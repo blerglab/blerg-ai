@@ -1,0 +1,103 @@
+{
+ "models": [
+  {
+   "slug": "gpt-reserve",
+   "display_name": "GPT-Reserve",
+   "description": "Fast and affordable agentic coding model.",
+   "default_reasoning_level": "medium",
+   "supported_reasoning_levels": [
+    {"effort": "low", "description": "Fast responses with lighter reasoning"},
+    {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
+    {"effort": "high", "description": "Greater reasoning depth for complex problems"}
+   ],
+   "shell_type": "unified_exec",
+   "visibility": "hide",
+   "supported_in_api": true,
+   "priority": 3,
+   "model_messages": {"instructions_template": "You are Codex, an agent based on GPT-5."},
+   "base_instructions": "You are Codex, a coding agent.",
+   "context_window": 272000
+  },
+  {
+   "slug": "gpt-5.6-terra",
+   "display_name": "GPT-5.6-Terra",
+   "description": "Older balanced model for straightforward work.",
+   "default_reasoning_level": "medium",
+   "supported_reasoning_levels": [
+    {"effort": "low", "description": "Fast responses with lighter reasoning"},
+    {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
+    {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+    {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+    {"effort": "max", "description": "Maximum reasoning depth for the hardest problems"},
+    {"effort": "ultra", "description": "Maximum reasoning with automatic task delegation"}
+   ],
+   "shell_type": "unified_exec",
+   "visibility": "list",
+   "supported_in_api": true,
+   "priority": 7,
+   "context_window": 272000
+  },
+  {
+   "slug": "gpt-6-astra",
+   "display_name": "GPT-6-Astra",
+   "description": "Our most capable model for complex, demanding work.",
+   "default_reasoning_level": "low",
+   "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max", "ultra"],
+   "shell_type": "unified_exec",
+   "visibility": "list",
+   "supported_in_api": true,
+   "priority": 1,
+   "context_window": 272000
+  },
+  {
+   "slug": "gpt-5.5",
+   "display_name": "GPT-5.5‮\u0007",
+   "description": "Legacy coding model.",
+   "default_reasoning_level": "turbo",
+   "supported_reasoning_levels": [
+    {"effort": "low"}, {"effort": "medium"}, {"effort": "high"}, {"effort": "xhigh"},
+    {"effort": "turbo", "description": "not a level this runner knows"}, 42, {"level": "max"}
+   ],
+   "visibility": "list",
+   "supported_in_api": true,
+   "priority": 12
+  },
+  {
+   "slug": "--dangerously-bypass-approvals-and-sandbox",
+   "display_name": "Evil",
+   "supported_reasoning_levels": ["high"],
+   "visibility": "list",
+   "priority": 2
+  },
+  {
+   "slug": "gpt 5 && rm -rf ~",
+   "display_name": "Evil 2",
+   "visibility": "list",
+   "priority": 2
+  },
+  {
+   "slug": "gpt-5.6-luna",
+   "display_name": "GPT-5.6-Luna",
+   "description": "Older fast and efficient model.",
+   "default_reasoning_level": "medium",
+   "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}, {"effort": "xhigh"}, {"effort": "max"}],
+   "visibility": "list",
+   "supported_in_api": true
+  },
+  {
+   "slug": "gpt-broken",
+   "display_name": "Broken",
+   "visibility": "list",
+   "priority": "first"
+  },
+  {
+   "slug": "codex-auto-review",
+   "display_name": "Codex Auto Review",
+   "description": "Automatic approval review model for Codex.",
+   "default_reasoning_level": "medium",
+   "supported_reasoning_levels": [{"effort": "medium"}],
+   "visibility": "hide",
+   "priority": 43
+  }
+ ]
+}

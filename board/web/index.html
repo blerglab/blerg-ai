@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0d1117" />
+    <title>Blerg Board</title>
+    <script>
+      // Apply a pinned theme before first paint to avoid a flash. Dark is the
+      // default; without a pin the CSS falls back to the OS preference.
+      (function () {
+        try {
+          var t = localStorage.getItem('blerg-theme');
+          if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

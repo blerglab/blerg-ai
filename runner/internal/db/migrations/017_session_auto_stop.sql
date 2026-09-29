@@ -1,0 +1,14 @@
+-- 017: sessions.auto_stop — one-shot sessions (agent contract v1).
+--
+-- An agent session started with a single prompt finishes its turn and then
+-- sits there waiting for more input: the lifecycle never becomes terminal, the
+-- result never reports `terminal: true`, and the completion webhook never
+-- fires, until somebody calls stop. That is right for an interactive session
+-- and wrong for a fire-and-forget tool call, so the caller says which one it
+-- asked for. The flag lives on the row rather than in memory because the
+-- turn_done that acts on it can arrive at a different replica, and long after
+-- the start that set it.
+--
+-- Default false: every session that existed before this column, and every
+-- caller that does not pass the flag, keeps the interactive behaviour.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auto_stop boolean NOT NULL DEFAULT false;

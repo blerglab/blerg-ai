@@ -1,0 +1,340 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "blerg-core",
+    "version": "v1",
+    "summary": "Identity, credentials and discovery for a Blerg install.",
+    "description": "The public, agent-facing contract of blerg-core (contract version v1). Paths are relative to the install's core origin, which GET /agents reports as core_base_url. Browser-only routes (/auth/*) are deliberately not described here: they are an interactive sign-in flow, not an API for agents."
+  },
+  "servers": [],
+  "tags": [
+    { "name": "discovery", "description": "Finding out what is deployed and how to talk to it." },
+    { "name": "tokens", "description": "Agent tokens: named, scoped, revocable credentials." },
+    { "name": "identity", "description": "Who the caller is." },
+    { "name": "credentials", "description": "The caller's own stored engine credentials." }
+  ],
+  "paths": {
+    "/agents": {
+      "get": {
+        "operationId": "agents",
+        "tags": ["discovery"],
+        "summary": "The install's agent manifest: every component, with auth and operations.",
+        "description": "No authentication. With `Accept: text/markdown` (or `?format=md`) the same document is returned as the Markdown agent guide, quickstart first.",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "description": "`md` returns the Markdown rendering instead of JSON.",
+            "schema": { "type": "string", "enum": ["md"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The aggregate manifest.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/AggregateManifest" } },
+              "text/markdown": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "tags": ["discovery"],
+        "summary": "This document.",
+        "description": "No authentication.",
+        "responses": {
+          "200": {
+            "description": "An OpenAPI 3.1 document.",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/tokens": {
+      "post": {
+        "operationId": "create_token",
+        "tags": ["tokens"],
+        "summary": "Mint an agent token; the token value is returned exactly once.",
+        "description": "Requires a human session (the browser's access token). The response is the only time `token` is ever returned: core stores a SHA-256 hash, never the value.",
+        "security": [{ "humanSession": ["card.read"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/CreateTokenRequest" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created token.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/CreatedToken" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": {
+            "description": "The account already holds the maximum number of live agent tokens (50); revoke one first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": { "error": { "type": "string" } }
+                }
+              }
+            }
+          },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "get": {
+        "operationId": "list_tokens",
+        "tags": ["tokens"],
+        "summary": "List the caller's agent tokens (never the token value).",
+        "security": [{ "humanSession": ["card.read"] }],
+        "responses": {
+          "200": {
+            "description": "The caller's tokens, newest first.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/TokenSummary" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/tokens/{id}": {
+      "delete": {
+        "operationId": "revoke_token",
+        "tags": ["tokens"],
+        "summary": "Revoke one of the caller's agent tokens.",
+        "description": "Idempotent: revoking an already-revoked token of the caller's own is still 200. An id that does not exist — or belongs to somebody else — is 404, never a 403 that would confirm the id is real.",
+        "security": [{ "humanSession": ["card.read"] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The token id from POST/GET /api/tokens.",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Revoked." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "description": "No such token of the caller's.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "500": { "description": "The revocation could not be written.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "503": { "description": "Identity service unavailable.", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "operationId": "me",
+        "tags": ["identity"],
+        "summary": "Who the caller is: account, provider, role.",
+        "security": [{ "humanSession": [] }, { "agentToken": [] }],
+        "responses": {
+          "200": {
+            "description": "The caller's identity.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Me" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/credentials": {
+      "get": {
+        "operationId": "list_credentials",
+        "tags": ["credentials"],
+        "summary": "List the caller's stored engine credentials (metadata only).",
+        "description": "Requires the `card.read` capability. Credential values are never returned by any public route.",
+        "security": [{ "humanSession": ["card.read"] }],
+        "responses": {
+          "200": {
+            "description": "One entry per engine the caller has stored a credential for.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/CredentialSummary" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "description": "The credential vault is not configured on this install." }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "humanSession": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A core-signed human access token (`kind: \"human\"`), obtained by signing in with a browser."
+      },
+      "agentToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A core-signed agent token (`kind: \"agent\"`) minted from the `platform` preset (`aud: \"blerg-core\"`)."
+      }
+    },
+    "responses": {
+      "BadRequest": { "description": "Malformed request.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+      "Unauthorized": { "description": "Missing, malformed, expired or revoked bearer token.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+      "Forbidden": { "description": "The principal is valid but lacks the required kind or capability.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+      "PayloadTooLarge": { "description": "The request body exceeded the endpoint's size cap.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+      "RateLimited": { "description": "Too many attempts; retry later.", "content": { "text/plain": { "schema": { "type": "string" } } } }
+    },
+    "schemas": {
+      "AggregateManifest": {
+        "type": "object",
+        "required": ["contract_version", "core_base_url", "quickstart", "components"],
+        "properties": {
+          "contract_version": { "type": "string", "const": "v1" },
+          "core_base_url": { "type": "string", "description": "This install's public core origin." },
+          "quickstart": { "type": "string", "description": "Markdown: how to get from nothing to a running session." },
+          "components": { "type": "array", "items": { "$ref": "#/components/schemas/ComponentEntry" } }
+        }
+      },
+      "ComponentEntry": {
+        "type": "object",
+        "required": ["name", "base_url", "version", "contract_version", "capabilities", "last_seen", "stale"],
+        "properties": {
+          "name": { "type": "string", "examples": ["blerg-core", "blerg-runner"] },
+          "base_url": { "type": "string" },
+          "version": { "type": "string" },
+          "contract_version": { "type": "string" },
+          "capabilities": { "type": "array", "items": { "type": "string" } },
+          "last_seen": { "type": "integer", "description": "Unix seconds of the component's last registration." },
+          "stale": { "type": "boolean", "description": "True when the component has not registered within core's TTL." },
+          "description": { "type": "string" },
+          "docs_url": { "type": "string", "description": "<base_url>/agents — the component's own manifest." },
+          "openapi_url": { "type": "string" },
+          "mcp_url": { "type": "string", "description": "Absent when the component has no MCP server." },
+          "auth": { "$ref": "#/components/schemas/AuthInfo" },
+          "operations": { "type": "array", "items": { "$ref": "#/components/schemas/Operation" } }
+        }
+      },
+      "AuthInfo": {
+        "type": "object",
+        "required": ["audience", "presets", "accepts"],
+        "properties": {
+          "audience": { "type": "string", "description": "The token `aud` this component verifies." },
+          "token_endpoint": { "type": "string", "description": "Absolute URL of core's POST /api/tokens." },
+          "presets": { "type": "array", "items": { "type": "string" } },
+          "accepts": { "type": "array", "items": { "type": "string" }, "examples": [["agent_token", "human_session"]] }
+        }
+      },
+      "Operation": {
+        "type": "object",
+        "required": ["name", "method", "path", "summary", "idempotent"],
+        "properties": {
+          "name": { "type": "string" },
+          "method": { "type": "string" },
+          "path": { "type": "string" },
+          "summary": { "type": "string" },
+          "cap": { "type": "string", "description": "The capability the caller needs; absent when none is required." },
+          "idempotent": { "type": "boolean" }
+        }
+      },
+      "CreateTokenRequest": {
+        "type": "object",
+        "required": ["name", "preset"],
+        "properties": {
+          "name": { "type": "string", "description": "A label for the token, shown in Settings." },
+          "preset": {
+            "type": "string",
+            "enum": ["run-sessions", "board", "platform"],
+            "description": "Closed list; the preset fixes the token's audience and capabilities."
+          },
+          "expires_in_days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365,
+            "default": 90
+          }
+        }
+      },
+      "CreatedToken": {
+        "type": "object",
+        "required": ["id", "token", "name", "aud", "caps", "expires_at", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "token": { "type": "string", "description": "The bearer token. Returned exactly once; core stores only its hash." },
+          "name": { "type": "string" },
+          "aud": { "type": "string" },
+          "caps": { "type": "array", "items": { "type": "string" } },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "TokenSummary": {
+        "type": "object",
+        "required": ["id", "name", "aud", "caps", "created_at", "expires_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "aud": { "type": "string" },
+          "caps": { "type": "array", "items": { "type": "string" } },
+          "created_at": { "type": "string", "format": "date-time" },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "last_used_at": { "type": ["string", "null"], "format": "date-time" },
+          "revoked_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "Me": {
+        "description": "Who the caller is. The shape depends on the credential: a browser session returns HumanMe, a `platform` agent token returns AgentMe (distinguishable by the `kind` field, which only AgentMe carries).",
+        "oneOf": [
+          { "$ref": "#/components/schemas/HumanMe" },
+          { "$ref": "#/components/schemas/AgentMe" }
+        ]
+      },
+      "HumanMe": {
+        "type": "object",
+        "required": ["account_id", "provider", "provider_subject", "email", "role", "must_change_password"],
+        "properties": {
+          "account_id": { "type": "string", "format": "uuid" },
+          "provider": { "type": "string" },
+          "provider_subject": { "type": "string" },
+          "email": { "type": "string", "description": "Empty when the account has no email." },
+          "role": { "type": "string" },
+          "must_change_password": { "type": "boolean" }
+        }
+      },
+      "AgentMe": {
+        "type": "object",
+        "required": ["kind", "token_id", "account_id", "provider_subject", "role", "caps"],
+        "properties": {
+          "kind": { "type": "string", "const": "agent" },
+          "token_id": { "type": "string", "format": "uuid", "description": "The agent_tokens id this token was minted as — its `sub` claim." },
+          "account_id": { "type": "string", "format": "uuid", "description": "The account the token acts for — its `on_behalf_of` claim." },
+          "provider_subject": { "type": "string" },
+          "role": { "type": "string", "description": "The owning account's platform role." },
+          "caps": { "type": "array", "items": { "type": "string" }, "description": "Exactly the capabilities the token carries and core enforces." }
+        }
+      },
+      "CredentialSummary": {
+        "type": "object",
+        "required": ["engine", "updated_at"],
+        "properties": {
+          "engine": { "type": "string", "description": "The credential kind: an agent engine (`claude`, `codex`, `hermes`, `openclaw`) or a git provider (`github`, `gitlab`) whose personal access token lets cluster sessions clone and push as the caller and lists the caller's own repositories in the launch sheet." },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

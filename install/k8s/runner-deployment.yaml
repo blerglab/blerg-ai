@@ -1,0 +1,217 @@
+# This is the in-cluster blerg-runner SERVER only (runner/Dockerfile.server).
+# The actual agent-session daemon is NOT deployed here — it runs on a human's
+# workstation (their own `claude` CLI install, auth, and tmux), and connects
+# in to this service's /ws/daemon over the Ingress from outside the cluster,
+# exactly as it does against the desktop stack. See README.md.
+#
+# blerg-runner-agent-launcher (below) is always created, but carries zero
+# permissions on its own — cluster runtime (ephemeral per-session agent Jobs)
+# only works once cluster-runtime.yaml's Role/RoleBinding grant it access in
+# the blerg-runner-sessions namespace. See CLUSTER-RUNTIME.md. Creating the
+# inert ServiceAccount unconditionally means enabling cluster runtime never
+# requires re-rolling this Deployment just to change serviceAccountName.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: blerg-runner-agent-launcher
+  namespace: blerg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blerg-runner
+  namespace: blerg
+  labels:
+    app: blerg-runner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blerg-runner
+  template:
+    metadata:
+      labels:
+        app: blerg-runner
+    spec:
+      serviceAccountName: blerg-runner-agent-launcher
+      containers:
+        - name: blerg-runner
+          image: "${REGISTRY}/blerg-runner:${TAG}"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: BLERG_RUNNER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_RUNNER_DATABASE_URL
+            - name: BLERG_RUNNER_DAEMON_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_RUNNER_DAEMON_TOKEN
+            - name: BLERG_RUNNER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_RUNNER_KEY
+            - name: BLERG_CORE_REGISTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_CORE_REGISTER_KEY
+            # Same value as core's own BLERG_CORE_INTERNAL_KEY — runner
+            # presents this back to core's internal endpoints.
+            - name: BLERG_RUNNER_CORE_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_CORE_INTERNAL_KEY
+            - name: BLERG_CORE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_CORE_URL
+            - name: BLERG_CORE_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_CORE_PUBLIC_URL
+            - name: BLERG_RUNNER_SELF_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_RUNNER_SELF_URL
+            - name: BLERG_RUNNER_DATA_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_RUNNER_DATA_DIR
+            # Optional — comma-separated CORS allowlist for runner's own
+            # browser WebSocket endpoint; unset means same-origin only.
+            - name: BLERG_RUNNER_ALLOWED_ORIGINS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_ALLOWED_ORIGINS, optional: true }
+            # Optional — enables the repo picker's GitHub org listing (see
+            # RepoLister in cmd/server/main.go) and doubles as the default
+            # git clone base for cluster-runtime sessions when
+            # BLERG_RUNNER_AGENT_GIT_BASE isn't set explicitly. Neither is
+            # required: without BLERG_RUNNER_GITHUB_ORG, the repo picker just
+            # shows local/checked-out repos only.
+            - name: BLERG_RUNNER_GITHUB_ORG
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_GITHUB_ORG, optional: true }
+            - name: BLERG_RUNNER_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef: { name: blerg-secrets, key: BLERG_RUNNER_GITHUB_TOKEN, optional: true }
+            # Optional — the Claude model list's source (see configmap.yaml).
+            # Absent key = the public Claude Code catalog; "" = built-in only.
+            - name: BLERG_RUNNER_MODEL_CATALOG_URL
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MODEL_CATALOG_URL, optional: true }
+            # Optional — the marketplaces always-on plugins may come from
+            # (see configmap.yaml). Re-checked here and again in each session
+            # pod before anything is installed.
+            - name: BLERG_RUNNER_PLUGIN_MARKETPLACES
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_PLUGIN_MARKETPLACES, optional: true }
+            # ── Cluster runtime (optional) ──────────────────────────────────
+            # Every var below is `optional: true`: unset until an operator
+            # follows CLUSTER-RUNTIME.md, at which point NewJobManagerFromEnv
+            # (runner/internal/server/k8sjobs.go) picks them up on next
+            # restart with no manifest changes needed. BLERG_RUNNER_AGENT_IMAGE
+            # is the on/off switch — every other cluster-runtime var is inert
+            # without it.
+            - name: BLERG_RUNNER_AGENT_IMAGE
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_AGENT_IMAGE, optional: true }
+            - name: BLERG_RUNNER_AGENT_NAMESPACE
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_AGENT_NAMESPACE, optional: true }
+            - name: BLERG_RUNNER_AGENT_SECRET
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_AGENT_SECRET, optional: true }
+            - name: BLERG_RUNNER_OAUTH_SECRET_NAME
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_OAUTH_SECRET_NAME, optional: true }
+            - name: BLERG_RUNNER_AGENT_GIT_BASE
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_AGENT_GIT_BASE, optional: true }
+            - name: BLERG_RUNNER_INTERNAL_URL
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_INTERNAL_URL, optional: true }
+            - name: BLERG_RUNNER_MAX_SESSIONS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_SESSIONS, optional: true }
+            - name: BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE, optional: true }
+            - name: BLERG_RUNNER_POD_TTL_SECONDS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_TTL_SECONDS, optional: true }
+            - name: BLERG_RUNNER_POD_CPU_REQUEST
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_CPU_REQUEST, optional: true }
+            - name: BLERG_RUNNER_POD_MEM_REQUEST
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_MEM_REQUEST, optional: true }
+            - name: BLERG_RUNNER_POD_CPU_LIMIT
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_CPU_LIMIT, optional: true }
+            - name: BLERG_RUNNER_POD_MEM_LIMIT
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_MEM_LIMIT, optional: true }
+            - name: BLERG_RUNNER_POD_TERMINATION_GRACE_SECONDS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_TERMINATION_GRACE_SECONDS, optional: true }
+            - name: BLERG_RUNNER_POD_TTL_AFTER_FINISHED_SECONDS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_TTL_AFTER_FINISHED_SECONDS, optional: true }
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            # /data (BLERG_RUNNER_DATA_DIR) is the emptyDir volume mounted
+            # below — every write runner does (agentconfig.go, publish.go)
+            # goes there, so the rest of the root filesystem stays read-only.
+            readOnlyRootFilesystem: true
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      # emptyDir loses uploaded agent-config bundles and mockups on pod
+      # restart; swap for a PVC in production.
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blerg-runner
+  namespace: blerg
+  labels:
+    app: blerg-runner
+spec:
+  selector:
+    app: blerg-runner
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

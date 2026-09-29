@@ -1,0 +1,903 @@
+#!/usr/bin/env python3
+"""
+blerg-runner — Blerg Runner messaging CLI for Claude sessions.
+
+A session running under Blerg Runner uses this script to communicate with the user
+without blocking the terminal.  Messages are routed through the Blerg Runner server
+and surfaced in the Chat UI (and optionally pushed to the user's phone).
+
+Subcommands
+-----------
+  update "<text>"                 Post an FYI (no reply needed); returns immediately.
+  ask    "<text>" [--timeout N]   Post a blocking question; blocks until the user
+                                  answers; prints the answer to stdout.
+  note   "<text>"                 Post an async note; returns immediately. The user's
+                                reply is delivered back into the session as PTY input.
+
+Environment (injected by the Blerg Runner daemon):
+  BLERG_RUNNER_SERVER_HTTP    e.g. http://runner.example.test
+  BLERG_RUNNER_SESSION_ID     UUID of the owning session
+  BLERG_RUNNER_SESSION_TOKEN  Per-session bearer token with "message" cap (every
+                              session; scoped to this session only)
+  BLERG_RUNNER_BOARD_TOKEN    Bearer token with "message" cap (Assist sessions)
+  BLERG_RUNNER_DAEMON_TOKEN   Legacy: the daemon master token. No longer injected
+                              into any session; honoured only if present.
+
+Any one of the tokens is sufficient (session token preferred). If none of the
+required env vars are present the CLI prints a one-line notice and exits 0
+so skills stay portable across non-Blerg Runner environments.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+
+def _derive_server_http():
+    """Server HTTP base. Prefer BLERG_RUNNER_SERVER_HTTP; fall back to deriving it from
+    BLERG_RUNNER_PREVIEW_URL (…/api/preview) or the WS dial URL BLERG_RUNNER_SERVER_URL
+    (ws://…/ws/daemon → http://…). The fallbacks let sessions spawned BEFORE
+    BLERG_RUNNER_SERVER_HTTP was injected still reach the server."""
+    v = os.environ.get("BLERG_RUNNER_SERVER_HTTP", "").strip().rstrip("/")
+    if v:
+        return v
+    preview = os.environ.get("BLERG_RUNNER_PREVIEW_URL", "").strip().rstrip("/")
+    if preview.endswith("/api/preview"):
+        return preview[: -len("/api/preview")].rstrip("/")
+    ws = os.environ.get("BLERG_RUNNER_SERVER_URL", "").strip().rstrip("/")
+    if ws.endswith("/ws/daemon"):
+        ws = ws[: -len("/ws/daemon")].rstrip("/")
+    if ws.startswith("ws://"):
+        return "http://" + ws[len("ws://"):]
+    if ws.startswith("wss://"):
+        return "https://" + ws[len("wss://"):]
+    return ""
+
+
+def _derive_session_id():
+    """Session id. Prefer BLERG_RUNNER_SESSION_ID; fall back to the owning tmux session
+    name 'blerg-<id>' (the CLI runs inside it) so existing sessions work too."""
+    v = os.environ.get("BLERG_RUNNER_SESSION_ID", "").strip()
+    if v:
+        return v
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"],
+            capture_output=True, text=True, timeout=5,
+        )
+        name = out.stdout.strip()
+        if name.startswith("blerg-"):
+            return name[len("blerg-"):]
+    except Exception:
+        pass
+    return ""
+
+
+SERVER_HTTP   = _derive_server_http()
+SESSION_ID    = _derive_session_id()
+SESSION_TOKEN = os.environ.get("BLERG_RUNNER_SESSION_TOKEN", "")
+DAEMON_TOKEN  = os.environ.get("BLERG_RUNNER_DAEMON_TOKEN", "")
+BOARD_ID      = os.environ.get("BLERG_RUNNER_BOARD_ID", "")
+BOARD_TOKEN   = os.environ.get("BLERG_RUNNER_BOARD_TOKEN", "")
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _configured():
+    # Any token with the message capability is sufficient: the per-session
+    # token (every session), the board token (Assist), or — legacy, no longer
+    # injected — the daemon master token.
+    return bool(SERVER_HTTP and SESSION_ID and (SESSION_TOKEN or BOARD_TOKEN or DAEMON_TOKEN))
+
+
+def _noop_notice():
+    print(
+        "blerg-runner: not running under Blerg Runner (env vars absent) — skipping.",
+        file=sys.stderr,
+    )
+
+
+def _headers():
+    # Prefer the per-session token (scoped to this session only); then the
+    # board token for Assist sessions; the daemon token is a legacy fallback
+    # that a daemon-spawned session no longer has.
+    token = SESSION_TOKEN or BOARD_TOKEN or DAEMON_TOKEN
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def _post(path, payload, timeout=30):
+    """POST JSON payload; return parsed response body.  Exits on any error."""
+    url = f"{SERVER_HTTP}{path}"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers=_headers(), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        print(f"blerg-runner: HTTP {exc.code} from {url}: {body}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"blerg-runner: connection error to {url}: {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _get(path, timeout=30):
+    """GET; return parsed response body.
+
+    On HTTP error: prints message to stderr and exits 1.
+    On network/timeout error: raises urllib.error.URLError so the poll loop
+    can decide whether to retry or treat as fatal.
+    """
+    url = f"{SERVER_HTTP}{path}"
+    req = urllib.request.Request(url, headers=_headers(), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        print(f"blerg-runner: HTTP {exc.code} from {url}: {body}", file=sys.stderr)
+        sys.exit(1)
+    # urllib.error.URLError (including socket.timeout) propagates to caller
+
+
+# ── Subcommands ───────────────────────────────────────────────────────────────
+
+def cmd_update(text):
+    """Post an FYI update; returns immediately."""
+    _post("/api/messages", {
+        "session_id": SESSION_ID,
+        "kind": "update",
+        "body": text,
+    })
+
+
+def cmd_ask(text, timeout_seconds=3600):
+    """Post a blocking question; blocks until answered; print answer to stdout."""
+    result = _post("/api/messages", {
+        "session_id": SESSION_ID,
+        "kind": "ask",
+        "body": text,
+    })
+    msg_id = result["id"]
+
+    deadline = time.monotonic() + timeout_seconds
+    poll_wait = 25  # seconds the server holds the long-poll before returning
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Final poll — maybe the answer landed just before we gave up.
+            try:
+                data = _get(f"/api/messages/{msg_id}/answer?wait=0", timeout=10)
+                if data.get("answered"):
+                    print(data.get("answer") or "")
+                    return
+            except urllib.error.URLError:
+                pass  # transient error at deadline; proceed to expire
+            # Still unanswered — close the message and bail.
+            try:
+                _post(f"/api/messages/{msg_id}/expire", {})
+            except SystemExit:
+                pass
+            print(
+                f"blerg-runner: ask timed out after {timeout_seconds}s — no answer received.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # Build the query param: cap at poll_wait, but don't exceed remaining time.
+        wait_sec = min(poll_wait, max(1, int(remaining)))
+        try:
+            data = _get(
+                f"/api/messages/{msg_id}/answer?wait={wait_sec}",
+                timeout=wait_sec + 10,
+            )
+            if data.get("answered"):
+                print(data.get("answer") or "")
+                return
+        except urllib.error.URLError:
+            # Transient network error or per-poll timeout — sleep briefly and
+            # retry until the overall deadline.  A slow/restarting server
+            # should not kill an ask mid-wait.
+            time.sleep(2)
+
+
+def cmd_note(text):
+    """Post an async note; returns immediately. The user's reply is delivered
+    back into the session as PTY input once the session is idle."""
+    _post("/api/messages", {
+        "session_id": SESSION_ID,
+        "kind": "note",
+        "body": text,
+    })
+
+
+# ── Board auth / helpers ──────────────────────────────────────────────────────
+
+def _board_configured():
+    return bool(SERVER_HTTP and BOARD_ID and BOARD_TOKEN)
+
+
+def _board_noop_notice():
+    print(
+        "blerg-runner: board not configured "
+        "(BLERG_RUNNER_SERVER_HTTP/BLERG_RUNNER_BOARD_ID/BLERG_RUNNER_BOARD_TOKEN absent) "
+        "— skipping.",
+        file=sys.stderr,
+    )
+
+
+def _board_headers():
+    return {
+        "Authorization": f"Bearer {BOARD_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+def _board_get(path, timeout=30):
+    """GET with board auth; exit on HTTP error."""
+    url = f"{SERVER_HTTP}{path}"
+    req = urllib.request.Request(url, headers=_board_headers(), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        try:
+            msg = json.loads(body).get("error") or body
+        except Exception:
+            msg = body
+        print(f"blerg-runner: HTTP {exc.code}: {msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"blerg-runner: connection error to {url}: {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _board_post(path, payload, timeout=30):
+    """POST JSON with board auth; return parsed response body."""
+    url = f"{SERVER_HTTP}{path}"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers=_board_headers(), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        try:
+            msg = json.loads(body).get("error") or body
+        except Exception:
+            msg = body
+        print(f"blerg-runner: HTTP {exc.code}: {msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"blerg-runner: connection error to {url}: {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _board_patch(path, payload, timeout=30):
+    """PATCH JSON with board auth; return parsed response body."""
+    url = f"{SERVER_HTTP}{path}"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers=_board_headers(), method="PATCH")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        try:
+            msg = json.loads(body).get("error") or body
+        except Exception:
+            msg = body
+        print(f"blerg-runner: HTTP {exc.code}: {msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"blerg-runner: connection error to {url}: {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _board_delete(path, timeout=30):
+    """DELETE with board auth."""
+    url = f"{SERVER_HTTP}{path}"
+    req = urllib.request.Request(url, headers=_board_headers(), method="DELETE")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        try:
+            msg = json.loads(body).get("error") or body
+        except Exception:
+            msg = body
+        print(f"blerg-runner: HTTP {exc.code}: {msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"blerg-runner: connection error to {url}: {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ── id-or-name resolution ─────────────────────────────────────────────────────
+
+_UUID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE,
+)
+
+
+def _is_uuid(s):
+    return bool(_UUID_RE.match(s))
+
+
+def _fetch_board(board_id=None):
+    """GET /api/boards/{id}; returns the parsed board JSON."""
+    bid = board_id or BOARD_ID
+    return _board_get(f"/api/boards/{bid}")
+
+
+def _resolve_column(name_or_id, board_id=None):
+    """Return a column id; resolve name against the board if not a UUID."""
+    if _is_uuid(name_or_id):
+        return name_or_id
+    board = _fetch_board(board_id)
+    matches = [c for c in board.get("columns", []) if c["name"] == name_or_id]
+    if len(matches) == 0:
+        print(f'blerg-runner: column not found: "{name_or_id}"', file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1:
+        print(
+            f'error: ambiguous name "{name_or_id}" ({len(matches)} matches); use id',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return matches[0]["id"]
+
+
+def _resolve_ticket(name_or_id, board_id=None):
+    """Return a ticket id; resolve title against the board's tickets if not a UUID."""
+    if _is_uuid(name_or_id):
+        return name_or_id
+    board = _fetch_board(board_id)
+    matches = [t for t in board.get("tickets", []) if t["title"] == name_or_id]
+    if len(matches) == 0:
+        print(f'blerg-runner: ticket not found: "{name_or_id}"', file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1:
+        print(
+            f'error: ambiguous name "{name_or_id}" ({len(matches)} matches); use id',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return matches[0]["id"]
+
+
+# ── board subcommands ─────────────────────────────────────────────────────────
+
+def cmd_board_show(board_id=None):
+    bid = board_id or BOARD_ID
+    board = _board_get(f"/api/boards/{bid}")
+    name = board.get("name", bid)
+    desc = board.get("description") or ""
+    repos = board.get("repos") or []
+    cols = board.get("columns") or []
+    tickets = board.get("tickets") or []
+
+    print(f"Board: {name} ({bid})")
+    if desc:
+        print(f"  {desc}")
+    if repos:
+        print(f"  Repos: {', '.join(repos)}")
+    print()
+
+    # Build column name lookup.
+    col_names = {c["id"]: c["name"] for c in cols}
+
+    # Group tickets by column.
+    by_col = {}
+    for t in tickets:
+        cid = t.get("column_id") or ""
+        by_col.setdefault(cid, []).append(t)
+
+    print("Columns:")
+    for col in cols:
+        terminal_tag = " [terminal]" if col.get("is_terminal") else ""
+        cnt = len(by_col.get(col["id"], []))
+        print(f"  {col['name']}{terminal_tag}  ({col['id']})  — {cnt} ticket(s)")
+        for t in by_col.get(col["id"], []):
+            prio = t.get("priority", "")
+            size = t.get("size") or ""
+            sz_tag = f" [{size}]" if size else ""
+            print(f"    [{prio}]{sz_tag} {t['title']}  ({t['id']})")
+
+    uncolumned = by_col.get("", [])
+    if uncolumned:
+        print("\nUncolumned tickets:")
+        for t in uncolumned:
+            print(f"  {t['title']}  ({t['id']})")
+
+
+def cmd_board_order(board_id=None):
+    bid = board_id or BOARD_ID
+    result = _board_get(f"/api/boards/{bid}/order")
+    tickets = result.get("tickets") or []
+    if not tickets:
+        print("(no tickets)")
+        return
+    for i, t in enumerate(tickets, 1):
+        prio = t.get("priority", "")
+        print(f"{i:3}. [{prio}] {t['title']}  ({t['id']})")
+
+
+# ── column subcommands ────────────────────────────────────────────────────────
+
+def cmd_column_add(board_id, name, after=None, terminal=False):
+    board_id = board_id or BOARD_ID
+    payload = {"name": name}
+    if after is not None:
+        payload["after"] = _resolve_column(after) if not _is_uuid(after) else after
+    if terminal:
+        payload["terminal"] = True
+    col = _board_post(f"/api/boards/{board_id}/columns", payload)
+    print(f"Column created: {col.get('name', '?')}  ({col.get('id', '?')})")
+
+
+def cmd_column_rename(col_arg, name):
+    cid = _resolve_column(col_arg)
+    col = _board_patch(f"/api/columns/{cid}", {"name": name})
+    print(f"Column renamed: {col.get('name', '?')}  ({col.get('id', '?')})")
+
+
+def cmd_column_move(col_arg, after=None, before=None):
+    cid = _resolve_column(col_arg)
+    payload = {}
+    if after is not None:
+        payload["after"] = _resolve_column(after) if not _is_uuid(after) else after
+    if before is not None:
+        payload["before"] = _resolve_column(before) if not _is_uuid(before) else before
+    col = _board_patch(f"/api/columns/{cid}", payload)
+    print(f"Column moved: {col.get('name', '?')}  ({col.get('id', '?')})")
+
+
+def cmd_column_set(col_arg, terminal):
+    cid = _resolve_column(col_arg)
+    col = _board_patch(f"/api/columns/{cid}", {"is_terminal": terminal})
+    t_str = "terminal" if terminal else "non-terminal"
+    print(f"Column set {t_str}: {col.get('name', '?')}  ({col.get('id', '?')})")
+
+
+def cmd_column_rm(col_arg):
+    cid = _resolve_column(col_arg)
+    _board_delete(f"/api/columns/{cid}")
+    print(f"Column deleted: {cid}")
+
+
+# ── ticket subcommands ────────────────────────────────────────────────────────
+
+def cmd_ticket_list(board_id, column=None, tags=None, priority=None,
+                    size=None, ready=False, limit=None, cursor=None):
+    board_id = board_id or BOARD_ID
+    params = {}
+    if column:
+        # Resolve column name to id if needed.
+        params["column"] = _resolve_column(column) if not _is_uuid(column) else column
+    if tags:
+        # urllib.parse.urlencode handles repeatable params via a list of pairs.
+        pass
+    if priority:
+        params["priority"] = priority
+    if size:
+        params["size"] = size
+    if ready:
+        params["ready"] = "true"
+    if limit is not None:
+        params["limit"] = str(limit)
+    if cursor:
+        params["cursor"] = cursor
+
+    parts = list(params.items())
+    for tag in (tags or []):
+        parts.append(("tag", tag))
+
+    qs = ("?" + urllib.parse.urlencode(parts)) if parts else ""
+    result = _board_get(f"/api/boards/{board_id}/tickets{qs}")
+    tickets = result.get("tickets") or []
+    next_cur = result.get("next_cursor") or ""
+
+    if not tickets:
+        print("(no tickets)")
+    else:
+        for t in tickets:
+            prio = t.get("priority", "")
+            cid = t.get("column_id") or "—"
+            print(f"[{prio}] {t['title']}  ({t['id']})  col:{cid}")
+
+    if next_cur:
+        print(f"\nNext cursor: {next_cur}")
+
+
+def cmd_ticket_get(ticket_arg):
+    tid = _resolve_ticket(ticket_arg)
+    t = _board_get(f"/api/tickets/{tid}")
+    print(f"Ticket: {t.get('title', '?')}  ({t.get('id', '?')})")
+    if t.get("body"):
+        print(f"\n{t['body']}")
+    print(f"\nPriority: {t.get('priority', '?')}  Size: {t.get('size') or '—'}")
+    print(f"Column:   {t.get('column_id') or '—'}")
+    tags = t.get("tags") or []
+    if tags:
+        print(f"Tags:     {', '.join(tags)}")
+    repos = t.get("repos") or []
+    if repos:
+        print(f"Repos:    {', '.join(repos)}")
+    deps = t.get("depends_on") or []
+    if deps:
+        print(f"Depends:  {', '.join(deps)}")
+    blocks = t.get("blocks") or []
+    if blocks:
+        print(f"Blocks:   {', '.join(blocks)}")
+
+
+def cmd_ticket_create(board_id, title, body=None, repos=None, column=None,
+                      tags=None, priority=None, size=None):
+    board_id = board_id or BOARD_ID
+    payload = {"title": title}
+    if body is not None:
+        payload["body"] = body
+    if repos:
+        payload["repos"] = repos
+    if column is not None:
+        cid = _resolve_column(column) if not _is_uuid(column) else column
+        payload["column_id"] = cid
+    if tags:
+        payload["tags"] = tags
+    if priority:
+        payload["priority"] = priority
+    if size:
+        payload["size"] = size
+    t = _board_post(f"/api/boards/{board_id}/tickets", payload)
+    print(f"Ticket created: {t.get('title', '?')}  ({t.get('id', '?')})")
+
+
+def cmd_ticket_update(ticket_arg, title=None, body=None,
+                      add_tags=None, rm_tags=None,
+                      add_repos=None, rm_repos=None,
+                      repos=None, priority=None, size=None):
+    tid = _resolve_ticket(ticket_arg)
+    payload = {}
+    if title is not None:
+        payload["title"] = title
+    if body is not None:
+        payload["body"] = body
+    if add_tags:
+        payload["add_tags"] = add_tags
+    if rm_tags:
+        payload["rm_tags"] = rm_tags
+    if add_repos:
+        payload["add_repos"] = add_repos
+    if rm_repos:
+        payload["rm_repos"] = rm_repos
+    if repos is not None:
+        payload["repos"] = repos
+    if priority is not None:
+        payload["priority"] = priority
+    if size is not None:
+        payload["size"] = size
+    t = _board_patch(f"/api/tickets/{tid}", payload)
+    print(f"Ticket updated: {t.get('title', '?')}  ({t.get('id', '?')})")
+
+
+def cmd_ticket_move(ticket_arg, column, after=None, before=None):
+    tid = _resolve_ticket(ticket_arg)
+    cid = _resolve_column(column) if not _is_uuid(column) else column
+    payload = {"column_id": cid}
+    if after is not None:
+        after_id = _resolve_ticket(after) if not _is_uuid(after) else after
+        payload["after"] = after_id
+    if before is not None:
+        before_id = _resolve_ticket(before) if not _is_uuid(before) else before
+        payload["before"] = before_id
+    t = _board_patch(f"/api/tickets/{tid}", payload)
+    print(f"Ticket moved: {t.get('title', '?')}  ({t.get('id', '?')})")
+
+
+def cmd_ticket_split(ticket_arg, titles):
+    tid = _resolve_ticket(ticket_arg)
+    result = _board_post(f"/api/tickets/{tid}/split", {"titles": titles})
+    new_tickets = result.get("tickets") or []
+    print(f"Ticket split into {len(new_tickets)} ticket(s):")
+    for t in new_tickets:
+        print(f"  {t.get('title', '?')}  ({t.get('id', '?')})")
+
+
+def cmd_ticket_dep_add(ticket_arg, on_arg):
+    tid = _resolve_ticket(ticket_arg)
+    dep_id = _resolve_ticket(on_arg)
+    _board_post(f"/api/tickets/{tid}/dependencies",
+                {"depends_on_ticket_id": dep_id})
+    print(f"Dependency added: {tid} depends on {dep_id}")
+
+
+def cmd_ticket_dep_rm(ticket_arg, on_arg):
+    tid = _resolve_ticket(ticket_arg)
+    dep_id = _resolve_ticket(on_arg)
+    _board_delete(f"/api/tickets/{tid}/dependencies/{dep_id}")
+    print(f"Dependency removed: {tid} no longer depends on {dep_id}")
+
+
+def cmd_ticket_archive(ticket_arg):
+    tid = _resolve_ticket(ticket_arg)
+    _board_post(f"/api/tickets/{tid}/archive", {})
+    print(f"Ticket archived: {tid}")
+
+
+# ── tag subcommands ───────────────────────────────────────────────────────────
+
+def cmd_tag_list(board_id):
+    """Print distinct sorted tags across all (non-archived) board tickets."""
+    board_id = board_id or BOARD_ID
+    board = _board_get(f"/api/boards/{board_id}")
+    ticket_ids = [t["id"] for t in board.get("tickets") or []]
+
+    tag_set = set()
+    for tid in ticket_ids:
+        detail = _board_get(f"/api/tickets/{tid}")
+        for tag in (detail.get("tags") or []):
+            tag_set.add(tag)
+
+    if not tag_set:
+        print("(no tags)")
+    else:
+        for tag in sorted(tag_set):
+            print(tag)
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="blerg-runner",
+        description="Send messages from a Claude session to the user via Blerg Runner.",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_update = sub.add_parser("update", help="Post an FYI (no reply needed)")
+    p_update.add_argument("text", help="Message body")
+
+    p_ask = sub.add_parser("ask", help="Post a blocking question and wait for the answer")
+    p_ask.add_argument("text", help="Question body")
+    p_ask.add_argument(
+        "--timeout",
+        type=int,
+        default=3600,
+        metavar="SECONDS",
+        help="Overall timeout in seconds (default: 3600)",
+    )
+
+    p_note = sub.add_parser("note", help="Post a non-blocking idea (Phase 1.5)")
+    p_note.add_argument("text", help="Note body")
+
+    # ── board ──────────────────────────────────────────────────────────────────
+    p_board = sub.add_parser("board", help="Board commands")
+    board_sub = p_board.add_subparsers(dest="board_cmd", required=True)
+
+    pb_show = board_sub.add_parser("show", help="Show board columns and tickets")
+    pb_show.add_argument("board", nargs="?", help="Board id (default: $BLERG_RUNNER_BOARD_ID)")
+
+    pb_order = board_sub.add_parser("order", help="Show board ticket order (ready-first)")
+    pb_order.add_argument("board", nargs="?", help="Board id (default: $BLERG_RUNNER_BOARD_ID)")
+
+    # ── column ─────────────────────────────────────────────────────────────────
+    p_col = sub.add_parser("column", help="Column commands")
+    col_sub = p_col.add_subparsers(dest="col_cmd", required=True)
+
+    pc_add = col_sub.add_parser("add", help="Add a column to a board")
+    pc_add.add_argument("board", nargs="?", help="Board id (default: $BLERG_RUNNER_BOARD_ID)")
+    pc_add.add_argument("--name", required=True, help="Column name")
+    pc_add.add_argument("--after", metavar="COL", help="Insert after this column id/name")
+    pc_add.add_argument("--terminal", action="store_true", help="Mark as terminal")
+
+    pc_rename = col_sub.add_parser("rename", help="Rename a column")
+    pc_rename.add_argument("col", help="Column id or name")
+    pc_rename.add_argument("--name", required=True, help="New name")
+
+    pc_move = col_sub.add_parser("move", help="Move a column")
+    pc_move.add_argument("col", help="Column id or name")
+    pc_move_pos = pc_move.add_mutually_exclusive_group(required=True)
+    pc_move_pos.add_argument("--after", metavar="COL", help="Insert after this column")
+    pc_move_pos.add_argument("--before", metavar="COL", help="Insert before this column")
+
+    pc_set = col_sub.add_parser("set", help="Set column properties")
+    pc_set.add_argument("col", help="Column id or name")
+    pc_set_term = pc_set.add_mutually_exclusive_group(required=True)
+    pc_set_term.add_argument("--terminal", dest="terminal", action="store_true")
+    pc_set_term.add_argument("--no-terminal", dest="terminal", action="store_false")
+
+    pc_rm = col_sub.add_parser("rm", help="Delete a column")
+    pc_rm.add_argument("col", help="Column id or name")
+
+    # ── ticket ─────────────────────────────────────────────────────────────────
+    p_tick = sub.add_parser("ticket", help="Ticket commands")
+    tick_sub = p_tick.add_subparsers(dest="ticket_cmd", required=True)
+
+    pt_list = tick_sub.add_parser("list", help="List tickets")
+    pt_list.add_argument("board", nargs="?", help="Board id (default: $BLERG_RUNNER_BOARD_ID)")
+    pt_list.add_argument("--column", metavar="COL", help="Filter by column id/name")
+    pt_list.add_argument("--tag", dest="tags", action="append", metavar="TAG")
+    pt_list.add_argument("--priority", metavar="P")
+    pt_list.add_argument("--size", metavar="S")
+    pt_list.add_argument("--ready", action="store_true")
+    pt_list.add_argument("--limit", type=int, metavar="N")
+    pt_list.add_argument("--cursor", metavar="C")
+
+    pt_get = tick_sub.add_parser("get", help="Get a ticket")
+    pt_get.add_argument("id", help="Ticket id or title")
+
+    pt_create = tick_sub.add_parser("create", help="Create a ticket")
+    pt_create.add_argument("board", nargs="?", help="Board id (default: $BLERG_RUNNER_BOARD_ID)")
+    pt_create.add_argument("--title", required=True)
+    pt_create.add_argument("--body", default=None)
+    pt_create.add_argument("--repos", metavar="A,B", default=None,
+                           help="Comma-separated repo list")
+    pt_create.add_argument("--column", metavar="COL", default=None)
+    pt_create.add_argument("--tag", dest="tags", action="append", metavar="TAG")
+    pt_create.add_argument("--priority", default=None)
+    pt_create.add_argument("--size", default=None)
+
+    pt_update = tick_sub.add_parser("update", help="Update a ticket")
+    pt_update.add_argument("id", help="Ticket id or title")
+    pt_update.add_argument("--title", default=None)
+    pt_update.add_argument("--body", default=None)
+    pt_update.add_argument("--add-tag", dest="add_tags", action="append", metavar="TAG")
+    pt_update.add_argument("--rm-tag", dest="rm_tags", action="append", metavar="TAG")
+    pt_update.add_argument("--add-repo", dest="add_repos", action="append", metavar="REPO")
+    pt_update.add_argument("--rm-repo", dest="rm_repos", action="append", metavar="REPO")
+    pt_update.add_argument("--repos", metavar="A,B", default=None)
+    pt_update.add_argument("--priority", default=None)
+    pt_update.add_argument("--size", default=None)
+
+    pt_move = tick_sub.add_parser("move", help="Move a ticket to a column")
+    pt_move.add_argument("id", help="Ticket id or title")
+    pt_move.add_argument("--column", required=True, metavar="COL")
+    pt_move_pos = pt_move.add_mutually_exclusive_group()
+    pt_move_pos.add_argument("--after", metavar="TICKET")
+    pt_move_pos.add_argument("--before", metavar="TICKET")
+
+    pt_split = tick_sub.add_parser("split", help="Split a ticket into multiple")
+    pt_split.add_argument("id", help="Ticket id or title")
+    pt_split.add_argument("--into", dest="titles", action="append",
+                          required=True, metavar="TITLE")
+
+    pt_dep = tick_sub.add_parser("dep", help="Manage ticket dependencies")
+    dep_sub = pt_dep.add_subparsers(dest="dep_cmd", required=True)
+
+    pd_add = dep_sub.add_parser("add", help="Add a dependency")
+    pd_add.add_argument("id", help="Ticket id or title")
+    pd_add.add_argument("--on", required=True, metavar="OTHER",
+                        help="Ticket this depends on (id or title)")
+
+    pd_rm = dep_sub.add_parser("rm", help="Remove a dependency")
+    pd_rm.add_argument("id", help="Ticket id or title")
+    pd_rm.add_argument("--on", required=True, metavar="OTHER",
+                       help="Ticket to un-depend on (id or title)")
+
+    pt_archive = tick_sub.add_parser("archive", help="Archive a ticket")
+    pt_archive.add_argument("id", help="Ticket id or title")
+
+    # ── tag ────────────────────────────────────────────────────────────────────
+    p_tag = sub.add_parser("tag", help="Tag commands")
+    tag_sub = p_tag.add_subparsers(dest="tag_cmd", required=True)
+
+    ptag_list = tag_sub.add_parser("list", help="List all distinct tags on a board")
+    ptag_list.add_argument("board", nargs="?", help="Board id (default: $BLERG_RUNNER_BOARD_ID)")
+
+    args = parser.parse_args()
+
+    # ── session messaging commands (existing) ──────────────────────────────────
+    if args.cmd in ("update", "ask", "note"):
+        if not _configured():
+            _noop_notice()
+            sys.exit(0)
+        if args.cmd == "update":
+            cmd_update(args.text)
+        elif args.cmd == "ask":
+            cmd_ask(args.text, timeout_seconds=args.timeout)
+        elif args.cmd == "note":
+            cmd_note(args.text)
+        return
+
+    # ── board commands — all require board auth ────────────────────────────────
+    if not _board_configured():
+        _board_noop_notice()
+        sys.exit(0)
+
+    if args.cmd == "board":
+        if args.board_cmd == "show":
+            cmd_board_show(args.board)
+        elif args.board_cmd == "order":
+            cmd_board_order(args.board)
+
+    elif args.cmd == "column":
+        if args.col_cmd == "add":
+            cmd_column_add(args.board, args.name, after=args.after,
+                           terminal=args.terminal)
+        elif args.col_cmd == "rename":
+            cmd_column_rename(args.col, args.name)
+        elif args.col_cmd == "move":
+            cmd_column_move(args.col, after=args.after, before=args.before)
+        elif args.col_cmd == "set":
+            cmd_column_set(args.col, args.terminal)
+        elif args.col_cmd == "rm":
+            cmd_column_rm(args.col)
+
+    elif args.cmd == "ticket":
+        if args.ticket_cmd == "list":
+            cmd_ticket_list(
+                args.board,
+                column=args.column,
+                tags=args.tags,
+                priority=args.priority,
+                size=args.size,
+                ready=args.ready,
+                limit=args.limit,
+                cursor=args.cursor,
+            )
+        elif args.ticket_cmd == "get":
+            cmd_ticket_get(args.id)
+        elif args.ticket_cmd == "create":
+            repos = [r.strip() for r in args.repos.split(",")] if args.repos else None
+            cmd_ticket_create(
+                args.board,
+                args.title,
+                body=args.body,
+                repos=repos,
+                column=args.column,
+                tags=args.tags,
+                priority=args.priority,
+                size=args.size,
+            )
+        elif args.ticket_cmd == "update":
+            repos = [r.strip() for r in args.repos.split(",")] if args.repos else None
+            cmd_ticket_update(
+                args.id,
+                title=args.title,
+                body=args.body,
+                add_tags=args.add_tags,
+                rm_tags=args.rm_tags,
+                add_repos=args.add_repos,
+                rm_repos=args.rm_repos,
+                repos=repos,
+                priority=args.priority,
+                size=args.size,
+            )
+        elif args.ticket_cmd == "move":
+            cmd_ticket_move(args.id, args.column, after=args.after, before=args.before)
+        elif args.ticket_cmd == "split":
+            cmd_ticket_split(args.id, args.titles)
+        elif args.ticket_cmd == "dep":
+            if args.dep_cmd == "add":
+                cmd_ticket_dep_add(args.id, args.on)
+            elif args.dep_cmd == "rm":
+                cmd_ticket_dep_rm(args.id, args.on)
+        elif args.ticket_cmd == "archive":
+            cmd_ticket_archive(args.id)
+
+    elif args.cmd == "tag":
+        if args.tag_cmd == "list":
+            cmd_tag_list(args.board)
+
+
+if __name__ == "__main__":
+    main()

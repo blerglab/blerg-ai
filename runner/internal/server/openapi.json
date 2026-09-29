@@ -1,0 +1,617 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "blerg-runner",
+    "version": "v1",
+    "summary": "Starts and drives coding-agent sessions on a Blerg install.",
+    "description": "The public, agent-facing contract of blerg-runner (contract version v1). Paths are relative to this component's base URL, which GET /agents reports as base_url. The browser and daemon surfaces (WebSockets, board and ticket REST) are deliberately not described here: they are the product's own UI transport, not an API for agents.",
+    "x-lifecycle": ["starting", "running", "disconnected", "ended", "error"]
+  },
+  "servers": [],
+  "tags": [
+    { "name": "discovery", "description": "Finding out what this component is and how to talk to it." },
+    { "name": "identity", "description": "What the calling credential is." },
+    { "name": "sessions", "description": "The session contract: start, drive, follow, collect." }
+  ],
+  "paths": {
+    "/agents": {
+      "get": {
+        "operationId": "agents",
+        "tags": ["discovery"],
+        "summary": "This component's agent manifest: auth and every operation.",
+        "description": "No authentication. With `Accept: text/markdown` (or `?format=md`) the same document is returned as Markdown.",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "description": "`md` returns the Markdown rendering instead of JSON.",
+            "schema": { "type": "string", "enum": ["md"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The runner's manifest entry.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ComponentEntry" } },
+              "text/markdown": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "tags": ["discovery"],
+        "summary": "This document.",
+        "description": "No authentication.",
+        "responses": {
+          "200": {
+            "description": "An OpenAPI 3.1 document.",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/runner/me": {
+      "get": {
+        "operationId": "me",
+        "tags": ["identity"],
+        "summary": "What the calling credential is: kind, subject, audience, capabilities, expiry.",
+        "description": "Introspection of the bearer credential you just used. The static runner key has no subject or expiry and returns only `{\"kind\": \"runner_key\"}`. The credential itself is never echoed back.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "responses": {
+          "200": {
+            "description": "The caller's principal.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Principal" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/models/{engine}": {
+      "get": {
+        "operationId": "models",
+        "tags": ["discovery"],
+        "summary": "The models a session on an engine can run on, with each model's effort levels.",
+        "description": "One list per engine (`claude`, `codex`, `hermes`, …). An engine with no model source answers 200 with an empty `models` list and `source: \"none\"` — there is nothing to pick, and `model`/`effort` stay unset. For `claude` the list is what Claude Code's own /model picker offers, taken from the public Claude Code model catalog (re-fetched every 6 hours; `source: \"builtin\"` means the compiled-in copy is being served because no fetch has succeeded or fetching is disabled). For `codex` and `hermes` the list is what a connected workstation daemon probed (`source: \"daemon\"`): `codex debug models` for Codex, and for Hermes the `/models` of the OpenAI-compatible endpoint its config names (only for `provider: custom`), re-probed every ~15 minutes. Pass `daemon_id` for that daemon's own list; without it, the one daemon that reported a list, or the union of all of them (lowest daemon id first). No report answers `source: \"none\"`. Models in section `main` come first, then `overflow`. Pass a model's `id` as `model` and one of its `efforts` as `effort` to POST /api/runner/start with the same `engine`. A model with an empty `efforts` list takes no effort. Also readable with a signed-in browser session token.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [
+          { "name": "engine", "in": "path", "required": true, "description": "Engine id, as POST /api/runner/start takes it (`claude` for the default engine).", "schema": { "type": "string" } },
+          { "name": "daemon_id", "in": "query", "required": false, "description": "The daemon the session will run on, for engines whose list a daemon reports (`codex`, `hermes`): that daemon's list, or `source: \"none\"` when it reported none — never another daemon's. Ignored by `claude`.", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The model list.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelList" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/runner/start": {
+      "post": {
+        "operationId": "start",
+        "tags": ["sessions"],
+        "summary": "Start a coding-agent session on a repository.",
+        "description": "Runs the session in a cluster Job when a cluster runtime is configured, otherwise on a connected workstation daemon: in its local sandbox container when the daemon has the sandbox image, else on its host. Pass `runtime` to choose explicitly. Send an `Idempotency-Key` header to make a retry safe: the same key with the same body replays the original `202` with `Idempotent-Replayed: true`; the same key with a different body is a `409`.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "1-128 characters, scoped to the calling credential, retained 24 h.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/StartRequest" } }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The session was accepted; follow it with the events or result operations.",
+            "headers": {
+              "Idempotent-Replayed": {
+                "description": "Present and `true` when this response replays an earlier request with the same Idempotency-Key.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["session_id"],
+                  "properties": { "session_id": { "type": "string", "format": "uuid" } }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotConfigured" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/Unprocessable" },
+          "500": { "$ref": "#/components/responses/ServerError" },
+          "503": { "$ref": "#/components/responses/NoRuntime" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}": {
+      "get": {
+        "operationId": "status",
+        "tags": ["sessions"],
+        "summary": "Session status: lifecycle, runtime, whether it can be resumed.",
+        "description": "Status is deliberately not one string: `lifecycle` is the session state machine, `runtime` describes the hosting layer, `resumable` says whether a dead session can be revived by the next message.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+        "responses": {
+          "200": {
+            "description": "The session's three-axis status.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Status" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/message": {
+      "post": {
+        "operationId": "send_message",
+        "tags": ["sessions"],
+        "summary": "Send a conversational turn to the session; resumes a disconnected one.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                  "text": { "type": "string", "description": "The turn to deliver. Required and non-empty." },
+                  "source": {
+                    "type": "string",
+                    "description": "Who is speaking, for the transcript. Defaults to `runner`.",
+                    "default": "runner"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/DaemonBusy" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/interrupt": {
+      "post": {
+        "operationId": "interrupt",
+        "tags": ["sessions"],
+        "summary": "Cancel the session's in-flight turn without ending it.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+        "responses": {
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "The session has no live runtime to interrupt." },
+          "503": { "$ref": "#/components/responses/DaemonBusy" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/stop": {
+      "post": {
+        "operationId": "stop",
+        "tags": ["sessions"],
+        "summary": "End the session for good and free its runtime slot.",
+        "description": "Idempotent: stopping an already-stopped session is still `200`. Finished work must call this or cluster session slots leak.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+        "responses": {
+          "200": {
+            "description": "Stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status"],
+                  "properties": { "status": { "type": "string", "const": "stopped" } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/events": {
+      "get": {
+        "operationId": "events",
+        "tags": ["sessions"],
+        "summary": "Read a window of the session transcript from a cursor.",
+        "description": "Poll with `after_seq` set to the highest `seq` you have seen. `has_more` is true when the window was truncated by `limit`.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/SessionId" },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "required": false,
+            "description": "Return only events with a higher sequence number. Default 0 (from the start).",
+            "schema": { "type": "integer", "format": "int64", "default": 0 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum events to return. Default 200, maximum 400.",
+            "schema": { "type": "integer", "default": 200, "maximum": 400 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A window of the transcript.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/events/stream": {
+      "get": {
+        "operationId": "events_stream",
+        "tags": ["sessions"],
+        "summary": "The same events as a Server-Sent Events stream.",
+        "description": "Each event carries `id: <seq>`, `event: <kind>` and the payload JSON as `data`. Resume after a disconnect with `Last-Event-ID` (or `?after_seq=`). A `: keepalive` comment is sent every 15 s; a final `event: end` carries the result payload when the session is terminal, then the stream closes.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/SessionId" },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "required": false,
+            "description": "Start after this sequence number; `Last-Event-ID` takes precedence.",
+            "schema": { "type": "integer", "format": "int64", "default": 0 }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "description": "The last `id` you received, for transparent resumption.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An event stream.",
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/result": {
+      "get": {
+        "operationId": "result",
+        "tags": ["sessions"],
+        "summary": "The structured outcome: terminal state, branch, last assistant message.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+        "responses": {
+          "200": {
+            "description": "The session's result so far; `terminal` says whether it is final.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Result" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "SessionId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The session id returned by the start operation.",
+        "schema": { "type": "string", "format": "uuid" }
+      }
+    },
+    "securitySchemes": {
+      "agentToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A core-signed agent token minted from the `run-sessions` preset (`aud: \"blerg-runner\"`, capability `session.start`). Get one from core: POST /api/tokens, or Settings → Agent tokens."
+      },
+      "runnerKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The operator's static runner key (BLERG_RUNNER_KEY). A component credential with no owning account; sessions it starts run on the operator's credentials. When it is unset the whole session contract answers 404."
+      }
+    },
+    "responses": {
+      "Accepted": {
+        "description": "Accepted.",
+        "content": {
+          "application/json": {
+            "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
+          }
+        }
+      },
+      "BadRequest": { "description": "Malformed request body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": { "description": "Missing, malformed, expired, revoked or under-capable bearer credential.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotConfigured": { "description": "The runner contract is not enabled on this install (no runner key configured).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "No such session — or one this credential may not see: an agent token is scoped to the sessions its owner started, and a session outside that scope is reported exactly as an unknown one.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unprocessable": { "description": "The request was understood but rejected: unknown or unsafe repo name, a reserved env key, an unusable callback_url, a runtime that is not `cluster`, `docker` or `daemon`, a `model` that is not a well-formed model name, an `effort` outside the engine's allowlist, or `runtime: cluster` on an install with no cluster configured.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "IdempotencyConflict": { "description": "The Idempotency-Key was already used with a different request body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "ServerError": { "description": "The session could not be recorded (database or idempotency store unavailable). The request was not started; retry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NoRuntime": { "description": "No runtime can take the session: no cluster capacity, no connected daemon has the repo, or an idempotency record raced — retry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "DaemonBusy": { "description": "The session's host is not accepting messages right now; retry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "ModelList": {
+        "type": "object",
+        "required": ["models", "source"],
+        "properties": {
+          "models": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } },
+          "source": { "type": "string", "enum": ["live", "builtin", "daemon", "none"], "description": "`live`: the engine's own list, last fetched successfully. `builtin`: the list compiled into this build. `daemon`: probed on a connected workstation daemon from the engine's own CLI or endpoint (Codex, Hermes). `none`: no source for this engine, or no daemon reported a list for it; `models` is empty." },
+          "fetched_at": { "type": ["string", "null"], "format": "date-time", "description": "When the live or daemon list was fetched (for a union of several daemons' lists, the oldest of them); null otherwise." },
+          "daemon_id": { "type": "string", "description": "For `source: \"daemon\"`: the daemon whose list this is. Absent for a union of several daemons' lists, and for every other source." },
+          "engine_efforts": { "type": "array", "items": { "type": "string" }, "description": "The engine's whole effort allowlist, lowest first (empty when it takes no effort) — the levels a model that is not in `models` (typed by hand) may be run at." }
+        }
+      },
+      "Model": {
+        "type": "object",
+        "required": ["id", "name", "section", "efforts"],
+        "properties": {
+          "id": { "type": "string", "description": "The model id to pass as `model`, e.g. `claude-sonnet-5`." },
+          "name": { "type": "string", "description": "Display name, e.g. `Sonnet 5`." },
+          "description": { "type": "string" },
+          "section": { "type": "string", "enum": ["main", "overflow"], "description": "`main` models are the picker's headline choices; `overflow` are older or alternate versions." },
+          "efforts": { "type": "array", "items": { "type": "string" }, "description": "Effort levels this model accepts, lowest first — a subset of the engine's allowlist (Claude: `low`, `medium`, `high`, `xhigh`, `max`; Codex: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; Hermes: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`). Empty when the model takes no effort." },
+          "default_effort": { "type": "string", "description": "The model's default effort. Absent when `efforts` is empty, and also when the engine does not say (Hermes): then sending no `effort` leaves it to the engine's own configuration." },
+          "effort_kind": { "type": "string", "description": "Optional: what the effort control means for this engine (e.g. `reasoning`), for display." }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": { "error": { "type": "string" } }
+      },
+      "Principal": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["agent", "human", "service", "runner_key"],
+            "description": "`runner_key` is the static operator key; the others come from a core-signed token."
+          },
+          "sub": { "type": "string", "description": "The token id. Absent for the runner key." },
+          "on_behalf_of": { "type": "string", "description": "The account the token acts for; attribution, never authorization." },
+          "aud": { "type": "string", "description": "The audience the token was minted for: always `blerg-runner` here." },
+          "caps": { "type": "array", "items": { "type": "string" } },
+          "expires_at": { "type": "integer", "format": "int64", "description": "Unix seconds. Absent for the runner key." }
+        }
+      },
+      "StartRequest": {
+        "type": "object",
+        "description": "`repo` is required unless `no_repo` is true, in which case `repo`, `git_url` and `provider` must be absent (422 otherwise). A blank `repo` without `no_repo` is refused with 422 `repo is required`, as it always was.",
+        "anyOf": [
+          { "required": ["repo"] },
+          { "required": ["no_repo"], "properties": { "no_repo": { "const": true } } }
+        ],
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "A folder name or `org/name` (one slash at most, no `..`, no leading dot). On a daemon runtime it must exist under the daemon's repos root. Required unless `no_repo` is true."
+          },
+          "no_repo": {
+            "type": "boolean",
+            "description": "Start a session tied to no repository. Must be set explicitly — a blank `repo` alone is never read as this. On the cluster the pod works in an empty directory that goes away with it: nothing is cloned and no git credential is given to it. On a daemon (`docker` or `daemon`) the session runs in a new, empty scratch folder under the daemon's repos root, named `.scratch-` plus a generated suffix; being dot-prefixed, it never appears in the daemon's folder list. The folder stays on that disk after the session ends. Any connected daemon may be chosen. The session's `repo` reads back as `\"\"` (cluster) or that scratch folder name (daemon)."
+          },
+          "git_url": { "type": "string", "description": "Clone URL override for cross-org repositories or another git provider, e.g. `https://gitlab.com/group/project.git` (cluster runtime only). A git token is only ever sent to the host it belongs to: the launcher's personal token for a registered provider's host (GitHub: github.com, GitLab: gitlab.com), or the install's shared token for its own configured git base. A URL on any other host is cloned with no token at all, so only a public repository clones there." },
+          "provider": { "type": "string", "enum": ["github", "gitlab"], "description": "The git provider `repo` lives on. Honoured on every runtime: a cluster clone comes from that provider's host with the caller's token for it, and a daemon never resolves the repo on another provider. Absent means GitHub, as before this field existed — pass it for any repository not on GitHub, or an `owner/name` is cloned from github.com. With `git_url`, the URL must be on this provider's host (422 otherwise)." },
+          "title": { "type": "string", "description": "A human-readable label for the session." },
+          "prompt": { "type": "string", "description": "The session's first turn." },
+          "model": { "type": "string", "description": "Engine-specific model name; the install's default when empty. An `id` from GET /api/models/{engine}; for Claude also a Claude Code alias such as `sonnet` or `sonnet[1m]` (lowercase letters, digits, `.`, `-`, `[`, `]`, at most 64 characters). Other engines: letters, digits and `. _ : / @ - [ ]`, not starting with `-`, at most 128 characters." },
+          "effort": { "type": "string", "description": "Reasoning effort (see the model's `efforts` in GET /api/models/{engine}); the model's own default when empty. Must be in the engine's allowlist — Claude: `low`, `medium`, `high`, `xhigh`, `max`; Codex: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; Hermes: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; an engine with no effort levels (today: OpenClaw) refuses any non-empty value with 422 — and, for a model the engine's list knows, in that model's own `efforts`. A daemon-reported list (Codex, Hermes) is per workstation and this call does not name one, so for those engines only the allowlist is checked here." },
+          "env": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Extra environment for the session. Keys beginning `BLERG_RUNNER_`, and `ANTHROPIC_API_KEY`, are reserved and rejected."
+          },
+          "callback_url": {
+            "type": "string",
+            "description": "Webhook for session completion. https, or http to localhost/127.0.0.1/[::1] and only where the install sets BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE=true (the desktop stack does; a cluster install rejects such a URL with 422). Redirects are not followed."
+          },
+          "callback_secret": {
+            "type": "string",
+            "description": "HMAC-SHA256 key for the webhook's X-Blerg-Signature header. Never returned by any endpoint."
+          },
+          "engine": { "type": "string", "description": "Coding engine to run. Defaults to `claude`." },
+          "runtime": {
+            "type": "string",
+            "enum": ["cluster", "docker", "daemon"],
+            "description": "Where to run it: a cluster Job (`cluster`), the local sandbox container on a connected daemon (`docker`), or that daemon's bare host (`daemon`). Defaults to `cluster` when a cluster runtime is configured, else `docker` when the chosen daemon has the sandbox image, else `daemon`. The sandbox reaches the board and the runner over the `blerg-sandbox` network but holds no git credentials, so its agent can commit but not push; pass `daemon` to run on the host instead. An explicit `docker` is honoured even where the image is missing — the daemon reports that."
+          },
+          "auto_stop": {
+            "type": "boolean",
+            "description": "One-shot: the runner stops the session itself once the first turn after the prompt is done — same effect as POST /stop, so `result.terminal` becomes true and the completion webhook fires without the caller stopping anything. Defaults to false: an interactive session stays up waiting for more messages."
+          }
+        }
+      },
+      "Status": {
+        "type": "object",
+        "required": ["lifecycle", "runtime", "resumable", "auto_stop", "error_reason", "end_reason", "ended_by"],
+        "properties": {
+          "lifecycle": { "$ref": "#/components/schemas/Lifecycle" },
+          "runtime": {
+            "type": "string",
+            "enum": ["none", "daemon", "cluster", "job_finished"],
+            "description": "The hosting layer, not the session state — and not the session's `runtime` field: a session hosted by a daemon reads `daemon` here whether its engine runs on that host or in its local sandbox. `GET /api/sessions` carries that distinction."
+          },
+          "resumable": { "type": "boolean", "description": "Whether the next message can revive a dead session." },
+          "auto_stop": { "type": "boolean", "description": "Whether this session was started one-shot: the runner ends it when its first turn is done." },
+          "error_reason": { "type": "string", "description": "Why it failed; empty unless the lifecycle is `error`." },
+          "end_reason": { "$ref": "#/components/schemas/EndReason" },
+          "ended_by": { "$ref": "#/components/schemas/EndedBy" }
+        }
+      },
+      "EndReason": {
+        "type": "string",
+        "enum": ["", "stopped_by_user", "stopped_by_agent", "auto_stopped", "process_exited", "process_failed", "start_failed", "job_finished", "job_failed", "job_disappeared", "not_resumed", "daemon_lost", "daemon_unreported"],
+        "description": "Why the session ended, from a fixed vocabulary; empty while it has not ended, and for sessions that ended before the runner recorded reasons. `stopped_by_user` / `stopped_by_agent`: a stop was requested (by a person, or by an agent token, service or the runner key). `auto_stopped`: the one-shot `auto_stop` ended it after its first turn. `process_exited` / `process_failed`: the process exited on its own, cleanly or not. `start_failed`: it never got going. `job_*`, `not_resumed`, `daemon_lost`, `daemon_unreported`: the runner's reconciler closed it out (the Job finished, failed or vanished; a disconnected session was not resumed within a day; its daemon did not come back; its daemon no longer had it). The first reason recorded wins: a stop is not overwritten by the process exit it causes. For failures `error_reason` still carries the detail. Treat a value you do not know as \"ended\"; the set may grow."
+      },
+      "EndedBy": {
+        "type": ["object", "null"],
+        "description": "What kind of actor ended the session; null when none did (a process exit, a failed Job, the reconciler). Never identifies the account.",
+        "required": ["kind"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["human", "agent", "service", "runner_key"] }
+        }
+      },
+      "Lifecycle": {
+        "type": "string",
+        "enum": ["starting", "running", "disconnected", "ended", "error"]
+      },
+      "EventPage": {
+        "type": "object",
+        "required": ["events", "has_more"],
+        "properties": {
+          "events": { "type": "array", "items": { "$ref": "#/components/schemas/Event" } },
+          "has_more": { "type": "boolean" }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "required": ["seq", "ts", "kind", "payload"],
+        "properties": {
+          "seq": { "type": "integer", "format": "int64", "description": "Monotonic per session; the cursor for after_seq." },
+          "ts": { "type": "string", "format": "date-time" },
+          "kind": { "type": "string", "description": "The event type, e.g. assistant, tool_use, webhook. The set is open: treat a kind you do not know as data to skip. `start_stage` reports start progress; `capabilities` reports what the session has loaded (payload: CapabilitiesPayload) and only the latest one describes the session." },
+          "payload": { "type": "object", "description": "Kind-specific body." }
+        }
+      },
+      "CapabilitiesPayload": {
+        "type": "object",
+        "description": "Payload of a `capabilities` event: what the session's engine has loaded. Engine-neutral data; a group the engine does not report is absent, a reported group with nothing in it has `items: []`. Every string is display text (control and format characters removed, lengths capped); MCP server configuration is never included.",
+        "required": ["engine", "groups"],
+        "properties": {
+          "engine": { "type": "string", "description": "Engine id: claude, native, codex, hermes, ..." },
+          "engine_name": { "type": "string" },
+          "model": { "type": "string" },
+          "version": { "type": "string", "description": "The engine's own version, when it reports one." },
+          "cwd": { "type": "string", "description": "Short display form of the working directory, never a full host path." },
+          "permission_mode": { "type": "string" },
+          "note": { "type": "string", "description": "Where the report comes from, for display." },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "label", "items"],
+              "properties": {
+                "id": { "type": "string", "enum": ["skills", "plugins", "mcp", "commands", "tools", "agents"] },
+                "label": { "type": "string" },
+                "note": { "type": "string" },
+                "total": { "type": "integer", "description": "Item count before the per-group cap (500); absent when nothing was cut." },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "description": { "type": "string" },
+                      "detail": { "type": "string", "description": "e.g. a plugin version or an MCP server's tool count." },
+                      "status": { "type": "string", "description": "e.g. connected, failed, needs-auth, enabled." },
+                      "source": { "type": "string", "description": "e.g. user, project, plugin, builtin." }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Result": {
+        "type": "object",
+        "required": ["session_id", "lifecycle", "terminal", "runtime", "repo", "branch", "artifacts"],
+        "properties": {
+          "session_id": { "type": "string", "format": "uuid" },
+          "lifecycle": { "$ref": "#/components/schemas/Lifecycle" },
+          "terminal": { "type": "boolean", "description": "True for `ended` and `error`: the work is over." },
+          "runtime": { "type": "string" },
+          "repo": { "type": "string" },
+          "git_url": { "type": "string" },
+          "branch": { "type": "string", "description": "`wip/<session_id>` on the repository's remote." },
+          "last_assistant_message": { "type": "string", "description": "Text of the most recent assistant event." },
+          "error_reason": { "type": "string" },
+          "end_reason": { "$ref": "#/components/schemas/EndReason" },
+          "ended_by": { "$ref": "#/components/schemas/EndedBy" },
+          "auto_stop": { "type": "boolean", "description": "Whether this session was started one-shot: the runner ended it when its first turn was done." },
+          "started_at": { "type": "string", "format": "date-time" },
+          "ended_at": { "type": ["string", "null"], "format": "date-time" },
+          "artifacts": { "type": "array", "items": { "type": "object" }, "description": "Reserved; always empty in v1." }
+        }
+      },
+      "ComponentEntry": {
+        "type": "object",
+        "required": ["name", "base_url", "version", "contract_version", "capabilities"],
+        "properties": {
+          "name": { "type": "string", "const": "blerg-runner" },
+          "base_url": { "type": "string" },
+          "version": { "type": "string" },
+          "contract_version": { "type": "string", "const": "v1" },
+          "capabilities": { "type": "array", "items": { "type": "string" } },
+          "description": { "type": "string" },
+          "docs_url": { "type": "string" },
+          "openapi_url": { "type": "string" },
+          "mcp_url": { "type": "string" },
+          "auth": {
+            "type": "object",
+            "required": ["audience", "presets", "accepts"],
+            "properties": {
+              "audience": { "type": "string" },
+              "token_endpoint": { "type": "string", "description": "Filled in by core in the aggregate manifest." },
+              "presets": { "type": "array", "items": { "type": "string" } },
+              "accepts": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "method", "path", "summary", "idempotent"],
+              "properties": {
+                "name": { "type": "string" },
+                "method": { "type": "string" },
+                "path": { "type": "string" },
+                "summary": { "type": "string" },
+                "cap": { "type": "string" },
+                "idempotent": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

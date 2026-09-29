@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>blerg</title>
+    <!-- Brand assets are served by blerg-core itself under /brand/ (core/internal/landing):
+         the same tokens.css board and runner adopt, so every surface shares one palette. -->
+    <link rel="icon" href="/brand/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/brand/tokens.css" />
+    <script>
+      // Apply a pinned theme before first paint to avoid a flash. Dark is the default;
+      // without a pin the tokens fall back to the OS preference. Same key as board/runner.
+      (function () {
+        try {
+          var t = localStorage.getItem("blerg-theme");
+          if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories: ["/contracts", "/core", "/board", "/runner"]
+    schedule: { interval: weekly }
+    groups:
+      go-dependencies: { patterns: ["*"] }
+  - package-ecosystem: npm
+    directories: ["/core/web", "/board/web", "/runner/frontend"]
+    schedule: { interval: weekly }
+    groups:
+      npm-dependencies: { patterns: ["*"] }
+  # The engine CLIs in the session images (runner/sandbox/Dockerfile and
+  # runner/Dockerfile.devcontainer). One pull request per engine, not grouped:
+  # a Codex bump needs its event shapes checked against
+  # runner/internal/daemon/codexdriver.go before it merges.
+  - package-ecosystem: npm
+    directory: "/runner/sandbox/engines"
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }
+  # Every directory with a Dockerfile. Dependabot matches any file whose name
+  # contains "dockerfile", so runner/Dockerfile.server, .daemon and
+  # .devcontainer are covered by "/runner". It updates the tag and the digest
+  # together.
+  - package-ecosystem: docker
+    directories: ["/core", "/board", "/runner", "/runner/sandbox"]
+    schedule: { interval: weekly }

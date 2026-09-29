@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: blerg
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - postgres-init-configmap.yaml
+  - postgres-statefulset.yaml
+  - core-deployment.yaml
+  - board-deployment.yaml
+  - runner-deployment.yaml
+  - ingress.yaml
+# blerg-secrets is intentionally NOT listed here — see secret.example.yaml.
+# deploy.sh creates/updates it separately (kubectl apply, generated at
+# deploy time) before applying this kustomization, so it is never templated
+# through kustomize or committed to git.
+#
+# cluster-runtime.yaml is intentionally NOT listed here either. `namespace:
+# blerg` above is a kustomize transformer: it would rewrite that file's
+# blerg-runner-sessions Role/RoleBinding — and the RoleBinding's ServiceAccount
+# subject namespace — into `blerg`, breaking RBAC that only works scoped to the
+# sessions namespace. deploy.sh applies it directly with `kubectl apply -f`
+# (unless CLUSTER_RUNTIME=off).

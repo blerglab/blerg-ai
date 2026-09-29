@@ -1,0 +1,16 @@
+[Unit]
+Description=Blerg runner daemon (drives local claude CLI + tmux for agent sessions)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__BIN_PATH__
+Environment=BLERG_RUNNER_SERVER_URL=__SERVER_URL__
+Environment=BLERG_RUNNER_DAEMON_TOKEN=__DAEMON_TOKEN__
+Environment=BLERG_RUNNER_REPOS_ROOT=__REPOS_ROOT__
+__EXTRA_ENV__
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

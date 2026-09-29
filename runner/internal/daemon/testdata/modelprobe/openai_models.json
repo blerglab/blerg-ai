@@ -1,0 +1,10 @@
+{
+ "object": "list",
+ "data": [
+  {"id": "llama-3.3-70b", "object": "model", "created": 1790000000, "owned_by": "vllm", "root": "/models/llama", "parent": null, "max_model_len": 131072, "permission": []},
+  {"id": "qwen3-30b", "object": "model", "created": 1790000000, "owned_by": "vllm", "root": "/models/qwen3-30b", "parent": null, "max_model_len": 65536, "permission": [{"id": "modelperm-1", "allow_sampling": true}]},
+  {"id": "mistral-small", "object": "model", "owned_by": "vllm"},
+  {"id": "phi-4", "object": "model", "owned_by": "vllm", "max_model_len": "big"},
+  {"id": "gemma-3-27b", "object": "model", "owned_by": "vllm", "max_model_len": 32768}
+ ]
+}

@@ -1,0 +1,9 @@
+● Bash(make test)
+  ⎿  Running…
+
+✢ Misting… (1m 26s · ↓ 3.6k tokens)
+
+──────────────────────────────────────────────
+❯
+──────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to  ·

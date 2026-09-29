@@ -1,0 +1,56 @@
+# Host-based routing under a single configurable domain (default: blerg.local).
+# Requires an ingress controller in the cluster (e.g. ingress-nginx); most
+# self-hosted k8s distros (k3s, MicroK8s) ship one by default. If yours uses a
+# different controller, adjust `ingressClassName` below.
+#
+#   <DOMAIN>              -> blerg-core   (control-plane landing page)
+#   board.<DOMAIN>         -> blerg-board  (kanban agent board)
+#   runner.<DOMAIN>        -> blerg-runner (agent session server; daemon connects here)
+#
+# ${DOMAIN} is substituted by deploy.sh (default: blerg.local). Point that
+# domain at your ingress controller's address via your own DNS or
+# per-host /etc/hosts entries — see README.md.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: blerg
+  namespace: blerg
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # nginx's default 1m body cap breaks the daemon's agent-config bundle
+    # upload (runner's agentconfig.go accepts up to 80MB) — I2.
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: "${DOMAIN}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: blerg-core
+                port:
+                  number: 8080
+    - host: "board.${DOMAIN}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: blerg-board
+                port:
+                  number: 8080
+    - host: "runner.${DOMAIN}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: blerg-runner
+                port:
+                  number: 8080

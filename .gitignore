@@ -1,0 +1,41 @@
+# Compiled binaries (a blerg-core binary was once committed by accident).
+/blerg-core
+/core/blerg-core
+
+# The built daemon binary (install/desktop/daemon/install.sh builds it here).
+/bin/
+
+# Secrets and local configuration: never commit these.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.kubeconfig
+
+# Working notes from agent sessions (plans, ledgers, reports).
+.superpowers/
+docs/superpowers/
+
+# Local tooling state and per-machine settings.
+.claude/worktrees/
+.claude/settings.local.json
+.envrc
+
+# More credential and key material.
+*.crt
+*.jks
+credentials*.json
+kubeconfig
+
+# Local databases.
+*.sqlite
+*.db
+
+# Build output and dependencies.
+node_modules/
+dist/

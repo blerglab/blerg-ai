@@ -1,0 +1,19 @@
+# Mirrors install/desktop/init-multi-db.sh: a single postgres:16 instance
+# owns three logical databases (blerg_core / blerg_board / blerg_runner),
+# all owned by the same POSTGRES_USER. This runs once via the postgres
+# image's docker-entrypoint-initdb.d convention, against a fresh PVC.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blerg-postgres-init
+  namespace: blerg
+data:
+  init-multi-db.sh: |
+    #!/bin/sh
+    set -e
+
+    for db in blerg_board blerg_runner; do
+      psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+        CREATE DATABASE $db OWNER $POSTGRES_USER;
+    EOSQL
+    done

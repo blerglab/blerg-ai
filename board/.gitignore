@@ -1,0 +1,6 @@
+web/node_modules/
+web/dist/
+bin/
+
+# TypeScript incremental-build state (a local build artifact)
+web/*.tsbuildinfo

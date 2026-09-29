@@ -1,0 +1,80 @@
+# blerg-runner-devcontainer: per-session agent workspace image. The runner binary
+# is PID 1; toolchains cover the common project types run through this stack.
+#
+# Built from a repo-root context, same reason as ../Dockerfile.server: the
+# `replace github.com/blerglab/blerg-ai/contracts => ../contracts` in
+# runner/go.mod needs a real sibling checkout in the build context, which a
+# runner/-only context can't provide (confirmed by testing — a runner/-only
+# context fails at `go mod download` with "reading /contracts/go.mod: no
+# such file or directory"). Build with:
+#   docker build -f runner/Dockerfile.devcontainer -t <tag> .
+FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS build
+WORKDIR /src
+COPY contracts/ /src/contracts/
+COPY runner/ /src/runner/
+WORKDIR /src/runner
+RUN go mod download
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=$(git describe --tags --always 2>/dev/null || echo dev)" -o /out/blerg-runner ./cmd/runner
+
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node
+
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git curl bash make ripgrep jq unzip build-essential \
+    python3 python3-pip python3-venv \
+    chromium fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
+# Chromium's own sandbox needs unprivileged user namespaces, which the default
+# seccomp profile session pods run under (RuntimeDefault, all capabilities
+# dropped; see install/k8s/CLUSTER-RUNTIME.md) blocks. The pod is the sandbox,
+# so `chromium --headless --screenshot=...` runs with --no-sandbox by default.
+RUN printf '%s\n' 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox"' > /etc/chromium.d/blerg-no-sandbox
+
+# Node.js LTS, copied from the official image (same Debian release as the
+# base) rather than installed by a script piped into a root shell: the node
+# binary and npm only, no corepack or yarn.
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# Two of the three subscription-billed session driver CLIs, at the exact
+# versions in runner/sandbox/engines/package.json, verified against the integrity
+# hashes in its package-lock.json. To move to a newer engine version, change
+# it there (`npm install --package-lock-only` refreshes the lockfile) and
+# rebuild. Linked into /usr/local/bin so they are on PATH in every kind of
+# shell.
+COPY runner/sandbox/engines/package.json runner/sandbox/engines/package-lock.json /opt/blerg-engines/
+RUN cd /opt/blerg-engines && npm ci --omit=dev --no-audit --no-fund \
+    && ln -s /opt/blerg-engines/node_modules/.bin/claude /usr/local/bin/claude \
+    && ln -s /opt/blerg-engines/node_modules/.bin/codex /usr/local/bin/codex \
+    && rm -rf /root/.npm
+
+# Go toolchain for Go projects (build-from-source workloads).
+COPY --from=build /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+COPY --from=build /out/blerg-runner /usr/local/bin/blerg-runner
+
+# Non-root workspace user.
+RUN useradd -m -u 1000 -d /workspace agent && mkdir -p /workspace && chown agent:agent /workspace
+USER agent
+WORKDIR /workspace
+ENV HOME=/workspace \
+    BLERG_RUNNER_HOME=/workspace \
+    CHROME_BIN=/usr/bin/chromium \
+    PATH="/workspace/.local/bin:${PATH}"
+
+# Hermes: not an npm package but a source checkout set up by its own
+# installer. Runs as the `agent` user with HOME=/workspace (same as the pod's
+# own $HOME at runtime) so it lands under /workspace/.local/bin and
+# /workspace/.hermes, which survive the later per-session checkout into
+# /workspace/<repo> (a subdirectory, not a wipe of /workspace itself).
+# install-hermes.sh pins the release and says what is and is not pinned; it
+# skips the setup wizard — see CODEX_AUTH_JSON's sibling env var for how a
+# real pod gets credentials (k8sjobs.go).
+COPY runner/sandbox/install-hermes.sh /opt/blerg-engines/install-hermes.sh
+RUN /opt/blerg-engines/install-hermes.sh
+
+ENTRYPOINT ["/usr/local/bin/blerg-runner"]

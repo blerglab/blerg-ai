@@ -1,0 +1,93 @@
+
+✻ Sautéed for 31m 38s
+
+❯ what else is left on the filter work? do we need to write a plan?
+
+● Good question — let me quantify what's actually left rather than guess, so we can decide whether it needs a plan.
+
+● Bash(cd /home/dev/repositories/example-app/.claude/worktrees/feature+list-filters/src
+      echo "=== inline <input> still in screens/components (excl e…)
+  ⎿  === inline <input> still in screens/components (excl editor) ===
+     133
+     total <input> occurrences:
+     … +22 lines (ctrl+o to expand)
+
+● Here's the honest inventory. The core filter logic / keyboard / foundation work is done and verified; what remains is the broad mechanical rollout to actually retire hand-rolled filter inputs everywhere. Concrete counts:
+
+  ┌─────────────────────┬─────────────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │         Area        │                    Remaining                    │                                                                                   Notes                                                                                   │
+  ├─────────────────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ FilterBar adoption  │ 3 of ~40 screens done                           │ ~120 hand-rolled filter inputs, but not all are migratable — many are search boxes, chips, date pickers that should stay custom. Realistically about half are genuine filt│
+  ├─────────────────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ .chip class         │ 0 screens; ~30 restyle chips inline             │ the .chip/.chip-lg classes exist but nothing uses them                                                                                                                    │
+  ├─────────────────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ PageHeader          │ 12 of 24 screens roll their own header          │ inconsistent title sizes/padding                                                                                                                                          │
+  ├─────────────────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ <EmptyState>        │ 1 of ~15 ad-hoc empty states                    │ seeded, not rolled out                                                                                                                                                    │
+  ├─────────────────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Sort menu           │ 9 custom dropdowns bypass it                    │ higher-judgment (focus order, mobile sheet behavior)                                                                                                                      │
+  ├─────────────────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Cosmetic            │ 4 files with duplicate color fallbacks          │ harmless (tokens are defined), purely tidy-up                                                                                                                             │
+  ├─────────────────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Mobile items        │ a few cramped toolbars / fixed widths           │ from the audit's medium tier                                                                                                                                              │
+  └─────────────────────┴─────────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Do we need a plan? Yes — but a lightweight one, not a heavy design doc. The reason: this is ~100+ files of mechanical change that's only safe if shipped in reviewable slices (one concern per branch/PR), each verified by tsc + lint + build. A single mega-PR touching every file would be
+  unreviewable and risky. The judgment calls (which inputs are real filters; dropdown focus order) are exactly what a checklist should pin down so it can be parallelized across agents without drift.
+
+  My recommendation: merge the current verified batch first (it's a clean, self-contained unit), then work the rollout as tracked slices.
+
+  Two decisions for you:
+
+● User answered Claude's questions:
+  ⎿  · How do you want to handle the work that's already done and verified (core logic + keyboard + primitives)? → Hold; keep building on this branch
+     · Do you want me to write a plan, and how far should the rollout go? → Write a checklist + do high-value slices
+
+● Got it — staying on this branch, writing a lightweight checklist, and executing the high-value slices (A FilterBar, B .chip, C PageHeader, D EmptyState, G mobile), deferring the sort-menu work. Let me check where plans live, then write it.
+
+● Bash(cd /home/dev/repositories/example-app/.claude/worktrees/feature+list-filters
+      ls docs/ 2>/dev/null && echo "---" && ls docs/plans/ 2>…)
+  ⎿  overview.md
+     notes.txt
+     architecture.md
+     … +9 lines (ctrl+o to expand)
+
+● Write(docs/plans/plan-filters.md)
+  ⎿  Wrote 64 lines to docs/plans/plan-filters.md
+       1 # List Filters — Plan
+       2
+       3 Branch: `feature/list-filters`
+       4
+       5 ## Goal
+       6 Replace hand-rolled filter inputs with a shared FilterBar so that
+       7 theming (light / dark) is uniform and correct, and obvious mobile
+       8 layout breaks are fixed.
+       9
+      10 ## Done (committed)
+     … +55 lines (ctrl+o to expand)
+
+● Plan committed to docs/plans/. Now executing the slices by file-group (each agent owns disjoint screens and applies all relevant transforms, so no two agents touch the same file). Launching four in parallel, then I verify centrally with tsc + lint + build and commit.
+
+  Running 4 agents… (ctrl+o to expand)
+   ├ Filter rollout group 1 · 26 tool uses · 82.9k tokens
+   │ ⎿  Done
+   ├ Filter rollout group 2 · 16 tool uses · 97.1k tokens
+   │ ⎿  Done
+   ├ Filter rollout group 3 · 29 tool uses · 98.4k tokens
+   │ ⎿  Update: src/screens/NoteListScreen.tsx
+   └ Filter rollout group 4 · 30 tool uses · 99.3k tokens
+     ⎿  Update: src/screens/NoteDetailScreen.tsx
+     (ctrl+b ctrl+b (twice) to run in background)
+     (ctrl+b ctrl+b (twice) to run in background)
+
+✻ Incubating… (8m 13s · ↓ 65.6k tokens)
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · gh auth login · esc to interrupt · ↓ to manage
+
+  ● main
+  ◯ general-purpose  Filter rollout group 3                                                                                                                                                                                                                                     5m 15s · ↓ 99.4k tokens
+  ◯ general-purpose  Filter rollout group 4                                                                                                                                                                                                                                      5m 6s · ↓ 99.9k tokens
+

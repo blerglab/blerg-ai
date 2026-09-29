@@ -1,0 +1,12 @@
+● Bash(hostname -I)
+  ⎿  === Host IPv4 address ===
+     203.0.113.114
+     === Guest IP (forward target) ===
+     … +4 lines (ctrl+o to expand)
+
+✶ Architecting… (thinking with high effort)
+
+──────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to  ·

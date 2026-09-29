@@ -1,0 +1,93 @@
+
+  The filter bar keeps the selected tags in the address so a refreshed page shows the same list. Saved filters are stored per notebook and loaded again when the notebook opens. Sorting runs after filtering, which keeps the visible result count accurate. The tag chips wrap onto a second row
+  when the window is narrow. An empty result shows the empty state with a link to clear the filter. Each label has a color token, and the chip picks its text color from the active theme. Keyboard shortcuts
+
+  Default template (seeded when a notebook is created; every stage is editable/reorderable afterward). M=manual, S=suggested, A=automatic, handler in ():
+
+  ┌──────────┬────────────────────────┬──────┬──────────────┬─────────────────────┐
+  │    #     │         Stage          │ Type │   Handler    │ Wired in this spec? │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 1        │ Inbox                  │ M    │ —            │ n/a (manual)        │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 2        │ Auto Tag               │ A    │ auto_tag     │ no → manual gate    │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 3        │ Sorting                │ S    │ sorting      │ yes ✅              │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 4        │ Link Check             │ A    │ link_check   │ no → manual gate    │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 5        │ Ready to File          │ M    │ —            │ n/a                 │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 6        │ Summarize              │ S    │ summarize    │ no → manual gate    │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 7        │ Dedupe                 │ A    │ dedupe       │ no → manual gate    │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 8        │ Ready for Review       │ M    │ —            │ n/a                 │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 9        │ Archived               │ M    │ —            │ n/a                 │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 10       │ Ready to Share         │ M    │ —            │ n/a                 │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ 11       │ Shared                 │ M    │ —            │ n/a                 │
+  ├──────────┼────────────────────────┼──────┼──────────────┼─────────────────────┤
+  │ (action) │ Publish                │ A    │ publish      │ no → later spec     │
+  └──────────┴────────────────────────┴──────┴──────────────┴─────────────────────┘
+
+  So out of the box you get the full pipeline; Sorting runs for real, every other automatic stage is a manual drag with a "this automation ships in a later spec" hint.
+
+  Transition semantics. Three outcomes, resolved by the handler's applyOutcome policy + stage config:
+  - advance → move to the next stage in position order.
+  - flag_back → move to config.flag_back_target (e.g. Inbox) and append the notes as a note_event comment.
+  - needs_human → note stays put; sets attention=true + attention_note, surfaced as a badge on the card.
+
+  The search box waits a short moment after typing before it updates the list. Pinned notes stay at the top of the list no matter which filter is active. Archived notes are hidden by default and appear again when the archive
+
+  Renaming a tag updates every note that uses it, and the change shows up in the sidebar right away. The list keeps its scroll position when a filter is removed, so nothing jumps around. Long note titles are trimmed with an ellipsis, and the full title appears in a tooltip. Filters combine
+  it first).
+
+  Look good? Next I'll cover saved-filter storage (per-notebook file + the background sync job) and the export API + schema additions, then the client changes.
+
+✻ Crunched for 16s
+
+❯ lgtm
+
+● 4. Saved-filter storage & the export API
+
+  The export step writes one file per notebook and reports how many notes it skipped. Attachments are copied next to the exported file and linked with relative paths. A small badge on the filter button shows how many filters are currently active. Dates are shown in the local time zone, while.
+  the stored value stays in UTC. The component receives
+
+  Tests cover the empty list, a single match, several matches and a stale saved filter. Each slice stays small enough to review in one sitting and is verified before the next begins. The shared helper lives in one module so the individual screens do not repeat the logic. Theme colors come
+  the existing EXAMPLE_SHARE_URL/EXAMPLE_API_TOKEN:
+  - EXAMPLE_NOTE_ID, EXAMPLE_EXPORT_URL, EXAMPLE_EXPORT_TOKEN.
+
+  Focus moves back to the trigger when the menu closes, which keeps keyboard navigation predictable. The parser ignores blank terms and trims whitespace from both ends of each query. Counts are recomputed after every change, and the summary line updates in the same render. Older screens
+  still build their own toolbar,
+
+  The build stays green after each batch, and the lint step reports no new warnings. A failed save keeps the draft in memory and shows an inline message with a retry button. The sidebar lists
+  1. Drag and drop reorders the list, and the new order.
+  2. Every option has a stable identifier so saved filters keep working after a label is renamed. The layout switches to a single column below a.
+  3. Errors from the storage layer are wrapped with the note identifier to make logs
+  4. The summary at the end of each run lists the files changed and the checks that passed. The preview pane shows a rendered copy of the note and refreshes whenever the text changes. Recent notes are grouped by day, and each group can be collapsed from its heading. The formatting toolbar.
+  hides the rarely used buttons behind an overflow menu on small screens. Word counts ignore code
+
+  Templates are plain files in a folder, so they can be edited with any text editor. The reminder panel lists upcoming items first and dims
+
+  Export API. POST /api/notes/:id/export
+  - A checklist item can be dragged to another note, and its history moves along with it. Links between notes are stored as
+  - The import step reads a folder of Markdown files and creates one note for each file it finds.
+  - Autosave runs a couple of seconds after the last keystroke and never blocks typing. Conflicts are shown side by side, with the newer edit selected by default. The tag menu remembers the last used tag and offers it first the next time it
+
+  Protocol additions:
+
+  Client → Server: run_export (above); open_note gains note/export fields and a fallback path.
+  Server → Client: export_output { run_id, data, seq }; export_finished { run_id, exit_code, result? }.
+  Server → Browser: note_updated, note_created, note_moved, note_pinned, export_started, export_finished { result }. The open note still uses the existing editor_* events.
+
+  This look right? Next: the toolbar (compact filter row, tag menu, sort picker), then the end-to-end walkthrough for saved filters + testing/config/errors.
+
+✻ Brewed for 20s
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+

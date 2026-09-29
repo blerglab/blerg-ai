@@ -1,0 +1,124 @@
+# golangci-lint v2 configuration: the one lint gate for all four Go modules
+# (contracts, core, board, runner). CI and `make lint` both use this file.
+#
+# The set is chosen to catch bugs, not to police style:
+#   - correctness: errcheck, govet, staticcheck, ineffassign, unused
+#   - security: gosec (every rule on; this code handles credentials, tokens
+#     and subprocesses)
+#   - resource and error handling: bodyclose, rowserrcheck, sqlclosecheck,
+#     errorlint, nilerr, noctx, contextcheck
+#   - dead weight and typos: unconvert, unparam, misspell
+#   - bug-prone idioms: gocritic (default checks), revive (a small rule set)
+#   - nolintlint: every //nolint must name its linter and give a reason
+#
+# Deliberately absent: line-length limits, mandatory doc comments, and
+# complexity gates (funlen, gocyclo, ...). They force cosmetic churn without
+# finding defects.
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - contextcheck
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+
+  settings:
+    gosec:
+      excludes:
+        # Unhandled errors: errcheck reports the same sites with better
+        # precision, and one finding should need one fix.
+        - G104
+        # Log injection by taint analysis: neutralised at the sink instead.
+        # Every binary installs contracts/logsafe, which escapes control
+        # characters so an entry is always exactly one line; the analysis
+        # cannot see that and flags every logged request value.
+        - G706
+    errcheck:
+      # Type assertions must be checked; blank assignments of errors are
+      # allowed because `_ = f()` is the explicit "ignored on purpose" idiom.
+      check-type-assertions: true
+      exclude-functions:
+        # Writing a response body after the status line is sent: nothing
+        # useful can be done with the error, the client has gone away.
+        - (net/http.ResponseWriter).Write
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: defer
+        - name: dot-imports
+        - name: duplicated-imports
+        - name: early-return
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: identical-branches
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: range-val-address
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-equal
+        - name: time-naming
+        - name: unconditional-recursion
+        - name: unreachable-code
+        - name: useless-break
+        - name: var-declaration
+        - name: waitgroup-by-value
+
+  exclusions:
+    paths:
+      # Third-party code that npm happens to ship Go sources in (e.g.
+      # runner/frontend/node_modules/flatted/golang). Not ours to fix; absent
+      # in CI's lint job, present after a local `npm ci`.
+      - node_modules
+    rules:
+      # Tests keep govet, staticcheck, unused and the rest. They are exempt
+      # only from the security scanner and from the checks that fire on
+      # short-lived fixture plumbing (unchecked cleanup, unclosed bodies,
+      # context-less requests, unused helper parameters).
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - contextcheck
+          - errcheck
+          - gosec
+          - noctx
+          - unparam
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt

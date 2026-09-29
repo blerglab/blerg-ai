@@ -1,0 +1,14 @@
+-- 015: sessions.daemon_lost_at (agent-contract spec §3, completion webhook).
+--
+-- A desktop session whose daemon's WebSocket drops is marked "error" but is
+-- deliberately revivable: the tmux pane keeps running and reconcileSessions
+-- brings the row back when the daemon reattaches. So the disconnect itself
+-- cannot be treated as the end of the session — but a daemon that never
+-- returns must not leave the session, and any broker waiting on its callback,
+-- hanging forever either.
+--
+-- This column records WHEN the daemon was lost, so the reconciler can wait a
+-- grace period and only then declare the session over. It is cleared the
+-- moment the session is revived, which is what makes "the daemon came back"
+-- and "the daemon is gone for good" distinguishable at all.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS daemon_lost_at timestamptz;

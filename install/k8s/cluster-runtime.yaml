@@ -1,0 +1,66 @@
+# Cluster runtime (ephemeral per-session agent Jobs) — namespace + RBAC.
+#
+# deploy.sh applies this for you (`kubectl apply -f cluster-runtime.yaml`)
+# unless you set CLUSTER_RUNTIME=off. Applying it by hand does the same thing
+# if you are not using deploy.sh.
+#
+# See CLUSTER-RUNTIME.md for the full picture (this file + the cluster-runtime
+# ConfigMap keys + the agent credentials Secret, all of which deploy.sh also
+# handles — see cluster-agent-secret.example.yaml).
+#
+# Why a separate file, NOT in kustomization.yaml's resources: that
+# kustomization sets `namespace: blerg`, and kustomize's namespace transformer
+# would rewrite the Role/RoleBinding below — and the RoleBinding's
+# ServiceAccount subject namespace — into `blerg`, breaking RBAC that only
+# works scoped to the sessions namespace. It also creates its own namespace
+# (blerg-runner-sessions, distinct from the `blerg` namespace everything
+# else runs in — each session gets its own throwaway pod here).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: blerg-runner-sessions
+  labels:
+    app.kubernetes.io/part-of: blerg
+---
+# Grants blerg-runner-agent-launcher (created unconditionally in
+# runner-deployment.yaml, permissionless until this Role/RoleBinding exist)
+# exactly what internal/server/k8sjobs.go's JobManager needs in this
+# namespace: manage session Jobs, read the shared credentials Secret to report
+# which engines are configured (GET /api/cluster/status), and create/patch/
+# delete the PER-SESSION credential Secrets that carry a spawning account's own
+# engine credential for the lifetime of one session (create + delete for the
+# Secret itself, patch to attach its ownerReferences to the session's Job so
+# k8s garbage-collects it alongside the Job), and read session pods (get/list
+# only) so the start progress a browser shows can say what the pod is waiting
+# on — Unschedulable, ImagePullBackOff, a missing Secret — instead of a bare
+# "Starting…". Without the pods rule sessions still start; the progress panel
+# just cannot see past "Job created".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: blerg-runner-agent-launcher
+  namespace: blerg-runner-sessions
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: blerg-runner-agent-launcher
+  namespace: blerg-runner-sessions
+subjects:
+  - kind: ServiceAccount
+    name: blerg-runner-agent-launcher
+    namespace: blerg
+roleRef:
+  kind: Role
+  name: blerg-runner-agent-launcher
+  apiGroup: rbac.authorization.k8s.io

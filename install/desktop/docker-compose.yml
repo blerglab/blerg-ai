@@ -1,0 +1,203 @@
+# Blerg desktop stack — local integration of the three services a human needs
+# to test scenario A (build a new app with an agent) and scenario B (onboard an
+# existing repo):
+#
+#   blerg-core   the control plane (this repo, core/Dockerfile)   -> :8081 (BLERG_PORT_CORE)
+#   blerg-board  the BOARD (kanban agent board)                    -> :8082 (BLERG_PORT_BOARD)
+#   blerg-runner the RUNNER (agent sessions)                       -> :8083 (BLERG_PORT_RUNNER)
+#
+# Host port collisions are common on a desktop already running other things —
+# override any of the three in install/desktop/.env if a default is taken.
+#
+# The board and runner sources live inside this monorepo,
+# at ./board and ./runner respectively, so a standalone clone of `blerg` can
+# build and run the whole stack on its own.
+#
+# NOT included here, and NOT containerizable: the blerg-runner DAEMON. Agent
+# sessions are actually run by a daemon process that must run on the HOST,
+# using the human's own `claude` CLI install, its auth, and tmux. See
+# blerg-up.sh and DAEMON.md for how to start it against blerg-runner.
+#
+# Postgres: one postgres:16 instance with three logical databases
+# (blerg_core / blerg_board / blerg_runner), all owned by the same user, via
+# init-multi-db.sh. Simplest thing that works for a single-host desktop stack;
+# it is internal to this compose project and leaves any other Postgres on the
+# machine alone.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: blerg
+      # A fixed password is safe ONLY because Postgres is never published to the
+      # host: it is reachable solely on the compose network. If you add a "ports:"
+      # entry for this service, change the password (here and in every
+      # DATABASE_URL below) first.
+      POSTGRES_PASSWORD: blerg
+      POSTGRES_DB: blerg_core
+    volumes:
+      - blerg-desktop-postgres:/var/lib/postgresql/data
+      - ./init-multi-db.sh:/docker-entrypoint-initdb.d/init-multi-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blerg -d blerg_core"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  blerg-core:
+    build:
+      context: ../..
+      dockerfile: core/Dockerfile
+      args:
+        VERSION: "${BLERG_VERSION:-dev}"
+    ports:
+      # Loopback by default: Docker publishes straight past the host firewall
+      # (ufw/firewalld do NOT protect these ports). Set BLERG_BIND_ADDR=0.0.0.0
+      # only if other machines must reach the stack — and then change the three
+      # origin vars to that host too, or login will still only work on localhost.
+      - "${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_CORE:-8081}:8080"
+    environment:
+      DATABASE_URL: postgres://blerg:blerg@postgres:5432/blerg_core?sslmode=disable
+      # Shared bootstrap key components present to register with core (POST /components).
+      BLERG_CORE_REGISTER_KEY: ${BLERG_CORE_REGISTER_KEY:-}
+      # The internal service key board/runner present on privileged core calls,
+      # and the local (JWT signing) key. Generated once by blerg-up.sh into .env.
+      BLERG_CORE_INTERNAL_KEY: ${BLERG_CORE_INTERNAL_KEY:-}
+      BLERG_CORE_LOCAL_KEY: ${BLERG_CORE_LOCAL_KEY:-}
+      # The public URL humans and browsers use to reach core (host-side, not
+      # the in-cluster name — matters for links/redirects core emits).
+      BLERG_CORE_PUBLIC_URL: http://localhost:${BLERG_PORT_CORE:-8081}
+      # The GET /auth/refresh return_to allowlist, and the token audience minted
+      # per origin. Without the first, every refresh 400s (nobody can log in to
+      # board or runner); without the second, every token is minted with aud
+      # "blerg-core", which board/runner reject — an infinite redirect loop.
+      # Derived from the BLERG_PORT_* vars below so a changed port can't
+      # silently break login; blerg-up.sh also regenerates these into .env on
+      # every run so a hand-edited port is picked up without you having to.
+      BLERG_CORE_ALLOWED_RETURN_ORIGINS: ${BLERG_CORE_ALLOWED_RETURN_ORIGINS:-http://localhost:${BLERG_PORT_CORE:-8081},http://localhost:${BLERG_PORT_BOARD:-8082},http://localhost:${BLERG_PORT_RUNNER:-8083}}
+      BLERG_CORE_ORIGIN_AUDIENCES: ${BLERG_CORE_ORIGIN_AUDIENCES:-http://localhost:${BLERG_PORT_CORE:-8081}=blerg-core,http://localhost:${BLERG_PORT_BOARD:-8082}=blerg-board,http://localhost:${BLERG_PORT_RUNNER:-8083}=blerg-runner}
+      BLERG_CORE_COOKIE_SECURE: "false"  # desktop only: Safari drops Secure cookies on http://localhost. Never on a public host.
+      # GitHub owner/repo marketplaces an account may register always-on
+      # plugins from (comma-separated, "*" = any). Empty = the official
+      # anthropics/claude-plugins-official only. Keep equal to the runner's.
+      BLERG_CORE_PLUGIN_MARKETPLACES: ${BLERG_CORE_PLUGIN_MARKETPLACES:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  blerg-board:
+    build:
+      context: ../..
+      dockerfile: board/Dockerfile
+      args:
+        VITE_CORE_PORT: "${BLERG_PORT_CORE:-8081}"
+        VERSION: "${BLERG_VERSION:-dev}"
+    ports:
+      # Loopback by default: Docker publishes straight past the host firewall
+      # (ufw/firewalld do NOT protect these ports). Set BLERG_BIND_ADDR=0.0.0.0
+      # only if other machines must reach the stack — and then change the three
+      # origin vars to that host too, or login will still only work on localhost.
+      - "${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_BOARD:-8082}:8080"
+    environment:
+      DATABASE_URL: postgres://blerg:blerg@postgres:5432/blerg_board?sslmode=disable
+      BLERG_BOARD_SERVICE_KEY: ${BLERG_BOARD_SERVICE_KEY:-}
+      # Encrypts board automation tokens at rest (base64, 32 bytes). Unset = boards cannot save one.
+      BLERG_BOARD_SECRET_KEY: ${BLERG_BOARD_SECRET_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Wires the board to the runner below. Both must agree on the key.
+      BLERG_RUNNER_URL: http://blerg-runner:8080
+      BLERG_RUNNER_KEY: ${BLERG_RUNNER_KEY:-}
+      # Optional pin for board-started sessions: daemon | docker | cluster (empty = the runner's default).
+      BLERG_BOARD_RUNNER_RUNTIME: ${BLERG_BOARD_RUNNER_RUNTIME:-}
+      # Register with, and validate tokens against, the control plane.
+      BLERG_CORE_URL: http://blerg-core:8080
+      BLERG_CORE_REGISTER_KEY: ${BLERG_CORE_REGISTER_KEY:-}
+      BLERG_CORE_PUBLIC_URL: http://localhost:${BLERG_PORT_CORE:-8081}
+      BLERG_BOARD_SELF_URL: http://blerg-board:8080
+      BLERG_BOARD_PUBLIC_URL: http://localhost:${BLERG_PORT_BOARD:-8082}
+      # The host-side runner daemon can't reach the compose-internal
+      # blerg-board name, so this must be the localhost URL, not blerg-board:8080.
+      # (A session in the local sandbox gets it rewritten to blerg-board:8080
+      # by the daemon — see the networks block at the bottom.)
+      BLERG_BOARD_AGENT_URL: http://localhost:${BLERG_PORT_BOARD:-8082}
+      RUNNER_UI_BASE: http://localhost:${BLERG_PORT_RUNNER:-8083}/sessions
+    networks: [default, sandbox]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      blerg-runner:
+        condition: service_started
+      blerg-core:
+        condition: service_started
+
+  blerg-runner:
+    build:
+      context: ../..
+      dockerfile: runner/Dockerfile.server
+      args:
+        VITE_CORE_PORT: "${BLERG_PORT_CORE:-8081}"
+        VERSION: "${BLERG_VERSION:-dev}"
+    ports:
+      # Loopback by default: Docker publishes straight past the host firewall
+      # (ufw/firewalld do NOT protect these ports). Set BLERG_BIND_ADDR=0.0.0.0
+      # only if other machines must reach the stack — and then change the three
+      # origin vars to that host too, or login will still only work on localhost.
+      - "${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_RUNNER:-8083}:8080"
+    environment:
+      BLERG_RUNNER_DATABASE_URL: postgres://blerg:blerg@postgres:5432/blerg_runner?sslmode=disable
+      # Required: the host daemon must present this token on /ws/daemon.
+      BLERG_RUNNER_DAEMON_TOKEN: ${BLERG_RUNNER_DAEMON_TOKEN:-}
+      # Enables the board->runner contract (must equal BLERG_RUNNER_KEY above).
+      BLERG_RUNNER_KEY: ${BLERG_RUNNER_KEY:-}
+      # Register with, and validate tokens against, the control plane.
+      BLERG_CORE_URL: http://blerg-core:8080
+      BLERG_CORE_REGISTER_KEY: ${BLERG_CORE_REGISTER_KEY:-}
+      BLERG_CORE_PUBLIC_URL: http://localhost:${BLERG_PORT_CORE:-8081}
+      # Same value as blerg-core's BLERG_CORE_INTERNAL_KEY — runner presents
+      # this on privileged core calls.
+      BLERG_RUNNER_CORE_INTERNAL_KEY: ${BLERG_CORE_INTERNAL_KEY:-}
+      BLERG_RUNNER_SELF_URL: http://blerg-runner:8080
+      BLERG_RUNNER_DATA_DIR: /data
+      # Completion webhooks may target this machine and the compose network.
+      # Everything in this stack is private by definition, so the runner's
+      # default refusal to POST results to private/loopback addresses would
+      # block every local callback.
+      BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE: "true"
+      # Where the Claude model list comes from (launch sheet Model/Effort).
+      # Unset = the public Claude Code catalog; set it EMPTY in .env for an
+      # offline machine to serve the built-in list. `-` (not `:-`) on purpose:
+      # an empty value must reach the runner as empty.
+      BLERG_RUNNER_MODEL_CATALOG_URL: ${BLERG_RUNNER_MODEL_CATALOG_URL-https://downloads.claude.ai/model-catalog/v1/catalog.json}
+      # Marketplaces always-on plugins may come from; same value as core's.
+      # Only used by a cluster runtime (this desktop stack has none).
+      BLERG_RUNNER_PLUGIN_MARKETPLACES: ${BLERG_RUNNER_PLUGIN_MARKETPLACES:-}
+    volumes:
+      - blerg-desktop-runner-data:/data
+    networks: [default, sandbox]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      blerg-core:
+        condition: service_started
+
+# The local-sandbox network. Agent sessions the host daemon runs in the local
+# sandbox (a docker container per session) join this network, so they reach
+# exactly the board and runner APIs by service name — http://blerg-board:8080
+# and http://blerg-runner:8080 — the same on Linux, macOS and WSL, with no
+# change to what is published on the host. Postgres and blerg-core are
+# deliberately NOT on it: a sandbox must never reach the database (whose
+# password is the well-known "blerg") or core's internal endpoints. Board and
+# runner stay on `default` too, which is how they still reach Postgres and core.
+#
+# The name is pinned (not project-prefixed like `<project>_default`) because
+# the daemon looks it up by that literal name (BLERG_RUNNER_SANDBOX_NETWORK,
+# default blerg-sandbox). A stack started from an older copy of this file has
+# no such network: re-run ./blerg-up.sh to create it. Until then sandboxed
+# sessions still run, but cannot reach the board (the daemon logs one warning).
+networks:
+  sandbox:
+    name: blerg-sandbox
+
+volumes:
+  blerg-desktop-postgres:
+  blerg-desktop-runner-data:

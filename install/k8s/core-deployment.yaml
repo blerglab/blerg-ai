@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blerg-core
+  namespace: blerg
+  labels:
+    app: blerg-core
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blerg-core
+  template:
+    metadata:
+      labels:
+        app: blerg-core
+    spec:
+      containers:
+        - name: blerg-core
+          image: "${REGISTRY}/blerg-core:${TAG}"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: DATABASE_URL_CORE
+            - name: BLERG_CORE_REGISTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_CORE_REGISTER_KEY
+            # Static shared secret core validates on its internal endpoints;
+            # runner presents this same value back as
+            # BLERG_RUNNER_CORE_INTERNAL_KEY (runner-deployment.yaml).
+            - name: BLERG_CORE_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_CORE_INTERNAL_KEY
+            # core's local KMS key (base64 of 32 random bytes) — without it
+            # BLERG_CORE_KEYBACKEND defaults away from "local" silently and
+            # per-account credential storage never comes up.
+            - name: BLERG_CORE_LOCAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_CORE_LOCAL_KEY
+            # Optional — enables core's own GitHub App/PAT reconciliation.
+            # Absent means the feature stays off, not an error.
+            - name: BLERG_CORE_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_CORE_GITHUB_TOKEN
+                  optional: true
+            - name: BLERG_CORE_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_CORE_PUBLIC_URL
+            # The GET /auth/refresh return_to allowlist. Without it the
+            # allowlist is empty and EVERY refresh 400s, which a user sees as
+            # being unable to log in to board or runner at all. Mirrors
+            # ingress.yaml's host routing: core at the apex, board/runner on
+            # their subdomains. ${DOMAIN} is substituted by deploy.sh.
+            # ${SCHEME} is "https" when deploy.sh is run with CLUSTER_ISSUER
+            # set (TLS terminated at the ingress), else "http" — this MUST
+            # match the scheme browsers actually reach the ingress on, or
+            # every refresh 400s on an origin mismatch.
+            - name: BLERG_CORE_ALLOWED_RETURN_ORIGINS
+              value: "${SCHEME}://${DOMAIN},${SCHEME}://board.${DOMAIN},${SCHEME}://runner.${DOMAIN}"
+            # Which audience an access token is minted for, per return_to
+            # origin. Without it every token defaults to aud "blerg-core",
+            # which board and runner both reject — the user sees an infinite
+            # redirect loop between the component and /auth/refresh.
+            - name: BLERG_CORE_ORIGIN_AUDIENCES
+              value: "${SCHEME}://${DOMAIN}=blerg-core,${SCHEME}://board.${DOMAIN}=blerg-board,${SCHEME}://runner.${DOMAIN}=blerg-runner"
+            # Core always sits behind the ingress here (ingress.yaml), and
+            # ingress-nginx OVERWRITES X-Forwarded-For with the real client
+            # address rather than appending to whatever the caller sent, so
+            # trusting the header is safe. Without this, human_sessions.ip
+            # records the ingress pod's IP for every login. Only affects
+            # session attribution, never authorization.
+            - name: BLERG_CORE_BEHIND_PROXY
+              value: "true"
+            # Optional — the GitHub owner/repo marketplaces an account may
+            # register always-on plugins from (comma-separated; "*" = any).
+            # Absent = only anthropics/claude-plugins-official. Keep it equal
+            # to the runner's BLERG_RUNNER_PLUGIN_MARKETPLACES (configmap.yaml).
+            - name: BLERG_CORE_PLUGIN_MARKETPLACES
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_CORE_PLUGIN_MARKETPLACES, optional: true }
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            runAsNonRoot: true
+            # distroless "nonroot" is UID 65532; pin it numerically so the
+            # kubelet's runAsNonRoot check never depends on image metadata.
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile: {type: RuntimeDefault}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blerg-core
+  namespace: blerg
+  labels:
+    app: blerg-core
+spec:
+  selector:
+    app: blerg-core
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

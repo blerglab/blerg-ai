@@ -1,0 +1,157 @@
+/* Blerg brand tokens — the single source of truth for color, type, and status
+   chip styling across every Blerg surface (core, board, runner, ops, gpu, ...).
+   The Blerg "Deep Slate" palette — a cool slate-tinted near-black with a wide
+   surface ramp (dark, the committed default) and a first-class cool-paper light
+   variant, orange kept as the signature accent. Do not invent parallel hex
+   values or a second status vocabulary in a derived surface — extend this file
+   instead, and keep the derived copies (landing, board, runner) in sync. */
+
+:root {
+  /* ── Deep Slate palette (DARK — the committed default; operators live in it).
+     Cool slate-tinted near-black with a wide surface ramp so panels step off
+     the ground, bright foreground for contrast, orange kept as the signature.
+     Light is a first-class alternate defined below. Theming structure:
+       bare :root                        = dark (default)
+       @media (prefers-color-scheme:light) = light, unless data-theme="dark"
+       :root[data-theme="light"|"dark"]  = explicit choice, wins over the OS
+     Style components through these tokens only — never a raw hex that works in
+     just one theme. Source of truth: keep the derived copies (landing, board,
+     runner) byte-identical to this block. ─────────────────────────────────── */
+  --basalt: #0d1117;     /* app background */
+  --scree: #161c26;      /* raised surface (panels, sheets) */
+  --scree-2: #1e2633;    /* card surface + row dividers */
+  --stone: #313d4f;      /* borders, inputs, dividers */
+  --fog: #c2ccd8;        /* secondary text */
+  --fog-dim: #8b97a7;    /* muted text */
+  --chalk: #f2f6fa;      /* primary text */
+
+  --blaze: #ff6a3d;      /* primary accent — actions, active/attention, focus ring */
+  --blaze-soft: #ff6a3d33;
+  --lichen: #63d68b;     /* healthy / success / passing */
+  --amber: #e8b13d;      /* pending / waiting */
+  --danger: #ff6b63;     /* failing / error / down */
+  --batch: #4c9bff;      /* GPU batch work */
+
+  /* diff inks */
+  --diff-add: #8ed6a6;
+  --diff-del: #ff9d94;
+
+  color-scheme: dark;
+
+  /* ── type: three voices, never blurred ──────────────────────────────────
+     display  = condensed uppercase sans, the chrome voice (nav, labels, headers)
+     body     = system sans, prose
+     mono     = monospace, data (ids, counts, timestamps, code) */
+  --display: "Avenir Next Condensed", "Bahnschrift", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --body: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+
+  /* small, deliberate type scale */
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --text-2xl: 36px;
+}
+
+/* ── Deep Slate — LIGHT. Cool paper ground, slate ink, orange deepened so it
+   holds contrast on light surfaces. Only the palette tokens change; every
+   component keeps reading the same names. ───────────────────────────────── */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --basalt: #eef1f6;
+    --scree: #f7f9fc;
+    --scree-2: #ffffff;
+    --stone: #d4dbe5;
+    --fog: #48525f;
+    --fog-dim: #6b7684;
+    --chalk: #131820;
+    --blaze: #d9531e;
+    --blaze-soft: #d9531e1a;
+    --lichen: #2f8a52;
+    --amber: #b7791f;
+    --danger: #d24747;
+    --batch: #2f6fd6;
+    --diff-add: #2f8a52;
+    --diff-del: #cf4b4b;
+  }
+}
+/* Explicit choices win over the OS preference, in both directions. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --basalt: #eef1f6;
+  --scree: #f7f9fc;
+  --scree-2: #ffffff;
+  --stone: #d4dbe5;
+  --fog: #48525f;
+  --fog-dim: #6b7684;
+  --chalk: #131820;
+  --blaze: #d9531e;
+  --blaze-soft: #d9531e1a;
+  --lichen: #2f8a52;
+  --amber: #b7791f;
+  --danger: #d24747;
+  --batch: #2f6fd6;
+  --diff-add: #2f8a52;
+  --diff-del: #cf4b4b;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --basalt: #0d1117;
+  --scree: #161c26;
+  --scree-2: #1e2633;
+  --stone: #313d4f;
+  --fog: #c2ccd8;
+  --fog-dim: #8b97a7;
+  --chalk: #f2f6fa;
+  --blaze: #ff6a3d;
+  --blaze-soft: #ff6a3d33;
+  --lichen: #63d68b;
+  --amber: #e8b13d;
+  --danger: #ff6b63;
+  --batch: #4c9bff;
+  --diff-add: #8ed6a6;
+  --diff-del: #ff9d94;
+}
+
+/* ── status chip helper ─────────────────────────────────────────────────────
+   Color is never the only signal: the chip text always names the state
+   ("UP" / "DOWN" / "PENDING" ...) and the dot carries the color. This keeps
+   --danger / --lichen off small colored text, which sits near the AA
+   small-text contrast threshold on --scree/--scree-2 (§8 of the design spec) —
+   the chip's own text stays --chalk/--fog and only the dot + border tint. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--stone);
+  color: var(--fog);
+  background: var(--scree-2);
+  line-height: 1.6;
+}
+.chip .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fog-dim);
+  flex: 0 0 auto;
+}
+.chip.up { border-color: color-mix(in srgb, var(--lichen) 40%, var(--stone)); }
+.chip.up .dot { background: var(--lichen); }
+.chip.down { border-color: color-mix(in srgb, var(--danger) 40%, var(--stone)); }
+.chip.down .dot { background: var(--danger); }
+.chip.pending { border-color: color-mix(in srgb, var(--amber) 40%, var(--stone)); }
+.chip.pending .dot { background: var(--amber); }
+.chip.active { border-color: color-mix(in srgb, var(--blaze) 40%, var(--stone)); }
+.chip.active .dot { background: var(--blaze); }
+.chip.idle .dot { background: var(--fog-dim); }

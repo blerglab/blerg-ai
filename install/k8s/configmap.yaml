@@ -1,0 +1,88 @@
+# Non-secret configuration shared across the stack. Credentials, tokens and
+# full DSNs (which embed the postgres password) live in the blerg-secrets
+# Secret instead — see secret.example.yaml and deploy.sh.
+#
+# Optional keys not listed in `data` below — add them here (or `kubectl -n
+# blerg edit configmap blerg-config`) only if you want the feature they
+# enable; runner-deployment.yaml reads all of them as `optional: true`, so
+# an absent key is simply unset, not an error:
+#   BLERG_RUNNER_GITHUB_ORG               — GitHub org for the repo picker's
+#                                            org listing (pair with
+#                                            BLERG_RUNNER_GITHUB_TOKEN in
+#                                            blerg-secrets)
+#   BLERG_RUNNER_AGENT_SECRET              — name of the shared agent Secret in
+#                                            blerg-runner-sessions, if you
+#                                            renamed it from the default
+#   BLERG_RUNNER_POD_TTL_SECONDS           — how long a finished session Job
+#                                            lingers before k8s reaps it
+#   BLERG_RUNNER_AGENT_GIT_BASE            — git host cluster sessions clone
+#                                            from. Deliberately NOT set below:
+#                                            the runner already defaults to
+#                                            https://github.com, and setting
+#                                            this explicitly disables the clean
+#                                            422 for bare repo names and
+#                                            overrides BLERG_RUNNER_GITHUB_ORG.
+#                                            Set it only for a self-hosted git
+#                                            host.
+#   BLERG_RUNNER_MODEL_CATALOG_URL         — where the launch sheet's Claude
+#                                            model list is fetched from.
+#                                            Absent = the public Claude Code
+#                                            catalog (refreshed every 6 h); set
+#                                            it to "" for an air-gapped cluster
+#                                            to serve the runner's built-in list.
+#   BLERG_CORE_PLUGIN_MARKETPLACES         — GitHub owner/repo marketplaces an
+#   BLERG_RUNNER_PLUGIN_MARKETPLACES         account may pick always-on plugins
+#                                            from (comma-separated, "*" = any).
+#                                            Absent = only
+#                                            anthropics/claude-plugins-official.
+#                                            Core enforces it when a list is
+#                                            saved; the runner (and each
+#                                            session pod) again before
+#                                            installing. Set both to the same
+#                                            value. Plugins run code in
+#                                            sessions: widen it deliberately.
+#
+# The BLERG_RUNNER_AGENT_* / _INTERNAL_URL / _MAX_SESSIONS keys in `data` below
+# turn on the cluster runtime (per-session agent pods). deploy.sh renders
+# BLERG_RUNNER_AGENT_IMAGE from ${REGISTRY}/blerg-runner-agent:${TAG}, and
+# renders it EMPTY when CLUSTER_RUNTIME=off — an empty image is the runner's
+# off switch, and every other key here is inert without it. See
+# CLUSTER-RUNTIME.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blerg-config
+  namespace: blerg
+data:
+  POSTGRES_USER: "blerg"
+  POSTGRES_DB: "blerg_core"
+  BLERG_CORE_URL: "http://blerg-core:8080"
+  # What core advertises to browsers must be browser-reachable — the
+  # in-cluster Service name/port isn't, so these are the public Ingress
+  # hostnames, not blerg-board:8080/blerg-runner:8080 (M7).
+  BLERG_BOARD_SELF_URL: "${SCHEME}://board.${DOMAIN}"
+  BLERG_RUNNER_URL: "http://blerg-runner:8080"
+  BLERG_RUNNER_SELF_URL: "${SCHEME}://runner.${DOMAIN}"
+  # core's own public origin — read by core itself (return_to/audience
+  # allowlists) and by board/runner for CORS (BLERG_BOARD_ALLOWED_ORIGINS/
+  # BLERG_RUNNER_ALLOWED_ORIGINS, when those are set).
+  BLERG_CORE_PUBLIC_URL: "${SCHEME}://${DOMAIN}"
+  # Public, because the workstation daemon and any browser talking to board
+  # are outside the cluster — the in-cluster Service name is not reachable
+  # from either.
+  BLERG_BOARD_PUBLIC_URL: "${SCHEME}://board.${DOMAIN}"
+  BLERG_BOARD_AGENT_URL: "${SCHEME}://board.${DOMAIN}"
+  RUNNER_UI_BASE: "${SCHEME}://runner.${DOMAIN}/sessions"
+  BLERG_RUNNER_DATA_DIR: "/data"
+  # Cluster runtime. Empty BLERG_RUNNER_AGENT_IMAGE = off (CLUSTER_RUNTIME=off).
+  BLERG_RUNNER_AGENT_IMAGE: "${AGENT_IMAGE}"
+  BLERG_RUNNER_AGENT_NAMESPACE: "blerg-runner-sessions"
+  # Session pods call the runner from inside the cluster, so this is the
+  # Service DNS name, not the public Ingress host.
+  BLERG_RUNNER_INTERNAL_URL: "http://blerg-runner.blerg.svc.cluster.local:8080"
+  BLERG_RUNNER_MAX_SESSIONS: "4"
+  # Completion webhooks refuse private, link-local and loopback callback targets
+  # unless this is "true" (WEBHOOK_ALLOW_PRIVATE in .env). Turn it on for an
+  # install whose public hostnames resolve to a private network (a homelab
+  # behind NAT) — otherwise every callback into that network is refused.
+  BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE: "${WEBHOOK_ALLOW_PRIVATE}"

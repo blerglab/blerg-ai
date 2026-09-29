@@ -1,0 +1,382 @@
+import { useState, useEffect } from 'react'
+import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom'
+import SessionList from './components/SessionList'
+import SessionDetail from './components/SessionDetail'
+import ChatRollup from './components/ChatRollup'
+import LaunchSheet from './components/LaunchSheet'
+import { PreviewTab } from './components/PreviewTab'
+import ClusterStatus from './components/ClusterStatus'
+import BoardsList from './components/BoardsList'
+import BoardView from './components/BoardView'
+import TicketDetail from './components/TicketDetail'
+import ArchiveView from './components/ArchiveView'
+import ToastContainer from './components/ToastContainer'
+import ThemeToggle from './components/ThemeToggle'
+import { useIsMobile } from './hooks/useIsMobile'
+import { useLaunchSheetOpen } from './hooks/useLaunchSheetOpen'
+import { useMessageStore, selectOpenCount } from './hooks/useMessageStore'
+import { startActivityTracking } from './activity'
+import { apiFetch } from './apiFetch'
+import { coreOrigin } from './authClient'
+
+// CORE_URL: the control-plane landing lives on core's own origin, which is
+// not simply "this origin with the port dropped" — see coreOrigin() for the
+// k8s (subdomain-stripping) vs. desktop (port-swapping) derivation. Shared
+// verbatim with board/web and core/web so all three wordmarks agree.
+const CORE_URL = coreOrigin()
+
+// BrandHeader: the Blerg wordmark + component name, styled to match the
+// control-plane landing and blerg-board's header — one designed system
+// across every surface.
+export function BrandHeader() {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 10,
+        padding: '9px 14px',
+        borderBottom: '1px solid var(--stone)',
+        background: 'var(--basalt)',
+        flexShrink: 0,
+      }}
+    >
+    <a
+      href={CORE_URL}
+      title="blerg control plane"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        textDecoration: 'none',
+      }}
+    >
+      <span
+        aria-label="blerg"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'baseline',
+          gap: 2,
+          fontFamily: 'var(--mono)',
+          fontWeight: 600,
+          fontSize: 16,
+          letterSpacing: '0.01em',
+          color: 'var(--chalk)',
+        }}
+      >
+        blerg
+        <span
+          aria-hidden="true"
+          style={{ width: '0.42em', height: '0.64em', background: 'var(--blaze)', display: 'inline-block', borderRadius: 1, transform: 'translateY(0.04em)' }}
+        />
+      </span>
+      <span style={{ width: 1, height: 14, background: 'var(--stone)' }} aria-hidden="true" />
+      <span
+        style={{
+          fontFamily: 'var(--display)',
+          fontSize: 12,
+          letterSpacing: '0.14em',
+          textTransform: 'uppercase',
+          fontWeight: 600,
+          color: 'var(--fog)',
+        }}
+      >
+        Runner
+      </span>
+    </a>
+      <ThemeToggle />
+    </div>
+  )
+}
+
+// AppHeader: hidden inside a session's immersive chat/terminal view (mobile
+// and desktop both need the full viewport there) — same rule TabBar uses.
+function AppHeader() {
+  const location = useLocation()
+  if (location.pathname.startsWith('/sessions/')) return null
+  return <BrandHeader />
+}
+
+export function TabBar({ clusterConfigured = false }: { clusterConfigured?: boolean } = {}) {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const openCount = useMessageStore(selectOpenCount)
+
+  // Hide the tab bar when inside a session — the back button handles navigation there,
+  // and the fixed bar would otherwise overlap the reply input at the bottom.
+  if (location.pathname.startsWith('/sessions/')) return null
+
+  const isActive = (path: string) => {
+    if (path === '/') return location.pathname === '/'
+    return location.pathname.startsWith(path)
+  }
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        bottom: 0,
+        left: 0,
+        right: 0,
+        background: 'var(--basalt)',
+        borderTop: '1px solid var(--stone)',
+        display: 'flex',
+      }}
+    >
+      <button
+        onClick={() => navigate('/')}
+        style={{
+          flex: 1,
+          padding: '12px',
+          textAlign: 'center',
+          color: isActive('/') ? 'var(--chalk)' : 'var(--fog-dim)',
+          fontSize: '14px',
+          cursor: 'pointer',
+          background: 'none',
+          border: 'none',
+          fontFamily: 'inherit',
+          letterSpacing: '0.05em',
+          position: 'relative',
+        }}
+      >
+        Chat
+        {openCount > 0 && (
+          <span
+            data-testid="open-count-badge"
+            style={{
+              position: 'absolute',
+              top: 6,
+              right: '50%',
+              transform: 'translateX(calc(50% + 14px))',
+              background: 'var(--danger)',
+              color: 'var(--chalk)',
+              borderRadius: '50%',
+              minWidth: 16,
+              height: 16,
+              fontSize: '0.65rem',
+              fontWeight: 700,
+              lineHeight: '16px',
+              textAlign: 'center',
+              padding: '0 3px',
+              boxSizing: 'border-box',
+            }}
+          >
+            {openCount}
+          </span>
+        )}
+      </button>
+      <button
+        onClick={() => navigate('/sessions')}
+        style={{
+          flex: 1,
+          padding: '12px',
+          textAlign: 'center',
+          color: isActive('/sessions') ? 'var(--chalk)' : 'var(--fog-dim)',
+          fontSize: '14px',
+          cursor: 'pointer',
+          background: 'none',
+          border: 'none',
+          fontFamily: 'inherit',
+          letterSpacing: '0.05em',
+        }}
+      >
+        Sessions
+      </button>
+      <button
+        onClick={() => navigate('/boards')}
+        style={{
+          flex: 1,
+          padding: '12px',
+          textAlign: 'center',
+          color: isActive('/boards') ? 'var(--chalk)' : 'var(--fog-dim)',
+          fontSize: '14px',
+          cursor: 'pointer',
+          background: 'none',
+          border: 'none',
+          fontFamily: 'inherit',
+          letterSpacing: '0.05em',
+        }}
+      >
+        Boards
+      </button>
+      <button
+        onClick={() => navigate('/preview')}
+        style={{
+          flex: 1,
+          padding: '12px',
+          textAlign: 'center',
+          color: isActive('/preview') ? 'var(--chalk)' : 'var(--fog-dim)',
+          fontSize: '14px',
+          cursor: 'pointer',
+          background: 'none',
+          border: 'none',
+          fontFamily: 'inherit',
+          letterSpacing: '0.05em',
+        }}
+      >
+        Preview
+      </button>
+      {clusterConfigured && (
+        <button
+          onClick={() => navigate('/cluster')}
+          style={{
+            flex: 1,
+            padding: '12px',
+            textAlign: 'center',
+            color: isActive('/cluster') ? 'var(--chalk)' : 'var(--fog-dim)',
+            fontSize: '14px',
+            cursor: 'pointer',
+            background: 'none',
+            border: 'none',
+            fontFamily: 'inherit',
+            letterSpacing: '0.05em',
+          }}
+        >
+          Cluster
+        </button>
+      )}
+    </div>
+  )
+}
+
+function Layout() {
+  const [launchOpen, setLaunchOpen] = useLaunchSheetOpen()
+  const isMobile = useIsMobile()
+  // Cluster tab/route only make sense when cluster runtime is actually
+  // configured (install/k8s) — on a desktop-only install /api/cluster/status
+  // reports configured:false and the tab would just lead to a dead end.
+  const [clusterConfigured, setClusterConfigured] = useState(false)
+
+  useEffect(() => {
+    apiFetch('/api/cluster/status')
+      .then(r => r.json())
+      .then(data => setClusterConfigured(Boolean(data?.configured)))
+      .catch(() => setClusterConfigured(false))
+  }, [])
+
+  const routes = (
+    <Routes>
+      <Route path="/" element={<ChatRollup />} />
+      <Route path="/sessions" element={<SessionList onNewSession={() => setLaunchOpen(true)} />} />
+      <Route path="/sessions/:id" element={<SessionDetail />} />
+      <Route path="/boards" element={<BoardsList />} />
+      <Route path="/boards/:id" element={<BoardView />} />
+      <Route path="/boards/:id/ticket/:ticketId" element={<TicketDetail />} />
+      <Route path="/boards/:id/archive" element={<ArchiveView />} />
+      <Route path="/preview" element={<PreviewTab />} />
+      <Route path="/cluster" element={<ClusterStatus />} />
+    </Routes>
+  )
+
+  if (isMobile) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          background: 'var(--basalt)',
+          color: 'var(--chalk)',
+          paddingBottom: '60px',
+        }}
+      >
+        <AppHeader />
+        {routes}
+        <TabBar clusterConfigured={clusterConfigured} />
+        <LaunchSheet key={launchOpen ? 'open' : 'closed'} open={launchOpen} onClose={() => setLaunchOpen(false)} />
+        <ToastContainer />
+      </div>
+    )
+  }
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100vh',
+        background: 'var(--basalt)',
+        color: 'var(--chalk)',
+        overflow: 'hidden',
+      }}
+    >
+      <AppHeader />
+      <div style={{ display: 'flex', flexDirection: 'row', flex: 1, minHeight: 0 }}>
+        <SessionList variant="sidebar" onNewSession={() => setLaunchOpen(true)} />
+        <div style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
+          {routes}
+        </div>
+      </div>
+      <LaunchSheet key={launchOpen ? 'open' : 'closed'} open={launchOpen} onClose={() => setLaunchOpen(false)} />
+      <ToastContainer />
+    </div>
+  )
+}
+
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4)
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
+  const rawData = window.atob(base64)
+  return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)))
+}
+
+// enableNotifications is the ONLY place that ever calls
+// Notification.requestPermission() — a user-initiated action from
+// NotificationsButton's click handler, never from a mount effect. Browsers
+// increasingly ignore (or actively penalize) permission prompts fired
+// without a user gesture, and asking on every page load regardless of the
+// visitor's prior answer is exactly that anti-pattern.
+async function enableNotifications() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return
+  const permission = await Notification.requestPermission()
+  if (permission !== 'granted') return
+  try { localStorage.setItem('blerg_notifications_wanted', '1') } catch { /* storage unavailable: the opt-in just isn't remembered */ }
+  const registration = await navigator.serviceWorker.register('/sw.js')
+  const { publicKey } = await (await apiFetch('/api/push/vapid-public-key')).json()
+  if (!publicKey) return
+  const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey).buffer as ArrayBuffer })
+  await apiFetch('/api/push/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subscription) })
+}
+
+// NotificationsButton reflects the CURRENT Notification.permission on mount
+// (granted/denied/default) rather than assuming "off" — so a visitor who
+// already granted or denied permission in a previous session isn't asked
+// again, and a "denied" visitor sees no button to re-trigger a prompt the
+// browser would silently refuse anyway.
+export function NotificationsButton() {
+  const [state, setState] = useState<'idle' | 'on' | 'off'>(() =>
+    typeof Notification !== 'undefined' && Notification.permission === 'granted' ? 'on' : 'idle')
+  if (state === 'on') return null
+  if (typeof Notification !== 'undefined' && Notification.permission === 'denied') return null
+  return (
+    <button type="button" onClick={() => enableNotifications().then(() => setState(Notification.permission === 'granted' ? 'on' : 'off')).catch(console.error)}
+      style={{ fontSize: '0.75rem', color: 'var(--fog)', background: 'none', border: '1px solid var(--stone)', borderRadius: 6, padding: '4px 8px', cursor: 'pointer' }}>
+      Enable notifications
+    </button>
+  )
+}
+
+function App() {
+  useEffect(() => {
+    startActivityTracking()
+  }, [])
+
+  // Silent re-subscribe only: if this visitor previously opted in (granted
+  // permission AND asked to be remembered) but the browser's push
+  // subscription didn't survive (e.g. cleared site data), quietly restore
+  // it — never re-prompt for permission here.
+  useEffect(() => {
+    let wanted = false
+    try { wanted = localStorage.getItem('blerg_notifications_wanted') === '1' } catch { /* storage unavailable: treat as not opted in */ }
+    if (wanted && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      enableNotifications().catch(console.error)
+    }
+  }, [])
+
+  return (
+    <BrowserRouter>
+      <Layout />
+    </BrowserRouter>
+  )
+}
+
+export default App

@@ -1,0 +1,6 @@
+model:
+  default: hermes-4-405b
+  provider: nous
+  base_url: https://inference-api.example/v1
+toolsets:
+  - hermes-cli

@@ -1,0 +1,754 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "blerg-board",
+    "version": "v1",
+    "summary": "Kanban board where agents draft cards and humans curate the work.",
+    "description": "The public, agent-facing contract of blerg-board (contract version v1). Paths are relative to this component's base URL, which GET /agents reports as base_url. These are the operations blerg-board's MCP tools wrap, so the same surface is reachable over plain HTTP or over MCP at /mcp with the same bearer token. The browser transport (WebSocket, diffs, metrics, icons), the operator surface (tokens, deployments, board deletion) and the session-driving routes are deliberately not described here: they are the product's own UI and control plane, not the card-writing contract.",
+    "x-admission-gate": "Agent writes on a gated board pass an admission gate: 409 with a review_id when denied, 202 with a review_id when held for a human. Read the body and act on it — resubmit once with dispute_of and a rebuttal to contest a denial."
+  },
+  "servers": [],
+  "tags": [
+    { "name": "discovery", "description": "Finding out what this component is and how to talk to it." },
+    { "name": "boards", "description": "Boards and their columns." },
+    { "name": "cards", "description": "The work itself: file, read, update, move, archive, comment." },
+    { "name": "reviews", "description": "Admission-gate verdicts." }
+  ],
+  "paths": {
+    "/agents": {
+      "get": {
+        "operationId": "agents",
+        "tags": ["discovery"],
+        "summary": "This component's agent manifest: auth and every operation.",
+        "description": "No authentication. With `Accept: text/markdown` (or `?format=md`) the same document is returned as Markdown.",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "description": "`md` returns the Markdown rendering instead of JSON.",
+            "schema": { "type": "string", "enum": ["md"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Board's manifest entry.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ComponentEntry" } },
+              "text/markdown": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "tags": ["discovery"],
+        "summary": "This document.",
+        "description": "No authentication.",
+        "responses": {
+          "200": {
+            "description": "An OpenAPI 3.1 document.",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/onboard": {
+      "get": {
+        "operationId": "onboard",
+        "tags": ["discovery"],
+        "summary": "Board conventions for agents: how to file, claim and move cards.",
+        "description": "No authentication. Prose, not a schema: read it before your first write.",
+        "responses": {
+          "200": {
+            "description": "The conventions document.",
+            "content": { "text/markdown": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/api/boards": {
+      "get": {
+        "operationId": "list_boards",
+        "tags": ["boards"],
+        "summary": "List the boards this credential can see.",
+        "description": "A board-scoped token sees only its own board.",
+        "security": [{ "agentToken": ["card.read"] }, { "boardToken": ["card.read"] }],
+        "responses": {
+          "200": {
+            "description": "The visible boards.",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Board" } } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "operationId": "create_board",
+        "tags": ["boards"],
+        "summary": "Create a board.",
+        "description": "Instance-wide admin work: requires `board.admin`.",
+        "security": [{ "agentToken": ["board.admin"] }, { "boardToken": ["board.admin"] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BoardInput" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "The created board.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Board" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/Unprocessable" }
+        }
+      }
+    },
+    "/api/boards/{id}": {
+      "get": {
+        "operationId": "get_board",
+        "tags": ["boards"],
+        "summary": "One board: name, repos, gate policy, columns and field schema.",
+        "security": [{ "agentToken": ["card.read"] }, { "boardToken": ["card.read"] }],
+        "parameters": [{ "$ref": "#/components/parameters/BoardId" }],
+        "responses": {
+          "200": {
+            "description": "The board.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Board" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "patch": {
+        "operationId": "update_board",
+        "tags": ["boards"],
+        "summary": "Update board settings, repos, models or field schema.",
+        "security": [{ "agentToken": ["board.admin"] }, { "boardToken": ["board.admin"] }],
+        "parameters": [{ "$ref": "#/components/parameters/BoardId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BoardInput" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated board.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Board" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/Unprocessable" }
+        }
+      }
+    },
+    "/api/boards/{id}/schema": {
+      "get": {
+        "operationId": "get_schema",
+        "tags": ["boards"],
+        "summary": "The board's declared custom fields.",
+        "description": "Read this before writing any `fields`: unknown keys and type mismatches are rejected with 422.",
+        "security": [{ "agentToken": ["card.read"] }, { "boardToken": ["card.read"] }],
+        "parameters": [{ "$ref": "#/components/parameters/BoardId" }],
+        "responses": {
+          "200": {
+            "description": "The field schema.",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/FieldDef" } } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/boards/{id}/columns": {
+      "get": {
+        "operationId": "list_columns",
+        "tags": ["boards"],
+        "summary": "The board's columns in order.",
+        "security": [{ "agentToken": ["card.read"] }, { "boardToken": ["card.read"] }],
+        "parameters": [{ "$ref": "#/components/parameters/BoardId" }],
+        "responses": {
+          "200": {
+            "description": "The columns, in board order.",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Column" } } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "operationId": "create_column",
+        "tags": ["boards"],
+        "summary": "Append a column to the board.",
+        "security": [{ "agentToken": ["column.write"] }, { "boardToken": ["column.write"] }],
+        "parameters": [{ "$ref": "#/components/parameters/BoardId" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "is_terminal": { "type": "boolean", "description": "Marks a 'done'-style column." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created column.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Column" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/columns/{id}/move": {
+      "post": {
+        "operationId": "move_column",
+        "tags": ["boards"],
+        "summary": "Reposition a column among its board's siblings.",
+        "security": [{ "agentToken": ["column.write"] }, { "boardToken": ["column.write"] }],
+        "parameters": [{ "$ref": "#/components/parameters/ColumnId" }],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "before_id": { "type": "string", "format": "uuid", "description": "Place before this column; omit for the end." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The moved column.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Column" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/boards/{id}/cards/search": {
+      "get": {
+        "operationId": "search_cards",
+        "tags": ["cards"],
+        "summary": "Search a board's cards by text and filters.",
+        "description": "Always search before filing: the admission gate denies semantic duplicates.",
+        "security": [{ "agentToken": ["card.read"] }, { "boardToken": ["card.read"] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/BoardId" },
+          { "name": "q", "in": "query", "required": false, "description": "Free text over title and body (typo-tolerant).", "schema": { "type": "string" } },
+          { "name": "type", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "tag", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "priority", "in": "query", "required": false, "schema": { "type": "string", "enum": ["low", "medium", "high", "urgent"] } },
+          { "name": "include_archived", "in": "query", "required": false, "description": "`1` includes archived cards.", "schema": { "type": "string", "enum": ["1"] } },
+          { "name": "field.{key}", "in": "query", "required": false, "description": "Equality filter on a declared field, e.g. `field.severity=sev1`.", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "default": 20 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching cards.",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Card" } } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/boards/{id}/cards": {
+      "post": {
+        "operationId": "create_card",
+        "tags": ["cards"],
+        "summary": "File a card.",
+        "description": "Agent writes on a gated board pass the admission gate: 409 (denied) or 202 (held) carry a `review_id`. Choose a stable `dedup_key` so re-running a sweep refreshes instead of duplicating.",
+        "security": [{ "agentToken": ["card.write"] }, { "boardToken": ["card.write"] }],
+        "parameters": [{ "$ref": "#/components/parameters/BoardId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CardInput" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "The created card.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Card" } } }
+          },
+          "200": {
+            "description": "An existing card with the same `dedup_key` was refreshed rather than duplicated.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Card" } } }
+          },
+          "202": { "$ref": "#/components/responses/GateHeld" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/GateDenied" },
+          "422": { "$ref": "#/components/responses/Unprocessable" }
+        }
+      }
+    },
+    "/api/cards/{id}": {
+      "get": {
+        "operationId": "get_card",
+        "tags": ["cards"],
+        "summary": "One card with repos, tags, links, dependencies and its version.",
+        "security": [{ "agentToken": ["card.read"] }, { "boardToken": ["card.read"] }],
+        "parameters": [{ "$ref": "#/components/parameters/CardId" }],
+        "responses": {
+          "200": {
+            "description": "The card.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Card" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "patch": {
+        "operationId": "update_card",
+        "tags": ["cards"],
+        "summary": "Update a card's content, fields, tags, repos or links.",
+        "description": "Send `If-Match: <version>` (or `if_match` in the body) to fail with 409 if the card changed since you read it. Attaching a link (the `link_card` operation of the manifest) is this same PATCH with a replacement `links` array.",
+        "security": [{ "agentToken": ["card.write"] }, { "boardToken": ["card.write"] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CardId" },
+          { "$ref": "#/components/parameters/IfMatch" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CardPatch" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated card.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Card" } } }
+          },
+          "202": { "$ref": "#/components/responses/GateHeld" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/GateDeniedOrStale" },
+          "422": { "$ref": "#/components/responses/Unprocessable" }
+        }
+      }
+    },
+    "/api/cards/{id}/move": {
+      "post": {
+        "operationId": "move_card",
+        "tags": ["cards"],
+        "summary": "Move a card to another column.",
+        "security": [{ "agentToken": ["card.write"] }, { "boardToken": ["card.write"] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CardId" },
+          { "$ref": "#/components/parameters/IfMatch" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["column_id"],
+                "properties": {
+                  "column_id": { "type": "string", "format": "uuid", "description": "Target column id." },
+                  "before_card_id": { "type": "string", "format": "uuid", "description": "Place before this card; omit for the end." },
+                  "if_match": { "type": "integer", "description": "Expected card version; the If-Match header does the same." },
+                  "dispute_of": { "type": "string", "format": "uuid", "description": "review_id of a denial being contested (once per review)." },
+                  "rebuttal": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The moved card.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Card" } } }
+          },
+          "202": { "$ref": "#/components/responses/GateHeld" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/GateDeniedOrStale" }
+        }
+      }
+    },
+    "/api/cards/{id}/archive": {
+      "post": {
+        "operationId": "archive_card",
+        "tags": ["cards"],
+        "summary": "Archive a card: it leaves the board but stays queryable.",
+        "security": [{ "agentToken": ["card.write"] }, { "boardToken": ["card.write"] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CardId" },
+          { "$ref": "#/components/parameters/IfMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived card.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Card" } } }
+          },
+          "202": { "$ref": "#/components/responses/GateHeld" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/GateDeniedOrStale" }
+        }
+      }
+    },
+    "/api/cards/{id}/comments": {
+      "post": {
+        "operationId": "comment_card",
+        "tags": ["cards"],
+        "summary": "Post a progress comment on a card — the engineer's log.",
+        "description": "Use it WHILE working: what you are investigating, findings with links, decisions and why. Short and frequent beats one long final edit.",
+        "security": [{ "agentToken": ["card.write"] }, { "boardToken": ["card.write"] }],
+        "parameters": [{ "$ref": "#/components/parameters/CardId" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["text"],
+                "properties": { "text": { "type": "string", "description": "The comment; markdown-ish plain text, include links." } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/Ok" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/reviews/{id}": {
+      "get": {
+        "operationId": "get_review",
+        "tags": ["reviews"],
+        "summary": "An admission review by id: the outcome of a held or denied write.",
+        "description": "Board-scoped: a token scoped to another board is refused.",
+        "security": [{ "agentToken": ["card.read"] }, { "boardToken": ["card.read"] }],
+        "parameters": [{ "$ref": "#/components/parameters/ReviewId" }],
+        "responses": {
+          "200": {
+            "description": "The review.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Review" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "BoardId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The board's id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "ColumnId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The column's id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "CardId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The card's id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "ReviewId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The admission review's id, as returned on a 202 or 409.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "IfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": false,
+        "description": "The card version you read. A mismatch is a 409 rather than a lost update.",
+        "schema": { "type": "string" }
+      }
+    },
+    "securitySchemes": {
+      "agentToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A core-signed token with `aud: \"blerg-board\"`, minted from the `board` preset. Get one from core: POST /api/tokens, or Settings → Agent tokens. A human's core-issued session token authenticates the same way and is capability-checked identically."
+      },
+      "boardToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A board-native token (`blergb_…`), minted by an admin or handed to a session when it is spawned. May also be sent as the X-Blerg-Board-Token header. Carries an explicit board scope and capability set."
+      }
+    },
+    "responses": {
+      "Ok": {
+        "description": "Done.",
+        "content": {
+          "application/json": { "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } } }
+        }
+      },
+      "BadRequest": { "description": "Malformed request body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": { "description": "Missing, malformed, expired or revoked credential.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Forbidden": { "description": "The credential is valid but lacks the capability, or is scoped to another board.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "No such board, column, card or review.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unprocessable": { "description": "The request was understood but rejected: an unknown field key, a type mismatch against the board's schema, or a repo the board does not declare.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "GateHeld": {
+        "description": "The admission gate held the write for a human. Poll the review with get_review.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GateVerdict" } } }
+      },
+      "GateDenied": {
+        "description": "The admission gate denied the write (usually a duplicate). Read `reason`; you may contest it once by resubmitting with `dispute_of` and a `rebuttal`.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GateVerdict" } } }
+      },
+      "GateDeniedOrStale": {
+        "description": "Either the admission gate denied the write (a `review_id` is present) or the If-Match version was stale.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GateVerdict" } } }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "field": { "type": "string", "description": "The offending field key, on a schema rejection." }
+        }
+      },
+      "GateVerdict": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" },
+          "review_id": { "type": "string", "format": "uuid", "description": "The admission review this verdict created." },
+          "verdict": { "type": "string", "description": "deny, revise or hold." },
+          "reason": { "type": "string", "description": "Why, in the gate's own words — act on it rather than retrying blind." }
+        }
+      },
+      "Board": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "description": { "type": ["string", "null"] },
+          "repos": { "type": "array", "items": { "type": "string" } },
+          "gate_enabled": { "type": "boolean", "description": "Whether agent writes pass the admission gate." },
+          "require_repo": { "type": "boolean" },
+          "field_schema": { "type": "array", "items": { "$ref": "#/components/schemas/FieldDef" } },
+          "concurrency": { "type": "integer", "description": "How many cards a board run works at once." },
+          "deploy_url": { "type": ["string", "null"] },
+          "automation_engine": { "type": "string", "enum": ["claude", "codex", "hermes"], "description": "Engine every session this board starts runs." },
+          "automation_token_set": { "type": "boolean", "description": "Whether an automation token is configured. The token itself is write-only and never returned." },
+          "automation_token_expires_at": { "type": ["string", "null"], "format": "date-time", "description": "When the configured automation token expires." },
+          "automation_account_id": { "type": ["string", "null"], "description": "The blerg-core account the automation token acts for: whose engine credential every session this board starts spends." }
+        }
+      },
+      "BoardInput": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "repos": { "type": "array", "items": { "type": "string" } },
+          "columns": { "type": "array", "items": { "type": "string" }, "description": "Initial column names, in order (create only)." },
+          "field_schema": { "type": "array", "items": { "$ref": "#/components/schemas/FieldDef" } },
+          "gate_enabled": { "type": "boolean" },
+          "require_repo": { "type": "boolean" },
+          "concurrency": { "type": "integer" },
+          "deploy_url": { "type": "string" },
+          "automation_engine": { "type": "string", "enum": ["claude", "codex", "hermes"] },
+          "automation_token": { "type": "string", "writeOnly": true, "description": "PATCH only, and only by a signed-in person: a blerg-core agent token (preset run-sessions) they minted for themselves. Every session the board starts runs as that person, on their own engine credential. Empty string clears it. Never returned." }
+        }
+      },
+      "FieldDef": {
+        "type": "object",
+        "required": ["key", "type"],
+        "properties": {
+          "key": { "type": "string" },
+          "label": { "type": "string" },
+          "type": { "type": "string", "enum": ["enum", "text", "number", "url", "timestamp", "bool"] },
+          "values": { "type": "array", "items": { "type": "string" } },
+          "display": { "type": "string", "enum": ["badge", "chip", "link", "inline", "hidden"] },
+          "filterable": { "type": "boolean" },
+          "order": { "type": "integer" }
+        }
+      },
+      "Column": {
+        "type": "object",
+        "required": ["id", "board_id", "name"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "board_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "rank": { "type": "string", "description": "Lexicographic ordering key; columns come back in board order." },
+          "is_terminal": { "type": "boolean" }
+        }
+      },
+      "Card": {
+        "type": "object",
+        "required": ["id", "board_id", "title", "version"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "board_id": { "type": "string", "format": "uuid" },
+          "column_id": { "type": "string", "format": "uuid" },
+          "number": { "type": "integer", "description": "The human card number, e.g. 42." },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "type": { "type": "string" },
+          "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+          "size": { "type": "string", "enum": ["XS", "S", "M", "L", "XL"] },
+          "repos": { "type": "array", "items": { "type": "string" } },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "fields": { "type": "object", "description": "Custom fields, matching the board's field schema." },
+          "links": { "type": "array", "items": { "$ref": "#/components/schemas/Link" } },
+          "dedup_key": { "type": ["string", "null"], "description": "Stable intent hash for idempotent re-filing." },
+          "version": { "type": "integer", "description": "Send it back as If-Match on the next write." },
+          "archived_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "CardInput": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string", "description": "What the card is — specific, not vague." },
+          "body": { "type": "string", "description": "Details, evidence, acceptance criteria." },
+          "type": { "type": "string", "description": "feature, bug, task, chore, incident, … (lowercased)." },
+          "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+          "size": { "type": "string", "enum": ["XS", "S", "M", "L", "XL"] },
+          "repos": { "type": "array", "items": { "type": "string" }, "description": "First entry is the primary working directory." },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "fields": { "type": "object" },
+          "column_id": { "type": "string", "format": "uuid", "description": "Target column; the first column by default." },
+          "dedup_key": { "type": "string" },
+          "dispute_of": { "type": "string", "format": "uuid", "description": "review_id of a denial being contested (once per review)." },
+          "rebuttal": { "type": "string", "description": "Why the denial was wrong." }
+        }
+      },
+      "CardPatch": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+          "size": { "type": "string", "enum": ["XS", "S", "M", "L", "XL"] },
+          "fields": { "type": "object" },
+          "tags": { "type": "array", "items": { "type": "string" }, "description": "Replacement tag set." },
+          "repos": { "type": "array", "items": { "type": "string" }, "description": "Replacement repo set." },
+          "links": { "type": "array", "items": { "$ref": "#/components/schemas/Link" }, "description": "Replacement link set — read the card, append, send it back." },
+          "column_id": { "type": "string", "format": "uuid" },
+          "if_match": { "type": "integer", "description": "Expected card version; the If-Match header does the same." },
+          "dispute_of": { "type": "string", "format": "uuid", "description": "review_id of a denial being contested (once per review)." },
+          "rebuttal": { "type": "string" }
+        }
+      },
+      "Link": {
+        "type": "object",
+        "required": ["kind", "url"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["session", "pr", "rcca", "doc", "url"] },
+          "url": { "type": "string" },
+          "label": { "type": ["string", "null"] }
+        }
+      },
+      "Review": {
+        "type": "object",
+        "required": ["id", "board_id", "operation"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "board_id": { "type": "string", "format": "uuid" },
+          "card_id": { "type": ["string", "null"], "format": "uuid" },
+          "operation": { "type": "string", "enum": ["create", "update", "move", "archive", "delete"] },
+          "verdict": { "type": ["string", "null"], "description": "accept, deny or revise; null while still held." },
+          "reason": { "type": ["string", "null"], "description": "Why, in the gate's own words." },
+          "duplicate_of": { "type": ["string", "null"], "format": "uuid", "description": "The card this one was judged a duplicate of." },
+          "dispute_of": { "type": ["string", "null"], "format": "uuid" },
+          "resolved_by": { "type": ["string", "null"], "description": "Who resolved it: a human, or `timeout`." },
+          "resolved_at": { "type": ["string", "null"], "format": "date-time" },
+          "held_expires_at": { "type": ["string", "null"], "format": "date-time", "description": "When an unresolved hold is swept by board policy." },
+          "submitted_at": { "type": "string", "format": "date-time" },
+          "payload": { "type": "object", "description": "The write that was submitted." }
+        }
+      },
+      "ComponentEntry": {
+        "type": "object",
+        "required": ["name", "base_url", "version", "contract_version", "capabilities"],
+        "properties": {
+          "name": { "type": "string", "const": "blerg-board" },
+          "base_url": { "type": "string" },
+          "version": { "type": "string" },
+          "contract_version": { "type": "string", "const": "v1" },
+          "capabilities": { "type": "array", "items": { "type": "string" } },
+          "description": { "type": "string" },
+          "docs_url": { "type": "string" },
+          "openapi_url": { "type": "string" },
+          "mcp_url": { "type": "string" },
+          "auth": {
+            "type": "object",
+            "required": ["audience", "presets", "accepts"],
+            "properties": {
+              "audience": { "type": "string" },
+              "token_endpoint": { "type": "string", "description": "Filled in by core in the aggregate manifest." },
+              "presets": { "type": "array", "items": { "type": "string" } },
+              "accepts": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "method", "path", "summary", "idempotent"],
+              "properties": {
+                "name": { "type": "string" },
+                "method": { "type": "string" },
+                "path": { "type": "string" },
+                "summary": { "type": "string" },
+                "cap": { "type": "string" },
+                "idempotent": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

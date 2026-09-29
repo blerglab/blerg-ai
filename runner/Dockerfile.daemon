@@ -1,0 +1,15 @@
+# Stage 1: Build Go binary
+FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS go-builder
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o blerg-runner-daemon ./cmd/daemon
+
+# Stage 2: Final image
+# Use base (not static) because PTY may need libc
+FROM gcr.io/distroless/base:nonroot@sha256:0896741ba5bafd3ac87ea025a5f578952f2d238ddc3614cb368acc983a687aa2
+WORKDIR /app
+COPY --from=go-builder /build/blerg-runner-daemon ./blerg-runner-daemon
+ENTRYPOINT ["./blerg-runner-daemon"]

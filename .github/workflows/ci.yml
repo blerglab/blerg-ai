@@ -1,0 +1,161 @@
+name: ci
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  # contracts + core share the root go.work.
+  core:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: blerg, POSTGRES_PASSWORD: blerg, POSTGRES_DB: blerg_core }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgres://blerg:blerg@localhost:5432/blerg_core
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: { go-version: '1.25', check-latest: true }
+      - run: test -z "$(gofmt -l ./contracts ./core ./board ./runner)"
+      - run: go vet ./contracts/... ./core/...
+      - run: go test ./contracts/... ./core/...
+
+  # One configuration (.golangci.yml at the root) for all four modules. contracts and
+  # core are linted together through go.work; runner and board are standalone modules,
+  # linted from their own directory with the workspace off.
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: contracts-core
+            dir: .
+            gowork: ""
+            args: ./contracts/... ./core/...
+          - name: runner
+            dir: runner
+            gowork: "off"
+            args: ./...
+          - name: board
+            dir: board
+            gowork: "off"
+            args: ./...
+    name: lint (${{ matrix.name }})
+    env:
+      GOWORK: ${{ matrix.gowork }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: { go-version: '1.25', check-latest: true }
+      - uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          version: v2.13.1
+          working-directory: ${{ matrix.dir }}
+          args: --config=${{ github.workspace }}/.golangci.yml ${{ matrix.args }}
+
+  # runner and board are standalone modules (not in go.work), each with its
+  # own database. Their DB-backed tests read TEST_DATABASE_URL and share one
+  # database per module, hence -p 1.
+  go-module:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [runner, board]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: blerg
+          POSTGRES_PASSWORD: blerg
+          POSTGRES_DB: blerg_${{ matrix.module }}_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      GOWORK: "off"
+      TEST_DATABASE_URL: postgres://blerg:blerg@localhost:5432/blerg_${{ matrix.module }}_test?sslmode=disable
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      # Some daemon tests drive a real tmux and git; without them they skip.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Git identity for tests that commit
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.test"
+          git config --global init.defaultBranch main
+      - run: go vet ./...
+      - run: go test -p 1 ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: core/web
+            browser: false
+          - dir: board/web
+            browser: false
+          - dir: runner/frontend
+            browser: true
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+      - run: npm ci
+      # runner/frontend has a vitest "browser" project that needs a real Chromium.
+      - name: Install Chromium for browser tests
+        if: matrix.browser
+        run: npx playwright install --with-deps chromium
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run build
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Needs docker compose (present on the hosted runner); skips without it.
+      - run: bash install/desktop/compose_test.sh
+      # kubectl is installed on the hosted runner but there is no cluster, and
+      # even a client-side dry-run asks the API server for resource kinds.
+      - run: bash install/k8s/deploy_test.sh
+        env:
+          BLERG_SKIP_KUBECTL: "1"
+      - run: bash install/desktop/hostcheck_test.sh
+      # The messaging CLI's tests: one is unittest, the other needs pytest.
+      - name: Messaging CLI tests
+        working-directory: runner/.claude/skills/session-messaging
+        run: |
+          python3 -m pip install pytest
+          python3 -m unittest test_blerg_runner
+          python3 -m pytest -q blerg_runner_board_test.py
+      - run: ./scripts/scrub.sh
+      - run: ./scripts/scrub_test.sh
+      - name: Documentation links
+        run: |
+          ./scripts/check_links_test.sh
+          ./scripts/check_links.sh

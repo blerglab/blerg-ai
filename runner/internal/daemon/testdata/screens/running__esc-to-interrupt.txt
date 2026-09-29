@@ -1,0 +1,97 @@
+  ⎿  go: errors parsing go.mod:
+     /home/dev/repositories/example-tool/go.mod:3: invalid go version '1.25.0': must match format 1.23
+
+● Bash(go version; which go; ls /usr/local/go/bin 2>/dev/null; cat go.mod | head -5)
+  ⎿  go version go1.18.1 linux/amd64
+     /usr/bin/go
+     module github.com/example-org/example-tool
+     … +4 lines (ctrl+o to expand)
+
+  Searched for 2 patterns, listed 1 directory (ctrl+o to expand)
+
+● The toolchain is /home/dev/go/bin/go. Let me use it.
+
+● Bash(/home/dev/go/bin/go version && /home/dev/go/bin/go test ./internal/filters/ -run TestParseFilter -v 2>&1 | tail -30)
+  ⎿  go version go1.25.0 linux/amd64
+     === RUN   TestParseFilter/plain_text_term_with_multi-word_quoted_options
+     === RUN   TestParseFilter/numbered_prefix_❯_1._is_not_a_tag_term
+     … +28 lines (ctrl+o to expand)
+
+● RED confirmed — both new term-list cases fail for the right reason (no match, want match), and the emptyQuery guard already passes. Now GREEN: fix parseFilter to skip blank and numbered lines when locating the candidate term.
+
+● Update(internal/filters/parse.go)
+  ⎿  Added 6 lines
+      10  // distinguishes a tag term from an ordinary search word ("#" alone).
+      11  var tagPrefix = regexp.MustCompile(`#\w+`)
+      12
+      13 +// termLine matches an enumerated term listed under a heading, e.g.
+      14 +// "a) #work…", "1. #ideas…", "2: #todo…". These sit between the heading
+      15 +// and the sort footer, so parseFilter skips over them when hunting for
+      16 +// the query that starts a real filter.
+      17 +var termLine = regexp.MustCompile(`^(?:[a-zA-Z]|\d+)[.):]\s`)
+      18 +
+      19  // parseFilter maps a raw query string to a filter. It reads the query text
+      20  // rather than the stored form, so it is immune to the
+      21  // reorder-vs-rename ambiguity that made tag matching flaky: a refresh
+
+● Background command "Locate a newer go toolchain" failed with exit code 1
+
+● Now update parseFilter to skip blank and numbered lines:
+
+● Update(internal/filters/parse.go)
+  ⎿  Added 6 lines, removed 3 lines
+      77  // parseFilter returns true when the query ends with a tag term
+      78  // (e.g. "#work"). There is no explicit marker for this, so we use a
+      79  // proximity heuristic: find the last sort footer and walk backward to
+      80 -// the nearest non-empty line and check whether it starts with "#".
+      80 +// the nearest "real" line, checking whether it starts with "#". Blank
+      81 +// lines and enumerated term lines (e.g. "a) …", "1. …") are skipped,
+      82 +// because people often type a heading and then list terms below it —
+      83 +// the "#" then sits above the term list, not next to the footer.
+      84  // Comment lines (starting with // after trimming) are excluded so that
+      85  // pasted code starting with "#" doesn't produce false positives.
+      86  func parseFilter(lines []string) bool {
+     ...
+      93    if footer < 0 {
+      94      return false
+      95    }
+      93 -  for j := 1; j <= 3 && footer-j >= 0; j++ {
+      96 +  for j := 1; j <= 12 && footer-j >= 0; j++ {
+      97      candidate := strings.TrimSpace(lines[footer-j])
+      95 -    if candidate == "" {
+      98 +    if candidate == "" || termLine.MatchString(candidate) {
+      99        continue
+     100      }
+     101      return strings.HasPrefix(candidate, "#") && !strings.HasPrefix(candidate, "//")
+
+● Bash(/home/dev/go/bin/go test ./internal/filters/ -run TestParseFilter 2>&1 | tail -20)
+  ⎿  ok         example.com/example-org/example-tool/internal/filters        0.005s
+
+● GREEN. Now let me build the table-driven test the user asked for. First, save the sample query as a fixture file, then write the replay test. Let me copy it directly into a testdata file to preserve fidelity:
+
+● Bash(mkdir -p internal/filters/testdata/queries
+      cp /home/dev/samples/tag-prefix-numbered-list.txt internal/filters/testdata/queries/tag__numbered-ter…)
+  ⎿  saved 97 lines
+
+● Let me copy the other two sample queries to build a richer corpus, and classify them to label correctly:
+
+● Bash(for s in 4a662dec-bc58-4e90-848d-35e761f5cd59 6fa4d1aa-25a3-464e-b689-082aaa65c8e3; do
+      echo "===== $s ====="; cat /home/dev/samples/$s.txt | grep -v '^$'…)
+  ⎿  ===== 4a662dec-bc58-4e90-848d-35e761f5cd59 =====
+     ● Bash(mkdir -p internal/filters/testdata/queries
+           cp /home/dev/samples/tag-prefix-numbered-list.txt internal/filters/testdata/queries/tag__numbered-…)
+     … +28 lines (ctrl+o to expand)
+
+● Excellent — real examples of a match (plain tag term) and a miss (numbered term list). Let me save both as fixtures:
+
+● Bash(cd internal/filters/testdata/queries
+      cp /home/dev/samples/7b7a453c-5db1-4c11-9986-11c73c803596.txt miss__numbered-terms-with-heading.txt…)
+  ⎿  Waiting…
+
+· Hashing… (5m 48s · ↓ 15.5k tokens)
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt
+

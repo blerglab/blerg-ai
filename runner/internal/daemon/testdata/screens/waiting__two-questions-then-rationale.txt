@@ -1,0 +1,93 @@
+
+  The filter bar keeps the selected tags in the address so a refreshed page shows the same list. Saved filters are stored per notebook and loaded again when the notebook opens. Sorting runs after filtering, which keeps the visible result count accurate. The tag chips wrap onto a second row
+
+✻ Sautéed for 3m 31s
+
+❯ the notes list appears to be slow, the profiler shows most time in sorting and rendering while the list is idle
+
+● An empty result shows the empty state with a link to clear the filter. Each label has a color token, and the chip picks its text color from the active theme. Keyboard shortcuts open the filter menu and move focus to the first option. The search box waits a short moment
+
+● Bash(cd /workspace/example-app; LOG=$(grep -E '^log_file=' config.example.toml | head -1 | cut -d= -f2- | tr -d '"'); echo "=== slow renders (non…)
+  ⎿  === slow renders (non-idle), longest first ===
+      id   | screen  | state  | wait_type       |  component   |          dur           |         label
+     ------+---------+--------+-----------------+---------------+------------------------+--------------------------
+     … +7 lines (ctrl+o to expand)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ I'm going to add a second sort option next to the first one -- does the order of pinned notes matter?
+
+● Short answer: it barely matters — pick whichever is simpler, but caching the sorted list is what actually fixes your problem, not the layout..
+
+  Here's the reasoning, tied to what we just saw:
+
+  Pinned notes stay at the top of the list no matter which filter is active. Archived notes are hidden by default and appear again when the archive toggle is on. Renaming a tag updates every note that uses it, and the change shows up in the sidebar right away. The list keeps its scroll
+  position when a filter is removed, so nothing jumps around. Long note titles are trimmed with an ellipsis, and the full title appears in a tooltip. Filters
+
+  The two changes that matter, ranked:
+  1. The export step writes one file per notebook and reports how many notes it skipped. Attachments are copied next to the exported file and linked with relative paths. A small badge on the filter button shows how many filters are currently active. Dates are shown in the local time zone, while
+  the
+  2. The component receives its options as props and never reads the store directly. Tests cover the empty list, a single match, several matches and a stale saved filter. Each slice stays small enough to review in one sitting and is verified before the next begins.
+
+  Sorting cost, for rendering specifically:
+  - The shared helper lives in one module so the individual screens do not repeat the logic. Theme colors come from the token file, which defines light and dark values side by side.
+  - Focus moves back to the trigger when the menu closes, which keeps keyboard navigation predictable. The parser ignores blank terms and
+
+  Counts are recomputed after every change, and the summary line updates in the same render. Older screens still build their own toolbar, which is why the rollout is done in batches. The build stays green after each batch, and the lint step reports no new warnings. A failed save keeps the draft in
+  will.
+
+  The sidebar lists notebooks alphabetically, with the most recent one pinned to the top. Drag and drop reorders the list, and the new order is written back after a short delay. Every option has a stable identifier so saved filters keep working after a label is renamed. The layout switches to a
+  single column below a fixed width and restores the grid
+
+✻ Cogitated for 33s
+
+❯ OK, switching over -- the extra option needs a new setting, which feels like a lot for a small list
+
+● Errors from the storage layer are wrapped with the note identifier to make logs easier to read. The summary at the end of each run lists
+
+  The preview pane shows a rendered copy of the note and refreshes whenever the text changes. Recent notes are grouped by day, and each group can be collapsed from its heading. The formatting toolbar hides the rarely used buttons behind an overflow menu on small screens. Word counts ignore code blocks, which matches.
+  what most people expect from the status bar. Templates are plain files in a folder, so they can be edited with any text editor. The reminder panel lists
+
+  A checklist item can be dragged to another note, and its history moves along with it. Links
+
+  1. The import step reads a folder of Markdown files and creates one note for each file it finds. Autosave runs a couple of seconds after the last keystroke and never blocks typing. Conflicts are shown side by side, with the newer edit selected by default. The tag menu remembers the last used tag and offers it
+  first the next time it opens.
+  2. Screen reader labels were added to every icon button, and the tab order follows the visual layout. The settings page groups options by area and keeps a short description under each toggle. Long lists are rendered in
+  windows, so scrolling stays smooth even with thousands of notes. The color palette has a high contrast variant that raises the border and text values. Every
+  3. Deleted notes go to a trash folder first and are removed for good after thirty days. Unit tests use small in-memory fixtures, while the slower checks.
+  4. The release notes are generated from the commit messages and edited by hand before publishing. The keyboard map is defined once and reused by the menu, the help dialog and the tests. Search results highlight the matching words and show a short excerpt
+
+  Images are resized when they are pasted, which keeps the notebook file small and quick to load. The sidebar remembers which folders were open, and restores them the next time the app starts. Each module exports a small interface, which keeps the imports short and the
+  tests simple. The status line shows the current notebook, the number of visible notes and
+
+✻ Cooked for 34s
+
+❯ I like having a realistic amount of data (the demo notebook has even more) in a view that mirrors real use, we wouldn't have hit all of these slow-scroll issues with a much shorter list (fewer notes, smaller attachments)
+
+● The filter bar keeps the selected tags in the address so a refreshed page shows the same list. Saved filters are stored per notebook and loaded again when the notebook opens. Sorting runs after filtering, which keeps the visible result count accurate. The tag chips wrap onto a second row when the
+  
+
+  An empty result shows the empty state with a link to clear the filter. Each label has a color token, and the chip picks its text color from the active theme. Keyboard shortcuts open the filter menu and move focus to the first option. The search box waits a short moment after typing
+  before it updates the list. Pinned notes stay at the top of the list no matter which filter is active. Archived notes are hidden by default and appear again when the archive toggle is on. Renaming a tag updates every note that uses it, and the change shows up in the sidebar right away. The list keeps
+  its
+
+  Long note titles are trimmed with an ellipsis, and the full title appears in a tooltip. Filters combine with a logical and by default, and the
+
+  - The export step writes one file per notebook and reports how many notes it skipped. Attachments are copied next to the exported file and linked with relative paths. A small badge on the filter button shows how many filters are currently
+  - Dates are shown in the local time zone, while the stored value stays in UTC. The component receives its options as props and never reads the store directly. Tests cover the empty list, a single match, several matches and a stale
+
+  Each slice stays small enough to review in one sitting and is verified before the next begins. The shared helper lives in one module so the individual screens do not repeat the logic. Theme colors come from the token file, which defines light and dark values side by side.
+
+  Focus moves back to the trigger when the menu closes, which keeps keyboard navigation predictable. The parser ignores blank terms and trims whitespace from both ends of each query. Counts are
+  1. Older screens still build their own toolbar, which is why the rollout is done in batches. The build stays green after each batch, and the
+  2. A failed save keeps the draft in memory and shows an inline message with a
+  3. The sidebar lists notebooks alphabetically, with the most recent one pinned to the
+
+  Want me to capture that as a memory note (filter/sort checklist) so the next large-list change doesn't repeat the slow-scroll dance? And — what is the smallest screen you support? That's the number that tells us whether your layout is right-sizing or quietly over-sizing.
+
+✻ Churned for 38s
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents                                                                                                                                                                                               new task? /clear to save 200.9k tokens
+

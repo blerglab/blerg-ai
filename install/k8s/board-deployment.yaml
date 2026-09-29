@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blerg-board
+  namespace: blerg
+  labels:
+    app: blerg-board
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blerg-board
+  template:
+    metadata:
+      labels:
+        app: blerg-board
+    spec:
+      containers:
+        - name: blerg-board
+          image: "${REGISTRY}/blerg-board:${TAG}"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: DATABASE_URL_BOARD
+            - name: BLERG_BOARD_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_BOARD_SERVICE_KEY
+            # Encrypts board automation tokens at rest. deploy.sh keeps the live
+            # value across redeploys; losing it means tokens must be re-entered.
+            - name: BLERG_BOARD_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_BOARD_SECRET_KEY
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: BLERG_RUNNER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_RUNNER_KEY
+            - name: BLERG_CORE_REGISTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_CORE_REGISTER_KEY
+            - name: BLERG_RUNNER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_RUNNER_URL
+            - name: BLERG_CORE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_CORE_URL
+            - name: BLERG_BOARD_SELF_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_BOARD_SELF_URL
+            - name: BLERG_BOARD_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_BOARD_PUBLIC_URL
+            - name: BLERG_BOARD_AGENT_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_BOARD_AGENT_URL
+            - name: RUNNER_UI_BASE
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: RUNNER_UI_BASE
+            - name: BLERG_CORE_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: BLERG_CORE_PUBLIC_URL
+            # Optional — comma-separated CORS allowlist for board's own
+            # WebSocket endpoints; unset means same-origin only.
+            - name: BLERG_BOARD_ALLOWED_ORIGINS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_BOARD_ALLOWED_ORIGINS, optional: true }
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile: {type: RuntimeDefault}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blerg-board
+  namespace: blerg
+  labels:
+    app: blerg-board
+spec:
+  selector:
+    app: blerg-board
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

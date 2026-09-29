@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.blerg.runner-daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BIN_PATH__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BLERG_RUNNER_SERVER_URL</key>
+    <string>__SERVER_URL__</string>
+    <key>BLERG_RUNNER_DAEMON_TOKEN</key>
+    <string>__DAEMON_TOKEN__</string>
+    <key>BLERG_RUNNER_REPOS_ROOT</key>
+    <string>__REPOS_ROOT__</string>
+__EXTRA_ENV__
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/blerg-runner-daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/blerg-runner-daemon.err.log</string>
+</dict>
+</plist>

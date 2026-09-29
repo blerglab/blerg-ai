@@ -1,0 +1,11 @@
+-- 014: completion webhook delivery marker (agent-contract spec §3).
+--
+-- A session can reach a terminal state through several independent paths (the
+-- daemon's session_ended, a disconnect marked "error", the stop endpoint,
+-- reconciliation), and more than one of them can fire for the same session.
+-- The callback must still be POSTed at most once, so delivery is claimed by
+-- stamping this column in a single conditional UPDATE before anything is sent:
+-- the first claimer wins and every later attempt sees a non-NULL value and
+-- stops. It records when delivery STARTED, not that the receiver accepted —
+-- the per-attempt outcome lives in the session's `webhook` agent events.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS webhook_delivered_at timestamptz;

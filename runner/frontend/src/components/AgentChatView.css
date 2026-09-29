@@ -1,0 +1,750 @@
+.agent-chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.agent-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border, var(--scree-2));
+}
+
+.agent-toolbar select {
+  background: var(--bg-2, var(--scree));
+  color: inherit;
+  border: 1px solid var(--border, var(--scree-2));
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.agent-stop {
+  margin-left: auto;
+  background: var(--scree-2);
+  color: var(--chalk);
+  border: 1px solid var(--stone);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.agent-timeline {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-card {
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+  max-width: 100%;
+}
+
+.agent-card pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+
+/* Markdown in a chat card: a card is a column the text must wrap inside, and
+   a long unbroken token (a URL, a hash) must not push it wider. */
+.agent-card .md {
+  min-width: 0;
+}
+
+.agent-card .message-body {
+  flex: 1;
+}
+
+.agent-card.user {
+  align-self: flex-end;
+  background: var(--scree-2);
+  max-width: 85%;
+}
+
+.agent-card.user.source-ask_answer {
+  border-left: 3px solid var(--batch);
+}
+
+.agent-card.assistant {
+  align-self: flex-start;
+  background: var(--bg-2, var(--scree));
+  max-width: 92%;
+}
+
+.agent-card.assistant.streaming {
+  opacity: 0.85;
+}
+
+.agent-card.tool {
+  align-self: stretch;
+  background: var(--basalt);
+  border: 1px solid var(--scree);
+  padding: 0;
+}
+
+.tool-header {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  align-items: center;
+  background: none;
+  border: none;
+  color: inherit;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tool-name {
+  font-weight: 600;
+  color: var(--lichen);
+}
+
+.tool-error .tool-name {
+  color: var(--danger);
+}
+
+.tool-summary {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  opacity: 0.7;
+  font-family: monospace;
+}
+
+.tool-status {
+  opacity: 0.8;
+}
+
+.tool-detail {
+  margin: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--scree);
+  font-size: 11px;
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.agent-card.checkin {
+  align-self: stretch;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  background: var(--basalt);
+  border-left: 3px solid var(--lichen);
+}
+
+.checkin-phase {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--lichen);
+  white-space: nowrap;
+}
+
+.agent-card.checkin.phase-pre_risky {
+  border-left-color: var(--blaze);
+}
+
+.agent-card.checkin.phase-pre_risky .checkin-phase {
+  color: var(--blaze);
+}
+
+.agent-card.message {
+  align-self: stretch;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  background: var(--scree);
+  border-left: 3px solid var(--batch);
+}
+
+.message-kind {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--batch);
+}
+
+.agent-card.kind-ask {
+  border-left-color: var(--chalk);
+}
+
+.ask-hint {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.agent-card.marker {
+  align-self: center;
+  font-size: 11px;
+  opacity: 0.65;
+  background: none;
+  padding: 2px 8px;
+}
+
+.agent-card.subagent {
+  align-self: stretch;
+  font-size: 12px;
+  background: var(--scree);
+  border-left: 3px solid var(--stone);
+}
+
+.agent-card.error {
+  align-self: stretch;
+  background: var(--scree);
+  border-left: 3px solid var(--danger);
+}
+
+.agent-composer {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--border, var(--scree-2));
+}
+
+.agent-composer textarea {
+  flex: 1;
+  resize: none;
+  min-height: 40px;
+  max-height: 140px;
+  background: var(--bg-2, var(--scree));
+  color: inherit;
+  border: 1px solid var(--border, var(--scree-2));
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.agent-composer button {
+  align-self: flex-end;
+  background: var(--stone);
+  color: inherit;
+  border: 1px solid var(--stone);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.agent-composer button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.publish-link {
+  display: block;
+  padding: 8px 12px;
+  border-top: 1px solid var(--scree);
+  color: var(--batch);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.publish-link:hover {
+  background: var(--scree);
+}
+
+.publish-screenshot {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  border-top: 1px solid var(--scree);
+  border-radius: 0 0 10px 10px;
+}
+
+.agent-rules-toggle {
+  background: none;
+  border: 1px solid var(--border, var(--scree-2));
+  border-radius: 6px;
+  color: inherit;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.rules-panel {
+  border-bottom: 1px solid var(--border, var(--scree-2));
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.rules-empty {
+  opacity: 0.6;
+  font-size: 12px;
+}
+
+.rule-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.rule-status {
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--blaze);
+}
+
+.rule-row.enabled .rule-status {
+  color: var(--lichen);
+}
+
+.rule-content {
+  flex: 1;
+}
+
+.rule-row button {
+  background: var(--scree);
+  border: 1px solid var(--scree-2);
+  border-radius: 5px;
+  color: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.rule-delete {
+  opacity: 0.6;
+}
+
+/* ─── Session ready card ─────────────────────────────────────────────────── */
+
+.agent-card.ready-card {
+  align-self: stretch;
+  background: var(--basalt);
+  border: 1px solid color-mix(in srgb, var(--lichen) 35%, var(--stone));
+  padding: 10px 12px;
+}
+
+.ready-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 650;
+}
+
+.ready-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lichen);
+  flex-shrink: 0;
+}
+
+.ready-time {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--fog-dim);
+}
+
+.ready-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 6px 14px;
+  margin: 8px 0 0;
+}
+
+.ready-facts div {
+  min-width: 0;
+}
+
+.ready-facts dt {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fog-dim);
+}
+
+.ready-facts dd {
+  margin: 1px 0 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* ─── Working indicator ──────────────────────────────────────────────────── */
+
+.agent-working {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--bg-2, var(--scree));
+  font-size: 12px;
+  color: var(--fog);
+}
+
+.agent-working.compact {
+  align-self: auto;
+  padding: 2px 8px;
+  border-radius: 6px;
+  margin-left: auto;
+}
+
+.agent-working.compact + .agent-stop {
+  margin-left: 0;
+}
+
+.agent-working-time {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--fog-dim);
+  margin-left: 2px;
+}
+
+.agent-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: flex-end;
+  height: 12px;
+}
+
+.agent-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--blaze);
+  animation: agent-dot-bounce 1.2s ease-in-out infinite;
+}
+
+.agent-dots i:nth-child(2) { animation-delay: 0.15s; }
+.agent-dots i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes agent-dot-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.55; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+
+.agent-working.static .agent-dots i {
+  animation: none;
+  opacity: 0.8;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-dots i {
+    animation: none;
+    opacity: 0.8;
+  }
+}
+
+/* ─── Waiting for the user ───────────────────────────────────────────────── */
+
+.agent-waiting {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--stone));
+  background: color-mix(in srgb, var(--amber) 8%, var(--basalt));
+  font-size: 12px;
+}
+
+.agent-waiting-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.agent-composer textarea:disabled {
+  opacity: 0.6;
+}
+
+.agent-notice {
+  margin: 0 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--stone));
+  background: color-mix(in srgb, var(--amber) 8%, var(--basalt));
+}
+
+/* ─── Compact tool calls ─────────────────────────────────────────────────── */
+
+.compact-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  opacity: 0.85;
+  cursor: pointer;
+}
+
+.tcg-inline,
+.tcg-rows {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+}
+
+.tcg-group {
+  align-self: stretch;
+  background: var(--basalt);
+  border: 1px solid var(--scree);
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.tcg-group-bad {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--scree));
+}
+
+.tcg-summary,
+.tcg-row-head {
+  display: flex;
+  width: 100%;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.tcg-summary {
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 8px;
+}
+
+.tcg-line,
+.tcg-row-head {
+  align-items: center;
+  gap: 6px;
+  line-height: 1.4;
+}
+
+.tcg-line {
+  display: flex;
+}
+
+.tcg-row-head {
+  padding: 2px 8px;
+}
+
+.tcg-title {
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcg-preview,
+.tcg-sum {
+  font-family: monospace;
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcg-preview {
+  padding-left: 18px;
+}
+
+.tcg-sum {
+  flex: 1;
+  min-width: 0;
+}
+
+.tcg-name {
+  font-weight: 600;
+  color: var(--lichen);
+}
+
+.tcg-row-bad .tcg-name,
+.tcg-bad {
+  color: var(--danger);
+}
+
+.tcg-ok {
+  color: var(--lichen);
+}
+
+.tcg-glyph,
+.tcg-spin {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+  flex: none;
+}
+
+.tcg-dur,
+.tcg-chev {
+  opacity: 0.6;
+  flex: none;
+}
+
+.tcg-clock {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  flex: none;
+}
+
+.tcg-clock-long {
+  opacity: 1;
+  color: var(--amber);
+}
+
+.tcg-hint {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.tcg-badge {
+  flex: none;
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.tcg-fail {
+  padding: 1px 8px 3px 26px;
+  color: var(--danger);
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcg-rows {
+  border-top: 1px solid var(--scree);
+  padding: 2px 0;
+}
+
+.tcg-inline .tcg-row {
+  background: var(--basalt);
+  border: 1px solid var(--scree);
+  border-radius: 6px;
+}
+
+.tcg-inline .tcg-row + .tcg-row {
+  margin-top: 2px;
+}
+
+.tcg-detail {
+  padding: 2px 8px 6px;
+}
+
+.tcg-detail pre {
+  margin: 2px 0 0;
+  padding: 6px 8px;
+  border-top: 1px solid var(--scree);
+  font-size: 11px;
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.tcg-out-bad {
+  color: var(--danger);
+}
+
+.tcg-showall {
+  background: none;
+  border: none;
+  color: var(--lichen);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.tcg-spin {
+  height: 10px;
+  width: 10px;
+  margin: 0 1px;
+  border: 2px solid var(--stone);
+  border-top-color: var(--lichen);
+  border-radius: 50%;
+  animation: tcg-rotate 0.8s linear infinite;
+}
+
+@keyframes tcg-rotate {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tcg-spin {
+    animation: none;
+  }
+}
+
+/* Timestamps: one line of small, muted type. */
+.card-time {
+  font-size: 10.5px;
+  line-height: 1.2;
+  opacity: 0.6;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.card-foot {
+  text-align: right;
+  margin-top: 2px;
+  line-height: 1.2;
+}
+
+.card-time-end {
+  margin-left: 8px;
+}
+
+.tool-header .card-time {
+  margin-left: auto;
+}
+
+.tcg-line .card-time {
+  margin-left: 4px;
+}
+
+.day-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10.5px;
+  opacity: 0.6;
+  margin: 2px 0;
+}
+
+.day-divider::before,
+.day-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--stone);
+}

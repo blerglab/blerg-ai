@@ -1,0 +1,93 @@
+● Update(~/repositories/example-app/.claude/worktrees/feature+list-filters/docs/plans/plan-filters.md)
+  ⎿  Added 26 lines, removed 11 lines
+      56  - NoteList, TagBrowser, PinnedNotes, ArchiveView
+      57  - FolderPage, NoteDetail, SearchPage (FilterBar earlier)
+      58
+      59 -### TODO — remaining screens (lower traffic)
+      60 -SharedNote, SharedFolder, LabelsScreen, ActivityLog,
+      61 -CommentInbox, ReviewQueue, Onboarding, attachment screens
+      62 -(AttachmentLibrary/AttachmentSet/AttachmentView), admin screens (Admin*.tsx).
+      59 +### DONE — mid/low-traffic screens
+      60 +Shared*, Labels, Activity, FolderSummary, Onboarding, CreateFolder,
+      61 +Folders/FolderDetail/FolderManage, CommentInbox, ReviewQueue,
+      62 +ProfileEditor, TemplateBuilder, attachment screens (AttachmentView/
+      63 +AttachmentSet/AttachmentLibrary/AttachmentPreview), small screens (NotFound/
+      64 +ApiError/Assistant/InviteAccept), admin screens (Reports/Requests/
+      65 +Testers/Users/Dashboard/Folders/Analytics).
+      66
+      64 -### TODO — shared components
+      65 -Inline filters/cards in reusable widgets: FolderSidebar, NoteTable,
+      66 -NoteEditor, NoteViewer, ChipPicker, LabelPicker, OwnerPicker,
+      67 -NumberPicker, DueDateEditor, reminder/checklist blocks, etc.
+      67 +### DONE — shared components (where the abstraction fits)
+      68 +Modals (AssignNote/Upload/UploadFile/Share/Survey), editors
+      69 +(NoteEditor/PromptEditor/DueDateEditor), panels (ReminderPattern/
+      70 +ExpectedReminders/GenerationHistory), cards (SuggestionCard/MessageCard/
+      71 +WelcomeCard). Slice F cosmetic fallback cleanup: complete (0 left).
+      72
+      69 -### DEFERRED
+      70 -Modal consolidation (slice E); cosmetic fallback cleanup in the 7
+      71 -remaining files; `color:'var(--bg)'`-as-on-accent normalisation.
+      73 +### Final adoption (counts)
+      74 +<FilterBar> 35 files · .chip 26 · <EmptyState> 16 · <LoadingState> 15 ·
+      75 +residual white-on-accent 0 · residual color fallbacks 0.
+      76
+      77 +### INTENTIONALLY LEFT INLINE (abstraction doesn't fit)
+      78 +Segmented/tab controls, chips, steppers (+/- count), icon-only buttons,
+      79 +calendar cells, dense in-table actions (font ≤11px), and buttons on
+      80 +non-accent coloured backgrounds (--purple/--warning/--success — no variant).
+      81 +These are correct as custom UI; do not force-migrate.
+      82 +
+      83 +### DEFERRED (own effort)
+      84 +Modal consolidation (slice E): 34 custom position:fixed overlays → a shared
+      85 +portal/Modal. Needs z-index hierarchy + mobile bottom-sheet + focus/backdrop
+      86 +decisions; not mechanical.
+      87 +
+      88  ## Verification checklist (per slice/commit)
+      89  - [ ] `npx tsc -b --noEmit` → 0
+      90  - [ ] `npm run lint` → 0
+
+● Bash(cd /home/dev/repositories/example-app/.claude/worktrees/feature+list-filters
+      git add -A…)
+  ⎿  pre-commit: syncing version...
+     pre-commit: running checks in parallel...
+       ✓ backend
+     … +7 lines (ctrl+o to expand)
+
+● Rollout substantially complete: 10 commits, 92 files, net −961 lines, all checks green. Let me record one process learning (the parallel-agent git incident) so it doesn't recur, then wrap up.
+
+  Read 1 file, recalled 1 memory, wrote 2 memories (ctrl+o to expand)
+
+● The list-filter pass is substantially complete. Here's the final picture.
+
+  Result
+
+  Branch feature/list-filters — 10 commits, 92 files, +1,380 / −2,341 (net −961 lines). Every commit passed the pre-commit gate (backend lint, frontend lint, type-check), and the final tree passes a clean build.
+
+  Bugs fixed
+  - ~48 white/var(--bg)-on-var(--accent) → var(--text-on-accent) (invisible/low-contrast in dark mode). 0 residual.
+  - ~180 wrong/redundant var(--x, #hex) fallbacks dropped — some were genuinely wrong (a dark value used as a light fallback). 0 residual.
+  - Added the previously-undefined --info* and semantic --*-text tokens to all three palettes (light/dark/colorblind) — a latent bug in Dashboard's info/warning banners.
+
+  Componentization (new themed primitives, colours 100% from CSS vars, real :hover/:active/:disabled)
+  - <FilterBar> (+ .bar classes) adopted in 35 files; .chip in 26; <EmptyState> in 16; <LoadingState> in 15. Dozens of dead style-consts deleted — hence the large net deletion.
+
+  Mobile
+  - Grid min() overflow guards; ReportsTable horizontal scroll; toolbar flexWrap across migrated screens. Confirmed DataTable/NoteBoard/Modal were already responsive.
+
+  Intentionally left inline (the abstraction doesn't fit): segmented/tab controls, chips, steppers, icon buttons, calendar cells, dense in-table actions, and buttons on --purple/--warning/--success backgrounds (no variant). Forcing these would reduce quality.
+
+  Deferred (documented in docs/plans/plan-filters.md): Modal consolidation — 34 custom overlays → a shared portal/Modal. It needs real decisions (z-index hierarchy, mobile bottom-sheet, focus/backdrop), so it's its own effort, not mechanical.
+
+  Process notes: one parallel subagent ran a git reset that wiped peers' uncommitted work; I caught it via reflog, recovered, then forbade git in all subsequent agents and committed between waves. I've saved that learning to memory. The one verification I can't do from here is live visual QA
+  in dark + colorblind themes — the changes are CSS-variable swaps with strong static guarantees (every token defined in all 3 palettes, build green), but a human eye in the actual themes is the real proof. I can launch the app and walk a few screens if you want.
+
+  This is complete. Should I merge to main and push to origin/main? (Branch stays untouched until you confirm.)
+
+✻ Churned for 53m 44s
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ merge to main and push to origin/main
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · gh auth login · ← for agents
+

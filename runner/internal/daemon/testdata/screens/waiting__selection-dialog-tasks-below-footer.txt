@@ -1,0 +1,95 @@
+● Task 2 is implemented (commit 7c3e9a1, 184/184). I'll finish its review gate, then address your toolbar clipping report — it's a separate
+  issue from the sidebar work and I don't want it to get lost.
+
+  Generating the Task 2 review package and dispatching the reviewer.
+
+● Bash(cd /home/dev/repositories/example-app
+      REVIEW=/home/dev/tools/plugins/cache/example-plugins/review/1.0.3/skills/review-package…)
+  ⎿  wrote /home/dev/repositories/example-app/.review/review-4b1f0d2..7c3e9a1.diff: 1 commit(s), 14019 bytes
+
+● Agent(Review Task 2 (spec + quality)) Sonnet 4.6
+  ⎿  Done (3 tool uses · 28.5k tokens · 2m 26s)
+  (ctrl+o to expand)
+
+● Reviewer found one Important bug: clearPendingNote uses a falsy guard (!state.pendingNotes[id]) that can't clear an entry whose
+  message is '' (reachable via msg.text ?? '') — which would break Task 4's error dismissal. Race/timer/memory handling all verified
+  sound. Dispatching a fix to the same implementer (it has the context).
+
+● SendMessage isn't available here, so I'll dispatch a fresh fix subagent scoped to the single finding.
+
+● Agent(Fix Task 2 clearPendingNote guard) Sonnet 4.6
+  ⎿  Done (11 tool uses · 23.3k tokens · 51s)
+  (ctrl+o to expand)
+
+● Fix done (e02b7d4, 185/185). The fix matches the reviewer's exact prescription plus a regression test — let me verify the one-line guard
+  change directly rather than spend a full re-review dispatch on it.
+
+● Bash(git show e02b7d4 --stat && echo "--- guard line ---" && grep -n "in state.pendingNotes" frontend/src/hooks/useNoteStore.ts)
+     commit e02b7d4a51c93f08b6d7124ae9035cf1b8e47a6d
+     Author: dev <dev@example.com>
+     Date:   Mon Jan 12 10:15:30 2026 +0000
+     … +18 lines (ctrl+o to expand)
+
+● Task 2 fully verified (guard fixed at line 248, regression test passing). Updating the ledger.
+
+● Update(.plan/progress.md)
+  ⎿  Added 1 line, removed 1 line
+       6
+       7  ## Tasks
+       8  - [x] Task 1: Name a note at creation
+       9 -- [ ] Task 2: Store pending/failed note state + fallback timeout
+       9 +- [x] Task 2: Store pending/failed note state + fallback timeout
+      10  - [ ] Task 3: Server broadcasts pre-save errors
+      11  - [ ] Task 4: Auto-navigate on create with loading & failure views
+      12  - [ ] Task 5: Delete navigates home
+
+● Update(.plan/progress.md)
+  ⎿  Added 1 line
+      22
+      23  ## Log
+      24 +- Task 1: complete (commits 5a17c3e..4b1f0d2, review clean — Minor only)
+      25 +- Task 2: complete (commits 4b1f0d2..e02b7d4, review found 1 Important [clearPendingNote falsy guard], fixed in e02b7d4
+         + + regression test; Minor: stale pendingTimers Map entries between tests — benign)
+
+● Task 2 is complete and verified. Now to your toolbar clipping report — I don't want it buried in the sidebar work, so let me address it
+  directly.
+
+  What you're describing: 1–2 characters clipped on the right edge of the toolbar, mostly when the labels are long enough to reach
+  that edge. Given the architecture (custom flex layout + native scroll), my leading hypothesis is a width mismatch between the
+  container and its children: the toolbar is sized to N buttons, but the rendered row's actual pixel width slightly exceeds the visible
+  area, so the rightmost button gets clipped by overflow. The "long labels, not always" pattern fits — you only see it when content
+  actually reaches the last slot. A common specific cause is a vertical scrollbar appearing and stealing width the layout did not
+  account for (so it clips once it grows).
+
+  That's a hypothesis, not a diagnosis — pinning it down properly means reproducing it with a screenshot, checking the width
+  computation against the container measurement, and writing a failing test, which is its own focused debugging session.
+
+  How do you want to sequence it?
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Sequencing
+
+When should I dig into the toolbar right-edge clipping bug?
+
+❯ 1. After the sidebar branch
+     Finish the 7 remaining sidebar tasks + final review first, then start a fresh systematic-debugging session on the clipping. Keeps the
+     two workstreams clean and separate. Recommended.
+  2. Pause and debug now
+     Stop the sidebar flow at this checkpoint (Tasks 1–2 done & committed) and investigate the clipping immediately, then resume the
+     plan after.
+  3. Quick look now, decide after
+     I spend a few minutes confirming the root cause (no fix yet), report what it is, then we decide whether to fix now or queue it —
+     sidebar flow stays paused briefly.
+  4. Type something.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+  9 tasks (2 done, 7 open)
+  ◻ Task 3: Server broadcasts pre-save errors
+  ◻ Task 4: Auto-navigate on create with loading/error views
+  ◻ Task 5: Delete navigates home
+  ◻ Task 6: Compact note card
+  ◻ Task 7: Toolbar focus pills + persisted collapse
+   … +2 pending, 2 completed
+

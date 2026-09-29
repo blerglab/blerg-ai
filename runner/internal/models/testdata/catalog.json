@@ -1,0 +1,976 @@
+{
+  "$schema": "https://downloads.claude.ai/model-catalog/v1/schema.json",
+  "schema_version": 1,
+  "version": 1178,
+  "issued_at": "2026-09-26T17:19:55Z",
+  "expires_at": "2026-10-03T17:19:55Z",
+  "key_id": "claude-code-release-signing-key",
+  "surfaces": {
+    "cc": {
+      "model_selector_state": [
+        {
+          "id": "cc",
+          "model": "claude-opus-5",
+          "thinking": {
+            "type": "effort",
+            "effort": "high"
+          },
+          "thinking_by_model": [
+            {
+              "id": "claude-fable-5-1",
+              "thinking": {
+                "type": "effort",
+                "effort": "high"
+              }
+            },
+            {
+              "id": "claude-opus-5-5",
+              "thinking": {
+                "type": "effort",
+                "effort": "medium"
+              }
+            },
+            {
+              "id": "claude-sonnet-5",
+              "thinking": {
+                "type": "effort",
+                "effort": "high"
+              }
+            },
+            {
+              "id": "claude-fable-5",
+              "thinking": {
+                "type": "effort",
+                "effort": "high"
+              }
+            },
+            {
+              "id": "claude-opus-5",
+              "thinking": {
+                "type": "effort",
+                "effort": "high"
+              }
+            },
+            {
+              "id": "claude-opus-4-8",
+              "thinking": {
+                "type": "effort",
+                "effort": "high"
+              }
+            },
+            {
+              "id": "claude-opus-4-7",
+              "thinking": {
+                "type": "effort",
+                "effort": "xhigh"
+              }
+            },
+            {
+              "id": "claude-opus-4-6",
+              "thinking": {
+                "type": "effort",
+                "effort": "high"
+              }
+            },
+            {
+              "id": "claude-sonnet-4-6",
+              "thinking": {
+                "type": "effort",
+                "effort": "high"
+              }
+            }
+          ],
+          "selection_source": "global_default"
+        }
+      ],
+      "model_selector_config": [
+        {
+          "id": "cc",
+          "models": [
+            {
+              "id": "claude-opus-5-5",
+              "name": "Opus 5.5",
+              "short_name": "Opus",
+              "description": "Most capable for ambitious work",
+              "section": "main",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "effort",
+                "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+                "effort_options": [
+                  {
+                    "id": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "name": "Medium",
+                    "badge": {
+                      "message": "Default",
+                      "variant": "neutral"
+                    }
+                  },
+                  {
+                    "id": "high",
+                    "name": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "name": "Extra"
+                  },
+                  {
+                    "id": "max",
+                    "name": "Max",
+                    "tooltip": {
+                      "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                    }
+                  }
+                ]
+              },
+              "min_claude_code_version": "2.1.280",
+              "quick_select": true,
+              "runtime": {
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 128000,
+                "effort_levels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "default_effort": "medium",
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 2576,
+                  "max_height": 2576
+                },
+                "family": "opus"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-sonnet-5",
+              "name": "Sonnet 5",
+              "short_name": "Sonnet",
+              "description": "Most efficient for everyday tasks",
+              "section": "main",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "effort",
+                "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+                "effort_options": [
+                  {
+                    "id": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "name": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "name": "High",
+                    "badge": {
+                      "message": "Default",
+                      "variant": "neutral"
+                    }
+                  },
+                  {
+                    "id": "xhigh",
+                    "name": "Extra"
+                  },
+                  {
+                    "id": "max",
+                    "name": "Max",
+                    "tooltip": {
+                      "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                    }
+                  }
+                ]
+              },
+              "quick_select": true,
+              "runtime": {
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 128000,
+                "effort_levels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "default_effort": "high",
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 2576,
+                  "max_height": 2576
+                },
+                "family": "sonnet"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-fable-5-1",
+              "name": "Fable 5.1",
+              "short_name": "Fable",
+              "description": "For your toughest challenges",
+              "section": "main",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "effort",
+                "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+                "effort_options": [
+                  {
+                    "id": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "name": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "name": "High",
+                    "badge": {
+                      "message": "Default",
+                      "variant": "neutral"
+                    }
+                  },
+                  {
+                    "id": "xhigh",
+                    "name": "Extra"
+                  },
+                  {
+                    "id": "max",
+                    "name": "Max",
+                    "tooltip": {
+                      "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                    }
+                  }
+                ]
+              },
+              "min_claude_code_version": "2.1.251",
+              "quick_select": true,
+              "runtime": {
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 128000,
+                "effort_levels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "default_effort": "high",
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 2576,
+                  "max_height": 2576
+                },
+                "family": "mythos"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-haiku-4-5-20251001",
+              "name": "Haiku 4.5",
+              "short_name": "Haiku",
+              "description": "Fastest for quick answers",
+              "section": "main",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "none"
+              },
+              "auto_permission_mode": "unavailable",
+              "quick_select": true,
+              "runtime": {
+                "max_input_tokens": 200000,
+                "max_output_tokens": 64000,
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 1568,
+                  "max_height": 1568
+                },
+                "family": "haiku"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-opus-5",
+              "name": "Opus 5",
+              "short_name": "Opus",
+              "section": "overflow",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "effort",
+                "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+                "effort_options": [
+                  {
+                    "id": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "name": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "name": "High",
+                    "badge": {
+                      "message": "Default",
+                      "variant": "neutral"
+                    }
+                  },
+                  {
+                    "id": "xhigh",
+                    "name": "Extra"
+                  },
+                  {
+                    "id": "max",
+                    "name": "Max",
+                    "tooltip": {
+                      "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                    }
+                  }
+                ]
+              },
+              "fast_mode": {
+                "type": "toggle",
+                "name": "Fast mode",
+                "options": [
+                  {
+                    "id": "fast",
+                    "name": "Enable fast mode",
+                    "selector_label": "Fast"
+                  },
+                  {
+                    "id": "off",
+                    "name": "Off"
+                  }
+                ]
+              },
+              "runtime": {
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 128000,
+                "effort_levels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "default_effort": "high",
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 2576,
+                  "max_height": 2576
+                },
+                "family": "opus"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-fable-5",
+              "name": "Fable 5",
+              "short_name": "Fable",
+              "section": "overflow",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "effort",
+                "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+                "effort_options": [
+                  {
+                    "id": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "name": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "name": "High",
+                    "badge": {
+                      "message": "Default",
+                      "variant": "neutral"
+                    }
+                  },
+                  {
+                    "id": "xhigh",
+                    "name": "Extra"
+                  },
+                  {
+                    "id": "max",
+                    "name": "Max",
+                    "tooltip": {
+                      "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                    }
+                  }
+                ]
+              },
+              "runtime": {
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 128000,
+                "effort_levels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "default_effort": "high",
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 2576,
+                  "max_height": 2576
+                },
+                "family": "mythos"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-opus-4-8",
+              "name": "Opus 4.8",
+              "short_name": "Opus",
+              "section": "overflow",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "effort",
+                "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+                "effort_options": [
+                  {
+                    "id": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "name": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "name": "High",
+                    "badge": {
+                      "message": "Default",
+                      "variant": "neutral"
+                    }
+                  },
+                  {
+                    "id": "xhigh",
+                    "name": "Extra"
+                  },
+                  {
+                    "id": "max",
+                    "name": "Max",
+                    "tooltip": {
+                      "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                    }
+                  }
+                ]
+              },
+              "fast_mode": {
+                "type": "toggle",
+                "name": "Fast mode",
+                "options": [
+                  {
+                    "id": "fast",
+                    "name": "Enable fast mode",
+                    "selector_label": "Fast"
+                  },
+                  {
+                    "id": "off",
+                    "name": "Off"
+                  }
+                ]
+              },
+              "runtime": {
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 128000,
+                "effort_levels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "default_effort": "high",
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 2576,
+                  "max_height": 2576
+                },
+                "family": "opus"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-opus-4-7",
+              "name": "Opus 4.7",
+              "short_name": "Opus",
+              "section": "overflow",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "effort",
+                "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+                "effort_options": [
+                  {
+                    "id": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "name": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "name": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "name": "Extra",
+                    "badge": {
+                      "message": "Default",
+                      "variant": "neutral"
+                    }
+                  },
+                  {
+                    "id": "max",
+                    "name": "Max",
+                    "tooltip": {
+                      "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                    }
+                  }
+                ]
+              },
+              "runtime": {
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 128000,
+                "effort_levels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "default_effort": "xhigh",
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 2576,
+                  "max_height": 2576
+                },
+                "family": "opus"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-opus-4-6",
+              "name": "Opus 4.6",
+              "short_name": "Opus",
+              "section": "overflow",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "effort",
+                "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+                "effort_options": [
+                  {
+                    "id": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "name": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "name": "High",
+                    "badge": {
+                      "message": "Default",
+                      "variant": "neutral"
+                    }
+                  },
+                  {
+                    "id": "max",
+                    "name": "Max",
+                    "tooltip": {
+                      "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                    }
+                  }
+                ]
+              },
+              "fast_mode": {
+                "type": "toggle",
+                "name": "Fast mode",
+                "options": [
+                  {
+                    "id": "fast",
+                    "name": "Enable fast mode",
+                    "selector_label": "Fast"
+                  },
+                  {
+                    "id": "off",
+                    "name": "Off"
+                  }
+                ]
+              },
+              "runtime": {
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 128000,
+                "effort_levels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ],
+                "default_effort": "high",
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 1568,
+                  "max_height": 1568
+                },
+                "family": "opus"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-sonnet-4-6",
+              "name": "Sonnet 4.6",
+              "short_name": "Sonnet",
+              "section": "overflow",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "effort",
+                "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+                "effort_options": [
+                  {
+                    "id": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "name": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "name": "High",
+                    "badge": {
+                      "message": "Default",
+                      "variant": "neutral"
+                    }
+                  },
+                  {
+                    "id": "max",
+                    "name": "Max",
+                    "tooltip": {
+                      "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                    }
+                  }
+                ]
+              },
+              "runtime": {
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 128000,
+                "effort_levels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ],
+                "default_effort": "high",
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 1568,
+                  "max_height": 1568
+                },
+                "family": "sonnet"
+              },
+              "offered_on": [
+                "first_party",
+                "anthropic_aws",
+                "bedrock",
+                "vertex",
+                "foundry",
+                "mantle",
+                "gateway"
+              ]
+            },
+            {
+              "id": "claude-opus-4-1-20250805",
+              "name": "Opus 4.1",
+              "short_name": "Opus",
+              "section": "overflow",
+              "capabilities": {
+                "compass": true,
+                "gsuite_tools": true,
+                "mm_images": true,
+                "mm_pdf": true,
+                "web_search": true
+              },
+              "thinking": {
+                "type": "none"
+              },
+              "auto_permission_mode": "unavailable",
+              "runtime": {
+                "max_input_tokens": 200000,
+                "max_output_tokens": 32000,
+                "capabilities": [
+                  "compass",
+                  "gsuite_tools",
+                  "mm_images",
+                  "mm_pdf",
+                  "web_search"
+                ],
+                "image_limits": {
+                  "max_width": 1568,
+                  "max_height": 1568
+                },
+                "family": "opus"
+              },
+              "offered_on": [
+                "bedrock",
+                "vertex"
+              ]
+            }
+          ],
+          "settings_vocabulary": {
+            "create_mode": {
+              "default": 1
+            },
+            "effort_level": {
+              "high": 3,
+              "low": 1,
+              "max": 5,
+              "medium": 2,
+              "xhigh": 4
+            },
+            "thinking_mode": {
+              "auto": 2,
+              "extended": 1,
+              "off": 3
+            }
+          },
+          "provider_alias_targets": {
+            "fable": {
+              "default": "claude-fable-5-1",
+              "per_provider": {
+                "gateway": "claude-fable-5"
+              }
+            },
+            "haiku": {
+              "default": "claude-haiku-4-5-20251001"
+            },
+            "opus": {
+              "default": "claude-opus-5",
+              "per_provider": {
+                "anthropic_aws": "claude-opus-5",
+                "bedrock": "claude-opus-5",
+                "foundry": "claude-opus-4-6",
+                "gateway": "claude-opus-4-7",
+                "mantle": "claude-opus-5",
+                "vertex": "claude-opus-5"
+              }
+            },
+            "sonnet": {
+              "default": "claude-sonnet-5",
+              "per_provider": {
+                "anthropic_aws": "claude-sonnet-4-6",
+                "gateway": "claude-sonnet-4-6"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,15 @@
+-- Pinned to the public schema on purpose. Unqualified, CREATE EXTENSION installs into
+-- whatever schema is FIRST in search_path — and every core test package now runs these
+-- migrations inside its own isolated per-test schema and drops that schema on cleanup
+-- (see e.g. core/internal/identity/accounts_test.go's testPool). Two packages running
+-- concurrently could then race: package A's "IF NOT EXISTS" sees the extension already
+-- present (installed into package B's schema) and skips creating it, then B's
+-- "DROP SCHEMA ... CASCADE" takes it away underneath A.
+--
+-- "public" is safe as the stable home: no test schema is ever named "public" (they are all
+-- test_blerg_core_*), so nothing ever drops it. Note that nothing actually depends on a
+-- pgcrypto function today — gen_random_uuid() has been a built-in in pg_catalog since
+-- PostgreSQL 13 — so pinning the extension out of the per-test search_path changes nothing
+-- for callers.
+CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public; -- for gen_random_uuid()
+-- foundational tables are added by later tasks' migrations (002+).

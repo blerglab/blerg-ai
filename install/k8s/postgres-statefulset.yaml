@@ -1,0 +1,100 @@
+# Single postgres:16 instance backing all three services, same topology as
+# the desktop compose stack (install/desktop/docker-compose.yml). Not
+# highly-available; fine for a small single-node test deploy. See the
+# README for the documented external-Postgres alternative.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: blerg
+  labels:
+    app: postgres
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: blerg
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: blerg-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          # `$(VAR)` only expands in a container's own command/args, never in
+          # a probe's exec.command (no shell runs there either) — confirmed
+          # broken by review: pg_isready would receive the literal string
+          # "$(POSTGRES_USER)" as -U, never becoming ready. sh -c gets real
+          # shell-side $VAR expansion instead.
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: {type: RuntimeDefault}
+      volumes:
+        - name: postgres-init
+          configMap:
+            name: blerg-postgres-init
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

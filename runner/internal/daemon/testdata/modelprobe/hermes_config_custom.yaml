@@ -1,0 +1,17 @@
+# Hermes config, custom OpenAI-compatible endpoint (a local model server).
+model:
+  context_length: 65536
+  ollama_num_ctx: 65536
+  default: "qwen3-30b"   # the configured model
+  provider: custom
+  base_url: 'BASE_URL'
+  api_key: sk-this-must-never-be-read-or-sent
+  nested:
+    base_url: http://wrong.invalid/v1
+    provider: nous
+fallback_providers: []
+toolsets:
+  - hermes-cli
+providers:
+  custom:
+    base_url: http://also-wrong.invalid/v1

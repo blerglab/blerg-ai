@@ -8,7 +8,7 @@
 # context fails at `go mod download` with "reading /contracts/go.mod: no
 # such file or directory"). Build with:
 #   docker build -f runner/Dockerfile.devcontainer -t <tag> .
-FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS build
+FROM golang:1.27-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS build
 WORKDIR /src
 COPY contracts/ /src/contracts/
 COPY runner/ /src/runner/

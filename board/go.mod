@@ -3,10 +3,10 @@ module github.com/blerglab/blerg-ai/board
 go 1.25.14
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.61.0
+	github.com/anthropics/anthropic-sdk-go v1.75.0
 	github.com/blerglab/blerg-ai/contracts v0.0.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 )
 
 replace github.com/blerglab/blerg-ai/contracts => ../contracts

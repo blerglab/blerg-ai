@@ -1,15 +1,18 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
+	"github.com/blerglab/blerg-ai/board/internal/templates"
 )
 
 // ── auth ─────────────────────────────────────────────────────────────────────
@@ -54,8 +57,8 @@ func (a *API) handleListBoards(w http.ResponseWriter, r *http.Request, p auth.Pr
 		writeDBError(w, err)
 		return
 	}
-	// Board-scoped agent tokens see only their board.
-	if p.Kind == auth.KindAgent && p.Token.BoardID != nil {
+	// Board-scoped tokens (any kind) see only their board.
+	if p.Token != nil && p.Token.BoardID != nil {
 		filtered := boards[:0]
 		for _, b := range boards {
 			if b.ID == *p.Token.BoardID {
@@ -72,10 +75,20 @@ func (a *API) handleCreateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	params, err := decode[db.BoardParams](r)
+	body, err := decode[struct {
+		db.BoardParams
+		Template string `json:"template"`
+	}](r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
+	}
+	params := body.BoardParams
+	if body.Template != "" {
+		if err := applyTemplate(&params, body.Template); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	b, err := db.CreateBoard(r.Context(), a.Pool, params)
 	if err != nil {
@@ -83,6 +96,39 @@ func (a *API) handleCreateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 		return
 	}
 	writeJSON(w, http.StatusCreated, b)
+}
+
+// applyTemplate copies a registered template's columns and field schema into
+// params. The board row, columns and schema are then written by the one
+// db.CreateBoard transaction. A template owns the columns and the schema, so
+// a request that also names either is ambiguous and refused.
+func applyTemplate(params *db.BoardParams, id string) error {
+	tpl, ok := templates.Get(id)
+	if !ok {
+		return fmt.Errorf("unknown template %q", id)
+	}
+	// An empty columns list or an empty field_schema ([] or null) says
+	// nothing, so it is treated as absent: a form that always sends them can
+	// still pick a template. A non-empty one is ambiguous and refused.
+	if len(params.Columns) > 0 || !emptyFieldSchema(params.FieldSchema) {
+		return errors.New("template cannot be combined with columns or field_schema: send either the template or your own columns and field_schema")
+	}
+	params.Columns, params.TerminalColumns = nil, nil
+	for _, c := range tpl.Columns {
+		params.Columns = append(params.Columns, c.Name)
+		if c.Terminal {
+			params.TerminalColumns = append(params.TerminalColumns, c.Name)
+		}
+	}
+	params.FieldSchema = tpl.FieldSchema
+	return nil
+}
+
+// emptyFieldSchema reports whether a field_schema value is absent, null or an
+// empty array.
+func emptyFieldSchema(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	return len(t) == 0 || string(t) == "null" || string(t) == "[]"
 }
 
 func (a *API) handleGetBoard(w http.ResponseWriter, r *http.Request, p auth.Principal) {
@@ -294,6 +340,10 @@ func (a *API) handleCreateCard(w http.ResponseWriter, r *http.Request, p auth.Pr
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if err := a.resolveArtifactLinks(&req.CardParams); err != nil {
+		writeDBError(w, err)
+		return
+	}
 	board, err := db.GetBoard(r.Context(), a.Pool, boardID)
 	if err != nil {
 		writeDBError(w, err)
@@ -403,6 +453,10 @@ func (a *API) handleUpdateCard(w http.ResponseWriter, r *http.Request, p auth.Pr
 	}
 	if req.IfMatch == nil {
 		req.IfMatch = ifMatch(r)
+	}
+	if err := a.resolveArtifactLinks(&req.CardParams); err != nil {
+		writeDBError(w, err)
+		return
 	}
 	board, err := db.GetBoard(r.Context(), a.Pool, card.BoardID)
 	if err != nil {
@@ -541,6 +595,13 @@ func (a *API) handleAddDep(w http.ResponseWriter, r *http.Request, p auth.Princi
 	}
 	if err := p.RequireBoard(card.BoardID, "card.write"); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	// The blocker is named in the body: for a project-scoped token another
+	// board's card answers exactly like a missing one (AddDependency would
+	// otherwise tell the two apart).
+	if !a.InScope(r.Context(), p, OwnerCard, req.DependsOn) {
+		notFoundForScope(w)
 		return
 	}
 	if err := db.AddDependency(r.Context(), a.Pool, card.ID, req.DependsOn, p.EventMeta()); err != nil {
@@ -882,7 +943,7 @@ func (a *API) handleGlobalSearch(w http.ResponseWriter, r *http.Request, p auth.
 		Limit:           30,
 		IncludeArchived: true,
 	}
-	if p.Kind == auth.KindAgent && p.Token.BoardID != nil {
+	if p.Token != nil && p.Token.BoardID != nil {
 		params.BoardID = *p.Token.BoardID
 	}
 	cards, err := db.SearchCards(r.Context(), a.Pool, params)

@@ -20,6 +20,8 @@ board or runner at all — see [Human login](#human-login) below.
 | `BLERG_CORE_REGISTER_KEY` | unset | Shared bootstrap key components (board, runner) present to `POST /components` to register themselves. Unset disables component self-registration. |
 | `BLERG_CORE_INTERNAL_KEY` | unset | Shared secret guarding `POST /internal/credentials/fetch`, the endpoint runner calls to fetch a spawning account's personal engine credential. Deliberately a DIFFERENT secret from `BLERG_CORE_REGISTER_KEY`: registration is a low-trust bootstrap, credential fetch hands back plaintext. Unset disables the endpoint entirely (runner then always falls back to the shared operator Secret). Runner reads the same value as `BLERG_RUNNER_CORE_INTERNAL_KEY`. |
 | `BLERG_CORE_PLUGIN_MARKETPLACES` | `anthropics/claude-plugins-official` | Comma-separated GitHub `owner/repo` marketplaces an account may register **always-on plugins** from; `*` allows any *valid* `owner/repo` (never a URL or path). Enforced when a list is saved (`422 marketplace not allowed by this install`); the runner re-checks it at install time with its own `BLERG_RUNNER_PLUGIN_MARKETPLACES` — set both to the same value. Malformed entries are logged and dropped, never widened. |
+| `BLERG_CORE_MCP_ALLOW_HTTP_HOSTS` | unset | Comma-separated hostnames for which an MCP connection's URL may use plain `http://` (otherwise `https` only). Core fetches a connection's URL itself, so this is an operator decision: list only hosts you run and trust. Empty by default. See [`docs/mcp-connections.md`](../../docs/mcp-connections.md). |
+| `BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS` | unset | Comma-separated hostnames an MCP connection may point at even though they resolve to a loopback, link-local, private (RFC 1918 / ULA) or carrier-grade NAT address. Every other host is checked at connect time, on the address actually dialled, and is refused if it is one of those. Empty by default. The runner has its own list, `BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS`; keep them consistent. |
 | `BLERG_CORE_COOKIE_SECURE` | `true` | Secure attribute on every cookie core sets. The desktop compose sets false because Safari does not treat http://localhost as a secure context for cookies. Anything reachable beyond localhost must keep true (and TLS). |
 
 **core must be served over TLS, or from `localhost` with `BLERG_CORE_COOKIE_SECURE=false`.**
@@ -380,6 +382,30 @@ the CLI; core and the runner read separate allow-list variables, so keep them eq
 runner's stricter list silently wins at install time. Two saves racing on the same list: the loser
 gets `409`. A plugin, once installed, acts with the session's full access — the allow-list is the
 control.
+
+### MCP connections and cron tokens
+
+A person's remote MCP servers (`mcp_connections`, migration 015) and the tokens that let a scheduled
+run act for them. Concepts and the security properties are in
+[`docs/mcp-connections.md`](../../docs/mcp-connections.md) and [`docs/crons.md`](../../docs/crons.md).
+
+- `GET/POST /api/mcp/connections`, `PATCH/DELETE /api/mcp/connections/{id}`: a signed-in **human**
+  only, for the caller's own account (an agent token gets `403`; another account's id is `404`).
+  Writes are same-origin checked. A response never contains the stored secret. At most 20
+  connections per account; a name is a short slug and may not be `board`, `blerg` or `gateway`.
+- `POST /internal/mcp/connections/list`, `.../token` and `.../defaults` (`X-Internal-Key`, the
+  runner only): `list` returns the account's connections without secrets, `token` returns exactly
+  one connection's credential after writing an audit row (`mcp_secret_access_log`; a failed audit
+  write aborts the call), `defaults` saves a connection's default tool selection and accepts a
+  login-session proof only. All three take `account_id` plus a liveness proof as described under
+  [Internal endpoints](#internal-endpoints-which-live-thing-authorises-the-call), and every failure
+  past the shape checks is the same `404`.
+- `POST /internal/tokens/mint`, `.../revoke`, `.../status` (`X-Internal-Key`, the runner only): the
+  cron token. `mint` needs a live login session as proof and returns only an id and an expiry; no
+  signed token is ever produced, so the token cannot be presented anywhere. It counts toward the
+  50 live agent tokens per account, expires after at most 365 days and is hidden from the token
+  list you can copy from. `revoke` needs the owning `account_id`; "log out everywhere" and
+  revoking the token in Settings make `status` answer not live.
 
 ### Internal endpoints: which live thing authorises the call
 

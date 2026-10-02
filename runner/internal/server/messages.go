@@ -138,6 +138,11 @@ func (a *API) HandlePostMessages(w http.ResponseWriter, r *http.Request) {
 // the user); update pushes only when the user is away (matching the session-state
 // push policy), so progress chatter doesn't buzz while they're watching.
 func (a *API) pushForMessage(sess db.SessionRow, msg db.MessageRow) {
+	// Push subscriptions belong to no account, so a notification cannot be
+	// aimed at a private session's owner alone: none is sent (privacy.go).
+	if sess.Private {
+		return
+	}
 	if msg.Kind == "update" && a.hub.ActiveWithin(activityTTL) {
 		return
 	}
@@ -290,6 +295,12 @@ func (a *API) HandlePostMessageReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if boardID == "" && !requireCoreOrDaemon(w, actor) {
+		return
+	}
+	// A person may not answer a private session's question unless it is theirs
+	// (the daemon token and a session's own board token are the session's side).
+	if actor.Core != nil && !a.coreActorCanSeeMessage(ctx, actor.Core, id) {
+		writeError(w, http.StatusNotFound, "message not found")
 		return
 	}
 
@@ -446,7 +457,8 @@ func (a *API) HandlePostMessageExpire(w http.ResponseWriter, r *http.Request) {
 // trust level was removed by the platform-identity project; there is no longer
 // an unauthenticated browser tier.
 func (a *API) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.authBrowser(w, r); !ok {
+	principal, ok := a.authBrowser(w, r)
+	if !ok {
 		return
 	}
 	if a.dbPool == nil {
@@ -459,7 +471,7 @@ func (a *API) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	rows, err := db.ListMessages(r.Context(), a.dbPool, limit)
+	rows, err := db.ListMessagesFor(r.Context(), a.dbPool, limit, principal.Sub) // private sessions' messages: owner only
 	if err != nil {
 		log.Printf("api list messages: %v", err)
 		writeError(w, http.StatusInternalServerError, "query failed")

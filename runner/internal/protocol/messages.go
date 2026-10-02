@@ -72,8 +72,12 @@ type ClusterStatus struct {
 	// instead, which matches every cluster session regardless of which
 	// per-pod daemon currently owns it.
 	DaemonID string `json:"daemon_id,omitempty"`
-	// MaxSessions is the concurrent cluster session cap (BLERG_RUNNER_MAX_SESSIONS).
+	// MaxSessions is the effective concurrent cluster session cap: the admin
+	// override when one is set, else BLERG_RUNNER_MAX_SESSIONS.
 	MaxSessions int `json:"max_sessions,omitempty"`
+	// MaxSessionsDefault is the environment value (BLERG_RUNNER_MAX_SESSIONS),
+	// what the cap returns to when the override is removed.
+	MaxSessionsDefault int `json:"max_sessions_default,omitempty"`
 	// ActiveSessions is the live count of non-terminal session Jobs, from a
 	// real-time k8s API call. -1 means the call failed (RBAC, connectivity)
 	// — "couldn't tell", not "zero".
@@ -94,6 +98,7 @@ type ClusterStatus struct {
 	CPULimit                string `json:"cpu_limit,omitempty"`
 	MemLimit                string `json:"mem_limit,omitempty"`
 	PodTTLSeconds           int64  `json:"pod_ttl_seconds,omitempty"`
+	PodIdleTimeoutSeconds   int64  `json:"pod_idle_timeout_seconds"`
 	TerminationGraceSeconds int64  `json:"termination_grace_seconds,omitempty"`
 	TTLSecondsAfterFinished int64  `json:"ttl_seconds_after_finished,omitempty"`
 }
@@ -143,6 +148,9 @@ type SessionInfo struct {
 	// Both absent for a live session and for rows ended before migration 018.
 	EndReason string   `json:"end_reason,omitempty"`
 	EndedBy   *EndedBy `json:"ended_by,omitempty"`
+	// CronID is the cron that started the session (migration 023); absent for every other
+	// session. The UI badges such a session as a cron run.
+	CronID string `json:"cron_id,omitempty"`
 }
 
 // EndedBy is who ended a session: the principal kind ("human", "agent",
@@ -194,6 +202,21 @@ type DaemonHello struct {
 	// treat the folder name as a repository to clone from GitHub — so the
 	// server never sends CloneFrom to a daemon that does not say this.
 	CloneFrom bool `json:"clone_from,omitempty"`
+	// MCPGateway: this daemon honours SpawnSession.MCPGateway (it writes the
+	// MCP config file and launches Claude with --mcp-config, --strict-mcp-config
+	// and the built-in tool allow-list). Absent from older daemons, which would
+	// ignore the unknown field and run the session with no MCP at all and every
+	// built-in tool — so the server never sends a grant to a daemon that does
+	// not say this.
+	MCPGateway bool `json:"mcp_gateway,omitempty"`
+	// RestrictTools: this daemon honours SpawnSession.RestrictTools (the
+	// built-in tool allow-list, no ambient MCP servers, no user settings,
+	// plugins, hooks or skills). Absent from older daemons, which would ignore
+	// the unknown field and run an unattended session with every built-in tool
+	// and the developer's whole Claude configuration — so the server never
+	// sends RestrictTools to a daemon that does not say this, and treats such a
+	// daemon as unavailable for a cron.
+	RestrictTools bool `json:"restrict_tools,omitempty"`
 	// AllowHostCredentialClone: this daemon's owner allows a named clone to
 	// use the launching person's own git token on the bare host (a This
 	// machine session). Without it the server sends a token only for a
@@ -436,6 +459,42 @@ type SpawnSession struct {
 	// Provider's own host only, and never writes it anywhere: not to a
 	// session record, not to the clone's .git/config, not to a log.
 	GitToken string `json:"git_token,omitempty"`
+	// MCPGateway hands the session its MCP gateway grant: the gateway's base
+	// URL and one token per connection. The daemon turns it into an MCP config
+	// file and never puts it in the environment, argv or a log. It is only
+	// honoured for a Claude Code agent-kind session in a sandbox or cluster
+	// pod, and the server only sends it to a daemon whose hello set
+	// DaemonHello.MCPGateway. Absent for every other session.
+	MCPGateway *MCPGatewayConfig `json:"mcp_gateway,omitempty"`
+	// RestrictTools makes the session run hardened: Claude Code gets only the
+	// file tools plus its granted MCP tools (no shell, no direct network, no
+	// agent spawning), no ambient MCP servers, and none of the user's settings,
+	// plugins, hooks or skills. The server sets it for every cron session and
+	// every session with an MCP grant, never from a request body. A grant
+	// implies it. Only honoured for a Claude Code agent-kind session in a
+	// sandbox or cluster pod, by a daemon whose hello set
+	// DaemonHello.RestrictTools. Absent for every other session.
+	RestrictTools bool `json:"restrict_tools,omitempty"`
+}
+
+// MCPGatewayConfig is a session's MCP gateway grant as delivered to a daemon
+// or a pod: where the gateway is and the per-connection tokens. It holds
+// secrets, so it is never logged and never forwarded through the session
+// environment. The receiver validates it (daemon.ValidateMCPGateway).
+type MCPGatewayConfig struct {
+	// BaseURL is the gateway base URL sessions dial, as configured on the
+	// server (not derived from the daemon's WebSocket address). The session's
+	// MCP server for connection <name> is <BaseURL>/mcp-gw/<name>.
+	BaseURL string `json:"base_url"`
+	// Servers is one entry per granted connection.
+	Servers []MCPGatewayServer `json:"servers"`
+}
+
+// MCPGatewayServer is one connection's gateway name and its bearer token (one
+// token per session and connection).
+type MCPGatewayServer struct {
+	Name  string `json:"name"`
+	Token string `json:"token"`
 }
 
 // Activity is sent by a browser (throttled) on user interaction so the server
@@ -533,6 +592,9 @@ type BrowserSessionEnded = SessionEnded
 type PreviewUpdated struct {
 	Type string `json:"type"` // "preview_updated"
 	HTML string `json:"html"`
+	// SessionID is the session that pushed the preview, when the pusher said
+	// so. A preview from a private session reaches only its owner's browsers.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // HistoryDone is sent to the browser after history replay is complete for a
@@ -802,6 +864,13 @@ type SubscribeAgentEvents struct {
 	SessionID string `json:"session_id"`
 	AfterSeq  int64  `json:"after_seq"`
 	Limit     int    `json:"limit,omitempty"`
+	// Tail asks for the newest Tail events instead of the oldest after
+	// AfterSeq, so a long transcript can be shown at once; the older part
+	// follows in pages via BeforeSeq.
+	Tail int `json:"tail,omitempty"`
+	// BeforeSeq asks for the Limit events just before this seq (oldest first),
+	// the next page of a transcript that was loaded from its end.
+	BeforeSeq int64 `json:"before_seq,omitempty"`
 }
 
 // AgentEventsReplayDone marks the end of a replay batch (server → browser).
@@ -810,6 +879,13 @@ type AgentEventsReplayDone struct {
 	SessionID string `json:"session_id"`
 	LastSeq   int64  `json:"last_seq"`
 	HasMore   bool   `json:"has_more"`
+	// Older marks the answer to a Tail or BeforeSeq request, which reads
+	// backwards from the end of the transcript: FirstSeq is the oldest event it
+	// carried and HasOlder says whether earlier ones remain. HasMore and
+	// LastSeq describe a forward replay and mean nothing for these.
+	Older    bool  `json:"older,omitempty"`
+	HasOlder bool  `json:"has_older,omitempty"`
+	FirstSeq int64 `json:"first_seq,omitempty"`
 	// ServerTime is the server's clock when the replay finished (RFC 3339,
 	// ms). Event ts values are server time; a browser measures "how long
 	// ago" against this, not its own possibly-skewed clock.

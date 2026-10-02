@@ -42,3 +42,51 @@ export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     return resp
   })
 }
+
+/**
+ * apiUpload sends a file like apiFetch does (same bearer token, same refresh-on-401 rule) but
+ * reports upload progress, which fetch cannot. It resolves to an ordinary Response.
+ */
+export function apiUpload(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body: Blob; signal?: AbortSignal },
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open(init.method ?? 'POST', url)
+    const token = getAccessToken()
+    for (const [k, v] of Object.entries(init.headers ?? {})) xhr.setRequestHeader(k, v)
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(e.loaded, e.total)
+    }
+    const onAbort = () => xhr.abort()
+    xhr.onload = () => {
+      init.signal?.removeEventListener('abort', onAbort)
+      if (xhr.status === 401 && !refreshAlreadyAttempted()) {
+        markRefreshAttempted()
+        redirectToRefresh(location.href)
+        return // the page is navigating away; never resolve a 401 the caller would parse
+      }
+      resolve(new Response(xhr.status === 204 ? null : xhr.responseText, {
+        status: xhr.status,
+        headers: { 'Content-Type': xhr.getResponseHeader('Content-Type') ?? 'application/json' },
+      }))
+    }
+    xhr.onerror = () => {
+      init.signal?.removeEventListener('abort', onAbort)
+      reject(new TypeError('Network error'))
+    }
+    xhr.onabort = () => {
+      init.signal?.removeEventListener('abort', onAbort)
+      reject(new DOMException('The upload was cancelled.', 'AbortError'))
+    }
+    if (init.signal?.aborted) {
+      xhr.abort()
+      return
+    }
+    init.signal?.addEventListener('abort', onAbort)
+    xhr.send(init.body)
+  })
+}

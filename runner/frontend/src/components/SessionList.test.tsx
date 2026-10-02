@@ -1,11 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, within, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import SessionList from './SessionList'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { useMessageStore } from '../hooks/useMessageStore'
 import { makeDaemon, makeSession } from '../test/fixtures'
-import { setFocus, setCollapsed } from '../lib/sidebarPrefs'
+import { setFocus } from '../lib/sidebarPrefs'
+import { usePendingProposals } from '../lib/proposals'
 
 vi.mock('../ws', () => import('../test/wsMock'))
 
@@ -33,12 +34,41 @@ describe('SessionList', () => {
     useMessageStore.setState({ messages: [], lastSeenAt: Date.now() + 9_999_999 })
   })
 
+  it('carries the cron badge through to the list and links to the crons page in the sidebar', () => {
+    seed([makeDaemon()], [
+      makeSession({ id: 'a', status: 'running', title: 'From a cron', cron_id: 'c1' }),
+      makeSession({ id: 'b', status: 'running', title: 'By hand' }),
+    ])
+    renderList({ variant: 'sidebar' })
+    expect(screen.getAllByTestId('cron-badge')).toHaveLength(1)
+    expect(screen.getByTestId('crons-nav')).toHaveTextContent('Crons')
+  })
+
+  it('links to Proposals in the sidebar with the pending count, hidden at zero', () => {
+    usePendingProposals.setState({ count: 2 })
+    const { unmount } = renderList({ variant: 'sidebar' })
+    expect(screen.getByTestId('proposals-nav')).toHaveTextContent('Proposals')
+    expect(screen.getByTestId('proposals-count-badge')).toHaveTextContent('2')
+    unmount()
+    usePendingProposals.setState({ count: 0 })
+    renderList({ variant: 'sidebar' })
+    expect(screen.queryByTestId('proposals-count-badge')).toBeNull()
+  })
+
   it('renders active sessions grouped under their repo', () => {
     seed([makeDaemon()], [makeSession({ status: 'running', repo: 'widget', title: 'Task one' })])
     renderList()
     // Repo header is uppercased via CSS but the text node is the raw repo name.
     expect(screen.getByText('widget')).toBeInTheDocument()
     expect(screen.getByText('Task one')).toBeInTheDocument()
+  })
+
+  it('lists an active cluster session whose pod daemon is not in the daemon list', () => {
+    seed([makeDaemon()], [
+      makeSession({ id: 'c1', daemon_id: 'hidden-pod-daemon', status: 'idle', repo: 'widget', title: 'Cluster task' }),
+    ])
+    renderList()
+    expect(screen.getByText('Cluster task')).toBeInTheDocument()
   })
 
   it('groups every no-repo session under "No repository", never a scratch folder name', () => {
@@ -69,21 +99,6 @@ describe('SessionList', () => {
     expect(screen.getByText(/daemon\/install\.sh status/)).toBeInTheDocument()
   })
 
-  it('says sessions will run as cluster pods when no daemon is connected and cluster is configured', async () => {
-    vi.stubGlobal('fetch', vi.fn((url: string) => {
-      if (url === '/api/cluster/status') {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, available_engines: [] }) })
-      }
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
-    }))
-    seed([], [])
-    renderList()
-    expect(
-      await screen.findByText('No workstation daemon connected — sessions will run as cluster pods.'),
-    ).toBeInTheDocument()
-    vi.unstubAllGlobals()
-  })
-
   it('calls onNewSession when the New button is clicked', () => {
     const onNewSession = vi.fn()
     renderList({ onNewSession })
@@ -98,7 +113,7 @@ describe('SessionList — single daemon', () => {
     useSessionStore.setState({ daemons: [], sessions: [], statusChangedAt: {}, serverVersion: '' })
   })
 
-  it('does NOT render focus pills or collapse-all with one daemon', () => {
+  it('does NOT render focus pills with one place to run', () => {
     seed(
       [makeDaemon({ id: 'd1', name: 'workstation' })],
       [makeSession({ id: 's1', daemon_id: 'd1', title: 'Widget task', status: 'running' })],
@@ -136,7 +151,7 @@ describe('SessionList — two daemons', () => {
     expect(screen.getByTestId('focus-pill-all')).toBeInTheDocument()
     expect(screen.getByTestId('focus-pill-d1')).toBeInTheDocument()
     expect(screen.getByTestId('focus-pill-d2')).toBeInTheDocument()
-    expect(screen.getByTestId('collapse-all')).toBeInTheDocument()
+    expect(screen.queryByTestId('collapse-all')).not.toBeInTheDocument()
   })
 
   it('shows sessions from both daemons by default (All)', () => {
@@ -186,35 +201,6 @@ describe('SessionList — two daemons', () => {
     expect(screen.queryByText('Backend task')).not.toBeInTheDocument()
   })
 
-  it('collapse-all collapses all daemon sections hiding sessions', () => {
-    seedTwo()
-    renderList()
-    // Sessions should be visible before collapse
-    expect(screen.getByText('Widget task')).toBeInTheDocument()
-    fireEvent.click(screen.getByTestId('collapse-all'))
-    // After collapse, sessions should not be visible
-    expect(screen.queryByText('Widget task')).not.toBeInTheDocument()
-    expect(screen.queryByText('Backend task')).not.toBeInTheDocument()
-  })
-
-  it('collapse-all persists collapsed state', () => {
-    seedTwo()
-    renderList()
-    fireEvent.click(screen.getByTestId('collapse-all'))
-    const raw = localStorage.getItem('blerg-runner.sidebar.collapsed')
-    const collapsed = JSON.parse(raw!)
-    expect(collapsed.d1).toBe(true)
-    expect(collapsed.d2).toBe(true)
-  })
-
-  it('remount reads persisted collapsed map and keeps sections collapsed', () => {
-    seedTwo()
-    setCollapsed({ d1: true, d2: true })
-    renderList()
-    expect(screen.queryByText('Widget task')).not.toBeInTheDocument()
-    expect(screen.queryByText('Backend task')).not.toBeInTheDocument()
-  })
-
   it('focused-but-disconnected daemon falls back to All', () => {
     // d2 is now disconnected
     useSessionStore.setState({
@@ -233,10 +219,10 @@ describe('SessionList — two daemons', () => {
     expect(screen.getByText('Backend task')).toBeInTheDocument()
   })
 
-  it('renders the ChatBubble in the top bar', () => {
+  it('has no Chat bubble in the top bar', () => {
     seed()
     renderList()
-    expect(screen.getByTestId('chat-bubble')).toBeInTheDocument()
+    expect(screen.queryByTestId('chat-bubble')).not.toBeInTheDocument()
   })
 })
 
@@ -331,18 +317,6 @@ describe('SessionList — search', () => {
     expect(screen.queryByText('Backend task')).not.toBeInTheDocument()
   })
 
-  it('search reaches sessions inside a collapsed daemon section', () => {
-    seedSearch()
-    // Pre-collapse d2 so its sessions are hidden
-    setCollapsed({ d2: true })
-    renderList()
-    // d2 is collapsed — Backend task should not be visible
-    expect(screen.queryByText('Backend task')).not.toBeInTheDocument()
-    // Type a query matching the d2 session
-    fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'backend' } })
-    // Despite d2 being collapsed, the matching session must be visible during search
-    expect(screen.getByText('Backend task')).toBeInTheDocument()
-  })
 })
 
 describe('SessionList — sort tiebreak', () => {
@@ -488,5 +462,45 @@ describe('SessionList — idle repos are always shown', () => {
     renderList()
     expect(screen.getByText('Idle task')).toBeInTheDocument()
     expect(screen.getByText('Running task')).toBeInTheDocument()
+  })
+})
+
+describe('SessionList — cluster pill count', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('follows the sessions in the store, not the number fetched once from the server', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ configured: true, max_sessions: 4, active_sessions: 3 }),
+    })))
+    seed([], [
+      makeSession({ id: 'c1', runtime: 'cluster', status: 'idle', daemon_id: 'pod-1' }),
+      makeSession({ id: 'c2', runtime: 'cluster', status: 'running', daemon_id: 'pod-2' }),
+    ])
+    renderList()
+    // the server says 3 are in use but the store has 2 active cluster sessions: the pill shows the live 2
+    expect(await screen.findByText(/Cluster · 2\/4 running/)).toBeInTheDocument()
+    // one is killed: the pill drops at once, with no refetch needed
+    act(() => {
+      useSessionStore.setState({ sessions: [
+        makeSession({ id: 'c1', runtime: 'cluster', status: 'stopped', daemon_id: 'pod-1' }),
+        makeSession({ id: 'c2', runtime: 'cluster', status: 'running', daemon_id: 'pod-2' }),
+      ] })
+    })
+    expect(await screen.findByText(/Cluster · 1\/4 running/)).toBeInTheDocument()
+  })
+
+  it('follows a cap saved on the Cluster page without a reload', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ configured: true, max_sessions: 4, active_sessions: 0 }),
+    })))
+    seed([], [])
+    renderList()
+    expect(await screen.findByText(/Cluster · 0\/4 running/)).toBeInTheDocument()
+    act(() => {
+      window.dispatchEvent(new CustomEvent('blerg:cluster-settings-saved', { detail: { configured: true, max_sessions: 12 } }))
+    })
+    expect(await screen.findByText(/Cluster · 0\/12 running/)).toBeInTheDocument()
   })
 })

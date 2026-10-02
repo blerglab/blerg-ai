@@ -88,6 +88,39 @@ func TestTmuxAttachCommandRouting(t *testing.T) {
 // no-new-privileges, pids/memory limits, no --restart, only the engine
 // config dirs that actually exist under home get mounted, and env
 // forwarding never leaks the host HOME/PATH or the daemon master token.
+// A restricted session (a cron, a grant) runs claude with file tools only: another engine's login
+// (codex, hermes) has no business inside its container, so only the claude login is mounted.
+func TestSandboxRunArgsClaudeOnlyMountsNoOtherEngineLogin(t *testing.T) {
+	home := t.TempDir()
+	for _, p := range []string{".claude", ".codex", ".hermes"} {
+		if err := os.MkdirAll(filepath.Join(home, p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{".claude.json", ".hermes/config.yaml", ".hermes/.env"} {
+		if err := os.WriteFile(filepath.Join(home, p), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all := " " + strings.Join(sandboxRunArgs("c", "/p", home, nil, sandboxRunExtras{}), " ") + " "
+	for _, want := range []string{"/.claude:", "/.claude.json:", "/.codex:", "/.hermes/.env:"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("an ordinary sandbox lost the %s mount: %s", want, all)
+		}
+	}
+	only := " " + strings.Join(sandboxRunArgs("c", "/p", home, nil, sandboxRunExtras{claudeOnly: true}), " ") + " "
+	for _, want := range []string{"/.claude:", "/.claude.json:"} {
+		if !strings.Contains(only, want) {
+			t.Errorf("a restricted sandbox needs the claude login (%s): %s", want, only)
+		}
+	}
+	for _, bad := range []string{"/.codex:", "/.hermes"} {
+		if strings.Contains(only, bad) {
+			t.Errorf("a restricted sandbox must not mount %s: %s", bad, only)
+		}
+	}
+}
+
 func TestSandboxRunArgsAreHardened(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {

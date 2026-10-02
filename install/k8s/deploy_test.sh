@@ -136,6 +136,45 @@ stdin_is_tty() { return 0; }
 deploy_must_refuse && { echo "FAIL: a terminal run was refused"; fail=1; }
 grep -qF 'kubectl config current-context' "$here/deploy.sh" || { echo "FAIL: deploy.sh does not show the kube context"; fail=1; }
 
+# MCP gateway: the runner serves it on its own port, exposed ONLY through an internal ClusterIP
+# Service. No Ingress may route to that Service or port (the gateway must never be reachable
+# from outside the cluster), and the ConfigMap must point sessions at the internal Service.
+gw_svc=blerg-runner-mcp-gateway
+grep -qF -- "name: $gw_svc" "$tmp/runner-deployment.yaml" || { echo "FAIL: internal gateway Service $gw_svc missing"; fail=1; }
+grep -qE '^\s+containerPort: 8090' "$tmp/runner-deployment.yaml" || { echo "FAIL: runner container does not declare the gateway port 8090"; fail=1; }
+gw_block="$(awk -v s="$gw_svc" 'BEGIN{RS="\n---\n"} index($0, "name: " s) && /kind: Service/ {print}' "$tmp/runner-deployment.yaml" | grep -vE '^\s*#')"
+[ -n "$gw_block" ] || { echo "FAIL: could not isolate the gateway Service"; fail=1; }
+grep -qE '^\s+type: ClusterIP\s*$' <<<"$gw_block" || { echo "FAIL: the gateway Service is not type: ClusterIP"; fail=1; }
+if grep -qE 'NodePort|LoadBalancer|externalIPs|nodePort' <<<"$gw_block"; then echo "FAIL: the gateway Service is exposed beyond the cluster"; fail=1; fi
+ing_files=""
+for f in "$tmp"/*.yaml; do grep -qE '^kind: Ingress' "$f" && ing_files="$ing_files $f"; done
+[ -n "$ing_files" ] || { echo "FAIL: no Ingress found to check"; fail=1; }
+for f in $ing_files; do
+  # Comments may talk about the gateway; only real fields count.
+  if grep -vE '^\s*#' "$f" | grep -qE "mcp-gateway|8090|mcp-gw"; then
+    echo "FAIL: $(basename "$f") references the MCP gateway service or port; it must never be routed by an Ingress"; fail=1
+  fi
+  # Every runner backend must be the web port, and nothing may name the gateway Service.
+  grep -vE '^\s*#' "$f" | awk '/name: blerg-runner/{r=1;next} r&&/number:/{ if ($2!=8080) bad=1; r=0 } END{exit bad}' \
+    || { echo "FAIL: an Ingress runner backend is not on port 8080"; fail=1; }
+done
+grep -qF 'BLERG_RUNNER_MCP_GW_ADDR: ":8090"' "$tmp/configmap.yaml" || { echo "FAIL: BLERG_RUNNER_MCP_GW_ADDR not set in the ConfigMap"; fail=1; }
+grep -qF "BLERG_RUNNER_MCP_GW_URL: \"http://$gw_svc.blerg.svc.cluster.local:8090\"" "$tmp/configmap.yaml" \
+  || { echo "FAIL: BLERG_RUNNER_MCP_GW_URL does not name the internal gateway Service"; fail=1; }
+for v in BLERG_RUNNER_MCP_GW_ADDR BLERG_RUNNER_MCP_GW_URL BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS \
+         BLERG_RUNNER_MCP_CALL_TIMEOUT_SECONDS BLERG_RUNNER_MCP_MAX_CONCURRENT BLERG_RUNNER_MCP_MAX_RESULT_BYTES; do
+  grep -qF -- "key: $v, optional: true" "$tmp/runner-deployment.yaml" || { echo "FAIL: $v is not an optional ConfigMap env of the runner"; fail=1; }
+done
+for v in BLERG_CORE_MCP_ALLOW_HTTP_HOSTS BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS; do
+  grep -qF -- "key: $v, optional: true" "$tmp/core-deployment.yaml" || { echo "FAIL: $v is not an optional ConfigMap env of core"; fail=1; }
+done
+# The sessions network-policy example must let session pods reach the gateway port (and nothing about it may be
+# missing from the docs an operator reads).
+grep -qE '^\s+port: 8090' "$here/networkpolicy-sessions.example.yaml" || { echo "FAIL: networkpolicy-sessions.example.yaml has no rule for the gateway port"; fail=1; }
+grep -qF 'blerg-runner-mcp-gateway' "$here/CLUSTER-RUNTIME.md" || { echo "FAIL: CLUSTER-RUNTIME.md does not document the gateway Service"; fail=1; }
+# Session pods must not reach core, and the board only through the commented-out opt-in rule.
+grep -vE '^\s*#' "$here/networkpolicy-sessions.example.yaml" | grep -qE 'app: blerg-(core|board)' && { echo "FAIL: networkpolicy-sessions.example.yaml lets session pods reach core or the board by default"; fail=1; }
+
 if [ -n "${BLERG_SKIP_KUBECTL:-}" ]; then
   echo "skip: BLERG_SKIP_KUBECTL set (dry-run not exercised)"
 elif command -v kubectl >/dev/null 2>&1; then

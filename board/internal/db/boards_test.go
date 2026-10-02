@@ -9,6 +9,58 @@ import (
 	"github.com/blerglab/blerg-ai/board/internal/db"
 )
 
+func TestCreateBoardTerminalColumns(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	b := mkBoard(t, pool, db.BoardParams{
+		Columns:         []string{"Open", "Finished"},
+		TerminalColumns: []string{"Finished"},
+	})
+	cols, err := db.ListColumns(ctx, pool, b.ID)
+	if err != nil || len(cols) != 2 {
+		t.Fatalf("columns = %v (%v)", cols, err)
+	}
+	if cols[0].IsTerminal || !cols[1].IsTerminal {
+		t.Errorf("is_terminal = %v, %v; want false, true", cols[0].IsTerminal, cols[1].IsTerminal)
+	}
+}
+
+// A failure while inserting a later column must roll the whole board back:
+// board row, repos and earlier columns included.
+func TestCreateBoardIsTransactional(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`CREATE FUNCTION t44_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN IF NEW.name = 'Boom' THEN RAISE EXCEPTION 'boom'; END IF; RETURN NEW; END $$`,
+		`CREATE TRIGGER t44_fail BEFORE INSERT ON board_columns FOR EACH ROW EXECUTE FUNCTION t44_fail()`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DROP TRIGGER IF EXISTS t44_fail ON board_columns`)
+		_, _ = pool.Exec(ctx, `DROP FUNCTION IF EXISTS t44_fail()`)
+	})
+	_, err := db.CreateBoard(ctx, pool, db.BoardParams{
+		Name: "half", Columns: []string{"Inbox", "Boom", "Done"},
+	})
+	if err == nil {
+		t.Fatal("expected the column insert to fail")
+	}
+	var boards, cols int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM boards`).Scan(&boards); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM board_columns`).Scan(&cols); err != nil {
+		t.Fatal(err)
+	}
+	if boards != 0 || cols != 0 {
+		t.Errorf("failed create left %d boards and %d columns behind", boards, cols)
+	}
+}
+
 func TestMoveColumnReordersWithinBoard(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()

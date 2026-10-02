@@ -80,7 +80,7 @@ case "$(lower "$AGENT_SECRET_EXTERNAL")" in
 esac
 # Completion webhooks refuse private/loopback callback targets unless this
 # renders "true" into BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE. Needed on installs
-# whose public hostnames resolve to a private network (a homelab behind NAT).
+# whose public hostnames resolve to a private network (a private network behind NAT).
 case "$(lower "${WEBHOOK_ALLOW_PRIVATE:-}")" in
   1|true|yes) WEBHOOK_ALLOW_PRIVATE=true ;;
   *) WEBHOOK_ALLOW_PRIVATE=false ;;

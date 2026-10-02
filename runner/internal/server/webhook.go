@@ -284,6 +284,12 @@ func (a *API) deliverCompletion(ctx context.Context, sessionID string) {
 	if row == nil || row.CallbackURL == nil || *row.CallbackURL == "" {
 		return
 	}
+	// A private session's result goes only to a receiver its owner chose: a
+	// session with no owning account has no one who could have, and it is never
+	// posted anywhere (privacy.go).
+	if row.Private && (row.SpawningAccountID == nil || *row.SpawningAccountID == "") {
+		return
+	}
 	res, err := a.buildSessionResult(ctx, sessionID)
 	if err != nil {
 		log.Printf("webhook %s: build result: %v", sessionID, err)

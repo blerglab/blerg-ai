@@ -309,8 +309,17 @@ func (d Deps) logCredentialAccess(ctx context.Context, accountID, engine, sessio
 // configured BLERG_CORE_INTERNAL_KEY secret. Mirrors validRegisterKey's exact shape (accepts
 // either "Authorization: Bearer <key>" or an "X-..."-style header — here "X-Internal-Key",
 // to avoid any confusion with the distinct registration secret's "X-Register-Key") for
-// consistency of style, but is a wholly separate check against a wholly separate secret.
+// consistency of style, but is a wholly separate check against a wholly separate secret. A request that
+// carries a forwarding header (it came through a proxy) is refused.
 func validInternalKey(r *http.Request, want string) bool {
+	// Component-to-component calls go straight to core. A forwarding header means the request came through a
+	// reverse proxy or ingress, i.e. from outside: refuse it whatever key it carries, so exposing core's host
+	// publicly does not expose these routes.
+	for _, h := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip", "Forwarded"} {
+		if r.Header.Get(h) != "" {
+			return false
+		}
+	}
 	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if got == "" || got == r.Header.Get("Authorization") {
 		got = r.Header.Get("X-Internal-Key")

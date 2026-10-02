@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react'
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import SessionList from './components/SessionList'
 import SessionDetail from './components/SessionDetail'
 import ChatRollup from './components/ChatRollup'
 import LaunchSheet from './components/LaunchSheet'
 import { PreviewTab } from './components/PreviewTab'
 import ClusterStatus from './components/ClusterStatus'
+import CronsPage from './components/CronsPage'
+import Proposals, { ProposalsBadge } from './components/Proposals'
+import { useProposalCountPoll } from './lib/proposals'
 import BoardsList from './components/BoardsList'
 import BoardView from './components/BoardView'
 import TicketDetail from './components/TicketDetail'
@@ -14,7 +17,6 @@ import ToastContainer from './components/ToastContainer'
 import ThemeToggle from './components/ThemeToggle'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useLaunchSheetOpen } from './hooks/useLaunchSheetOpen'
-import { useMessageStore, selectOpenCount } from './hooks/useMessageStore'
 import { startActivityTracking } from './activity'
 import { apiFetch } from './apiFetch'
 import { coreOrigin } from './authClient'
@@ -101,14 +103,12 @@ function AppHeader() {
 export function TabBar({ clusterConfigured = false }: { clusterConfigured?: boolean } = {}) {
   const navigate = useNavigate()
   const location = useLocation()
-  const openCount = useMessageStore(selectOpenCount)
 
   // Hide the tab bar when inside a session — the back button handles navigation there,
   // and the fixed bar would otherwise overlap the reply input at the bottom.
   if (location.pathname.startsWith('/sessions/')) return null
 
   const isActive = (path: string) => {
-    if (path === '/') return location.pathname === '/'
     return location.pathname.startsWith(path)
   }
 
@@ -124,48 +124,6 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
         display: 'flex',
       }}
     >
-      <button
-        onClick={() => navigate('/')}
-        style={{
-          flex: 1,
-          padding: '12px',
-          textAlign: 'center',
-          color: isActive('/') ? 'var(--chalk)' : 'var(--fog-dim)',
-          fontSize: '14px',
-          cursor: 'pointer',
-          background: 'none',
-          border: 'none',
-          fontFamily: 'inherit',
-          letterSpacing: '0.05em',
-          position: 'relative',
-        }}
-      >
-        Chat
-        {openCount > 0 && (
-          <span
-            data-testid="open-count-badge"
-            style={{
-              position: 'absolute',
-              top: 6,
-              right: '50%',
-              transform: 'translateX(calc(50% + 14px))',
-              background: 'var(--danger)',
-              color: 'var(--chalk)',
-              borderRadius: '50%',
-              minWidth: 16,
-              height: 16,
-              fontSize: '0.65rem',
-              fontWeight: 700,
-              lineHeight: '16px',
-              textAlign: 'center',
-              padding: '0 3px',
-              boxSizing: 'border-box',
-            }}
-          >
-            {openCount}
-          </span>
-        )}
-      </button>
       <button
         onClick={() => navigate('/sessions')}
         style={{
@@ -217,6 +175,42 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
       >
         Preview
       </button>
+      <button
+        onClick={() => navigate('/crons')}
+        style={{
+          flex: 1,
+          padding: '12px',
+          textAlign: 'center',
+          color: isActive('/crons') ? 'var(--chalk)' : 'var(--fog-dim)',
+          fontSize: '14px',
+          cursor: 'pointer',
+          background: 'none',
+          border: 'none',
+          fontFamily: 'inherit',
+          letterSpacing: '0.05em',
+        }}
+      >
+        Crons
+      </button>
+      <button
+        onClick={() => navigate('/proposals')}
+        style={{
+          flex: 1,
+          padding: '12px',
+          textAlign: 'center',
+          color: isActive('/proposals') ? 'var(--chalk)' : 'var(--fog-dim)',
+          fontSize: '14px',
+          cursor: 'pointer',
+          background: 'none',
+          border: 'none',
+          fontFamily: 'inherit',
+          letterSpacing: '0.05em',
+          position: 'relative',
+        }}
+      >
+        Proposals
+        <ProposalsBadge style={{ position: 'absolute', top: 6, right: 4 }} />
+      </button>
       {clusterConfigured && (
         <button
           onClick={() => navigate('/cluster')}
@@ -243,6 +237,8 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
 function Layout() {
   const [launchOpen, setLaunchOpen] = useLaunchSheetOpen()
   const isMobile = useIsMobile()
+  // Keeps the Proposals nav badge fresh wherever the person is.
+  useProposalCountPoll()
   // Cluster tab/route only make sense when cluster runtime is actually
   // configured (install/k8s) — on a desktop-only install /api/cluster/status
   // reports configured:false and the tab would just lead to a dead end.
@@ -257,7 +253,9 @@ function Layout() {
 
   const routes = (
     <Routes>
-      <Route path="/" element={<ChatRollup />} />
+      {/* The Chat inbox is not offered in the navigation for now; it stays reachable by URL. */}
+      <Route path="/" element={<Navigate to="/sessions" replace />} />
+      <Route path="/chat" element={<ChatRollup />} />
       <Route path="/sessions" element={<SessionList onNewSession={() => setLaunchOpen(true)} />} />
       <Route path="/sessions/:id" element={<SessionDetail />} />
       <Route path="/boards" element={<BoardsList />} />
@@ -266,6 +264,8 @@ function Layout() {
       <Route path="/boards/:id/archive" element={<ArchiveView />} />
       <Route path="/preview" element={<PreviewTab />} />
       <Route path="/cluster" element={<ClusterStatus />} />
+      <Route path="/crons" element={<CronsPage />} />
+      <Route path="/proposals" element={<Proposals />} />
     </Routes>
   )
 

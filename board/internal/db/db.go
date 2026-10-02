@@ -25,6 +25,7 @@ var (
 	ErrNotFound          = errors.New("not found")
 	ErrStaleVersion      = errors.New("stale version")
 	ErrInvalidRepos      = errors.New("repos must be a non-empty subset of the board's repos")
+	ErrInvalidLink       = errors.New("invalid card link")
 	ErrColumnHasCards    = errors.New("column has live cards")
 	ErrDependencyCycle   = errors.New("dependency would create a cycle")
 	ErrDuplicateDedupKey = errors.New("duplicate dedup key")

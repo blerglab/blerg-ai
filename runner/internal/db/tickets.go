@@ -1070,8 +1070,15 @@ func ArchiveTicket(ctx context.Context, pool *pgxpool.Pool, id string) (TicketRo
 // SetTicketSession binds a session to a ticket by setting tickets.session_id.
 // Used when an Assist session is spawned for a specific ticket so the board
 // can show which ticket is actively being worked on by an AI session.
+//
+// A private session is never bound: a ticket card is visible to everyone on
+// its board and carries the session id, so binding would announce a session
+// its owner keeps to themselves (the call is then a silent no-op).
 func SetTicketSession(ctx context.Context, pool *pgxpool.Pool, ticketID, sessionID string) error {
-	_, err := pool.Exec(ctx, `UPDATE tickets SET session_id = $2 WHERE id = $1`, ticketID, sessionID)
+	_, err := pool.Exec(ctx, `
+		UPDATE tickets SET session_id = $2
+		 WHERE id = $1
+		   AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = $2 AND s.private)`, ticketID, sessionID)
 	if err != nil {
 		return fmt.Errorf("SetTicketSession: %w", err)
 	}

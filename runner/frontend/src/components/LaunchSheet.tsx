@@ -5,6 +5,8 @@ import { useSessionStore } from '../hooks/useSessionStore'
 import { apiFetch } from '../apiFetch'
 import { coreOrigin } from '../authClient'
 import RunColumn from './RunColumn'
+import McpPicker from './McpPicker'
+import type { McpSelectionEntry } from '../types'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { defaultRuntime, runtimeDisabledReason } from '../lib/runtimes'
 import type { RunRuntime, RunKind, RunEngine } from '../lib/runtimes'
@@ -256,6 +258,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [freeTextProvider, setFreeTextProvider] = useState('github')
   const [selectedDaemon, setSelectedDaemon] = useState<DaemonApiInfo | null>(null)
   const [initialPrompt, setInitialPrompt] = useState('')
+  // MCP servers and tools chosen for this session (McpPicker). Empty: none, and no `mcp` is sent.
+  const [mcp, setMcp] = useState<McpSelectionEntry[]>([])
   // Session kind: the native agent harness (structured chat transcript, no
   // terminal) or the classic tmux-hosted terminal CLI. Agent is the default —
   // it is what this tool is for, and it is what the sandbox now covers.
@@ -631,6 +635,10 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     (runtime !== 'daemon' || agentAck) && !clusterEngineBlocked && blockedReason === null &&
     !clusterRepoUnresolved && !freeTextModelInvalid
 
+  // A grant is refused on the bare host and for any engine but Claude, and only an agent
+  // session can carry one (the gateway is reached through Claude's MCP config).
+  const mcpAvailable = (runtime === 'cluster' || runtime === 'docker') && engine === 'claude' && kind === 'agent'
+
   // ── Run column handlers ────────────────────────────────────────────────────
   // Any deliberate pick pins the runtime for the life of this sheet.
   function pickRuntime(rt: RunRuntime) {
@@ -774,6 +782,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           kind,
           runtime,
           engine: engine !== 'claude' ? engine : undefined,
+          // Only when something is selected, and only where a grant can run at all.
+          mcp: mcpAvailable && mcp.length > 0 ? mcp : undefined,
         }),
       })
       if (!res.ok) {
@@ -1099,6 +1109,18 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                   boxSizing: 'border-box',
                 }}
               />
+            </div>
+
+            {/* MCP servers: all unchecked, every tool off, until the person chooses */}
+            <div style={{ marginBottom: 20 }} data-testid="launch-mcp">
+              <span style={sectionLabel}>MCP Servers</span>
+              {mcpAvailable ? (
+                <McpPicker value={mcp} onChange={setMcp} />
+              ) : (
+                <div data-testid="launch-mcp-unavailable" style={{ color: 'var(--fog)', fontSize: 13 }}>
+                  MCP servers are available for Claude agent sessions in a cluster pod or the local sandbox, not on this machine unsandboxed, not for other engines, and not for terminal sessions.
+                </div>
+              )}
             </div>
 
             {/* Submit */}

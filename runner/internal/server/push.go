@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"strings"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
@@ -22,6 +23,10 @@ func pushTopic(url string) string {
 	sum := sha256.Sum256([]byte(url))
 	return base64.RawURLEncoding.EncodeToString(sum[:])[:32]
 }
+
+// sendWebPush is webpush.SendNotification; a variable so tests can observe
+// whether a delivery is attempted.
+var sendWebPush = webpush.SendNotification
 
 // SendPush sends a Web Push notification to all stored push subscriptions. url
 // is the path the service worker opens when the notification is clicked (e.g.
@@ -41,6 +46,20 @@ func SendPush(pool *pgxpool.Pool, title, body, url string) {
 	}
 
 	ctx := context.Background()
+	// A notification for a private session must never go out: a subscription
+	// belongs to no account, so it cannot be aimed at the owner alone. The
+	// callers already skip such sessions; this is the backstop for one that
+	// forgets (and for a lookup that fails: fail closed).
+	if id, ok := strings.CutPrefix(url, "/sessions/"); ok {
+		owners, err := db.PrivateSessionOwners(ctx, pool, []string{id})
+		if err != nil {
+			log.Printf("SendPush: privacy lookup: %v", err)
+			return
+		}
+		if _, private := owners[id]; private {
+			return
+		}
+	}
 	subs, err := db.ListPushSubscriptions(ctx, pool)
 	if err != nil {
 		log.Printf("SendPush: list subscriptions: %v", err)
@@ -61,7 +80,7 @@ func SendPush(pool *pgxpool.Pool, title, body, url string) {
 				Auth:   sub.Auth,
 			},
 		}
-		resp, err := webpush.SendNotification(payload, wpSub, &webpush.Options{
+		resp, err := sendWebPush(payload, wpSub, &webpush.Options{
 			VAPIDPublicKey:  vapidPublic,
 			VAPIDPrivateKey: vapidPrivate,
 			TTL:             30,

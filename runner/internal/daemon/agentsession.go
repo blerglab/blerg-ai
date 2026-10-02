@@ -82,6 +82,9 @@ type agentSession struct {
 	// sandboxed marks a session whose engine runs inside a container, so Kill
 	// tears the container down the way killTmuxSession does for a terminal one.
 	sandboxed bool
+	// mcp is the session's MCP gateway config file (nil: no grant), removed
+	// when the session ends.
+	mcp *mcpConfigFile
 	// engine is the session's engine id ("" = Claude): the rules every
 	// in-session model/effort change is checked against (changeModel).
 	engine string
@@ -98,6 +101,13 @@ const (
 	// container got past them. Refusing beats running the engine on the host
 	// under a "sandboxed" label, and the text claims nothing more than it knows.
 	sandboxUnsupportedDriverRefusal = "this engine cannot run in the sandbox"
+	// mcpGatewayNeedsClaudeRefusal: a grant is delivered as Claude Code flags
+	// (--mcp-config, --strict-mcp-config, --tools); any other driver would
+	// ignore it and run with every tool and no MCP, so it is refused instead.
+	mcpGatewayNeedsClaudeRefusal = "an MCP gateway grant needs the Claude Code engine"
+	// restrictToolsNeedsClaudeRefusal: the same for the tool restriction of an
+	// unattended session, which is Claude Code flags too.
+	restrictToolsNeedsClaudeRefusal = "a restricted (unattended) session needs the Claude Code engine"
 )
 
 // sandboxCredential is how a sandboxed session's Claude credential reaches the
@@ -515,6 +525,22 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		sandboxCred = cred
 	}
 
+	if msg.RestrictTools && !useClaudeCode {
+		h.sendError(msg.SessionID, restrictToolsNeedsClaudeRefusal)
+		return
+	}
+	if msg.MCPGateway != nil {
+		if !useClaudeCode {
+			h.sendError(msg.SessionID, mcpGatewayNeedsClaudeRefusal)
+			return
+		}
+		// The error names the problem, never a token.
+		if err := ValidateMCPGateway(msg.MCPGateway); err != nil {
+			h.sendError(msg.SessionID, err.Error())
+			return
+		}
+	}
+
 	skillList, _ := skills.Discover(workDir, h.cfg.HomeDir)
 	agentTypes := agent.DiscoverAgentTypes(workDir, h.cfg.HomeDir)
 
@@ -592,7 +618,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// credential mounts, never the rest of the host.
 	var prefix sandboxExec
 	if msg.Sandbox {
-		container, err := startSandboxContainer(msg.SessionID, workDir, env, sandboxCred, h.cfg.Sandbox)
+		sbOpts := h.cfg.Sandbox
+		sbOpts.ClaudeOnly = msg.RestrictTools || msg.MCPGateway != nil
+		container, err := startSandboxContainer(msg.SessionID, workDir, env, sandboxCred, sbOpts)
 		if err != nil {
 			cancel()
 			h.sendError(msg.SessionID, "could not start the sandbox container: "+err.Error())
@@ -600,6 +628,30 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 		prefix = sandboxExecPrefix(container)
 		sess.sandboxed = true
+	}
+
+	// The MCP gateway config file, written before any turn (inside the
+	// container for a sandbox) so a session that cannot get its grant fails
+	// here rather than running without it.
+	var mcpFile *mcpConfigFile
+	var ccOpts []ccOption
+	if msg.RestrictTools {
+		// A grant session is restricted too: the driver adds the flags for it
+		// as soon as it has a config source, RestrictTools or not.
+		ccOpts = append(ccOpts, withRestrictTools())
+	}
+	if msg.MCPGateway != nil {
+		mcpFile = newMCPConfigFile(msg.MCPGateway, prefix)
+		if _, err := mcpFile.Ensure(); err != nil {
+			cancel()
+			if msg.Sandbox {
+				removeSandboxContainer(msg.SessionID)
+			}
+			h.sendError(msg.SessionID, err.Error())
+			return
+		}
+		ccOpts = append(ccOpts, withMCPConfigSource(mcpFile))
+		sess.mcp = mcpFile
 	}
 
 	var loop *agent.Loop
@@ -652,7 +704,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		})
 	case useClaudeCode:
 		log.Printf("agent session %s: claude-code driver (the engine's own login)", msg.SessionID)
-		cc := newClaudeCodeDriver(workDir, model, msg.Effort, emitter, env)
+		cc := newClaudeCodeDriver(workDir, model, msg.Effort, emitter, env, ccOpts...)
 		cc.skills, cc.home = skillList, h.cfg.HomeDir
 		driver = cc
 	default:
@@ -668,6 +720,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		sb, ok := driver.(sandboxedDriver)
 		if !ok {
 			cancel()
+			mcpFile.Remove()
 			removeSandboxContainer(msg.SessionID)
 			h.sendError(msg.SessionID, sandboxUnsupportedDriverRefusal)
 			return
@@ -829,6 +882,7 @@ func (h *AgentHost) Kill(sessionID string) {
 	sess.emitter.close() // release any Emit blocked on a full buffer
 	sess.loop.Interrupt()
 	sess.cancel()
+	sess.mcp.Remove() // before the container goes, so the file is deleted in it too
 	if sess.sandboxed {
 		// Same teardown a terminal sandbox gets on kill (killTmuxSession): the
 		// container outlives nothing.

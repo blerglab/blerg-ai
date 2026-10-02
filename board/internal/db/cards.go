@@ -93,6 +93,9 @@ type CardParams struct {
 	Repos      *[]string       `json:"repos"`
 	Tags       *[]string       `json:"tags"`
 	Links      *[]Link         `json:"links"`
+	// AddLinks appends links to the card's existing ones (an entry already present is left alone), atomically
+	// with the write: two writers adding a link at once never lose one, which a read-modify-write of Links can.
+	AddLinks *[]Link `json:"add_links"`
 	// IfMatch guards the write when non-nil (409 on mismatch). Uniform
 	// versioning: the write bumps version whether or not a guard was supplied.
 	IfMatch *int `json:"if_match"`
@@ -201,6 +204,12 @@ func CreateCard(ctx context.Context, pool *pgxpool.Pool, boardID string, p CardP
 	if err := normalizeCardParams(&p); err != nil {
 		return CreateResult{}, err
 	}
+	if p.Links == nil && p.AddLinks != nil { // a new card has nothing to append to
+		p.Links = p.AddLinks
+	}
+	if err := validateParamLinks(p); err != nil {
+		return CreateResult{}, err
+	}
 	if p.Title == nil || *p.Title == "" {
 		return CreateResult{}, fmt.Errorf("title required")
 	}
@@ -247,6 +256,18 @@ func CreateCard(ctx context.Context, pool *pgxpool.Pool, boardID string, p CardP
 			}
 			if p.ColumnID != nil && *p.ColumnID != "" &&
 				(existing.ColumnID == nil || *existing.ColumnID != *p.ColumnID) {
+				// The target column must be on THIS board: the FK alone would
+				// let a refresh drag the card into another board's column.
+				// Same error as the create path's unresolvable column.
+				var onBoard bool
+				if err := tx.QueryRow(ctx,
+					`SELECT EXISTS (SELECT 1 FROM board_columns WHERE id = $1 AND board_id = $2)`,
+					*p.ColumnID, boardID).Scan(&onBoard); err != nil {
+					return CreateResult{}, err
+				}
+				if !onBoard {
+					return CreateResult{}, fmt.Errorf("board has no columns")
+				}
 				// Move to the end of the driver's target column.
 				var maxRank *string
 				if err := tx.QueryRow(ctx,
@@ -584,6 +605,33 @@ func replaceTags(ctx context.Context, tx pgx.Tx, cardID string, tags []string) e
 	return nil
 }
 
+// onlyAddsLinks reports whether a patch carries nothing but add_links (and guards).
+func onlyAddsLinks(p CardParams) bool {
+	p.AddLinks, p.IfMatch, p.IfMatchOnHit = nil, nil, nil
+	return reflect.DeepEqual(p, CardParams{})
+}
+
+// appendLinks adds links after the card's existing ones. It runs inside UpdateCard's transaction, which holds
+// the card row, so concurrent appends serialise.
+func appendLinks(ctx context.Context, tx pgx.Tx, cardID string, links []Link) error {
+	// After the highest rank in use, not after the number of rows: a replace that repeated an entry left a gap.
+	var n int
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(rank::int) + 1, 0) FROM card_links WHERE card_id = $1`, cardID).Scan(&n); err != nil {
+		return err
+	}
+	for _, l := range links {
+		tag, err := tx.Exec(ctx,
+			`INSERT INTO card_links (card_id, kind, url, label, rank)
+			 VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+			cardID, l.Kind, l.URL, l.Label, fmt.Sprintf("%04d", n))
+		if err != nil {
+			return err
+		}
+		n += int(tag.RowsAffected())
+	}
+	return nil
+}
+
 func replaceLinks(ctx context.Context, tx pgx.Tx, cardID string, links []Link) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM card_links WHERE card_id = $1`, cardID); err != nil {
 		return err
@@ -658,6 +706,9 @@ func changedFields(before Card, p CardParams) []string {
 	if p.Tags != nil {
 		mark("tags", !slices.Equal(normalizeTags(*p.Tags), before.Tags))
 	}
+	if p.AddLinks != nil {
+		mark("links", len(newLinks(before.Links, *p.AddLinks)) > 0)
+	}
 	if p.Links != nil {
 		mark("links", !sameLinks(*p.Links, before.Links))
 	}
@@ -713,6 +764,9 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	if err := normalizeCardParams(&p); err != nil {
 		return Card{}, err
 	}
+	if err := validateParamLinks(p); err != nil {
+		return Card{}, err
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return Card{}, err
@@ -738,10 +792,14 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	// actually changes. Only the collections need the extra reads, and only
 	// when the patch carries them.
 	before := card
-	if p.Repos != nil || p.Tags != nil || p.Links != nil {
+	if p.Repos != nil || p.Tags != nil || p.Links != nil || p.AddLinks != nil {
 		if err := loadCardExtras(ctx, tx, &before); err != nil {
 			return Card{}, err
 		}
+	}
+	// An append of links the card already has is not a change: no version bump, no event.
+	if p.AddLinks != nil && onlyAddsLinks(p) && len(newLinks(before.Links, *p.AddLinks)) == 0 {
+		return before, nil
 	}
 
 	set, args := []string{"version = version + 1", "updated_at = now()"}, []any{}
@@ -813,6 +871,11 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	}
 	if p.Links != nil {
 		if err := replaceLinks(ctx, tx, cardID, *p.Links); err != nil {
+			return Card{}, err
+		}
+	}
+	if p.AddLinks != nil {
+		if err := appendLinks(ctx, tx, cardID, *p.AddLinks); err != nil {
 			return Card{}, err
 		}
 	}

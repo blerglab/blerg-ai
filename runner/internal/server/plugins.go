@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -55,9 +54,7 @@ func fetchCorePlugins(ctx context.Context, client *http.Client, coreURL, interna
 	if !proof.valid() {
 		return nil, errNoLivenessProof
 	}
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
+	client = coreHTTPClient(client) // never follows a redirect: the request carries the internal key
 	raw, err := json.Marshal(internalPluginsRequest{
 		AccountID: accountID, Engine: pluginspec.EngineClaude, TokenID: proof.TokenID, SessionID: proof.SessionID,
 	})
@@ -105,8 +102,11 @@ func pluginAllowlistFromEnv() (pluginspec.Allowlist, string) {
 }
 
 // pluginsWanted: only Claude sessions with a known spawning account get always-on plugins.
+// A session with an MCP grant gets none: the pod would ignore them (it skips user config when
+// a grant is present) and a plugin's own MCP servers must never widen a grant session.
+// A cron session (NoOperatorFallback) gets none either: nobody is watching it.
 func pluginsWanted(spec SessionJobSpec) bool {
-	return spec.SpawningAccountID != "" && (spec.Engine == "" || spec.Engine == pluginspec.EngineClaude)
+	return spec.MCPGateway == nil && !spec.RestrictTools && !spec.NoOperatorFallback && spec.SpawningAccountID != "" && (spec.Engine == "" || spec.Engine == pluginspec.EngineClaude)
 }
 
 // ResolvePlugins fills spec.Plugins (and PluginsNote when the list could not be used) exactly

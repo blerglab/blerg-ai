@@ -4,6 +4,7 @@ import { apiFetch } from "./apiFetch";
 import { getAccessToken } from "./authClient";
 import { mustChangePassword } from "./claims";
 import PluginsSection from "./PluginsSection";
+import McpConnectionsSection from "./McpConnectionsSection";
 import Shell, { useSite, type Site } from "./Shell";
 
 // Settings: per-credential paste-in. Talks to POST/GET/DELETE /api/credentials (Task 14),
@@ -710,6 +711,7 @@ function SettingsScreen() {
         ))}
       </section>
       <PluginsSection />
+      <McpConnectionsSection site={site} />
       <AgentTokens site={site} />
     </Shell>
   );

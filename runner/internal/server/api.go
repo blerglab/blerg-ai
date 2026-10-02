@@ -90,16 +90,20 @@ func validateRepoNames(repos []string) error {
 
 // API groups the dependencies shared by all REST handlers.
 type API struct {
-	hub            *Hub
-	dbPool         *pgxpool.Pool
-	daemonToken    string
-	repos          *RepoLister
-	userRepos      *UserRepoLister // per-caller repos from their own git tokens; nil without core
-	vapidPublicKey string
-	waiters        *messageWaiters
-	embedder       Embedder
-	runnerKey      string
-	coreAuth       *coreauth.Client
+	// beforeMarkPrivate is a test seam: it runs at the top of MarkPrivate, that is
+	// between a session's insert and its marking (privacy_atomic_test.go).
+	beforeMarkPrivate func(sessionID string)
+	hub               *Hub
+	dbPool            *pgxpool.Pool
+	daemonToken       string
+	repos             *RepoLister
+	userRepos         *UserRepoLister // per-caller repos from their own git tokens; nil without core
+	vapidPublicKey    string
+	waiters           *messageWaiters
+	embedder          Embedder
+	runnerKey         string
+	coreAuth          *coreauth.Client
+	cron              *CronService // the cron start path and lifecycle (cronstart.go); nil when crons are off
 
 	// coreURL/coreInternalKey address blerg-core's internal credential
 	// endpoints for browser-facing lookups (GET /api/me/credentials).
@@ -244,6 +248,7 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 	// they all already hold — is the least invasive way to give them the
 	// completion webhook without threading an extra argument through each.
 	if hub != nil {
+		hub.SetPrivacyPool(dbPool) // lets every broadcast withhold private sessions (privacy.go)
 		hub.SetCompletionNotifier(api.notifyCompletion)
 		hub.SetAutoStopper(api.autoStopOnTurnDone)
 	}
@@ -303,6 +308,9 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 		info.ErrorReason = *row.ErrorReason
 	}
 	info.EndReason, info.EndedBy = endAttribution(&row, viewer)
+	if row.CronID != nil {
+		info.CronID = *row.CronID
+	}
 	return info
 }
 
@@ -457,7 +465,7 @@ func (a *API) listPersonalCredentialKinds(ctx context.Context, accountID string)
 		log.Printf("api me/credentials: no session id on the caller's token for account=%s; not asking core", accountID)
 		return nil, false, false
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := coreHTTPClient(nil) // never follows a redirect: the request carries the internal key
 	raw, err := json.Marshal(internalCredentialListRequest{AccountID: accountID, TokenID: proof.TokenID, SessionID: proof.SessionID})
 	if err != nil {
 		return nil, false, false
@@ -545,6 +553,9 @@ func (a *API) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
 		if daemonID != "" && status != "" && row.Status != status {
 			continue
 		}
+		if !canSeeAccount(principal.Sub, &row) { // a private session is its owner's alone
+			continue
+		}
 		result = append(result, sessionRowToInfo(row, principal.Sub))
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -591,6 +602,10 @@ type spawnSessionRequest struct {
 	// — the launch sheet sends the name it showed before Launch — and refused
 	// without no_repo or on the cluster, where there is no folder to name.
 	ScratchFolder string `json:"scratch_folder,omitempty"`
+	// MCP selects the caller's own MCP connections (and tools) for this session
+	// (mcpstart.go). Only this route, for a signed-in person, accepts it. Absent or
+	// empty means none.
+	MCP []MCPSelection `json:"mcp,omitempty"`
 }
 
 // noRepoProblem is what is wrong with a no_repo start that also names a
@@ -631,6 +646,14 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
+	}
+	// Only a signed-in person may attach MCP connections: refuse anyone else before
+	// anything else is looked at.
+	if len(req.MCP) > 0 {
+		if apiErr := checkGrantRequester(requesterOf(principal)); apiErr != nil {
+			writeAPIError(w, apiErr)
+			return
+		}
 	}
 	// runtime is a closed set (spec §2). An unrecognised value is a caller
 	// mistake, and the only safe answer is to refuse: silently falling back
@@ -682,7 +705,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.NoRepo {
-			a.startClusterNoRepo(w, r, principal.Sub, proofFromPrincipal(principal), req)
+			a.startClusterNoRepo(w, r, principal.Sub, proofFromPrincipal(principal), requesterOf(principal), req)
 			return
 		}
 		if req.Repo == "" {
@@ -741,6 +764,14 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// The caller's MCP selection is checked, against core and the live upstream, before
+		// anything is recorded (mcpstart.go).
+		grant, apiErr := a.resolveGrant(r.Context(), requesterOf(principal), req.MCP,
+			grantTarget{Runtime: runnerRuntimeCluster, Engine: req.Engine, Kind: req.Kind})
+		if apiErr != nil {
+			writeAPIError(w, apiErr)
+			return
+		}
 		gitURL := jm.CloneURLFor(req.Provider, req.Repo)
 		sessionID := newUUID()
 		// Create the session row BEFORE the Job: agent_events has an FK on
@@ -754,8 +785,12 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			// runtime='cluster' goes in with the row (see InsertClusterSession):
 			// the reconciler selects on that column and must not be able to
 			// miss a session because a follow-up write failed.
-			if err := db.InsertClusterSession(r.Context(), a.dbPool, sessionID, clusterDaemonID, "starting",
-				"/workspace/"+req.Repo, req.Repo, req.Title, req.Model); err != nil {
+			// A start that carries a grant goes in private, with its owner, in this same
+			// insert: no other account can list it before attachGrant marks it.
+			origin := sessionOriginFor(principal.Sub, grant != nil, "")
+			a.notePrivateInsert(sessionID, origin)
+			if err := db.InsertClusterSessionAs(r.Context(), a.dbPool, sessionID, clusterDaemonID, "starting",
+				"/workspace/"+req.Repo, req.Repo, req.Title, req.Model, origin); err != nil {
 				writeError(w, http.StatusInternalServerError, "session create failed")
 				return
 			}
@@ -782,13 +817,27 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		if a.dbPool != nil {
 			recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
 		}
+		// The grant goes on now that the spawning account is recorded (the session is made
+		// private after it); its tokens go only into the per-session Secret.
+		var gateway *protocol.MCPGatewayConfig
+		if grant != nil {
+			if gateway, apiErr = a.attachGrant(r.Context(), sessionID, grant); apiErr != nil {
+				a.abortGrantSession(r.Context(), sessionID)
+				writeAPIError(w, apiErr)
+				return
+			}
+		}
 		// Visible now, with its start plan: creating the Job (credential
 		// lookups included) and everything after it is what the browser's
 		// progress panel follows.
 		spec := SessionJobSpec{
-			SessionID: sessionID, Repo: req.Repo, Title: req.Title,
+			MCPGateway: gateway,
+			// Every grant session runs restricted (mcpstart.go).
+			RestrictTools: gateway != nil,
+			SessionID:     sessionID, Repo: req.Repo, Title: req.Title,
 			Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.InitialPrompt,
-			GitURL: gitURL,
+			ExtraEnv: withClusterSessionToken(r.Context(), a.dbPool, sessionID, nil),
+			GitURL:   gitURL,
 			// Derived from the verified access token's Sub, never taken from
 			// the request body — a caller must never claim to be spawning on
 			// behalf of a different account than its own token proves.
@@ -859,6 +908,14 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			"this daemon is too old to clone from "+req.Provider+" — update it, or clone the repository under its repos root")
 		return
 	}
+	// MCP connections: never on the bare host, only on a daemon that says it can deliver them
+	// (mcpstart.go). Checked before any row, token or clone credential exists.
+	grant, apiErr := a.resolveGrant(r.Context(), requesterOf(principal), req.MCP,
+		grantTarget{Runtime: runtimeName(req.Runtime), Engine: req.Engine, Kind: req.Kind, Daemon: daemon})
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
 
 	// A named clone: the daemon gets a folder to clone into (or to use, when
 	// it already holds this repository) and the repository itself, plus —
@@ -914,9 +971,10 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		// Both kinds honour the Docker runtime now: a sandboxed agent-kind
 		// session runs its engine inside the same hardened container a
 		// sandboxed terminal session gets (spec §3).
-		Sandbox:      req.Runtime == "docker",
-		Engine:       req.Engine,
-		SessionToken: mintSpawnSessionToken(r.Context(), a.dbPool, sessionID, daemon, folder, req.Title, req.Model),
+		Sandbox: req.Runtime == "docker",
+		Engine:  req.Engine,
+		SessionToken: a.spawnSessionToken(r.Context(), sessionID, daemon, folder, req.Title, req.Model,
+			sessionOriginFor(principal.Sub, grant != nil, "")),
 	}
 
 	if a.dbPool != nil {
@@ -948,8 +1006,22 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	data, err := json.Marshal(msg) //nolint:gosec // the spawn message must carry the session token to the daemon over the authenticated websocket; never logged
+	if grant != nil {
+		// The spawning account is recorded above; the session becomes private after it, and
+		// the tokens travel only in this spawn message.
+		if msg.MCPGateway, apiErr = a.attachGrant(r.Context(), sessionID, grant); apiErr != nil {
+			a.abortGrantSession(r.Context(), sessionID)
+			writeAPIError(w, apiErr)
+			return
+		}
+		msg.RestrictTools = true // every grant session runs restricted (mcpstart.go)
+	}
+
+	data, err := json.Marshal(msg) //nolint:gosec // the spawn message must carry the session token (and any MCP gateway grant) to the daemon over the authenticated websocket; never logged
 	if err != nil {
+		if grant != nil {
+			a.abortGrantSession(r.Context(), sessionID)
+		}
 		writeError(w, http.StatusInternalServerError, "marshal error")
 		return
 	}
@@ -972,10 +1044,16 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 // "No repository" session: no repo to validate or resolve, no clone URL, and
 // so no git credential of any kind for the pod. The row records repo "" (the
 // cluster has no folder to name) and the pod works in an empty directory.
-func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, accountID string, proof coreProof, req spawnSessionRequest) {
+func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, accountID string, proof coreProof, who grantRequester, req spawnSessionRequest) {
 	jm := a.hub.JobManager()
 	if jm == nil {
 		writeError(w, http.StatusServiceUnavailable, "cluster runtime not configured on this server")
+		return
+	}
+	grant, apiErr := a.resolveGrant(r.Context(), who, req.MCP,
+		grantTarget{Runtime: runnerRuntimeCluster, Engine: req.Engine, Kind: req.Kind})
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
 	sessionID := newUUID()
@@ -983,8 +1061,11 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 		if err := db.UpsertDaemon(r.Context(), a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
 			log.Printf("cluster daemon upsert: %v", err)
 		}
-		if err := db.InsertClusterSession(r.Context(), a.dbPool, sessionID, clusterDaemonID, "starting",
-			clusterNoRepoWorkdir, "", req.Title, req.Model); err != nil {
+		// Private, with its owner, in the insert itself when a grant is attached (see above).
+		origin := sessionOriginFor(accountID, grant != nil, "")
+		a.notePrivateInsert(sessionID, origin)
+		if err := db.InsertClusterSessionAs(r.Context(), a.dbPool, sessionID, clusterDaemonID, "starting",
+			clusterNoRepoWorkdir, "", req.Title, req.Model, origin); err != nil {
 			writeError(w, http.StatusInternalServerError, "session create failed")
 			return
 		}
@@ -999,9 +1080,21 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 		}
 		recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
 	}
+	var gateway *protocol.MCPGatewayConfig
+	if grant != nil {
+		if gateway, apiErr = a.attachGrant(r.Context(), sessionID, grant); apiErr != nil {
+			a.abortGrantSession(r.Context(), sessionID)
+			writeAPIError(w, apiErr)
+			return
+		}
+	}
 	spec := SessionJobSpec{
-		SessionID: sessionID, NoRepo: true, Title: req.Title,
+		MCPGateway: gateway,
+		// Every grant session runs restricted (mcpstart.go).
+		RestrictTools: gateway != nil,
+		SessionID:     sessionID, NoRepo: true, Title: req.Title,
 		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.InitialPrompt,
+		ExtraEnv:          withClusterSessionToken(r.Context(), a.dbPool, sessionID, nil),
 		SpawningAccountID: accountID,
 		AuthSessionID:     proof.SessionID,
 		TokenID:           proof.TokenID,
@@ -1074,9 +1167,11 @@ func abortSpawnSessionToken(ctx context.Context, pool *pgxpool.Pool, sessionID s
 	if err := db.RevokeBoardTokensForSession(ctx, pool, sessionID); err != nil {
 		log.Printf("spawn %s: abort revoke: %v", sessionID, err)
 	}
+	revokeSessionGrants(ctx, pool, sessionID, "spawn aborted") // a session with a grant that never started
 	if err := db.DeleteSession(ctx, pool, sessionID); err != nil {
 		log.Printf("spawn %s: abort delete row: %v", sessionID, err)
 	}
+	removeSessionArtifactFiles(sessionID) // the rows went with the session; a file is the server's to remove
 }
 
 // sessionTokenTTL bounds the per-session messaging token; session end revokes
@@ -1092,10 +1187,28 @@ const sessionTokenTTL = 24 * time.Hour
 // simply cannot message — when there is no DB or minting fails. The raw
 // token is never logged.
 func mintSpawnSessionToken(ctx context.Context, pool *pgxpool.Pool, sessionID string, dc *DaemonConn, repo, title, model string) string {
+	return mintSpawnSessionTokenAs(ctx, pool, sessionID, dc, repo, title, model, db.SessionOrigin{})
+}
+
+// spawnSessionToken is mintSpawnSessionTokenAs that first tells the hub the
+// session is private (notePrivateInsert), so even its first broadcast is scoped.
+func (a *API) spawnSessionToken(ctx context.Context, sessionID string, dc *DaemonConn, repo, title, model string, origin db.SessionOrigin) string {
+	a.notePrivateInsert(sessionID, origin)
+	return mintSpawnSessionTokenAs(ctx, a.dbPool, sessionID, dc, repo, title, model, origin)
+}
+
+// mintSpawnSessionTokenAs is mintSpawnSessionToken for a start whose origin is
+// known up front (a grant or a cron): the row goes in with its owner and its
+// private flag, so no other account can list it before MarkPrivate runs. That
+// holds on the failure paths too: a token that cannot be minted leaves the row
+// that was inserted private (it is never inserted public and marked later), and
+// a row that could not be pre-created is inserted private by the daemon's
+// session_started, which reads the hub's private note (HandleSessionStarted).
+func mintSpawnSessionTokenAs(ctx context.Context, pool *pgxpool.Pool, sessionID string, dc *DaemonConn, repo, title, model string, origin db.SessionOrigin) string {
 	if pool == nil {
 		return ""
 	}
-	if err := db.InsertSession(ctx, pool, sessionID, dc.ID, "starting", path.Join(dc.CurrentReposRoot(), repo), repo, title, model); err != nil {
+	if err := db.InsertSessionAs(ctx, pool, sessionID, dc.ID, "starting", path.Join(dc.CurrentReposRoot(), repo), repo, title, model, origin); err != nil {
 		log.Printf("spawn %s: pre-create session row: %v", sessionID, err)
 		return ""
 	}
@@ -1105,6 +1218,33 @@ func mintSpawnSessionToken(ctx context.Context, pool *pgxpool.Pool, sessionID st
 		return ""
 	}
 	return tok
+}
+
+// sessionTokenEnv is the env var the `blerg-runner` CLI reads its per-session token from.
+const sessionTokenEnv = "BLERG_RUNNER_SESSION_TOKEN" //nolint:gosec // the name of an environment variable, not a credential
+
+// withClusterSessionToken returns env plus a freshly minted per-session messaging token, the
+// cluster counterpart of what the daemon exports to a desktop session: the pod image's
+// `blerg-runner` CLI (update, ask, note, publish) authenticates with it, scoped to this one
+// session. It rides in ExtraEnv, i.e. the per-session Secret, never as a literal in the Job spec.
+// The session row must already exist (the token's foreign key). The caller's map is not modified;
+// with no database, or when minting fails (logged, never the token), env is returned as it was and
+// the session simply cannot message. Session end revokes it like every other session token.
+func withClusterSessionToken(ctx context.Context, pool *pgxpool.Pool, sessionID string, env map[string]string) map[string]string {
+	if pool == nil {
+		return env
+	}
+	tok, err := db.MintSessionToken(ctx, pool, sessionID, []string{"message"}, sessionTokenTTL)
+	if err != nil {
+		log.Printf("cluster start %s: MintSessionToken: %v", sessionID, err)
+		return env
+	}
+	out := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		out[k] = v
+	}
+	out[sessionTokenEnv] = tok
+	return out
 }
 
 // ─── DELETE /api/sessions/{id} ────────────────────────────────────────────────
@@ -1123,6 +1263,13 @@ func (a *API) HandleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	if sessionID == "" {
 		writeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+
+	// A private session is answered exactly as an unknown one, before anything
+	// about it (its daemon, its state) can be told apart.
+	if !a.browserCanSee(r.Context(), principal.Sub, sessionID) {
+		writeError(w, http.StatusNotFound, "session not found or daemon not connected")
 		return
 	}
 
@@ -1204,6 +1351,60 @@ func (a *API) HandleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ─── POST /api/sessions/{id}/pause ───────────────────────────────────────────
+
+// HandlePauseSession frees a cluster session's pod without ending the session:
+// the row goes to "disconnected", the state a lost pod leaves behind, so the
+// next message resumes it exactly as it would after an eviction. Whatever the
+// agent was in the middle of is cut off; its conversation is not.
+func (a *API) HandlePauseSession(w http.ResponseWriter, r *http.Request) {
+	principal, ok := a.authBrowser(w, r)
+	if !ok {
+		return
+	}
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
+		writeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	if !a.browserCanSee(r.Context(), principal.Sub, sessionID) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	jm := a.hub.JobManager()
+	if a.dbPool == nil || jm == nil {
+		writeError(w, http.StatusConflict, "only cluster sessions can be paused")
+		return
+	}
+	row, err := db.GetSession(r.Context(), a.dbPool, sessionID)
+	if err != nil || row == nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if row.Runtime == nil || *row.Runtime != "cluster" {
+		writeError(w, http.StatusConflict, "only cluster sessions can be paused")
+		return
+	}
+	if row.Status == "disconnected" {
+		// Already paused (or its pod already gone): nothing to do.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if row.Status != "running" && row.Status != "idle" && row.Status != "waiting" {
+		writeError(w, http.StatusConflict, "session is "+row.Status+" and cannot be paused")
+		return
+	}
+	// Mark it first: the pod's connection drop that follows then finds a
+	// session that is already not active, and leaves it as it is.
+	setSessionStatus(r.Context(), a.hub, a.dbPool, sessionID, "disconnected", nil, nil, false)
+	if err := jm.DeleteSessionJob(sessionID); err != nil { //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
+		log.Printf("pause %s: delete job: %v", sessionID, err)
+		writeError(w, http.StatusBadGateway, "could not stop the session's pod")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ─── PATCH /api/sessions/{id} ─────────────────────────────────────────────────
 
 type patchSessionRequest struct {
@@ -1212,12 +1413,17 @@ type patchSessionRequest struct {
 
 // HandlePatchSession updates the title of the given session.
 func (a *API) HandlePatchSession(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.authBrowser(w, r); !ok {
+	principal, ok := a.authBrowser(w, r)
+	if !ok {
 		return
 	}
 	sessionID := r.PathValue("id")
 	if sessionID == "" {
 		writeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	if !a.browserCanSee(r.Context(), principal.Sub, sessionID) {
+		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 

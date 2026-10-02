@@ -155,9 +155,9 @@ var toolDefs = []map[string]any{
 	},
 	{
 		"name":        "blerg_card_link",
-		"description": "Attach a link to a card: kind ∈ session|pr|rcca|doc|url.",
+		"description": "Attach a link to a card: kind ∈ session|pr|rcca|doc|url|artifact. An artifact is a file a runner session published: url is its /sessions/<session id>?artifact=<file id> path.",
 		"inputSchema": cardRef(props{
-			"kind":  str("session|pr|rcca|doc|url"),
+			"kind":  str("session|pr|rcca|doc|url|artifact"),
 			"url":   str("the link"),
 			"label": str("display label"),
 		}, req("kind", "url")),

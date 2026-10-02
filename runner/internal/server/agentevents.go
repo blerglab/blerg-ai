@@ -137,10 +137,17 @@ func ackAgentEvent(dc *DaemonConn, msg protocol.AgentEvent, seq int64) {
 // replays only the first window of one, so the Skills & plugins panel asks
 // for the latest directly.
 func (a *API) HandleGetCapabilities(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.authBrowser(w, r); !ok {
+	principal, ok := a.authBrowser(w, r)
+	if !ok {
 		return
 	}
 	sessionID := r.PathValue("id")
+	if !a.browserCanSee(r.Context(), principal.Sub, sessionID) {
+		// Same answer as for a session that has no capabilities report, so
+		// the route is not an oracle for which private sessions exist.
+		writeJSON(w, http.StatusOK, map[string]any{"capabilities": nil})
+		return
+	}
 	out := map[string]any{"capabilities": nil}
 	if a.dbPool != nil {
 		rows, err := db.ListAgentEventsTail(r.Context(), a.dbPool, sessionID, protocol.CapabilitiesKind, 1)
@@ -216,41 +223,64 @@ drainLoop:
 }
 
 // replayAgentEvents sends a window of persisted events + replay_done marker.
+// Forward (the default) is the oldest events after AfterSeq. Tail or BeforeSeq
+// read backwards from the end of the transcript instead: a long transcript is
+// shown from its newest events at once and the older ones follow in pages.
 func replayAgentEvents(ctx context.Context, _ *Hub, bc *BrowserConn, pool *pgxpool.Pool, msg protocol.SubscribeAgentEvents) {
-	lastSeq := msg.AfterSeq
-	hasMore := false
+	done := protocol.AgentEventsReplayDone{
+		Type: "agent_events_replay_done", SessionID: msg.SessionID, LastSeq: msg.AfterSeq,
+	}
+	var rows []db.AgentEventRow
 	if pool != nil {
-		limit := msg.Limit
-		if limit <= 0 {
-			limit = 200
+		var err error
+		switch {
+		case msg.Tail > 0 || msg.BeforeSeq > 0:
+			limit := msg.Limit
+			if msg.Tail > 0 {
+				limit = msg.Tail
+			}
+			var more bool
+			rows, more, err = db.ListAgentEventsBefore(ctx, pool, msg.SessionID, msg.BeforeSeq, limit)
+			done.Older, done.HasOlder = true, more
+			if len(rows) > 0 {
+				done.FirstSeq = rows[0].Seq
+				if msg.Tail > 0 {
+					done.LastSeq = rows[len(rows)-1].Seq
+				}
+			}
+		default:
+			limit := msg.Limit
+			if limit <= 0 {
+				limit = 200
+			}
+			rows, err = db.ListAgentEvents(ctx, pool, msg.SessionID, msg.AfterSeq, limit)
+			done.HasMore = len(rows) == limit
+			if len(rows) > 0 {
+				done.LastSeq = rows[len(rows)-1].Seq
+			}
 		}
-		rows, err := db.ListAgentEvents(ctx, pool, msg.SessionID, msg.AfterSeq, limit)
 		if err != nil {
 			log.Printf("agent replay %s: %v", msg.SessionID, err)
 		}
-		for _, r := range rows {
-			ev := protocol.AgentEvent{
-				Type: "agent_event", SessionID: r.SessionID, ClientEventID: r.ClientEventID,
-				Seq: r.Seq, Ts: r.Ts.UTC().Format(time.RFC3339Nano),
-				Kind: r.Kind, Payload: json.RawMessage(r.Payload),
-			}
-			raw, err := json.Marshal(ev)
-			if err != nil {
-				continue
-			}
-			select {
-			case bc.send <- raw:
-			case <-ctx.Done():
-				return
-			}
-			lastSeq = r.Seq
-		}
-		hasMore = len(rows) == limit
 	}
-	if raw, err := json.Marshal(protocol.AgentEventsReplayDone{
-		Type: "agent_events_replay_done", SessionID: msg.SessionID, LastSeq: lastSeq, HasMore: hasMore,
-		ServerTime: time.Now().UTC().Format(time.RFC3339Nano),
-	}); err == nil {
+	for _, r := range rows {
+		ev := protocol.AgentEvent{
+			Type: "agent_event", SessionID: r.SessionID, ClientEventID: r.ClientEventID,
+			Seq: r.Seq, Ts: r.Ts.UTC().Format(time.RFC3339Nano),
+			Kind: r.Kind, Payload: json.RawMessage(r.Payload),
+		}
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			continue
+		}
+		select {
+		case bc.send <- raw:
+		case <-ctx.Done():
+			return
+		}
+	}
+	done.ServerTime = time.Now().UTC().Format(time.RFC3339Nano)
+	if raw, err := json.Marshal(done); err == nil {
 		select {
 		case bc.send <- raw:
 		case <-ctx.Done():

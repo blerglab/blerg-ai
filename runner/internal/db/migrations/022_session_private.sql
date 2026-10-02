@@ -1,0 +1,15 @@
+-- 022: private sessions.
+--
+-- A private session is visible only to the account that started it
+-- (spawning_account_id). Unlike every other session on an install, no
+-- human bypasses it: an install operator, another member and a board admin's
+-- agent token all see it as if it did not exist. The runner decides
+-- visibility in ONE predicate (internal/server/privacy.go) and applies it to
+-- every surface that names a session or emits its data.
+--
+-- Nothing sets the flag by itself; a start that puts an unattended agent (a
+-- cron) or a third-party connection (an MCP grant) on a session writes it in
+-- the row's own insert (db.SessionOrigin), and the server marks it again
+-- through MarkPrivate (which also updates its in-memory record).
+-- Existing rows are not private, so behaviour is unchanged for them.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS private boolean NOT NULL DEFAULT false;

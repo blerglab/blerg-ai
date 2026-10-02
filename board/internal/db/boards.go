@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -134,6 +135,10 @@ type BoardParams struct {
 	AutomationEngine *string  `json:"automation_engine"`
 	Repos            []string `json:"repos"`
 	Columns          []string `json:"columns"` // initial column names, in order
+	// TerminalColumns names the initial columns created with is_terminal set.
+	// Not part of the wire format: only board templates fill it, so a request
+	// body cannot reach it.
+	TerminalColumns []string `json:"-"`
 }
 
 // checkConcurrency guards the one value the dispatcher cannot express. 0 is
@@ -370,8 +375,8 @@ func CreateBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams) (Board,
 		}
 		rank = next
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO board_columns (board_id, rank, name) VALUES ($1,$2,$3)`,
-			b.ID, rank, name); err != nil {
+			`INSERT INTO board_columns (board_id, rank, name, is_terminal) VALUES ($1,$2,$3,$4)`,
+			b.ID, rank, name, slices.Contains(p.TerminalColumns, name)); err != nil {
 			return Board{}, fmt.Errorf("insert column: %w", err)
 		}
 	}

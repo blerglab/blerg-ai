@@ -601,7 +601,7 @@ cluster pods instead. That message is about your workstation, not the cluster.
 
 Session completion webhooks refuse callback targets that resolve to private,
 link-local or loopback addresses (SSRF guard). On an install whose public
-hostnames resolve to a private network — a homelab behind NAT — that refuses
+hostnames resolve to a private network — a private network behind NAT — that refuses
 every callback into that network. Set `WEBHOOK_ALLOW_PRIVATE=1` in `.env`
 (rendered into the runner's `BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE`) and re-run
 `deploy.sh` to allow them.
@@ -642,7 +642,7 @@ The same procedure for both installs, with a restore drill checklist, is in
 |---|---|---|
 | Postgres data: accounts, boards, sessions, encrypted credentials | PVC `postgres-data-postgres-0` in `blerg` (`5Gi`) | Everything. |
 | `blerg-secrets`, above all `BLERG_CORE_LOCAL_KEY` | Secret in `blerg` | **Losing `BLERG_CORE_LOCAL_KEY` loses every stored credential** — there is no recovery; users must re-enter them. Losing `POSTGRES_PASSWORD` locks the components out of the database. |
-| Runner data (uploaded agent-config bundles, published mockups) | `emptyDir` at `/data` in the runner pod | Already lost on every runner restart; swap the volume for a PVC in `runner-deployment.yaml` if you need it kept. |
+| Runner data (uploaded agent-config bundles, published mockups, files agents published with `blerg-runner publish`) | `emptyDir` at `/data` in the runner pod | Already lost on every runner restart (published files then answer "no longer available"); swap the volume for a PVC in `runner-deployment.yaml` if you need it kept. |
 | `blerg-runner-agent` | Secret in `blerg-runner-sessions` | Recreated by the next `deploy.sh` run (daemon token copied from `blerg-secrets`; optional keys only if pinned in `.env`). |
 
 Session Jobs, their per-session Secrets, and the images are disposable.

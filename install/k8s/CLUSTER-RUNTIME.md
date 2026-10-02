@@ -391,10 +391,47 @@ Playwright downloads for itself ignore `/etc/chromium.d`. A pod's `/dev/shm` is
 routes to, including in-cluster services such as Postgres, core and the board.
 [`networkpolicy-sessions.example.yaml`](networkpolicy-sessions.example.yaml)
 is an optional policy that blocks pod-to-cluster traffic from the sessions
-namespace except DNS and the runner service, while keeping general internet
-egress (git hosts, model APIs, the plugin marketplace). It is not applied by
+namespace except DNS and the runner (port 8080 and the MCP gateway's port 8090),
+while keeping general internet egress to public
+addresses (git hosts, model APIs, the plugin marketplace). Core is not
+reachable from a session pod, and the board only if you uncomment the clearly
+marked opt-in rule (crons do not need it: their board access goes through the
+gateway). Verify with a throwaway session: the gateway answers (401 without a
+token) and `curl` to core, the board (unless opted in) and Postgres times out.
+It is not applied by
 `deploy.sh`; it needs a CNI that enforces NetworkPolicy (MicroK8s' default,
 Calico, does) and CIDRs that match your cluster — read its header first.
+
+### Crons, MCP connections and the gateway
+
+Sessions with MCP connections, and every cron run
+([`docs/crons.md`](../../docs/crons.md), [`docs/mcp-connections.md`](../../docs/mcp-connections.md)),
+reach their tools through the runner's **MCP gateway**, not directly:
+
+- The runner serves the gateway on its own listener, port 8090
+  (`BLERG_RUNNER_MCP_GW_ADDR`), and exposes it **only** through the
+  `blerg-runner-mcp-gateway` Service, a `ClusterIP` Service separate from
+  `blerg-runner`. `ingress.yaml` routes only the web port 8080; nothing routes
+  the gateway, and `deploy_test.sh` fails if an Ingress ever references its
+  Service or port. Do not add one, and do not change the Service type.
+- Session pods dial it at `BLERG_RUNNER_MCP_GW_URL`
+  (`http://blerg-runner-mcp-gateway.blerg.svc.cluster.local:8090`, set in
+  `configmap.yaml`). Each pod holds only a per-session, per-connection token,
+  delivered through its per-session Secret and never in the Job spec.
+- **Apply the egress policy if you use crons or connections.** A cron run
+  reads untrusted text unattended. The runner already restricts it to file tools
+  plus the MCP tools you allowed, and the policy is the layer that keeps a fooled
+  agent from reaching Postgres or your private network. The example already
+  allows the gateway port; if you write your own policy, allow TCP 8090 to the
+  runner pods (a NetworkPolicy sees the pod port) or every MCP tool call will
+  fail. Cron sessions are ordinary session Jobs in the `blerg-runner-sessions`
+  namespace, so the policy covers them with no extra selector.
+- A cluster cron uses the owner's stored credentials and **never** falls back
+  to the shared operator Secret: a missing personal credential fails the run
+  before a pod exists.
+- `BLERG_*_MCP_ALLOW_HTTP_HOSTS` and `BLERG_*_MCP_ALLOW_PRIVATE_HOSTS` (see
+  `configmap.yaml`) are empty by default. The runner, not the session pod,
+  fetches a connection's URL, so listing a private MCP host needs no policy rule.
 
 ## Per-session Secret
 

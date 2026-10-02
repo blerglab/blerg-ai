@@ -128,6 +128,12 @@ func TestWSClient(t *testing.T) {
 	if firstHello.ProtocolVersion != "1" {
 		t.Errorf("protocol_version = %q, want 1", firstHello.ProtocolVersion)
 	}
+	if !firstHello.MCPGateway {
+		t.Error("hello does not report the mcp_gateway capability")
+	}
+	if !firstHello.RestrictTools {
+		t.Error("hello does not report the restrict_tools capability")
+	}
 
 	// ── Drop the first connection ─────────────────────────────────────────────
 	firstConn := <-connReadyCh

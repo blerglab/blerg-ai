@@ -59,6 +59,8 @@ type DaemonConn struct {
 	repoRemotes      map[string]protocol.RepoOrigin // checked-out name → provider + "owner/name" of its origin (known ones only)
 	gitProviders     []string                       // providers the daemon can clone from (hello); nil = GitHub only
 	cloneFrom        bool                           // honours SpawnSession.CloneFrom (hello)
+	mcpGateway       bool                           // honours SpawnSession.MCPGateway (hello mcp_gateway)
+	restrictTools    bool                           // honours SpawnSession.RestrictTools (hello restrict_tools)
 	hostTokenClone   bool                           // owner allows personal-token clones on the bare host (hello)
 	sandboxAvailable bool
 	hostClaude       hostClaudeCaps
@@ -339,6 +341,10 @@ type Hub struct {
 	// reposRootReqs are set_repos_root requests waiting for their daemon's
 	// answer (reposroot.go).
 	reposRootReqs reposRootRequests
+	// privacy reads which sessions are private (privacy.go). Guarded by mu.
+	privacy privacyGate
+	// mcpStart is how a session start reaches the MCP gateway (mcpstart.go).
+	mcpStart mcpStartHolder
 }
 
 // NewHub creates a ready-to-use Hub.
@@ -555,12 +561,30 @@ func (h *Hub) UnregisterBrowser(id string) {
 
 // BroadcastToBrowsers sends a pre-encoded JSON message to every connected browser.
 // Slow or blocked browsers are skipped (non-blocking send).
+//
+// A message that names a private session (a session_id, a nested session or
+// message, a daemon_disconnected's list) goes only to sockets of the account
+// that owns it; see privacy.go. Every broadcast helper below funnels through
+// here, so no call site has to remember to filter.
 func (h *Hub) BroadcastToBrowsers(msg []byte) {
+	scope := h.scopeOf(msg) // reads the database: never under h.mu
+	perAccount := map[string][]byte{}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, b := range h.browsers {
+		data, ok := perAccount[b.AccountID]
+		if !ok {
+			var allowed bool
+			if data, allowed = scope.forAccount(b.AccountID, msg); !allowed {
+				data = nil
+			}
+			perAccount[b.AccountID] = data
+		}
+		if data == nil {
+			continue
+		}
 		select {
-		case b.send <- msg:
+		case b.send <- data:
 		default:
 			// browser channel full — skip rather than block
 		}
@@ -578,20 +602,35 @@ func (h *Hub) BroadcastJSON(v any) {
 
 // BroadcastJSONPerAccount is BroadcastJSON for a message whose content depends
 // on who is looking (whether a session was ended by "you"). build is called
-// once per distinct browser account, under the hub's read lock — it must be
-// pure and must not call back into the hub.
+// once per distinct browser account — it must be pure and must not call back
+// into the hub. A payload naming a private session reaches only its owner's
+// sockets (privacy.go), exactly as with BroadcastToBrowsers.
 func (h *Hub) BroadcastJSONPerAccount(build func(accountID string) any) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	cache := map[string][]byte{}
+	browsers := make([]*BrowserConn, 0, len(h.browsers))
 	for _, b := range h.browsers {
+		browsers = append(browsers, b)
+	}
+	h.mu.RUnlock()
+	// Browser send channels are never closed, so sending after the lock is
+	// released is safe; it lets the privacy lookup (a database read) run
+	// outside the hub's lock.
+	cache := map[string][]byte{}
+	for _, b := range browsers {
 		data, ok := cache[b.AccountID]
 		if !ok {
-			var err error
-			if data, err = json.Marshal(build(b.AccountID)); err != nil {
+			raw, err := json.Marshal(build(b.AccountID))
+			if err != nil {
+				cache[b.AccountID] = nil
 				continue
 			}
+			if out, allowed := h.scopeOf(raw).forAccount(b.AccountID, raw); allowed {
+				data = out
+			}
 			cache[b.AccountID] = data
+		}
+		if data == nil {
+			continue
 		}
 		select {
 		case b.send <- data:

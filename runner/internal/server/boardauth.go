@@ -151,7 +151,7 @@ func requireCoreOrDaemon(w http.ResponseWriter, actor boardActor) bool {
 // authDaemonOrCoreCap accepts the daemon token or a core token holding coreCap.
 // Board tokens are not a credential here. Writes 401 (no / unverifiable
 // credential) or 403 (core token without coreCap) and returns ok=false.
-func (a *API) authDaemonOrCoreCap(w http.ResponseWriter, r *http.Request, coreCap string) (boardActor, bool) { //nolint:unparam // returns the actor like the other auth helpers; today's callers only need the verdict
+func (a *API) authDaemonOrCoreCap(w http.ResponseWriter, r *http.Request, coreCap string) (boardActor, bool) {
 	raw := a.rawBearer(r)
 	if raw == "" {
 		writeError(w, http.StatusUnauthorized, "unauthorized")

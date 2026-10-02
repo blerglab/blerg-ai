@@ -279,6 +279,24 @@ func TestAgentTokenLive(t *testing.T) {
 		t.Errorf("expired AgentTokenLive = %v, %v; want false, nil", live, err)
 	}
 
+	// A disabled account's tokens are not live, and they are again once it is re-enabled.
+	disabled, _, err := svc.CreateAgentToken(ctx, owner, "disabled", "run-sessions", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool().Exec(ctx, `UPDATE accounts SET disabled_at = now() WHERE id = $1`, owner); err != nil {
+		t.Fatal(err)
+	}
+	if live, err := svc.AgentTokenLive(ctx, owner, disabled.ID); err != nil || live {
+		t.Errorf("disabled account AgentTokenLive = %v, %v; want false, nil", live, err)
+	}
+	if _, err := st.Pool().Exec(ctx, `UPDATE accounts SET disabled_at = NULL WHERE id = $1`, owner); err != nil {
+		t.Fatal(err)
+	}
+	if live, err := svc.AgentTokenLive(ctx, owner, disabled.ID); err != nil || !live {
+		t.Errorf("re-enabled account AgentTokenLive = %v, %v; want true, nil", live, err)
+	}
+
 	// Revoked.
 	if err := svc.RevokeAgentToken(ctx, owner, rec.ID); err != nil {
 		t.Fatal(err)

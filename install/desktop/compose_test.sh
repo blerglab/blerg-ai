@@ -105,5 +105,30 @@ FAKECHMOD
 )" || true
 [ "$tighten_behaviour" = "survived" ] || { echo "FAIL: tighten-permissions pattern did not survive a failing chmod under set -euo pipefail (got: $tighten_behaviour)"; fail=1; }
 
+# MCP gateway: set on the runner, dialled by sandbox containers as blerg-runner:8090 on the
+# blerg-sandbox network, and NEVER published on the host (the runner publishes exactly one port).
+for want in 'BLERG_RUNNER_MCP_GW_ADDR: :8090' 'BLERG_RUNNER_MCP_GW_URL: http://blerg-runner:8090' \
+            'BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS: ""' 'BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS: ""' \
+            'BLERG_CORE_MCP_ALLOW_HTTP_HOSTS: ""' 'BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS: ""'; do
+  grep -qF -- "$want" <<<"$out" || { echo "FAIL: $want"; fail=1; }
+done
+if command -v python3 >/dev/null 2>&1; then
+  gw_out="$(BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) \
+            docker compose --env-file /dev/null config --format json | python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+bad = []
+for svc, s in c["services"].items():
+    for p in s.get("ports") or []:
+        if "8090" in (str(p.get("target")), str(p.get("published"))):
+            bad.append(svc + " publishes the MCP gateway port " + json.dumps(p))
+if len(c["services"]["blerg-runner"].get("ports") or []) != 1:
+    bad.append("blerg-runner must publish exactly one port (its UI/API)")
+print("\n".join(bad))
+')"
+  [ -z "$gw_out" ] || { while IFS= read -r l; do echo "FAIL: $l"; done <<<"$gw_out"; fail=1; }
+fi
+grep -q 'BLERG_RUNNER_MCP_GW_URL' .env.example || { echo "FAIL: .env.example does not document the MCP gateway variables"; fail=1; }
+
 [ "$fail" -eq 0 ] && echo ok
 exit "$fail"

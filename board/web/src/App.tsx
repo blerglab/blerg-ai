@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  BrowserRouter, Routes, Route, Link, NavLink, useLocation, useNavigate, useParams,
+  BrowserRouter, Routes, Route, Link, NavLink, useLocation, useNavigate, useParams, useSearchParams,
 } from "react-router-dom";
 import { api, ApiError, Board } from "./api";
 import { coreOrigin } from "./authClient";
@@ -146,12 +146,29 @@ function BoardIcon({ board }: { board: Board }) {
   );
 }
 
+// Board templates the create form offers. Kept in step with the backend
+// registry (board/internal/templates) by hand: there is no listing route.
+const BOARD_TEMPLATES = [
+  {
+    id: "focus-board",
+    name: "Focus board",
+    description: "Inbox, Today, This week, Waiting on, Someday, Proposed and Done, with source, due and tracking fields.",
+  },
+];
+
 function Boards() {
   const me = useMe();
   const [boards, setBoards] = useState<Board[] | null>(null);
   const [overview, setOverview] = useState<Record<string, BoardOverview>>({});
-  const [creating, setCreating] = useState(false);
+  // ?new=<template id> (a link from elsewhere) opens the create form with
+  // that template already chosen.
+  const [search] = useSearchParams();
+  const linked = BOARD_TEMPLATES.some((t) => t.id === search.get("new")) ? search.get("new")! : null;
+  const [creating, setCreating] = useState(linked !== null);
   const [name, setName] = useState("");
+  const [template, setTemplate] = useState(linked ?? "");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const load = () => Promise.all([
     api<Board[]>("/api/boards").then((b) => setBoards(b ?? [])),
     api<BoardOverview[]>("/api/overview").then((os) => {
@@ -168,9 +185,21 @@ function Boards() {
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
-    await api("/api/boards", { json: { name: name.trim(), require_repo: false } });
-    setName(""); setCreating(false); load();
+    if (!name.trim() || saving) return;
+    setCreateError(null);
+    setSaving(true);
+    try {
+      await api("/api/boards", {
+        json: { name: name.trim(), require_repo: false, ...(template ? { template } : {}) },
+      });
+    } catch (err) {
+      // Keep the form and what was typed; say why the server refused.
+      setCreateError(err instanceof Error ? err.message : "Could not create the board.");
+      setSaving(false);
+      return;
+    }
+    setSaving(false);
+    setName(""); setTemplate(""); setCreating(false); load().catch(() => {});
   };
 
   if (!boards) return null;
@@ -179,7 +208,7 @@ function Boards() {
       <div className="row">
         <h1 className="page">Boards</h1>
         <span className="spacer" />
-        <button className="btn small" onClick={() => setCreating(!creating)}>
+        <button className="btn small" onClick={() => { setCreating(!creating); setCreateError(null); }}>
           {creating ? "Cancel" : "New board"}
         </button>
       </div>
@@ -187,7 +216,17 @@ function Boards() {
         <form className="stack" onSubmit={create} style={{ marginBottom: 16 }}>
           <input type="text" placeholder="board name" value={name} autoFocus
             onChange={(e) => setName(e.target.value)} />
-          <button className="btn" type="submit">Create board</button>
+          <label htmlFor="board-template">Template</label>
+          <select id="board-template" value={template} onChange={(e) => setTemplate(e.target.value)}>
+            <option value="">None</option>
+            {BOARD_TEMPLATES.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          <p style={{ margin: 0, color: "var(--fog-dim)", fontSize: 13 }}>
+            {BOARD_TEMPLATES.find((t) => t.id === template)?.description
+              ?? "The default columns (inbox, ready, in progress, done) and no custom fields."}
+          </p>
+          {createError && <p role="alert" style={{ color: "var(--danger)", fontSize: 13, margin: 0 }}>{createError}</p>}
+          <button className="btn" type="submit" disabled={saving}>Create board</button>
         </form>
       )}
       {boards.length === 0 && !creating ? (

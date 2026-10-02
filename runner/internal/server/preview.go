@@ -10,6 +10,10 @@ import (
 
 type previewBody struct {
 	HTML string `json:"html"`
+	// SessionID is optional: the pushing session. When it names a private
+	// session the preview is delivered to that session's owner only (the
+	// broadcast filter reads it), and is not kept as the shared latest preview.
+	SessionID string `json:"session_id"`
 }
 
 // HandlePreview handles POST /api/preview.
@@ -31,10 +35,19 @@ func (h *Hub) HandlePreview(daemonToken string) http.HandlerFunc {
 			return
 		}
 
-		h.SetPreview(body.HTML)
+		private := false
+		if body.SessionID != "" {
+			owners, ok := h.privateOwners([]string{body.SessionID})
+			_, isPrivate := owners[body.SessionID]
+			private = !ok || isPrivate // fail closed
+		}
+		if !private {
+			h.SetPreview(body.HTML) // the shared latest preview must never hold a private session's
+		}
 		h.BroadcastJSON(protocol.PreviewUpdated{
-			Type: "preview_updated",
-			HTML: body.HTML,
+			Type:      "preview_updated",
+			HTML:      body.HTML,
+			SessionID: body.SessionID,
 		})
 
 		w.WriteHeader(http.StatusOK)

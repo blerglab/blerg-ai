@@ -67,13 +67,69 @@
 }
 
 .agent-card.user {
-  align-self: flex-end;
-  background: var(--scree-2);
+  align-self: flex-start;
+  background: color-mix(in srgb, var(--blaze) 10%, var(--scree-2));
+  border-left: 3px solid var(--blaze);
   max-width: 85%;
+}
+
+.agent-card .card-author {
+  display: block;
+  margin-bottom: 2px;
+  font-size: var(--text-2xs, 11px);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--blaze);
 }
 
 .agent-card.user.source-ask_answer {
   border-left: 3px solid var(--batch);
+}
+
+/* A message that has not been recorded yet: the same bubble in a slightly
+   quieter tint, with a status line and a spinner underneath. */
+.agent-card.user.queued {
+  background: color-mix(in srgb, var(--blaze) 5%, var(--scree-2));
+  border-left-color: color-mix(in srgb, var(--blaze) 45%, transparent);
+}
+
+.agent-card.user.queued.failed {
+  border-left-color: var(--danger);
+}
+
+.queue-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: var(--text-2xs, 11px);
+  color: var(--fog-dim);
+}
+
+.agent-card.user.queued.failed .queue-status {
+  color: var(--danger);
+}
+
+.queue-spinner {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border: 2px solid color-mix(in srgb, var(--fog-dim) 35%, transparent);
+  border-top-color: var(--fog);
+  border-radius: 50%;
+  animation: queue-spin 0.8s linear infinite;
+}
+
+@keyframes queue-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-spinner {
+    animation: none;
+    border-top-color: color-mix(in srgb, var(--fog-dim) 35%, transparent);
+  }
 }
 
 .agent-card.assistant {
@@ -200,6 +256,19 @@
   padding: 2px 8px;
 }
 
+.agent-card.marker.turn-done {
+  align-self: flex-start;
+}
+
+/* A turn's footer (stop reason, model, tokens, time taken) sits inside the
+   assistant bubble it closes, not as a floating line between bubbles. */
+.agent-card .turn-foot {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fog-dim);
+  opacity: 0.8;
+}
+
 .agent-card.subagent {
   align-self: stretch;
   font-size: 12px;
@@ -211,6 +280,12 @@
   align-self: stretch;
   background: var(--scree);
   border-left: 3px solid var(--danger);
+}
+
+.agent-composer-hint {
+  padding: 2px 16px;
+  font-size: 11px;
+  color: var(--fog-dim);
 }
 
 .agent-composer {
@@ -747,4 +822,222 @@
   flex: 1;
   height: 1px;
   background: var(--stone);
+}
+
+/* Send and Attach sit together on the right of the box. */
+.agent-composer-actions {
+  display: flex;
+  gap: 6px;
+  align-self: flex-end;
+}
+
+.agent-composer-actions button {
+  align-self: auto;
+}
+
+/* The transcript loads in pages: it is kept out of sight until complete (so it
+   does not jump while it fills in) and a skeleton of placeholder bubbles stands
+   in for it. */
+.agent-timeline.loading {
+  display: none;
+}
+
+.agent-skeleton {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  /* more placeholders than any screen shows, fading out so the list never just stops */
+  -webkit-mask-image: linear-gradient(to bottom, #000 65%, transparent);
+  mask-image: linear-gradient(to bottom, #000 65%, transparent);
+}
+
+/* The bars have no width of their own, so a bubble must: otherwise it shrinks to its padding. */
+.sk-bubble {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 8px;
+  box-sizing: border-box;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--bg-2, var(--scree));
+  width: 92%;
+  align-self: flex-start;
+}
+
+.sk-bubble.user {
+  background: color-mix(in srgb, var(--blaze) 7%, var(--scree-2));
+  border-left: 3px solid color-mix(in srgb, var(--blaze) 30%, transparent);
+  width: 72%;
+}
+
+.sk-bubble.tool {
+  align-self: stretch;
+  width: auto;
+  padding: 8px 12px;
+  background: var(--basalt);
+  border: 1px solid var(--scree);
+}
+
+.sk-bar {
+  display: block;
+  height: 10px;
+  border-radius: 5px;
+  background: linear-gradient(
+    90deg,
+    var(--stone) 0%,
+    color-mix(in srgb, var(--stone) 55%, var(--fog-dim)) 50%,
+    var(--stone) 100%
+  );
+  background-size: 200% 100%;
+  opacity: 0.5;
+  animation: sk-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes sk-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sk-bar {
+    animation: none;
+    background: var(--stone);
+  }
+}
+
+/* A session with no live process: say so, and say what a message will do. */
+.agent-offline {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 10px 6px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--stone));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 9%, var(--scree));
+  color: var(--fog);
+  font-size: var(--text-sm, 13px);
+  line-height: 1.45;
+}
+
+.agent-offline strong {
+  color: var(--chalk);
+  font-weight: 600;
+}
+
+.agent-offline-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+/* ── toolbar: labels collapse to icons on narrow screens ─────────────────── */
+.agent-toolbar {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.agent-toolbar select {
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
+.agent-toolbar button,
+.agent-toolbar .compact-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tb-count {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--scree-2);
+  color: var(--fog);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+@media (max-width: 700px) {
+  .agent-toolbar {
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  /* the pickers share the first row; the buttons become icons */
+  .agent-toolbar select {
+    flex: 1 1 0;
+    max-width: 45%;
+  }
+
+  .agent-toolbar .tb-label {
+    display: none;
+  }
+
+  .agent-toolbar .tb-icon {
+    font-size: 15px;
+    line-height: 1;
+  }
+
+  .agent-toolbar button,
+  .agent-toolbar .compact-toggle {
+    min-width: 36px;
+    min-height: 32px;
+    justify-content: center;
+    padding: 3px 8px;
+  }
+
+  .agent-toolbar .compact-toggle input {
+    display: none; /* the icon is the control; its on/off state shows below */
+  }
+
+  .agent-toolbar .compact-toggle:has(input:checked) {
+    background: color-mix(in srgb, var(--blaze) 18%, var(--basalt));
+    border-radius: 6px;
+    outline: 1px solid var(--blaze);
+  }
+}
+
+/* the ended notice is calmer than the 'no pod' one: nothing is wrong, the session is over */
+.agent-offline.ended {
+  border-color: var(--stone);
+  background: var(--scree);
+}
+
+.agent-offline.ended .agent-offline-dot {
+  background: var(--fog-dim);
+}
+
+/* the older part of a long transcript is still arriving above what is shown */
+.older-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 12px;
+  color: var(--fog-dim);
+}
+
+/* while older messages are still arriving the scrollbar thumb would shrink and jump with every page,
+   so it is not drawn until the whole transcript is in */
+.agent-timeline.backfilling {
+  scrollbar-color: transparent transparent;
+}
+.agent-timeline.backfilling::-webkit-scrollbar-thumb {
+  background: transparent;
 }

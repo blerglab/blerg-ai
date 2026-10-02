@@ -1,14 +1,20 @@
 // Chat/timeline view for agent-kind sessions: structured transcript cards,
 // streaming assistant text, composer, model/effort controls, interrupt.
-import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ToolGroup } from './AgentToolCalls'
 import { HIDDEN_KINDS, buildTimeline, isVisibleEvent } from '../lib/toolGroups'
 import { DayDivider, TimeLabel } from './TimeLabel'
 import { ClockOffsetContext } from '../lib/clockOffset'
+import { getDraft, setDraft as saveDraft } from '../lib/drafts'
 import { dayKey, parseTs, turnDuration } from '../lib/timeLabel'
 import { send, onMessage, onOpen } from '../ws'
 import { useAgentTranscript } from './../hooks/useAgentTranscript'
 import { apiFetch } from '../apiFetch'
+
+// A long transcript is loaded from its end: this many of the newest events come first, so the
+// conversation shows at once, and the older ones follow in pages of OLDER_PAGE in the background.
+const INITIAL_TAIL = 200
+const OLDER_PAGE = 200
 import { useEngineModels } from '../lib/engineModels'
 import { ENGINE_LABELS } from '../lib/runtimes'
 import { latestStartAttempt, placeholderAttempt, startPanelVisible, withSessionOutcome } from '../lib/startStages'
@@ -16,6 +22,7 @@ import { useSessionStore } from '../hooks/useSessionStore'
 import type {
   AgentEvent,
   AgentEventsReplayDone,
+  ArtifactPayload,
   AssistantTextPayload,
   CheckInPayload,
   CompactionPayload,
@@ -36,6 +43,16 @@ import WorkingIndicator from './WorkingIndicator'
 import { liveCalls, oldestLive } from '../lib/liveCalls'
 import CapabilitiesPanel from './CapabilitiesPanel'
 import { useCapabilities } from '../hooks/useCapabilities'
+import { useArtifacts } from '../hooks/useArtifacts'
+import { ArtifactActionsContext } from '../lib/artifactActions'
+import { fileCount, findLatest, groupArtifacts, type ArtifactInfo } from '../lib/artifacts'
+import ArtifactCard from './ArtifactCard'
+import ArtifactsPanel from './ArtifactsPanel'
+import ArtifactViewer from './ArtifactViewer'
+import { ComposerChips, MessageText } from './AttachmentChips'
+import { describeSessionEnd } from '../lib/sessionEnd'
+import { useAttachments } from '../hooks/useAttachments'
+import { composeMessage } from '../lib/attachments'
 import { capabilityCount } from '../lib/capabilities'
 import { useTicker } from '../hooks/useTicker'
 import './AgentChatView.css'
@@ -62,12 +79,83 @@ function saveCompact(on: boolean) {
   }
 }
 
+// The ?artifact=<id> of the address: the link `blerg-runner publish` prints.
+function artifactParam(): string | null {
+  return new URLSearchParams(window.location.search).get('artifact')
+}
+
+// Takes ?artifact= out of the address (history.replaceState: no navigation, no new entry), so a
+// reload does not open the viewer again.
+function clearArtifactParam() {
+  const u = new URL(window.location.href)
+  if (!u.searchParams.has('artifact')) return
+  u.searchParams.delete('artifact')
+  window.history.replaceState(window.history.state, '', u.pathname + u.search + u.hash)
+}
+
+interface QueuedMessage { id: string; text: string; afterSeq: number }
+
+// Placeholder bubbles shown while a session's transcript loads: the rough shape of a conversation
+// (your message, a longer reply, a tool row, another exchange) so the page does not start blank.
+function HistorySkeleton() {
+  const bars = (widths: number[]) => widths.map((w, i) => <span key={i} className="sk-bar" style={{ width: `${w}%` }} />)
+  return (
+    <div className="agent-skeleton" role="status" aria-label="Loading conversation" data-testid="history-loading">
+      <div className="sk-bubble user">{bars([55, 30])}</div>
+      <div className="sk-bubble assistant">{bars([92, 88, 70])}</div>
+      <div className="sk-bubble tool">{bars([48])}</div>
+      <div className="sk-bubble assistant">{bars([85, 95, 60])}</div>
+      <div className="sk-bubble user">{bars([40])}</div>
+      <div className="sk-bubble assistant">{bars([90, 75])}</div>
+      <div className="sk-bubble tool">{bars([60])}</div>
+      <div className="sk-bubble assistant">{bars([95, 82, 90, 55])}</div>
+      <div className="sk-bubble user">{bars([65, 25])}</div>
+      <div className="sk-bubble assistant">{bars([88, 92, 70])}</div>
+      <div className="sk-bubble tool">{bars([42])}</div>
+      <div className="sk-bubble assistant">{bars([90, 80])}</div>
+    </div>
+  )
+}
+
+// The queued messages whose real user_message event has not arrived yet. Each
+// event can satisfy only the oldest waiting message, so two identical texts
+// queued back to back resolve one at a time.
+function unmatchedQueued(queued: QueuedMessage[], events: AgentEvent[]): QueuedMessage[] {
+  let head = 0
+  for (const ev of events) {
+    if (head >= queued.length) break
+    if (ev.kind !== 'user_message') continue
+    const p = ev.payload as UserMessagePayload
+    if (p?.source === 'system') continue
+    if ((ev.seq ?? 0) > queued[head].afterSeq && p.text.trim() === queued[head].text) head++
+  }
+  return queued.slice(head)
+}
+
 // A card for an event that is neither a tool call nor a group of them. Memoized
 // on the event so appending to the transcript re-renders only what is new.
-const EventRow = memo(function EventRow({ ev, turnStart }: { ev: AgentEvent; turnStart?: number }) {
-  return renderEvent(ev, NO_RESULTS, turnStart)
+const EventRow = memo(function EventRow({ ev, turnStart, footer, footerStart }: { ev: AgentEvent; turnStart?: number; footer?: AgentEvent; footerStart?: number }) {
+  return renderEvent(ev, NO_RESULTS, turnStart, footer, footerStart)
 })
 const NO_RESULTS = new Map<string, ToolResultPayload>()
+
+// A turn's footer (stop reason, model, tokens, time taken) is shown inside the
+// assistant bubble it closes, not as a floating line between bubbles. seq is the
+// rendered sequence with null wherever a non-event (a tool card or group) sits:
+// only an assistant reply IMMEDIATELY followed by its turn_done is paired.
+function pairFooters(seq: (AgentEvent | null)[]): { footers: Map<string, AgentEvent>; absorbed: Set<string> } {
+  const footers = new Map<string, AgentEvent>()
+  const absorbed = new Set<string>()
+  for (let i = 0; i + 1 < seq.length; i++) {
+    const a = seq[i]
+    const b = seq[i + 1]
+    if (a && b && a.kind === 'assistant_text' && b.kind === 'turn_done') {
+      footers.set(a.client_event_id, b)
+      absorbed.add(b.client_event_id)
+    }
+  }
+  return { footers, absorbed }
+}
 
 // publishedURL extracts the URL from a push_mockup / push_screenshot result.
 function publishedURL(result?: ToolResultPayload): string | null {
@@ -241,16 +329,22 @@ function ReadyCard({ session, readyAt }: { session: SessionInfo; readyAt: number
 }
 
 // turnStartTimes maps each turn_done event to when its turn began: the time of
-// the latest real user message before it. Absent when unknown.
+// the first real user message since the previous turn ended (messages sent
+// while a turn runs are folded into it). Absent when unknown.
 function turnStartTimes(events: AgentEvent[]): Map<string, number> {
   const out = new Map<string, number>()
   let start: number | null = null
   for (const ev of events) {
     if (ev.kind === 'user_message') {
       if ((ev.payload as UserMessagePayload | undefined)?.source === 'system') continue
-      start = parseTs(ev.ts)
-    } else if (ev.kind === 'turn_done' && start !== null) {
-      out.set(ev.client_event_id, start)
+      // A message sent mid-turn is part of the turn already under way: the clock runs from the first.
+      if (start === null) start = parseTs(ev.ts)
+    } else if (ev.kind === 'turn_done') {
+      if (start !== null) out.set(ev.client_event_id, start)
+      start = null
+    } else if (ev.kind === 'status_changed' && (ev.payload as { status?: unknown } | undefined)?.status === 'idle') {
+      // Idle without a turn_done (a message that never started a turn): the next turn starts afresh.
+      start = null
     }
   }
   return out
@@ -277,10 +371,28 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
   const ingest = useAgentTranscript(s => s.ingest)
   const ingestReplayDone = useAgentTranscript(s => s.ingestReplayDone)
   const statusChangedAt = useSessionStore(s => s.statusChangedAt[sessionId])
-  const [draft, setDraft] = useState('')
+  const [draft, setDraftState] = useState(() => getDraft(sessionId))
+  function setDraft(text: string) {
+    setDraftState(text)
+    saveDraft(sessionId, text)
+  }
+  // Files attached to the message being written (uploaded as soon as they are added).
+  const attachments = useAttachments(sessionId)
+  const attachInput = useRef<HTMLInputElement | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const dragDepth = useRef(0)
   const [showRules, setShowRules] = useState(false)
   const [showCaps, setShowCaps] = useState(false)
+  const [showFiles, setShowFiles] = useState(false)
+  // The file open in the viewer (from a card or the panel), and the one a ?artifact= link names,
+  // which opens as soon as the list is read.
+  const [viewing, setViewing] = useState<ArtifactInfo | null>(null)
+  const [linked, setLinked] = useState<string | null>(artifactParam)
   const [pending, setPending] = useState<PendingTurn | null>(null)
+  // Messages sent while a turn is running. The backend queues them and only
+  // records them in the transcript when the turn picks them up, so they are
+  // shown here at once, dimmed, and dropped as their real event arrives.
+  const [queued, setQueued] = useState<QueuedMessage[]>([])
   const [notice, setNotice] = useState<string | null>(null)
   const [compact, setCompact] = useState(loadCompact)
   const bottomRef = useRef<HTMLDivElement | null>(null)
@@ -304,11 +416,36 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
       if (ev.session_id === sessionId) ingest(ev)
     })
     const offDone = onMessage<AgentEventsReplayDone>('agent_events_replay_done', msg => {
-      if (msg.session_id === sessionId) ingestReplayDone(msg)
+      if (msg.session_id !== sessionId) return
+      ingestReplayDone(msg)
+      // The transcript is loaded from its end so it can be shown at once; the older part follows
+      // in the background, a page at a time, until the start is reached.
+      if (msg.older) {
+        if (msg.has_older && msg.first_seq) {
+          send({ type: 'subscribe_agent_events', session_id: sessionId, before_seq: msg.first_seq, limit: OLDER_PAGE })
+        }
+        return
+      }
+      // The server replays a page (200 events) at a time. A longer transcript
+      // needs the following pages too, or everything between the first page
+      // and the live tail is silently missing.
+      if (msg.has_more) {
+        send({ type: 'subscribe_agent_events', session_id: sessionId, after_seq: msg.last_seq })
+      }
     })
     const offOpen = onOpen(() => {
-      const lastSeq = useAgentTranscript.getState().sessions[sessionId]?.lastSeq ?? 0
+      const t = useAgentTranscript.getState().sessions[sessionId]
+      const lastSeq = t?.lastSeq ?? 0
+      if (lastSeq === 0) {
+        // First load: the newest events now, the rest behind them.
+        send({ type: 'subscribe_agent_events', session_id: sessionId, after_seq: 0, tail: INITIAL_TAIL })
+        return
+      }
       send({ type: 'subscribe_agent_events', session_id: sessionId, after_seq: lastSeq })
+      // A drop can have cut the background load short: pick it up where it stopped.
+      if (t?.hasOlder && t.firstSeq > 0) {
+        send({ type: 'subscribe_agent_events', session_id: sessionId, before_seq: t.firstSeq, limit: OLDER_PAGE })
+      }
     })
     return () => {
       offEvent()
@@ -322,6 +459,30 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
   const streaming = transcript?.streaming ?? ''
   const capabilities = useCapabilities(sessionId, events)
   const capsCount = capabilityCount(capabilities?.payload)
+  // Uploads leave no transcript event, so read the list again when one finishes or is removed, and
+  // whenever the panel is opened or closed.
+  const artifacts = useArtifacts(sessionId, events, `${attachments.done.length}:${showFiles}`)
+  const linkedArtifact = linked ? artifacts.items.find(a => a.id === linked) ?? null : null
+  const linkMissing = linked !== null && artifacts.status === 'ready' && !linkedArtifact
+  // The viewer shows the list's own entry for the file when there is one: a card carries only its
+  // own version, the list also knows how many versions the file has now.
+  const picked = viewing ?? linkedArtifact
+  const openArtifact = picked ? artifacts.items.find(a => a.id === picked.id) ?? picked : null
+  const openLatest = openArtifact ? findLatest(artifacts.items, openArtifact) : undefined
+  const latestVersions = useMemo(
+    () => new Map(groupArtifacts(artifacts.items).map(g => [`${g.origin}\0${g.name}`, g.latest.version ?? 1])),
+    [artifacts.items],
+  )
+  const artifactActions = useMemo(() => ({
+    sessionId,
+    view: setViewing,
+    latestVersion: (a: ArtifactPayload) => latestVersions.get(`${a.origin === 'user' ? 'user' : 'agent'}\0${a.name}`),
+  }), [sessionId, latestVersions])
+  function closeViewer() {
+    setViewing(null)
+    setLinked(null)
+    clearArtifactParam()
+  }
 
   // ─── Start progress ───────────────────────────────────────────────────────
   const rawAttempt = useMemo(() => latestStartAttempt(events), [events])
@@ -332,6 +493,10 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
 
   // ─── Working / waiting ────────────────────────────────────────────────────
   const terminal = session.status === 'error' || session.status === 'stopped'
+  // A stopped or ended session has no process and cannot be resumed: say so and lock the composer.
+  const ended = session.status === 'stopped' || session.status === 'ended'
+  const inputLocked = session.status === 'starting' || ended
+  const endLine = ended ? describeSessionEnd(session) : null
   const pendingActive = pending !== null && !terminal && !pendingSettled(pending, events)
   const waiting = session.status === 'waiting' && !pendingActive
   const working = !waiting && (pendingActive || session.status === 'running')
@@ -366,9 +531,47 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
     return () => clearTimeout(t)
   }, [pending, answered])
 
+  // Sent messages the transcript has not recorded yet: each is replaced by its
+  // real event, in order. If the session ended or failed first, the message is
+  // kept on screen, marked as not delivered, so it never just vanishes.
+  const visibleQueued = useMemo(() => unmatchedQueued(queued, events), [queued, events])
+  const queueState: 'failed' | 'queued' | 'sending' = terminal
+    ? 'failed'
+    : session.status === 'running'
+      ? 'queued'
+      : 'sending'
+
+  // The transcript arrives in pages. While it is still loading, do not paint or
+  // scroll it page by page (that is a visible storm of jumps); show it once,
+  // already at the bottom.
+  // The Claude Code (and native) engines take a message while a turn runs; the other engines hold it until
+  // the turn ends, and the wording says which.
+  const steers = !session.engine || session.engine === 'claude'
+  const loadingHistory = !(transcript?.replayDone) || transcript?.hasMore === true
+  // Older events still on their way in behind what is already on screen.
+  const loadingOlder = !loadingHistory && transcript?.hasOlder === true
+  // Until the transcript is complete, show placeholder bubbles instead of an empty or filling-in
+  // area (a session that is still starting has its own progress panel).
+  const showSkeleton = loadingHistory && !starting
   useEffect(() => {
+    if (loadingHistory) return
     if (stickRef.current) bottomRef.current?.scrollIntoView?.({ block: 'end' })
-  }, [events.length, streaming, working, waiting])
+  }, [events.length, streaming, working, waiting, loadingHistory])
+
+  // Older events arrive above what the reader is looking at. When they are not at the bottom, move
+  // the view down by exactly what was added so the text under their eyes does not jump.
+  const timelineRef = useRef<HTMLDivElement | null>(null)
+  const heldFirstSeq = useRef(0)
+  const heldHeight = useRef(0)
+  const firstSeq = events.find(e => e.seq != null)?.seq ?? 0
+  useLayoutEffect(() => {
+    const el = timelineRef.current
+    if (!el) return
+    const grewUpward = heldFirstSeq.current > 0 && firstSeq > 0 && firstSeq < heldFirstSeq.current
+    if (grewUpward && !stickRef.current) el.scrollTop += el.scrollHeight - heldHeight.current
+    heldFirstSeq.current = firstSeq
+    heldHeight.current = el.scrollHeight
+  })
 
   function onTimelineScroll(e: React.UIEvent<HTMLDivElement>) {
     const el = e.currentTarget
@@ -376,8 +579,11 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
   }
 
   function submit() {
-    const text = draft.trim()
-    if (!text || session.status === 'starting') return
+    const typed = draft.trim()
+    const files = attachments.done
+    if ((!typed && files.length === 0) || attachments.uploading || inputLocked) return
+    // The note naming the files is what makes the agent fetch them.
+    const text = composeMessage(typed, files)
     if (send({ type: 'agent_user_message', session_id: sessionId, text }) === false) {
       // Not connected: nothing was sent. Keep the text; don't pretend.
       setNotice('Not connected — your message was not sent. It is still in the box; send it again once reconnected.')
@@ -385,10 +591,38 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
     }
     setNotice(null)
     setDraft('')
+    attachments.clear()
     stickRef.current = true
     if (!NO_TURN_COMMAND.test(text)) {
-      setPending({ since: Date.now() - clockOffset, afterSeq: transcript?.lastSeq ?? 0 })
+      // Show the message at once. The transcript only records it when the
+      // session picks it up: after the running turn, or once a stopped or
+      // disconnected session has woken up.
+      const afterSeq = transcript?.lastSeq ?? 0
+      setQueued(q => [...q, { id: `q${Date.now()}-${q.length}`, text, afterSeq }])
+      if (!working) setPending({ since: Date.now() - clockOffset, afterSeq })
     }
+  }
+
+  const hasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files')
+  const dropProps = inputLocked ? {} : {
+    onDragEnter: (e: React.DragEvent) => {
+      if (!hasFiles(e)) return
+      dragDepth.current++
+      setDragging(true)
+    },
+    onDragOver: (e: React.DragEvent) => { if (hasFiles(e)) e.preventDefault() },
+    onDragLeave: (e: React.DragEvent) => {
+      if (!hasFiles(e)) return
+      dragDepth.current = Math.max(0, dragDepth.current - 1)
+      if (dragDepth.current === 0) setDragging(false)
+    },
+    onDrop: (e: React.DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      dragDepth.current = 0
+      setDragging(false)
+      attachments.addFiles(e.dataTransfer.files)
+    },
   }
 
   function interrupt() {
@@ -414,6 +648,10 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
   const timelineItems = useMemo(() => (compact ? buildTimeline(events) : []), [events, compact])
   // When each turn began (the user message before its turn_done), for "took 42 s".
   const turnStarts = useMemo(() => turnStartTimes(events), [events])
+  // Turn footers folded into the assistant bubble that closes each turn.
+  const footerPairs = useMemo(() => pairFooters(compact
+    ? timelineItems.map(item => (item.type === 'event' ? item.ev : null))
+    : events.filter(ev => !HIDDEN_KINDS.has(ev.kind))), [events, timelineItems, compact])
   // Where the local date changes between consecutive visible items: the
   // divider goes before the item, keyed like it, carrying that item's time.
   const dayBreaks = useMemo(() => {
@@ -427,7 +665,9 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
     return dayBreaksOf(stamps)
   }, [events, timelineItems, compact])
 
-  const placeholder = session.status === 'starting'
+  const placeholder = ended
+    ? 'This session has ended — start a new session to keep working'
+    : session.status === 'starting'
     ? 'The session is starting — you can message it once it is ready'
     : live && !hasUserMessage
       ? 'Message the agent to get started… (/model, /effort, /<skill>)'
@@ -438,7 +678,9 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
 
   return (
     <ClockOffsetContext.Provider value={clockOffset}>
-    <div className="agent-chat" data-testid="agent-chat">
+    <ArtifactActionsContext.Provider value={artifactActions}>
+    <div className="agent-chat" data-testid="agent-chat" {...dropProps}>
+      {dragging && <div className="drop-zone" role="status" data-testid="drop-zone">Drop files to attach</div>}
       <div className="agent-toolbar">
         <select
           aria-label="Model"
@@ -471,9 +713,12 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
         <button
           className="agent-rules-toggle"
           data-testid="rules-toggle"
+          aria-label="Rules"
+          title="Rules"
           onClick={() => setShowRules(s => !s)}
         >
-          ⚖ Rules
+          <span className="tb-icon" aria-hidden="true">⚖</span>
+          <span className="tb-label">Rules</span>
         </button>
         <button
           type="button"
@@ -483,32 +728,82 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
           aria-label={capabilities ? `Skills & plugins (${capsCount} loaded)` : 'Skills & plugins'}
           onClick={() => setShowCaps(true)}
         >
-          🧩 Skills &amp; plugins
+          <span className="tb-icon" aria-hidden="true">🧩</span>
+          <span className="tb-label">Skills &amp; plugins</span>
           {capabilities && <span className="caps-badge" data-testid="capabilities-badge" aria-hidden="true">{capsCount}</span>}
+        </button>
+        <button
+          type="button"
+          className="files-toggle"
+          data-testid="files-toggle"
+          aria-haspopup="dialog"
+          aria-label={artifacts.status === 'ready' ? `Files (${fileCount(artifacts.items)})` : 'Files'}
+          title="Files"
+          onClick={() => setShowFiles(true)}
+        >
+          <span className="tb-icon" aria-hidden="true">📎</span>
+          <span className="tb-label">Files</span>
+          {artifacts.status === 'ready' && <span className="tb-count" aria-hidden="true">{fileCount(artifacts.items)}</span>}
         </button>
         <label className="compact-toggle" title="Fold runs of tool calls into one summary row">
           <input
             type="checkbox"
             checked={compact}
+            aria-label="Compact tool calls"
             onChange={e => { setCompact(e.target.checked); saveCompact(e.target.checked) }}
           />
-          Compact tool calls
+          <span className="tb-icon" aria-hidden="true">▤</span>
+          <span className="tb-label">Compact tool calls</span>
         </label>
         {working && streaming && <WorkingIndicator since={since} now={now} waitingOn={waitingOn} compact />}
         {busy && (
-          <button className="agent-stop" onClick={interrupt}>
-            ⏹ Stop
+          <button className="agent-stop" onClick={interrupt} aria-label="Stop" title="Stop (Esc)">
+            <span className="tb-icon" aria-hidden="true">⏹</span>
+            <span className="tb-label">Stop</span>
           </button>
         )}
       </div>
 
       {showRules && <RulesPanel project={session.repo} />}
       {showCaps && <CapabilitiesPanel report={capabilities} onClose={() => setShowCaps(false)} />}
+      {showFiles && (
+        <ArtifactsPanel
+          sessionId={sessionId}
+          items={artifacts.items}
+          status={artifacts.status}
+          onClose={() => setShowFiles(false)}
+          onView={setViewing}
+          onChanged={artifacts.refresh}
+          onAttach={() => { setShowFiles(false); attachInput.current?.click() }}
+        />
+      )}
+      {openArtifact && (
+        <ArtifactViewer
+          key={openArtifact.id}
+          sessionId={sessionId}
+          artifact={openArtifact}
+          latest={openLatest}
+          onOpen={a => { setLinked(null); clearArtifactParam(); setViewing(a) }}
+          onClose={closeViewer}
+        />
+      )}
+      {linkMissing && (
+        <div className="artifact-missing" role="status" data-testid="artifact-missing">
+          That file no longer exists.
+          <button type="button" className="artifact-btn" onClick={closeViewer}>Dismiss</button>
+        </div>
+      )}
 
-      <div className="agent-timeline" onScroll={onTimelineScroll}>
+      {showSkeleton && <HistorySkeleton />}
+      <div ref={timelineRef} className={`agent-timeline${showSkeleton ? ' loading' : ''}${loadingOlder ? ' backfilling' : ''}`} onScroll={onTimelineScroll}>
+        {loadingOlder && (
+          <div className="older-loading" data-testid="older-loading" role="status">
+            <span className="queue-spinner" aria-hidden="true" /> Loading earlier messages…
+          </div>
+        )}
         {starting && attempt && <StartProgress attempt={attempt} session={session} clockOffset={clockOffset} />}
         {starting && !attempt && <StartProgress attempt={placeholderAttempt(startedAt)} session={session} clockOffset={clockOffset} />}
-        {!starting && (live || hasUserMessage) && <ReadyCard session={session} readyAt={readyAt} />}
+        {!starting && !loadingOlder && (live || hasUserMessage) && <ReadyCard session={session} readyAt={readyAt} />}
         {compact
           ? timelineItems.map(item => {
               if (item.type === 'tools') {
@@ -530,24 +825,53 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
                 )
               }
               const k = item.ev.client_event_id
+              if (footerPairs.absorbed.has(k)) return null
+              const footer = footerPairs.footers.get(k)
               return (
                 <Fragment key={k}>
                   {dayBreaks.has(k) && <DayDivider ts={dayBreaks.get(k)!} />}
-                  <EventRow ev={item.ev} turnStart={turnStarts.get(k)} />
+                  <EventRow
+                    ev={item.ev}
+                    turnStart={turnStarts.get(k)}
+                    footer={footer}
+                    footerStart={footer ? turnStarts.get(footer.client_event_id) : undefined}
+                  />
                 </Fragment>
               )
             })
-          : events.filter(ev => !HIDDEN_KINDS.has(ev.kind)).map(ev => (
-              <Fragment key={ev.client_event_id}>
-                {dayBreaks.has(ev.client_event_id) && <DayDivider ts={dayBreaks.get(ev.client_event_id)!} />}
-                {renderEvent(ev, resultsByCall, turnStarts.get(ev.client_event_id))}
-              </Fragment>
-            ))}
+          : events.filter(ev => !HIDDEN_KINDS.has(ev.kind) && !footerPairs.absorbed.has(ev.client_event_id)).map(ev => {
+              const footer = footerPairs.footers.get(ev.client_event_id)
+              return (
+                <Fragment key={ev.client_event_id}>
+                  {dayBreaks.has(ev.client_event_id) && <DayDivider ts={dayBreaks.get(ev.client_event_id)!} />}
+                  {renderEvent(ev, resultsByCall, turnStarts.get(ev.client_event_id), footer,
+                    footer ? turnStarts.get(footer.client_event_id) : undefined)}
+                </Fragment>
+              )
+            })}
         {streaming && (
           <div className="agent-card assistant streaming" data-testid="streaming">
             <Markdown text={streaming} />
           </div>
         )}
+        {visibleQueued.map((q, i) => (
+          <div key={q.id} className={`agent-card user queued ${queueState}`} data-testid="queued-message">
+            <span className="card-author">You</span>
+            <MessageText text={q.text} />
+            <div className="queue-status" role="status">
+              {queueState === 'failed'
+                ? <><span aria-hidden="true">⚠</span> Not delivered</>
+                : <>
+                    <span className="queue-spinner" aria-hidden="true" />
+                    {queueState === 'sending'
+                      ? 'Sending…'
+                      : visibleQueued.length === 1
+                        ? (steers ? 'Queued — the agent picks it up at its next step' : 'Queued')
+                        : `Queued · ${i + 1} of ${visibleQueued.length}`}
+                  </>}
+            </div>
+          </div>
+        ))}
         {working && !streaming && <WorkingIndicator since={since} now={now} waitingOn={waitingOn} />}
         {waiting && (
           <div className="agent-waiting" role="status" aria-live="polite" data-testid="waiting">
@@ -558,30 +882,107 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
         <div ref={bottomRef} />
       </div>
 
+      {ended && (
+        <div className="agent-offline ended" role="status" data-testid="ended-banner">
+          <span className="agent-offline-dot" aria-hidden="true" />
+          <span>
+            <strong>This session has ended.</strong>{' '}
+            {endLine ? `${endLine.text}. ` : ''}It can’t be resumed — start a new session to keep working.
+          </span>
+        </div>
+      )}
+      {session.status === 'disconnected' && (
+        <div className="agent-offline" role="status" data-testid="offline-banner">
+          <span className="agent-offline-dot" aria-hidden="true" />
+          <span>
+            {session.runtime === 'cluster' || !session.runtime
+              ? <><strong>No pod is running for this session.</strong> It timed out or was stopped. Send a message and a new pod will start and pick up where it left off. Work that was committed is restored; uncommitted changes are not.</>
+              : <><strong>This session is disconnected from its machine.</strong> Messages are delivered when it reconnects.</>}
+          </span>
+        </div>
+      )}
       {notice && (
         <div className="agent-notice" role="status" data-testid="send-notice">{notice}</div>
       )}
+      {working && (
+        <div className="agent-composer-hint" data-testid="composer-hint">
+          {steers ? 'Working — Enter sends it to the agent · Esc interrupts' : 'Working — Enter queues your message · Esc interrupts'}
+        </div>
+      )}
+      {attachments.notice && <div className="agent-notice" role="status" data-testid="attach-notice">{attachments.notice}</div>}
       <div className="agent-composer">
+        <input
+          ref={attachInput}
+          type="file"
+          multiple
+          className="agent-attach-input"
+          data-testid="attach-input"
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={e => {
+            attachments.addFiles(e.target.files ?? [])
+            e.target.value = ''
+          }}
+        />
         <textarea
           value={draft}
           placeholder={placeholder}
-          disabled={session.status === 'starting'}
+          disabled={inputLocked}
           onChange={e => setDraft(e.target.value)}
+          onPaste={e => {
+            const files = Array.from(e.clipboardData?.files ?? [])
+            if (files.length === 0) return
+            // A copied file brings no text; a page with an image brings both, and keeps its text.
+            if (!e.clipboardData.getData('text/plain')) e.preventDefault()
+            attachments.addFiles(files)
+          }}
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
               submit()
+            } else if (e.key === 'Escape' && busy) {
+              // Like the terminal: Esc stops the turn that is running.
+              e.preventDefault()
+              interrupt()
             }
           }}
         />
-        <button onClick={submit} disabled={!draft.trim() || session.status === 'starting'}>Send</button>
+        <div className="agent-composer-actions">
+          <button
+            type="button"
+            className="agent-attach"
+            aria-label="Attach files"
+            title="Attach files"
+            disabled={inputLocked}
+            onClick={() => attachInput.current?.click()}
+          >
+            📎
+          </button>
+          <button onClick={submit} disabled={(!draft.trim() && attachments.done.length === 0) || attachments.uploading || inputLocked}>Send</button>
+        </div>
       </div>
+      <ComposerChips items={attachments.items} onRemove={attachments.remove} />
     </div>
+    </ArtifactActionsContext.Provider>
     </ClockOffsetContext.Provider>
   )
 }
 
-function renderEvent(ev: AgentEvent, results: Map<string, ToolResultPayload>, turnStart?: number) {
+// The turn footer line: stop reason, model, usage, when, and how long it took.
+function turnDoneText(ev: AgentEvent, turnStart?: number) {
+  const p = ev.payload as TurnDonePayload
+  const d = turnDuration(turnStart ?? null, parseTs(ev.ts))
+  return (
+    <>
+      {p.stop_reason} · {p.model} · {usageCost(p)}
+      {p.check_in_missing ? ' · ⚠ no completion check-in' : ''}
+      {' · '}<TimeLabel ts={ev.ts} />
+      {d ? ` · ${d}` : ''}
+    </>
+  )
+}
+
+function renderEvent(ev: AgentEvent, results: Map<string, ToolResultPayload>, turnStart?: number, footer?: AgentEvent, footerStart?: number) {
   const key = ev.client_event_id
   switch (ev.kind) {
     case 'user_message': {
@@ -589,7 +990,8 @@ function renderEvent(ev: AgentEvent, results: Map<string, ToolResultPayload>, tu
       if (p.source === 'system') return null // harness-injected reminders
       return (
         <div key={key} className={`agent-card user source-${p.source}`}>
-          <Markdown text={p.text} />
+          <span className="card-author">You</span>
+          <MessageText text={p.text} />
           <div className="card-foot"><TimeLabel ts={ev.ts} /></div>
         </div>
       )
@@ -600,6 +1002,7 @@ function renderEvent(ev: AgentEvent, results: Map<string, ToolResultPayload>, tu
         <div key={key} className="agent-card assistant">
           <Markdown text={p.text} />
           <div className="card-foot"><TimeLabel ts={ev.ts} /></div>
+          {footer && <div className="turn-foot" data-testid="turn-done">{turnDoneText(footer, footerStart)}</div>}
         </div>
       )
     }
@@ -657,13 +1060,9 @@ function renderEvent(ev: AgentEvent, results: Map<string, ToolResultPayload>, tu
       )
     }
     case 'turn_done': {
-      const p = ev.payload as TurnDonePayload
       return (
         <div key={key} className="agent-card marker turn-done" data-testid="turn-done">
-          {p.stop_reason} · {p.model} · {usageCost(p)}
-          {p.check_in_missing ? ' · ⚠ no completion check-in' : ''}
-          {' · '}<TimeLabel ts={ev.ts} />
-          {(() => { const d = turnDuration(turnStart ?? null, parseTs(ev.ts)); return d ? ` · ${d}` : '' })()}
+          {turnDoneText(ev, turnStart)}
         </div>
       )
     }
@@ -679,6 +1078,8 @@ function renderEvent(ev: AgentEvent, results: Map<string, ToolResultPayload>, tu
         <div key={key} className="agent-card marker">✂ context compacted ({p.summary.length} char summary)</div>
       )
     }
+    case 'artifact':
+      return <ArtifactCard key={key} payload={ev.payload as ArtifactPayload} ts={ev.ts} />
     default: {
       const s = ev.payload as StatusPayload
       void s

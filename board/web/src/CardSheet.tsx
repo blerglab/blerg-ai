@@ -1,3 +1,4 @@
+import { CardLinks, SafeAnchor } from "./CardLinks";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, Board, boardSocket, Card, CardEvent, CardLink, Column, FieldDef, pendingBlockers } from "./api";
@@ -15,7 +16,7 @@ function FieldValue({ def, value }: { def: FieldDef; value: unknown }) {
   const s = String(value);
   switch (def.display ?? (def.type === "url" ? "link" : "inline")) {
     case "hidden": return null;
-    case "link": return <a href={s} target="_blank" rel="noreferrer">{s}</a>;
+    case "link": return <SafeAnchor href={s}>{s}</SafeAnchor>;
     case "badge": return <span className="chip" style={{ color: "var(--blaze)", borderColor: "var(--blaze-soft)" }}>{s}</span>;
     case "chip": return <span className="chip">{s}</span>;
     default: return <>{s}</>;
@@ -145,7 +146,7 @@ export function ReviewSection({ card, events, columns, deployURL, checks, onDone
       )}
       {prs.map((l) => (
         <p key={l.url}><span className="chip">pr</span>{" "}
-          <a href={l.url} target="_blank" rel="noreferrer">{l.label || l.url}</a></p>
+          <SafeAnchor href={l.url}>{l.label || l.url}</SafeAnchor></p>
       ))}
       <p>
         <Link className="btn ghost small" to={`/boards/${card.board_id}/cards/${card.number}/diff`}>
@@ -153,7 +154,7 @@ export function ReviewSection({ card, events, columns, deployURL, checks, onDone
         </Link>
       </p>
       {deployURL && (
-        <p><a className="live-chip" href={deployURL} target="_blank" rel="noreferrer">● LIVE — verify there ↗</a></p>
+        <p><SafeAnchor className="live-chip" href={deployURL}>● LIVE — verify there ↗</SafeAnchor></p>
       )}
       {!rejecting ? (
         <div style={{ marginTop: 10 }}>
@@ -227,7 +228,7 @@ function DocViewer({ cardId, link, onClose }: { cardId: string; link: CardLink; 
       <div className="doc-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={link.label || link.url}>
         <div className="doc-modal-head">
           <span className="chip doc">doc</span>
-          <a className="doc-modal-title" href={link.url} target="_blank" rel="noreferrer">{link.label || link.url}</a>
+          <SafeAnchor className="doc-modal-title" href={link.url}>{link.label || link.url}</SafeAnchor>
           <span className="spacer" />
           <button className="btn ghost small" onClick={onClose}>Close</button>
         </div>
@@ -427,28 +428,7 @@ export function CardSheet({ card, board, columns, onClose }: {
 
           {!isMirrored && <StatsPanel cardId={full.id} />}
 
-          {(dedupedLinks(full.links).length > 0) && (
-            <section>
-              <h4>Links</h4>
-              {dedupedLinks(full.links).map((l) => (
-                <div key={l.kind + l.url}>
-                  {l.kind === "doc" ? (
-                    <button type="button" className="chip doc" onClick={() => setDocLink(l)}
-                      title="open in blerg-board">doc</button>
-                  ) : (
-                    <span className="chip">{l.kind}</span>
-                  )}{" "}
-                  {l.kind === "doc" ? (
-                    <button type="button" className="link-btn" onClick={() => setDocLink(l)}>
-                      {l.label || l.url}
-                    </button>
-                  ) : (
-                    <a href={l.url} target="_blank" rel="noreferrer">{l.label || l.url}</a>
-                  )}
-                </div>
-              ))}
-            </section>
-          )}
+          <CardLinks links={full.links} onOpenDoc={setDocLink} />
 
           {docLink && <DocViewer key={`${full.id}:${docLink.url}`} cardId={full.id} link={docLink} onClose={() => setDocLink(null)} />}
 
@@ -537,16 +517,3 @@ function MoveButton({ card, column, onDone }: { card: Card; column: Column; onDo
   return <button className="btn ghost small" onClick={move}>→ {column.name}</button>;
 }
 
-// dedupedLinks collapses repeat links (same kind + label — e.g. one "runner
-// session" per spawn attempt) down to the most recent occurrence.
-function dedupedLinks(links: Card["links"]) {
-  const seen = new Set<string>();
-  const out: NonNullable<Card["links"]> = [];
-  for (const l of (links ?? []).slice().reverse()) {
-    const k = `${l.kind}|${l.label || l.url}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.unshift(l);
-  }
-  return out;
-}

@@ -79,6 +79,11 @@ func (a *API) Routes(mux *http.ServeMux) {
 				writeError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
+			// A core-issued agent token with a Project claim is confined to
+			// that board here, before any handler runs (see scope.go).
+			if board, scoped := p.ProjectScoped(); scoped && !a.scopeDecision(w, r, board) {
+				return
+			}
 			h(w, r, p)
 		}
 	}
@@ -157,7 +162,7 @@ func writeDBError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, db.ErrStaleVersion):
 		writeError(w, http.StatusConflict, "stale version (If-Match mismatch)")
-	case errors.Is(err, db.ErrInvalidRepos):
+	case errors.Is(err, db.ErrInvalidRepos), errors.Is(err, db.ErrInvalidLink):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, db.ErrColumnHasCards):
 		writeError(w, http.StatusConflict, db.ErrColumnHasCards.Error())

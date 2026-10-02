@@ -40,7 +40,7 @@ function renderDetail(id = 'sess-a') {
     <MemoryRouter initialEntries={[`/sessions/${id}`]}>
       <Routes>
         <Route path="/sessions/:id" element={<SessionDetail />} />
-        <Route path="/" element={<div>HOME</div>} />
+        <Route path="/sessions" element={<div>HOME</div>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -261,6 +261,47 @@ describe('SessionDetail', () => {
     await waitFor(() => expect(useToastStore.getState().toasts).toHaveLength(1))
     expect(screen.queryByText('HOME')).not.toBeInTheDocument()
     expect(screen.getByText(session.title || session.repo!)).toBeInTheDocument()
+  })
+
+  // ── Pause: frees a cluster session's pod, keeps the session ───────────────
+
+  it('offers Pause on a live cluster session and posts to the pause endpoint', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    seedSession({ id: 'sess-a', status: 'idle', runtime: 'cluster' })
+    renderDetail()
+
+    fireEvent.click(screen.getByText('⏸ Pause'))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toContain('/api/sessions/sess-a/pause')
+    expect(init.method).toBe('POST')
+    // it stays on the session: pausing is not leaving
+    expect(screen.queryByText('HOME')).not.toBeInTheDocument()
+    expect(useToastStore.getState().toasts).toHaveLength(0)
+  })
+
+  it('toasts when the pause fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 502 })))
+    seedSession({ status: 'running', runtime: 'cluster' })
+    renderDetail()
+    fireEvent.click(screen.getByText('⏸ Pause'))
+    await waitFor(() => expect(useToastStore.getState().toasts).toHaveLength(1))
+  })
+
+  it('does not offer Pause on a desktop session, a starting one, or one already paused', () => {
+    seedSession({ status: 'idle', runtime: 'daemon' })
+    const { unmount } = renderDetail()
+    expect(screen.queryByText('⏸ Pause')).not.toBeInTheDocument()
+    unmount()
+    seedSession({ status: 'starting', runtime: 'cluster' })
+    const second = renderDetail()
+    expect(screen.queryByText('⏸ Pause')).not.toBeInTheDocument()
+    second.unmount()
+    seedSession({ status: 'disconnected', runtime: 'cluster' })
+    renderDetail()
+    expect(screen.queryByText('⏸ Pause')).not.toBeInTheDocument()
   })
 
   it('sends mark_session_read on mount when a sessionId is present', () => {

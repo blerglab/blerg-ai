@@ -182,6 +182,11 @@ func (s *Server) dispatch(ctx context.Context, p server.RunnerPrincipal, name st
 			// Idempotency-Key header is over REST.
 			IdempotencyKey *string `json:"idempotency_key"`
 		}
+		// MCP connections can only be attached from the launch sheet by a signed-in person: an
+		// `mcp` argument is refused, never dropped as an unknown key.
+		if apiErr := server.RejectMCPArgument(args); apiErr != nil {
+			return apiToolError(apiErr)
+		}
 		if bad := decodeArgs(args, &a); bad != nil {
 			return bad
 		}

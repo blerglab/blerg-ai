@@ -60,8 +60,15 @@ type JobManager struct {
 	// the spawn path can tell whether a bare (one-segment) repo name has an
 	// org to resolve against — see HandlePostSessions's cluster branch.
 	GitHubOrg     string
-	MaxSessions   int   // concurrent cluster session cap
-	PodTTLSeconds int64 // activeDeadlineSeconds (pod TTL, not session TTL)
+	MaxSessions   int   // concurrent cluster session cap (env default; see effectiveMaxSessions)
+	PodTTLSeconds int64 // activeDeadlineSeconds: the hard cap on a pod's lifetime, busy or not
+	// PodIdleSeconds ends a session pod after this long with no user message or
+	// finished turn (0 = never). The pod enforces it (BLERG_RUNNER_IDLE_TIMEOUT_SECONDS).
+	PodIdleSeconds int64
+	// Overrides, when set, returns the admin-set values that win over the two
+	// fields above (db.SettingPodTTLSeconds / db.SettingPodIdleTimeoutSeconds).
+	// Read at each spawn so a change applies to the next pod without a restart.
+	Overrides func() map[string]int64
 
 	// CoreURL/CoreInternalKey point at blerg-core's internal
 	// credential-fetch endpoint (Task 15's POST /internal/credentials/fetch)
@@ -160,7 +167,8 @@ func NewJobManagerFromEnv(gitHubOrg string) *JobManager {
 		ExplicitGitURLBase: explicitGitBase,
 		GitHubOrg:          gitHubOrg,
 		MaxSessions:        envOrInt("BLERG_RUNNER_MAX_SESSIONS", 4),
-		PodTTLSeconds:      int64(envOrInt("BLERG_RUNNER_POD_TTL_SECONDS", 6*3600)),
+		PodTTLSeconds:      int64(envOrInt("BLERG_RUNNER_POD_TTL_SECONDS", 7*24*3600)),
+		PodIdleSeconds:     int64(envOrInt("BLERG_RUNNER_POD_IDLE_TIMEOUT_SECONDS", 24*3600)),
 
 		CoreURL:          os.Getenv("BLERG_CORE_URL"),
 		CoreInternalKey:  os.Getenv("BLERG_RUNNER_CORE_INTERNAL_KEY"),
@@ -386,20 +394,50 @@ func (j *JobManager) AvailableEngines() []string {
 // Status summarizes cluster-runtime configuration and live state for the
 // status dashboard and the launch UI's engine gating. Never includes secret
 // values — only key presence (via AvailableEngines) and non-secret config.
+// limits is the pod lifetime cap and idle timeout in effect now: an admin's
+// stored override where there is one, the environment default otherwise.
+func (j *JobManager) limits() (ttl, idle int64) {
+	ttl, idle = j.PodTTLSeconds, j.PodIdleSeconds
+	if j.Overrides != nil {
+		o := j.Overrides()
+		if v, ok := o[db.SettingPodTTLSeconds]; ok && v > 0 {
+			ttl = v
+		}
+		if v, ok := o[db.SettingPodIdleTimeoutSeconds]; ok && v >= 0 {
+			idle = v
+		}
+	}
+	return ttl, idle
+}
+
+// effectiveMaxSessions is the concurrent session cap in force now: the admin
+// override (db.SettingMaxSessions) when one is set and positive, else the
+// environment value. Read at each use, so a change applies to the next start.
+func (j *JobManager) effectiveMaxSessions() int {
+	if j.Overrides != nil {
+		if v, ok := j.Overrides()[db.SettingMaxSessions]; ok && v > 0 {
+			return int(v)
+		}
+	}
+	return j.MaxSessions
+}
+
 func (j *JobManager) Status() protocol.ClusterStatus {
 	active, err := j.ActiveSessionJobs()
 	if err != nil {
 		log.Printf("cluster status: list active jobs: %v", err)
 		active = -1 // -1 signals "couldn't tell", distinct from a real 0
 	}
+	ttl, idle := j.limits()
 	return protocol.ClusterStatus{
 		Configured:              true,
 		Namespace:               j.Namespace,
 		Image:                   j.Image,
 		DaemonID:                clusterDaemonID,
-		MaxSessions:             j.MaxSessions,
+		MaxSessions:             j.effectiveMaxSessions(),
+		MaxSessionsDefault:      j.MaxSessions,
 		ActiveSessions:          active,
-		AvailableEngines:        j.AvailableEngines(),
+		AvailableEngines:        nonNilStrings(j.AvailableEngines()),
 		GitConfigured:           j.gitConfigured(),
 		SecretName:              j.SecretName,
 		OAuthSecretName:         j.OAuthSecretName,
@@ -407,7 +445,8 @@ func (j *JobManager) Status() protocol.ClusterStatus {
 		MemRequest:              j.MemRequest,
 		CPULimit:                j.CPULimit,
 		MemLimit:                j.MemLimit,
-		PodTTLSeconds:           j.PodTTLSeconds,
+		PodTTLSeconds:           ttl,
+		PodIdleTimeoutSeconds:   idle,
 		TerminationGraceSeconds: j.TerminationGraceSeconds,
 		TTLSecondsAfterFinished: j.TTLSecondsAfterFinished,
 	}
@@ -458,8 +497,33 @@ type SessionJobSpec struct {
 	Plugins         []pluginspec.Entry
 	PluginsNote     string
 	PluginsResolved bool
-	retried         bool // internal: finished-Job conflict retry guard
+	// MCPGateway is the session's MCP gateway grant (mcpstart.go): the gateway address and one
+	// token per connection. Its JSON goes ONLY into the per-session Secret, and the Job carries
+	// a secretKeyRef for mcpGatewayEnvVar, never the value. A session with a grant gets
+	// no always-on plugins (pluginsWanted).
+	MCPGateway *protocol.MCPGatewayConfig
+	// RestrictTools makes the pod run Claude Code hardened (tool allow-list, no ambient MCP, no
+	// user settings, plugins, hooks or skills): set for every cron session and every session
+	// with a grant. The Job carries it as the plain env value restrictToolsEnvVar=1 (not a
+	// secret); the pod reads and unsets it at once. Set only in process.
+	RestrictTools bool
+	// NoOperatorFallback is set for a cron's session (spec 7.4): the shared operator Secret must
+	// never supply this session's credentials. CreateSessionJob then fails with
+	// ErrNoPersonalCredential, creating no Secret and no Job, whenever the owner's personal
+	// credential fetch returns nothing for any reason (no account, core not configured, 404, 5xx,
+	// a network error). Set only in process; nothing decoded from a request body reaches it.
+	NoOperatorFallback bool
+	retried            bool // internal: finished-Job conflict retry guard
 }
+
+// ErrNoPersonalCredential is what CreateSessionJob returns for a NoOperatorFallback session whose
+// personal credential could not be fetched. It is a credential problem, not a capacity one: the
+// cron scheduler fails the run (cron.ErrCredential) instead of holding it.
+var ErrNoPersonalCredential = errors.New("the owner's personal credential is unavailable: a cron never runs on the shared operator credential")
+
+// errClusterCap is the cluster's concurrent session cap, reported by CreateSessionJob (its text
+// is "cluster session cap reached (N)"). The cron start path treats it as capacity.
+var errClusterCap = errors.New("cluster session cap reached")
 
 // CloneURL is the git URL a cluster session clones: the caller's explicit
 // override when given (cross-org repos), else the configured base with the
@@ -646,6 +710,10 @@ func (j *JobManager) createSessionSecret(ctx context.Context, sessionID string, 
 		return false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusConflict {
+		log.Printf("create session secret for %s: 409 already exists", sessionID)
+		return false, errSessionSecretExists
+	}
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		// The k8s API's rejection body can echo back parts of the request —
 		// including the names (and, on some validation errors, the shape) of
@@ -662,6 +730,72 @@ func (j *JobManager) createSessionSecret(ctx context.Context, sessionID string, 
 // errSessionSecretCreate is the only thing a failed per-session Secret create
 // ever tells its caller. See createSessionSecret.
 var errSessionSecretCreate = errors.New("could not prepare session credentials")
+
+// errSessionSecretExists is createSessionSecret's internal answer to a 409; it
+// never leaves CreateSessionJob (the caller sees errSessionSecretCreate).
+var errSessionSecretExists = errors.New("session secret already exists")
+
+// sessionCleanupWait bounds how long CreateSessionJob waits for a replaced
+// session's old Job/Secret to be gone; sessionCleanupPoll is the poll interval.
+var (
+	sessionCleanupWait = 10 * time.Second
+	sessionCleanupPoll = 200 * time.Millisecond
+)
+
+// secretExists reports whether the named Secret is present. Only a definite
+// 200 counts as present: any other answer (404, no RBAC, network) is "not
+// known to exist", and a Secret that is still there then surfaces as the 409
+// on create, which has its own handling.
+func (j *JobManager) secretExists(ctx context.Context, name string) bool {
+	resp, err := j.doWithContentType(ctx, http.MethodGet,
+		"/api/v1/namespaces/"+j.Namespace+"/secrets/"+name, nil, "application/json")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return resp.StatusCode == http.StatusOK
+}
+
+// waitSessionGone polls until the session's Secret (and, when withJob, its
+// Job) no longer exist, so a fresh Secret POST cannot race the old one's
+// deletion. It returns false when they are still there after
+// sessionCleanupWait.
+func (j *JobManager) waitSessionGone(sessionID string, withJob bool) bool {
+	deadline := time.Now().Add(sessionCleanupWait)
+	for {
+		jobThere := false
+		if withJob {
+			jobThere, _ = j.jobPresence(sessionID)
+		}
+		if !jobThere && !j.secretExists(context.Background(), sessionSecretName(sessionID)) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(sessionCleanupPoll)
+	}
+}
+
+// clearFinishedSession removes a FINISHED Job and the per-session Secret it
+// left behind (both live on for ttlSecondsAfterFinished after the pod ends),
+// then waits for them to be gone. A live Job is never touched. Errors are
+// logged in detail and returned as the fixed errSessionSecretCreate.
+func (j *JobManager) clearFinishedSession(sessionID string) error {
+	exists, finished := j.jobPresence(sessionID)
+	if !exists || !finished {
+		return nil
+	}
+	if err := j.DeleteSessionJob(sessionID); err != nil {
+		log.Printf("clear finished job for %s: %v", sessionID, err)
+		return errSessionSecretCreate
+	}
+	if !j.waitSessionGone(sessionID, true) {
+		log.Printf("clear finished job for %s: old job/secret still present after %s", sessionID, sessionCleanupWait)
+		return errSessionSecretCreate
+	}
+	return nil
+}
 
 // errSessionJobCreate is the only thing a rejected Job create ever tells its
 // caller. See CreateSessionJob's non-2xx branch.
@@ -742,9 +876,7 @@ func fetchCoreCredential(ctx context.Context, client *http.Client, coreURL, inte
 	if !proof.valid() {
 		return nil, false, errNoLivenessProof
 	}
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
+	client = coreHTTPClient(client) // never follows a redirect: the request carries the internal key
 	raw, err := json.Marshal(internalCredentialFetchRequest{AccountID: accountID, Engine: engine, TokenID: proof.TokenID, SessionID: proof.SessionID})
 	if err != nil {
 		return nil, false, err
@@ -797,8 +929,13 @@ func fetchCoreCredential(ctx context.Context, client *http.Client, coreURL, inte
 
 // CreateSessionJob creates the runner Job. Enforces the concurrency cap.
 func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
-	if n, err := j.ActiveSessionJobs(); err == nil && n >= j.MaxSessions {
-		return fmt.Errorf("cluster session cap reached (%d)", j.MaxSessions)
+	limit := j.effectiveMaxSessions()
+	if n, err := j.ActiveSessionJobs(); err == nil && n >= limit {
+		return fmt.Errorf("%w (%d)", errClusterCap, limit)
+	}
+	// A cron session has no fallback: with nothing to authenticate as, the shared Secret would.
+	if spec.NoOperatorFallback && spec.SpawningAccountID == "" {
+		return ErrNoPersonalCredential
 	}
 	// Fail closed: a session for an account, with personal credentials wired, must name the
 	// live token/session that authorises reading them. Checked before anything is created.
@@ -823,11 +960,23 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	// Always-on plugins: non-secret configuration, resolved (fail soft) once per start.
 	j.ResolvePlugins(context.Background(), &spec)
 	env = append(env, j.pluginEnv(spec)...)
+	podTTL, podIdle := j.limits()
+	if podIdle > 0 {
+		env = append(env, map[string]any{"name": "BLERG_RUNNER_IDLE_TIMEOUT_SECONDS", "value": strconv.FormatInt(podIdle, 10)})
+	}
 	if spec.Resume {
 		env = append(env, map[string]any{"name": "BLERG_RUNNER_RESUME", "value": "1"})
 	}
 	if spec.NoRepo {
 		env = append(env, map[string]any{"name": "BLERG_RUNNER_NO_REPO", "value": "1"})
+	}
+	// A grant implies the restriction, so a session that reaches here with one and no flag
+	// (a caller that forgot) is still restricted.
+	if spec.RestrictTools || spec.MCPGateway != nil {
+		if _, dup := spec.ExtraEnv[restrictToolsEnvVar]; dup {
+			return fmt.Errorf("env key %s is reserved", restrictToolsEnvVar)
+		}
+		env = append(env, map[string]any{"name": restrictToolsEnvVar, "value": "1"})
 	}
 
 	// sessionData collects everything that must never appear as a literal
@@ -843,6 +992,17 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	}
 	for k, v := range spec.ExtraEnv {
 		sessionData[k] = []byte(v)
+	}
+	// The MCP gateway grant: tokens, so Secret only. The caller's env can never name this key.
+	if spec.MCPGateway != nil {
+		if _, dup := spec.ExtraEnv[mcpGatewayEnvVar]; dup {
+			return fmt.Errorf("env key %s is reserved", mcpGatewayEnvVar)
+		}
+		raw, err := json.Marshal(spec.MCPGateway)
+		if err != nil {
+			return errSessionSecretCreate
+		}
+		sessionData[mcpGatewayEnvVar] = raw
 	}
 
 	// Personal-credential-first: for the engine actually being spawned, and
@@ -862,6 +1022,11 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	if spec.SpawningAccountID != "" {
 		if effectiveEngine == "claude" {
 			plaintext, found, err := j.fetchPersonalCredential(context.Background(), spec.SpawningAccountID, "claude", spec.proof())
+			if spec.NoOperatorFallback && (err != nil || !found) {
+				log.Printf("cluster session %s: no personal claude credential for account %s and no operator fallback for a cron: not starting",
+					spec.SessionID, spec.SpawningAccountID)
+				return ErrNoPersonalCredential
+			}
 			if err == nil && found {
 				// Both claude keys become personal, only the chosen one is
 				// emitted: a personal API key must not run alongside the
@@ -874,6 +1039,9 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 			}
 		} else if credKey, ok := engineCredentialKey[effectiveEngine]; ok {
 			plaintext, found, err := j.fetchPersonalCredential(context.Background(), spec.SpawningAccountID, effectiveEngine, spec.proof())
+			if spec.NoOperatorFallback && (err != nil || !found) {
+				return ErrNoPersonalCredential
+			}
 			if err == nil && found {
 				sessionData[credKey] = plaintext
 				personalKeys[credKey] = true
@@ -883,7 +1051,11 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 		// the session clones as themselves when they've connected a token
 		// for the clone URL's provider, whatever agent they're running.
 		if gitKind != "" {
-			if plaintext, found, err := j.fetchPersonalCredential(context.Background(), spec.SpawningAccountID, gitKind, spec.proof()); err == nil && found {
+			plaintext, found, err := j.fetchPersonalCredential(context.Background(), spec.SpawningAccountID, gitKind, spec.proof())
+			if spec.NoOperatorFallback && (err != nil || !found) {
+				return ErrNoPersonalCredential
+			}
+			if err == nil && found {
 				sessionData[gitTokenKey] = plaintext
 				personalKeys[gitTokenKey] = true
 			}
@@ -903,7 +1075,33 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	// personal credential was found (personalKeys empty).
 	secretCreated := false
 	if len(sessionData) > 0 {
+		// A FINISHED Job (graceful stop, idle exit, deadline) keeps its
+		// per-session Secret for ttlSecondsAfterFinished, and that Secret would
+		// 409 the create below — clear both first. A live Job is left alone.
+		if err := j.clearFinishedSession(spec.SessionID); err != nil {
+			return err
+		}
 		created, err := j.createSessionSecret(context.Background(), spec.SessionID, sessionData)
+		if errors.Is(err, errSessionSecretExists) {
+			// Still 409: either a live session's Secret (refuse, untouched) or
+			// an orphan of a crashed start (no live Job owns it) — replace the
+			// orphan and retry exactly once.
+			if exists, finished := j.jobPresence(spec.SessionID); exists && !finished {
+				return errSessionSecretCreate
+			}
+			if derr := j.deleteSessionSecret(context.Background(), spec.SessionID); derr != nil {
+				log.Printf("delete orphan session secret for %s: %v", spec.SessionID, derr)
+				return errSessionSecretCreate
+			}
+			if !j.waitSessionGone(spec.SessionID, false) {
+				log.Printf("orphan session secret for %s still present after %s", spec.SessionID, sessionCleanupWait)
+				return errSessionSecretCreate
+			}
+			created, err = j.createSessionSecret(context.Background(), spec.SessionID, sessionData)
+			if errors.Is(err, errSessionSecretExists) {
+				err = errSessionSecretCreate
+			}
+		}
 		if err != nil {
 			// Fail closed rather than falling back to a literal env value:
 			// the prompt/ExtraEnv (runner-brokered session tokens) and any
@@ -927,6 +1125,14 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 				},
 			})
 		}
+		if spec.MCPGateway != nil {
+			env = append(env, map[string]any{
+				"name": mcpGatewayEnvVar,
+				"valueFrom": map[string]any{
+					"secretKeyRef": map[string]any{"name": sessionSecretName(spec.SessionID), "key": mcpGatewayEnvVar, "optional": false},
+				},
+			})
+		}
 		extraKeys := make([]string, 0, len(spec.ExtraEnv))
 		for k := range spec.ExtraEnv {
 			extraKeys = append(extraKeys, k)
@@ -945,7 +1151,17 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	// provenance records, per credential env var, where this session's value
 	// came from — see the log line after the loop. Keys only, never values.
 	provenance := make([]string, 0, len(sessionCredentialKeys))
+	// A restricted session (a cron, a grant, RestrictTools) runs claude with file tools only, so
+	// the operator's codex and hermes credentials are of no use to it and only widen what a
+	// compromised pod exposes: they are withheld.
+	restricted := spec.RestrictTools || spec.MCPGateway != nil || spec.NoOperatorFallback
 	for _, key := range sessionCredentialKeys {
+		if restricted && (key == "CODEX_AUTH_JSON" || key == "HERMES_ENV_CONTENTS") {
+			if _, dup := spec.ExtraEnv[key]; !dup {
+				provenance = append(provenance, key+"=withheld")
+				continue
+			}
+		}
 		// A caller-supplied ExtraEnv entry of the same name was already
 		// emitted (from the per-session Secret) by the loop above. Emitting
 		// this one too would put two env entries with the same name in one
@@ -1007,7 +1223,7 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 		},
 		"spec": map[string]any{
 			"backoffLimit":            0,
-			"activeDeadlineSeconds":   j.PodTTLSeconds,
+			"activeDeadlineSeconds":   podTTL,
 			"ttlSecondsAfterFinished": j.TTLSecondsAfterFinished,
 			"template": map[string]any{
 				"metadata": map[string]any{
@@ -1156,14 +1372,26 @@ func (j *JobManager) adoptSessionSecret(sessionID, jobUID string) error {
 // jobFinished reports whether the session's Job object exists in a terminal
 // state (Succeeded/Failed > 0).
 func (j *JobManager) jobFinished(sessionID string) bool {
+	_, finished := j.jobPresence(sessionID)
+	return finished
+}
+
+// jobPresence reports whether the session's Job object exists and, if so,
+// whether it is in a terminal state. An unreadable answer counts as "exists,
+// not finished" so it is never mistaken for a deletable Job; only a definite
+// 404 is "does not exist".
+func (j *JobManager) jobPresence(sessionID string) (exists, finished bool) {
 	resp, err := j.do(http.MethodGet,
 		"/apis/batch/v1/namespaces/"+j.Namespace+"/jobs/"+j.jobName(sessionID), nil)
 	if err != nil {
-		return false
+		return true, false
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, false
+	}
 	if resp.StatusCode != http.StatusOK {
-		return false
+		return true, false
 	}
 	var job struct {
 		Status struct {
@@ -1172,9 +1400,9 @@ func (j *JobManager) jobFinished(sessionID string) bool {
 		} `json:"status"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&job) != nil {
-		return false
+		return true, false
 	}
-	return job.Status.Succeeded > 0 || job.Status.Failed > 0
+	return true, job.Status.Succeeded > 0 || job.Status.Failed > 0
 }
 
 // DeleteSessionJob removes the Job (and its pod) for a killed session.
@@ -1283,6 +1511,13 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 			authSessionID = requesterSessionID
 		}
 	}
+	// A session that holds MCP connections resumes only for the account that started it, from
+	// a signed-in browser session; otherwise the resume is refused and nothing is started.
+	grants, problem := grantResumeProblem(ctx, pool, sessionID, launcher, requesterAccountID, requesterSessionID)
+	if problem != nil {
+		log.Printf("resume %s: refused: %s", sessionID, problem.Message)
+		return
+	}
 	// The session stays "disconnected" until the new pod connects, so restart
 	// its status clock now: the reconciler measures both the 24 h resume
 	// expiry and the missing-Job grace from that stamp, and neither must fire
@@ -1294,6 +1529,8 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 	spec := SessionJobSpec{
 		SessionID: sessionID, Repo: row.Repo, Title: title, Model: model, Effort: effort, Engine: engine,
 		InitialPrompt: text, Resume: true,
+		// The old pod's token died with its session's last end; the new pod gets its own.
+		ExtraEnv: withClusterSessionToken(ctx, pool, sessionID, nil),
 		// A cluster row's repo is empty only for a "No repository" session:
 		// every other cluster start refuses an empty repo. It resumes the same
 		// way — an empty workspace, nothing cloned.
@@ -1306,6 +1543,24 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 		SpawningAccountID: spawningAccountID,
 		TokenID:           tokenID,
 		AuthSessionID:     authSessionID,
+		// A resumed cron session is still a cron's: it never falls back to the operator credential
+		// (a resume by anyone but the owner has no account, and so no credential, and fails).
+		NoOperatorFallback: row.CronID != nil,
+		// A resumed cron session is still restricted (a grant session is, below).
+		RestrictTools: row.CronID != nil,
+	}
+	if len(grants) > 0 {
+		// New tokens for the new pod, replacing the old ones in one transaction: the old
+		// tokens died with the old pod. No always-on plugins for a grant session.
+		gateway, err := reissueGrants(ctx, h, pool, sessionID, launcher, requesterSessionID, grants)
+		if err != nil {
+			log.Printf("resume %s: re-issue MCP grants: %v", sessionID, err)
+			announceClusterStart(ctx, h, pool, sessionID, row.Repo, true, nil)
+			clusterJobCreateFailed(ctx, h, pool, sessionID, "MCP connections could not be granted again")
+			return
+		}
+		spec.MCPGateway = gateway
+		spec.RestrictTools = true
 	}
 	jm.ResolvePlugins(ctx, &spec)
 	announceClusterStart(ctx, h, pool, sessionID, row.Repo, true, pluginStage(spec.Plugins, spec.PluginsNote))
@@ -1346,4 +1601,12 @@ func sessionContainerSecurityContext() map[string]any {
 		"capabilities":             map[string]any{"drop": []string{"ALL"}},
 		"seccompProfile":           map[string]any{"type": "RuntimeDefault"},
 	}
+}
+
+// nonNilStrings turns a nil slice into an empty one, so JSON encodes [] and never null.
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }

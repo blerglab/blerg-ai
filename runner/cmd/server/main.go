@@ -194,11 +194,22 @@ func main() {
 	}
 
 	api := server.NewAPI(hub, dbPool, cfg.DaemonToken, repoLister, cfg.VapidPublicKey)
+	if jm := hub.JobManager(); jm != nil {
+		jm.Overrides = api.SettingsOverrides()
+	}
 	// Close out cluster sessions whose Job ended without the pod reporting back
 	// (deadline, OOM kill, image pull failure, node loss) so they reach a
 	// terminal status and fire their completion webhook. Inert without a
 	// cluster runtime or a database; stops with ctx.
 	go api.StartClusterJobReconciler(ctx, 0)
+	// Own listener; off unless BLERG_RUNNER_MCP_GW_ADDR is set. Session starts reach it (and the
+	// address sessions dial, BLERG_RUNNER_MCP_GW_URL) through SetMCPGateway.
+	api.SetMCPGateway(server.StartMCPGateway(ctx, dbPool, cfg.CoreURL, cfg.CoreInternalKey), server.MCPGatewayURLFromEnv(), cfg.CoreURL, cfg.CoreInternalKey)
+	// The cron scheduler, watchdog and sweeper: on only with the database and blerg-core, and it
+	// logs why when off. Must follow SetMCPGateway (its start path reads that configuration).
+	server.StartCrons(ctx, api, cfg.CoreURL, cfg.CoreInternalKey)
+	// Proposal expiry, lost approvals and pruning: independent of crons and of blerg-core.
+	server.StartProposalMaintenance(ctx, api)
 	if emb := server.NewEmbedderFromEnv(); emb != nil {
 		api.SetEmbedder(emb)
 		log.Println("knowledge-search embedder enabled (Voyage)")
@@ -217,10 +228,12 @@ func main() {
 	mux.HandleFunc("GET /api/daemons", api.HandleGetDaemons)
 	mux.HandleFunc("PUT /api/daemons/{id}/repos-root", api.HandlePutDaemonReposRoot)
 	mux.HandleFunc("GET /api/cluster/status", api.HandleGetClusterStatus)
+	mux.HandleFunc("PUT /api/cluster/settings", api.HandlePutClusterSettings)
 	mux.HandleFunc("GET /api/me/credentials", api.HandleGetMyCredentials)
 	mux.HandleFunc("GET /api/sessions", api.HandleGetSessions)
 	mux.HandleFunc("POST /api/sessions", api.HandlePostSessions)
 	mux.HandleFunc("DELETE /api/sessions/{id}", api.HandleDeleteSession)
+	mux.HandleFunc("POST /api/sessions/{id}/pause", api.HandlePauseSession)
 	mux.HandleFunc("PATCH /api/sessions/{id}", api.HandlePatchSession)
 	mux.HandleFunc("GET /api/repos", api.HandleGetRepos)
 	mux.HandleFunc("POST /api/preview", hub.HandlePreview(cfg.DaemonToken))
@@ -228,6 +241,9 @@ func main() {
 	mux.HandleFunc("POST /api/push/subscribe", api.HandlePostPushSubscribe)
 	mux.HandleFunc("GET /api/sessions/{id}/agent-events", api.HandleGetAgentEvents)
 	mux.HandleFunc("GET /api/sessions/{id}/capabilities", api.HandleGetCapabilities)
+	api.RegisterMCPRoutes(mux)
+	api.RegisterCronRoutes(mux, cfg.CoreURL, cfg.CoreInternalKey)
+	api.RegisterProposalRoutes(mux)
 	// Runner contract (blerg-board) — enabled only when BLERG_RUNNER_KEY is set.
 	api.SetRunnerKey(os.Getenv("BLERG_RUNNER_KEY"))
 	// Additive: also accept blerg-core-issued tokens (aud "blerg-runner") once
@@ -266,6 +282,7 @@ func main() {
 	mux.HandleFunc("DELETE /api/agent/rules/{id}", api.HandleDeleteRule)
 	mux.HandleFunc("POST /api/mockups", api.HandlePostMockup)
 	mux.HandleFunc("GET /m/", api.HandleServeMockup)
+	api.RegisterArtifactRoutes(mux)
 	mux.HandleFunc("POST /api/screenshots", api.HandlePostScreenshot)
 	mux.HandleFunc("GET /s/", api.HandleServeScreenshot)
 	mux.HandleFunc("POST /api/agent-config", api.HandlePostAgentConfig)

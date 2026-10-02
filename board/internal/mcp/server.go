@@ -6,11 +6,13 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -78,7 +80,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		writeRPC(w, req.ID, map[string]any{}, nil)
 	case "tools/list":
-		writeRPC(w, req.ID, map[string]any{"tools": toolDefs}, nil)
+		writeRPC(w, req.ID, map[string]any{"tools": visibleTools(principal)}, nil)
 	case "tools/call":
 		s.handleToolCall(r.Context(), w, req, principal)
 	default:
@@ -108,6 +110,10 @@ func (s *Server) handleToolCall(ctx context.Context, w http.ResponseWriter, req 
 		return
 	}
 	result, err := s.dispatch(ctx, p, call.Name, call.Arguments)
+	if errors.Is(err, errInvalidArguments) {
+		writeRPC(w, req.ID, nil, &rpcError{Code: -32602, Message: err.Error()})
+		return
+	}
 	if err != nil {
 		writeRPC(w, req.ID, toolError(map[string]string{"error": err.Error()}), nil)
 		return
@@ -126,15 +132,71 @@ func (s *Server) resolveCard(ctx context.Context, cardID, boardID string, number
 	return db.Card{}, fmt.Errorf("pass card_id, or board_id + number")
 }
 
-// unwrapStringJSON re-parses named args that arrived as string-encoded JSON
-// ("[{...}]" instead of [{...}]). Some MCP clients stringify values whose
-// schema property they can't type; strict unmarshals downstream would 400.
-func unwrapStringJSON(args json.RawMessage, keys ...string) json.RawMessage {
-	var m map[string]json.RawMessage
-	if json.Unmarshal(args, &m) != nil {
-		return args
+// errInvalidArguments marks tool arguments that are refused before any tool
+// (or scope check) sees them; handleToolCall answers them as invalid params.
+var errInvalidArguments = errors.New("invalid params")
+
+// canonicalArgs decodes a tool call's arguments exactly ONCE into the single
+// form both the scope check and the tool use. Go's struct decode is
+// case-insensitive and the last matching key wins, so two spellings of one key
+// ("review_id" and "REVIEW_ID") would let a check and a tool read different
+// values. Here the arguments must be one JSON object, with nothing after it,
+// and no key may appear twice under ANY spelling (exact, case-folded, or
+// written with unicode escapes, which the decoder resolves first). The result
+// has each key exactly once, in a fixed order, with string-wrapped JSON
+// values ("fields", "field_schema") unwrapped; nothing downstream re-decodes
+// the original bytes.
+func canonicalArgs(raw json.RawMessage) (json.RawMessage, error) {
+	if t := bytes.TrimSpace(raw); len(t) == 0 || string(t) == "null" {
+		return json.RawMessage(`{}`), nil
 	}
-	changed := false
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, fmt.Errorf("%w: arguments must be a JSON object", errInvalidArguments)
+	}
+	vals := map[string]json.RawMessage{}
+	var keys []string
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("%w: malformed arguments", errInvalidArguments)
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return nil, fmt.Errorf("%w: malformed arguments", errInvalidArguments)
+		}
+		for _, seen := range keys {
+			if strings.EqualFold(seen, key) {
+				return nil, fmt.Errorf("%w: argument %q is given more than once", errInvalidArguments, key)
+			}
+		}
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, fmt.Errorf("%w: malformed arguments", errInvalidArguments)
+		}
+		keys = append(keys, key)
+		vals[key] = v
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return nil, fmt.Errorf("%w: malformed arguments", errInvalidArguments)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: unexpected data after the arguments object", errInvalidArguments)
+	}
+	unwrapStringJSON(vals, "field_schema", "fields")
+	out, err := json.Marshal(vals)
+	if err != nil {
+		return nil, fmt.Errorf("%w: malformed arguments", errInvalidArguments)
+	}
+	return out, nil
+}
+
+// unwrapStringJSON re-parses named args that arrived as string-encoded JSON
+// ("[{...}]" instead of [{...}]), in place. Some MCP clients stringify values
+// whose schema property they can't type; strict unmarshals downstream would
+// 400. The keys are already unique (canonicalArgs), so this cannot change
+// which value any key resolves to.
+func unwrapStringJSON(m map[string]json.RawMessage, keys ...string) {
 	for _, k := range keys {
 		raw, ok := m[k]
 		if !ok || len(raw) == 0 || raw[0] != '"' {
@@ -152,28 +214,26 @@ func unwrapStringJSON(args json.RawMessage, keys ...string) json.RawMessage {
 			continue
 		}
 		m[k] = json.RawMessage(trimmed)
-		changed = true
 	}
-	if !changed {
-		return args
-	}
-	out, err := json.Marshal(m)
-	if err != nil {
-		return args
-	}
-	return out
 }
 
 func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, args json.RawMessage) (map[string]any, error) {
 	pool := s.api.Pool
-	args = unwrapStringJSON(args, "field_schema", "fields")
+	// Decode once; the scope check and the tool both read this same value.
+	args, err := canonicalArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.scopeCheck(ctx, p, name, args); err != nil {
+		return nil, err
+	}
 	switch name {
 	case "blerg_board_list":
 		boards, err := db.ListBoards(ctx, pool)
 		if err != nil {
 			return nil, err
 		}
-		if p.Kind == auth.KindAgent && p.Token.BoardID != nil {
+		if p.Token != nil && p.Token.BoardID != nil {
 			scoped := boards[:0]
 			for _, b := range boards {
 				if b.ID == *p.Token.BoardID {
@@ -463,8 +523,8 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		if err := p.RequireBoard(card.BoardID, "card.write"); err != nil {
 			return nil, err
 		}
-		links := slices.Concat(card.Links, []db.Link{{Kind: a.Kind, URL: a.URL, Label: &a.Label}})
-		res, err := s.api.UpdateCardGated(ctx, p, card.ID, db.CardParams{Links: &links}, "", "")
+		links := []db.Link{{Kind: a.Kind, URL: a.URL, Label: &a.Label}}
+		res, err := s.api.UpdateCardGated(ctx, p, card.ID, db.CardParams{AddLinks: &links}, "", "")
 		if err != nil {
 			return nil, err
 		}
@@ -505,6 +565,12 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		}
 		rev, err := db.GetReview(ctx, pool, a.ReviewID)
 		if err != nil {
+			return nil, err
+		}
+		// Authorize on the review's own board, like REST: the scope check
+		// only covers project-scoped tokens, a native board-scoped agent
+		// token must be confined here.
+		if err := p.RequireBoard(rev.BoardID, "card.read"); err != nil {
 			return nil, err
 		}
 		return toolText(rev), nil

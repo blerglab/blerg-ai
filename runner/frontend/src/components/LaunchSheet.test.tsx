@@ -37,9 +37,18 @@ function buildFetchMock(
     reposStaleAt?: string
     // noRepos: /api/repos answers an empty list (nothing checked out, no provider).
     noRepos?: boolean
+    // mcpConnections / mcpTools: the runner's MCP connection list and (for connection c1) its tools.
+    mcpConnections?: Record<string, unknown>[]
+    mcpTools?: Record<string, unknown>[]
   },
 ) {
   return vi.fn((url: string, init?: RequestInit) => {
+    if (url === '/api/mcp/connections') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ connections: opts?.mcpConnections ?? [] }) })
+    }
+    if (url === '/api/mcp/connections/c1/tools') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ tools: opts?.mcpTools ?? [] }) })
+    }
     // modelsByEngine keys: "<engine>?daemon_id=<id>" for one daemon's answer,
     // or just "<engine>" for any daemon (and none).
     const modelsPath = url.startsWith('/api/models/') ? url.slice('/api/models/'.length) : undefined
@@ -1699,5 +1708,93 @@ describe('LaunchSheet — No repository', () => {
     expect(screen.getByTestId('no-repo-plan')).toHaveTextContent(`${SCRATCH} in /repos/a`)
     fireEvent.click(screen.getByTestId('daemon-d2'))
     expect(screen.getByTestId('no-repo-plan')).toHaveTextContent(`${SCRATCH} in /repos/b`)
+  })
+})
+
+describe('LaunchSheet MCP servers', () => {
+  let captureBody: { value?: Record<string, unknown> }
+  const MCP = {
+    mcpConnections: [{ id: 'c1', name: 'calendar', url: 'https://x/mcp', auth_kind: 'static', status: 'ok', default_tools: {} }],
+    mcpTools: [
+      { name: 'read', description: 'reads', hash: 'h-read', annotations: { readOnlyHint: true } },
+      { name: 'send', description: 'sends', hash: 'h-send' },
+    ],
+  }
+
+  beforeEach(() => {
+    captureBody = {}
+    useSessionStore.setState({ pendingSessionIds: {}, failedSessions: {} })
+    vi.stubGlobal('localStorage', makeMemoryStorage())
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  async function renderSheet(opts?: Parameters<typeof buildFetchMock>[1]) {
+    vi.stubGlobal('fetch', buildFetchMock(captureBody, { ...MCP, ...opts }))
+    render(
+      <MemoryRouter>
+        <LaunchSheet open={true} onClose={vi.fn()} />
+      </MemoryRouter>,
+    )
+    await screen.findByText('Repository')
+  }
+
+  async function launch() {
+    fireEvent.click(screen.getByText('myrepo'))
+    fireEvent.click(screen.getByText(/Launch/))
+    await waitFor(() => expect(captureBody.value).toBeDefined())
+    return captureBody.value!
+  }
+
+  it('sends no mcp when nothing is selected, even with connections available', async () => {
+    await renderSheet()
+    const box = await screen.findByRole('checkbox', { name: 'calendar' })
+    expect((box as HTMLInputElement).checked).toBe(false)
+    const body = await launch()
+    expect('mcp' in body).toBe(false)
+  })
+
+  it('sends no mcp for a checked connection with every tool off', async () => {
+    await renderSheet()
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
+    await screen.findByTestId('mcp-tool-calendar-read')
+    const body = await launch()
+    expect('mcp' in body).toBe(false)
+  })
+
+  it('sends mcp with each chosen tool and the hash the picker saw', async () => {
+    await renderSheet()
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
+    await screen.findByTestId('mcp-tool-calendar-read')
+    fireEvent.change(screen.getByLabelText('calendar read mode'), { target: { value: 'allow' } })
+    const body = await launch()
+    expect(body.mcp).toEqual([{ connection: 'c1', tools: { read: { mode: 'allow', hash: 'h-read' } } }])
+  })
+
+  it('offers the picker on the cluster pod and the local sandbox, and explains its absence on the host and for other engines', async () => {
+    await renderSheet({ clusterStatus: CLUSTER_ON, myCreds: { engines: ['claude'], git: true } })
+    expect(await screen.findByTestId('mcp-picker')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    expect(screen.getByTestId('mcp-picker')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('runtime-daemon'))
+    expect(screen.queryByTestId('mcp-picker')).toBeNull()
+    expect(screen.getByTestId('launch-mcp-unavailable')).toHaveTextContent(/not on this machine unsandboxed/)
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    fireEvent.click(screen.getByTestId('engine-codex'))
+    expect(screen.queryByTestId('mcp-picker')).toBeNull()
+    expect(screen.getByTestId('launch-mcp-unavailable')).toBeInTheDocument()
+  })
+
+  it('does not send a selection made earlier once the runtime cannot carry it', async () => {
+    await renderSheet()
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
+    await screen.findByTestId('mcp-tool-calendar-read')
+    fireEvent.change(screen.getByLabelText('calendar read mode'), { target: { value: 'allow' } })
+    fireEvent.click(screen.getByTestId('runtime-daemon'))
+    fireEvent.click(screen.getByLabelText(/I understand/))
+    const body = await launch()
+    expect(body.runtime).toBe('daemon')
+    expect('mcp' in body).toBe(false)
   })
 })

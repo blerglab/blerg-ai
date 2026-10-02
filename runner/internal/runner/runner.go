@@ -15,8 +15,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
@@ -51,15 +53,101 @@ type Config struct {
 	// empty then.
 	NoRepo bool
 
+	// IdleTimeout (BLERG_RUNNER_IDLE_TIMEOUT_SECONDS) ends the pod after this
+	// long with no user message or finished turn; 0 means never.
+	IdleTimeout time.Duration
+
 	// Plugins is the always-on plugin list (BLERG_RUNNER_PLUGINS), Claude sessions only.
 	// PluginsErr is set when the variable was present but unusable.
 	Plugins    []pluginspec.Entry
 	PluginsErr error
+
+	// MCPGateway is the session's MCP gateway grant, from ONE environment
+	// variable, daemon.MCPGatewayEnvVar (BLERG_RUNNER_MCP_CONFIG): the JSON of a
+	// protocol.MCPGatewayConfig ({"base_url": ..., "servers": [{"name": ...,
+	// "token": ...}]}), delivered from the per-session Kubernetes Secret
+	// through a secretKeyRef (never written into the Job spec). ConfigFromEnv
+	// reads it and UNSETS it at once, before any child process (plugin install,
+	// claude, a tool's shell) can inherit it; the daemon package's environment
+	// builders drop it as well. The agent host writes the 0600 config file
+	// outside the workdir from the spawn (podSpawn) and removes it at the end.
+	// MCPGatewayErr is set when the variable was present but unusable: the pod
+	// then fails its start rather than run without the grant's tool list.
+	MCPGateway    *protocol.MCPGatewayConfig
+	MCPGatewayErr error
+
+	// RestrictTools (daemon.RestrictToolsEnvVar, "1"): the session is a cron's
+	// or holds a grant, so Claude runs with the tool allow-list, no ambient MCP
+	// server and none of the user's settings, plugins, hooks or skills, grant
+	// or no grant. Plain, not secret; read and unset at once like the grant.
+	RestrictTools bool
+}
+
+// takeRestrictToolsEnv consumes daemon.RestrictToolsEnvVar: "1" or "true" (any case) restricts.
+func takeRestrictToolsEnv() bool {
+	raw, present := os.LookupEnv(daemon.RestrictToolsEnvVar)
+	if !present {
+		return false
+	}
+	_ = os.Unsetenv(daemon.RestrictToolsEnvVar)
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true":
+		return true
+	}
+	return false
+}
+
+// takeMCPGatewayEnv consumes daemon.MCPGatewayEnvVar: parsed, validated and
+// removed from the process environment. The error never contains the value.
+func takeMCPGatewayEnv() (*protocol.MCPGatewayConfig, error) {
+	raw, present := os.LookupEnv(daemon.MCPGatewayEnvVar)
+	if !present {
+		return nil, nil
+	}
+	_ = os.Unsetenv(daemon.MCPGatewayEnvVar)
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var cfg protocol.MCPGatewayConfig
+	dec := json.NewDecoder(strings.NewReader(raw))
+	if err := dec.Decode(&cfg); err != nil || dec.More() {
+		return nil, fmt.Errorf("%s is not a valid MCP gateway configuration", daemon.MCPGatewayEnvVar)
+	}
+	if err := daemon.ValidateMCPGateway(&cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", daemon.MCPGatewayEnvVar, err)
+	}
+	return &cfg, nil
+}
+
+// skipsUserConfig: a session with a grant runs unattended on untrusted text,
+// so it does not load the user's downloaded ~/.claude bundle (settings, hooks,
+// plugin cache, agent definitions), which is code and configuration the
+// session's tool list does not cover.
+func (c Config) skipsUserConfig() bool { return c.MCPGateway != nil || c.RestrictTools }
+
+// podSpawn is the pod's synthesised spawn_session for its one agent session.
+func podSpawn(cfg Config, workDir string) protocol.SpawnSession {
+	spawn := protocol.SpawnSession{
+		Type: "spawn_session", SessionID: cfg.SessionID, Repo: cfg.Repo,
+		Title: cfg.Title, Model: cfg.Model, Effort: cfg.Effort, Engine: cfg.Engine, Kind: "agent",
+		MCPGateway: cfg.MCPGateway,
+		// A grant implies the restriction.
+		RestrictTools: cfg.RestrictTools || cfg.MCPGateway != nil,
+	}
+	if cfg.NoRepo {
+		// No Repo to resolve a path from: hand the host the directory itself.
+		spawn.ProjectPath = workDir
+	}
+	return spawn
 }
 
 func ConfigFromEnv() Config {
 	plugins, pluginsErr := ParsePluginsEnv(os.Getenv("BLERG_RUNNER_PLUGINS"))
+	gateway, gatewayErr := takeMCPGatewayEnv()
 	return Config{
+		RestrictTools: takeRestrictToolsEnv(),
+		MCPGateway:    gateway,
+		MCPGatewayErr: gatewayErr,
 		Plugins:       plugins,
 		PluginsErr:    pluginsErr,
 		ServerWS:      os.Getenv("BLERG_RUNNER_SERVER_WS"),
@@ -77,8 +165,41 @@ func ConfigFromEnv() Config {
 		APIKey:        os.Getenv("ANTHROPIC_API_KEY"),
 		Resume:        os.Getenv("BLERG_RUNNER_RESUME") == "1",
 		NoRepo:        os.Getenv("BLERG_RUNNER_NO_REPO") == "1",
+		IdleTimeout:   idleTimeoutFromEnv(os.Getenv("BLERG_RUNNER_IDLE_TIMEOUT_SECONDS")),
 		Home:          envDefault("BLERG_RUNNER_HOME", "/workspace"),
 	}
+}
+
+// idleTimeoutFromEnv parses the idle timeout in seconds; anything unusable
+// means no idle limit (the pod's hard lifetime cap still applies).
+func idleTimeoutFromEnv(v string) time.Duration {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Second
+}
+
+// idleTracker records when a session last did something the user would call
+// activity: a message sent, a turn finished. Viewing the session is not.
+type idleTracker struct{ last atomic.Int64 }
+
+func newIdleTracker() *idleTracker {
+	t := &idleTracker{}
+	t.touch()
+	return t
+}
+
+func (t *idleTracker) touch() { t.last.Store(time.Now().UnixNano()) }
+
+func (t *idleTracker) idleFor() time.Duration {
+	return time.Since(time.Unix(0, t.last.Load()))
+}
+
+// idleCheckEvery is how often the idle limit is checked: promptly for short
+// limits, once a minute for long ones.
+func idleCheckEvery(limit time.Duration) time.Duration {
+	return min(time.Minute, max(limit/10, time.Second))
 }
 
 func envDefault(key, def string) string {
@@ -157,6 +278,10 @@ func scrubToken(s, token string) string {
 }
 
 func gitRun(dir string, args ...string) (string, error) {
+	// The agent owns the working tree and can write .git/config: keep git from EXECUTING anything the
+	// repository's own settings name (a hook, an fsmonitor command, a credential helper). The command line
+	// beats the repository config for these keys.
+	args = append([]string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "protocol.ext.allow=never"}, args...)
 	cmd := exec.Command("git", args...) //nolint:gosec,noctx // literal git binary; callers pass fixed subcommands, and clone puts the URL after --; noctx: short git steps of pod startup, which has no context to bound them; the pod itself is killed on timeout
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -191,7 +316,11 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 		return workDir, "existing", nil // pre-mounted workspace (tests)
 	}
 	cloneURL := authURL(cfg.GitURL, cfg.GitToken)
-	if out, err := gitRun(cfg.Home, "clone", "--", cloneURL, workDir); err != nil {
+	// A blobless partial clone: full history and every branch, but file
+	// contents are fetched only for the checkout (and lazily afterwards). Pod
+	// startup is bounded by the download, and history blobs are most of it. A
+	// server that cannot filter makes git warn and clone in full.
+	if out, err := gitRun(cfg.Home, "clone", "--filter=blob:none", "--", cloneURL, workDir); err != nil {
 		// git anonymises URLs in its own messages; this is the belt to that
 		// braces — the text travels to the browser as a start-stage detail.
 		return "", "", &cloneError{out: scrubToken(fmt.Sprintf("%v: %s", err, out), cfg.GitToken)}
@@ -299,6 +428,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// only fires after spawn, which is after that.
 	var workDir string
 	killed := make(chan struct{})
+	activity := newIdleTracker()
 	host := daemon.NewAgentHost(client, daemon.AgentHostConfig{
 		ReposRoot:   cfg.Home,
 		ServerHTTP:  cfg.ServerHTTP,
@@ -311,6 +441,7 @@ func Run(ctx context.Context, cfg Config) error {
 		HomeDir:    cfg.Home,
 		Pricing:    daemon.DefaultPricing(),
 		OnTurnDone: func(sessionID string) {
+			activity.touch()
 			go PushWip(workDir, sessionID)
 		},
 	})
@@ -324,6 +455,7 @@ func Run(ctx context.Context, cfg Config) error {
 	client.OnMessage("agent_user_message", func(raw []byte) {
 		var msg protocol.AgentUserMessage
 		if json.Unmarshal(raw, &msg) == nil {
+			activity.touch()
 			host.UserMessage(msg.SessionID, msg.Text, msg.Source)
 		}
 	})
@@ -385,7 +517,18 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	stages.report(done(protocol.StageConnect), active(protocol.StageClone, cloneDetail))
 
-	if err := daemon.DownloadConfigBundle(ctx, cfg.ServerHTTP, cfg.DaemonToken, cfg.Home); err != nil {
+	if cfg.MCPGatewayErr != nil {
+		// Fail closed: the server meant this session to have a grant and its
+		// tool allow-list; starting without them would be the wrong session.
+		detail := "the MCP gateway configuration is unusable"
+		log.Printf("runner: %v", cfg.MCPGatewayErr)
+		stages.report(done(protocol.StageConnect))
+		stages.fail(protocol.StageEngine, detail, "", cfg.Resume)
+		return fmt.Errorf("%s", detail)
+	}
+	if cfg.skipsUserConfig() {
+		log.Printf("runner: MCP gateway grant: not loading the user's Claude config bundle")
+	} else if err := daemon.DownloadConfigBundle(ctx, cfg.ServerHTTP, cfg.DaemonToken, cfg.Home); err != nil {
 		log.Printf("runner: config bundle: %v (continuing without user config)", err)
 	}
 	if err := writeCodexAuthFromEnv(cfg.Home); err != nil {
@@ -405,14 +548,7 @@ func Run(ctx context.Context, cfg Config) error {
 	log.Printf("runner: workspace %s (%s)", workDir, wsState)
 	reportWorkspaceReady(ctx, cfg, stages, installPlugins)
 
-	spawn := protocol.SpawnSession{
-		Type: "spawn_session", SessionID: cfg.SessionID, Repo: cfg.Repo,
-		Title: cfg.Title, Model: cfg.Model, Effort: cfg.Effort, Engine: cfg.Engine, Kind: "agent",
-	}
-	if cfg.NoRepo {
-		// No Repo to resolve a path from: hand the host the directory itself.
-		spawn.ProjectPath = workDir
-	}
+	spawn := podSpawn(cfg, workDir)
 	if cfg.Resume {
 		events, err := FetchTranscript(ctx, cfg)
 		if err != nil {
@@ -432,13 +568,28 @@ func Run(ctx context.Context, cfg Config) error {
 		host.Spawn(spawn) //nolint:contextcheck // the session outlives this startup context; the prompt-context fetch inside has its own short timeout
 	}
 
-	select {
-	case <-ctx.Done():
-		log.Printf("runner: terminating — final wip push")
-		PushWip(workDir, cfg.SessionID)
-		return nil
-	case <-killed:
-		PushWip(workDir, cfg.SessionID)
-		return nil
+	var idleTick <-chan time.Time
+	if cfg.IdleTimeout > 0 {
+		t := time.NewTicker(idleCheckEvery(cfg.IdleTimeout))
+		defer t.Stop()
+		idleTick = t.C
+	}
+	for {
+		select {
+		case <-idleTick:
+			if activity.idleFor() < cfg.IdleTimeout {
+				continue
+			}
+			log.Printf("runner: idle for %s — ending the pod; the session can be resumed", cfg.IdleTimeout)
+			PushWip(workDir, cfg.SessionID)
+			return nil
+		case <-ctx.Done():
+			log.Printf("runner: terminating — final wip push")
+			PushWip(workDir, cfg.SessionID)
+			return nil
+		case <-killed:
+			PushWip(workDir, cfg.SessionID)
+			return nil
+		}
 	}
 }

@@ -92,6 +92,16 @@ spec:
             - name: BLERG_CORE_PLUGIN_MARKETPLACES
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_CORE_PLUGIN_MARKETPLACES, optional: true }
+            # Optional — hostnames an MCP connection's URL may use over plain
+            # http, or reach although they resolve to a private address
+            # (comma-separated; absent = https and public addresses only). The
+            # runner reads its own pair (configmap.yaml): set both.
+            - name: BLERG_CORE_MCP_ALLOW_HTTP_HOSTS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_CORE_MCP_ALLOW_HTTP_HOSTS, optional: true }
+            - name: BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS, optional: true }
           readinessProbe:
             httpGet:
               path: /healthz

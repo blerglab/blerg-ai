@@ -9,6 +9,10 @@ interface SessionTranscript {
   lastSeq: number
   replayDone: boolean
   hasMore: boolean
+  // The transcript is loaded from its end; older events remain to be fetched, and firstSeq is the
+  // oldest seq held so far (where the next older page starts).
+  hasOlder: boolean
+  firstSeq: number
   // client clock − server clock (ms), from the last replay's server_time.
   // Event ts values are server time; subtract this from Date.now() to get
   // "server now" so elapsed times don't inherit the browser's clock skew.
@@ -28,6 +32,8 @@ const empty = (): SessionTranscript => ({
   lastSeq: 0,
   replayDone: false,
   hasMore: false,
+  hasOlder: false,
+  firstSeq: 0,
   clockOffset: 0,
 })
 
@@ -83,6 +89,23 @@ export const useAgentTranscript = create<AgentTranscriptState>((set) => ({
   ingestReplayDone: (msg) =>
     set((state) => {
       const cur = state.sessions[msg.session_id] ?? empty()
+      if (msg.older) {
+        // A backward page says nothing about the forward replay, so hasMore stays as it was.
+        const first = msg.first_seq ?? 0
+        return {
+          sessions: {
+            ...state.sessions,
+            [msg.session_id]: {
+              ...cur,
+              replayDone: true,
+              hasOlder: msg.has_older === true,
+              firstSeq: first > 0 && (cur.firstSeq === 0 || first < cur.firstSeq) ? first : cur.firstSeq,
+              clockOffset: offsetFrom(msg.server_time, cur.clockOffset),
+              lastSeq: Math.max(cur.lastSeq, msg.last_seq),
+            },
+          },
+        }
+      }
       return {
         sessions: {
           ...state.sessions,

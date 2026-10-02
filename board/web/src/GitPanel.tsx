@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "./api";
 import { TimeAgo } from "./TimeAgo";
+import { SafeAnchor } from "./CardLinks";
 
 interface Commit { sha: string; message: string; author: string; date: string; url: string }
 interface GitInfo {
@@ -45,16 +46,16 @@ export function GitPanel({ cardId, boardId, cardNumber }: {
                 <>
                   <dt>branch</dt>
                   <dd>
-                    <a className="mono" href={info.branch_url} target="_blank" rel="noreferrer">
+                    <SafeAnchor className="mono" href={info.branch_url}>
                       {info.branch}
-                    </a>
+                    </SafeAnchor>
                   </dd>
                 </>
               )}
               {info?.pr_url && (
                 <>
                   <dt>pull request</dt>
-                  <dd><a href={info.pr_url} target="_blank" rel="noreferrer">{info.pr_url}</a></dd>
+                  <dd><SafeAnchor href={info.pr_url}>{info.pr_url}</SafeAnchor></dd>
                 </>
               )}
               <dt>diff</dt>
@@ -71,7 +72,7 @@ export function GitPanel({ cardId, boardId, cardNumber }: {
               <span className="commits-label">commits</span>
               {info!.commits!.map((c) => (
                 <div className="commit" key={c.sha}>
-                  <a className="mono sha" href={c.url} target="_blank" rel="noreferrer">{c.sha}</a>
+                  <SafeAnchor className="mono sha" href={c.url}>{c.sha}</SafeAnchor>
                   <span className="cmsg">{c.message}</span>
                   <span className="cwho">{c.author} · <TimeAgo iso={c.date} /></span>
                 </div>

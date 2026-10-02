@@ -64,6 +64,8 @@ operator never handles that credential: board fetches it from core's vault.
 | `BLERG_BOARD_GATE_ENGINE` | — (required with the token) | `claude` or `hermes`. `codex` is refused (see below). Set without the token, boot is refused. |
 | `BLERG_BOARD_CORE_INTERNAL_KEY` | unset | Same value as core's `BLERG_CORE_INTERNAL_KEY` (the key the runner holds as `BLERG_RUNNER_CORE_INTERNAL_KEY`). Required in account mode; not read otherwise. |
 | `BLERG_CORE_URL` | unset | blerg-core base URL (board verifies core-issued tokens against it). Required in account mode. |
+| `BLERG_CORE_REGISTER_KEY` | unset | Core's registration key. With `BLERG_CORE_URL` set, the board registers itself (and its agent manifest) in core's component directory and keeps that registration alive. Unset: the board still verifies core's tokens but does not register. |
+| `BLERG_BOARD_SELF_URL` | `BLERG_BOARD_PUBLIC_URL`, else `http://blerg-board:8080` | The address the board registers with core: where core and the other components reach it. Only read when `BLERG_CORE_REGISTER_KEY` is set. |
 | `BLERG_BOARD_GATE_MODEL` | see notes | Model the gate asks for. Claude: defaults to `BLERG_BOARD_CLAUDE_MODEL`, then `claude-opus-5`. Hermes: defaults to the first model the endpoint lists at `/v1/models`. |
 
 What the account needs connected in Settings:
@@ -181,7 +183,7 @@ blerg-board purely as a board.
 | `RUNNER_GIT_BASE` | unset | Git host base (e.g. `https://github.com/your-org`) sessions clone `<repo>.git` from. |
 | `BLERG_BOARD_PUBLIC_URL` | `https://blerg-board.example.com` | Human-facing base URL used in card links. Always set it. |
 | `BLERG_BOARD_AGENT_URL` | `http://blerg-board.blerg-board.svc` | blerg-board's own URL as reachable *from spawned sessions* (in-cluster address). **In-cluster default — override it — the installers set it to the public URL.** |
-| `RUNNER_UI_BASE` | unset | Base URL of the runner's session UI (e.g. `https://runner.example.com/sessions`). Omits the session-view link when unset. |
+| `RUNNER_UI_BASE` | unset | Base URL of the runner's session UI (e.g. `https://runner.example.com/sessions`). Omits the session-view link when unset. It is also what an `artifact` card link (a file a session published) is checked against and resolved with: with it unset, artifact links are refused. |
 | `RUNNER_BOOTSTRAP_REPO` | `blerg-board` | Scratch repo used for bootstrap sessions on boards with no repo wired yet. |
 | `RUNNER_GIT_CREDENTIAL_ENV` | unset | Name of an env var (already present in spawned sessions) holding a git/GitHub credential, used in the bootstrap prompt. Unset has the session ask the human for one instead. |
 | `INFRA_DOCS_URL` | unset | Paired with `INFRA_DOCS_NOTE` to append an infra-reference paragraph to session prompts. Both must be set for it to appear — either empty keeps prompts environment-agnostic. |

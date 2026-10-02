@@ -140,7 +140,7 @@ export default function SessionCard({ session, active }: Props) {
   const unread = !!session.unread
   const flashing = isWaiting && unread
   const hasDetails = (status === 'error' && !!session.error_reason)
-    || !!(session.runtime && RUNTIME_CHIP[session.runtime]) || !!kindChipLabel(session.kind) || !!session.model
+    || !!(session.runtime && RUNTIME_CHIP[session.runtime]) || !!kindChipLabel(session.kind) || !!session.model || !!session.cron_id
 
   return (
     <div
@@ -251,6 +251,11 @@ export default function SessionCard({ session, active }: Props) {
       {/* Where and how it runs — the two facts the launch sheet now makes
           explicit, carried through to the list so a Host session is never a
           silent one. */}
+      {session.cron_id && (
+        <span data-testid="cron-badge" title="Started by a cron" style={{ ...chipStyle, color: 'var(--amber)', borderColor: 'var(--amber)' }}>
+          cron
+        </span>
+      )}
       {session.runtime && RUNTIME_CHIP[session.runtime] && (
         <span data-testid="runtime-chip" style={chipStyle}>
           {RUNTIME_CHIP[session.runtime]}

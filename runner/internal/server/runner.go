@@ -129,12 +129,24 @@ type RunnerStartRequest = runnerStartRequest
 type APIError struct {
 	Status  int
 	Message string
+	// Cause is what a caller in this process can match on (errors.Is / errors.As) to tell one
+	// failure from another with the same status; it never reaches a response body. Nil for
+	// almost every error.
+	Cause error
 }
 
 func (e *APIError) Error() string { return e.Message }
 
+// Unwrap exposes Cause to errors.Is and errors.As.
+func (e *APIError) Unwrap() error { return e.Cause }
+
 func apiErrorf(status int, format string, args ...any) *APIError {
 	return &APIError{Status: status, Message: fmt.Sprintf(format, args...)}
+}
+
+// apiErrorCause is apiErrorf with a Cause attached.
+func apiErrorCause(status int, cause error, format string, args ...any) *APIError {
+	return &APIError{Status: status, Message: fmt.Sprintf(format, args...), Cause: cause}
 }
 
 // writeAPIError renders an APIError exactly as the handlers always have.
@@ -227,6 +239,24 @@ type runnerStartRequest struct {
 	// gets a new scratch folder under the repos root (a generated
 	// ".scratch-…" name). omitempty keeps an older request's idempotency hash.
 	NoRepo bool `json:"no_repo,omitempty"`
+	// Grant is the MCP connections this session may use, resolved and checked (mcpstart.go).
+	// It is set only in process (the scheduler); json:"-" means a request body can never
+	// carry one and that the idempotency hash of a request without it is unchanged. Every
+	// spawn path either attaches it or refuses.
+	Grant *ResolvedGrant `json:"-"`
+	// The three fields below are set only in process, by the cron scheduler (cronstart.go), and
+	// are json:"-" for the same reason as Grant: a request body can never carry them, and the
+	// idempotency hash of a request without them is unchanged.
+	//
+	// DaemonID pins a NoRepo start to one connected daemon (the cron's daemon_id). CronID marks the
+	// session as started by that cron (sessions.cron_id) and makes it private. NoOperatorFallback
+	// forbids the shared operator credential on the cluster (SessionJobSpec.NoOperatorFallback).
+	DaemonID           string `json:"-"`
+	CronID             string `json:"-"`
+	NoOperatorFallback bool   `json:"-"`
+	// IdemScope overrides the idempotency scope of this start (a cron's is stable across token
+	// renewals: "cron:<cron id>"). In process only, like the fields above.
+	IdemScope string `json:"-"`
 }
 
 // Runtime values POST /api/runner/start accepts. "" means "whatever this
@@ -337,7 +367,7 @@ func (p runnerPrincipal) seesAllSessions() bool {
 // REST and MCP alike, so the two surfaces cannot come to disagree about who may
 // touch what.
 //
-// A session the principal may not see is reported EXACTLY as an unknown one —
+// The decision itself is canSee (privacy.go). A session the principal may not see is reported EXACTLY as an unknown one —
 // same status, same message — so the contract is not an oracle for which
 // session ids exist. A session with no spawning account (one the static runner
 // key started) belongs to nobody, so a scoped principal cannot see it either.
@@ -346,11 +376,7 @@ func (a *API) requireSessionAccess(ctx context.Context, p runnerPrincipal, sessi
 	if err != nil || row == nil {
 		return nil, apiErrorf(http.StatusNotFound, "session not found")
 	}
-	if p.seesAllSessions() {
-		return row, nil
-	}
-	owner := p.spawningAccountID()
-	if owner == "" || row.SpawningAccountID == nil || *row.SpawningAccountID != owner {
+	if !canSee(p, row) { // privacy.go: also the private-session rule, which no principal bypasses
 		return nil, apiErrorf(http.StatusNotFound, "session not found")
 	}
 	return row, nil
@@ -448,8 +474,20 @@ func (a *API) HandleRunnerStart(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("Idempotency-Key must be a single header of 1-%d characters", maxIdempotencyKeyLen))
 		return
 	}
+	var raw json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	// MCP connections can only be attached from the launch sheet's route by a signed-in
+	// person (mcpstart.go): this one refuses a body that names them rather than dropping the
+	// unknown key and starting a session without the connections the caller expected.
+	if apiErr := RejectMCPArgument(raw); apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
 	var req runnerStartRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
@@ -483,6 +521,16 @@ type StartResponse struct {
 func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req RunnerStartRequest, idemKey string) (StartResponse, *APIError) {
 	if len(idemKey) > maxIdempotencyKeyLen {
 		return StartResponse{}, apiErrorf(http.StatusBadRequest, "%s", idempotencyKeyMessage)
+	}
+	// A grant is built in process (the scheduler) for the account the principal acts for; a
+	// request decoded from a body cannot carry one. Refuse one that is malformed or for
+	// somebody else rather than start a session on the wrong account's connections.
+	if req.Grant != nil && (!req.Grant.valid() || principal.spawningAccountID() == "" ||
+		req.Grant.AccountID != principal.spawningAccountID()) {
+		return StartResponse{}, apiErrorf(http.StatusForbidden, "the MCP grant does not belong to the caller")
+	}
+	if msg := cronStartProblem(req); msg != "" { // cronstart.go: what a cron's start must look like
+		return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", msg)
 	}
 	if req.NoRepo {
 		if msg := noRepoProblem(req.Repo, req.GitURL, req.Provider, false, false); msg != "" {
@@ -533,6 +581,9 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	// start is still in flight must be answered with the SAME id.
 	sessionID := newUUID()
 	scope := principal.startScope()
+	if req.IdemScope != "" {
+		scope = req.IdemScope
+	}
 	if idemKey != "" && a.dbPool != nil {
 		hash, err := startRequestHash(req)
 		if err != nil {
@@ -564,7 +615,7 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 		if idemKey != "" && a.dbPool != nil {
 			// Nothing runs under this key, so it must not answer a retry with
 			// a session that never existed.
-			if err := db.ReleaseIdempotencyKey(ctx, a.dbPool, scope, idemKey, sessionID); err != nil {
+			if err := db.ReleaseIdempotencyKey(context.WithoutCancel(ctx), a.dbPool, scope, idemKey, sessionID); err != nil {
 				log.Printf("runner start: idempotency release: %v", err)
 			}
 		}
@@ -598,6 +649,12 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 	}
 	spawningAccount := principal.spawningAccountID()
 	tokenID := principal.tokenID()
+	// A grant is attached or the start is refused, before anything is recorded (mcpstart.go).
+	if req.Grant != nil {
+		if apiErr := a.checkGrant(req.Grant, grantTarget{Runtime: runnerRuntimeCluster, Engine: req.Engine, Kind: "agent"}); apiErr != nil {
+			return apiErr
+		}
+	}
 	// Fail closed before anything is recorded: with personal credentials wired, core only
 	// releases them against a named live token/session, and this caller names neither.
 	if spawningAccount != "" && jm.personalCredentialsWired() && !principal.proof().valid() {
@@ -618,8 +675,14 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 		// runtime='cluster' is written by the insert itself: the reconciler
 		// selects on that column, so a session whose runtime landed in a
 		// separate write that failed would never be closed out.
-		if err := db.InsertClusterSession(ctx, a.dbPool, sessionID, clusterDaemonID, "starting",
-			workdir, req.Repo, req.Title, req.Model); err != nil {
+		//
+		// A grant or a cron makes the session private, and that (with its owner and the
+		// cron id) goes in the same insert: no other account can list it before the
+		// marking below runs.
+		origin := sessionOriginFor(spawningAccount, req.Grant != nil || req.CronID != "", req.CronID)
+		a.notePrivateInsert(sessionID, origin)
+		if err := db.InsertClusterSessionAs(ctx, a.dbPool, sessionID, clusterDaemonID, "starting",
+			workdir, req.Repo, req.Title, req.Model, origin); err != nil {
 			return apiErrorf(http.StatusInternalServerError, "session create failed")
 		}
 		if err := db.SetSessionKind(ctx, a.dbPool, sessionID, "agent"); err != nil {
@@ -657,14 +720,35 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 			}
 		}
 	}
+	// A cron's session is marked (cron_id) and made private, after its account is recorded.
+	if apiErr := a.markCronSession(ctx, req, sessionID); apiErr != nil {
+		a.abortGrantSession(ctx, sessionID)
+		return apiErr
+	}
+	// The spawning account is recorded above; the session is made private after it, and the
+	// tokens go only into the per-session Secret.
+	var gateway *protocol.MCPGatewayConfig
+	if req.Grant != nil {
+		var apiErr *APIError
+		if gateway, apiErr = a.attachGrant(ctx, sessionID, req.Grant); apiErr != nil {
+			a.abortGrantSession(ctx, sessionID)
+			return apiErr
+		}
+	}
 	spec := SessionJobSpec{
-		SessionID: sessionID, Repo: req.Repo, Title: req.Title,
-		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.Prompt, ExtraEnv: req.Env,
+		MCPGateway: gateway,
+		// Every cron session and every grant session runs restricted (mcpstart.go).
+		RestrictTools: req.Grant != nil || req.CronID != "",
+		SessionID:     sessionID, Repo: req.Repo, Title: req.Title,
+		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.Prompt,
+		ExtraEnv:          withClusterSessionToken(ctx, a.dbPool, sessionID, req.Env),
 		GitURL:            gitURL,
 		NoRepo:            req.NoRepo,
 		SpawningAccountID: spawningAccount,
 		TokenID:           tokenID,
 		AuthSessionID:     principal.proof().SessionID,
+		// A cron never runs on the shared operator credential (spec 7.4).
+		NoOperatorFallback: req.NoOperatorFallback,
 	}
 	jm.ResolvePlugins(ctx, &spec)
 	announceClusterStart(ctx, a.hub, a.dbPool, sessionID, req.Repo, false, pluginStage(spec.Plugins, spec.PluginsNote))
@@ -683,7 +767,9 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 			// through the 503 would leave an async broker waiting forever.
 			a.notifyCompletion(sessionID) //nolint:contextcheck // webhook delivery outlives its caller by design: retries run for minutes (see notifyCompletion)
 		}
-		return apiErrorf(http.StatusServiceUnavailable, "%s", err.Error())
+		// The typed causes let the cron start path tell a credential failure and a cap reached
+		// in a race from an ordinary one; the body the caller sees is unchanged.
+		return apiErrorCause(http.StatusServiceUnavailable, startFailureCause(err), "%s", err.Error())
 	}
 	clusterJobCreated(ctx, a.hub, a.dbPool, sessionID, a.startWatchEvery())
 	return nil
@@ -713,9 +799,16 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		// No folder to look for: any connected daemon will do. The session
 		// gets a new scratch folder there, created (never cloned) by the
 		// daemon exactly like a new folder.
-		dc = a.hub.DaemonForScratch(req.Runtime)
+		if req.DaemonID != "" {
+			// An in-process pin (a cron's daemon_id): that daemon or none, never another one.
+			if dc = a.hub.GetDaemon(req.DaemonID); dc == nil {
+				return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the pinned daemon is not connected")
+			}
+		} else {
+			dc = a.hub.DaemonForScratch(req.Runtime)
+		}
 		if dc == nil {
-			return apiErrorf(http.StatusServiceUnavailable, "no daemon connected — connect one, or use the cluster runtime")
+			return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "no daemon connected — connect one, or use the cluster runtime")
 		}
 		req.Repo = scratch.NewName()
 	} else {
@@ -725,13 +818,26 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		return apiErrorf(http.StatusServiceUnavailable,
 			"no connected daemon has repo %q — check it out under the daemon's repos root, or connect a daemon", req.Repo)
 	}
+	runtime := resolveDaemonRuntime(req.Runtime, dc.SandboxAvailable())
+	// A grant is attached or the start is refused, before anything is recorded: never on the
+	// bare host, and only on a daemon that reports mcp_gateway (mcpstart.go).
+	if req.Grant != nil {
+		if apiErr := a.checkGrant(req.Grant, grantTarget{Runtime: runtime, Engine: req.Engine, Kind: "agent", Daemon: dc}); apiErr != nil {
+			return apiErr
+		}
+	} else if req.CronID != "" {
+		// A cron session with no connections is still restricted: the daemon must be able to.
+		if apiErr := checkRestrictTarget(runtime, dc); apiErr != nil {
+			return apiErr
+		}
+	}
 	// A daemon session runs on the developer's own workstation with that
 	// developer's credentials, so there is no per-session credential to fetch
 	// and nothing for a token id to unlock. The attribution is still recorded
 	// — who asked for this session is worth knowing wherever it ran, and the
 	// record must not depend on which runtime happened to take it.
-	sessionToken := mintSpawnSessionToken(ctx, a.dbPool, sessionID, dc, req.Repo, req.Title, req.Model)
-	runtime := resolveDaemonRuntime(req.Runtime, dc.SandboxAvailable())
+	sessionToken := a.spawnSessionToken(ctx, sessionID, dc, req.Repo, req.Title, req.Model,
+		sessionOriginFor(principal.spawningAccountID(), req.Grant != nil || req.CronID != "", req.CronID))
 	// The v1 contract has no dangerously_skip_permissions field, so no start
 	// through it ever asks to bypass the engine's prompts — on either runtime.
 	skipPerms := false
@@ -769,12 +875,30 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 			}
 		}
 	}
+	// A cron's session is marked (cron_id) and made private, after its account is recorded.
+	if apiErr := a.markCronSession(ctx, req, sessionID); apiErr != nil {
+		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+		return apiErr
+	}
 	// blerg-board's contract for the env it injects (see handleSpawnBoardSession):
 	// these two key names are what identify the board this session answers to.
 	boardID := req.Env["BLERG_BOARD_BOARD"]
 	boardToken := req.Env["BLERG_BOARD_TOKEN"]
-	raw, err := json.Marshal(protocol.SpawnSession{ //nolint:gosec // the spawn message must carry the session token to the daemon over the authenticated websocket; never logged
-		Type: "spawn_session", SessionID: sessionID, Repo: req.Repo, Title: req.Title,
+	// The spawning account is recorded above; the session is made private after it, and the
+	// raw tokens travel only in this spawn message.
+	var gateway *protocol.MCPGatewayConfig
+	if req.Grant != nil {
+		var apiErr *APIError
+		if gateway, apiErr = a.attachGrant(ctx, sessionID, req.Grant); apiErr != nil {
+			a.abortGrantSession(ctx, sessionID)
+			return apiErr
+		}
+	}
+	raw, err := json.Marshal(protocol.SpawnSession{ //nolint:gosec // the spawn message must carry the session token (and any MCP gateway grant) to the daemon over the authenticated websocket; never logged
+		MCPGateway: gateway,
+		// Every cron session and every grant session runs restricted (mcpstart.go).
+		RestrictTools: req.Grant != nil || req.CronID != "",
+		Type:          "spawn_session", SessionID: sessionID, Repo: req.Repo, Title: req.Title,
 		// DaemonForRepo picked a daemon that already has the folder, so no
 		// clone is needed; the provider lets it refuse a checkout whose
 		// origin is a different provider's repository.
@@ -805,7 +929,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	case dc.send <- raw:
 	default:
 		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
-		return apiErrorf(http.StatusServiceUnavailable, "daemon send buffer full — retry")
+		return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "daemon send buffer full — retry")
 	}
 	announceDaemonAgentStart(ctx, a.hub, a.dbPool, sessionID, dc.Name, runtime == runnerRuntimeDocker)
 	// Record ownership now, not when the daemon's session_started arrives:
@@ -931,7 +1055,8 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	if source == "" {
 		source = "runner"
 	}
-	if _, apiErr := a.requireSessionAccess(ctx, principal, sessionID); apiErr != nil {
+	row, apiErr := a.requireSessionAccess(ctx, principal, sessionID)
+	if apiErr != nil {
 		return nil, apiErr
 	}
 	if dc := a.hub.FindDaemonForSession(sessionID); dc != nil {
@@ -955,6 +1080,14 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	// falling back to the shared operator Secret. The static runner key has no
 	// account behind it and so resumes on the operator Secret, as before;
 	// resumeClusterSession does the equality check against the launcher.
+	//
+	// A session holding MCP connections is resumed only by the account that started it, from
+	// a signed-in browser session (its new gateway tokens carry that login as their proof):
+	// say so here, where the caller can be told, not only in the resume itself.
+	if _, problem := grantResumeProblem(ctx, a.dbPool, sessionID, derefOrEmpty(row.SpawningAccountID),
+		principal.spawningAccountID(), principal.proof().SessionID); problem != nil {
+		return nil, problem
+	}
 	resumeClusterSession(ctx, a.hub, a.dbPool, sessionID, text, principal.spawningAccountID(), principal.proof().SessionID)
 	return map[string]any{"ok": true, "resumed": true}, nil
 }
@@ -1035,6 +1168,7 @@ func (a *API) stopSession(ctx context.Context, sessionID string, end db.SessionE
 		if err := db.RevokeBoardTokensForSession(ctx, a.dbPool, sessionID); err != nil {
 			log.Printf("runner stop: revoke session tokens %s: %v", sessionID, err)
 		}
+		revokeSessionGrants(ctx, a.dbPool, sessionID, "runner stop")
 	}
 }
 

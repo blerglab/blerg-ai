@@ -231,17 +231,60 @@ func corePrincipal(s coreauth.Synthesized) Principal {
 	if s.Kind == "agent" {
 		kind = KindAgent
 	}
-	return Principal{
-		Kind:     kind,
-		FromCore: true,
-		Token: &db.Token{
-			ID:           "core:" + s.Sub,
-			Kind:         s.Kind,
-			Label:        "blerg-core: " + s.Sub,
-			Capabilities: s.Caps,
-			LineageID:    s.Lineage,
-		},
+	tok := &db.Token{
+		ID:           "core:" + s.Sub,
+		Kind:         s.Kind,
+		Label:        "blerg-core: " + s.Sub,
+		Capabilities: s.Caps,
+		LineageID:    s.Lineage,
 	}
+	// A core-issued token of ANY kind carrying a non-empty Project claim is
+	// scoped to that board: for the blerg-board audience, Project is the board
+	// id (the cron/board exchange mints it so). Setting BoardID makes every
+	// existing board-scope check (requireCapability, RequireGlobalRead, the
+	// list/search narrowing) treat it like a board-scoped native agent token.
+	// A malformed Project fails closed: the token is scoped to a board id that
+	// exists nowhere and carries no capabilities, never left unscoped. Tokens
+	// without a Project claim are never narrowed.
+	if s.Project != "" {
+		board := s.Project
+		if !validProject(board) {
+			board = invalidProjectBoard
+			tok.Capabilities = nil
+		}
+		tok.BoardID = &board
+	}
+	return Principal{Kind: kind, FromCore: true, Token: tok}
+}
+
+// invalidProjectBoard is the board a token with a malformed Project claim is
+// scoped to. It is not a uuid, so it names no board, and its token also holds
+// no capabilities.
+const invalidProjectBoard = "\x00invalid-project"
+
+// validProject: a Project claim must be non-empty, at most 64 bytes, with no
+// control characters.
+func validProject(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return false
+		}
+	}
+	return true
+}
+
+// ProjectScoped reports the single board a core-issued token is scoped to
+// (its Project claim, any token kind). It is false for every other principal,
+// including native board-scoped agent tokens, whose behaviour is unchanged.
+// The REST and MCP surfaces use it for their uniform not-found pre-check.
+func (p Principal) ProjectScoped() (boardID string, ok bool) {
+	if !p.FromCore || p.Token == nil || p.Token.BoardID == nil {
+		return "", false
+	}
+	return *p.Token.BoardID, true
 }
 
 // RequireBoard checks that a principal is authorized for capability on
@@ -263,13 +306,12 @@ func corePrincipal(s coreauth.Synthesized) Principal {
 // inherit the native service key's blanket bypass and get full board-admin
 // on every board regardless of its actual capability claims.
 //
-// Board scope: agent tokens carry an explicit BoardID and are rejected
-// outside it. Core-issued principals never carry a BoardID (blerg-core's
-// Claims.Project is a project scope, and blerg-board's boards table has no
-// project/owner column — boards are not project-scoped in board's data
-// model), so a core principal's reach is capability-gated but
-// instance-wide: it is checked against every board's required capability,
-// but not narrowed to a single board the way a native agent token is.
+// Board scope: native agent tokens carry an explicit BoardID and are rejected
+// outside it. Core-issued principals are capability-gated and instance-wide
+// (checked against every board's required capability, not narrowed) EXCEPT a
+// core-issued AGENT token with a Project claim: corePrincipal maps that claim
+// (a board id) onto BoardID, so it is narrowed to that one board exactly like
+// a native agent token (see ProjectScoped).
 func (p Principal) RequireBoard(boardID, capability string) error {
 	if p.IsNativeService() {
 		return nil
@@ -311,10 +353,11 @@ func (p Principal) IsNativeService() bool { return p.Kind == KindService && !p.F
 // instance-wide is_admin (consumed for board-scoped UI gating, e.g. per-card
 // Accept/Reject) only because core-issued principals — the only ones humans
 // or member/admin roles actually authenticate as — never carry a board
-// scope to begin with (see RequireBoard's board-scope comment above,
-// auth.go:242-248): for them IsAdmin() and RequireAdmin(anyBoardID) agree.
-// A native board-scoped agent token is the one case where they can diverge,
-// and agents don't consume /api/me for UI decisions.
+// scope to begin with (only a core AGENT token with a Project claim does,
+// see RequireBoard): for them IsAdmin() and RequireAdmin(anyBoardID) agree.
+// A board-scoped agent token (native, or core-issued with a Project claim)
+// is the one case where they can diverge, and agents don't consume /api/me
+// for UI decisions.
 func (p Principal) IsAdmin() bool {
 	return p.IsNativeService() || (p.Token != nil && p.Token.HasCap("board.admin"))
 }

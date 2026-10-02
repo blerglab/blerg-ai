@@ -59,6 +59,10 @@ type Synthesized struct {
 	Caps       []string
 	Lineage    string
 	OnBehalfOf string
+	// Project is the token's project claim. For a core-issued AGENT token
+	// aimed at blerg-board it is a board id (see auth.corePrincipal);
+	// "" means the token is not narrowed to any board.
+	Project string
 }
 
 // Synthesize reduces a verified identity.Principal to the fields callers need
@@ -70,6 +74,7 @@ func Synthesize(p identity.Principal) Synthesized {
 		Caps:       append([]string(nil), p.Caps...),
 		Lineage:    p.Lineage,
 		OnBehalfOf: p.OnBehalfOf,
+		Project:    p.Project,
 	}
 }
 

@@ -191,6 +191,8 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 		dc.SetRepoOrigins(hello.RepoOrigins, hello.RepoRemotes)
 		dc.SetGitProviders(hello.GitProviders)
 		dc.SetCloneFrom(hello.CloneFrom)
+		dc.SetMCPGateway(hello.MCPGateway)
+		dc.SetRestrictTools(hello.RestrictTools)
 		dc.SetAllowHostCredentialClone(hello.AllowHostCredentialClone)
 		dc.SetSandboxAvailable(hello.SandboxAvailable)
 		dc.SetHostClaude(hello.ClaudeCLIAvailable, hello.AnthropicKeySet, hello.SandboxClaudeCredential)
@@ -384,6 +386,8 @@ func revokeSessionTokens(ctx context.Context, dbPool *pgxpool.Pool, sessionID, w
 	if err := db.RevokeBoardTokensForSession(ctx, dbPool, sessionID); err != nil {
 		log.Printf("revoke tokens %s (%s): %v", sessionID, why, err)
 	}
+	// The MCP gateway tokens (mcpstart.go) die with the session's other credentials.
+	revokeSessionGrants(ctx, dbPool, sessionID, why)
 }
 
 // reconcileDesiredStatus computes the status a session should have, given the
@@ -624,6 +628,12 @@ func handleDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 		}
 	}
 
+	// A cluster session pod (mode "runner") is never shown to browsers as a
+	// daemon, so its drop is not announced; its sessions' own status changes
+	// (set above) already reach them.
+	if dc.Mode == "runner" {
+		return
+	}
 	// Broadcast daemon_disconnected regardless of DB availability.
 	h.BroadcastJSON(protocol.DaemonDisconnected{
 		Type:               "daemon_disconnected",

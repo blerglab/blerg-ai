@@ -81,6 +81,11 @@ services:
       # plugins from (comma-separated, "*" = any). Empty = the official
       # anthropics/claude-plugins-official only. Keep equal to the runner's.
       BLERG_CORE_PLUGIN_MARKETPLACES: ${BLERG_CORE_PLUGIN_MARKETPLACES:-}
+      # Hostnames an MCP connection may reach over plain http, or although they resolve to a
+      # private/loopback address (comma-separated). Empty = https and public addresses only.
+      # The runner has its own pair; set both to the same hosts.
+      BLERG_CORE_MCP_ALLOW_HTTP_HOSTS: ${BLERG_CORE_MCP_ALLOW_HTTP_HOSTS:-}
+      BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS: ${BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -171,6 +176,27 @@ services:
       # Marketplaces always-on plugins may come from; same value as core's.
       # Only used by a cluster runtime (this desktop stack has none).
       BLERG_RUNNER_PLUGIN_MARKETPLACES: ${BLERG_RUNNER_PLUGIN_MARKETPLACES:-}
+      # MCP gateway: a second listener that sessions with MCP connections (and crons) reach
+      # their tools through. It is deliberately NOT in the "ports:" list above, so it has no
+      # host port: it is reachable only on the compose networks, which for sessions means the
+      # `blerg-sandbox` network below (the address sandbox containers dial is GW_URL).
+      # Never add a published port for it. Unset GW_ADDR to turn the gateway off.
+      BLERG_RUNNER_MCP_GW_ADDR: ${BLERG_RUNNER_MCP_GW_ADDR-:8090}
+      BLERG_RUNNER_MCP_GW_URL: ${BLERG_RUNNER_MCP_GW_URL-http://blerg-runner:8090}
+      # Hostnames an MCP connection may reach over plain http, or although they resolve to a
+      # private/loopback address (comma-separated). Empty = https and public addresses only.
+      # Core reads its own pair (below, on blerg-core). List only hosts you run yourself.
+      BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS: ${BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS:-}
+      BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS: ${BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS:-}
+      # Gateway limits; empty = the built-in defaults (60 s, 4 concurrent, 262144 bytes).
+      # The board's in-network address: where a cron's failure card is posted, and the default
+      # endpoint of the built-in `board` connection (<base>/mcp). Empty = crons get no board.
+      BLERG_RUNNER_BOARD_URL: ${BLERG_RUNNER_BOARD_URL-http://blerg-board:8080}
+      # Overrides the MCP endpoint alone (default: BLERG_RUNNER_BOARD_URL + /mcp).
+      BLERG_RUNNER_BOARD_MCP_URL: ${BLERG_RUNNER_BOARD_MCP_URL:-}
+      BLERG_RUNNER_MCP_CALL_TIMEOUT_SECONDS: ${BLERG_RUNNER_MCP_CALL_TIMEOUT_SECONDS:-}
+      BLERG_RUNNER_MCP_MAX_CONCURRENT: ${BLERG_RUNNER_MCP_MAX_CONCURRENT:-}
+      BLERG_RUNNER_MCP_MAX_RESULT_BYTES: ${BLERG_RUNNER_MCP_MAX_RESULT_BYTES:-}
     volumes:
       - blerg-desktop-runner-data:/data
     networks: [default, sandbox]

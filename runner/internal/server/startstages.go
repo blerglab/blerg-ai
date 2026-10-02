@@ -515,6 +515,8 @@ func (a *API) markClusterStartFailed(ctx context.Context, sessionID, reason stri
 		if err := db.SetSessionError(ctx, a.dbPool, sessionID, reason); err != nil {
 			log.Printf("cluster start: SetSessionError %s: %v", sessionID, err)
 		}
+		// A start that failed after its grants were made: no Job will ever use the tokens.
+		revokeSessionGrants(ctx, a.dbPool, sessionID, "cluster start failed")
 	}
 	clusterJobCreateFailed(ctx, a.hub, a.dbPool, sessionID, reason)
 	broadcastWithEnd(a.hub, sessionEndFor(ctx, a.dbPool, sessionID, "error"), func(endReason string, endedBy *protocol.EndedBy) any {

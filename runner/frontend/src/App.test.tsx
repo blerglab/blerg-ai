@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { TabBar, NotificationsButton, BrandHeader } from './App'
 import { useMessageStore } from './hooks/useMessageStore'
 import { coreOrigin } from './authClient'
+import { usePendingProposals } from './lib/proposals'
 
 // TabBar uses useNavigate and useLocation — must be inside a Router.
 function renderTabBar(initialPath = '/') {
@@ -19,7 +20,7 @@ describe('TabBar open-questions badge', () => {
     useMessageStore.setState({ messages: [] })
   })
 
-  it('shows a count badge on the Chat tab when there are open messages', () => {
+  it('has no Chat tab and no count badge, even when there are open messages', () => {
     useMessageStore.setState({
       messages: [
         {
@@ -30,28 +31,12 @@ describe('TabBar open-questions badge', () => {
           status: 'open',
           created_at: '2026-06-23T10:00:00Z',
         },
-        {
-          id: 'msg-2',
-          session_id: 'sess-b',
-          kind: 'note',
-          body: 'Side thought',
-          status: 'open',
-          created_at: '2026-06-23T10:01:00Z',
-        },
-        {
-          id: 'msg-3',
-          session_id: 'sess-a',
-          kind: 'update',
-          body: 'Done',
-          status: 'answered',
-          created_at: '2026-06-23T10:02:00Z',
-        },
       ],
     })
     renderTabBar()
-    const badge = screen.getByTestId('open-count-badge')
-    expect(badge).toBeInTheDocument()
-    expect(badge).toHaveTextContent('2')
+    expect(screen.queryByText('Chat')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('open-count-badge')).not.toBeInTheDocument()
+    expect(screen.getByText('Sessions')).toBeInTheDocument()
   })
 
   it('hides the badge when there are no open messages', () => {
@@ -109,6 +94,48 @@ describe('TabBar cluster visibility', () => {
       </MemoryRouter>,
     )
     expect(screen.getByText('Cluster')).toBeInTheDocument()
+  })
+})
+
+function LocationProbe() {
+  return <div data-testid="probe">{useLocation().pathname}</div>
+}
+
+describe('TabBar crons tab', () => {
+  it('always offers the Crons tab and opens /crons', () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <TabBar />
+        <Routes><Route path="*" element={<LocationProbe />} /></Routes>
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Crons' }))
+    expect(screen.getByTestId('probe')).toHaveTextContent('/crons')
+  })
+})
+
+describe('TabBar proposals tab', () => {
+  beforeEach(() => usePendingProposals.setState({ count: 0 }))
+
+  it('opens /proposals', () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <TabBar />
+        <Routes><Route path="*" element={<LocationProbe />} /></Routes>
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Proposals' }))
+    expect(screen.getByTestId('probe')).toHaveTextContent('/proposals')
+  })
+
+  it('shows the pending count and hides it at zero', () => {
+    usePendingProposals.setState({ count: 3 })
+    const { unmount } = renderTabBar()
+    expect(screen.getByTestId('proposals-count-badge')).toHaveTextContent('3')
+    unmount()
+    usePendingProposals.setState({ count: 0 })
+    renderTabBar()
+    expect(screen.queryByTestId('proposals-count-badge')).toBeNull()
   })
 })
 

@@ -271,6 +271,13 @@ ANTHROPIC_API_KEY=
 BLERG_PORT_CORE=8081
 BLERG_PORT_BOARD=8082
 BLERG_PORT_RUNNER=8083
+
+# MCP connections and crons: the runner's gateway is set up by docker-compose.yml (on the
+# blerg-sandbox network only, never a host port). Optional overrides, see .env.example:
+# BLERG_CORE_MCP_ALLOW_HTTP_HOSTS=
+# BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS=
+# BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS=
+# BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS=
 ENVEOF
   blerg_ok "Wrote install/desktop/.env"
 fi

@@ -497,7 +497,10 @@ func sanitizedEnviron(extra ...string) []string {
 	base := os.Environ()
 	out := make([]string, 0, len(base)+len(extra))
 	for _, e := range base {
-		if !strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") {
+		// The master token, and a pod's gateway grant (MCPGatewayEnvVar; the pod
+		// entrypoint unsets it as well): neither may reach any child process.
+		if !strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") && !strings.HasPrefix(e, MCPGatewayEnvVar+"=") &&
+			!strings.HasPrefix(e, RestrictToolsEnvVar+"=") {
 			out = append(out, e)
 		}
 	}
@@ -1076,6 +1079,15 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 	// model/effort become engine CLI arguments: refuse a bad one before any
 	// workspace work, rather than trusting the server to have checked.
 	if problem := spawnModelProblem(msg); problem != "" {
+		log.Printf("manager: %s: %s", msg.SessionID, problem)
+		m.sendError(msg.SessionID, problem)
+		return
+	}
+	// An MCP gateway grant is honoured only by a sandboxed agent-kind Claude
+	// session. The server checks the same, but this daemon is the process that
+	// would run it: a terminal session has no place to apply the tool
+	// allow-list, and a bare-host session is a full shell as the developer.
+	if problem := mcpGatewaySpawnProblem(msg); problem != "" {
 		log.Printf("manager: %s: %s", msg.SessionID, problem)
 		m.sendError(msg.SessionID, problem)
 		return

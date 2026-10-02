@@ -238,6 +238,27 @@ describe('AgentChatView timestamps', () => {
     expect(b.textContent).toContain('took 3 min 5 s')
   })
 
+  it('measures a turn that absorbed messages sent mid-turn from the first of them', () => {
+    ingest(
+      ev('user_message', { text: 'go', source: 'chat' }, NOW - 5 * M),
+      ev('user_message', { text: 'also this', source: 'chat' }, NOW - 5 * M + 20 * S),
+      turnDone(NOW - 5 * M + 100 * S),
+    )
+    render(<AgentChatView session={session} />)
+    expect(screen.getByTestId('turn-done').textContent).toContain('took 1 min 40 s')
+  })
+
+  it('does not carry a message that never started a turn into the next turn\'s duration', () => {
+    ingest(
+      ev('user_message', { text: 'lost', source: 'chat' }, NOW - 10 * M),
+      ev('status_changed', { status: 'idle', reason: 'turn_done' }, NOW - 10 * M + 5 * S),
+      ev('user_message', { text: 'real', source: 'chat' }, NOW - 2 * M),
+      turnDone(NOW - 2 * M + 30 * S),
+    )
+    render(<AgentChatView session={session} />)
+    expect(screen.getByTestId('turn-done').textContent).toContain('took 30 s')
+  })
+
   it('omits the duration when the turn start is unknown', () => {
     ingest(turnDone(NOW - M))
     render(<AgentChatView session={session} />)

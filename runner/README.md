@@ -424,6 +424,28 @@ an MCP client that validates locally will refuse a promptless start that REST wo
 must be 1-128 characters`, the same rejection an empty `Idempotency-Key` header gets, rather than
 a silently dropped retry guarantee.
 
+### MCP connections and crons (human-only routes)
+
+These routes are for a signed-in person's browser session only: they need a human token **with a
+login session** (an agent token, even one holding `session.start`, gets `403`, and no token `401`),
+and another account's connection or cron is always `404`. They are deliberately **not** part of the
+agent contract, so they are in neither `openapi.json` nor the MCP server. Concepts:
+[`docs/mcp-connections.md`](../docs/mcp-connections.md) and [`docs/crons.md`](../docs/crons.md).
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/mcp/connections` | the caller's connections (from core, no secrets) with each one's default tools |
+| `GET` | `/api/mcp/connections/{id}/tools` | the connection's live tool list: name, description, input schema, annotations and the hash a launch will pin |
+| `PATCH` | `/api/mcp/connections/{id}/defaults` | save the default tool selection, `{"default_tools": {tool: {"mode": "allow", "hash": ...}}}`; `{}` clears it |
+| `GET` `POST` | `/api/crons` | list and create crons (creating mints the cron token) |
+| `GET` `PATCH` `DELETE` | `/api/crons/{id}` | read, edit and delete (delete revokes the token and stops a running session) |
+| `POST` | `/api/crons/{id}/run` · `/pause` · `/resume` · `/renew` | run now, pause, resume and renew the token |
+| `GET` | `/api/crons/{id}/runs` | run history |
+
+A session with MCP connections is started from the launch sheet with an `mcp` field on
+`POST /api/sessions`, which only a signed-in person may send; `POST /api/runner/start` and the
+runner's own MCP `start_session` tool refuse it.
+
 ### Model lists
 
 `GET /api/models/{engine}` answers `{models:[{id, name, description, section, efforts[],
@@ -779,12 +801,12 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_DATABASE_URL` | yes | — | Postgres DSN |
 | `BLERG_RUNNER_DAEMON_TOKEN` | yes | — | shared token the daemon presents on `/ws/daemon` |
 | `BLERG_RUNNER_LISTEN_PORT` | no | `8080` | app-level HTTP listen port. Deliberately not `BLERG_RUNNER_PORT` — Kubernetes auto-injects that name (`BLERG_RUNNER_PORT=tcp://<clusterIP>:8080`) into every pod for a `blerg-runner` Service already in the namespace, which would silently clobber a same-named custom var |
-| `BLERG_RUNNER_DATA_DIR` | no | — | directory for runner's on-disk state (published artifacts, uploaded agent-config bundles) |
+| `BLERG_RUNNER_DATA_DIR` | no | — | directory for runner's on-disk state: published mockups and screenshots, uploaded agent-config bundles, and the files agents publish with `blerg-runner publish` (`artifacts/<session>/…`; see [`docs/artifacts.md`](../docs/artifacts.md)). It needs a persistent volume to keep them across restarts |
 | `BLERG_RUNNER_KEY` | no | — | board↔runner contract key (must match the board's `BLERG_RUNNER_KEY`) |
 | `BLERG_CORE_URL` / `BLERG_CORE_REGISTER_KEY` | no | — | register with, and validate tokens against, `blerg-core` (the runner works standalone with the static key if unset) |
 | `BLERG_RUNNER_CORE_INTERNAL_KEY` | no | — | must equal core's `BLERG_CORE_INTERNAL_KEY`. Together with `BLERG_CORE_URL`, enables the personal-credential-first session spawn path, the per-person part of `GET /api/repos` (see [Repository list](#repository-list)), and `GET /api/me/credentials` (browser-authed; reports which personal credentials the caller has as `{"engines":[…],"git":bool,"git_providers":["github","gitlab"]}`, presence only — never a value — and `"unavailable":true` when core can't be asked); either unset means runner always uses the shared operator Secret, lists no one's own repositories, and that endpoint always answers `unavailable` |
 | `BLERG_RUNNER_GITHUB_ORG` / `BLERG_RUNNER_GITHUB_TOKEN` | no | — | an optional shared GitHub organisation whose repositories everyone sees in the launch sheet, alongside their own (token optional for a public org). Also the default org a bare repo name resolves against for cluster clones |
-| `BLERG_RUNNER_SELF_URL` | no | — | the runner's own URL, advertised at registration |
+| `BLERG_RUNNER_SELF_URL` | no | — | the runner's own URL, advertised at registration. Also the base of the proposal links an agent is given when its write call is queued (`<this>/proposals?id=<id>`); without it the agent is given only the proposal id |
 | `VOYAGE_API_KEY` | no | — | enables semantic (embedding) search for the agent memory / knowledge store. **Privacy: when set, the name and content of each memory an agent saves (`POST /api/agent/memories`) and the query text of each knowledge search (`POST /api/agent/knowledge-search`) is sent to Voyage AI's API (`https://api.voyageai.com/v1/embeddings`), and the returned vector is stored beside the memory in your database. Unset by default; when unset, nothing is sent to Voyage and search uses plain keyword matching.** A failed Voyage call also falls back to keyword matching, and a memory is still saved without its vector |
 | `VOYAGE_MODEL` | no | `voyage-3-lite` | the Voyage embedding model to request; only read when `VOYAGE_API_KEY` is set |
 | `BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE` | no | `false` | `true` = allow session completion webhooks to be delivered to private, loopback or link-local addresses. Off by default: a `callback_url` is chosen by whoever starts a session, so without this the runner refuses to become a proxy into its own network (checked at connect time, on the address actually resolved, per attempt). It also gates the contract's plain-`http://localhost` callback exception: without it, a loopback `callback_url` is refused at start with a `422`. Set it `true` when receivers legitimately live beside the runner — the desktop compose stack does |
@@ -792,6 +814,24 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_ALLOWED_ORIGINS` | no | — | comma-separated `scheme://host` origins allowed to open `/ws/browser` cross-origin. Same-origin requests and requests with no `Origin` header are always allowed, so this is only needed when the frontend is served from a different origin than runner's API |
 | `BLERG_RUNNER_MODEL_CATALOG_URL` | no | `https://downloads.claude.ai/model-catalog/v1/catalog.json` | where the Claude model list (`GET /api/models/claude`, the launch sheet's Model/Effort picker) comes from: the public Claude Code model catalog, fetched at startup and every 6 h (https only — plain http is accepted only for a loopback host — same-host redirects only, 5 s timeout, 1 MB cap; the last good copy is kept). Set it **empty** to disable fetching — air-gapped installs — and serve the list compiled into this build instead |
 | `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official` | comma-separated GitHub `owner/repo` marketplaces **always-on plugins** may come from (`*` = any valid `owner/repo`). When a cluster session starts for an account, the server reads that account's list from core (`POST /internal/plugins/list`, see `core/docs/CONFIG.md`), drops entries whose marketplace is not allowed here, and hands the rest to the pod as `BLERG_RUNNER_PLUGINS` (non-secret JSON) together with this allow-list, which the pod checks again before running `claude plugin marketplace add` / `claude plugin install <plugin>@<marketplace> --scope user` (no shell, 90 s per command, 4 min overall, one after another). If core cannot be reached the session still starts without plugins and its start panel says so. Claude sessions only; Local sandbox and This machine sessions install nothing. Keep equal to core's `BLERG_CORE_PLUGIN_MARKETPLACES` |
+| `BLERG_RUNNER_MCP_GW_ADDR` | no | — (gateway off) | listen address of the **MCP gateway**, a second listener and `http.Server` separate from the main port (for example `:8090`). Unset disables the gateway, and with it every session with MCP connections and every cron that uses one. It also needs the database and core (`BLERG_CORE_URL` plus `BLERG_RUNNER_CORE_INTERNAL_KEY`). Never route it through a public ingress; see [`docs/mcp-connections.md`](../docs/mcp-connections.md) |
+| `BLERG_RUNNER_MCP_GW_URL` | no | — | the address **sessions dial** to reach the gateway: an in-cluster Service URL for pods, the runner's address on the sandbox network for desktop sandbox containers. Sent to a session in its config; not derived from the daemon's WebSocket address. A launch with MCP connections is refused with a specific message while it is unset |
+| `BLERG_RUNNER_BOARD_URL` | no | — | the board's base address **as the runner reaches it** (absolute `http(s)`, no credentials, query or fragment; for example `http://blerg-board:8080`). A cron's failure card is posted to the board's API there, and the built-in `board` connection's MCP endpoint defaults to `<this>/mcp`. Unset or invalid: crons get no board connection and no failure card. See [`docs/crons.md`](../docs/crons.md) |
+| `BLERG_RUNNER_BOARD_MCP_URL` | no | `<BLERG_RUNNER_BOARD_URL>/mcp` | overrides the built-in `board` connection's MCP endpoint alone (same validation as above). Usually a private address: it is fetched by the runner's gateway, never by a session |
+| `BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS` | no | empty | comma-separated hostnames for which an MCP connection URL may use plain `http://` (otherwise `https` only). Applies to the gateway and to the launch sheet's tool listing. Core has its own list, `BLERG_CORE_MCP_ALLOW_HTTP_HOSTS` |
+| `BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS` | no | empty | comma-separated hostnames an MCP connection may reach although they resolve to a loopback, link-local, private, carrier-grade NAT or metadata address. Every other host is checked on the address actually dialled. Core has its own list, `BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS` |
+| `BLERG_RUNNER_MCP_CALL_TIMEOUT_SECONDS` | no | `60` | per-call timeout for a `tools/call` to the upstream MCP server |
+| `BLERG_RUNNER_MCP_MAX_CONCURRENT` | no | `4` | concurrent upstream calls per session and connection; a further call is refused immediately |
+| `BLERG_RUNNER_MCP_MAX_RESULT_BYTES` | no | `262144` | cap on the text returned to the session for one call; longer results are truncated |
+| `BLERG_CLAUDE_STEERING` | no | on | read by whatever starts Claude Code sessions (the workstation daemon, and the cluster session pod). `0` runs one `claude` process per message instead of one long-lived process per session; the default lets a message sent while the agent works reach it at its next step. An older Claude Code without the streaming input mode falls back to the per-message behaviour by itself. See [`docs/talking-to-an-agent.md`](../docs/talking-to-an-agent.md) |
+| `BLERG_RUNNER_MOCKUP_HOSTS` | no | empty | comma-separated hostnames on which published mockup bundles (agent-authored HTML/JS) may be served. When set, bundles are served **only** there and never on the app's own origin; empty means no restriction, which is for development |
+| `BLERG_RUNNER_MOCKUP_BASE` | no | — | the base URL the runner returns for a published mockup bundle (for example `https://m.example.com`); the bundle is at `<base>/m/<id>/` |
+
+Set by the runner itself on a session, never by you: `BLERG_RUNNER_MCP_CONFIG` (the JSON of the
+session's MCP server entries and gateway tokens, from a per-session Secret for a pod, written to a
+`0600` file and then removed from the environment before the agent starts) and
+`BLERG_RUNNER_RESTRICT_TOOLS` (the built-in tool allow-list of a restricted session). Neither is
+accepted from a request's `env`.
 
 Not environment variables, but worth knowing they exist: the session reconciler's windows are
 compile-time constants — it polls every 30 s, waits 2 min before reading a missing cluster Job as
@@ -859,8 +899,9 @@ DAEMON.md's "Cluster pod auth" for how each engine's credentials reach a pod.
 | `BLERG_RUNNER_AGENT_GIT_BASE` | `https://github.com/<BLERG_RUNNER_GITHUB_ORG>`, or `https://github.com` when no org is set | git clone URL base for GitHub pods — a bare repo name is appended as `<base>/<repo>.git`; so is an `org/name` when this is set explicitly, while with only the org default an `org/name` clones from `https://github.com/org/name.git`. With neither this nor an org set, a cluster spawn must name its repo as `org/name` (a bare name is refused with 422). Repositories on another git provider (a launch with `"provider":"gitlab"`) always clone from that provider's own host, never from this base |
 | `BLERG_RUNNER_AGENT_SECRET` | `blerg-runner-agent` | k8s Secret holding `ANTHROPIC_API_KEY`/`BLERG_RUNNER_DAEMON_TOKEN`/`BLERG_RUNNER_GIT_TOKEN` |
 | `BLERG_RUNNER_OAUTH_SECRET_NAME` | same as `BLERG_RUNNER_AGENT_SECRET` | separate Secret for operator-synced creds (`CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_AUTH_JSON`, `HERMES_ENV_CONTENTS`, `BLERG_RUNNER_GIT_TOKEN`) when rotation flows from elsewhere (e.g. Infisical) |
-| `BLERG_RUNNER_MAX_SESSIONS` | `4` | concurrent cluster session cap |
-| `BLERG_RUNNER_POD_TTL_SECONDS` | `21600` (6h) | `activeDeadlineSeconds` — pod TTL, not session TTL |
+| `BLERG_RUNNER_MAX_SESSIONS` | `4` | concurrent cluster session cap. An administrator can change it (1 to 64) on the runner's Cluster page (`PUT /api/cluster/settings` with `max_sessions`, `0` or `null` returns to this value; needs the `account.manage` capability); a saved value beats the environment and applies to the next session start, no restart. `GET /api/cluster/status` reports the effective `max_sessions` and this value as `max_sessions_default` |
+| `BLERG_RUNNER_POD_TTL_SECONDS` | `604800` (7d) | `activeDeadlineSeconds` — the hard cap on a pod's lifetime, busy or idle |
+| `BLERG_RUNNER_POD_IDLE_TIMEOUT_SECONDS` | `86400` (24h) | the pod ends itself after this long with no message sent and no turn finished (`0` = never). The session keeps its history and can be resumed. An administrator can change this and the lifetime cap on the runner's Cluster page (`PUT /api/cluster/settings`, needs the `account.manage` capability); a saved value beats the environment and applies to pods started afterwards |
 | `BLERG_RUNNER_POD_CPU_REQUEST` / `BLERG_RUNNER_POD_MEM_REQUEST` | `500m` / `1Gi` | pod resource requests |
 | `BLERG_RUNNER_POD_CPU_LIMIT` / `BLERG_RUNNER_POD_MEM_LIMIT` | `1` / `4Gi` | pod resource limits |
 | `BLERG_RUNNER_POD_TERMINATION_GRACE_SECONDS` | `120` | grace period before a killed pod is force-stopped |

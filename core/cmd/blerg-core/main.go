@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/logsafe"
+	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/contracts/secrets"
 	"github.com/blerglab/blerg-ai/core/internal/api"
@@ -24,6 +25,7 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/discovery"
 	"github.com/blerglab/blerg-ai/core/internal/identity"
 	"github.com/blerglab/blerg-ai/core/internal/keybackend"
+	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
 	"github.com/blerglab/blerg-ai/core/internal/plugins"
 	"github.com/blerglab/blerg-ai/core/internal/projects"
 )
@@ -341,6 +343,16 @@ func pluginAllowlist() pluginspec.Allowlist {
 	return a
 }
 
+// mcpNetPolicy is the outbound policy for user-supplied MCP server URLs: https only and no
+// private addresses, except for the hosts the operator lists in BLERG_CORE_MCP_ALLOW_HTTP_HOSTS
+// and BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS (comma-separated hostnames).
+func mcpNetPolicy() netguard.Policy {
+	return netguard.Policy{
+		AllowHTTPHosts:    netguard.ParseHostList(os.Getenv("BLERG_CORE_MCP_ALLOW_HTTP_HOSTS")),
+		AllowPrivateHosts: netguard.ParseHostList(os.Getenv("BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS")),
+	}
+}
+
 // sessionTTL reads BLERG_CORE_SESSION_TTL (a time.ParseDuration string, e.g. "720h"),
 // defaulting to 720h (30 days) — the same default identity.Service falls back to when
 // SetSessionTTL is never called. An unparsable value logs and falls back to the default rather
@@ -436,6 +448,7 @@ func buildDeps(ctx context.Context, st *db.PgStore) (api.Deps, *identity.Service
 		Registry:             discovery.NewRegistry(st, componentTTL),
 		Credentials:          credentials.NewService(st, keyBackend),
 		Plugins:              plugins.NewService(st, pluginAllowlist()),
+		MCPConnections:       mcpconn.NewService(st, keyBackend, mcpNetPolicy()),
 		Audience:             "blerg-core",
 		RegisterKey:          os.Getenv("BLERG_CORE_REGISTER_KEY"),
 		InternalKey:          os.Getenv("BLERG_CORE_INTERNAL_KEY"),
@@ -529,6 +542,9 @@ func serve(ctx context.Context) error {
 			}
 		}
 	}
+
+	mcpconn.StartPruneLoop(ctx, deps.MCPConnections, 24*time.Hour)
+	identity.StartExchangePruneLoop(ctx, identitySvc, time.Hour)
 
 	log.Printf("blerg-core listening on %s", addr)
 	handler := withSPAFallback(api.NewRouter(deps), spaHandler(webDistDir()))

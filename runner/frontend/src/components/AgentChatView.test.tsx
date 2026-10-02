@@ -73,6 +73,27 @@ describe('AgentChatView', () => {
     expect(screen.getByTestId('turn-done').textContent).toContain('10 in · 5 out')
   })
 
+  it('folds a turn footer into the assistant bubble it closes, and leaves it standalone after a tool card', () => {
+    localStorage.setItem('blerg.agent.compactTools', '0')
+    const ingest = useAgentTranscript.getState().ingest
+    const usage = { input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0 }
+    ingest(ev({ seq: 1, kind: 'user_message', payload: { text: 'go', source: 'chat' } }))
+    ingest(ev({ seq: 2, kind: 'assistant_text', payload: { text: 'first reply', done: true } }))
+    ingest(ev({ seq: 3, kind: 'turn_done', payload: { stop_reason: 'end_turn', model: 'm1', usage } }))
+    ingest(ev({ seq: 4, kind: 'user_message', payload: { text: 'again', source: 'chat' } }))
+    ingest(ev({ seq: 5, kind: 'assistant_text', payload: { text: 'second reply', done: true } }))
+    ingest(ev({ seq: 6, kind: 'tool_call', payload: { tool: 'bash', call_id: 'c9', input: { command: 'ls' } } }))
+    ingest(ev({ seq: 7, kind: 'tool_result', payload: { call_id: 'c9', output: 'x', is_error: false, duration_ms: 1 } }))
+    ingest(ev({ seq: 8, kind: 'turn_done', payload: { stop_reason: 'end_turn', model: 'm2', usage } }))
+
+    render(<AgentChatView session={session} />)
+    const [folded, standalone] = screen.getAllByTestId('turn-done')
+    expect(folded.closest('.agent-card')?.classList.contains('assistant')).toBe(true)
+    expect(folded.textContent).toContain('m1')
+    expect(standalone.classList.contains('marker')).toBe(true)
+    expect(standalone.textContent).toContain('m2')
+  })
+
   it('renders assistant and user text as Markdown, streaming included', () => {
     const ingest = useAgentTranscript.getState().ingest
     ingest(ev({ seq: 1, kind: 'user_message', payload: { text: 'please **fix** it', source: 'chat' } }))

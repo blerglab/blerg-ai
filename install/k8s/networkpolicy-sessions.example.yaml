@@ -15,14 +15,33 @@
 # WHAT THIS DOES. For every pod in the `blerg-runner-sessions` namespace it
 # denies all ingress, and limits egress to:
 #   1. DNS, to kube-dns in kube-system (UDP and TCP 53);
-#   2. the runner Service in the `blerg` namespace, on port 8080 (the pod's
-#      websocket back to the runner, BLERG_RUNNER_INTERNAL_URL);
-#   3. the public internet, over any port: git hosts, model APIs, the plugin
+#   2. the runner in the `blerg` namespace, on port 8080 (the pod's websocket
+#      back to the runner, BLERG_RUNNER_INTERNAL_URL);
+#   3. the runner's MCP GATEWAY, on port 8090 (the blerg-runner-mcp-gateway
+#      Service; BLERG_RUNNER_MCP_GW_URL). Sessions with MCP connections, and
+#      every cron run that uses one, reach their tools only through this. A
+#      policy that omits this rule makes those sessions fail with connection
+#      errors on every tool call;
+#   4. NOTHING in your cluster beyond the three above. In particular blerg-core
+#      and blerg-board are NOT reachable: a session never needs core, and the
+#      built-in board connection of a cron is served by the runner's gateway
+#      (rule 3), not by the pod. Only if sessions you start from a board must
+#      call the board's own API from inside the pod, uncomment the clearly
+#      marked OPT-IN rule below (board only, never core);
+#   5. the public internet, over any port: git hosts, model APIs, the plugin
 #      marketplace, package registries. This is 0.0.0.0/0 and ::/0 MINUS the
 #      private, loopback, link-local (cloud metadata, 169.254.169.254) and
-#      CGNAT ranges listed under `except`.
-# Everything else, notably every other pod and Service inside the cluster and
-# the node addresses, is unreachable from a session pod.
+#      CGNAT ranges listed under `except`. The engine itself needs its model
+#      API, so this cannot simply be removed; on a CNI with FQDN policies
+#      (Cilium, Calico Enterprise) replace it with just the hosts you use.
+# Everything else, notably Postgres and every other pod and Service inside the
+# cluster and the node addresses, is unreachable from a session pod.
+#
+# CRONS AND UNATTENDED RUNS. A cron run (docs/crons.md) is a session that reads
+# untrusted text with nobody watching. Its tools are already restricted to file
+# tools plus the MCP tools you allowed, but this policy is the layer that keeps
+# a fooled agent from reaching your in-cluster services or a private network
+# from its pod. It is RECOMMENDED whenever crons or MCP connections are used.
 #
 # CHECK BEFORE APPLYING, because this depends on YOUR cluster:
 #   * A CNI that ENFORCES NetworkPolicy. MicroK8s' default (Calico) does; k3s'
@@ -37,12 +56,19 @@
 #     on most distributions; adjust if yours differs (NodeLocal DNSCache, for
 #     example, listens on a link-local address that the `except` would block:
 #     add that address as an ipBlock on port 53).
-#   * The runner selector below (`app: blerg-runner` in `blerg`) matches
-#     install/k8s/runner-deployment.yaml.
-#   * Board-started sessions that call the board API from inside the pod
-#     (BLERG_BOARD_URL) need the extra rule shown commented out at the bottom.
+#   * The runner (and, if enabled, board) selectors below (`app: blerg-runner`,
+#     `blerg-board` in `blerg`) match the Deployments in
+#     install/k8s. The gateway rule targets the runner POD port 8090 (a
+#     NetworkPolicy sees the pod port, after the Service maps to it); change it
+#     if you changed BLERG_RUNNER_MCP_GW_ADDR.
+#   * If you allow MCP servers on a private network with
+#     BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS, those are fetched by the RUNNER (the
+#     gateway), not by the session pod, so this policy needs no rule for them.
 #   * Verify with a throwaway session: `curl` to https://github.com should
-#     work, `curl` to http://blerg-core.blerg.svc:8080 should time out.
+#     work, `curl` to http://blerg-runner-mcp-gateway.blerg.svc:8090 should
+#     connect (and answer 401 without a token), and `curl` to http://blerg-core:8080
+#     and to the Postgres Service should time out (so should blerg-board:8080
+#     unless you enabled the opt-in rule).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -80,24 +106,23 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-    # 3. General internet egress, minus everything private.
+    # 3. The runner's MCP gateway (blerg-runner-mcp-gateway Service, pod port
+    #    8090). Reached only with a per-session, per-connection token.
     - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8  # scrub:allow (generic private ranges, not a host)
-              - 172.16.0.0/12  # scrub:allow (generic private ranges, not a host)
-              - 192.168.0.0/16  # scrub:allow (generic private ranges, not a host)
-              - 100.64.0.0/10  # scrub:allow (generic private ranges, not a host)
-              - 169.254.0.0/16
-              - 127.0.0.0/8
-        - ipBlock:
-            cidr: ::/0
-            except:
-              - fc00::/7
-              - fe80::/10
-              - ::1/128
-    # Optional: board-started sessions that use the board API from the pod.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: blerg
+          podSelector:
+            matchLabels:
+              app: blerg-runner
+      ports:
+        - protocol: TCP
+          port: 8090
+    # 4. OPT-IN, OFF BY DEFAULT: the blerg-board API on port 8080.
+    #    Uncomment ONLY if sessions started from a board must call the board's
+    #    API from inside the pod with their own scoped token. blerg-core is
+    #    deliberately NOT listed and must stay unreachable from session pods.
+    #    Crons do not need this: their board access goes through the gateway.
     # - to:
     #     - namespaceSelector:
     #         matchLabels:
@@ -108,3 +133,26 @@ spec:
     #   ports:
     #     - protocol: TCP
     #       port: 8080
+    # 5. General internet egress, minus everything private.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8  # scrub:allow (generic private ranges, not a host)
+              - 172.16.0.0/12  # scrub:allow (generic private ranges, not a host)
+              - 192.168.0.0/16  # scrub:allow (generic private ranges, not a host)
+              - 100.64.0.0/10  # scrub:allow (generic private ranges, not a host)
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+              - 0.0.0.0/8
+              - 192.0.0.0/24
+              - 198.18.0.0/15
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7
+              - fe80::/10
+              - ::1/128
+              - ::ffff:0:0/96  # IPv4-mapped: would reach the IPv4 ranges above
+              - 64:ff9b::/96   # NAT64: ditto, where the network translates it
+              - 64:ff9b:1::/48

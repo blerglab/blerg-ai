@@ -227,4 +227,15 @@ describe('SessionCard', () => {
       expect(screen.queryByTestId('kind-chip')).not.toBeInTheDocument()
     })
   })
+  describe('cron badge', () => {
+    it('marks a session a cron started', () => {
+      renderCard(makeSession({ cron_id: 'c1' }))
+      expect(screen.getByTestId('cron-badge')).toHaveTextContent('cron')
+    })
+
+    it('shows no badge on an ordinary session', () => {
+      renderCard(makeSession())
+      expect(screen.queryByTestId('cron-badge')).not.toBeInTheDocument()
+    })
+  })
 })

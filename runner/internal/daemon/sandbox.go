@@ -138,6 +138,9 @@ type SandboxOptions struct {
 	// RepoRoot is the checkout the daemon runs from (RepoRootFromExecutable);
 	// the messaging CLI is mounted from it. "" = no mount.
 	RepoRoot string
+	// ClaudeOnly is set per session (never from configuration) for a restricted session: only the
+	// claude login is mounted, not codex's or hermes's.
+	ClaudeOnly bool
 }
 
 // Service-name URLs a container on the sandbox network uses in place of the
@@ -304,6 +307,8 @@ func cliMountArg(hostPath string) string {
 type sandboxRunExtras struct {
 	network string // --network <name>; "" = default bridge
 	cliPath string // host path of the messaging CLI to mount; "" = none
+	// claudeOnly mounts only the claude login (a restricted session runs no other engine).
+	claudeOnly bool
 }
 
 // sandboxRunArgs is the `docker run` argument list for a session sandbox:
@@ -352,7 +357,12 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 		// runner/sandbox/Dockerfile) — not the host's own $HOME. These are
 		// read-write on purpose (the engine needs its login) — which is why the
 		// launch sheet and DAEMON.md say the sandbox does NOT protect them.
-		for _, p := range []string{".claude", ".claude.json", ".codex", ".hermes/config.yaml", ".hermes/.env"} {
+		logins := []string{".claude", ".claude.json", ".codex", ".hermes/config.yaml", ".hermes/.env"}
+		if extras.claudeOnly {
+			// A restricted session runs claude only: no other engine's login goes in.
+			logins = logins[:2]
+		}
+		for _, p := range logins {
 			if _, err := os.Stat(filepath.Join(home, p)); err == nil {
 				args = append(args, "-v", filepath.Join(home, p)+":/home/agent/"+p)
 			}
@@ -442,7 +452,7 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	// to a session that is being recreated right now either way.
 	forceRemoveContainer(container)
 	home, _ := os.UserHomeDir()
-	extras := sandboxRunExtras{cliPath: messagingCLIPath(opts.RepoRoot)}
+	extras := sandboxRunExtras{cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly}
 	if opts.Network != "" {
 		exists, err := sandboxNetworkState(opts.Network)
 		if err != nil {
@@ -599,13 +609,19 @@ var sandboxTurnPIDFile = "/tmp/blerg-turn.pid"
 // without this a user's Interrupt would leave the engine running to completion;
 // interrupt() signals the recorded PID instead.
 func (p sandboxExec) command(ctx context.Context, workDir, bin string, args ...string) *exec.Cmd {
+	return p.commandPID(ctx, workDir, bin, sandboxTurnPIDFile, args...)
+}
+
+// commandPID is command with the in-container PID file named by the caller: a long-lived engine process
+// has its own file, so a later process's start or end can never remove or signal another's.
+func (p sandboxExec) commandPID(ctx context.Context, workDir, bin, pidFile string, args ...string) *exec.Cmd {
 	if !p.enabled() {
 		cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // bin is a resolved engine binary and args the engine's own argv; no shell
 		cmd.Dir = workDir
 		return cmd
 	}
 	inner := append([]string{
-		"sh", "-c", "echo $$ > " + sandboxTurnPIDFile + `; exec "$@"`, "sh", bin,
+		"sh", "-c", "echo $$ > " + pidFile + `; exec "$@"`, "sh", bin,
 	}, args...)
 	full := append(append([]string{}, p[1:]...), inner...)
 	return exec.CommandContext(ctx, p[0], full...) //nolint:gosec // p[0] is the daemon-built docker prefix; engine argv follows as separate elements, run via exec "$@" so no interpolation
@@ -615,30 +631,48 @@ func (p sandboxExec) command(ctx context.Context, workDir, bin string, args ...s
 // recorded), and reports whether that succeeded. A failure — no turn running,
 // container gone, docker unavailable — leaves the caller to fall back to
 // killing the host-side `docker exec` client.
-func (p sandboxExec) interrupt() error {
+func (p sandboxExec) interrupt() error { return p.interruptPID(sandboxTurnPIDFile) }
+
+// interruptPID is interrupt for the PID file of one process.
+func (p sandboxExec) interruptPID(pidFile string) error {
 	if !p.enabled() {
 		return errors.New("not sandboxed")
 	}
 	return dockerRun("exec", p.container(), "sh", "-c",
-		"kill -TERM $(cat "+sandboxTurnPIDFile+")")
+		"kill -TERM $(cat "+pidFile+")")
+}
+
+// killPID force-kills (SIGKILL) the in-container process whose PID file is pidFile. For a process that must
+// go away even if it ignores SIGTERM (a wedged engine); interruptPID's SIGTERM is for a polite interrupt.
+func (p sandboxExec) killPID(pidFile string) error {
+	if !p.enabled() {
+		return errors.New("not sandboxed")
+	}
+	return dockerRun("exec", p.container(), "sh", "-c", "kill -KILL $(cat "+pidFile+")")
 }
 
 // clearTurnPID deletes the PID file a finished turn left behind, so a later
 // Interrupt cannot signal a PID the container has since recycled. Best-effort:
 // a turn that never started wrote none.
-func (p sandboxExec) clearTurnPID() {
+func (p sandboxExec) clearTurnPID() { p.clearPID(sandboxTurnPIDFile) }
+
+// clearPID deletes one process's PID file.
+func (p sandboxExec) clearPID(pidFile string) {
 	if !p.enabled() {
 		return
 	}
-	_ = dockerRun("exec", p.container(), "rm", "-f", sandboxTurnPIDFile)
+	_ = dockerRun("exec", p.container(), "rm", "-f", pidFile)
 }
 
 // interruptTurn is every driver's Interrupt: signal the process inside the
 // container when the turn runs there, and kill the host-side child otherwise
 // (or when the in-container signal could not be delivered — the client is
 // still worth killing so the driver's Wait returns).
-func interruptTurn(p sandboxExec, cmd *exec.Cmd) {
-	if p.enabled() && p.interrupt() == nil {
+func interruptTurn(p sandboxExec, cmd *exec.Cmd) { interruptTurnPID(p, cmd, sandboxTurnPIDFile) }
+
+// interruptTurnPID is interruptTurn for the process whose in-container PID file is pidFile.
+func interruptTurnPID(p sandboxExec, cmd *exec.Cmd, pidFile string) {
+	if p.enabled() && p.interruptPID(pidFile) == nil {
 		return
 	}
 	if cmd != nil && cmd.Process != nil {

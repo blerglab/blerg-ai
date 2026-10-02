@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { getFocus, setFocus, getCollapsed, setCollapsed } from './sidebarPrefs'
+import { getFocus, setFocus } from './sidebarPrefs'
 
 const FOCUS_KEY = 'blerg-runner.sidebar.focus'
-const COLLAPSED_KEY = 'blerg-runner.sidebar.collapsed'
 
 describe('sidebarPrefs', () => {
   beforeEach(() => {
@@ -17,6 +16,11 @@ describe('sidebarPrefs', () => {
     it('round-trips a daemon id', () => {
       setFocus('daemon-1')
       expect(getFocus()).toBe('daemon-1')
+    })
+
+    it('round-trips the cluster focus', () => {
+      setFocus('cluster')
+      expect(getFocus()).toBe('cluster')
     })
 
     it('returns null after setFocus(null)', () => {
@@ -39,38 +43,6 @@ describe('sidebarPrefs', () => {
       setFocus('daemon-1')
       setFocus(null)
       expect(localStorage.getItem(FOCUS_KEY)).toBeNull()
-    })
-  })
-
-  describe('getCollapsed / setCollapsed', () => {
-    it('returns empty object when key is absent', () => {
-      expect(getCollapsed()).toEqual({})
-    })
-
-    it('round-trips a collapsed map', () => {
-      const map = { d1: true, d2: false }
-      setCollapsed(map)
-      expect(getCollapsed()).toEqual(map)
-    })
-
-    it('returns empty object on garbage JSON', () => {
-      localStorage.setItem(COLLAPSED_KEY, '{{bad')
-      expect(getCollapsed()).toEqual({})
-    })
-
-    it('returns empty object if stored value is an array (not a plain object)', () => {
-      localStorage.setItem(COLLAPSED_KEY, JSON.stringify(['d1', 'd2']))
-      expect(getCollapsed()).toEqual({})
-    })
-
-    it('returns empty object if stored value is null JSON', () => {
-      localStorage.setItem(COLLAPSED_KEY, JSON.stringify(null))
-      expect(getCollapsed()).toEqual({})
-    })
-
-    it('persists the map to localStorage', () => {
-      setCollapsed({ d1: true })
-      expect(JSON.parse(localStorage.getItem(COLLAPSED_KEY)!)).toEqual({ d1: true })
     })
   })
 })

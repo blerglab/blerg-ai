@@ -107,7 +107,7 @@ var boardOperations = []agentsmanifest.Operation{
 	// an agent looking for "how do I attach a PR" should find it in the table
 	// rather than having to infer it from the update schema.
 	{Name: "link_card", Method: "PATCH", Path: "/api/cards/{id}", Cap: capCardWrite,
-		Summary: "Attach a link (session, pr, rcca, doc, url) by PATCHing the card's links array."},
+		Summary: "Attach a link (session, pr, rcca, doc, url, artifact) by PATCHing {\"add_links\":[{kind,url,label}]}: appended atomically, existing links untouched."},
 	{Name: "move_card", Method: "POST", Path: "/api/cards/{id}/move", Cap: capCardWrite,
 		Summary: "Move a card to another column, optionally before a given card."},
 	{Name: "archive_card", Method: "POST", Path: "/api/cards/{id}/archive", Cap: capCardWrite,

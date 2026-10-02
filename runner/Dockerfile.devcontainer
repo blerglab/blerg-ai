@@ -1,5 +1,5 @@
 # blerg-runner-devcontainer: per-session agent workspace image. The runner binary
-# is PID 1; toolchains cover the common project types run through this stack.
+# (blerg-runner-pod) is PID 1; toolchains cover the common project types run through this stack.
 #
 # Built from a repo-root context, same reason as ../Dockerfile.server: the
 # `replace github.com/blerglab/blerg-ai/contracts => ../contracts` in
@@ -14,7 +14,7 @@ COPY contracts/ /src/contracts/
 COPY runner/ /src/runner/
 WORKDIR /src/runner
 RUN go mod download
-RUN CGO_ENABLED=0 go build -ldflags "-X main.version=$(git describe --tags --always 2>/dev/null || echo dev)" -o /out/blerg-runner ./cmd/runner
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=$(git describe --tags --always 2>/dev/null || echo dev)" -o /out/blerg-runner-pod ./cmd/runner
 
 FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node
 
@@ -55,7 +55,12 @@ RUN cd /opt/blerg-engines && npm ci --omit=dev --no-audit --no-fund \
 COPY --from=build /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
-COPY --from=build /out/blerg-runner /usr/local/bin/blerg-runner
+# The pod's PID 1 is blerg-runner-pod. `blerg-runner` is the agent-facing CLI (update / ask / note /
+# publish, a stdlib-only Python script run by the image's python3), the same file desktop
+# sessions get, so a Claude Code session can message the user and hand them a file with it.
+COPY --from=build /out/blerg-runner-pod /usr/local/bin/blerg-runner-pod
+COPY --from=build /src/runner/.claude/skills/session-messaging/blerg-runner /usr/local/bin/blerg-runner
+RUN chmod 0755 /usr/local/bin/blerg-runner
 
 # Non-root workspace user.
 RUN useradd -m -u 1000 -d /workspace agent && mkdir -p /workspace && chown agent:agent /workspace
@@ -77,4 +82,4 @@ ENV HOME=/workspace \
 COPY runner/sandbox/install-hermes.sh /opt/blerg-engines/install-hermes.sh
 RUN /opt/blerg-engines/install-hermes.sh
 
-ENTRYPOINT ["/usr/local/bin/blerg-runner"]
+ENTRYPOINT ["/usr/local/bin/blerg-runner-pod"]

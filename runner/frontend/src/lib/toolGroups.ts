@@ -11,7 +11,7 @@ export const HIDDEN_KINDS = new Set(['provider_blocks', 'status_changed', 'start
 // nothing, so it must not split a run of tool calls either.
 const CARD_KINDS = new Set([
   'user_message', 'assistant_text', 'check_in', 'ask', 'update', 'note',
-  'model_changed', 'subagent_started', 'subagent_done', 'turn_done', 'error', 'compaction',
+  'model_changed', 'subagent_started', 'subagent_done', 'turn_done', 'error', 'compaction', 'artifact',
 ])
 
 // Tools whose result is a link or image worth seeing at once: they stay full

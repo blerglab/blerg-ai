@@ -7,9 +7,11 @@ interface ClusterStatusApi {
   namespace?: string
   image?: string
   daemon_id?: string
+  // The cap in force (the admin override when set), and the environment value it returns to.
   max_sessions?: number
+  max_sessions_default?: number
   active_sessions: number
-  available_engines: string[]
+  available_engines: string[] | null // null when the cluster has no operator credentials
   // Whether the operator Secret carries a shared git token. Without one, a
   // session can only clone public repos unless the launching user has their
   // own GitHub credential.
@@ -21,6 +23,7 @@ interface ClusterStatusApi {
   cpu_limit?: string
   mem_limit?: string
   pod_ttl_seconds?: number
+  pod_idle_timeout_seconds?: number
   termination_grace_seconds?: number
   ttl_seconds_after_finished?: number
 }
@@ -69,6 +72,118 @@ function fmtSeconds(s?: number): string {
   if (s % 3600 === 0) return `${s / 3600}h`
   if (s % 60 === 0) return `${s / 60}m`
   return `${s}s`
+}
+
+// "500m" -> "0.5 CPU", "1Gi" -> "1 GiB": a pod's resource request as people say it.
+function fmtCPU(v: string): string {
+  const m = /^(\d+(?:\.\d+)?)m$/.exec(v)
+  return `${m ? Number(m[1]) / 1000 : v} CPU`
+}
+function fmtMem(v: string): string {
+  return v.replace(/^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti)$/, '$1 $2B')
+}
+
+const MIN_SESSIONS = 1
+const MAX_SESSIONS = 64
+
+// PodLimits lets an administrator change how long a session pod may sit idle,
+// how long any pod may live and how many session pods may run at once.
+// Applies to pods started after a save. A non-admin's save is refused by the
+// server and the reason is shown.
+export function PodLimits({ status, onSaved }: { status: ClusterStatusApi; onSaved: (s: ClusterStatusApi) => void }) {
+  const hours = (s?: number) => String((s ?? 0) / 3600)
+  const [idle, setIdle] = useState(hours(status.pod_idle_timeout_seconds))
+  const [ttl, setTtl] = useState(hours(status.pod_ttl_seconds))
+  const shownCap = status.max_sessions == null ? '' : String(status.max_sessions)
+  const [cap, setCap] = useState(shownCap)
+  // "Use default" was pressed and the cap field not edited since: Save removes the override.
+  const [resetCap, setResetCap] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const capDefault = status.max_sessions_default
+  const capOverridden = capDefault != null && status.max_sessions != null && status.max_sessions !== capDefault
+
+  async function save() {
+    setMsg(null)
+    // Only a changed cap is sent: 0 removes the override, a number sets it.
+    let capChange: number | undefined
+    if (resetCap) {
+      capChange = 0
+    } else if (cap !== shownCap) {
+      const n = Number(cap)
+      if (cap.trim() === '' || !Number.isInteger(n) || n < MIN_SESSIONS || n > MAX_SESSIONS) {
+        setMsg({ ok: false, text: `Max concurrent session pods must be a whole number from ${MIN_SESSIONS} to ${MAX_SESSIONS}.` })
+        return
+      }
+      capChange = n
+    }
+    setBusy(true)
+    try {
+      const r = await apiFetch('/api/cluster/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pod_idle_timeout_seconds: Math.round(Number(idle) * 3600),
+          pod_ttl_seconds: Math.round(Number(ttl) * 3600),
+          ...(capChange === undefined ? {} : { max_sessions: capChange }),
+        }),
+      })
+      const body = await r.json().catch(() => ({}))
+      if (!r.ok) {
+        setMsg({ ok: false, text: body.error || (r.status === 403 ? 'Only an administrator can change this.' : 'Could not save.') })
+        return
+      }
+      onSaved(body as ClusterStatusApi)
+      // The sidebar's Cluster pill reads the cap on its own; tell it, so it shows the new one at once.
+      window.dispatchEvent(new CustomEvent('blerg:cluster-settings-saved', { detail: body }))
+      setMsg({ ok: true, text: 'Saved. Applies to sessions started from now on.' })
+    } catch {
+      setMsg({ ok: false, text: 'Could not save.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const input: React.CSSProperties = {
+    width: 80, background: 'var(--basalt)', color: 'var(--chalk)',
+    border: '1px solid var(--stone)', borderRadius: 4, padding: '2px 6px', textAlign: 'right',
+  }
+  return (
+    <div style={card}>
+      <span style={sectionLabel}>Session pod limits (administrators)</span>
+      <div style={row}>
+        <label htmlFor="pod-idle-hours">End a pod after idle (hours, 0 = never)</label>
+        <input id="pod-idle-hours" type="number" min={0} step={0.5} value={idle} onChange={e => setIdle(e.target.value)} style={input} />
+      </div>
+      <div style={row}>
+        <label htmlFor="pod-ttl-hours">Hard lifetime cap (hours)</label>
+        <input id="pod-ttl-hours" type="number" min={1} step={1} value={ttl} onChange={e => setTtl(e.target.value)} style={input} />
+      </div>
+      <div style={{ ...row, borderBottom: 'none', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <label htmlFor="max-session-pods">Max concurrent session pods</label>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {status.active_sessions >= 0 && <span style={{ color: 'var(--fog)', fontSize: '0.75rem' }}>{status.active_sessions} in use</span>}
+          {capDefault != null && <span style={{ color: 'var(--fog)', fontSize: '0.75rem' }}>default {capDefault}</span>}
+          {capOverridden && !resetCap && (
+            <button type="button" onClick={() => { setCap(String(capDefault)); setResetCap(true) }}>Use default</button>
+          )}
+          <input
+            id="max-session-pods" type="number" min={MIN_SESSIONS} max={MAX_SESSIONS} step={1} value={cap}
+            onChange={e => { setCap(e.target.value); setResetCap(false) }} style={input}
+          />
+        </span>
+      </div>
+      <p style={{ color: 'var(--fog)', fontSize: '0.75rem', margin: '8px 0' }}>
+        Idle means no message sent and no turn finished. An ended session keeps its history and can be resumed.
+        {status.cpu_request && status.mem_request && (
+          <> Each session pod asks for about {fmtCPU(status.cpu_request)} and {fmtMem(status.mem_request)}, so more pods need more cluster capacity.</>
+        )}
+      </p>
+      <button onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+      {msg && <span role="status" style={{ marginLeft: 10, fontSize: '0.8rem', color: msg.ok ? 'var(--fog)' : 'var(--danger)' }}>{msg.text}</span>}
+    </div>
+  )
 }
 
 export default function ClusterStatus() {
@@ -147,16 +262,23 @@ export default function ClusterStatus() {
               <div style={row}><span>Max concurrent sessions</span><span>{status.max_sessions}</span></div>
               <div style={row}><span>CPU / memory request</span><span>{status.cpu_request} / {status.mem_request}</span></div>
               <div style={row}><span>CPU / memory limit</span><span>{status.cpu_limit} / {status.mem_limit}</span></div>
-              <div style={row}><span>Pod TTL</span><span>{fmtSeconds(status.pod_ttl_seconds)}</span></div>
+              <div style={row}><span>Pod idle timeout</span><span>{status.pod_idle_timeout_seconds ? fmtSeconds(status.pod_idle_timeout_seconds) : 'never'}</span></div>
+              <div style={row}><span>Pod lifetime cap</span><span>{fmtSeconds(status.pod_ttl_seconds)}</span></div>
               <div style={row}><span>Termination grace</span><span>{fmtSeconds(status.termination_grace_seconds)}</span></div>
               <div style={{ ...row, borderBottom: 'none' }}><span>Finished Job cleanup after</span><span>{fmtSeconds(status.ttl_seconds_after_finished)}</span></div>
             </div>
+
+            <PodLimits
+              key={`${status.pod_idle_timeout_seconds}-${status.pod_ttl_seconds}-${status.max_sessions}`}
+              status={status}
+              onSaved={s => setStatus(prev => ({ ...prev, ...s, active_sessions: prev?.active_sessions ?? 0, available_engines: prev?.available_engines ?? [] }))}
+            />
 
             <div style={card}>
               <span style={sectionLabel}>Available engines</span>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {ALL_ENGINES.map(id => {
-                  const available = status.available_engines.includes(id)
+                  const available = (status.available_engines ?? []).includes(id)
                   return (
                     <span
                       key={id}

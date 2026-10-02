@@ -1,22 +1,15 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding assistants working in this directory.
 
 ## Project
 
 blerg-runner is a local tool for managing Claude Code projects and driving agent sessions. Keep scope small and focused on local Claude/agent management use cases.
 
-## Plugins
-
-This project has the following Claude Code plugins enabled (see `.claude/settings.json`):
-- `frontend-design` — for building UI components
-- `superpowers` — for structured planning, debugging, and development workflows
-
 ## Building & testing
 
-Tests require the pinned Go toolchain at `$HOME/go/bin/go` (`go.mod` declares
-`go 1.25`, which the system `go` is too old to satisfy). Use `make test` — it already
-points at the right binary.
+Tests need Go 1.25 or newer (see `go.mod`). Use `make test`: it runs `$HOME/go/bin/go`
+when that exists and the `go` on your PATH otherwise.
 
 ## Session state detection — fix tests first
 

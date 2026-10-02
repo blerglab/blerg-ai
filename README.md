@@ -2,7 +2,7 @@
 
 Blerg runs coding-agent sessions (Claude Code, Codex and others) on your own machine or your own Kubernetes cluster, and gives them a shared kanban board to draft and pick up work. It exists so that agents can do real work under a login, a budget and a sandbox you control, instead of on someone else's platform.
 
-**Try it in about ten minutes** (Linux, macOS or Windows with WSL2; Docker and a logged-in Claude Code or Codex needed, see [Requirements](#requirements)):
+**Try it in roughly ten minutes, plus the first sandbox image build** (Linux, macOS or Windows with WSL2; Docker and a logged-in Claude Code or Codex needed, see [Requirements](#requirements)):
 
 ```
 git clone https://github.com/blerglab/blerg-ai.git && cd blerg-ai/install/desktop
@@ -137,6 +137,7 @@ In plain terms; the precise rules and how to report a problem are in [`SECURITY.
 - **Point sessions only at code you would run yourself.** A repository you launch a session in is code the agent will execute.
 - **Credentials are per person.** Each account stores its own engine and git credentials in core's vault (encrypted with `BLERG_CORE_LOCAL_KEY` on the desktop), and a cluster session runs with the credentials of the person who launched it. There is no shared operator credential to leak.
 - **Plugins and board automation tokens act with a person's credentials.** A plugin you list under Settings runs third-party code in every cluster session you start, with that session's access. A board's automation token lets that board start sessions as you, so anyone who can write cards on that board can spend your credential and could get an agent to reveal it. Connect only what you are comfortable sharing that way.
+- **Unattended agents read untrusted text.** A cron, or any session with [MCP connections](docs/mcp-connections.md), runs with file tools only and just the tools you selected, in a sandbox or a pod, in a session only you can see. A hostile message can still steer it into misusing those tools, so allow the fewest and prefer read-only ones; see [`docs/crons.md`](docs/crons.md).
 - **The stack listens on `127.0.0.1` by default.** Put authentication and TLS in front of it before exposing it.
 - **Docker group membership is root-equivalent.** Add only accounts you would trust with root.
 
@@ -154,7 +155,8 @@ runner's REST contract or its MCP server — full reference in
 
 ## Configuration
 
-Every environment variable each service reads, with defaults:
+Every environment variable each service reads, with defaults (the runner's are in the table in
+[`runner/README.md`](runner/README.md#configuration-env)):
 
 - [`core/docs/CONFIG.md`](core/docs/CONFIG.md) — `blerg-core` (login/refresh origins, auth providers, key backends, frontend build-time vars)
 - [`board/docs/CONFIG.md`](board/docs/CONFIG.md) — `blerg-board`
@@ -176,7 +178,8 @@ Requires `blerg-core` (and, for the runner, `blerg-board`) already running — s
 ## Tests
 
 ```
-make test                                  # contracts + core (Go)
+make test                                  # Go tests: contracts, core, runner and board (some need Postgres)
+cd core/web && npm test                    # core frontend
 cd board/web && npm test                   # board frontend
 cd runner/frontend && npm test             # runner frontend
 ```
@@ -190,6 +193,12 @@ cd runner/frontend && npm test             # runner frontend
 | [`install/k8s/CLUSTER-RUNTIME.md`](install/k8s/CLUSTER-RUNTIME.md) | How cluster sessions work |
 | [`core/docs/CONFIG.md`](core/docs/CONFIG.md), [`board/docs/CONFIG.md`](board/docs/CONFIG.md) | Every environment variable |
 | [`board/README.md`](board/README.md), [`runner/README.md`](runner/README.md) | The board and the runner, including the runner's API contract |
+| [`docs/mcp-connections.md`](docs/mcp-connections.md) | MCP connections: giving a session tools from a remote MCP server, through the runner's gateway |
+| [`docs/proposals.md`](docs/proposals.md) | Proposals: agent write calls queued for your approval, what you approve, limits |
+| [`docs/crons.md`](docs/crons.md) | Crons: scheduled, unattended agent runs, what they can and cannot do |
+| [`docs/artifacts.md`](docs/artifacts.md) | Files from a session: `blerg-runner publish`, what the app can show, limits, where they live |
+| [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md) | Messaging a running agent, interrupting, pausing a cluster session, long conversations |
+| [`docs/design/`](docs/design/) | Design notes: [AI crons and MCP connections](docs/design/ai-crons.md), [mid-turn steering](docs/design/mid-turn-steering.md) |
 | [`docs/backup-and-restore.md`](docs/backup-and-restore.md) | What state exists, how to back it up and restore it, desktop and Kubernetes |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 

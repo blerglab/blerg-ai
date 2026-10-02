@@ -185,6 +185,9 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 	daemons := h.GetAllDaemons()
 	daemonInfos := make([]protocol.DaemonInfo, 0, len(daemons))
 	for _, d := range daemons {
+		if d.Mode == "runner" {
+			continue // a cluster session pod, not a machine the owner picks
+		}
 		daemonInfos = append(daemonInfos, protocol.DaemonInfo{
 			ID:        d.ID,
 			Name:      d.Name,
@@ -202,6 +205,9 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 			log.Printf("browser initial_state ListSessions: %v", err)
 		} else {
 			for _, r := range rows {
+				if !canSeeAccount(bc.AccountID, &r) { // a private session is its owner's alone
+					continue
+				}
 				// Use the shared row→info mapper so every SessionInfo field
 				// (including unread/starred) is populated consistently — a manual
 				// duplicate here previously dropped those flags on reconnect.
@@ -217,7 +223,7 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 	// Roll-up messages (open + recent), so the Chat surface is populated on load.
 	messageInfos := []protocol.MessageInfo{}
 	if dbPool != nil {
-		if rows, err := db.ListMessages(ctx, dbPool, defaultMessageLimit); err != nil {
+		if rows, err := db.ListMessagesFor(ctx, dbPool, defaultMessageLimit, bc.AccountID); err != nil {
 			log.Printf("browser initial_state ListMessages: %v", err)
 		} else {
 			for _, r := range rows {
@@ -340,6 +346,15 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 
 		var env envelope
 		if err := json.Unmarshal(raw, &env); err != nil {
+			continue
+		}
+		// Privacy: a frame that names a session this socket's account may not
+		// see is dropped before any handler runs. It covers every session
+		// command (subscribe, input, resize, scrollback, messages, model,
+		// interrupt, read, star) in one place, so a command added later
+		// inherits it. The refusal is silent, like an unknown session.
+		if sid := inboundSessionID(raw); sid != "" && !h.accountCanSee(bc.AccountID, sid) {
+			log.Printf("browser %s: %s for a session it may not see: dropped", bc.ID, env.Type)
 			continue
 		}
 

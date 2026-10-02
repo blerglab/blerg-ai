@@ -39,6 +39,9 @@ func (a *API) CreateCardGated(ctx context.Context, p auth.Principal, boardID str
 	if err := p.RequireBoard(boardID, "card.write"); err != nil {
 		return CardWriteResult{}, err
 	}
+	if err := a.resolveArtifactLinks(&params); err != nil {
+		return CardWriteResult{}, err
+	}
 	board, err := db.GetBoard(ctx, a.Pool, boardID)
 	if err != nil {
 		return CardWriteResult{}, err
@@ -66,6 +69,9 @@ func (a *API) UpdateCardGated(ctx context.Context, p auth.Principal, cardID stri
 		return CardWriteResult{}, err
 	}
 	if err := p.RequireBoard(card.BoardID, "card.write"); err != nil {
+		return CardWriteResult{}, err
+	}
+	if err := a.resolveArtifactLinks(&params); err != nil {
 		return CardWriteResult{}, err
 	}
 	board, err := db.GetBoard(ctx, a.Pool, card.BoardID)

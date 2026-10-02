@@ -84,6 +84,12 @@ type fakeK8s struct {
 	// pods is what the pod list answers, keyed by session id (one pod per
 	// session). nil answers 403, like a cluster without the pods RBAC rule.
 	pods map[string]map[string]any
+	// existingSecrets is the set of per-session Secrets the cluster already
+	// holds (a Job's leftovers inside its ttlSecondsAfterFinished window, or an
+	// orphan from a crashed start): a Secret POST for such a name answers 409,
+	// a GET 200, and a DELETE removes it. A deleted Job answers 404 like the
+	// real API.
+	existingSecrets map[string]bool
 }
 
 // setPod makes the fake report pod (a Pod object) for sessionID.
@@ -143,6 +149,10 @@ func (f *fakeK8s) handler() http.HandlerFunc {
 		case r.Method == "GET" && strings.Contains(r.URL.Path, "/secrets/"):
 			parts := strings.Split(r.URL.Path, "/")
 			name := parts[len(parts)-1]
+			if f.existingSecrets[name] {
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{}})
+				return
+			}
 			data, ok := f.secrets[name]
 			if !ok {
 				w.WriteHeader(http.StatusNotFound)
@@ -158,6 +168,13 @@ func (f *fakeK8s) handler() http.HandlerFunc {
 			body, _ := io.ReadAll(r.Body)
 			var secret map[string]any
 			_ = json.Unmarshal(body, &secret)
+			if md, _ := secret["metadata"].(map[string]any); md != nil {
+				if n, _ := md["name"].(string); f.existingSecrets[n] {
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(`{"kind":"Status","reason":"AlreadyExists","code":409}`))
+					return
+				}
+			}
 			f.createdSecrets = append(f.createdSecrets, secret)
 			w.WriteHeader(201)
 		case r.Method == "PATCH" && strings.Contains(r.URL.Path, "/secrets/"):
@@ -173,6 +190,7 @@ func (f *fakeK8s) handler() http.HandlerFunc {
 		case r.Method == "DELETE" && strings.Contains(r.URL.Path, "/secrets/"):
 			parts := strings.Split(r.URL.Path, "/")
 			f.deletedSecrets = append(f.deletedSecrets, parts[len(parts)-1])
+			delete(f.existingSecrets, parts[len(parts)-1])
 			w.WriteHeader(200)
 		case r.Method == "GET" && strings.Contains(r.URL.Path, "/jobs") && r.URL.RawQuery != "":
 			// List with labelSelector — ActiveSessionJobs's cap check.
@@ -223,6 +241,10 @@ func (f *fakeK8s) handler() http.HandlerFunc {
 		case r.Method == "DELETE":
 			parts := strings.Split(r.URL.Path, "/")
 			f.deleted = append(f.deleted, parts[len(parts)-1])
+			if f.missingJobs == nil {
+				f.missingJobs = map[string]bool{}
+			}
+			f.missingJobs[parts[len(parts)-1]] = true
 			w.WriteHeader(200)
 		default:
 			w.WriteHeader(404)
@@ -1199,3 +1221,117 @@ func TestResumeClusterSessionDoesNotReMintAnotherUsersCredentials(t *testing.T) 
 		})
 	}
 }
+
+// resumeSecretName is the per-session Secret name the resume tests collide on.
+const resumeSecretName = "blerg-runner-session-s-res"
+
+func resumeSpec() SessionJobSpec {
+	return SessionJobSpec{SessionID: "s-res", Repo: "r", InitialPrompt: "resume please", Resume: true}
+}
+
+// A finished Job (pod stopped gracefully, idle exit, deadline) keeps its
+// per-session Secret for ttlSecondsAfterFinished. Resuming in that window must
+// clear both and start fresh instead of failing on the Secret's 409.
+func TestCreateSessionJobResumeReplacesFinishedJobAndStaleSecret(t *testing.T) {
+	f := &fakeK8s{existingSecrets: map[string]bool{resumeSecretName: true}}
+	jm := newTestJobManager(t, f)
+	f.setJobStatus(jm.jobName("s-res"), map[string]any{"succeeded": 1})
+	if err := jm.CreateSessionJob(resumeSpec()); err != nil {
+		t.Fatalf("resume over a finished Job = %v, want nil", err)
+	}
+	if len(f.deleted) != 1 || f.deleted[0] != jm.jobName("s-res") {
+		t.Errorf("the finished Job must be deleted once, deleted = %v", f.deleted)
+	}
+	if len(f.deletedSecrets) == 0 || f.deletedSecrets[0] != resumeSecretName {
+		t.Errorf("the stale Secret must be deleted, deletedSecrets = %v", f.deletedSecrets)
+	}
+	if len(f.createdSecrets) != 1 || len(f.created) != 1 {
+		t.Errorf("want 1 new Secret and 1 new Job, got %d and %d", len(f.createdSecrets), len(f.created))
+	}
+}
+
+// A LIVE Job's Secret is never touched: the double spawn is refused exactly
+// as before and nothing is deleted.
+func TestCreateSessionJobResumeLiveJobKeepsSecretAndJob(t *testing.T) {
+	f := &fakeK8s{existingSecrets: map[string]bool{resumeSecretName: true}}
+	jm := newTestJobManager(t, f) // the fake reports a Job as live by default
+	err := jm.CreateSessionJob(resumeSpec())
+	if err == nil || err.Error() != "could not prepare session credentials" {
+		t.Fatalf("err = %v, want the fixed credentials error", err)
+	}
+	if len(f.deleted) != 0 || len(f.deletedSecrets) != 0 {
+		t.Errorf("a live session's Job/Secret must not be deleted: %v %v", f.deleted, f.deletedSecrets)
+	}
+	if len(f.createdSecrets) != 0 || len(f.created) != 0 {
+		t.Errorf("nothing may be created over a live session: %d %d", len(f.createdSecrets), len(f.created))
+	}
+	if !f.existingSecrets[resumeSecretName] {
+		t.Error("the live session's Secret must still exist")
+	}
+}
+
+// An orphan Secret (a crashed start left it, no Job exists) is replaced.
+func TestCreateSessionJobReplacesOrphanSecret(t *testing.T) {
+	f := &fakeK8s{existingSecrets: map[string]bool{resumeSecretName: true}}
+	jm := newTestJobManager(t, f)
+	f.setJobMissing(jm.jobName("s-res"))
+	if err := jm.CreateSessionJob(resumeSpec()); err != nil {
+		t.Fatalf("start over an orphan Secret = %v, want nil", err)
+	}
+	if len(f.deletedSecrets) != 1 || len(f.createdSecrets) != 1 || len(f.created) != 1 {
+		t.Errorf("want orphan deleted then 1 Secret + 1 Job; got deletedSecrets=%v secrets=%d jobs=%d",
+			f.deletedSecrets, len(f.createdSecrets), len(f.created))
+	}
+}
+
+// A Secret create that keeps answering 409 fails once with the fixed error:
+// one delete, one retry, no loop, no Job. The k8s body never reaches the caller.
+func TestCreateSessionJobSecretConflictPersistsFailsOnce(t *testing.T) {
+	const sentinel = "SENTINEL-409-body-detail"
+	f := &fakeK8s{
+		secretCreateStatus: http.StatusConflict,
+		secretCreateBody:   `{"message":"secrets already exists ` + sentinel + `","code":409}`,
+	}
+	jm := newTestJobManager(t, f)
+	f.setJobMissing(jm.jobName("s-res"))
+	err := jm.CreateSessionJob(resumeSpec())
+	if err == nil || err.Error() != "could not prepare session credentials" {
+		t.Fatalf("err = %v, want the fixed credentials error", err)
+	}
+	if strings.Contains(err.Error(), sentinel) || strings.Contains(err.Error(), "409") {
+		t.Errorf("the k8s body/status must not reach the caller: %v", err)
+	}
+	if len(f.deletedSecrets) != 1 {
+		t.Errorf("exactly one orphan delete expected, got %v", f.deletedSecrets)
+	}
+	if len(f.created) != 0 {
+		t.Errorf("no Job may be created: %d", len(f.created))
+	}
+}
+
+// The finished-Job pre-step reports only a fixed string when the Job delete
+// fails: the k8s response body must not reach the caller.
+func TestCreateSessionJobResumeCleanupErrorsHideK8sBody(t *testing.T) {
+	const sentinel = "SENTINEL-delete-body"
+	f := &fakeK8s{existingSecrets: map[string]bool{resumeSecretName: true}}
+	jm := newTestJobManager(t, f)
+	f.setJobStatus(jm.jobName("s-res"), map[string]any{"failed": 1})
+	inner := jm.Client
+	jm.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/jobs/") {
+			return &http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader(sentinel)), Header: http.Header{}}, nil
+		}
+		return inner.Transport.RoundTrip(r)
+	})}
+	err := jm.CreateSessionJob(resumeSpec())
+	if err == nil {
+		t.Fatal("a failed finished-Job delete must fail the start")
+	}
+	if strings.Contains(err.Error(), sentinel) || strings.Contains(err.Error(), "500") {
+		t.Errorf("k8s body leaked: %v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

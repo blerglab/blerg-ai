@@ -13,8 +13,13 @@
 #   BLERG_RUNNER_AGENT_SECRET              — name of the shared agent Secret in
 #                                            blerg-runner-sessions, if you
 #                                            renamed it from the default
-#   BLERG_RUNNER_POD_TTL_SECONDS           — how long a finished session Job
-#                                            lingers before k8s reaps it
+#   BLERG_RUNNER_POD_TTL_SECONDS           — hard cap on a session pod's
+#                                            lifetime (default 7 days)
+#   BLERG_RUNNER_POD_IDLE_TIMEOUT_SECONDS  — end a pod after this long with no
+#                                            message or finished turn
+#                                            (default 24h; 0 = never). An
+#                                            admin can change both of these
+#                                            from the runner's Cluster page.
 #   BLERG_RUNNER_AGENT_GIT_BASE            — git host cluster sessions clone
 #                                            from. Deliberately NOT set below:
 #                                            the runner already defaults to
@@ -41,6 +46,30 @@
 #                                            installing. Set both to the same
 #                                            value. Plugins run code in
 #                                            sessions: widen it deliberately.
+#   BLERG_CORE_MCP_ALLOW_HTTP_HOSTS        — hostnames an MCP connection's URL
+#   BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS       may use over plain http, or reach
+#   BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS        although they resolve to a private,
+#   BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS     loopback or link-local address
+#                                            (comma-separated hostnames).
+#                                            Absent = https and public
+#                                            addresses only. Core and the
+#                                            runner read separate lists: set
+#                                            both to the same hosts, and list
+#                                            only hosts you run. See
+#                                            docs/mcp-connections.md.
+#   BLERG_RUNNER_MCP_CALL_TIMEOUT_SECONDS  — MCP gateway limits: per-call timeout
+#   BLERG_RUNNER_MCP_MAX_CONCURRENT          (default 60), concurrent calls per
+#   BLERG_RUNNER_MCP_MAX_RESULT_BYTES        connection (4) and result size cap
+#                                            (262144). Absent = the defaults.
+#   BLERG_RUNNER_BOARD_MCP_URL             — overrides the board MCP endpoint
+#                                            alone (default: BLERG_RUNNER_BOARD_URL
+#                                            below + /mcp). Absent = the default.
+#
+# The MCP gateway (BLERG_RUNNER_MCP_GW_ADDR / _GW_URL in `data` below) is served
+# on its own port (8090), reachable only through the internal-only
+# blerg-runner-mcp-gateway Service. Never route it through the Ingress. Remove
+# BLERG_RUNNER_MCP_GW_ADDR to turn the gateway off. To let session pods reach it
+# under a default-deny egress policy, see networkpolicy-sessions.example.yaml.
 #
 # The BLERG_RUNNER_AGENT_* / _INTERNAL_URL / _MAX_SESSIONS keys in `data` below
 # turn on the cluster runtime (per-session agent pods). deploy.sh renders
@@ -81,8 +110,16 @@ data:
   # Service DNS name, not the public Ingress host.
   BLERG_RUNNER_INTERNAL_URL: "http://blerg-runner.blerg.svc.cluster.local:8080"
   BLERG_RUNNER_MAX_SESSIONS: "4"
+  # MCP gateway: the runner's second listener, and the in-cluster address session
+  # pods dial for it (the internal-only Service in runner-deployment.yaml).
+  BLERG_RUNNER_MCP_GW_ADDR: ":8090"
+  BLERG_RUNNER_MCP_GW_URL: "http://blerg-runner-mcp-gateway.blerg.svc.cluster.local:8090"
+  # The board as the runner reaches it: a cron's failure card is posted there and
+  # the built-in `board` connection's MCP endpoint defaults to <this>/mcp. Empty
+  # = crons get no board connection and no failure card.
+  BLERG_RUNNER_BOARD_URL: "http://blerg-board:8080"
   # Completion webhooks refuse private, link-local and loopback callback targets
   # unless this is "true" (WEBHOOK_ALLOW_PRIVATE in .env). Turn it on for an
-  # install whose public hostnames resolve to a private network (a homelab
-  # behind NAT) — otherwise every callback into that network is refused.
+  # install whose public hostnames resolve to a private network (a private
+  # network behind NAT) — otherwise every callback into that network is refused.
   BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE: "${WEBHOOK_ALLOW_PRIVATE}"

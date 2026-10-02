@@ -48,7 +48,7 @@ whim ([`core/docs/CONFIG.md`](../core/docs/CONFIG.md)).
 | `install/desktop/.env`: `BLERG_CORE_LOCAL_KEY`, the service keys, the daemon token, ports, and your Claude OAuth token if you gave one | `install/desktop/.env` (mode 0600) | **Yes.** It is the only copy of the key |
 | Daemon settings, such as the repos folder you chose | `~/.blerg-runner-daemon/settings.json` (or `$BLERG_RUNNER_DAEMON_STATE_DIR/settings.json`) | Yes, it is tiny. Without it the daemon falls back to `BLERG_RUNNER_REPOS_ROOT` from `.env` |
 | Session recovery records (they carry session tokens) | `<repos root>/.blerg-runner/sessions/` | Optional. Only useful together with a database restored from the same moment |
-| Runner data: uploaded agent-config bundles, published mockups | Docker volume `blerg-desktop-runner-data`, mounted at `/data` in the runner | Optional; re-uploadable |
+| Runner data: uploaded agent-config bundles, published mockups, files agents published (`artifacts/`) | Docker volume `blerg-desktop-runner-data`, mounted at `/data` in the runner | Back it up to keep published and uploaded files: they cannot be regenerated, and without the volume the Files panel still lists them but they cannot be downloaded |
 | Your repositories | the repos root | They are yours, and in git. Back them up the way you back up any code |
 | The sandbox image `blerg-runner-sandbox:latest`, the three `desktop-blerg-*` images | Docker | No. `./blerg-up.sh` rebuilds them |
 
@@ -166,7 +166,7 @@ in `install/k8s/postgres-statefulset.yaml`.
 | `blerg-secrets`: `BLERG_CORE_LOCAL_KEY`, `POSTGRES_PASSWORD`, the service keys, the daemon token | Secret in namespace `blerg` | **Yes.** Losing `POSTGRES_PASSWORD` locks the components out of the database |
 | `blerg-runner-agent`: the daemon token and any engine credential you pinned in `.env` | Secret in namespace `blerg-runner-sessions` | Only if you pinned credentials or manage it yourself (`AGENT_SECRET_EXTERNAL`). Otherwise the next `deploy.sh` recreates it |
 | `install/k8s/.env`: `REGISTRY`, `TAG`, `DOMAIN` and any `SECRET_*` pins | your checkout, not the cluster | Yes, it is small |
-| Runner data (agent-config bundles, mockups) | `emptyDir` in the runner pod | Not kept across restarts by design |
+| Runner data (agent-config bundles, mockups, files agents published and files you uploaded) | `emptyDir` in the runner pod | Lost when the runner pod restarts, by design: the Files panel keeps listing them afterwards, but they cannot be downloaded. Give the runner a volume if you want them kept |
 | Session Jobs, their per-session Secrets, the images | cluster and registry | No |
 
 ### Back up

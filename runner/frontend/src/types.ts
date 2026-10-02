@@ -90,6 +90,8 @@ export interface SessionInfo {
   // runner recorded reasons.
   end_reason?: string;
   ended_by?: EndedBy | null;
+  // The cron that started this session (crons, spec 7.6); absent for every other session.
+  cron_id?: string;
 }
 
 export interface EndedBy {
@@ -142,7 +144,8 @@ export type AgentEventKind =
   | 'error'
   | 'compaction'
   | 'start_stage'
-  | 'capabilities';
+  | 'capabilities'
+  | 'artifact';
 
 export interface AgentEvent {
   type: 'agent_event';
@@ -169,6 +172,17 @@ export interface TurnDonePayload {
   model: string;
   usage: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number };
   check_in_missing?: boolean;
+}
+// A file the agent handed the user (`blerg-runner publish`). Mirrors the server's artifactInfo.
+// view says how the app can show it: markdown | text | json | csv | image | pdf | audio | video |
+// html | none (download only). An unknown value is treated as download-only.
+// origin: 'agent' (published by the session) or 'user' (attached by a person from the chat box);
+// absent on older replies, which are agent files.
+// version: this file's number among the files of the same name and origin (1 for the first);
+// latest_version (the list only): the highest of them. Both are absent from an older server.
+export interface ArtifactPayload {
+  id: string; name: string; size: number; content_type: string; view: string
+  origin?: 'agent' | 'user'; version?: number; latest_version?: number
 }
 export interface ErrorPayload { message: string; retryable: boolean }
 export interface CompactionPayload { summary: string; through_index: number }
@@ -219,11 +233,41 @@ export interface CapabilitiesPayload {
   groups: CapabilityGroup[]
 }
 
+// MCP connections (runner GET /api/mcp/connections and .../{id}/tools), and what a launch
+// sends as `mcp`. The hash is the one the picker saw; the server refuses a tool whose live
+// hash differs.
+export type McpToolMode = 'off' | 'propose' | 'allow'
+export interface McpConnectionInfo {
+  id: string
+  name: string
+  url: string
+  auth_kind: string
+  status: string // "ok" is the only status a session can use
+  default_tools: Record<string, { mode: string; hash: string }>
+}
+export interface McpToolInfo {
+  name: string
+  description: string
+  inputSchema?: unknown
+  // What the server claims about itself (readOnlyHint, destructiveHint, title...). Display only.
+  annotations?: { readOnlyHint?: boolean; [k: string]: unknown }
+  hash: string
+}
+export interface McpSelectionEntry {
+  connection: string
+  tools: Record<string, { mode: 'allow' | 'propose'; hash: string }>
+}
+
 export interface AgentEventsReplayDone {
   type: 'agent_events_replay_done';
   session_id: string;
   last_seq: number;
   has_more: boolean;
+  // Set on the answer to a tail / before_seq request, which reads backwards from the end of the
+  // transcript: first_seq is the oldest event it carried, has_older says whether earlier ones remain.
+  older?: boolean;
+  has_older?: boolean;
+  first_seq?: number;
   server_time?: string; // server clock at replay end — for skew-free elapsed times
 }
 
@@ -241,7 +285,7 @@ export interface SessionTitleChanged {
 }
 
 // Session status values
-export type SessionStatus = "starting" | "running" | "idle" | "waiting" | "stopped" | "error" | "disconnected";
+export type SessionStatus = "starting" | "running" | "idle" | "waiting" | "stopped" | "error" | "disconnected" | "ended";
 
 // ─── Server → Browser message interfaces ──────────────────────────────────────
 
@@ -471,8 +515,10 @@ export interface SpawnSession {
 export interface SubscribeAgentEvents {
   type: "subscribe_agent_events";
   session_id: string;
-  after_seq: number;
+  after_seq?: number;
   limit?: number;
+  tail?: number; // the newest N events, instead of the oldest after after_seq
+  before_seq?: number; // the limit events just before this seq (the next older page)
 }
 
 export interface AgentUserMessage {
@@ -574,3 +620,76 @@ export type BrowserMessage =
   | AgentUserMessage
   | SetSessionModel
   | InterruptSession;
+
+// ─── Crons (runner /api/crons, spec 7.7) ──────────────────────────────────────
+
+export type CronStatus = 'active' | 'disabled' | 'paused' | 'expired'
+export type CronRunStatus = 'claimed' | 'started' | 'held' | 'skipped' | 'failed'
+export type CronRuntime = 'auto' | 'cluster' | 'docker'
+
+export interface CronRunInfo {
+  id: string
+  cron_id: string
+  scheduled_for: string
+  claimed_at: string
+  started_at: string | null
+  session_id: string | null
+  status: CronRunStatus
+  reason: string | null
+  late: boolean
+  manual: boolean
+}
+
+// A cron as the server sends it. There is no token id: only when its access token expires.
+export interface CronInfo {
+  id: string
+  name: string
+  status: CronStatus
+  enabled: boolean
+  schedule: string
+  timezone: string
+  prompt: string
+  engine: string
+  model: string | null
+  effort: string | null
+  runtime: CronRuntime
+  daemon_id: string | null
+  board_id: string | null
+  mcp: McpSelectionEntry[]
+  token_expires_at: string
+  grace_seconds: number
+  max_runtime_seconds: number
+  next_run_at: string
+  last_run_at: string | null
+  consecutive_failures: number
+  paused_reason: string | null
+  last_run: CronRunInfo | null
+  connection_problems: string[]
+  created_at: string
+  updated_at: string
+}
+
+// MCP proposals (spec 9): a call the agent asked for on a tool in `propose` mode, frozen until the
+// person approves or rejects it. `arguments` is authoritative (exactly what an approval sends);
+// `agent_summary` is a convenience line built by the gateway. `result` is untrusted upstream output.
+export type ProposalState = 'pending' | 'executing' | 'done' | 'rejected' | 'expired' | 'failed' | 'unknown'
+export type ProposalResult = null | { content?: { type: string; text?: string }[]; isError?: boolean } | { error: string }
+export interface ProposalInfo {
+  id: string
+  state: ProposalState
+  connection_id: string
+  connection_name: string
+  tool: string
+  arguments: Record<string, unknown>
+  // The frozen arguments as the exact stored JSON text (absent on an older server). Shown instead
+  // of re-serialising `arguments`, which would change number lexemes.
+  arguments_raw?: string
+  agent_summary: string
+  session_id: string | null
+  cron_id: string | null
+  created_at: string
+  expires_at: string
+  decided_at: string | null
+  decided_by: string | null
+  result: ProposalResult
+}

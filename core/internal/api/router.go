@@ -19,6 +19,7 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/discovery"
 	"github.com/blerglab/blerg-ai/core/internal/identity"
 	"github.com/blerglab/blerg-ai/core/internal/landing"
+	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
 	"github.com/blerglab/blerg-ai/core/internal/plugins"
 	"github.com/blerglab/blerg-ai/core/internal/projects"
 )
@@ -48,6 +49,10 @@ type Deps struct {
 	// account's always-on plugins, under the operator's marketplace allow-list. Nil fails those
 	// endpoints closed (503).
 	Plugins *plugins.Service
+
+	// MCPConnections backs /api/mcp/connections and /internal/mcp/connections/* (routes_mcp.go).
+	// Nil fails those endpoints closed (503).
+	MCPConnections *mcpconn.Service
 
 	// RegisterKey is the bootstrap shared secret components (board, runner) present to
 	// POST /components to self-register. It is intentionally a simple shared secret, not a
@@ -399,6 +404,9 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("POST /internal/credentials/list", deps.handleInternalListCredentials)
 	// The runner reads an account's plugin list (no secrets) with a mandatory liveness proof.
 	mux.HandleFunc("POST /internal/plugins/list", deps.handleInternalListPlugins)
+
+	deps.registerMCPRoutes(mux)
+	deps.registerInternalTokenRoutes(mux)
 
 	return mux
 }

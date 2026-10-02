@@ -39,6 +39,12 @@ spec:
           image: "${REGISTRY}/blerg-runner:${TAG}"
           ports:
             - containerPort: 8080
+            # The MCP gateway's own listener (BLERG_RUNNER_MCP_GW_ADDR). It is
+            # reached only through the internal-only blerg-runner-mcp-gateway
+            # Service below; ingress.yaml must never route to it (deploy_test.sh
+            # asserts that).
+            - name: mcp-gateway
+              containerPort: 8090
           env:
             - name: BLERG_RUNNER_DATABASE_URL
               valueFrom:
@@ -115,6 +121,41 @@ spec:
             - name: BLERG_RUNNER_PLUGIN_MARKETPLACES
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_PLUGIN_MARKETPLACES, optional: true }
+            # ── MCP gateway (optional) ──────────────────────────────────────
+            # Where sessions with MCP connections (and crons) reach their tools.
+            # GW_ADDR is the listener, GW_URL the address session pods dial (the
+            # internal Service below). configmap.yaml sets both; unset GW_ADDR
+            # turns the gateway off. The allow-lists and limits are documented
+            # in configmap.yaml and default to empty / built-in.
+            - name: BLERG_RUNNER_MCP_GW_ADDR
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_GW_ADDR, optional: true }
+            - name: BLERG_RUNNER_MCP_GW_URL
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_GW_URL, optional: true }
+            # Optional — the board cron runs use (see configmap.yaml): the failure
+            # card's target and the built-in board connection's endpoint.
+            - name: BLERG_RUNNER_BOARD_URL
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_BOARD_URL, optional: true }
+            - name: BLERG_RUNNER_BOARD_MCP_URL
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_BOARD_MCP_URL, optional: true }
+            - name: BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS, optional: true }
+            - name: BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS, optional: true }
+            - name: BLERG_RUNNER_MCP_CALL_TIMEOUT_SECONDS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_CALL_TIMEOUT_SECONDS, optional: true }
+            - name: BLERG_RUNNER_MCP_MAX_CONCURRENT
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_MAX_CONCURRENT, optional: true }
+            - name: BLERG_RUNNER_MCP_MAX_RESULT_BYTES
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_MAX_RESULT_BYTES, optional: true }
             # ── Cluster runtime (optional) ──────────────────────────────────
             # Every var below is `optional: true`: unset until an operator
             # follows CLUSTER-RUNTIME.md, at which point NewJobManagerFromEnv
@@ -149,6 +190,9 @@ spec:
             - name: BLERG_RUNNER_POD_TTL_SECONDS
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_TTL_SECONDS, optional: true }
+            - name: BLERG_RUNNER_POD_IDLE_TIMEOUT_SECONDS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_IDLE_TIMEOUT_SECONDS, optional: true }
             - name: BLERG_RUNNER_POD_CPU_REQUEST
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_CPU_REQUEST, optional: true }
@@ -215,3 +259,25 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
+---
+# The MCP gateway, INTERNAL ONLY: a ClusterIP Service that session pods dial
+# (BLERG_RUNNER_MCP_GW_URL in configmap.yaml). It is deliberately a separate
+# Service from blerg-runner, so nothing that routes to the runner's web port
+# can reach the gateway, and ingress.yaml must never reference it or port
+# 8090 (install/k8s/deploy_test.sh fails if it does). Never change this to
+# NodePort or LoadBalancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: blerg-runner-mcp-gateway
+  namespace: blerg
+  labels:
+    app: blerg-runner
+spec:
+  type: ClusterIP
+  selector:
+    app: blerg-runner
+  ports:
+    - name: mcp-gateway
+      port: 8090
+      targetPort: mcp-gateway

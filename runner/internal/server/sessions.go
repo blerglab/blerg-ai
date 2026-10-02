@@ -82,8 +82,17 @@ func sessionLabel(title, repo, id string) string {
 // to all browsers.
 func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, daemonID string, msg protocol.SessionStarted) {
 	if pool != nil {
-		if err := db.InsertSession(ctx, pool, msg.SessionID, daemonID, "starting",
-			msg.ProjectPath, msg.Repo, msg.Title, msg.Model); err != nil {
+		// A session the server already recorded as private (notePrivateInsert, before its row was
+		// written) goes in private and owned, so a pre-create that failed cannot leave a public row
+		// until MarkPrivate runs. An upsert only ever adds an origin.
+		var origin db.SessionOrigin
+		if owners, ok := hub.privateOwners([]string{msg.SessionID}); ok {
+			if owner, private := owners[msg.SessionID]; private {
+				origin = db.SessionOrigin{SpawningAccount: owner, Private: true}
+			}
+		}
+		if err := db.InsertSessionAs(ctx, pool, msg.SessionID, daemonID, "starting",
+			msg.ProjectPath, msg.Repo, msg.Title, msg.Model, origin); err != nil {
 			log.Printf("InsertSession %s: %v", msg.SessionID, err)
 		}
 		if err := db.AppendSessionEvent(ctx, pool, msg.SessionID, "state_change",
@@ -110,6 +119,7 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	runtime := ""
 	effort := "" // the launch effort, recorded on the row at spawn
 	engine := ""
+	cronID := "" // set when a cron started the session, so the badge shows from the first message
 	if pool != nil {
 		if row, err := db.GetSession(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("session_started GetSession %s: %v", msg.SessionID, err)
@@ -121,6 +131,7 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 				effort = *row.Effort
 			}
 			engine = derefOrEmpty(row.Engine)
+			cronID = derefOrEmpty(row.CronID)
 			if kind == "" {
 				kind = row.Kind
 			}
@@ -147,6 +158,7 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 			StartedAt:   time.Now().UTC().Format(time.RFC3339),
 			Kind:        kind,
 			Runtime:     runtime,
+			CronID:      cronID,
 		},
 	})
 }
@@ -293,7 +305,9 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 
 		// Send an OS push only when the user is away. If anyone has interacted
 		// recently, they're engaged and the client shows an in-app toast instead.
-		if !hub.ActiveWithin(activityTTL) && !readyIdle {
+		// Never for a private session: a subscription belongs to no account, so
+		// the push could not be limited to the session's owner (privacy.go).
+		if !hub.ActiveWithin(activityTTL) && !readyIdle && !current.Private {
 			var title string
 			if current.Title != nil {
 				title = *current.Title
@@ -387,6 +401,7 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 		if err := db.RevokeBoardTokensForSession(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("RevokeBoardTokensForSession session_ended %s: %v", msg.SessionID, err)
 		}
+		revokeSessionGrants(ctx, pool, msg.SessionID, "session_ended")
 		if err := db.ClearTicketSessionBySession(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("ClearTicketSessionBySession session_ended %s: %v", msg.SessionID, err)
 		}

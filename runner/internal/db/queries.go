@@ -70,6 +70,12 @@ type SessionRow struct {
 	EndReason      *string
 	EndedByKind    *string
 	EndedByAccount *string
+	// Private (migration 022): the session is visible only to
+	// SpawningAccountID. See internal/server/privacy.go.
+	Private bool
+	// CronID (migration 023) is the cron that started the session, nil for every
+	// other session. The UI badges it and the scheduler counts and stops by it.
+	CronID *string
 }
 
 // IdempotencyRow is one runner_idempotency record: which session a
@@ -167,7 +173,7 @@ func GetDaemonByName(ctx context.Context, conn *pgxpool.Pool, name string) (*Dae
 // DaemonName is not populated (no join is performed).
 func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*SessionRow, error) {
 	row := conn.QueryRow(ctx, `
-		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account
+		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text
 		  FROM sessions
 		 WHERE id = $1
 	`, sessionID)
@@ -176,7 +182,7 @@ func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*Ses
 		&r.Title, &r.Model, &r.Engine, &r.Effort, &r.StartedAt, &r.EndedAt, &r.Unread, &r.Starred, &r.SpawningAccountID,
 		&r.Runtime, &r.SkipPermissions, &r.ErrorReason,
 		&r.TokenID, &r.CallbackURL, &r.CallbackSecret, &r.GitURL, &r.AutoStop, &r.Kind,
-		&r.EndReason, &r.EndedByKind, &r.EndedByAccount)
+		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -186,17 +192,125 @@ func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*Ses
 	return &r, nil
 }
 
+// SetSessionPrivate sets or clears a session's private flag (migration 022):
+// a private session is visible only to its spawning account. Callers go
+// through the server's MarkPrivate, which also drops the in-process
+// visibility cache. A session that does not exist is pgx.ErrNoRows.
+//
+// Marking a session private also unbinds it from any ticket: a ticket card is
+// visible to everyone on its board, and it names its session.
+func SetSessionPrivate(ctx context.Context, conn *pgxpool.Pool, sessionID string, private bool) error {
+	tag, err := conn.Exec(ctx, `UPDATE sessions SET private = $2 WHERE id = $1`, sessionID, private)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	if private {
+		if _, err := conn.Exec(ctx, `UPDATE tickets SET session_id = NULL WHERE session_id = $1`, sessionID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListPrivateSessionOwners returns every private session and its owning
+// account ("" when it has none). The runner server reads it at start-up, and
+// again after a failed read, to seed its in-memory record of private sessions.
+func ListPrivateSessionOwners(ctx context.Context, conn *pgxpool.Pool) (map[string]string, error) {
+	rows, err := conn.Query(ctx, `SELECT id::text, COALESCE(spawning_account_id, '') FROM sessions WHERE private`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, owner string
+		if err := rows.Scan(&id, &owner); err != nil {
+			return nil, err
+		}
+		out[id] = owner
+	}
+	return out, rows.Err()
+}
+
+// PrivateSessionOwners returns, for the given session ids, the private ones
+// and the account each belongs to ("" when the session has no spawning
+// account, which nobody can then see). Ids that are not private, or do not
+// exist, are absent from the result.
+func PrivateSessionOwners(ctx context.Context, conn *pgxpool.Pool, ids []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := conn.Query(ctx, `
+		SELECT id::text, COALESCE(spawning_account_id, '')
+		  FROM sessions
+		 WHERE private AND id::text = ANY($1)`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, owner string
+		if err := rows.Scan(&id, &owner); err != nil {
+			return nil, err
+		}
+		out[id] = owner
+	}
+	return out, rows.Err()
+}
+
 // InsertSession creates a new session record. ON CONFLICT (id) DO NOTHING makes
 // it idempotent: when the server pre-creates an assist session row before
 // the daemon confirms via session_started, the daemon's arrival is a no-op.
 func InsertSession(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status, projectPath, repo, title, model string) error {
+	return InsertSessionAs(ctx, conn, id, daemonID, status, projectPath, repo, title, model, SessionOrigin{})
+}
+
+// SessionOrigin is what a start knows about a session before its row exists and
+// must be written IN the insert, so that the row is never visible without it:
+// a session that is private, or that a cron started, must not be listable by
+// another account in the window between a plain insert and a follow-up write.
+// The zero value adds nothing (an ordinary session).
+type SessionOrigin struct {
+	// SpawningAccount is the verified account the session is started for. A
+	// private session is private TO this account, so it goes in with the flag.
+	SpawningAccount string
+	// Private makes the session visible to SpawningAccount alone (migration 022).
+	Private bool
+	// CronID is the cron that started the session (migration 023).
+	CronID string
+}
+
+// sessionOriginArgs are the extra insert arguments: spawning account, private, cron id.
+func (o SessionOrigin) args() (account any, private bool, cronID any) {
+	if o.SpawningAccount != "" {
+		account = o.SpawningAccount
+	}
+	if o.CronID != "" {
+		cronID = o.CronID
+	}
+	return account, o.Private, cronID
+}
+
+// InsertSessionAs is InsertSession that also writes the session's origin in the
+// same statement. On a conflict (a revived session) an origin only ever adds:
+// a private session stays private and a known account or cron is not erased.
+func InsertSessionAs(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status, projectPath, repo, title, model string, o SessionOrigin) error {
+	account, private, cronID := o.args()
 	// Upsert: a resumed cluster session re-sends session_started for a row
 	// that already exists — revive it (status/daemon) instead of erroring.
 	_, err := conn.Exec(ctx, `
-		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, model)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''))
+		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, model,
+		                      spawning_account_id, private, cron_id)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8, $9, $10::uuid)
 		ON CONFLICT (id) DO UPDATE
 		  SET daemon_id         = EXCLUDED.daemon_id,
+		      spawning_account_id = COALESCE(EXCLUDED.spawning_account_id, sessions.spawning_account_id),
+		      private           = sessions.private OR EXCLUDED.private,
+		      cron_id           = COALESCE(EXCLUDED.cron_id, sessions.cron_id),
 		      status            = EXCLUDED.status,
 		      -- Where the host actually put the session wins over the row the
 		      -- server pre-created: a "No repository" scratch folder whose name
@@ -218,7 +332,7 @@ func InsertSession(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status
 		      -- must not be judged on how long it was gone.
 		      status_changed_at = now(),
 		      daemon_lost_at    = NULL
-	`, id, daemonID, status, projectPath, repo, title, model)
+	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID)
 	return err
 }
 
@@ -235,11 +349,23 @@ func InsertSession(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status
 // skip_permissions is deliberately not set here: cluster sessions never bypass
 // the engine's prompts, and the column defaults to false.
 func InsertClusterSession(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status, projectPath, repo, title, model string) error {
+	return InsertClusterSessionAs(ctx, conn, id, daemonID, status, projectPath, repo, title, model, SessionOrigin{})
+}
+
+// InsertClusterSessionAs is InsertClusterSession that also writes the session's
+// origin (private, cron, spawning account) in the same statement; see
+// SessionOrigin and InsertSessionAs.
+func InsertClusterSessionAs(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status, projectPath, repo, title, model string, o SessionOrigin) error {
+	account, private, cronID := o.args()
 	_, err := conn.Exec(ctx, `
-		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, model, runtime)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), 'cluster')
+		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, model, runtime,
+		                      spawning_account_id, private, cron_id)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), 'cluster', $8, $9, $10::uuid)
 		ON CONFLICT (id) DO UPDATE
 		  SET daemon_id         = EXCLUDED.daemon_id,
+		      spawning_account_id = COALESCE(EXCLUDED.spawning_account_id, sessions.spawning_account_id),
+		      private           = sessions.private OR EXCLUDED.private,
+		      cron_id           = COALESCE(EXCLUDED.cron_id, sessions.cron_id),
 		      status            = EXCLUDED.status,
 		      runtime           = 'cluster',
 		      ended_at          = NULL,
@@ -250,7 +376,7 @@ func InsertClusterSession(ctx context.Context, conn *pgxpool.Pool, id, daemonID,
 		      end_recorded_at   = NULL,
 		      status_changed_at = now(),
 		      daemon_lost_at    = NULL
-	`, id, daemonID, status, projectPath, repo, title, model)
+	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID)
 	return err
 }
 
@@ -339,7 +465,7 @@ func ListSessions(ctx context.Context, conn *pgxpool.Pool) ([]SessionRow, error)
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
-		       s.end_reason, s.ended_by_kind, s.ended_by_account
+		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 ORDER BY s.started_at DESC
@@ -356,7 +482,7 @@ func ListSessionsByStatus(ctx context.Context, conn *pgxpool.Pool, status string
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
-		       s.end_reason, s.ended_by_kind, s.ended_by_account
+		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.status = $1
@@ -573,7 +699,7 @@ func ListSessionsByDaemon(ctx context.Context, conn *pgxpool.Pool, daemonID stri
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
-		       s.end_reason, s.ended_by_kind, s.ended_by_account
+		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.daemon_id = $1
@@ -601,7 +727,7 @@ func ListSessionsByDaemonMode(ctx context.Context, conn *pgxpool.Pool, mode stri
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
-		       s.end_reason, s.ended_by_kind, s.ended_by_account
+		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE d.mode = $1
@@ -622,7 +748,7 @@ func scanSessionRows(rows pgx.Rows) ([]SessionRow, error) {
 			&r.ID, &r.DaemonID, &r.DaemonName, &r.Status,
 			&r.ProjectPath, &r.Repo, &r.Title, &r.Model, &r.Engine, &r.Effort, &r.StartedAt, &r.EndedAt, &r.Unread, &r.Starred,
 			&r.Runtime, &r.SkipPermissions, &r.ErrorReason, &r.Kind,
-			&r.EndReason, &r.EndedByKind, &r.EndedByAccount,
+			&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.SpawningAccountID, &r.Private, &r.CronID,
 		); err != nil {
 			return nil, err
 		}
@@ -947,6 +1073,29 @@ func ListMessages(ctx context.Context, conn *pgxpool.Pool, limit int) ([]Message
 	return scanMessageRows(rows)
 }
 
+// ListMessagesFor is ListMessages as one account may see it: messages of a
+// private session other than the account's own are left out BEFORE the
+// recent-history limit is applied, so another account's chatter cannot crowd
+// this account's feed. An empty account sees no private session at all.
+func ListMessagesFor(ctx context.Context, conn *pgxpool.Pool, limit int, account string) ([]MessageRow, error) {
+	rows, err := conn.Query(ctx, `
+		WITH v AS (
+			SELECT m.* FROM messages m
+			  JOIN sessions s ON s.id = m.session_id
+			 WHERE NOT s.private
+			    OR (s.spawning_account_id IS NOT NULL AND s.spawning_account_id = $2)
+		)
+		SELECT `+messageCols+` FROM v
+		 WHERE status = 'open'
+		    OR id IN (SELECT id FROM v ORDER BY created_at DESC LIMIT $1)
+		 ORDER BY created_at DESC
+	`, limit, account)
+	if err != nil {
+		return nil, err
+	}
+	return scanMessageRows(rows)
+}
+
 // ListMessagesBySession returns one session's messages, newest-first.
 func ListMessagesBySession(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]MessageRow, error) {
 	rows, err := conn.Query(ctx, `
@@ -1062,6 +1211,48 @@ func ListAgentEvents(ctx context.Context, conn *pgxpool.Pool, sessionID string, 
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ListAgentEventsBefore returns up to limit events of the session with seq below
+// beforeSeq, oldest first: the newest such events, so beforeSeq 0 means the very
+// end of the transcript. more says whether earlier events remain.
+func ListAgentEventsBefore(ctx context.Context, conn *pgxpool.Pool, sessionID string, beforeSeq int64, limit int) (rows []AgentEventRow, more bool, err error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	// One extra row says whether anything older is left.
+	res, err := conn.Query(ctx, `
+		SELECT session_id, seq, client_event_id, kind, payload::text, ts
+		  FROM agent_events
+		 WHERE session_id = $1 AND ($2 = 0 OR seq < $2)
+		 ORDER BY seq DESC
+		 LIMIT $3
+	`, sessionID, beforeSeq, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer res.Close()
+	for res.Next() {
+		var r AgentEventRow
+		if err := res.Scan(&r.SessionID, &r.Seq, &r.ClientEventID, &r.Kind, &r.Payload, &r.Ts); err != nil {
+			return nil, false, err
+		}
+		rows = append(rows, r)
+	}
+	if err := res.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(rows) > limit {
+		more = true
+		rows = rows[:limit]
+	}
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	return rows, more, nil
 }
 
 // SetSessionEngine records a session's CLI engine ("" (claude) | "codex" | "hermes").

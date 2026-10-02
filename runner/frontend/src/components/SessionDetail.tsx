@@ -124,7 +124,7 @@ export default function SessionDetail() {
         <div style={{ padding: '24px', color: 'var(--chalk)' }}>
           <div style={{ color: 'var(--danger)', marginBottom: 16 }}>{message}</div>
           <button
-            onClick={() => { clearFailedSession(sessionId!); navigate('/') }}
+            onClick={() => { clearFailedSession(sessionId!); navigate('/sessions') }}
             style={{ background: 'none', border: 'none', color: 'var(--blaze)', cursor: 'pointer', fontSize: 16, fontFamily: 'inherit' }}
           >
             Back to home
@@ -148,7 +148,7 @@ export default function SessionDetail() {
     return (
       <div style={{ padding: '24px', color: 'var(--chalk)' }}>
         <button
-          onClick={() => navigate('/')}
+          onClick={() => navigate('/sessions')}
           style={{ background: 'none', border: 'none', color: 'var(--blaze)', cursor: 'pointer', fontSize: 16, marginBottom: 16, fontFamily: 'inherit' }}
         >
           ← Back
@@ -164,6 +164,19 @@ export default function SessionDetail() {
   const isAgent = session.kind === 'agent'
   const endLine = describeSessionEnd(session)
 
+  // A live cluster session can be paused: its pod is freed, the session stays and a message resumes it.
+  const canPause = session.runtime === 'cluster' && ['running', 'idle', 'waiting'].includes(session.status)
+
+  async function handlePauseClick() {
+    if (!sessionId) return
+    try {
+      const res = await apiFetch(`/api/sessions/${sessionId}/pause`, { method: 'POST' })
+      if (!res.ok) addToast({ title: 'Pause failed', body: `Server returned ${res.status}. The session is still running.` })
+    } catch {
+      addToast({ title: 'Pause failed', body: 'Network error. The session is still running.' })
+    }
+  }
+
   async function handleKillClick() {
     if (!sessionId) return
     if (killArmed) {
@@ -172,7 +185,7 @@ export default function SessionDetail() {
       try {
         const res = await apiFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
         if (res.ok) {
-          navigate('/')
+          navigate('/sessions')
         } else {
           addToast({ title: 'Kill failed', body: `Server returned ${res.status}. The session may still be running.` })
         }
@@ -192,7 +205,7 @@ export default function SessionDetail() {
       <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--stone)', display: 'flex', alignItems: 'center', gap: 12, background: 'var(--basalt)' }}>
         {isMobile && (
           <button
-            onClick={() => navigate('/')}
+            onClick={() => navigate('/sessions')}
             style={{ background: 'none', border: 'none', color: 'var(--blaze)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0, fontFamily: 'inherit' }}
           >
             ←
@@ -349,6 +362,26 @@ export default function SessionDetail() {
             ))}
           </div>
         )}
+        {canPause && (
+          <button
+            onClick={handlePauseClick}
+            title="Free the pod but keep the session — send a message to resume it"
+            style={{
+              background: 'var(--basalt)',
+              border: '1px solid var(--scree)',
+              borderRadius: 6,
+              color: 'var(--chalk)',
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 700,
+              padding: '4px 10px',
+              fontFamily: 'inherit',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            ⏸ Pause
+          </button>
+        )}
         {isActive && (
           <button
             onClick={handleKillClick}
@@ -407,7 +440,7 @@ export default function SessionDetail() {
               try {
                 const res = await apiFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
                 if (res.ok) {
-                  navigate('/')
+                  navigate('/sessions')
                 } else {
                   addToast({ title: 'Delete failed', body: `Server returned ${res.status}.` })
                 }

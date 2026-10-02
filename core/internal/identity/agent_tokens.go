@@ -161,7 +161,7 @@ func (s *Service) CreateAgentToken(ctx context.Context, accountID, name, preset 
 	var live int
 	if err := s.st.Pool().QueryRow(ctx,
 		`SELECT count(*) FROM agent_tokens
-		  WHERE account_id = $1 AND revoked_at IS NULL AND expires_at > now()`, accountID).Scan(&live); err != nil {
+		  WHERE account_id = $1 AND kind <> 'exchange' AND revoked_at IS NULL AND expires_at > now()`, accountID).Scan(&live); err != nil {
 		return AgentTokenRecord{}, "", err
 	}
 	if live >= maxLiveAgentTokens {
@@ -291,11 +291,13 @@ func sleepPastSecondBoundary(ctx context.Context) error {
 
 // ListAgentTokens returns accountID's own tokens, newest first, metadata only — revoked and
 // expired ones included, so the owner can see the whole history rather than having rows
-// silently vanish.
+// silently vanish. Cron-kind rows (CreateUnsignedAgentToken) are NOT listed: they are no
+// credential the owner holds, so there is nothing to copy; they still count toward the cap and
+// are managed from the runner's crons page.
 func (s *Service) ListAgentTokens(ctx context.Context, accountID string) ([]AgentTokenRecord, error) {
 	rows, err := s.st.Pool().Query(ctx,
 		`SELECT id::text, name, aud, caps, created_at, expires_at, last_used_at, revoked_at
-		   FROM agent_tokens WHERE account_id = $1 ORDER BY created_at DESC, id`, accountID)
+		   FROM agent_tokens WHERE account_id = $1 AND kind = 'token' ORDER BY created_at DESC, id`, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -366,8 +368,9 @@ func (s *Service) AgentTokenLive(ctx context.Context, accountID, id string) (boo
 	}
 	var live bool
 	err := s.st.Pool().QueryRow(ctx,
-		`UPDATE agent_tokens SET last_used_at = now()
-		  WHERE id = $1 AND account_id = $2 AND revoked_at IS NULL AND expires_at > now()
+		`UPDATE agent_tokens t SET last_used_at = now()
+		  WHERE t.id = $1 AND t.account_id = $2 AND t.revoked_at IS NULL AND t.expires_at > now()
+		    AND EXISTS (SELECT 1 FROM accounts a WHERE a.id = t.account_id AND a.disabled_at IS NULL)
 		  RETURNING true`, id, accountID).Scan(&live)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

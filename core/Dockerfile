@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 go build -o /blerg-core ./core/cmd/blerg-core
 # overrides for deriving core's own origin (see coreOrigin there). Core's
 # frontend is same-origin with core, so the derivation already works unset —
 # they exist here for parity with board/runner and for unusual topologies.
-FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS web-builder
+FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS web-builder
 WORKDIR /web
 COPY core/web/package.json core/web/package-lock.json ./
 RUN npm ci

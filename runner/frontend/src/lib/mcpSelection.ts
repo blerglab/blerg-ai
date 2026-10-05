@@ -16,6 +16,35 @@ export type McpSeenHashes = Record<string, Record<string, string>>
 
 export const isReadOnlyTool = (t: McpToolInfo) => t.annotations?.readOnlyHint === true
 
+// Presets: one click for the whole connection. `approval` allows what the server marks
+// read-only and proposes the rest; `custom` is what the per-tool list produces when the modes
+// match no preset.
+export type McpPreset = 'allow_all' | 'approval' | 'none'
+export const MCP_PRESET_LABEL: Record<McpPreset, string> = {
+  allow_all: 'Allow all', approval: 'Require approval', none: 'None',
+}
+
+export function presetModes(preset: McpPreset, tools: McpToolInfo[]): Record<string, McpToolMode> {
+  const out: Record<string, McpToolMode> = {}
+  for (const t of tools) {
+    out[t.name] = preset === 'none' ? 'off'
+      : preset === 'allow_all' ? 'allow'
+      : isReadOnlyTool(t) ? 'allow' : 'propose'
+  }
+  return out
+}
+
+// presetOf names the preset the current modes amount to, or 'custom'. A server with only
+// read-only tools makes `allow_all` and `approval` identical; it reads as `allow_all`.
+export function presetOf(modes: Record<string, McpToolMode> | undefined, tools: McpToolInfo[]): McpPreset | 'custom' {
+  const m = modes ?? {}
+  const mode = (t: McpToolInfo) => m[t.name] ?? 'off'
+  if (tools.every(t => mode(t) === 'off')) return 'none'
+  if (tools.every(t => mode(t) === 'allow')) return 'allow_all'
+  if (tools.every(t => mode(t) === (isReadOnlyTool(t) ? 'allow' : 'propose'))) return 'approval'
+  return 'custom'
+}
+
 // buildSelection turns the picker's state into the launch payload: only checked connections,
 // only tools that are not off, each with the hash the person saw (the live one when the tools
 // are loaded, else the one the value came in with). A connection with no tool left is omitted:

@@ -53,19 +53,28 @@ func stage(id, label, state, detail string) protocol.StartStage {
 // plugins is the always-on plugin stage (see pluginStage), included only when the
 // session has plugins — or a note about why it does not — and placed after the
 // clone and before the agent starts, the order the pod does them in.
-func clusterStartPlan(repo string, plugins *protocol.StartStage) []protocol.StartStage {
+//
+// lead are stages that already happened before the Job (a new repository's
+// creation, newrepo.go), shown first in their final state.
+func clusterStartPlan(repo string, plugins *protocol.StartStage, lead ...protocol.StartStage) []protocol.StartStage {
 	cloneLabel, cloneDetail := "Cloning repo", repo
 	if repo == "" {
 		// A "No repository" session: the pod only makes an empty directory.
 		cloneLabel, cloneDetail = "Preparing workspace", "empty — no repository"
 	}
-	plan := []protocol.StartStage{
+	plan := append([]protocol.StartStage{}, lead...)
+	for _, l := range lead {
+		if l.ID == protocol.StageRepo {
+			cloneLabel = "Cloning new repository"
+		}
+	}
+	plan = append(plan,
 		stage(protocol.StageQueued, "Queued", protocol.StageStateActive, "Creating the session's Job"),
 		stage(protocol.StageSchedule, "Scheduling pod", protocol.StageStatePending, ""),
 		stage(protocol.StageImage, "Pulling image", protocol.StageStatePending, ""),
 		stage(protocol.StageConnect, "Connecting to server", protocol.StageStatePending, ""),
 		stage(protocol.StageClone, cloneLabel, protocol.StageStatePending, cloneDetail),
-	}
+	)
 	if plugins != nil {
 		plan = append(plan, *plugins)
 	}
@@ -78,10 +87,18 @@ func clusterStartPlan(repo string, plugins *protocol.StartStage) []protocol.Star
 // daemonStartPlan is the plan of a daemon-hosted agent start: the spawn goes
 // to the daemon, which (for the Docker runtime) starts the sandbox container
 // and then the engine.
-func daemonStartPlan(daemonName string, sandbox bool) []protocol.StartStage {
+//
+// plugins is the always-on plugin stage (pluginStage), included only when the
+// session has plugins — or a note about why it does not. It comes BEFORE the
+// sandbox stage: the daemon installs into its workshop before the container
+// starts, because the container mounts the plugin cache at `docker run`.
+func daemonStartPlan(daemonName string, sandbox bool, plugins *protocol.StartStage) []protocol.StartStage {
 	plan := []protocol.StartStage{
 		stage(protocol.StageQueued, "Queued", protocol.StageStateDone, ""),
 		stage(protocol.StageDaemon, "Waiting for daemon", protocol.StageStateActive, daemonName),
+	}
+	if plugins != nil {
+		plan = append(plan, *plugins)
 	}
 	if sandbox {
 		plan = append(plan, stage(protocol.StageSandbox, "Starting sandbox container", protocol.StageStatePending, ""))
@@ -476,8 +493,8 @@ func broadcastSessionCreated(ctx context.Context, h *Hub, pool *pgxpool.Pool, se
 // announceClusterStart runs once a cluster session's row exists, before its
 // Job is created: the session appears everywhere as "starting" and its start
 // plan is recorded. resume marks the plan as a resume attempt.
-func announceClusterStart(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, repo string, resume bool, plugins *protocol.StartStage) {
-	plan := clusterStartPlan(repo, plugins)
+func announceClusterStart(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, repo string, resume bool, plugins *protocol.StartStage, lead ...protocol.StartStage) {
+	plan := clusterStartPlan(repo, plugins, lead...)
 	if resume {
 		plan[0].Detail = "Resuming: creating a new Job"
 	} else {
@@ -531,12 +548,12 @@ func (a *API) markClusterStartFailed(ctx context.Context, sessionID, reason stri
 // to a daemon and shows the session everywhere. Called only once the spawn
 // is in the daemon's send queue: before that the row may still be deleted
 // (abortSpawnSessionToken), and agent_events rows would block the delete.
-func announceDaemonAgentStart(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, daemonName string, sandbox bool) {
+func announceDaemonAgentStart(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, daemonName string, sandbox bool, plugins *protocol.StartStage) {
 	runtime := daemonRuntimeName
 	if sandbox {
 		runtime = "docker"
 	}
-	beginStart(ctx, h, pool, sessionID, runtime, daemonStartPlan(daemonName, sandbox))
+	beginStart(ctx, h, pool, sessionID, runtime, daemonStartPlan(daemonName, sandbox, plugins))
 	broadcastSessionCreated(ctx, h, pool, sessionID)
 }
 

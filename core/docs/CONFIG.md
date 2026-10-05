@@ -358,7 +358,11 @@ with a fresh `iat` — it never persists a token that was dead on arrival.
 ### Always-on plugins
 
 Each account has an ordered list of plugins per engine (`user_plugins`, migration 014) that the
-runner installs into every new cluster session started as that account. Only `claude` is
+runner installs into every new Claude agent session started as that account: a cluster pod
+installs them into its throwaway HOME, and a workstation daemon installs them into its own
+plugin workshop (`~/.blerg-runner-daemon/plugins/claude`, never the person's `~/.claude`) and
+loads them for the session only with `--plugin-dir` — see `install/desktop/DAEMON.md`. Restricted
+sessions (an MCP grant, a cron) and terminal sessions get none. Only `claude` is
 registered today (`core/internal/plugins`); an entry is `{marketplace, plugin}` — a GitHub
 `owner/repo` and a plugin name (`^[a-z0-9][a-z0-9._-]{0,63}$`). Max 20 per account, no duplicates,
 marketplace must be allowed by `BLERG_CORE_PLUGIN_MARKETPLACES`. The list is not secret.

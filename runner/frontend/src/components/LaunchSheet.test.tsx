@@ -1010,16 +1010,58 @@ describe('LaunchSheet — cluster credential preflight', () => {
     expect(captureBody.value!.provider).toBeUndefined()
   })
 
-  // M4: a cluster pod is built from a clone and discarded at the end of the
-  // session — an empty directory in it has nowhere to live.
-  it('does not offer "New folder" on cluster runtime', async () => {
+  // A cluster pod is built from a clone and discarded at the end of the
+  // session, so "New folder" becomes "New repository": the server creates
+  // owner/name on the person's git host and the pod clones it.
+  it('offers "New repository" on cluster runtime and sends new_repo with provider and visibility', async () => {
     await renderClusterAgent({
       daemons: [],
       clusterStatus: CLUSTER_ON,
-      myCreds: { engines: ['claude'], git: true },
+      myCreds: { engines: ['claude'], git: true, git_providers: ['github'] },
     })
-    expect(screen.queryByTestId('new-folder-option')).not.toBeInTheDocument()
     expect(screen.queryByText('New folder')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('new-folder-option'))
+    expect(screen.getByText('type owner/name above ↑')).toBeInTheDocument()
+    expect(screen.getByText(/Launch/).closest('button')).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText('you/new-project'), { target: { value: 'me/new-proj' } })
+    expect(screen.getByText('Create "me/new-proj" on GitHub')).toBeInTheDocument()
+    expect(screen.queryByTestId('new-repo-token-note')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('new-repo-visibility-public'))
+    expect(screen.getByText('Create & Launch →')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Create & Launch →'))
+    await waitFor(() => expect(captureBody.value).toBeDefined())
+    expect(captureBody.value).toMatchObject({ repo: 'me/new-proj', provider: 'github', new_repo: true, visibility: 'public', runtime: 'cluster' })
+    expect(captureBody.value!.clone).toBeUndefined()
+    expect(captureBody.value!.no_repo).toBeUndefined()
+  })
+
+  it('warns, without blocking, when the person has no token for the new repository\'s provider', async () => {
+    await renderClusterAgent({
+      daemons: [],
+      clusterStatus: CLUSTER_ON,
+      myCreds: { engines: ['claude'], git: true, git_providers: ['github'] },
+    })
+    fireEvent.click(screen.getByTestId('new-folder-option'))
+    fireEvent.change(screen.getByPlaceholderText('you/new-project'), { target: { value: 'grp/tool' } })
+    fireEvent.click(screen.getByTestId('new-repo-provider-gitlab'))
+    expect(screen.getByText('Create "grp/tool" on GitLab')).toBeInTheDocument()
+    expect(screen.getByTestId('new-repo-token-note')).toHaveTextContent('No GitLab token in Settings')
+    expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled()
+    fireEvent.click(screen.getByText('Create & Launch →'))
+    await waitFor(() => expect(captureBody.value).toBeDefined())
+    expect(captureBody.value).toMatchObject({ repo: 'grp/tool', provider: 'gitlab', new_repo: true, visibility: 'private' })
+  })
+
+  it('does not accept a URL as a new repository name', async () => {
+    await renderClusterAgent({
+      daemons: [],
+      clusterStatus: CLUSTER_ON,
+      myCreds: { engines: ['claude'], git: true, git_providers: ['github'] },
+    })
+    fireEvent.click(screen.getByTestId('new-folder-option'))
+    fireEvent.change(screen.getByPlaceholderText('you/new-project'), { target: { value: 'https://github.com/me/x' } })
+    expect(screen.getByText(/Launch/).closest('button')).toBeDisabled()
   })
 })
 
@@ -1758,6 +1800,7 @@ describe('LaunchSheet MCP servers', () => {
   it('sends no mcp for a checked connection with every tool off', async () => {
     await renderSheet()
     fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
+    fireEvent.click(await screen.findByTestId('mcp-customize-calendar'))
     await screen.findByTestId('mcp-tool-calendar-read')
     const body = await launch()
     expect('mcp' in body).toBe(false)
@@ -1766,6 +1809,7 @@ describe('LaunchSheet MCP servers', () => {
   it('sends mcp with each chosen tool and the hash the picker saw', async () => {
     await renderSheet()
     fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
+    fireEvent.click(await screen.findByTestId('mcp-customize-calendar'))
     await screen.findByTestId('mcp-tool-calendar-read')
     fireEvent.change(screen.getByLabelText('calendar read mode'), { target: { value: 'allow' } })
     const body = await launch()
@@ -1789,6 +1833,7 @@ describe('LaunchSheet MCP servers', () => {
   it('does not send a selection made earlier once the runtime cannot carry it', async () => {
     await renderSheet()
     fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
+    fireEvent.click(await screen.findByTestId('mcp-customize-calendar'))
     await screen.findByTestId('mcp-tool-calendar-read')
     fireEvent.change(screen.getByLabelText('calendar read mode'), { target: { value: 'allow' } })
     fireEvent.click(screen.getByTestId('runtime-daemon'))

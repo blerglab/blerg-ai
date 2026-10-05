@@ -11,10 +11,14 @@
 // Only for calls to runner's OWN API (same-origin, /api/...). A genuinely
 // external fetch has no business carrying this token and should keep using
 // the bare global fetch.
-import { getAccessToken, redirectToRefresh } from './authClient'
+import { ensureFreshToken, getAccessToken, redirectToRefresh } from './authClient'
 import { refreshAlreadyAttempted, markRefreshAttempted } from './refreshGuard'
 
 export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  return send(url, init, false)
+}
+
+function send(url: string, init: RequestInit | undefined, retried: boolean): Promise<Response> {
   const token = getAccessToken()
   // Only attach the header when a token actually exists — an unconditional
   // template literal sends the literal string "Bearer null", which the server
@@ -22,8 +26,11 @@ export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = token
     ? { ...init?.headers, Authorization: `Bearer ${token}` }
     : { ...init?.headers }
-  return fetch(url, { ...init, headers }).then((resp) => {
+  return fetch(url, { ...init, headers }).then(async (resp) => {
     if (resp.status === 401) {
+      // The token has most likely just expired. Get a new one without leaving the page and say the
+      // request again, once: a reload would throw away what the person is looking at.
+      if (!retried && (await ensureFreshToken())) return send(url, init, true)
       if (!refreshAlreadyAttempted()) {
         markRefreshAttempted()
         redirectToRefresh(location.href)

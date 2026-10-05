@@ -136,7 +136,7 @@ same guide:
 
 - To read/review => markdown, html or pdf.
 - Data => csv or json.
-- A visual => png/svg/html.
+- A visual => png/svg/html. To **show** the user something and get feedback on it — a UI state, a rendered page, a diagram — take a screenshot (a headless browser, e.g. `npx playwright screenshot <url> shot.png`, or the app's own export) and publish the PNG: it shows inline in their chat, so they can react to what you see instead of a description of it.
 - Something they will edit in Office => docx/xlsx (download only).
 - An HTML artifact must be **one self-contained file**: inline CSS/JS, images as `data:` URIs.
   It runs in a sandbox with scripts but **cannot load anything from the network**.

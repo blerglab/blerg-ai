@@ -137,8 +137,8 @@ func main() {
 	// Local inference (an OpenAI-compatible endpoint) is read once here and
 	// shared by every feature that offloads to it — the gate is only the
 	// first. BLERG_BOARD_INFER_URL/BLERG_BOARD_INFER_MODEL are canonical; GATE_OPENAI_*
-	// and ROOK_* are read as fallback aliases so live deployments keep
-	// working untouched (see docs/CONFIG.md).
+	// is read as a fallback alias so existing deployments keep working
+	// untouched (see docs/CONFIG.md).
 	infer := localinfer.NewFromEnv()
 	if infer.Configured() {
 		log.Printf("local inference: %s (chat model %q)", infer.BaseURL(), infer.ChatModel())

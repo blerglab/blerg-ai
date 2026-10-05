@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import SessionList from './components/SessionList'
+import SessionsHome from './components/SessionsHome'
 import SessionDetail from './components/SessionDetail'
 import ChatRollup from './components/ChatRollup'
 import LaunchSheet from './components/LaunchSheet'
 import { PreviewTab } from './components/PreviewTab'
 import ClusterStatus from './components/ClusterStatus'
+import Insights from './components/Insights'
 import CronsPage from './components/CronsPage'
 import Proposals, { ProposalsBadge } from './components/Proposals'
 import { useProposalCountPoll } from './lib/proposals'
@@ -211,6 +213,23 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
         Proposals
         <ProposalsBadge style={{ position: 'absolute', top: 6, right: 4 }} />
       </button>
+      <button
+        onClick={() => navigate('/insights')}
+        style={{
+          flex: 1,
+          padding: '12px',
+          textAlign: 'center',
+          color: isActive('/insights') ? 'var(--chalk)' : 'var(--fog-dim)',
+          fontSize: '14px',
+          cursor: 'pointer',
+          background: 'none',
+          border: 'none',
+          fontFamily: 'inherit',
+          letterSpacing: '0.05em',
+        }}
+      >
+        Insights
+      </button>
       {clusterConfigured && (
         <button
           onClick={() => navigate('/cluster')}
@@ -256,7 +275,14 @@ function Layout() {
       {/* The Chat inbox is not offered in the navigation for now; it stays reachable by URL. */}
       <Route path="/" element={<Navigate to="/sessions" replace />} />
       <Route path="/chat" element={<ChatRollup />} />
-      <Route path="/sessions" element={<SessionList onNewSession={() => setLaunchOpen(true)} />} />
+      {/* On a phone /sessions IS the list. Beside the sidebar it would be a second copy of it, so the
+          wide layout shows a prompt instead. */}
+      <Route
+        path="/sessions"
+        element={isMobile
+          ? <SessionList onNewSession={() => setLaunchOpen(true)} />
+          : <SessionsHome onNewSession={() => setLaunchOpen(true)} />}
+      />
       <Route path="/sessions/:id" element={<SessionDetail />} />
       <Route path="/boards" element={<BoardsList />} />
       <Route path="/boards/:id" element={<BoardView />} />
@@ -266,6 +292,7 @@ function Layout() {
       <Route path="/cluster" element={<ClusterStatus />} />
       <Route path="/crons" element={<CronsPage />} />
       <Route path="/proposals" element={<Proposals />} />
+      <Route path="/insights" element={<Insights />} />
     </Routes>
   )
 

@@ -59,9 +59,17 @@ runner at the board with `BLERG_RUNNER_BOARD_URL` (see [`crons.md`](crons.md#the
 
 Adding a connection gives no session any access. When you start a session you choose, per
 connection, which of its tools the session may call. In the runner's launch sheet each connection is
-unchecked, and inside it every tool is off. A "select all read-only" shortcut ticks the tools the
-server itself marks read-only; allowing any other tool shows a warning, because it can change
-things.
+unchecked, and inside it every tool is off until you pick one of three presets:
+
+- **Allow all** — every tool allowed; the sheet says how many of them can change things.
+- **Require approval** — the tools the server marks read-only are allowed, every other tool is
+  *proposed*: the call is queued on the Proposals page for your OK (see [`proposals.md`](proposals.md)).
+- **None** — nothing attached.
+
+**Customize** opens the per-tool list, where each tool is off, propose or allow on its own;
+allowing a tool the server does not mark read-only shows a warning, because it can change
+things. A selection that matches no preset shows as *Custom*. The crons form has no presets:
+an unattended job's tools are chosen one by one.
 
 Each choice is pinned to the tool's **definition hash**. If the server later changes a tool's
 name, description or input schema, the pin no longer matches and the tool disappears from the

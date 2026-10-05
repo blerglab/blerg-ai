@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getAccessToken, consumeAccessTokenFromFragment, coreOrigin } from "./authClient";
+import { getAccessToken, consumeAccessTokenFromFragment, coreOrigin, ensureFreshToken, startTokenRenewal, SILENT_REFRESH_PAGE } from "./authClient";
 
 describe("authClient", () => {
   beforeEach(() => {
@@ -112,5 +112,155 @@ describe("coreOrigin", () => {
     at("http://localhost:8082/cards");
     expect(coreOrigin()).toBe("http://localhost:8081");
     vi.unstubAllEnvs();
+  });
+});
+
+// ── silent renewal ───────────────────────────────────────────────────────────────────────────────
+// The hidden-frame renewal is driven here with a fake frame: appendChild is intercepted so nothing
+// loads, and a test plays core's part by giving the frame a location and firing its load event.
+
+const fakeJwt = (expMs: number) => `h.${btoa(JSON.stringify({ exp: Math.floor(expMs / 1000) }))}.s`;
+
+describe("silent renewal", () => {
+  let frames: HTMLIFrameElement[];
+  let removed: HTMLIFrameElement[];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", "/");
+    frames = [];
+    removed = [];
+    vi.spyOn(document.body, "appendChild").mockImplementation(((node: Node) => {
+      const f = node as HTMLIFrameElement;
+      f.remove = () => { removed.push(f); };
+      frames.push(f);
+      return node;
+    }) as typeof document.body.appendChild);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  // core's side: the frame ended up on our own origin with the token in its fragment
+  const answerWithToken = (f: HTMLIFrameElement, token: string) => {
+    Object.defineProperty(f, "contentWindow", {
+      configurable: true,
+      value: { location: { origin: location.origin, hash: `#access_token=${encodeURIComponent(token)}` } },
+    });
+    f.dispatchEvent(new Event("load"));
+  };
+  // core's side when it cannot help: the frame is still on core's origin, which a page may not read
+  const answerCrossOrigin = (f: HTMLIFrameElement) => {
+    Object.defineProperty(f, "contentWindow", {
+      configurable: true,
+      get() { throw new DOMException("Blocked a frame from accessing a cross-origin frame.", "SecurityError"); },
+    });
+    f.dispatchEvent(new Event("load"));
+  };
+
+  it("asks core for a token in a hidden frame that comes back to this origin", async () => {
+    const p = ensureFreshToken();
+    expect(frames).toHaveLength(1);
+    const f = frames[0];
+    const src = new URL(f.src);
+    expect(src.pathname).toBe("/auth/refresh");
+    expect(src.searchParams.get("return_to")).toBe(location.origin + SILENT_REFRESH_PAGE);
+    expect(f.getAttribute("aria-hidden")).toBe("true");
+    expect(f.style.visibility).toBe("hidden");
+    answerWithToken(f, "fresh+token/1");
+    await expect(p).resolves.toBe(true);
+    expect(getAccessToken()).toBe("fresh+token/1");
+    expect(removed).toEqual([f]);
+  });
+
+  it("reports failure, and keeps the old token, when core answers with its own page", async () => {
+    window.history.replaceState(null, "", "/#access_token=old-token");
+    consumeAccessTokenFromFragment();
+    const p = ensureFreshToken();
+    answerCrossOrigin(frames[0]);
+    await expect(p).resolves.toBe(false);
+    expect(getAccessToken()).toBe("old-token");
+    expect(removed).toHaveLength(1);
+  });
+
+  it("reports failure when the frame comes back without a token", async () => {
+    const p = ensureFreshToken();
+    Object.defineProperty(frames[0], "contentWindow", {
+      configurable: true,
+      value: { location: { origin: location.origin, hash: "" } },
+    });
+    frames[0].dispatchEvent(new Event("load"));
+    await expect(p).resolves.toBe(false);
+  });
+
+  it("gives up on a frame that never answers", async () => {
+    const p = ensureFreshToken();
+    await vi.advanceTimersByTimeAsync(15_001);
+    await expect(p).resolves.toBe(false);
+    expect(removed).toHaveLength(1);
+  });
+
+  it("shares one frame between callers that ask at the same time", async () => {
+    const a = ensureFreshToken();
+    const b = ensureFreshToken();
+    expect(frames).toHaveLength(1);
+    answerWithToken(frames[0], "shared");
+    await expect(Promise.all([a, b])).resolves.toEqual([true, true]);
+    // and a later call starts a new one
+    const c = ensureFreshToken();
+    expect(frames).toHaveLength(2);
+    answerCrossOrigin(frames[1]);
+    await c;
+  });
+
+  it("renews shortly before the token expires, and schedules the next renewal from the new one", async () => {
+    const now = Date.now();
+    window.history.replaceState(null, "", `/#access_token=${fakeJwt(now + 10 * 60_000)}`);
+    consumeAccessTokenFromFragment();
+    startTokenRenewal();
+    await vi.advanceTimersByTimeAsync(8 * 60_000);
+    expect(frames).toHaveLength(0); // not yet: 90 s before expiry is 8.5 min in
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(frames).toHaveLength(1);
+    answerWithToken(frames[0], fakeJwt(Date.now() + 10 * 60_000));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(8 * 60_000 + 31_000);
+    expect(frames).toHaveLength(2); // the next renewal, from the new token
+    answerCrossOrigin(frames[1]);
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("tries again soon when a scheduled renewal fails and the token is still good", async () => {
+    const now = Date.now();
+    window.history.replaceState(null, "", `/#access_token=${fakeJwt(now + 5 * 60_000)}`);
+    consumeAccessTokenFromFragment();
+    startTokenRenewal();
+    await vi.advanceTimersByTimeAsync(3.6 * 60_000);
+    expect(frames).toHaveLength(1);
+    answerCrossOrigin(frames[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(frames).toHaveLength(2); // the retry
+    answerCrossOrigin(frames[1]);
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("renews when a hidden tab is shown with a token that is about to expire", async () => {
+    const now = Date.now();
+    window.history.replaceState(null, "", `/#access_token=${fakeJwt(now + 60_000)}`);
+    consumeAccessTokenFromFragment();
+    startTokenRenewal();
+    // the timer fires at the 5 s floor; let that attempt fail, then show the tab again
+    await vi.advanceTimersByTimeAsync(5_001);
+    answerCrossOrigin(frames[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    const before = frames.length;
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(frames.length).toBe(before + 1);
+    answerCrossOrigin(frames[frames.length - 1]);
+    await vi.advanceTimersByTimeAsync(0);
   });
 });

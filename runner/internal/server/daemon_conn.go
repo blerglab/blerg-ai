@@ -193,6 +193,7 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 		dc.SetCloneFrom(hello.CloneFrom)
 		dc.SetMCPGateway(hello.MCPGateway)
 		dc.SetRestrictTools(hello.RestrictTools)
+		dc.SetPlugins(hello.Plugins)
 		dc.SetAllowHostCredentialClone(hello.AllowHostCredentialClone)
 		dc.SetSandboxAvailable(hello.SandboxAvailable)
 		dc.SetHostClaude(hello.ClaudeCLIAvailable, hello.AnthropicKeySet, hello.SandboxClaudeCredential)

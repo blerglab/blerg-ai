@@ -136,14 +136,10 @@ function HistorySection({
 }) {
   const [expanded, setExpanded] = useState(false)
 
-  // Group by repo, sorted by most recently ended.
-  const byRepo = new Map<string, SessionInfo[]>()
-  for (const s of sessions) {
-    const key = repoLabel(s.repo)
-    const list = byRepo.get(key) ?? []
-    list.push(s)
-    byRepo.set(key, list)
-  }
+  // One list in time order, most recently ended first: history is read as
+  // "what happened lately", not per repo.
+  const endedAt = (s: SessionInfo) => s.ended_at ?? s.started_at
+  const ordered = [...sessions].sort((a, b) => endedAt(b).localeCompare(endedAt(a)))
 
   return (
     <div style={{ marginTop: 8, borderTop: '1px solid var(--basalt)', paddingTop: 10 }}>
@@ -187,27 +183,13 @@ function HistorySection({
 
       {expanded && (
         <div style={{ opacity: 0.6 }}>
-          {[...byRepo.entries()].map(([repo, repoSessions]) => (
-            <div key={repo} style={{ marginBottom: 10 }}>
-              <div style={{
-                color: 'var(--stone)',
-                fontSize: '0.68rem',
-                fontWeight: 700,
-                letterSpacing: '0.08em',
-                textTransform: 'uppercase',
-                marginBottom: 5,
-              }}>
-                {repo}
-              </div>
-              {repoSessions.map(session => (
-                <SessionCard
-                  key={session.id}
-                  session={session}
-                  daemon={daemons.find(d => d.id === session.daemon_id)}
-                  active={isSidebar && session.id === activeSessionId}
-                />
-              ))}
-            </div>
+          {ordered.map(session => (
+            <SessionCard
+              key={session.id}
+              session={session}
+              daemon={daemons.find(d => d.id === session.daemon_id)}
+              active={isSidebar && session.id === activeSessionId}
+            />
           ))}
         </div>
       )}
@@ -224,6 +206,7 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
   const isPreviewActive = location.pathname === '/preview'
   const isCronsActive = location.pathname.startsWith('/crons')
   const isProposalsActive = location.pathname.startsWith('/proposals')
+  const isInsightsActive = location.pathname.startsWith('/insights')
 
   // The cluster runtime: whether this server can run sessions as cluster pods,
   // and its session cap. Advisory only — any failure leaves it unconfigured,
@@ -731,6 +714,33 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
             <span style={{ fontSize: '1rem' }}>✓</span>
             <span>Proposals</span>
             <ProposalsBadge style={{ marginLeft: 'auto' }} />
+          </div>
+        )}
+
+        {/* Insights nav item (sidebar only): pod startup, sessions, tokens and estimated cost */}
+        {isSidebar && (
+          <div
+            role="link"
+            data-testid="insights-nav"
+            onClick={() => navigate('/insights')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '10px 14px',
+              marginTop: 4,
+              borderRadius: 8,
+              cursor: 'pointer',
+              background: isInsightsActive ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'transparent',
+              border: isInsightsActive ? `1px solid var(--blaze)` : '1px solid transparent',
+              color: isInsightsActive ? 'var(--amber)' : 'var(--fog)',
+              fontSize: '0.9rem',
+              fontWeight: isInsightsActive ? 700 : 500,
+              letterSpacing: '0.05em',
+            }}
+          >
+            <span style={{ fontSize: '1rem' }}>◔</span>
+            <span>Insights</span>
           </div>
         )}
       </div>

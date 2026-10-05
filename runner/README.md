@@ -284,7 +284,7 @@ new attempt. Stages are data — a viewer renders whatever list it is given.
 | Runtime | Stages | Reported by |
 |---|---|---|
 | cluster | `queued` → `schedule` (Scheduling pod) → `image` (Pulling image) → `connect` → `clone` → [`plugins`] → `engine` → `ready` | server: queued, and schedule/image from the Job's pod status (polled every 2 s: Unschedulable with its cause, ErrImagePull/ImagePullBackOff, InvalidImageName, CreateContainerConfigError, exit, OOMKilled, eviction); pod: connect, clone (failure classified: repo not found / auth failed / host unreachable), plugins (only when the account has always-on plugins: `Installing plugins`, then `2 of 2 installed` / `1 of 2 installed — frontend-design failed`; a failing plugin never fails the start), engine, missing engine credential |
-| daemon / docker | `queued` → `daemon` → [`sandbox`] → `engine` → `ready` | server |
+| daemon / docker | `queued` → `daemon` → [`plugins`] → [`sandbox`] → `engine` → `ready` | server: queued, daemon, sandbox, engine; daemon: plugins (only when the account has always-on plugins and the daemon's hello said `plugins`: `Installing plugins`, then `2 of 2 installed` or a warning naming what failed; a failing plugin never fails the start) |
 
 `ready` is recorded when the session first reaches `running`/`idle`/`waiting`; a failure while
 starting marks the stage it was on failed with the session's `error_reason`. Only fixed text and
@@ -691,6 +691,42 @@ with `repo`, `git_url`, `provider`, `clone` or `new_repo`. `POST /api/runner/sta
 with the sandbox image unless `runtime: daemon`) always gets a generated name. Without
 `no_repo`, a blank `repo` is refused exactly as before.
 
+### New repository (cluster)
+
+A cluster session can start in a repository that does not exist yet. `POST /api/sessions` with
+`"runtime": "cluster"`, `"new_repo": true`, `"repo": "owner/name"` (the slash is required: a bare
+name is never resolved against `BLERG_RUNNER_GITHUB_ORG` for a new repository), an optional
+`"provider"` (`github` by default, or `gitlab`) and an optional `"visibility"` (`private` by
+default, or `public`). The launch sheet offers it as **New repository** when Cluster pod is
+selected. What happens:
+
+1. The server fetches the launcher's own token for that provider from core. With one, it asks the
+   provider whether `owner/name` exists: yes is **409** (launch it as an existing repository).
+   Then it creates the repository with an initial commit (`auto_init` on GitHub,
+   `initialize_with_readme` on GitLab) under the user when `owner` is the token's own account,
+   otherwise under that org/group. "Already exists" from the create call is a 409 too, never a
+   fallback.
+2. The start plan leads with a `repo` stage ("Creating repository"): `done` with
+   `github.com/owner/name · private`, or `warning` with the reason when the repository could not
+   be created (no token in Settings, a token that may not create under that owner, a provider
+   error). The session starts either way.
+3. The pod gets `BLERG_RUNNER_NEW_REPO=1`. It retries the clone a few times (a repository created
+   seconds ago may not be clonable yet). When the clone keeps failing it runs `git init` on the
+   session's `wip/<id>` branch with `origin` set to the clone URL (the person's token included,
+   as in a normal clone), marks the `clone` stage as a warning ("Initialised an empty repository
+   — no remote yet"), prepends a note to the agent's first prompt saying the remote does not
+   exist and must be created before pushing, and reports the first failed push as an `error`
+   event in the transcript. `PushWip` keeps trying after every turn, so the work is pushed as
+   soon as the remote exists.
+4. The row records `git_url` and `new_repo` (migration 035), so a resume clones from the same
+   place, or initialises again if it still does not exist. **A new-repository pod never
+   receives the operator's shared `BLERG_RUNNER_GIT_TOKEN`**: only the person's own token for
+   the host, or none — so it can reach nothing the person cannot.
+
+Behaviour change: the cluster branch used to ignore `new_repo` (a caller sending it with an
+existing repository got a clone); it now answers 409. The v1 start contract
+(`POST /api/runner/start`) does not take `new_repo`.
+
 ### Launching on a repository by name
 
 A repository does not have to be listed or checked out anywhere. `POST /api/sessions` takes either
@@ -813,7 +849,9 @@ requires reading Go source to discover.
 | `BLERG_CORE_PUBLIC_URL` | no | — | core's browser-facing origin; when set, `/healthz` allows that origin (the landing page's status tiles) cross-origin |
 | `BLERG_RUNNER_ALLOWED_ORIGINS` | no | — | comma-separated `scheme://host` origins allowed to open `/ws/browser` cross-origin. Same-origin requests and requests with no `Origin` header are always allowed, so this is only needed when the frontend is served from a different origin than runner's API |
 | `BLERG_RUNNER_MODEL_CATALOG_URL` | no | `https://downloads.claude.ai/model-catalog/v1/catalog.json` | where the Claude model list (`GET /api/models/claude`, the launch sheet's Model/Effort picker) comes from: the public Claude Code model catalog, fetched at startup and every 6 h (https only — plain http is accepted only for a loopback host — same-host redirects only, 5 s timeout, 1 MB cap; the last good copy is kept). Set it **empty** to disable fetching — air-gapped installs — and serve the list compiled into this build instead |
-| `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official` | comma-separated GitHub `owner/repo` marketplaces **always-on plugins** may come from (`*` = any valid `owner/repo`). When a cluster session starts for an account, the server reads that account's list from core (`POST /internal/plugins/list`, see `core/docs/CONFIG.md`), drops entries whose marketplace is not allowed here, and hands the rest to the pod as `BLERG_RUNNER_PLUGINS` (non-secret JSON) together with this allow-list, which the pod checks again before running `claude plugin marketplace add` / `claude plugin install <plugin>@<marketplace> --scope user` (no shell, 90 s per command, 4 min overall, one after another). If core cannot be reached the session still starts without plugins and its start panel says so. Claude sessions only; Local sandbox and This machine sessions install nothing. Keep equal to core's `BLERG_CORE_PLUGIN_MARKETPLACES` |
+| `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official` | comma-separated GitHub `owner/repo` marketplaces **always-on plugins** may come from (`*` = any valid `owner/repo`). When a cluster session starts for an account, the server reads that account's list from core (`POST /internal/plugins/list`, see `core/docs/CONFIG.md`), drops entries whose marketplace is not allowed here, and hands the rest to the pod as `BLERG_RUNNER_PLUGINS` (non-secret JSON) together with this allow-list, which the pod checks again before running `claude plugin marketplace add` / `claude plugin install <plugin>@<marketplace> --scope user` (no shell, 90 s per command, 4 min overall, one after another). If core cannot be reached the session still starts without plugins and its start panel says so. Claude agent sessions only. A Local sandbox or This machine session gets the same list through `SpawnSession.plugins`, sent only to a daemon whose hello said `plugins`; the daemon re-checks its own `BLERG_RUNNER_PLUGIN_MARKETPLACES`, installs into its plugin workshop under its state dir with `CLAUDE_CONFIG_DIR` (never the person's `~/.claude`) and starts Claude with one `--plugin-dir=` per plugin (`install/desktop/DAEMON.md`). Restricted sessions never load any. Keep equal to core's `BLERG_CORE_PLUGIN_MARKETPLACES` |
+
+| `BLERG_RUNNER_METRICS_TOKEN` | no | — (endpoint off) | the bearer token a Prometheus scraper presents to `GET /metrics`. Unset: the endpoint answers `404`. Set: a missing or wrong token is `401`. Metrics are aggregates only; no session, account or title appears in them. See [`docs/telemetry.md`](../docs/telemetry.md) |
 | `BLERG_RUNNER_MCP_GW_ADDR` | no | — (gateway off) | listen address of the **MCP gateway**, a second listener and `http.Server` separate from the main port (for example `:8090`). Unset disables the gateway, and with it every session with MCP connections and every cron that uses one. It also needs the database and core (`BLERG_CORE_URL` plus `BLERG_RUNNER_CORE_INTERNAL_KEY`). Never route it through a public ingress; see [`docs/mcp-connections.md`](../docs/mcp-connections.md) |
 | `BLERG_RUNNER_MCP_GW_URL` | no | — | the address **sessions dial** to reach the gateway: an in-cluster Service URL for pods, the runner's address on the sandbox network for desktop sandbox containers. Sent to a session in its config; not derived from the daemon's WebSocket address. A launch with MCP connections is refused with a specific message while it is unset |
 | `BLERG_RUNNER_BOARD_URL` | no | — | the board's base address **as the runner reaches it** (absolute `http(s)`, no credentials, query or fragment; for example `http://blerg-board:8080`). A cron's failure card is posted to the board's API there, and the built-in `board` connection's MCP endpoint defaults to `<this>/mcp`. Unset or invalid: crons get no board connection and no failure card. See [`docs/crons.md`](../docs/crons.md) |
@@ -823,9 +861,6 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_MCP_CALL_TIMEOUT_SECONDS` | no | `60` | per-call timeout for a `tools/call` to the upstream MCP server |
 | `BLERG_RUNNER_MCP_MAX_CONCURRENT` | no | `4` | concurrent upstream calls per session and connection; a further call is refused immediately |
 | `BLERG_RUNNER_MCP_MAX_RESULT_BYTES` | no | `262144` | cap on the text returned to the session for one call; longer results are truncated |
-| `BLERG_CLAUDE_STEERING` | no | on | read by whatever starts Claude Code sessions (the workstation daemon, and the cluster session pod). `0` runs one `claude` process per message instead of one long-lived process per session; the default lets a message sent while the agent works reach it at its next step. An older Claude Code without the streaming input mode falls back to the per-message behaviour by itself. See [`docs/talking-to-an-agent.md`](../docs/talking-to-an-agent.md) |
-| `BLERG_RUNNER_MOCKUP_HOSTS` | no | empty | comma-separated hostnames on which published mockup bundles (agent-authored HTML/JS) may be served. When set, bundles are served **only** there and never on the app's own origin; empty means no restriction, which is for development |
-| `BLERG_RUNNER_MOCKUP_BASE` | no | — | the base URL the runner returns for a published mockup bundle (for example `https://m.example.com`); the bundle is at `<base>/m/<id>/` |
 
 Set by the runner itself on a session, never by you: `BLERG_RUNNER_MCP_CONFIG` (the JSON of the
 session's MCP server entries and gateway tokens, from a per-session Secret for a pod, written to a

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // makeBareRepo creates a bare origin with one commit on main.
@@ -249,5 +250,130 @@ func TestPrepareWorkspaceCloneErrorNeverCarriesToken(t *testing.T) {
 	}
 	if got := scrubToken("x "+fake+" y "+esc, fake); strings.Contains(got, fake) || strings.Contains(got, esc) {
 		t.Fatalf("scrubToken left the token: %q", got)
+	}
+}
+
+// A "New repository" session clones when the repository is there (after the
+// server created it), and otherwise initialises an empty repository on the wip
+// branch whose origin — token included — is where the repository would be.
+func TestPrepareWorkspaceNewRepoClonesOrInitialises(t *testing.T) {
+	newRepoCloneDelay = 0
+	t.Cleanup(func() { newRepoCloneDelay = 2 * time.Second })
+
+	bare := makeBareRepo(t)
+	cfg := Config{Home: t.TempDir(), Repo: "me/new-proj", SessionID: "s-new", GitURL: bare, NewRepo: true}
+	workDir, state, err := PrepareWorkspace(cfg)
+	if err != nil || state != "fresh-clone" {
+		t.Fatalf("existing remote: state=%q err=%v", state, err)
+	}
+	if br := gitT(t, workDir, "branch", "--show-current"); br != "wip/s-new" {
+		t.Fatalf("branch = %q", br)
+	}
+
+	// No remote: initialise, on the wip branch, with a token-bearing origin.
+	missing := "https://github.com/me/new-proj.git"
+	cfg = Config{Home: t.TempDir(), Repo: "me/new-proj", SessionID: "s-new2", GitURL: missing, GitToken: "ghp-s3cret", NewRepo: true}
+	workDir, state, err = PrepareWorkspace(cfg)
+	if err != nil {
+		t.Fatalf("missing remote: %v", err)
+	}
+	if state != WorkspaceInitialised {
+		t.Fatalf("state = %q, want %q", state, WorkspaceInitialised)
+	}
+	if want := filepath.Join(cfg.Home, "me", "new-proj"); workDir != want {
+		t.Fatalf("workDir = %q, want %q", workDir, want)
+	}
+	if br := gitT(t, workDir, "symbolic-ref", "--short", "HEAD"); br != "wip/s-new2" {
+		t.Fatalf("branch = %q", br)
+	}
+	if origin := gitT(t, workDir, "remote", "get-url", "origin"); origin != "https://x-access-token:ghp-s3cret@github.com/me/new-proj.git" {
+		t.Fatalf("origin = %q", origin)
+	}
+	if out := gitT(t, workDir, "status", "--porcelain"); out != "" {
+		t.Fatalf("new repository is not clean: %q", out)
+	}
+	// Nothing to push yet: PushWip is a no-op (no HEAD).
+	PushWip(workDir, cfg.SessionID)
+
+	// A resume of an initialised session clones once the remote exists (the
+	// repository was created in the meantime), and initialises again otherwise.
+	resumed := Config{Home: t.TempDir(), Repo: "me/new-proj", SessionID: "s-new2", GitURL: bare, NewRepo: true, Resume: true}
+	if _, state, err := PrepareWorkspace(resumed); err != nil || state != "fresh-clone" {
+		t.Fatalf("resume with the remote now present: state=%q err=%v", state, err)
+	}
+	absent := filepath.Join(t.TempDir(), "nowhere.git")
+	resumed.GitURL, resumed.Home = absent, t.TempDir()
+	if _, state, err := PrepareWorkspace(resumed); err != nil || state != WorkspaceInitialised {
+		t.Fatalf("resume with the remote still missing: state=%q err=%v", state, err)
+	}
+	// A resume must not start empty because the provider was merely unreachable: PushWip would force the wip
+	// branch over the earlier work. (Port 1 refuses the connection; that says nothing about the repository.)
+	resumed.GitURL, resumed.Home = "http://127.0.0.1:1/me/new-proj.git", t.TempDir()
+	if _, _, err := PrepareWorkspace(resumed); err == nil {
+		t.Fatal("a resume must fail, not initialise an empty repository, when the clone fails for a non-missing reason")
+	}
+
+	// Without NewRepo the same failure is still a failure.
+	cfg.NewRepo = false
+	cfg.Home = t.TempDir()
+	if _, _, err := PrepareWorkspace(cfg); err == nil {
+		t.Fatal("an ordinary session must fail when the clone fails")
+	} else if strings.Contains(err.Error(), "ghp-s3cret") {
+		t.Fatalf("token in the error: %v", err)
+	}
+}
+
+// The note the agent gets names the redacted origin and never the token; a
+// push into a missing remote is reported once.
+func TestNewRepoNoteAndPushProblem(t *testing.T) {
+	note := newRepoNote("me/new-proj", "https://github.com/me/new-proj.git")
+	for _, want := range []string{"does not exist yet", "gh repo create me/new-proj", "https://github.com/me/new-proj.git"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note lacks %q: %s", want, note)
+		}
+	}
+	for out, want := range map[string]string{
+		"remote: Repository not found.\nfatal: repository 'https://github.com/x/y.git/' not found": "the remote repository does not exist (or this session's token cannot see it)",
+		"fatal: Authentication failed for 'https://github.com/x/y.git/'":                           "the remote refused this session's credential",
+		"something else": "git push failed; see the pod log",
+	} {
+		if got := classifyPushFailure(out); got != want {
+			t.Errorf("classifyPushFailure(%q) = %q, want %q", out, got, want)
+		}
+	}
+
+	newRepoCloneDelay = 0
+	t.Cleanup(func() { newRepoCloneDelay = 2 * time.Second })
+	cfg := Config{Home: t.TempDir(), Repo: "me/x", SessionID: "s-p", GitURL: filepath.Join(t.TempDir(), "nowhere.git"), NewRepo: true}
+	workDir, _, err := PrepareWorkspace(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, workDir, "add", ".")
+	cmd := exec.Command("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "work")
+	cmd.Dir = workDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v: %s", err, out)
+	}
+	var reports []string
+	pushProblem = func(_, sessionID, detail string) { reports = append(reports, sessionID+": "+detail) }
+	t.Cleanup(func() { pushProblem = nil })
+	PushWip(workDir, "s-p")
+	if len(reports) != 1 || !strings.Contains(reports[0], "s-p: the remote repository does not exist") {
+		t.Fatalf("reports = %v", reports)
+	}
+}
+
+func TestConfigFromEnvNewRepo(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_NEW_REPO", "1")
+	if !ConfigFromEnv().NewRepo {
+		t.Fatal("NewRepo not read")
+	}
+	t.Setenv("BLERG_RUNNER_NEW_REPO", "")
+	if ConfigFromEnv().NewRepo {
+		t.Fatal("NewRepo set without the variable")
 	}
 }

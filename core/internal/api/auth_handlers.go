@@ -316,6 +316,10 @@ func (d Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		// The presented cookie is dead (revoked/expired/replayed) — clear it rather than
 		// leaving a known-dead value sitting in the browser for a future request to retry.
 		http.SetCookie(w, d.cookie(refreshCookieName, "", http.SameSiteStrictMode, -1))
+		if errors.Is(err, identity.ErrSessionReplayed) {
+			// The request that tripped the account-wide revocation: where it came from, for diagnosing it.
+			log.Printf("auth: refresh replay from ip=%s ua=%q return_to=%s", d.clientIP(r), r.UserAgent(), returnTo)
+		}
 		writeSignInRequired(w, r, returnTo, "expired", "Your session has expired or was signed out everywhere.")
 		return
 	}

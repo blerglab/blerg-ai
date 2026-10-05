@@ -258,10 +258,11 @@ export default function PluginsSection() {
       <p className="eyebrow">Sessions</p>
       <h2 className="section-title">Always-on plugins</h2>
       <p className="section-help">
-        These plugins are installed at the start of every cluster session started as you,
-        including sessions your boards start with your automation token. They do not change
-        Claude Code on your own machine. Plugins run code in your sessions, so only add ones you
-        trust.
+        These plugins are loaded into every Claude agent session started as you — on the
+        cluster and on your own workstation daemon (Local sandbox or This machine) — including
+        sessions your boards start with your automation token. They do not change Claude Code
+        on your own machine: a daemon keeps them in its own folder and loads them for the
+        session only. Plugins run code in your sessions, so only add ones you trust.
       </p>
       <ul className="card-list">
         {PLUGIN_ENGINES.map((e) => (

@@ -141,7 +141,15 @@ type SandboxOptions struct {
 	// ClaudeOnly is set per session (never from configuration) for a restricted session: only the
 	// claude login is mounted, not codex's or hermes's.
 	ClaudeOnly bool
+	// PluginCache is set per session when it loads always-on plugins: the
+	// session's plugin snapshot (pluginworkshop.go), bind-mounted read-only at
+	// sandboxPluginPath. "" = no mount.
+	PluginCache string
 }
+
+// sandboxPluginPath is where a sandboxed session sees its plugin snapshot;
+// the --plugin-dir flags of such a session are translated to it.
+const sandboxPluginPath = "/blerg/plugins"
 
 // Service-name URLs a container on the sandbox network uses in place of the
 // host's loopback ones: the compose service names and their in-network port.
@@ -302,6 +310,17 @@ func cliMountArg(hostPath string) string {
 	return "type=bind," + src + ",dst=" + sandboxCLIMountPath + ",readonly"
 }
 
+// pluginCacheMountArg is the --mount value for the plugin cache: read-only,
+// so a plugin that writes into its own directory fails loudly rather than
+// changing what the next session loads. Quoted like cliMountArg.
+func pluginCacheMountArg(hostPath string) string {
+	src := "src=" + hostPath
+	if strings.ContainsAny(hostPath, `,"`) {
+		src = `"` + strings.ReplaceAll(src, `"`, `""`) + `"`
+	}
+	return "type=bind," + src + ",dst=" + sandboxPluginPath + ",readonly"
+}
+
 // sandboxRunExtras are the per-start additions to `docker run` that depend on
 // the host's state at spawn time rather than on the session.
 type sandboxRunExtras struct {
@@ -309,6 +328,8 @@ type sandboxRunExtras struct {
 	cliPath string // host path of the messaging CLI to mount; "" = none
 	// claudeOnly mounts only the claude login (a restricted session runs no other engine).
 	claudeOnly bool
+	// pluginCache is the daemon's plugin cache to mount read-only; "" = none.
+	pluginCache string
 }
 
 // sandboxRunArgs is the `docker run` argument list for a session sandbox:
@@ -351,6 +372,9 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 		// Read-only: the session runs the CLI, it has no business editing the
 		// daemon's own copy of it.
 		args = append(args, "--mount", cliMountArg(extras.cliPath))
+	}
+	if extras.pluginCache != "" {
+		args = append(args, "--mount", pluginCacheMountArg(extras.pluginCache))
 	}
 	if home != "" {
 		// /home/agent matches the sandbox image's ENV HOME (see
@@ -452,7 +476,7 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	// to a session that is being recreated right now either way.
 	forceRemoveContainer(container)
 	home, _ := os.UserHomeDir()
-	extras := sandboxRunExtras{cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly}
+	extras := sandboxRunExtras{cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly, pluginCache: opts.PluginCache}
 	if opts.Network != "" {
 		exists, err := sandboxNetworkState(opts.Network)
 		if err != nil {

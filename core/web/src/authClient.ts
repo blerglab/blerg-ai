@@ -67,3 +67,123 @@ export function coreOrigin(): string {
 export function redirectToRefresh(returnTo: string): void {
   location.href = `${coreOrigin()}/auth/refresh?return_to=${encodeURIComponent(returnTo)}`;
 }
+
+// ─── Silent renewal ───────────────────────────────────────────────────────────────────────────────
+// An access token lasts about ten minutes. Renewing it with redirectToRefresh sends the whole page to
+// core and back, which reloads the app and throws away what the person was looking at. So before that
+// is ever needed, the page asks core for a new token in a hidden frame: core's /auth/refresh answers
+// the frame with a redirect to THIS origin's /silent-refresh.html carrying the token in the URL
+// fragment, and since the frame is same-origin again by then the page can read it, store it and throw
+// the frame away. Nothing on screen changes.
+//
+// The refresh cookie is SameSite=Strict, which a frame to a different SITE would not carry. core, board
+// and runner are always one site (subdomains of one domain, or one host on different ports), so it is
+// carried. When the frame gets no token (signed out, cookie not sent, core unreachable) the caller
+// falls back to the full-page redirect, exactly as before.
+
+/** Renew this long before the token expires. */
+const RENEW_BEFORE_MS = 90_000;
+/** Give up on one frame after this long. */
+const SILENT_TIMEOUT_MS = 15_000;
+/** Retry a failed scheduled renewal after this long, while the token is still good. */
+const RENEW_RETRY_MS = 30_000;
+/** The page core redirects the frame to: a static page of this origin that does nothing. */
+export const SILENT_REFRESH_PAGE = "/silent-refresh.html";
+
+// tokenExpiryMs is a cheap, UNVERIFIED read of the token's exp claim, for scheduling only.
+function tokenExpiryMs(token: string): number | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) return null;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"))) as { exp?: unknown };
+    return typeof payload.exp === "number" ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+function silentRefresh(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const frame = document.createElement("iframe");
+    frame.setAttribute("aria-hidden", "true");
+    frame.tabIndex = -1;
+    frame.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden";
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      frame.remove();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), SILENT_TIMEOUT_MS);
+    frame.addEventListener("load", () => {
+      try {
+        // Reading the frame's location throws while it is still on core's origin (core answered with
+        // its sign-in page or an error): that is "no token", not a failure to report.
+        const loc = frame.contentWindow!.location;
+        const match = loc.origin === location.origin ? loc.hash.match(/access_token=([^&]+)/) : null;
+        if (match) {
+          accessToken = decodeURIComponent(match[1]);
+          finish(true);
+          return;
+        }
+      } catch {
+        /* cross-origin: no token */
+      }
+      finish(false);
+    });
+    const returnTo = location.origin + SILENT_REFRESH_PAGE;
+    frame.src = `${coreOrigin()}/auth/refresh?return_to=${encodeURIComponent(returnTo)}`;
+    document.body.appendChild(frame);
+  });
+}
+
+let inflight: Promise<boolean> | null = null;
+
+/** ensureFreshToken gets a new access token without leaving the page. Resolves true when one was
+ *  stored, false when the caller should fall back to redirectToRefresh. Concurrent calls share one
+ *  frame. */
+export function ensureFreshToken(): Promise<boolean> {
+  if (!inflight) {
+    inflight = silentRefresh().finally(() => {
+      inflight = null;
+    });
+  }
+  return inflight;
+}
+
+let renewTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleRenewal(delayOverride?: number): void {
+  if (renewTimer) clearTimeout(renewTimer);
+  renewTimer = null;
+  const exp = accessToken ? tokenExpiryMs(accessToken) : null;
+  if (exp === null) return;
+  const delay = delayOverride ?? Math.max(5_000, exp - Date.now() - RENEW_BEFORE_MS);
+  renewTimer = setTimeout(() => void renewNow(), delay);
+}
+
+async function renewNow(): Promise<void> {
+  const ok = await ensureFreshToken();
+  if (ok) {
+    scheduleRenewal();
+    return;
+  }
+  // No new token. While the current one is still good, try again shortly; once it has expired the
+  // next request's 401 takes the visible route (and a hidden tab renews when it is shown again).
+  const exp = accessToken ? tokenExpiryMs(accessToken) : null;
+  if (exp !== null && exp > Date.now()) scheduleRenewal(RENEW_RETRY_MS);
+}
+
+/** startTokenRenewal keeps the token fresh in the background: it renews shortly before expiry and
+ *  again when a tab that was hidden is shown (timers in a hidden tab can be late). Call once, after
+ *  consumeAccessTokenFromFragment. */
+export function startTokenRenewal(): void {
+  scheduleRenewal();
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !accessToken) return;
+    const exp = tokenExpiryMs(accessToken);
+    if (exp !== null && exp - Date.now() <= RENEW_BEFORE_MS) void renewNow();
+  });
+}

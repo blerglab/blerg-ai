@@ -4,7 +4,7 @@
 // the session can be silently renewed instead of just bouncing the user.
 // board no longer has its own /login route to fall back to (see Task 6).
 
-import { getAccessToken, redirectToRefresh } from "./authClient";
+import { ensureFreshToken, getAccessToken, redirectToRefresh } from "./authClient";
 import { refreshAlreadyAttempted, markRefreshAttempted } from "./refreshGuard";
 
 export class ApiError extends Error {
@@ -20,6 +20,7 @@ export class ApiError extends Error {
 export async function api<T = unknown>(
   path: string,
   init?: RequestInit & { json?: unknown },
+  retried = false,
 ): Promise<T> {
   const opts: RequestInit = { credentials: "same-origin", ...init };
   if (init?.json !== undefined) {
@@ -34,6 +35,9 @@ export async function api<T = unknown>(
   if (token) opts.headers = { ...opts.headers, Authorization: `Bearer ${token}` };
   const resp = await fetch(path, opts);
   if (resp.status === 401) {
+    // The token has most likely just expired. Get a new one without leaving the page and say the
+    // request again, once: a reload would throw away what the person is looking at.
+    if (!retried && (await ensureFreshToken())) return api<T>(path, init, true);
     // Only navigate to core's /auth/refresh once per page load — a second
     // consecutive 401 (e.g. the refresh itself didn't fix things, or two
     // requests raced) must not re-trigger the redirect, or a broken refresh
@@ -226,7 +230,8 @@ export function boardSocket(boardId: string, onPing: () => void): () => void {
   let closed = false;
   const connect = () => {
     let opened = false;
-    ws = new WebSocket(`${proto}://${location.host}/ws?board=${boardId}`, ["bearer", token]);
+    // The token in memory may have been renewed since the socket was first opened.
+    ws = new WebSocket(`${proto}://${location.host}/ws?board=${boardId}`, ["bearer", getAccessToken() ?? token]);
     ws.onopen = () => {
       opened = true;
     };
@@ -241,8 +246,15 @@ export function boardSocket(boardId: string, onPing: () => void): () => void {
       // shared with api.ts's 401 handling), so an unreachable server can
       // never turn into a redirect loop.
       if (!opened && !refreshAlreadyAttempted()) {
-        markRefreshAttempted();
-        redirectToRefresh(location.href);
+        // Renew quietly first; only when that fails send the page away to do it.
+        void ensureFreshToken().then((ok) => {
+          if (ok) {
+            connect();
+            return;
+          }
+          markRefreshAttempted();
+          redirectToRefresh(location.href);
+        });
         return;
       }
       setTimeout(connect, 3000);

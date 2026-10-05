@@ -894,8 +894,12 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 			return apiErr
 		}
 	}
+	restricted := req.Grant != nil || req.CronID != ""
+	// Always-on plugins for a board-started Claude session on a daemon, as for a launch-sheet one.
+	plugins, pluginNote := a.daemonPlugins(ctx, dc, principal.spawningAccountID(), principal.proof(), "agent", req.Engine, restricted)
 	raw, err := json.Marshal(protocol.SpawnSession{ //nolint:gosec // the spawn message must carry the session token (and any MCP gateway grant) to the daemon over the authenticated websocket; never logged
 		MCPGateway: gateway,
+		Plugins:    plugins,
 		// Every cron session and every grant session runs restricted (mcpstart.go).
 		RestrictTools: req.Grant != nil || req.CronID != "",
 		Type:          "spawn_session", SessionID: sessionID, Repo: req.Repo, Title: req.Title,
@@ -931,7 +935,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
 		return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "daemon send buffer full — retry")
 	}
-	announceDaemonAgentStart(ctx, a.hub, a.dbPool, sessionID, dc.Name, runtime == runnerRuntimeDocker)
+	announceDaemonAgentStart(ctx, a.hub, a.dbPool, sessionID, dc.Name, runtime == runnerRuntimeDocker, pluginStage(plugins, pluginNote))
 	// Record ownership now, not when the daemon's session_started arrives:
 	// the board polls status and may message/stop immediately, and those all
 	// resolve the session through the hub.

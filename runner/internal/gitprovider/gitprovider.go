@@ -59,6 +59,11 @@ type Provider interface {
 	// asked with token (the caller's own). A repository the token cannot
 	// see, or any failure, is an error: "can't tell", never "public".
 	Private(ctx context.Context, token, owner, name string) (bool, error)
+	// CreateRepo creates owner/name on this service with token (the
+	// caller's own), initialised with one commit so it has a default branch
+	// to clone. ErrExists when the name is taken; any other failure is a
+	// *StatusError (status only) or a transport error — never the body.
+	CreateRepo(ctx context.Context, token, owner, name string, private bool) error
 }
 
 // Repo is a repository a Provider listed.

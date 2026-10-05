@@ -52,6 +52,10 @@ type Config struct {
 	// workspace directory, no clone and no git at all. Repo and GitURL are
 	// empty then.
 	NoRepo bool
+	// NewRepo (BLERG_RUNNER_NEW_REPO=1): a "New repository" session. The
+	// clone is retried, and when it keeps failing an empty repository is
+	// initialised with origin = GitURL instead of failing the start.
+	NewRepo bool
 
 	// IdleTimeout (BLERG_RUNNER_IDLE_TIMEOUT_SECONDS) ends the pod after this
 	// long with no user message or finished turn; 0 means never.
@@ -165,6 +169,7 @@ func ConfigFromEnv() Config {
 		APIKey:        os.Getenv("ANTHROPIC_API_KEY"),
 		Resume:        os.Getenv("BLERG_RUNNER_RESUME") == "1",
 		NoRepo:        os.Getenv("BLERG_RUNNER_NO_REPO") == "1",
+		NewRepo:       os.Getenv("BLERG_RUNNER_NEW_REPO") == "1",
 		IdleTimeout:   idleTimeoutFromEnv(os.Getenv("BLERG_RUNNER_IDLE_TIMEOUT_SECONDS")),
 		Home:          envDefault("BLERG_RUNNER_HOME", "/workspace"),
 	}
@@ -299,10 +304,25 @@ const ScratchDir = "scratch"
 // survive and there is no wip branch to bring anything back from.
 const WorkspaceEmpty = "empty"
 
+// WorkspaceInitialised is the workspace state of a "New repository" session
+// whose repository could not be cloned: a fresh `git init` whose origin points
+// at where the repository would be, with no commits.
+const WorkspaceInitialised = daemon.WorkspaceInitialised
+
+// newRepoCloneAttempts and newRepoCloneDelay: a repository created seconds ago
+// may not be clonable yet (GitHub's auto_init commit lands asynchronously), so
+// a new-repository clone is retried before the pod decides there is nothing
+// there. The delay is a variable so tests need not wait.
+var (
+	newRepoCloneAttempts = 5
+	newRepoCloneDelay    = 2 * time.Second
+)
+
 // PrepareWorkspace clones the repo under home and, on resume, checks out the
 // session's wip branch if the remote has one. Returns the workDir and the
 // workspace state ("fresh-clone" | "resumed-from-wip"). A no-repo session gets
-// an empty ScratchDir instead, and state WorkspaceEmpty.
+// an empty ScratchDir instead, and state WorkspaceEmpty; a new-repo session
+// whose clone fails gets an initialised empty repository, WorkspaceInitialised.
 func PrepareWorkspace(cfg Config) (string, string, error) {
 	if cfg.NoRepo {
 		workDir := filepath.Join(cfg.Home, ScratchDir)
@@ -320,10 +340,42 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 	// contents are fetched only for the checkout (and lazily afterwards). Pod
 	// startup is bounded by the download, and history blobs are most of it. A
 	// server that cannot filter makes git warn and clone in full.
-	if out, err := gitRun(cfg.Home, "clone", "--filter=blob:none", "--", cloneURL, workDir); err != nil {
+	attempts := 1
+	if cfg.NewRepo {
+		attempts = newRepoCloneAttempts
+	}
+	var cloneErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(newRepoCloneDelay)
+		}
+		out, err := gitRun(cfg.Home, "clone", "--filter=blob:none", "--", cloneURL, workDir)
+		if err == nil {
+			cloneErr = nil
+			break
+		}
 		// git anonymises URLs in its own messages; this is the belt to that
 		// braces — the text travels to the browser as a start-stage detail.
-		return "", "", &cloneError{out: scrubToken(fmt.Sprintf("%v: %s", err, out), cfg.GitToken)}
+		cloneErr = &cloneError{out: scrubToken(fmt.Sprintf("%v: %s", err, out), cfg.GitToken)}
+		_ = os.RemoveAll(workDir) // a failed clone may leave the directory behind
+	}
+	if cloneErr != nil {
+		if !cfg.NewRepo {
+			return "", "", cloneErr
+		}
+		// On a resume the wip branch may already hold earlier work on the remote, and PushWip would force over
+		// it from an empty repository. Only an answer that says the repository is not there justifies starting
+		// empty; a flaky network or a provider outage fails the start instead.
+		if cfg.Resume && !repoMissing(cloneErr.Error()) {
+			return "", "", cloneErr
+		}
+		// The repository is not there (not created, or not visible to this
+		// token): start in an empty one that pushes to where it should be.
+		log.Printf("runner: new repository: clone failed after %d attempt(s); initialising an empty repository", attempts)
+		if err := initNewRepo(cfg, workDir, cloneURL); err != nil {
+			return "", "", err
+		}
+		return workDir, WorkspaceInitialised, nil
 	}
 	state := "fresh-clone"
 	wip := wipBranch(cfg.SessionID)
@@ -341,6 +393,52 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 	return workDir, state, nil
 }
 
+// repoMissing reports whether a failed clone's output says the remote repository does not exist (or is not
+// visible to the token), as opposed to a network or server failure.
+func repoMissing(out string) bool {
+	out = strings.ToLower(out)
+	for _, s := range []string{"not found", "does not exist", "does not appear to be a git repository"} {
+		if strings.Contains(out, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// initNewRepo makes workDir an empty repository on the session's wip branch
+// whose origin is cloneURL (token included when one was given — the same
+// exposure as a normal clone's .git/config — so a push works as soon as the
+// remote exists).
+func initNewRepo(cfg Config, workDir, cloneURL string) error {
+	if err := os.MkdirAll(workDir, 0o750); err != nil {
+		return fmt.Errorf("create workspace: %w", err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"symbolic-ref", "HEAD", "refs/heads/" + wipBranch(cfg.SessionID)},
+		{"remote", "add", "origin", cloneURL},
+	} {
+		if out, err := gitRun(workDir, args...); err != nil {
+			return fmt.Errorf("init new repository: git %s: %v: %s", args[0], err, scrubToken(out, cfg.GitToken))
+		}
+	}
+	return nil
+}
+
+// newRepoNote is prepended to the first prompt of a session whose repository
+// could not be created: the agent would otherwise push, see an error and tell
+// nobody. url is the redacted origin.
+func newRepoNote(repo, url string) string {
+	return "[system] This is a new repository that could not be created on its git host: `origin` points at " + url +
+		" but that repository does not exist yet, so `git push` will fail until it does. Before pushing, create it (for example with " +
+		"`gh repo create " + repo + "` or the host's API, if you have a credential that may) or ask the person to create it; " +
+		"blerg-runner cannot do this for you. Work and commit as usual in the meantime.\n\n"
+}
+
+// pushProblem is what PushWip tells the session about a failed push, once.
+// nil = log only (the default).
+var pushProblem func(workDir, sessionID, detail string)
+
 // PushWip force-pushes the session's wip branch if there are new commits.
 // Idempotent and cheap; called after every turn and on SIGTERM.
 func PushWip(workDir, sessionID string) {
@@ -354,7 +452,23 @@ func PushWip(workDir, sessionID string) {
 	}
 	if out, err := gitRun(workDir, "push", "--force", "origin", "HEAD:"+wipBranch(sessionID)); err != nil {
 		log.Printf("runner: wip push: %v: %s", err, out)
+		if pushProblem != nil {
+			pushProblem(workDir, sessionID, classifyPushFailure(out))
+		}
 	}
+}
+
+// classifyPushFailure is the fixed, caller-safe text for a failed push: git's
+// own output can carry the clone URL, and with it the token.
+func classifyPushFailure(out string) string {
+	o := strings.ToLower(out)
+	switch {
+	case strings.Contains(o, "repository not found") || strings.Contains(o, "does not appear to be a git repository") || strings.Contains(o, "could not read from remote"):
+		return "the remote repository does not exist (or this session's token cannot see it)"
+	case strings.Contains(o, "authentication failed") || strings.Contains(o, "403") || strings.Contains(o, "permission"):
+		return "the remote refused this session's credential"
+	}
+	return "git push failed; see the pod log"
 }
 
 // FetchTranscript pulls the persisted transcript for resume.
@@ -546,6 +660,24 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	workDir = wd
 	log.Printf("runner: workspace %s (%s)", workDir, wsState)
+	if wsState == WorkspaceInitialised {
+		// The clone did not happen: a warning (which later progress never
+		// folds to a green check) says what the workspace is instead, and the
+		// agent's first prompt says what that means for pushing.
+		stages.report(protocol.StartStage{ID: protocol.StageClone, State: protocol.StageStateWarning,
+			Detail: "Initialised an empty repository — no remote yet"})
+		cfg.InitialPrompt = newRepoNote(cfg.Repo, gitprovider.RedactURL(cfg.GitURL)) + cfg.InitialPrompt
+		var once sync.Once
+		pushProblem = func(_, sessionID, detail string) {
+			once.Do(func() {
+				payload, _ := json.Marshal(agent.ErrorPayload{Message: "Pushing the wip branch failed: " + detail, Retryable: true})
+				_ = client.Send(protocol.AgentEvent{
+					Type: "agent_event", SessionID: sessionID, ClientEventID: newEventID(),
+					Ts: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: payload,
+				})
+			})
+		}
+	}
 	reportWorkspaceReady(ctx, cfg, stages, installPlugins)
 
 	spawn := podSpawn(cfg, workDir)

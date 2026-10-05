@@ -51,7 +51,7 @@ func TestPromptBuildersOmitInfraParagraphWithoutConfig(t *testing.T) {
 		if strings.Contains(p, "Infrastructure reference") {
 			t.Errorf("prompt %d: unexpected infra paragraph with no runner config:\n%s", i, p)
 		}
-		if strings.Contains(p, ".svc.cluster") || strings.Contains(p, "lab-notes") {
+		if strings.Contains(p, ".svc.cluster") || strings.Contains(p, "homelab") {
 			t.Errorf("prompt %d: leaked infra-specific text with no runner config:\n%s", i, p)
 		}
 	}

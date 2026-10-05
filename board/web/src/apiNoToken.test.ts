@@ -8,6 +8,7 @@ const { redirectToRefresh } = vi.hoisted(() => ({ redirectToRefresh: vi.fn() }))
 vi.mock("./authClient", () => ({
   getAccessToken: () => null,
   redirectToRefresh,
+  ensureFreshToken: vi.fn().mockResolvedValue(false),
   consumeAccessTokenFromFragment: () => {},
   coreOrigin: () => "http://core.test",
 }));

@@ -601,7 +601,7 @@ cluster pods instead. That message is about your workstation, not the cluster.
 
 Session completion webhooks refuse callback targets that resolve to private,
 link-local or loopback addresses (SSRF guard). On an install whose public
-hostnames resolve to a private network — a private network behind NAT — that refuses
+hostnames resolve to a private network — a homelab behind NAT — that refuses
 every callback into that network. Set `WEBHOOK_ALLOW_PRIVATE=1` in `.env`
 (rendered into the runner's `BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE`) and re-run
 `deploy.sh` to allow them.

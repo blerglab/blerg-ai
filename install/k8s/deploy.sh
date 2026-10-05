@@ -80,7 +80,7 @@ case "$(lower "$AGENT_SECRET_EXTERNAL")" in
 esac
 # Completion webhooks refuse private/loopback callback targets unless this
 # renders "true" into BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE. Needed on installs
-# whose public hostnames resolve to a private network (a private network behind NAT).
+# whose public hostnames resolve to a private network (a homelab behind NAT).
 case "$(lower "${WEBHOOK_ALLOW_PRIVATE:-}")" in
   1|true|yes) WEBHOOK_ALLOW_PRIVATE=true ;;
   *) WEBHOOK_ALLOW_PRIVATE=false ;;
@@ -196,6 +196,9 @@ BLERG_BOARD_SECRET_KEY="$(pick_b64 "${SECRET_BLERG_BOARD_SECRET_KEY:-}" BLERG_BO
 ANTHROPIC_API_KEY="${SECRET_ANTHROPIC_API_KEY:-$(existing ANTHROPIC_API_KEY)}"
 BLERG_CORE_GITHUB_TOKEN="${SECRET_BLERG_CORE_GITHUB_TOKEN:-$(existing BLERG_CORE_GITHUB_TOKEN)}"
 BLERG_RUNNER_GITHUB_TOKEN="${SECRET_BLERG_RUNNER_GITHUB_TOKEN:-$(existing BLERG_RUNNER_GITHUB_TOKEN)}"
+# The bearer token a Prometheus scraper presents to the runner's /metrics. Never randomized: absent means the
+# endpoint is off. Set SECRET_BLERG_RUNNER_METRICS_TOKEN once (or patch the live Secret); a redeploy keeps it.
+BLERG_RUNNER_METRICS_TOKEN="${SECRET_BLERG_RUNNER_METRICS_TOKEN:-$(existing BLERG_RUNNER_METRICS_TOKEN)}"
 
 # Values go to kubectl through private files, never as command-line arguments (which any
 # local user can read from the process list). Optional, possibly-empty tokens are
@@ -217,6 +220,7 @@ secret_add BLERG_BOARD_SECRET_KEY "$BLERG_BOARD_SECRET_KEY"
 [ -n "$ANTHROPIC_API_KEY" ] && secret_add ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
 [ -n "$BLERG_CORE_GITHUB_TOKEN" ] && secret_add BLERG_CORE_GITHUB_TOKEN "$BLERG_CORE_GITHUB_TOKEN"
 [ -n "$BLERG_RUNNER_GITHUB_TOKEN" ] && secret_add BLERG_RUNNER_GITHUB_TOKEN "$BLERG_RUNNER_GITHUB_TOKEN"
+[ -n "$BLERG_RUNNER_METRICS_TOKEN" ] && secret_add BLERG_RUNNER_METRICS_TOKEN "$BLERG_RUNNER_METRICS_TOKEN"
 
 kubectl create secret generic blerg-secrets \
   --namespace blerg "${SECRET_ARGS[@]}" \

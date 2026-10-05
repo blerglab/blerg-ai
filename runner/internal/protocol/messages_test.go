@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"strings"
 	"testing"
 )
@@ -71,6 +72,32 @@ func TestRestrictToolsFieldAndCapability(t *testing.T) {
 	raw, _ = json.Marshal(SpawnSession{Type: "spawn_session", RestrictTools: true})
 	if !strings.Contains(string(raw), `"restrict_tools":true`) {
 		t.Fatalf("restriction missing: %s", raw)
+	}
+}
+
+func TestPluginsFieldAndCapability(t *testing.T) {
+	var old DaemonHello
+	if err := json.Unmarshal([]byte(`{"type":"daemon_hello","name":"d","restrict_tools":true}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Plugins {
+		t.Fatal("a daemon that predates plugins claims it")
+	}
+	raw, _ := json.Marshal(DaemonHello{Type: "daemon_hello", Plugins: true})
+	if !strings.Contains(string(raw), `"plugins":true`) {
+		t.Fatalf("capability missing: %s", raw)
+	}
+	raw, _ = json.Marshal(SpawnSession{Type: "spawn_session"})
+	if strings.Contains(string(raw), "plugins") {
+		t.Fatalf("absent plugin list marshalled: %s", raw)
+	}
+	raw, _ = json.Marshal(SpawnSession{Type: "spawn_session", Plugins: []pluginspec.Entry{{Marketplace: "a/b", Plugin: "c"}}})
+	if !strings.Contains(string(raw), `"plugins":[{"marketplace":"a/b","plugin":"c"}]`) {
+		t.Fatalf("plugin list missing: %s", raw)
+	}
+	var back SpawnSession
+	if err := json.Unmarshal(raw, &back); err != nil || len(back.Plugins) != 1 || back.Plugins[0].Plugin != "c" {
+		t.Fatalf("round trip: %+v %v", back.Plugins, err)
 	}
 }
 

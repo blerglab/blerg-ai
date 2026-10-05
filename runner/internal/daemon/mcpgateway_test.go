@@ -85,6 +85,28 @@ func TestCCPathDenyRules(t *testing.T) {
 			t.Errorf("absolute rule %q must use the // prefix (only the project-relative /.x rules may not)", r)
 		}
 	}
+	// The repository's own control files: .git holds the clone credential of a cluster pod and settings the
+	// runner's git (and a developer's, in a bind-mounted checkout) EXECUTES; the agent-tool config files are
+	// read by the next unrestricted run. Denied project-relative ("/x", root) and nested ("**/x"); proven with
+	// the real CLI for Read (root and nested), Grep (the tree is skipped), Edit and Write.
+	for _, p := range []string{"/.git", "/.git/**", "**/.git/**"} {
+		for _, verb := range []string{"Read", "Edit"} {
+			if !slices.Contains(rules, verb+"("+p+")") {
+				t.Errorf("deny rules lack %s(%s): the git config could be read or rewritten", verb, p)
+			}
+		}
+	}
+	for _, p := range []string{"/.claude/**", "**/.claude/**", "/.mcp.json", "**/.mcp.json", "/.vscode/**", "**/.vscode/**", "/.envrc", "/.husky/**", "/.githooks/**"} {
+		if !slices.Contains(rules, "Edit("+p+")") {
+			t.Errorf("deny rules lack Edit(%s): the file could be planted for the next run in this checkout", p)
+		}
+	}
+	// ...but ordinary files in the project stay writable: no rule denies everything under the root.
+	for _, r := range rules {
+		if r == "Edit(/**)" || r == "Edit(**)" || r == "Read(/**)" || r == "Read(**)" {
+			t.Errorf("rule %q denies ordinary project files", r)
+		}
+	}
 	// MINOR 32: the logins and credentials of the other engines and of cluster/dev tooling are
 	// denied for reading AND overwriting, in the same "~" form proven for ~/.claude.
 	for _, p := range []string{
@@ -111,28 +133,6 @@ func TestCCPathDenyRules(t *testing.T) {
 			if strings.Contains(r, "a,b") || strings.Contains(r, "a b") || strings.Contains(r, "a)b") || strings.Contains(r, "relative") {
 				t.Errorf("unsafe dir %q leaked into rule %q", bad, r)
 			}
-		}
-	}
-	// The repository's own control files: .git holds the clone credential of a cluster pod and settings the
-	// runner's git (and a developer's, in a bind-mounted checkout) EXECUTES; the agent-tool config files are
-	// read by the next unrestricted run. Denied project-relative ("/x", root) and nested ("**/x"); proven with
-	// the real CLI for Read (root and nested), Grep (the tree is skipped), Edit and Write.
-	for _, p := range []string{"/.git", "/.git/**", "**/.git/**"} {
-		for _, verb := range []string{"Read", "Edit"} {
-			if !slices.Contains(rules, verb+"("+p+")") {
-				t.Errorf("deny rules lack %s(%s): the git config could be read or rewritten", verb, p)
-			}
-		}
-	}
-	for _, p := range []string{"/.claude/**", "**/.claude/**", "/.mcp.json", "**/.mcp.json", "/.vscode/**", "**/.vscode/**", "/.envrc", "/.husky/**", "/.githooks/**"} {
-		if !slices.Contains(rules, "Edit("+p+")") {
-			t.Errorf("deny rules lack Edit(%s): the file could be planted for the next run in this checkout", p)
-		}
-	}
-	// ...but ordinary files in the project stay writable: no rule denies everything under the root.
-	for _, r := range rules {
-		if r == "Edit(/**)" || r == "Edit(**)" || r == "Read(/**)" || r == "Read(**)" {
-			t.Errorf("rule %q denies ordinary project files", r)
 		}
 	}
 	// The session workdir stays usable: nothing denies a broad prefix.

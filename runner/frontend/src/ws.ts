@@ -1,6 +1,7 @@
 import type { BrowserMessage, ServerMessage } from './types'
 import {
   consumeAccessTokenFromFragment,
+  ensureFreshToken,
   getAccessToken,
   redirectToRefresh,
 } from './authClient'
@@ -105,8 +106,15 @@ function connect(): void {
     if (!opened) {
       const tok = getAccessToken()
       if ((!tok || tokenExpired(tok)) && !refreshAlreadyAttempted()) {
-        markRefreshAttempted()
-        redirectToRefresh(location.href)
+        // Renew quietly first; only when that fails send the page away to do it.
+        void ensureFreshToken().then((ok) => {
+          if (ok) {
+            connect()
+            return
+          }
+          markRefreshAttempted()
+          redirectToRefresh(location.href)
+        })
         return
       }
     }

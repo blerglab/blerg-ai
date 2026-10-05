@@ -58,7 +58,7 @@ describe("Always-on plugins", () => {
     render(<PluginsSection />);
     await screen.findByText("No always-on plugins yet.");
     const help = document.querySelector(".section-help")!.textContent ?? "";
-    expect(help).toMatch(/every cluster session started as you/);
+    expect(help).toMatch(/every Claude agent session started as you/);
     expect(help).toMatch(/automation token/);
     expect(help).toMatch(/do not change Claude Code on your own machine/);
     expect(help).toMatch(/run code in your sessions, so only add ones you trust/);

@@ -1,27 +1,29 @@
 // McpPicker: choose which of the person's MCP connections a session may use, and for each
 // tool whether it is off, queued for approval, or allowed (spec 6.2, 6.3).
 //
-// Everything starts off: no connection checked, every tool off. A server's readOnlyHint is
-// only a badge (the server controls it) and feeds the "select all read-only tools" button; it
-// is never pre-selected. `allow` on a tool not marked read-only carries a warning. `propose`
-// queues the call for the person's approval on the Proposals page.
+// Everything starts off: no connection checked, every tool off. A checked connection offers
+// three presets — Allow all, Require approval (read-only tools allowed, the rest proposed),
+// None — and Customize, which opens the per-tool list. A server's readOnlyHint is only a
+// badge (the server controls it) and is what the presets go by; it is never pre-selected.
+// `allow` on a tool not marked read-only carries a warning. `propose` queues the call for the
+// person's approval on the Proposals page.
 //
 // The value it emits is the launch payload: [{connection, tools: {name: {mode, hash}}}] with
 // only tools that are not off, and only connections that have at least one. Reusable by the
-// crons form: value/onChange are the whole interface; requireExplicit drops the bulk
-// "select all read-only" action so each tool must be chosen by hand.
+// crons form: value/onChange are the whole interface; requireExplicit drops the presets so
+// each tool must be chosen by hand.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../apiFetch'
 import type { McpConnectionInfo, McpSelectionEntry, McpToolInfo, McpToolMode } from '../types'
 import {
-  MCP_ALLOW_WARNING, MCP_PROPOSE_LABEL, buildSelection, isReadOnlyTool,
-  type McpModes, type McpSeenHashes, type McpToolsState,
+  MCP_ALLOW_WARNING, MCP_PRESET_LABEL, MCP_PROPOSE_LABEL, buildSelection, isReadOnlyTool, presetModes, presetOf,
+  type McpModes, type McpPreset, type McpSeenHashes, type McpToolsState,
 } from '../lib/mcpSelection'
 
 interface Props {
   value: McpSelectionEntry[]
   onChange: (next: McpSelectionEntry[]) => void
-  // Hide the bulk "select all read-only tools" action: every tool's mode must be picked by hand.
+  // No presets: every tool's mode must be picked by hand (the crons form).
   requireExplicit?: boolean
 }
 
@@ -41,6 +43,14 @@ function notReadyReason(c: McpConnectionInfo): string {
 
 const box: React.CSSProperties = { border: '1px solid var(--stone)', borderRadius: 8, background: 'var(--scree)', padding: '8px 12px' }
 const muted: React.CSSProperties = { color: 'var(--fog)', fontSize: 13 }
+// The runner's button pair (as in Proposals and the crons page).
+const button: React.CSSProperties = {
+  background: 'var(--scree)', border: '1px solid var(--stone)', borderRadius: 6, color: 'var(--fog)',
+  padding: '5px 12px', cursor: 'pointer', fontSize: '0.85rem', fontFamily: 'inherit',
+}
+const primary: React.CSSProperties = {
+  ...button, background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))', border: '1px solid var(--blaze)', color: 'var(--amber)', fontWeight: 700,
+}
 
 export default function McpPicker({ value, onChange, requireExplicit = false }: Props) {
   const [conns, setConns] = useState<McpConnectionInfo[] | null>(null)
@@ -58,6 +68,8 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
     return m
   })
   const [tools, setTools] = useState<Record<string, McpToolsState>>({})
+  // Connections whose per-tool list is open (Customize).
+  const [custom, setCustom] = useState<Set<string>>(() => new Set())
 
   // The async tool load outlives the render that started it: it reads the latest state and the
   // latest onChange from here (written in an effect, never during render).
@@ -134,12 +146,10 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
     emit(checked, nextModes, tools)
   }
 
-  function selectReadOnly(id: string) {
+  function applyPreset(id: string, preset: McpPreset) {
     const st = tools[id]
     if (st?.status !== 'ready') return
-    const cur = { ...modes[id] }
-    for (const t of st.tools) if (isReadOnlyTool(t)) cur[t.name] = 'allow'
-    const nextModes = { ...modes, [id]: cur }
+    const nextModes = { ...modes, [id]: presetModes(preset, st.tools) }
     setModes(nextModes)
     emit(checked, nextModes, tools)
   }
@@ -169,7 +179,7 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
           <div style={{ ...muted, color: 'var(--danger)' }}>
             Connection {id} no longer exists (it was deleted, or is not yours), so its tools cannot be used.
           </div>
-          <button type="button" onClick={() => removeOrphan(id)} aria-label={`Remove missing connection ${id}`}>Remove</button>
+          <button type="button" style={button} onClick={() => removeOrphan(id)} aria-label={`Remove missing connection ${id}`}>Remove</button>
         </div>
       ))}
       {conns.map(c => {
@@ -179,6 +189,9 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
         const st = tools[c.id]
         const modeOf = (name: string): McpToolMode => modes[c.id]?.[name] ?? 'off'
         const anyOn = Object.values(modes[c.id] ?? {}).some(m => m !== 'off')
+        const preset = st?.status === 'ready' ? presetOf(modes[c.id], st.tools) : 'none'
+        const showList = requireExplicit || custom.has(c.id) || preset === 'custom'
+        const acting = st?.status === 'ready' ? st.tools.filter(t => !isReadOnlyTool(t)).length : 0
         return (
           <div key={c.id} data-testid={`mcp-conn-${c.name}`} style={{ ...box, opacity: usable ? 1 : 0.6 }}>
             <label style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: usable || chosen ? 'pointer' : 'not-allowed' }}>
@@ -196,18 +209,47 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
             {on && st?.status === 'error' && (
               <div data-testid={`mcp-tools-error-${c.name}`} style={{ ...muted, color: 'var(--danger)' }}>
                 Could not load tools: {st.message}{' '}
-                <button type="button" onClick={() => loadTools(c.id)}>Retry</button>
+                <button type="button" style={button} onClick={() => loadTools(c.id)}>Retry</button>
               </div>
             )}
             {on && st?.status === 'ready' && (
               <div style={{ marginTop: 8 }}>
                 {st.tools.length === 0 && <div style={muted}>This server lists no tools.</div>}
-                {!requireExplicit && st.tools.some(isReadOnlyTool) && (
-                  <button type="button" data-testid={`mcp-readonly-${c.name}`} onClick={() => selectReadOnly(c.id)}>
-                    Select all read-only tools
-                  </button>
+                {!requireExplicit && st.tools.length > 0 && (
+                  <div data-testid={`mcp-presets-${c.name}`} style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {(['allow_all', 'approval', 'none'] as McpPreset[]).map(p => (
+                      <button
+                        key={p}
+                        type="button"
+                        data-testid={`mcp-preset-${c.name}-${p}`}
+                        aria-pressed={preset === p}
+                        onClick={() => applyPreset(c.id, p)}
+                        style={preset === p ? primary : button}
+                      >
+                        {MCP_PRESET_LABEL[p]}
+                      </button>
+                    ))}
+                    {preset === 'custom' && <span data-testid={`mcp-preset-${c.name}-custom`} style={{ ...muted, fontWeight: 700 }}>Custom</span>}
+                    <button
+                      type="button"
+                      data-testid={`mcp-customize-${c.name}`}
+                      aria-expanded={showList}
+                      onClick={() => setCustom(s => { const n = new Set(s); if (n.has(c.id)) n.delete(c.id); else n.add(c.id); return n })}
+                      style={{ ...button, marginLeft: 'auto' }}
+                    >
+                      {showList ? 'Hide tools' : 'Customize'}
+                    </button>
+                  </div>
                 )}
-                <div style={{ maxHeight: 260, overflowY: 'auto', marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {!requireExplicit && preset === 'allow_all' && acting > 0 && (
+                  <div role="alert" data-testid={`mcp-warn-${c.name}`} style={{ color: 'var(--danger)', fontSize: 12, marginTop: 4 }}>
+                    {acting} of {st.tools.length} tools can change things: {MCP_ALLOW_WARNING}.
+                  </div>
+                )}
+                {!requireExplicit && preset === 'approval' && (
+                  <div style={{ ...muted, marginTop: 4 }}>Read-only tools allowed; the other {acting} {MCP_PROPOSE_LABEL}.</div>
+                )}
+                {showList && <div style={{ maxHeight: 260, overflowY: 'auto', marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {st.tools.map(t => {
                     const mode = modeOf(t.name)
                     const ro = isReadOnlyTool(t)
@@ -228,7 +270,7 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
                           </select>
                         </div>
                         {t.description && <div style={{ ...muted, fontSize: 12 }}>{t.description.length > 200 ? t.description.slice(0, 200) + '…' : t.description}</div>}
-                        {mode === 'allow' && !ro && (
+                        {mode === 'allow' && !ro && (requireExplicit || preset !== 'allow_all') && (
                           <div role="alert" data-testid={`mcp-warn-${c.name}-${t.name}`} style={{ color: 'var(--danger)', fontSize: 12 }}>
                             Warning: {MCP_ALLOW_WARNING}.
                           </div>
@@ -236,7 +278,7 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
                       </div>
                     )
                   })}
-                </div>
+                </div>}
                 {!anyOn && <div style={{ ...muted, marginTop: 6 }}>No tools selected: this server will not be attached.</div>}
               </div>
             )}

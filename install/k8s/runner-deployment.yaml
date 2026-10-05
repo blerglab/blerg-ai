@@ -110,6 +110,11 @@ spec:
             - name: BLERG_RUNNER_GITHUB_TOKEN
               valueFrom:
                 secretKeyRef: { name: blerg-secrets, key: BLERG_RUNNER_GITHUB_TOKEN, optional: true }
+            # Optional — turns on GET /metrics (Prometheus): a scraper presents this as a bearer token.
+            # Absent key = the endpoint answers 404. See docs/telemetry.md.
+            - name: BLERG_RUNNER_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef: { name: blerg-secrets, key: BLERG_RUNNER_METRICS_TOKEN, optional: true }
             # Optional — the Claude model list's source (see configmap.yaml).
             # Absent key = the public Claude Code catalog; "" = built-in only.
             - name: BLERG_RUNNER_MODEL_CATALOG_URL

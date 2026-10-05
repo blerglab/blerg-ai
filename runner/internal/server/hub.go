@@ -61,6 +61,7 @@ type DaemonConn struct {
 	cloneFrom        bool                           // honours SpawnSession.CloneFrom (hello)
 	mcpGateway       bool                           // honours SpawnSession.MCPGateway (hello mcp_gateway)
 	restrictTools    bool                           // honours SpawnSession.RestrictTools (hello restrict_tools)
+	plugins          bool                           // honours SpawnSession.Plugins (hello plugins)
 	hostTokenClone   bool                           // owner allows personal-token clones on the bare host (hello)
 	sandboxAvailable bool
 	hostClaude       hostClaudeCaps
@@ -202,6 +203,23 @@ func (dc *DaemonConn) CanCloneTarget() bool {
 	dc.liveMu.RLock()
 	defer dc.liveMu.RUnlock()
 	return dc.cloneFrom
+}
+
+// SetPlugins records the hello's plugins capability.
+func (dc *DaemonConn) SetPlugins(v bool) {
+	dc.liveMu.Lock()
+	dc.plugins = v
+	dc.liveMu.Unlock()
+}
+
+// CanPlugins reports whether SpawnSession.Plugins may be sent to this daemon.
+// An older daemon, or one without the claude CLI, would ignore the field and
+// start without plugins — so it is never sent one, and the start plan never
+// shows a plugin stage for it.
+func (dc *DaemonConn) CanPlugins() bool {
+	dc.liveMu.RLock()
+	defer dc.liveMu.RUnlock()
+	return dc.plugins
 }
 
 // SetAllowHostCredentialClone records the daemon's hello

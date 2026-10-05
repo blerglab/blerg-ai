@@ -55,6 +55,14 @@ describe('SessionList', () => {
     expect(screen.queryByTestId('proposals-count-badge')).toBeNull()
   })
 
+  it('links to Insights in the sidebar, and only there', () => {
+    const { unmount } = renderList({ variant: 'sidebar' })
+    expect(screen.getByTestId('insights-nav')).toHaveTextContent('Insights')
+    unmount()
+    renderList()
+    expect(screen.queryByTestId('insights-nav')).toBeNull()
+  })
+
   it('renders active sessions grouped under their repo', () => {
     seed([makeDaemon()], [makeSession({ status: 'running', repo: 'widget', title: 'Task one' })])
     renderList()
@@ -502,5 +510,26 @@ describe('SessionList — cluster pill count', () => {
       window.dispatchEvent(new CustomEvent('blerg:cluster-settings-saved', { detail: { configured: true, max_sessions: 12 } }))
     })
     expect(await screen.findByText(/Cluster · 0\/12 running/)).toBeInTheDocument()
+  })
+})
+
+describe('History order', () => {
+  it('lists ended sessions most recent first across repos, with no repo headings', () => {
+    useSessionStore.setState({
+      sessions: [
+        makeSession({ id: 'old', status: 'stopped', repo: '/r/alpha', title: 'Oldest', ended_at: '2026-10-01T10:00:00Z' }),
+        makeSession({ id: 'new', status: 'stopped', repo: '/r/beta', title: 'Newest', ended_at: '2026-10-03T10:00:00Z' }),
+        makeSession({ id: 'mid', status: 'stopped', repo: '/r/alpha', title: 'Middle', ended_at: '2026-10-02T10:00:00Z' }),
+      ],
+      daemons: [makeDaemon({ id: 'd1' })],
+    } as never)
+    renderList()
+    fireEvent.click(screen.getByText('History'))
+    const titles = ['Newest', 'Middle', 'Oldest'].map(t => screen.getByText(t))
+    const pos = titles.map(el => el.compareDocumentPosition(titles[0]))
+    expect(pos[1] & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+    expect(titles[2].compareDocumentPosition(titles[1]) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+    expect(screen.queryByText('alpha')).toBeNull()
+    expect(screen.queryByText('beta')).toBeNull()
   })
 })

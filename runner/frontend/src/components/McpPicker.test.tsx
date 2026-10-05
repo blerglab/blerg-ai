@@ -47,8 +47,10 @@ function setup(opts?: { initial?: McpSelectionEntry[]; requireExplicit?: boolean
   return emitted
 }
 
-const check = async () => {
+// Check the connection and open its per-tool list (Customize); the crons form shows the list directly.
+const check = async (explicit = false) => {
   fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
+  if (!explicit) fireEvent.click(await screen.findByTestId('mcp-customize-calendar'))
   await screen.findByTestId('mcp-tool-calendar-read')
 }
 const modeSelect = (tool: string) => screen.getByLabelText(`calendar ${tool} mode`) as HTMLSelectElement
@@ -85,22 +87,56 @@ describe('McpPicker', () => {
     expect(modeSelect('read').value).toBe('off')
   })
 
-  it('"select all read-only tools" sets only the read-only tools to allow', async () => {
+  it('a checked connection shows the presets with none pressed and the tool list hidden', async () => {
+    const emitted = setup()
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
+    await screen.findByTestId('mcp-presets-calendar')
+    expect(screen.queryByTestId('mcp-tool-calendar-read')).toBeNull()
+    expect(screen.getByTestId('mcp-preset-calendar-none').getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByTestId('mcp-preset-calendar-allow_all').getAttribute('aria-pressed')).toBe('false')
+    expect(emitted[emitted.length - 1]).toEqual([])
+  })
+
+  it('"Require approval" allows the read-only tools and proposes the rest', async () => {
     const emitted = setup()
     await check()
-    fireEvent.click(screen.getByTestId('mcp-readonly-calendar'))
+    fireEvent.click(screen.getByTestId('mcp-preset-calendar-approval'))
     expect(modeSelect('read').value).toBe('allow')
     expect(modeSelect('list').value).toBe('allow')
-    expect(modeSelect('send').value).toBe('off')
+    expect(modeSelect('send').value).toBe('propose')
+    expect(screen.getByTestId('mcp-preset-calendar-approval').getAttribute('aria-pressed')).toBe('true')
     expect(emitted[emitted.length - 1]).toEqual([
-      { connection: 'c1', tools: { read: { mode: 'allow', hash: 'h-read' }, list: { mode: 'allow', hash: 'h-list' } } },
+      { connection: 'c1', tools: { read: { mode: 'allow', hash: 'h-read' }, list: { mode: 'allow', hash: 'h-list' }, send: { mode: 'propose', hash: 'h-send' } } },
     ])
   })
 
-  it('hides the bulk read-only action when every mode must be explicit', async () => {
-    setup({ requireExplicit: true })
+  it('"Allow all" allows every tool with one summary warning instead of one per tool', async () => {
+    const emitted = setup()
     await check()
-    expect(screen.queryByTestId('mcp-readonly-calendar')).toBeNull()
+    fireEvent.click(screen.getByTestId('mcp-preset-calendar-allow_all'))
+    expect(modeSelect('send').value).toBe('allow')
+    expect(screen.getByTestId('mcp-warn-calendar').textContent).toContain('1 of 3 tools can change things')
+    expect(screen.queryByTestId('mcp-warn-calendar-send')).toBeNull()
+    expect(Object.keys(emitted[emitted.length - 1][0].tools)).toEqual(['read', 'list', 'send'])
+  })
+
+  it('"None" turns everything off, and a hand-edited list reads as Custom', async () => {
+    const emitted = setup()
+    await check()
+    fireEvent.click(screen.getByTestId('mcp-preset-calendar-allow_all'))
+    fireEvent.click(screen.getByTestId('mcp-preset-calendar-none'))
+    expect(modeSelect('send').value).toBe('off')
+    expect(emitted[emitted.length - 1]).toEqual([])
+    fireEvent.change(modeSelect('send'), { target: { value: 'propose' } })
+    expect(screen.getByTestId('mcp-preset-calendar-custom')).toBeTruthy()
+    expect(screen.getByTestId('mcp-preset-calendar-none').getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('shows no presets and the tool list directly when every mode must be explicit', async () => {
+    setup({ requireExplicit: true })
+    await check(true)
+    expect(screen.queryByTestId('mcp-presets-calendar')).toBeNull()
+    expect(screen.queryByTestId('mcp-customize-calendar')).toBeNull()
   })
 
   it('warns on allow for a tool not marked read-only, and not for a read-only one', async () => {

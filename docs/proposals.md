@@ -37,8 +37,8 @@ they do not match the summary, reject.
 
 - A pending proposal **expires after 7 days**. Decided proposals are removed after 30 days.
 - The frozen arguments may be at most 64 KiB; a larger call is refused and the agent is told why.
-- At most 50 proposals may be pending per account at once, 10 per session and 20 per cron; further
-  calls are refused until you decide some. Queued calls also count against the session's tool call budget, so a looping agent
+- At most 50 proposals may be pending per account at once; further calls are refused until you
+  decide some. Queued calls also count against the session's tool call budget, so a looping agent
   cannot flood the queue.
 - Proposals are private: only the account that started the session sees them.
 

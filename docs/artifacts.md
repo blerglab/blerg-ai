@@ -53,7 +53,8 @@ The guidance the agent reads:
 
 - To read or review: Markdown, HTML or PDF.
 - Data: CSV or JSON.
-- A visual: PNG, SVG or HTML.
+- A visual: PNG, SVG or HTML. To show you something for feedback — a UI state, a rendered page, a
+  diagram — the agent screenshots it and publishes the PNG, which shows inline in the chat.
 - Something you will edit in Office: DOCX or XLSX (download only).
 - An HTML file must be **one self-contained file**: inline CSS and JavaScript, images as `data:`
   URIs. It cannot load anything from the network.

@@ -3,14 +3,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 // vi.mock factories are hoisted above top-level const declarations, so the
 // spies themselves must be created inside vi.hoisted to be visible in the
 // factory below.
-const { redirectToRefresh, getAccessToken, consumeAccessTokenFromFragment } = vi.hoisted(() => ({
+const { redirectToRefresh, ensureFreshToken, getAccessToken, consumeAccessTokenFromFragment } = vi.hoisted(() => ({
   redirectToRefresh: vi.fn(),
+  ensureFreshToken: vi.fn<() => Promise<boolean>>(),
   getAccessToken: vi.fn<() => string | null>(),
   consumeAccessTokenFromFragment: vi.fn(),
 }))
 
 vi.mock('./authClient', () => ({
   redirectToRefresh,
+  ensureFreshToken,
   getAccessToken,
   consumeAccessTokenFromFragment,
 }))
@@ -55,6 +57,8 @@ describe('ws.ts', () => {
   beforeEach(() => {
     vi.resetModules()
     redirectToRefresh.mockClear()
+    ensureFreshToken.mockReset()
+    ensureFreshToken.mockResolvedValue(false)
     getAccessToken.mockReset()
     consumeAccessTokenFromFragment.mockReset()
     FakeWebSocket.instances = []
@@ -93,11 +97,28 @@ describe('ws.ts', () => {
 
     const timersBefore = vi.getTimerCount()
     socket.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(0) // the quiet renewal is tried first and (here) comes back empty
 
     expect(redirectToRefresh).toHaveBeenCalledTimes(1)
     expect(redirectToRefresh).toHaveBeenCalledWith(location.href)
     // no reconnect scheduled — we're navigating away instead
     expect(vi.getTimerCount()).toBe(timersBefore)
+
+    vi.useRealTimers()
+  })
+
+  it('an expired token is renewed quietly and the socket reconnected, with no page redirect', async () => {
+    getAccessToken.mockReturnValue(EXPIRED_TOKEN())
+    ensureFreshToken.mockResolvedValue(true)
+    vi.useFakeTimers()
+
+    await import('./ws')
+    const before = FakeWebSocket.instances.length
+    FakeWebSocket.instances[before - 1].onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(redirectToRefresh).not.toHaveBeenCalled()
+    expect(FakeWebSocket.instances.length).toBe(before + 1) // reconnected at once with the renewed token
 
     vi.useRealTimers()
   })
@@ -111,6 +132,7 @@ describe('ws.ts', () => {
 
     const socket = FakeWebSocket.instances[0]
     socket.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(0)
     expect(redirectToRefresh).toHaveBeenCalledTimes(1)
     expect(refreshAlreadyAttempted()).toBe(true)
 

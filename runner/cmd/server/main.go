@@ -229,6 +229,13 @@ func main() {
 	mux.HandleFunc("PUT /api/daemons/{id}/repos-root", api.HandlePutDaemonReposRoot)
 	mux.HandleFunc("GET /api/cluster/status", api.HandleGetClusterStatus)
 	mux.HandleFunc("PUT /api/cluster/settings", api.HandlePutClusterSettings)
+	mux.HandleFunc("GET /api/insights", api.HandleGetInsights)
+	mux.HandleFunc("GET /api/insights/prices", api.HandleGetInsightPrices)
+	mux.HandleFunc("PUT /api/insights/prices", api.HandlePutInsightPrice)
+	mux.HandleFunc("DELETE /api/insights/prices", api.HandleDeleteInsightPrice)
+	// Prometheus metrics: off (404) unless BLERG_RUNNER_METRICS_TOKEN is set; then a scraper presents it as a bearer token.
+	api.SetMetricsToken(os.Getenv("BLERG_RUNNER_METRICS_TOKEN"))
+	mux.HandleFunc("GET /metrics", api.HandleMetrics)
 	mux.HandleFunc("GET /api/me/credentials", api.HandleGetMyCredentials)
 	mux.HandleFunc("GET /api/sessions", api.HandleGetSessions)
 	mux.HandleFunc("POST /api/sessions", api.HandlePostSessions)

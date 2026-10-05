@@ -6,28 +6,9 @@ All notable changes to Blerg are recorded here. The format follows
 [`CONTRIBUTING.md`](CONTRIBUTING.md#versions-and-releases): breaking changes may land in any
 minor release and are called out here.
 
-## [0.1.0] - Unreleased
+## [Unreleased]
 
-First public release: everything below is what exists today. Blerg is pre-1.0, so expect
-breaking changes in later minor versions.
-
-### Core (`blerg-core`)
-
-- Control plane and single sign-on: one login that the board and the runner both accept, with
-  local accounts, a one-time bootstrap admin password (printed once in the first-boot log), forced
-  password change, `users create` / `users set-password` commands and rate-limited sign-in.
-- Identity revocation that takes effect immediately, including for a re-login.
-- Per-person credential vault for engine and git credentials (Claude, Codex, Hermes, GitHub,
-  GitLab), encrypted with a local key (`BLERG_CORE_LOCAL_KEY`) or with a Vault transit backend.
-  The Settings page is where each person adds their own.
-- Agent tokens: user-minted, preset-based (for example `run-sessions`), listed and revocable in
-  Settings.
-- Agent discovery: a public manifest at `GET /agents` (Markdown for an LLM, JSON for a tool) and
-  `GET /openapi.json`, plus the component registry the home page reads.
-- Always-on plugins: a per-account list that is installed into every new cluster Claude session,
-  restricted to an operator-set marketplace allow-list.
-- Web UI for sign-in, Settings and the home page; every environment variable is documented in
-  [`core/docs/CONFIG.md`](core/docs/CONFIG.md).
+### Core
 
 - MCP connections: add a remote MCP server (a URL plus a static token, or none) under Settings, up
   to 20 per account. The token is stored encrypted, never shown again, and every read of it by the
@@ -45,50 +26,32 @@ breaking changes in later minor versions.
   for an account without a login. The token is never issued as a bearer credential, lasts at most
   365 days and is revoked by "log out everywhere".
 
-### Board (`blerg-board`)
+### Board
 
-- A kanban board that agents write to and humans curate: per-board custom field schemas,
-  idempotent writes (`dedup_key`, `external_id`) and optimistic concurrency (`If-Match`).
-- Admission gate: an LLM curator on the agent write path that denies duplicates and sends vague
-  cards back for revision, with an append-only audit trail. It can use any OpenAI-compatible
-  endpoint, the Claude API, or one account's own connected credential.
-- MCP server (`/mcp`), a small CLI (`blerg-board ls|get|new|move|search`) and a bundled
-  `managing-cards` skill.
-- Board automation identity: a board holds one person's agent token and starts every runner
-  session as that person, on their engine credential. The token is set on the board (engine:
-  Claude, Codex or Hermes), never shown again, and expires.
-- Sessions can be started from a card, and **Run board** works a whole board; they default to the
-  Local sandbox when the daemon has one.
-- Deployment signals (`POST` per-environment state) and the `GET /api/version` endpoint.
-  Configuration: [`board/docs/CONFIG.md`](board/docs/CONFIG.md).
-
-- Artifacts on cards: a new `artifact` link kind for a file a session published, an atomic
-  `add_links` append on `PATCH /api/cards/{id}` (also used by the `blerg_card_link` MCP tool), and
-  `blerg-runner publish --card` to attach a file to the session's card. Artifact links must be the
-  runner's viewer address exactly. See [`docs/artifacts.md`](docs/artifacts.md). Migration `019`.
-- Card links are only made clickable for `http(s)` addresses, everywhere on the card, and `pr`, `url`,
-  `session` and `artifact` links must be web addresses when written.
 - Board scoping: a token minted for one board can no longer read or write another.
 - Focus board template: one click creates a board with Inbox, Today, This week, Waiting on,
   Someday, Proposed and Done columns and a matching field schema, with a starter prompt for a cron.
 
-### Runner (`blerg-runner`)
+### Runner
 
-- Server, workstation daemon and per-session pod entrypoint. The server serves the API, the
-  daemon WebSocket and the web UI; sessions stream back as structured events.
-- Three runtimes, chosen explicitly on the launch sheet's Run column and never silently
-  widened: **cluster pod**, **Local sandbox** (a hardened container on the daemon's host) and
-  **This machine** (unsandboxed, needs an acknowledgement).
-- Agent and Terminal session kinds; engines Claude Code, Codex, Hermes and OpenClaw (OpenClaw on
-  the host only), with engine-agnostic model and effort pickers fed by live model lists.
-- Clone a repository by `owner/name` or URL onto a daemon (GitHub and GitLab), change the repos
-  folder live, and start a session with no repository.
-- Agent contract v1: `GET /agents` discovery, idempotent session start, one-shot sessions
-  (`auto_stop`), server-sent events, a signed completion webhook and an MCP server.
-- Session recovery after a daemon or pod restart, start-progress reporting, the reason a session
-  ended, a Skills and plugins panel and a compact tool-call view in the agent transcript.
-- Reference: [`runner/README.md`](runner/README.md).
-
+- Always-on plugins on desktop sessions: the Settings plugin list now reaches Claude agent sessions
+  on a workstation daemon (Local sandbox and This machine), not only cluster pods. The daemon
+  installs into its own plugin workshop under `~/.blerg-runner-daemon` — never the person's
+  `~/.claude` — and starts Claude with `--plugin-dir` per plugin, mounting the cache read-only into
+  a sandbox. Restricted sessions (grants, crons) and terminals get none. The start panel shows the
+  install as a `plugins` stage. See `install/desktop/DAEMON.md`.
+- New repository on the cluster: the launch sheet's **New repository** creates `owner/name` on
+  GitHub or GitLab with the person's own token (private by default) and starts the session in it.
+  When it cannot be created the session starts in an empty, initialised repository pointed at
+  where it would be, with a warning in the start panel and a note to the agent. **Behaviour
+  change:** `POST /api/sessions` with `new_repo: true` on the cluster used to be ignored (an
+  existing repository was cloned); it now creates, or answers 409 for an existing repository. New
+  request field `visibility`; new column `sessions.new_repo` (migration 035).
+- Insights page and Prometheus metrics: pod startup time (total and per step), session durations and
+  busy time, tokens by model and day, and an estimated dollar cost from admin-entered prices. Members
+  see their own sessions, admins can see everyone's. `GET /metrics` (off until
+  `BLERG_RUNNER_METRICS_TOKEN` is set) exposes aggregates only. See
+  [`docs/telemetry.md`](docs/telemetry.md).
 - MCP gateway and connections: pick a connection and its tools in the launch sheet (all off by
   default, each pinned to the tool's definition). The session reaches them through a gateway on its
   own listener (`BLERG_RUNNER_MCP_GW_ADDR`, `BLERG_RUNNER_MCP_GW_URL`) and never holds the
@@ -96,7 +59,7 @@ breaking changes in later minor versions.
 - Crons: schedule an unattended agent run (a five-field expression and a time zone, at least 15
   minutes apart), with run history, run now, pause and renewal. A machine that was off runs an
   overdue cron once, marked late. See [`docs/crons.md`](docs/crons.md).
-- Proposals: set any tool of a connection to "propose" and the agent's call is queued instead of
+- Proposals: set a connection's write tool to "propose" and the agent's call is queued instead of
   run. Review the frozen arguments on the Proposals page, approve or reject; pending proposals
   expire after 7 days. See [`docs/proposals.md`](docs/proposals.md).
 - Built-in `board` connection: a cron can read and write cards on one board through a fixed set of
@@ -140,19 +103,63 @@ breaking changes in later minor versions.
   a slow link.
 - Unsent chat messages are kept per session across navigation and reloads, and active cluster
   sessions appear in the sidebar.
-- Mid-turn steering for Claude Code sessions: a message sent while the agent works is written to a
-  long-lived `claude` process and delivered at the agent's next tool step instead of waiting for the
-  whole turn; Esc interrupts the turn without restarting the agent, and a queued message then runs
-  next. Set `BLERG_CLAUDE_STEERING=0` for the old one-process-per-message behaviour (an older Claude
-  Code that lacks the streaming input mode falls back to it by itself). See
-  [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md).
-- Pause: a live cluster session can be paused, which frees its pod and keeps the session; a message
-  resumes it. A killed or ended session now says so in the chat and locks the message box.
-- Long conversations open on their most recent messages at once; the earlier ones load in the
-  background without moving the view.
-- The sidebar's Cluster count follows sessions as they start and end, and a cap saved on the Cluster
-  page shows at once. The Cluster page no longer goes blank on a cluster with no operator engines.
-- Chat toolbar icons on narrow screens; a calmer "sending" bubble; a skeleton while history loads.
+
+## [0.1.0] - Unreleased
+
+First public release: everything below is what exists today. Blerg is pre-1.0, so expect
+breaking changes in later minor versions.
+
+### Core (`blerg-core`)
+
+- Control plane and single sign-on: one login that the board and the runner both accept, with
+  local accounts, a one-time bootstrap admin password (printed once in the first-boot log), forced
+  password change, `users create` / `users set-password` commands and rate-limited sign-in.
+- Identity revocation that takes effect immediately, including for a re-login.
+- Per-person credential vault for engine and git credentials (Claude, Codex, Hermes, GitHub,
+  GitLab), encrypted with a local key (`BLERG_CORE_LOCAL_KEY`) or with a Vault transit backend.
+  The Settings page is where each person adds their own.
+- Agent tokens: user-minted, preset-based (for example `run-sessions`), listed and revocable in
+  Settings.
+- Agent discovery: a public manifest at `GET /agents` (Markdown for an LLM, JSON for a tool) and
+  `GET /openapi.json`, plus the component registry the home page reads.
+- Always-on plugins: a per-account list that is installed into every new cluster Claude session,
+  restricted to an operator-set marketplace allow-list.
+- Web UI for sign-in, Settings and the home page; every environment variable is documented in
+  [`core/docs/CONFIG.md`](core/docs/CONFIG.md).
+
+### Board (`blerg-board`)
+
+- A kanban board that agents write to and humans curate: per-board custom field schemas,
+  idempotent writes (`dedup_key`, `external_id`) and optimistic concurrency (`If-Match`).
+- Admission gate: an LLM curator on the agent write path that denies duplicates and sends vague
+  cards back for revision, with an append-only audit trail. It can use any OpenAI-compatible
+  endpoint, the Claude API, or one account's own connected credential.
+- MCP server (`/mcp`), a small CLI (`blerg-board ls|get|new|move|search`) and a bundled
+  `managing-cards` skill.
+- Board automation identity: a board holds one person's agent token and starts every runner
+  session as that person, on their engine credential. The token is set on the board (engine:
+  Claude, Codex or Hermes), never shown again, and expires.
+- Sessions can be started from a card, and **Run board** works a whole board; they default to the
+  Local sandbox when the daemon has one.
+- Deployment signals (`POST` per-environment state) and the `GET /api/version` endpoint.
+  Configuration: [`board/docs/CONFIG.md`](board/docs/CONFIG.md).
+
+### Runner (`blerg-runner`)
+
+- Server, workstation daemon and per-session pod entrypoint. The server serves the API, the
+  daemon WebSocket and the web UI; sessions stream back as structured events.
+- Three runtimes, chosen explicitly on the launch sheet's Run column and never silently
+  widened: **cluster pod**, **Local sandbox** (a hardened container on the daemon's host) and
+  **This machine** (unsandboxed, needs an acknowledgement).
+- Agent and Terminal session kinds; engines Claude Code, Codex, Hermes and OpenClaw (OpenClaw on
+  the host only), with engine-agnostic model and effort pickers fed by live model lists.
+- Clone a repository by `owner/name` or URL onto a daemon (GitHub and GitLab), change the repos
+  folder live, and start a session with no repository.
+- Agent contract v1: `GET /agents` discovery, idempotent session start, one-shot sessions
+  (`auto_stop`), server-sent events, a signed completion webhook and an MCP server.
+- Session recovery after a daemon or pod restart, start-progress reporting, the reason a session
+  ended, a Skills and plugins panel and a compact tool-call view in the agent transcript.
+- Reference: [`runner/README.md`](runner/README.md).
 
 ### Installers
 
@@ -167,3 +174,6 @@ breaking changes in later minor versions.
   AI agent do the install is in [`install/k8s/AGENT-INSTALL.md`](install/k8s/AGENT-INSTALL.md).
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
+
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/blerglab/blerg-ai/releases/tag/v0.1.0

@@ -2,14 +2,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // vi.mock factories are hoisted above top-level const declarations, so the
 // spy itself must be created inside vi.hoisted to be visible in the factory.
-const { redirectToRefresh } = vi.hoisted(() => ({ redirectToRefresh: vi.fn() }));
+const { redirectToRefresh, ensureFreshToken } = vi.hoisted(() => ({
+  redirectToRefresh: vi.fn(),
+  ensureFreshToken: vi.fn(),
+}));
 
 // Real getAccessToken/consumeAccessTokenFromFragment (so the bearer-header
 // assertion exercises the actual in-memory token), but a spy in place of
 // redirectToRefresh — a real one would try to navigate jsdom's location.
 vi.mock("./authClient", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./authClient")>();
-  return { ...actual, redirectToRefresh };
+  return { ...actual, redirectToRefresh, ensureFreshToken };
 });
 
 import { consumeAccessTokenFromFragment } from "./authClient";
@@ -19,6 +22,8 @@ import { clearRefreshAttempted } from "./refreshGuard";
 describe("api", () => {
   beforeEach(() => {
     redirectToRefresh.mockClear();
+    ensureFreshToken.mockReset();
+    ensureFreshToken.mockResolvedValue(false);
     window.history.replaceState(null, "", "/");
     window.history.replaceState(null, "", "/#access_token=tok-xyz");
     consumeAccessTokenFromFragment();
@@ -54,6 +59,36 @@ describe("api", () => {
     await expect(api("/api/boards")).rejects.toBeInstanceOf(ApiError);
 
     expect(redirectToRefresh).toHaveBeenCalledWith(location.href);
+  });
+
+  it("renews the token quietly on a 401 and repeats the request once with the new one, with no redirect", async () => {
+    ensureFreshToken.mockImplementationOnce(async () => {
+      window.history.replaceState(null, "", "/#access_token=tok-new");
+      consumeAccessTokenFromFragment();
+      return true;
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 401, ok: false, text: () => Promise.resolve("{}") })
+      .mockResolvedValueOnce({ status: 200, ok: true, text: () => Promise.resolve('{"ok":true}') });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api("/api/boards")).resolves.toEqual({ ok: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe("Bearer tok-new");
+    expect(redirectToRefresh).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the page redirect when the repeated request is refused too", async () => {
+    ensureFreshToken.mockResolvedValue(true);
+    const fetchMock = vi.fn().mockResolvedValue({ status: 401, ok: false, text: () => Promise.resolve("{}") });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api("/api/boards")).rejects.toBeInstanceOf(ApiError);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(redirectToRefresh).toHaveBeenCalledTimes(1);
   });
 
   it("does not redirect on a non-401 response", async () => {

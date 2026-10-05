@@ -7,10 +7,9 @@ Status: implemented. Applies to `contracts`, `core`,
 
 Let a person schedule an AI agent to run unattended, give it access to their own
 services through MCP servers, and have it keep a board up to date. The motivating case
-is a task board kept up to date from a person's connected services: a few times a day an
-agent reads what its connections expose, creates and updates cards, and proposes actions
-that the person approves. The person can edit the board and ask for new tracking at any
-time.
+is a personal "focus" board: a few times a day an agent reads email and a calendar,
+creates and updates cards, and proposes actions (a reply, a calendar entry) that the
+person approves. The person can edit the board and ask for new tracking at any time.
 
 Two features make this possible and are useful on their own:
 
@@ -760,7 +759,39 @@ on repeats.
 - Manual: a real Claude session with a granted fake server on the cluster and on the
   desktop sandbox.
 
-## 13. Design decisions
+## 13. Delivery phases
+
+1. **Connections (static) and gateway.** Core connections API and settings UI, shared
+   network policy package, runner gateway, grants, config injection, daemon capability
+   and protocol field, launch-sheet section, tool picker and pinning, tool restrictions
+   and private sessions (section 8).
+2. **Crons.** Tables, scheduler, cron token endpoints, start-path typed errors, API and
+   UI, run history, watchdog, catch-up.
+3. **Proposals.**
+4. **Board integration and template.** Exchange tokens, the board's board-scoping,
+   built-in `board` connection, focus-board template, failure card.
+5. **OAuth exchange.** Discovery, registration, PKCE, refresh, `needs_auth`.
+
+Phase 5 is last because it is the most self-contained, but the mail and calendar case
+depends on it (or on an MCP server that accepts a static token), so it should not slip
+far behind phase 4.
+
+## 14. Items to verify first (a blocking spike before phase 1 builds on them)
+
+1. Claude Code at the version the pod image and sandbox pin accepts `--mcp-config <file>`
+   with `type: "http"` and headers; `--strict-mcp-config` removes ambient servers,
+   including those in the `~/.claude.json` the sandbox mounts; and either `--tools` (an
+   allow-list) or `--disallowedTools` really prevents the tool under
+   `--dangerously-skip-permissions`. If neither holds, cron sessions run with a
+   permissions mode that enforces it. The spike also records the exact built-in tool
+   names the init event reports.
+2. Streamable HTTP details the gateway must proxy: session ids and event-stream replies.
+3. Whether the intended upstream servers accept a bearer header and speak Streamable
+   HTTP.
+4. That the board can scope a core agent token by `Project` (10.2).
+5. Whether all disallowed built-in tool names are stable across Claude Code versions.
+
+## 15. Decisions taken on the requester's behalf
 
 - A gateway enforces tool modes, rather than client-side flags, keeping the same
   user-visible behaviour (section 3).

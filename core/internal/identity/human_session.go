@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -253,6 +254,10 @@ func (s *Service) RefreshAccessToken(ctx context.Context, rawRefreshToken, audie
 		if err := tx.Commit(ctx); err != nil {
 			return "", "", err
 		}
+		// Said out loud because it signs the person out of every device: which login chain it was and how
+		// stale the presented token was are what tell a stolen token from a browser that kept an old cookie.
+		log.Printf("identity: rotated-out refresh token replayed (chain %.8s, rotated %s ago); revoking every session of the account",
+			chainID, time.Since(*revokedAt).Round(time.Second))
 		if err := s.RevokeAccountEverywhere(ctx, accountID); err != nil {
 			return "", "", err
 		}

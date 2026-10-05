@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"log"
 	"net/http"
 	"path"
@@ -104,6 +105,7 @@ type API struct {
 	runnerKey         string
 	coreAuth          *coreauth.Client
 	cron              *CronService // the cron start path and lifecycle (cronstart.go); nil when crons are off
+	metrics           metricsState // GET /metrics: its bearer token and a short cache (metrics.go)
 
 	// coreURL/coreInternalKey address blerg-core's internal credential
 	// endpoints for browser-facing lookups (GET /api/me/credentials).
@@ -148,6 +150,17 @@ type API struct {
 	fetchGitToken func(ctx context.Context, accountID, kind string) ([]byte, bool, error)
 	// repoVisibility answers repoPrivate; nil = ask the provider. Tests set it.
 	repoVisibility func(ctx context.Context, p gitprovider.Provider, token string, ref gitprovider.Ref) (private, known bool)
+	// createRepo creates a new repository for a cluster session (newrepo.go); nil = the provider.
+	// Tests set it.
+	createRepo func(ctx context.Context, p gitprovider.Provider, token string, ref gitprovider.Ref, private bool) error
+
+	// pluginAllow is this server's marketplace allow-list (BLERG_RUNNER_PLUGIN_MARKETPLACES), read
+	// once at construction, for sessions sent to a workstation daemon (daemonPlugins). The cluster
+	// path keeps its own copy on the JobManager, which a desktop install does not have.
+	pluginAllow pluginspec.Allowlist
+	// fetchPlugins fetches an account's always-on plugin list for a daemon session. nil = core's
+	// internal endpoint; tests set it.
+	fetchPlugins func(ctx context.Context, accountID string, proof coreProof) ([]pluginspec.Entry, error)
 }
 
 // SetEmbedder configures the knowledge-search embedder (nil = keyword fallback).
@@ -242,6 +255,7 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		vapidPublicKey: vapidPublicKey,
 		waiters:        newMessageWaiters(),
 	}
+	api.pluginAllow, _ = pluginAllowlistFromEnv()
 	// Several paths that end a session are package functions on the hub side
 	// of the server (daemon message handling, disconnect, reconciliation) with
 	// no API to call. Registering the notifier on the Hub — the one object
@@ -571,10 +585,16 @@ type spawnSessionRequest struct {
 	Model                      string `json:"model,omitempty"`
 	Effort                     string `json:"effort,omitempty"` // "" | one of models.Efforts
 	DangerouslySkipPermissions bool   `json:"dangerously_skip_permissions,omitempty"`
-	NewRepo                    bool   `json:"new_repo,omitempty"`
-	Kind                       string `json:"kind,omitempty"`    // "" (tmux) | "agent"
-	Runtime                    string `json:"runtime,omitempty"` // "" (daemon) | "docker" | "cluster"
-	Engine                     string `json:"engine,omitempty"`  // "" (claude) | "codex" | "hermes" | "openclaw" (openclaw: daemon runtime only, not cluster)
+	// NewRepo: on a daemon, create Repo as a new empty folder (git init) under
+	// the repos root. On the cluster, create Repo ("owner/name", required in
+	// that form) on Provider with the caller's own token and start in it; see
+	// newrepo.go for what happens when it cannot be created.
+	NewRepo bool `json:"new_repo,omitempty"`
+	// Visibility of a cluster NewRepo: "private" (default) or "public".
+	Visibility string `json:"visibility,omitempty"`
+	Kind       string `json:"kind,omitempty"`    // "" (tmux) | "agent"
+	Runtime    string `json:"runtime,omitempty"` // "" (daemon) | "docker" | "cluster"
+	Engine     string `json:"engine,omitempty"`  // "" (claude) | "codex" | "hermes" | "openclaw" (openclaw: daemon runtime only, not cluster)
 	// Provider is the git provider Repo lives on — a registered gitprovider
 	// ID ("github", "gitlab", …), honoured on every runtime; "" is the legacy
 	// GitHub default (see repo_provider.go). It is what RepoInfo.provider
@@ -741,6 +761,17 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// A new repository is created under exactly the owner the caller
+		// typed: no bare-name resolution against the operator's org or a
+		// daemon's folder origin may pick an owner for them.
+		if req.NewRepo && !strings.Contains(req.Repo, "/") {
+			writeError(w, http.StatusUnprocessableEntity, "a new repository must be given as owner/name")
+			return
+		}
+		if req.NewRepo && req.Visibility != "" && req.Visibility != "private" && req.Visibility != "public" {
+			writeError(w, http.StatusUnprocessableEntity, `visibility must be "private" or "public"`)
+			return
+		}
 		// The origin a daemon reported carries its provider, so a folder
 		// whose origin is on GitLab resolves to GitLab, never to a same-named
 		// GitHub guess.
@@ -771,6 +802,23 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		if apiErr != nil {
 			writeAPIError(w, apiErr)
 			return
+		}
+		// A new repository is created (or not — the session still starts)
+		// before anything is recorded; the outcome leads the start plan.
+		var lead []protocol.StartStage
+		if req.NewRepo {
+			// The repository is created on the provider's own host, but the pod clones from CloneURLFor: when an
+			// operator's git base redirects that, the clone would never find what was just created.
+			if msg := newRepoHostProblem(jm.CloneURLFor(req.Provider, req.Repo), req.Provider); msg != "" {
+				writeError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+			st, apiErr := a.createClusterRepo(withCoreProof(r.Context(), proofFromPrincipal(principal)), req, principal.Sub)
+			if apiErr != nil {
+				writeAPIError(w, apiErr)
+				return
+			}
+			lead = append(lead, st)
 		}
 		gitURL := jm.CloneURLFor(req.Provider, req.Repo)
 		sessionID := newUUID()
@@ -813,6 +861,11 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			if err := db.SetSessionGitURL(r.Context(), a.dbPool, sessionID, gitURL); err != nil {
 				log.Printf("cluster SetSessionGitURL %s: %v", sessionID, err)
 			}
+			if req.NewRepo {
+				if err := db.SetSessionNewRepo(r.Context(), a.dbPool, sessionID); err != nil {
+					log.Printf("cluster SetSessionNewRepo %s: %v", sessionID, err)
+				}
+			}
 		}
 		if a.dbPool != nil {
 			recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
@@ -838,6 +891,9 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.InitialPrompt,
 			ExtraEnv: withClusterSessionToken(r.Context(), a.dbPool, sessionID, nil),
 			GitURL:   gitURL,
+			// A new repository: the pod initialises when the clone fails, and
+			// never holds the operator's git token (newrepo.go).
+			NewRepo: req.NewRepo, NoOperatorGitToken: req.NewRepo,
 			// Derived from the verified access token's Sub, never taken from
 			// the request body — a caller must never claim to be spawning on
 			// behalf of a different account than its own token proves.
@@ -848,7 +904,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			TokenID:       proofFromPrincipal(principal).TokenID,
 		}
 		jm.ResolvePlugins(r.Context(), &spec)
-		announceClusterStart(r.Context(), a.hub, a.dbPool, sessionID, req.Repo, false, pluginStage(spec.Plugins, spec.PluginsNote))
+		announceClusterStart(r.Context(), a.hub, a.dbPool, sessionID, req.Repo, false, pluginStage(spec.Plugins, spec.PluginsNote), lead...)
 		if err := jm.CreateSessionJob(spec); err != nil { //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
 			// The row exists (and browsers were told), so the failure is
 			// recorded on it rather than leaving a session that is forever
@@ -1016,6 +1072,10 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		msg.RestrictTools = true // every grant session runs restricted (mcpstart.go)
 	}
+	// Always-on plugins (non-secret): only for a Claude agent-kind session with no grant, on a
+	// daemon that can load them. Resolved after the grant so a granted session never gets any.
+	var pluginNote string
+	msg.Plugins, pluginNote = a.daemonPlugins(r.Context(), daemon, principal.Sub, proofFromPrincipal(principal), req.Kind, req.Engine, msg.RestrictTools)
 
 	data, err := json.Marshal(msg) //nolint:gosec // the spawn message must carry the session token (and any MCP gateway grant) to the daemon over the authenticated websocket; never logged
 	if err != nil {
@@ -1034,7 +1094,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Kind == "agent" {
-		announceDaemonAgentStart(r.Context(), a.hub, a.dbPool, sessionID, daemon.Name, req.Runtime == "docker")
+		announceDaemonAgentStart(r.Context(), a.hub, a.dbPool, sessionID, daemon.Name, req.Runtime == "docker", pluginStage(msg.Plugins, pluginNote))
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"session_id": sessionID})

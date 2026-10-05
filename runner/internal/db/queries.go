@@ -1384,6 +1384,22 @@ func SetSessionGitURL(ctx context.Context, conn *pgxpool.Pool, sessionID, gitURL
 	return err
 }
 
+// SetSessionNewRepo marks a session as launched as "New repository" (migration 035).
+func SetSessionNewRepo(ctx context.Context, conn *pgxpool.Pool, sessionID string) error {
+	_, err := conn.Exec(ctx, `UPDATE sessions SET new_repo = true WHERE id = $1`, sessionID)
+	return err
+}
+
+// GetSessionNewRepo reports whether a session was launched as "New repository". A session that
+// does not exist, or any error, is false.
+func GetSessionNewRepo(ctx context.Context, conn *pgxpool.Pool, sessionID string) bool {
+	var v bool
+	if err := conn.QueryRow(ctx, `SELECT new_repo FROM sessions WHERE id = $1`, sessionID).Scan(&v); err != nil {
+		return false
+	}
+	return v
+}
+
 // SetSessionPosture records how a session was launched — the runtime it runs
 // under and whether engine permission prompts were bypassed. Called right
 // after the session row is pre-created, before the spawn_session message

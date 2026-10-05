@@ -262,8 +262,9 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	hello.GitProviders = gitprovider.Default.CredentialKinds()
 	hello.CloneFrom = true // SpawnSession.CloneFrom (EnsureClonedTarget)
 	hello.AllowHostCredentialClone = c.config.AllowHostCredentialClone
-	hello.MCPGateway = true    // SpawnSession.MCPGateway (mcpgateway.go)
-	hello.RestrictTools = true // SpawnSession.RestrictTools (claudecode.go ccHardeningFlags)
+	hello.MCPGateway = true             // SpawnSession.MCPGateway (mcpgateway.go)
+	hello.RestrictTools = true          // SpawnSession.RestrictTools (claudecode.go ccHardeningFlags)
+	hello.Plugins = pluginsCapability() // SpawnSession.Plugins (pluginworkshop.go)
 	// sentModelsGen is the generation of the model lists this connection
 	// has reported; only the heartbeat goroutine touches it after the hello.
 	var sentModelsGen uint64

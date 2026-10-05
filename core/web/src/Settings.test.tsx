@@ -129,6 +129,7 @@ describe("Settings — agent tokens", () => {
     sessionStorage.clear();
     vi.stubGlobal("fetch", buildTokenFetchMock(store, captured));
     vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
+    vi.spyOn(authClient, "ensureFreshToken").mockResolvedValue(false); // no quiet renewal in these tests
   });
 
   afterEach(() => {
@@ -431,6 +432,7 @@ describe("Settings", () => {
     captureBody = {};
     vi.stubGlobal("fetch", buildFetchMock(store, captureBody));
     vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
+    vi.spyOn(authClient, "ensureFreshToken").mockResolvedValue(false); // no quiet renewal in these tests
   });
 
   afterEach(() => {
@@ -612,6 +614,7 @@ describe("Settings", () => {
 
   it("omits the Authorization header entirely when there is no access token", async () => {
     vi.spyOn(authClient, "getAccessToken").mockReturnValue(null);
+    vi.spyOn(authClient, "ensureFreshToken").mockResolvedValue(false); // no quiet renewal in these tests
     const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
       Promise.resolve({ ok: true, json: () => Promise.resolve([]) }),
     );

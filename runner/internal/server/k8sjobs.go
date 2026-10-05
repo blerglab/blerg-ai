@@ -44,8 +44,8 @@ type JobManager struct {
 	ServerWSURL   string // ws URL runner pods dial, e.g. ws://blerg-runner-server.default:8080/ws/daemon
 	ServerHTTPURL string
 	SecretName    string // Secret with ANTHROPIC_API_KEY / BLERG_RUNNER_DAEMON_TOKEN / BLERG_RUNNER_GIT_TOKEN
-	// OAuthSecretName holds CLAUDE_CODE_OAUTH_TOKEN when it is synced by the
-	// Infisical operator into its own secret (BLERG_RUNNER_OAUTH_SECRET_NAME);
+	// OAuthSecretName holds CLAUDE_CODE_OAUTH_TOKEN when an external secrets
+	// operator syncs it into its own secret (BLERG_RUNNER_OAUTH_SECRET_NAME);
 	// defaults to SecretName.
 	OAuthSecretName string
 	GitURLBase      string // e.g. https://github.com/<org> — repo appended
@@ -473,6 +473,17 @@ type SessionJobSpec struct {
 	// is told BLERG_RUNNER_NO_REPO=1 and works in an empty directory, and no
 	// clone URL — hence no git token of any kind — goes into the pod.
 	NoRepo bool
+	// NewRepo is a "New repository" session (newrepo.go): the pod is told
+	// BLERG_RUNNER_NEW_REPO=1 and, when the clone of GitURL fails, initialises
+	// an empty repository whose origin is GitURL instead of failing the start.
+	NewRepo bool
+	// NoOperatorGitToken withholds the operator's shared BLERG_RUNNER_GIT_TOKEN
+	// from the pod: it gets the launcher's own token for the clone host or
+	// none. Set for every NewRepo session — a repository the person could
+	// not create (or see) must never be reachable with a token that is not
+	// theirs. Unlike NoOperatorFallback it says nothing about engine
+	// credentials.
+	NoOperatorGitToken bool
 	// SpawningAccountID is the verified account id (identity.Principal.Sub)
 	// of the human who requested this session, used to look up a personal
 	// credential for spec.Engine via fetchPersonalCredential before falling
@@ -970,6 +981,9 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	if spec.NoRepo {
 		env = append(env, map[string]any{"name": "BLERG_RUNNER_NO_REPO", "value": "1"})
 	}
+	if spec.NewRepo {
+		env = append(env, map[string]any{"name": "BLERG_RUNNER_NEW_REPO", "value": "1"})
+	}
 	// A grant implies the restriction, so a session that reaches here with one and no flag
 	// (a caller that forgot) is still restricted.
 	if spec.RestrictTools || spec.MCPGateway != nil {
@@ -1065,7 +1079,7 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	// (gitCredentialFor): for a clone anywhere else it is claimed as
 	// "personal" so the operator Secret can never supply it — the key is
 	// then either the launcher's own token for that provider or omitted.
-	if !gitOperatorOK {
+	if !gitOperatorOK || spec.NoOperatorGitToken {
 		personalKeys[gitTokenKey] = true
 	}
 
@@ -1188,7 +1202,7 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 			continue
 		}
 		secretName := j.SecretName
-		// Operator-synced credentials (rotation flows from Infisical): the
+		// Operator-synced credentials (rotation flows from the secrets operator): the
 		// oauth token, codex's auth.json contents, hermes's whole .env
 		// contents, and, when present there, the git token.
 		if (key == "CLAUDE_CODE_OAUTH_TOKEN" || key == "BLERG_RUNNER_GIT_TOKEN" || key == "CODEX_AUTH_JSON" || key == "HERMES_ENV_CONTENTS") && j.OAuthSecretName != "" {
@@ -1525,6 +1539,7 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 	if err := db.TouchSessionStatusChanged(ctx, pool, sessionID); err != nil {
 		log.Printf("resume %s: touch status clock: %v", sessionID, err)
 	}
+	newRepo := db.GetSessionNewRepo(ctx, pool, sessionID)
 	// A resume is a start too: the browser shows its progress the same way.
 	spec := SessionJobSpec{
 		SessionID: sessionID, Repo: row.Repo, Title: title, Model: model, Effort: effort, Engine: engine,
@@ -1539,10 +1554,14 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 		// cross-org or non-GitHub repository resumes from the same place
 		// instead of being re-derived from the operator's base. Empty on
 		// rows from before it was recorded, which re-derive as they always did.
-		GitURL:            derefOrEmpty(row.GitURL),
-		SpawningAccountID: spawningAccountID,
-		TokenID:           tokenID,
-		AuthSessionID:     authSessionID,
+		GitURL: derefOrEmpty(row.GitURL),
+		// A "New repository" session resumes as one: the pod may still have to
+		// initialise, and the operator's git token stays out (newrepo.go).
+		NewRepo:            newRepo,
+		NoOperatorGitToken: newRepo,
+		SpawningAccountID:  spawningAccountID,
+		TokenID:            tokenID,
+		AuthSessionID:      authSessionID,
 		// A resumed cron session is still a cron's: it never falls back to the operator credential
 		// (a resume by anyone but the owner has no account, and so no credential, and fails).
 		NoOperatorFallback: row.CronID != nil,

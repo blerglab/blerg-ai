@@ -116,6 +116,9 @@ func (f *fakeProvider) ListMine(_ context.Context, token string) ([]gitprovider.
 func (f *fakeProvider) Private(context.Context, string, string, string) (bool, error) {
 	return false, errors.New("not used")
 }
+func (f *fakeProvider) CreateRepo(context.Context, string, string, string, bool) error {
+	return errors.New("not used")
+}
 func (f *fakeProvider) set(repos []gitprovider.Repo, err error) {
 	f.mu.Lock()
 	f.repos, f.err = repos, err

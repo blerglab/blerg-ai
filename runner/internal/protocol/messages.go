@@ -5,6 +5,8 @@ package protocol
 import (
 	"encoding/json"
 
+	"github.com/blerglab/blerg-ai/contracts/pluginspec"
+
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 )
 
@@ -217,6 +219,14 @@ type DaemonHello struct {
 	// sends RestrictTools to a daemon that does not say this, and treats such a
 	// daemon as unavailable for a cron.
 	RestrictTools bool `json:"restrict_tools,omitempty"`
+	// Plugins: this daemon honours SpawnSession.Plugins (it installs the
+	// account's always-on plugins into a daemon-owned CLAUDE_CONFIG_DIR and
+	// loads them with --plugin-dir). Only a daemon with the claude CLI on its
+	// PATH says this. Absent from older daemons, which would ignore the field
+	// and start the session without plugins — so the server never sends
+	// Plugins to a daemon that does not say this, and the start panel never
+	// promises them.
+	Plugins bool `json:"plugins,omitempty"`
 	// AllowHostCredentialClone: this daemon's owner allows a named clone to
 	// use the launching person's own git token on the bare host (a This
 	// machine session). Without it the server sends a token only for a
@@ -475,6 +485,15 @@ type SpawnSession struct {
 	// sandbox or cluster pod, by a daemon whose hello set
 	// DaemonHello.RestrictTools. Absent for every other session.
 	RestrictTools bool `json:"restrict_tools,omitempty"`
+	// Plugins is the launching account's always-on plugin list (blerg-core
+	// Settings), already validated against the server's marketplace
+	// allow-list. The daemon installs each into its own plugin workshop
+	// (never the person's ~/.claude) and starts Claude Code with one
+	// --plugin-dir per plugin. Only sent for a Claude Code agent-kind session
+	// that is neither restricted nor granted, to a daemon whose hello set
+	// DaemonHello.Plugins; the daemon drops it again for any session it would
+	// not load plugins into. Absent for every other session.
+	Plugins []pluginspec.Entry `json:"plugins,omitempty"`
 }
 
 // MCPGatewayConfig is a session's MCP gateway grant as delivered to a daemon
@@ -775,6 +794,7 @@ const (
 // Start stage ids. They are data, not UI branches: a runtime's plan is just
 // an ordered list of these, and a viewer renders whatever list it is given.
 const (
+	StageRepo     = "repo"     // cluster, new repository: the repository being created on the provider
 	StageQueued   = "queued"   // session row + (cluster) Job being created
 	StageSchedule = "schedule" // cluster: waiting for a node
 	StageImage    = "image"    // cluster: pulling the image / creating the container

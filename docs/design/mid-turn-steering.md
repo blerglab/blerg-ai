@@ -1,6 +1,6 @@
 # Mid-turn steering for Claude Code agent sessions
 
-Status: implemented. Scope: the Claude Code engine driver
+Status: design v2, 2026-10-01 (revised after two adversarial reviews). Scope: the Claude Code engine driver
 (`runner/internal/daemon/claudecode.go`, small helpers in `sandbox.go`) and the chat view. Other engines are
 untouched.
 

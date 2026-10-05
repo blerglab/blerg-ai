@@ -250,6 +250,7 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 		// A desktop Claude agent session runs on the user's `claude` login
 		// when it is installed, like a terminal session does.
 		PreferClaudeCLI: true,
+		SpawnKilled:     m.spawnKilled,
 		ReposRoot:       cfg.ReposRoot,
 		ReposRootFn:     cfg.ReposRootSetting.Get,
 		ServerHTTP:      cfg.ServerHTTP,
@@ -258,6 +259,9 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 		BudgetUSD:       budget,
 		Pricing:         DefaultPricing(),
 		Sandbox:         cfg.sandboxOptions(),
+		// Always-on plugins land in the daemon's own state dir, never in
+		// the person's ~/.claude (pluginworkshop.go).
+		Plugins: NewPluginWorkshop(DaemonStateDir()),
 	})
 	if apiKey != "" {
 		log.Printf("manager: agent sessions enabled (Claude: the claude CLI when installed, else the native loop, budget $%.0f/session)", budget)

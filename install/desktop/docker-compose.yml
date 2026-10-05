@@ -168,6 +168,9 @@ services:
       # default refusal to POST results to private/loopback addresses would
       # block every local callback.
       BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE: "true"
+      # Optional: bearer token for the runner's Prometheus endpoint (GET /metrics).
+      # Empty = endpoint off (404). See docs/telemetry.md.
+      BLERG_RUNNER_METRICS_TOKEN: ${BLERG_RUNNER_METRICS_TOKEN:-}
       # Where the Claude model list comes from (launch sheet Model/Effort).
       # Unset = the public Claude Code catalog; set it EMPTY in .env for an
       # offline machine to serve the built-in list. `-` (not `:-`) on purpose:

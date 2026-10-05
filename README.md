@@ -5,7 +5,7 @@ Blerg runs coding-agent sessions (Claude Code, Codex and others) on your own mac
 **Try it in roughly ten minutes, plus the first sandbox image build** (Linux, macOS or Windows with WSL2; Docker and a logged-in Claude Code or Codex needed, see [Requirements](#requirements)):
 
 ```
-git clone https://github.com/blerglab/blerg-ai.git && cd blerg-ai/install/desktop
+git clone https://github.com/blerglab/blerg-ai.git blerg && cd blerg/install/desktop
 ./blerg-up.sh
 ```
 
@@ -88,7 +88,7 @@ That line shows both the username (`provider_subject=…`) and the password. It 
 
 Log in at exactly `http://localhost:8081` — the desktop stack turns the cookie `Secure` flag off for that origin so every browser (Safari included) works; `127.0.0.1` or a LAN IP will not.
 
-**First session.** Open **Runner** (`http://localhost:8083`) → **+ New** → pick a repo under your repos root, or type any `owner/name` or paste a repository URL (a public one like `torvalds/linux`, or, in the Local sandbox, a private one your GitHub/GitLab token in Settings can reach; it is cloned into your repos root first — see [DAEMON.md](install/desktop/DAEMON.md#cloning-a-repository-you-name)) → Launch. The button reads **Launch Session** for a repo already in your repos root, **Clone & Launch →** when the repo has to be cloned first, and **Create & Launch →** when you are starting a new folder. The Run column shows every choice at once; on a desktop install it defaults to an **Agent** session in the **Local sandbox** — a container on your daemon. Pick **Terminal** instead for a tmux session you can watch and type in; that one keeps permission prompts ON, so Claude will ask you to trust the folder (press `y`) the first time. Board session / card spawn / **Run board** on the Board go through the runner's v1 start contract instead, and get the same default: an agent-kind session in the Local sandbox when your daemon has the sandbox image, on the host only when it doesn't (or when you opt out — see the next paragraph).
+**First session.** Open **Runner** (`http://localhost:8083`) → **+ New** → pick a repo under your repos root, or type any `owner/name` or paste a repository URL (a public one like `torvalds/linux`, or, in the Local sandbox, a private one your GitHub/GitLab token in Settings can reach; it is cloned into your repos root first — see [DAEMON.md](install/desktop/DAEMON.md#cloning-a-repository-you-name)) → Launch. The button reads **Launch Session** for a repo already in your repos root, **Clone & Launch →** when the repo has to be cloned first, and **Create & Launch →** when you are starting a new folder (or, with Cluster pod selected, a **New repository** the runner creates on GitHub or GitLab with your token — see [CLUSTER-RUNTIME.md](install/k8s/CLUSTER-RUNTIME.md#new-repository)). The Run column shows every choice at once; on a desktop install it defaults to an **Agent** session in the **Local sandbox** — a container on your daemon. Pick **Terminal** instead for a tmux session you can watch and type in; that one keeps permission prompts ON, so Claude will ask you to trust the folder (press `y`) the first time. Board session / card spawn / **Run board** on the Board go through the runner's v1 start contract instead, and get the same default: an agent-kind session in the Local sandbox when your daemon has the sandbox image, on the host only when it doesn't (or when you opt out — see the next paragraph).
 
 **Before the Board can start sessions**, give each board an automation token — the Board starts nothing without one, and says so. In core **Settings → Agent tokens**, create a token with preset `run-sessions`; on the board, open the settings panel (the **model** chip in the header) → **Automation**, paste it, pick the engine (Claude, Codex or Hermes), and Save. Every session that board starts — **Run board** and everything it spawns, plus the card and board-chat buttons — then runs as you: on a cluster install on the engine credential you connected in Settings (for Hermes, your own endpoint), on the desktop on your daemon's engine login as below. It must be your own token; it is never shown again, and it expires (90 days by default — the panel says when). Anyone who can write cards on that board can spend your credential and could get an agent to reveal it, so only connect a token you're comfortable with every card-writer effectively having. Details: [`board/docs/CONFIG.md`](board/docs/CONFIG.md#board-automation-identity-who-a-boards-sessions-run-as).
 
@@ -196,9 +196,10 @@ cd runner/frontend && npm test             # runner frontend
 | [`docs/mcp-connections.md`](docs/mcp-connections.md) | MCP connections: giving a session tools from a remote MCP server, through the runner's gateway |
 | [`docs/proposals.md`](docs/proposals.md) | Proposals: agent write calls queued for your approval, what you approve, limits |
 | [`docs/crons.md`](docs/crons.md) | Crons: scheduled, unattended agent runs, what they can and cannot do |
-| [`docs/artifacts.md`](docs/artifacts.md) | Files from a session: `blerg-runner publish`, what the app can show, limits, where they live |
+| [`docs/telemetry.md`](docs/telemetry.md) | Insights page and Prometheus metrics: startup times, session durations, tokens, estimated cost |
 | [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md) | Messaging a running agent, interrupting, pausing a cluster session, long conversations |
 | [`docs/design/`](docs/design/) | Design notes: [AI crons and MCP connections](docs/design/ai-crons.md), [mid-turn steering](docs/design/mid-turn-steering.md) |
+| [`docs/artifacts.md`](docs/artifacts.md) | Files from a session: `blerg-runner publish`, what the app can show, limits, where they live |
 | [`docs/backup-and-restore.md`](docs/backup-and-restore.md) | What state exists, how to back it up and restore it, desktop and Kubernetes |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 

@@ -339,6 +339,7 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 	d.mu.Unlock()
 
 	pidFile := fmt.Sprintf("%s.%s.%d", sandboxTurnPIDFile, tag, gen)
+	opts = append(opts, withPluginDirs(d.pluginDirs))
 	cmd := d.prefix.commandPID(ctx, d.workDir, "claude", pidFile, ccSessionArgs(model, effort, resume, opts...)...)
 	cmd.Env = d.env
 	stdin, err := cmd.StdinPipe()

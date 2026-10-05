@@ -1,0 +1,51 @@
+/* Insights page: tokens come from the app's palette (index.css custom properties). */
+.insights { padding: 20px 24px 64px; max-width: 980px; margin: 0 auto; color: var(--chalk); }
+.insights h1 { font-size: 1.4rem; margin: 0; }
+.insights h2 { font-size: 1.05rem; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--stone); letter-spacing: 0.03em; }
+.insights h3 { font-size: 0.85rem; margin: 18px 0 8px; color: var(--fog); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+.insights-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.insights-sub { margin: 4px 0 0; color: var(--fog-dim); font-size: 0.85rem; }
+.insights-controls { display: flex; gap: 10px; flex-wrap: wrap; }
+.insights .seg { display: inline-flex; border: 1px solid var(--stone); border-radius: 8px; overflow: hidden; }
+.insights .seg button { background: transparent; color: var(--fog); border: 0; padding: 6px 12px; font: inherit; font-size: 0.82rem; cursor: pointer; }
+.insights .seg button.on { background: color-mix(in srgb, var(--blaze) 22%, var(--basalt)); color: var(--amber); font-weight: 700; }
+.insights-note { margin: 10px 0; color: var(--fog); font-size: 0.88rem; line-height: 1.5; }
+.insights-error { color: var(--danger, #e5484d); }
+.insights-error button { margin-left: 6px; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 18px; }
+.card { background: var(--scree); border: 1px solid var(--stone); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.card-label { font-size: 0.72rem; color: var(--fog-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+.card-value { font-size: 1.6rem; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.card-hint { font-size: 0.74rem; color: var(--fog-dim); margin-top: 2px; overflow-wrap: anywhere; }
+
+.grid { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.grid th { text-align: left; color: var(--fog-dim); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 8px; border-bottom: 1px solid var(--stone); }
+.grid td { padding: 7px 8px; border-bottom: 1px solid color-mix(in srgb, var(--stone) 50%, transparent); }
+.grid .n { text-align: right; font-variant-numeric: tabular-nums; }
+.grid .muted, .insights .muted { color: var(--fog-dim); }
+.insights table { display: block; overflow-x: auto; }
+
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.steps li { display: grid; grid-template-columns: 130px 1fr 190px; gap: 10px; align-items: center; font-size: 0.85rem; }
+.step-bar { position: relative; height: 10px; background: color-mix(in srgb, var(--stone) 40%, transparent); border-radius: 5px; overflow: hidden; }
+.step-bar i { position: absolute; inset: 0 auto 0 0; background: color-mix(in srgb, var(--blaze) 35%, transparent); }
+.step-bar b { position: absolute; inset: 0 auto 0 0; background: var(--blaze); }
+.step-val small { color: var(--fog-dim); }
+@media (max-width: 640px) { .steps li { grid-template-columns: 1fr; gap: 2px; } }
+
+.plain { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; font-size: 0.88rem; }
+.plain a { color: var(--amber); text-decoration: none; }
+.plain a:hover { text-decoration: underline; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 640px) { .two { grid-template-columns: 1fr; } }
+
+.chart { margin: 16px 0 0; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .bar { fill: var(--blaze); }
+.chart .axis { fill: var(--fog-dim); font-size: 10px; }
+.chart figcaption { font-size: 0.74rem; color: var(--fog-dim); margin-top: 4px; }
+
+.prices input { width: 84px; background: var(--basalt); color: var(--chalk); border: 1px solid var(--stone); border-radius: 4px; padding: 3px 6px; text-align: right; font: inherit; font-size: 0.82rem; }
+.prices .actions { white-space: nowrap; text-align: right; }
+.prices .actions button { margin-left: 6px; }

@@ -133,24 +133,61 @@ func (j *JobManager) ResolvePlugins(ctx context.Context, spec *SessionJobSpec) {
 		spec.PluginsNote = errPluginsUnavailable.Error()
 		return
 	}
+	spec.Plugins, spec.PluginsNote = resolvePluginList(list, j.PluginAllow, "cluster session "+spec.SessionID)
+}
+
+// resolvePluginList re-checks a list from core against this server's own allow-list: malformed,
+// duplicate (case-insensitive marketplace) and disallowed entries are skipped, never installed,
+// and the list is capped at MaxEntries. note says what was skipped ("" when nothing was).
+func resolvePluginList(list []pluginspec.Entry, allow pluginspec.Allowlist, who string) ([]pluginspec.Entry, string) {
+	var out []pluginspec.Entry
 	skipped := 0
 	seen := map[pluginspec.Entry]bool{}
 	for _, e := range list {
 		key := pluginspec.Entry{Marketplace: strings.ToLower(e.Marketplace), Plugin: e.Plugin}
-		if pluginspec.ValidateClaude(e) != nil || !j.PluginAllow.Allows(e.Marketplace) || seen[key] {
-			log.Printf("cluster session %s: skipping plugin %q from %q (malformed, duplicate or marketplace not allowed)", spec.SessionID, e.Plugin, e.Marketplace)
+		if pluginspec.ValidateClaude(e) != nil || !allow.Allows(e.Marketplace) || seen[key] {
+			log.Printf("%s: skipping plugin %q from %q (malformed, duplicate or marketplace not allowed)", who, e.Plugin, e.Marketplace)
 			skipped++
 			continue
 		}
 		seen[key] = true
-		spec.Plugins = append(spec.Plugins, e)
-		if len(spec.Plugins) == pluginspec.MaxEntries {
+		out = append(out, e)
+		if len(out) == pluginspec.MaxEntries {
 			break
 		}
 	}
+	note := ""
 	if skipped > 0 {
-		spec.PluginsNote = fmt.Sprintf("%d skipped: marketplace not allowed by this install", skipped)
+		note = fmt.Sprintf("%d skipped: marketplace not allowed by this install", skipped)
 	}
+	return out, note
+}
+
+// daemonPlugins resolves the always-on plugin list for a session sent to a workstation daemon:
+// the same predicate as the cluster's pluginsWanted (a Claude agent-kind session, with a known
+// account, neither restricted nor granted), plus the daemon must have said in its hello that it
+// honours SpawnSession.Plugins. Never fails the start: a list that could not be loaded gives a
+// note for the start panel and a session without plugins. The daemon re-checks every entry.
+func (a *API) daemonPlugins(ctx context.Context, d *DaemonConn, accountID string, proof coreProof, kind, engine string, restricted bool) ([]pluginspec.Entry, string) {
+	if d == nil || !d.CanPlugins() || kind != "agent" || restricted || accountID == "" ||
+		(engine != "" && engine != pluginspec.EngineClaude) || a.coreURL == "" || a.coreInternalKey == "" {
+		return nil, ""
+	}
+	if !proof.valid() {
+		return nil, ""
+	}
+	fetch := a.fetchPlugins
+	if fetch == nil {
+		fetch = func(ctx context.Context, accountID string, proof coreProof) ([]pluginspec.Entry, error) {
+			return fetchCorePlugins(ctx, nil, a.coreURL, a.coreInternalKey, accountID, proof)
+		}
+	}
+	list, err := fetch(ctx, accountID, proof)
+	if err != nil {
+		log.Printf("daemon %s: always-on plugins unavailable, starting without them: %v", d.Name, err)
+		return nil, errPluginsUnavailable.Error()
+	}
+	return resolvePluginList(list, a.pluginAllow, "daemon "+d.Name)
 }
 
 // pluginEnv is the pod env carrying the list: the entries as compact JSON plus the allow-list the

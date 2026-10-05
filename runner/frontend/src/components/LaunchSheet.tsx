@@ -249,6 +249,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [scratchSuffix, setScratchSuffix] = useState(() => newScratchSuffix())
   const [scratchRenaming, setScratchRenaming] = useState(false)
   const [newFolderMode, setNewFolderMode] = useState(false)
+  // Visibility of a new repository created on the cluster (private by default).
+  const [visibility, setVisibility] = useState<'private' | 'public'>('private')
   // A repository nobody has checked out and nobody listed is still
   // launchable: a cluster pod clones it, and so does a daemon (into its
   // repos folder). freeTextMode is "use exactly what I typed" — owner/name,
@@ -437,7 +439,6 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   if ((runtime !== 'docker' || kind === 'agent') && dangerouslySkipPermissions) setDangerouslySkipPermissions(false)
   // "New folder" isn't offered on cluster runtime, so a
   // selection made before the switch must not survive it invisibly.
-  if (runtime === 'cluster' && newFolderMode) setNewFolderMode(false)
 
   // Engine availability for the picker's warning state: on the desktop
   // daemon, whatever the selected daemon reported; on cluster runtime,
@@ -548,10 +549,18 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const scratchFolder = SCRATCH_PREFIX + scratchSuffix
   const scratchNameInvalid = noRepoMode && onDaemonRuntime && !validScratchSuffix(scratchSuffix)
 
+  // New repository on the cluster: the text must read as owner/name (not a
+  // URL — the server creates it on the picked provider, it has no host yet).
+  const newRepoRef: RepoRef | null = runtime === 'cluster' && newFolderMode && typedRef && !typedRef.url ? typedRef : null
+  // No token for that provider: the server will try, fail, and start the
+  // session in an empty repository instead — a warning, not a block.
+  const newRepoTokenMissing =
+    !!newRepoRef && myCreds !== null && !(myCreds.git_providers ?? []).includes(newRepoRef.provider)
+
   const hasRepoChoice =
     (noRepoMode && !scratchNameInvalid) ||
     selectedRepo !== null ||
-    (newFolderMode && folderName !== '') ||
+    (newFolderMode && folderName !== '' && (runtime !== 'cluster' || newRepoRef !== null)) ||
     (freeTextMode && folderName !== '' && (runtime === 'cluster' || typedRef !== null))
 
   // A daemon clone of a named repository (a typed one, or a listed one that
@@ -725,6 +734,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     let repoProvider = (runtime === 'cluster' && !newFolderMode && !freeTextMode) || daemonClone
       ? selectedRepo?.provider
       : undefined
+    // A new repository on the cluster is created on the picked provider.
+    if (newRepoRef) {
+      repoName = fullName(newRepoRef)
+      repoProvider = newRepoRef.provider
+    }
     // A repository named by URL goes as the URL (the server parses it); one
     // named by owner/name goes with its provider — and, on a daemon, as a
     // named clone. A listed repository not on a daemon that can clone by
@@ -753,6 +767,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
       git_url: gitUrl,
       clone,
       new_repo: newFolderMode || undefined,
+      visibility: newRepoRef ? visibility : undefined,
     })
   }
 
@@ -838,7 +853,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                 ref={repoInputRef}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                placeholder={newFolderMode ? 'Folder name...' : runtime === 'cluster' ? 'org/name' : 'Search repos, or owner/name or a URL...'}
+                placeholder={newFolderMode ? (runtime === 'cluster' ? 'you/new-project' : 'Folder name...') : runtime === 'cluster' ? 'org/name' : 'Search repos, or owner/name or a URL...'}
                 style={{
                   width: '100%',
                   background: 'var(--scree)',
@@ -981,26 +996,86 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     ))}
                   </div>
                 )}
-                {/* A cluster pod is created from a clone and thrown away when
-                    the session ends — an empty directory in it has nowhere to
-                    live and nothing to push to, so the option isn't offered. */}
-                {runtime !== 'cluster' && (
-                  <div
-                    data-testid="new-folder-option"
-                    style={newFolderMode ? itemSelected : { ...itemBase, borderStyle: 'dashed' }}
-                    onClick={selectNewFolder}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ color: newFolderMode ? 'var(--amber)' : 'var(--fog)', fontSize: '0.85rem' }}>+</span>
-                      <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>
-                        {folderName !== '' ? `Create folder "${folderName}"` : 'New folder'}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: '0.75rem', marginTop: 2, color: 'var(--fog)' }}>
-                      {newFolderMode && folderName === '' ? 'type a name above ↑' : 'new empty directory'}
-                    </div>
+                {/* New folder (daemon): an empty directory under the repos
+                    root. New repository (cluster): a pod is thrown away when
+                    the session ends, so the server creates the repository on
+                    the person's git host first and the pod clones it. */}
+                <div
+                  data-testid="new-folder-option"
+                  style={newFolderMode ? itemSelected : { ...itemBase, borderStyle: 'dashed' }}
+                  onClick={selectNewFolder}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ color: newFolderMode ? 'var(--amber)' : 'var(--fog)', fontSize: '0.85rem' }}>+</span>
+                    <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>
+                      {runtime === 'cluster'
+                        ? (newRepoRef ? `Create "${fullName(newRepoRef)}" on ${providerLabel(newRepoRef.provider)}` : 'New repository')
+                        : (folderName !== '' ? `Create folder "${folderName}"` : 'New folder')}
+                    </span>
                   </div>
-                )}
+                  <div style={{ fontSize: '0.75rem', marginTop: 2, color: 'var(--fog)' }}>
+                    {runtime === 'cluster'
+                      ? (newFolderMode && !newRepoRef ? 'type owner/name above ↑' : 'create it on GitHub or GitLab and start in it')
+                      : (newFolderMode && folderName === '' ? 'type a name above ↑' : 'new empty directory')}
+                  </div>
+                  {runtime === 'cluster' && newFolderMode && (
+                    <>
+                      <div role="radiogroup" aria-label="Git host for the new repository" style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                        {Object.keys(PROVIDER_LABELS).map(p => (
+                          <button
+                            key={p}
+                            type="button"
+                            role="radio"
+                            aria-checked={freeTextProvider === p}
+                            data-testid={`new-repo-provider-${p}`}
+                            onClick={e => { e.stopPropagation(); setFreeTextProvider(p) }}
+                            style={{
+                              fontSize: '0.7rem',
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              cursor: 'pointer',
+                              fontFamily: 'inherit',
+                              background: freeTextProvider === p ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
+                              color: freeTextProvider === p ? 'var(--amber)' : 'var(--fog)',
+                              border: `1px solid ${freeTextProvider === p ? 'var(--blaze)' : 'var(--stone)'}`,
+                            }}
+                          >
+                            {PROVIDER_LABELS[p]}
+                          </button>
+                        ))}
+                      </div>
+                      <div role="radiogroup" aria-label="Visibility" style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                        {(['private', 'public'] as const).map(v => (
+                          <button
+                            key={v}
+                            type="button"
+                            role="radio"
+                            aria-checked={visibility === v}
+                            data-testid={`new-repo-visibility-${v}`}
+                            onClick={e => { e.stopPropagation(); setVisibility(v) }}
+                            style={{
+                              fontSize: '0.7rem',
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              cursor: 'pointer',
+                              fontFamily: 'inherit',
+                              background: visibility === v ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
+                              color: visibility === v ? 'var(--amber)' : 'var(--fog)',
+                              border: `1px solid ${visibility === v ? 'var(--blaze)' : 'var(--stone)'}`,
+                            }}
+                          >
+                            {v === 'private' ? 'Private' : 'Public'}
+                          </button>
+                        ))}
+                      </div>
+                      {newRepoTokenMissing && newRepoRef && (
+                        <div data-testid="new-repo-token-note" style={{ fontSize: '0.75rem', marginTop: 6, color: 'var(--amber)' }}>
+                          No {providerLabel(newRepoRef.provider)} token in {settingsLink} — the repository will exist only in the pod until it is pushed.
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
                 {filteredRepos.map(repo => (
                   <div
                     key={repoKey(repo)}

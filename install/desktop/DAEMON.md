@@ -370,6 +370,59 @@ but a sandboxed session is not isolated from exfiltrating data over the
 network or hitting other services reachable from your machine. Revisit if
 that tradeoff stops being acceptable for your use case.
 
+## Always-on plugins
+
+The plugin list a person keeps in core **Settings → Always-on plugins** reaches their desktop
+sessions too: every Claude **agent-kind** session (Local sandbox or This machine) starts with
+those plugins loaded. Terminal sessions do not (run `/plugin` there yourself), and neither does a
+restricted session (an MCP grant, a cron).
+
+How, and what it touches:
+
+- The daemon's hello says `plugins` only when `claude` is on its PATH and it has a state
+  directory; the server sends the list
+  (`SpawnSession.plugins`) only to such a daemon, so an older daemon or a host without the CLI just
+  starts without plugins and the start panel never promises them.
+- The daemon installs into its **plugin workshop**, `~/.blerg-runner-daemon/plugins/claude`
+  (under `$BLERG_RUNNER_DAEMON_STATE_DIR` when set), by running `claude plugin marketplace add`
+  and `claude plugin install … --scope user` with `CLAUDE_CONFIG_DIR` pointed at it. **Your own
+  `~/.claude` is never written**: nothing is installed or enabled for your interactive `claude`.
+- Each session gets its own **snapshot** of the verified plugin directories (hardlinks, so it is
+  cheap) under `<workshop>/sessions/<session id>`, and its Claude Code is started with one
+  `--plugin-dir=<snapshot>/<marketplace>/<plugin>/<version>` per plugin: loaded for that process
+  only, and untouched by a later launch updating or rebuilding the cache. The snapshot is removed
+  when the session ends, and leftovers are swept when the daemon starts. A same-named plugin you
+  installed yourself is replaced by the workshop's copy for the session, not duplicated.
+- A Local sandbox session gets its snapshot bind-mounted **read-only** at `/blerg/plugins`. A plugin
+  that must write into its own directory fails loudly rather than changing what the next session
+  loads. The workshop directory is created `0755` for that mount.
+- Once an hour the daemon refreshes: `claude plugin marketplace update` per marketplace and
+  `claude plugin update` per plugin, so a plugin's new version arrives on a later launch. A warm
+  launch costs a few seconds; the very first launch clones the marketplace (about a minute).
+- The daemon re-validates every entry and re-checks its own `BLERG_RUNNER_PLUGIN_MARKETPLACES`
+  (default: the official marketplace only). If you allow more marketplaces on the server and core,
+  set the same value in the daemon's own environment too, or those plugins are skipped as "not
+  allowed" on this machine. Entries that fail are
+  skipped, never installed; one failing plugin never stops the others or the session. The start
+  panel's `plugins` stage shows `2 of 2 installed` or a warning naming what failed. When the
+  workshop itself looks broken — a marketplace that cannot be added or listed, an install path
+  that does not check out — the daemon rebuilds it once (at most once an hour; it is a cache, and
+  a daemon restart or a timeout can leave a half-cloned marketplace behind) and retries. One
+  plugin that simply will not install is only reported. A launch spends at most five minutes on
+  plugins.
+- The install children get an allow-listed environment (PATH, HOME, locale, proxy and CA settings,
+  `CLAUDE_CONFIG_DIR`, git's no-prompt settings) — never the session token, board token or
+  initial prompt. HOME is your real home, so a private marketplace your git credentials can reach
+  works; git never prompts.
+- The workshop is a cache: delete it to start over. It is not part of a backup. Two daemons sharing
+  one state dir (two people on one host) may race each other over it; give each its own
+  `BLERG_RUNNER_DAEMON_STATE_DIR`.
+
+A plugin runs with the session's full access once loaded, on the host or in the container; the
+marketplace allow-list is the control. When a plugin does not show up in the session's **Skills &
+plugins** panel, check the daemon log (`journalctl --user -u blerg-runner-daemon` on Linux) for
+`daemon: plugins:` lines.
+
 ## Engines
 
 The launch sheet's Run column has an Engine picker: **Claude** (default),

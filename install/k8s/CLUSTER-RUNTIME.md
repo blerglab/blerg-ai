@@ -149,6 +149,28 @@ actually live before looking anywhere else:
 kubectl -n blerg exec deploy/blerg-runner -- env | grep BLERG_RUNNER_CORE_INTERNAL_KEY
 ```
 
+## New repository
+
+With **Cluster pod** selected, the launch sheet's **New repository** item creates a repository on
+the person's git host and starts the session in it: type `owner/name`, pick GitHub or GitLab and
+Private or Public, and launch (**Create & Launch →**). The runner uses the person's own `github` /
+`gitlab` token from Settings to create it — under their account when `owner` is their login,
+otherwise under that organisation or group — with an initial commit, and the pod clones it like
+any other repository. The default branch is the provider's; the agent works on `wip/<session>`.
+
+An existing repository is refused (409): launch it as an existing one instead. When the
+repository cannot be created — no token in Settings, a token without permission to create
+repositories under that owner (a fine-grained GitHub token needs **Administration: write**, a
+GitLab token `api`), a provider error — the session still starts: the pod initialises an empty
+repository whose `origin` is where the repository would be, the start panel's first stage says
+why creation did not happen, and the agent's first prompt tells it the remote does not exist yet.
+Work is committed locally; the first push fails visibly in the transcript, and pushes succeed as
+soon as the repository is created (by the agent with a credential that may, or by the person).
+The pod of a new-repository session never gets the operator's `BLERG_RUNNER_GIT_TOKEN`.
+
+API: `POST /api/sessions` with `new_repo: true`, `repo: "owner/name"`, optional `provider` and
+`visibility` — see `runner/README.md`, "New repository (cluster)".
+
 ## Operator secrets contract
 
 Two Kubernetes Secrets, with **stable names and keys**. That contract is the

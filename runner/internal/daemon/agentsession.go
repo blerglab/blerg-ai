@@ -25,6 +25,10 @@ import (
 
 // AgentHostConfig configures agent-kind session hosting inside the daemon.
 type AgentHostConfig struct {
+	// SpawnKilled, when set, reports whether a kill_session arrived for a spawn that is still being prepared.
+	// The Manager sets it; the cluster pod has no such window. It is checked after the plugin install, which
+	// can run for minutes after the Manager's own kill checks.
+	SpawnKilled func(sessionID string) bool
 	// ClaudeCode switches sessions to the subscription-billed Claude Code
 	// driver (headless `claude -p`) instead of the native API loop. Set when
 	// CLAUDE_CODE_OAUTH_TOKEN is present and no ANTHROPIC_API_KEY is.
@@ -52,6 +56,10 @@ type AgentHostConfig struct {
 	// Sandbox is the network/CLI-mount setup a sandboxed session's container
 	// gets (sandbox.go). Zero value — the cluster pod's — joins no network.
 	Sandbox SandboxOptions
+	// Plugins is the daemon's plugin workshop (pluginworkshop.go), where a
+	// session's always-on plugins (SpawnSession.Plugins) are installed. nil —
+	// the cluster pod's, and a daemon without a state dir — loads none.
+	Plugins *pluginWorkshop
 }
 
 // reposRoot is the repos root in effect now.
@@ -82,6 +90,7 @@ type agentSession struct {
 	// sandboxed marks a session whose engine runs inside a container, so Kill
 	// tears the container down the way killTmuxSession does for a terminal one.
 	sandboxed bool
+	plugins   bool // holds a plugin snapshot in the workshop (released on Kill)
 	// mcp is the session's MCP gateway config file (nil: no grant), removed
 	// when the session ends.
 	mcp *mcpConfigFile
@@ -451,12 +460,20 @@ func (h *AgentHost) Spawn(msg protocol.SpawnSession) { h.spawn(msg, nil, "") }
 // transcript events (pod/daemon restart). wsState describes the workspace
 // ("resumed-from-wip" | "fresh-clone"); a fresh clone means uncommitted work
 // from before the restart is gone, and the model is told so.
+// WorkspaceInitialised is the workspace state of a "New repository" session
+// whose repository could not be cloned (runner.PrepareWorkspace).
+const WorkspaceInitialised = "initialised"
+
 func (h *AgentHost) SpawnResumed(msg protocol.SpawnSession, events []agent.RestoredEvent, wsState string) {
 	note := ""
 	if wsState == "empty" {
 		// A "No repository" cluster session (runner.WorkspaceEmpty): nothing
 		// to clone, and nothing survived the old pod.
 		note = "[system] Session resumed after a restart. This session has no repository, so its workspace is a new, empty directory: nothing written before the restart survived. Re-create anything you still need."
+	} else if wsState == WorkspaceInitialised {
+		// A "New repository" cluster session whose repository still does not
+		// exist (runner.WorkspaceInitialised): nothing could be cloned back.
+		note = "[system] Session resumed after a restart. This session's repository could not be cloned (it was never created on its git host, or is not reachable), so the workspace is a new, empty repository again: nothing written before the restart survived. Re-create anything you still need, and create the remote before pushing."
 	} else if wsState != "resumed-from-wip" {
 		note = "[system] Session resumed after a restart. The workspace is a fresh clone: committed work on the wip branch survived, but any uncommitted changes from before the restart are gone. Re-verify workspace state before continuing."
 	}
@@ -616,13 +633,69 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// the engine subprocess to run: every turn below is wrapped in `docker
 	// exec` by this prefix, so the engine sees only /workspace and the
 	// credential mounts, never the rest of the host.
+	// Always-on plugins (pluginworkshop.go), installed before the container
+	// starts because a sandbox mounts the session's snapshot at `docker run`.
+	// The list is dropped — whatever the server sent — for any session that
+	// must not load code of its own: a restricted or granted one (--plugin-dir
+	// survives the hardening flags), a non-Claude engine, a terminal kind; and
+	// for a daemon with no workshop. A dropped non-empty list is said so in
+	// the start panel, never shown as installed.
+	var pluginDirs []string
+	if len(msg.Plugins) > 0 {
+		stages := daemonStageReporter{sender: h.sender, sessionID: msg.SessionID}
+		reason := ""
+		switch {
+		case msg.RestrictTools || msg.MCPGateway != nil:
+			reason = "not loaded: a restricted session runs without plugins"
+		case !useClaudeCode || msg.Kind != "agent":
+			reason = "not loaded: only Claude Code agent sessions load plugins"
+		case h.cfg.Plugins == nil:
+			reason = "not loaded: this daemon has no plugin workshop (no state directory)"
+		}
+		if reason != "" {
+			stages.report(protocol.StartStage{ID: protocol.StagePlugins, Label: "Installing plugins", State: protocol.StageStateWarning, Detail: reason})
+		} else {
+			stages.report(protocol.StartStage{ID: protocol.StagePlugins, Label: "Installing plugins",
+				State: protocol.StageStateActive, Detail: fmt.Sprintf("Installing %d plugin(s)", len(msg.Plugins))})
+			dirs, res := h.cfg.Plugins.prepare(ctx, msg.SessionID, msg.Plugins)
+			pluginDirs = dirs
+			if h.cfg.SpawnKilled != nil && h.cfg.SpawnKilled(msg.SessionID) {
+				// Stopped while the plugins installed: the session must not start behind the user's back.
+				log.Printf("agent session %s: spawn abandoned — killed while its plugins were being prepared", msg.SessionID)
+				cancel()
+				if len(dirs) > 0 {
+					h.cfg.Plugins.release(msg.SessionID)
+				}
+				return
+			}
+			log.Printf("agent session %s: plugins: %s", msg.SessionID, res.Detail())
+			state := protocol.StageStateDone
+			if len(res.Failed)+len(res.Skipped) > 0 {
+				state = protocol.StageStateWarning
+			}
+			stages.report(protocol.StartStage{ID: protocol.StagePlugins, Label: "Installing plugins", State: state, Detail: res.Detail()})
+		}
+	}
+	// releasePlugins drops the session's plugin snapshot when the spawn fails
+	// after preparing it; a started session's goes on Kill.
+	releasePlugins := func() {
+		if len(pluginDirs) > 0 {
+			h.cfg.Plugins.release(msg.SessionID)
+		}
+	}
+
 	var prefix sandboxExec
 	if msg.Sandbox {
 		sbOpts := h.cfg.Sandbox
 		sbOpts.ClaudeOnly = msg.RestrictTools || msg.MCPGateway != nil
+		if len(pluginDirs) > 0 {
+			sbOpts.PluginCache = h.cfg.Plugins.sessionDir(msg.SessionID)
+			pluginDirs = translatePluginDirs(pluginDirs, sbOpts.PluginCache)
+		}
 		container, err := startSandboxContainer(msg.SessionID, workDir, env, sandboxCred, sbOpts)
 		if err != nil {
 			cancel()
+			releasePlugins()
 			h.sendError(msg.SessionID, "could not start the sandbox container: "+err.Error())
 			return
 		}
@@ -640,6 +713,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		// as soon as it has a config source, RestrictTools or not.
 		ccOpts = append(ccOpts, withRestrictTools())
 	}
+	if len(pluginDirs) > 0 {
+		ccOpts = append(ccOpts, withPluginDirs(pluginDirs))
+	}
 	if msg.MCPGateway != nil {
 		mcpFile = newMCPConfigFile(msg.MCPGateway, prefix)
 		if _, err := mcpFile.Ensure(); err != nil {
@@ -647,6 +723,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			if msg.Sandbox {
 				removeSandboxContainer(msg.SessionID)
 			}
+			releasePlugins()
 			h.sendError(msg.SessionID, err.Error())
 			return
 		}
@@ -722,6 +799,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			cancel()
 			mcpFile.Remove()
 			removeSandboxContainer(msg.SessionID)
+			releasePlugins()
 			h.sendError(msg.SessionID, sandboxUnsupportedDriverRefusal)
 			return
 		}
@@ -733,6 +811,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 
 	sess.loop = driver
 	sess.cancel = cancel
+	sess.plugins = len(pluginDirs) > 0
 
 	h.mu.Lock()
 	h.sessions[msg.SessionID] = sess
@@ -888,6 +967,9 @@ func (h *AgentHost) Kill(sessionID string) {
 		// container outlives nothing.
 		removeSandboxContainer(sessionID)
 	}
+	if sess.plugins {
+		h.cfg.Plugins.release(sessionID) // after the container: the snapshot was mounted in it
+	}
 	_ = h.sender.Send(protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: 0})
 }
 
@@ -1029,4 +1111,27 @@ func fetchDataPlaneContext(base, token, project string) string {
 		}
 	}
 	return b.String()
+}
+
+// daemonStageReporter sends start_stage events for a daemon-hosted start,
+// the way the cluster pod's reporter does (runner/stages.go): the server
+// merges them into the session's start plan as authoritative. Best effort —
+// a report the connection drops is only a progress line.
+type daemonStageReporter struct {
+	sender    Sender
+	sessionID string
+}
+
+func (r daemonStageReporter) report(stages ...protocol.StartStage) {
+	if r.sender == nil || len(stages) == 0 {
+		return
+	}
+	raw, err := json.Marshal(protocol.StartStagePayload{Stages: stages})
+	if err != nil {
+		return
+	}
+	_ = r.sender.Send(protocol.AgentEvent{
+		Type: "agent_event", SessionID: r.sessionID, ClientEventID: ccUUID(),
+		Ts: time.Now().UTC().Format(time.RFC3339Nano), Kind: protocol.StartStageKind, Payload: raw,
+	})
 }

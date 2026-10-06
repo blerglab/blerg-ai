@@ -5,7 +5,7 @@
   "description": "Pinned engine CLIs installed into the session images (runner/sandbox/Dockerfile and runner/Dockerfile.devcontainer) with npm ci.",
   "license": "Apache-2.0",
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.284",
+    "@anthropic-ai/claude-code": "2.1.289",
     "@openai/codex": "0.154.0"
   }
 }

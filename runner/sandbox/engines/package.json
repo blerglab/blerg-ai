@@ -6,6 +6,6 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.284",
-    "@openai/codex": "0.154.0"
+    "@openai/codex": "0.160.0"
   }
 }

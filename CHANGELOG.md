@@ -8,6 +8,14 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-09
+
+### Security
+
+- `@blerglab/chat` renders PDFs with `pdfjs-dist` 6.4 (was 5.7): PDF.js below 6.2.108 could run
+  JavaScript from a malicious PDF ([GHSA advisory](https://github.com/advisories?query=pdfjs-dist)),
+  and the viewer shows files an agent published.
+
 ## [0.1.1] - 2026-10-09
 
 ### Fixed
@@ -289,6 +297,7 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/blerglab/blerg-ai/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/blerglab/blerg-ai/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/blerglab/blerg-ai/releases/tag/v0.1.0

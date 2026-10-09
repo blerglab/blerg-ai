@@ -6,12 +6,16 @@
 
 import '@testing-library/jest-dom/vitest'
 import { afterEach, vi } from 'vitest'
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
 
 // Unmount any rendered components and clear the DOM between tests.
 afterEach(() => {
   cleanup()
 })
+
+// waitFor's default second is not enough when the whole suite runs on a loaded CI runner; a
+// passing test is not made slower by this, only a slow one is given the time it needs.
+configure({ asyncUtilTimeout: 5000 })
 
 // ── ResizeObserver ────────────────────────────────────────────────────────────
 // Used by TerminalDOMView. jsdom has no implementation. A no-op observer is

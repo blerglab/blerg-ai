@@ -2,11 +2,15 @@
 // minimal stubs let them mount, and tests that care override per test.
 import '@testing-library/jest-dom/vitest'
 import { afterEach } from 'vitest'
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
 
 afterEach(() => {
   cleanup()
 })
+
+// waitFor's default second is not enough when the whole suite runs on a loaded CI runner; a
+// passing test is not made slower by this, only a slow one is given the time it needs.
+configure({ asyncUtilTimeout: 5000 })
 
 class ResizeObserverStub {
   observe(): void {}

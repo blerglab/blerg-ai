@@ -132,17 +132,16 @@ func (a *API) HandleRunnerEventsLive(w http.ResponseWriter, r *http.Request) {
 		}
 		return frame(0, "status", raw)
 	}
-	// end sends the result and reports false: the stream is over either way.
-	end := func() bool {
+	// end sends the result; the stream is over either way.
+	end := func() {
 		res, err := a.buildSessionResult(ctx, sessionID)
 		if err != nil {
 			log.Printf("runner live stream %s: result: %v", sessionID, err)
-			return false
+			return
 		}
 		if raw, err := json.Marshal(res); err == nil {
 			frame(0, "end", raw)
 		}
-		return false
 	}
 
 	// The opening page, its marker, and where the session stands.

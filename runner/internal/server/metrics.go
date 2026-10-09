@@ -245,7 +245,7 @@ func (a *API) renderMetrics(ctx context.Context, now time.Time) (string, error) 
 
 	// cluster
 	if jm := a.hub.JobManager(); jm != nil {
-		cs := jm.Status()
+		cs := jm.Status() //nolint:contextcheck // bounded by the JobManager client timeout and deliberately not tied to the caller, like the status endpoint
 		w.gauge("blerg_runner_cluster_sessions_active", "Cluster sessions in use.", []promSample{{value: float64(cs.ActiveSessions)}})
 		w.gauge("blerg_runner_cluster_sessions_max", "The cluster session cap.", []promSample{{value: float64(cs.MaxSessions)}})
 	}

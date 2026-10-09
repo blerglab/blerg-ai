@@ -8,6 +8,17 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-09
+
+### Fixed
+
+- The first public CI run was red on five jobs, none of them a product bug: a test built its
+  database URL with `&` on a URL that had no query string; `install/desktop/.env.example` listed
+  `BLERG_RUNNER_METRICS_TOKEN` as a generated key (it is optional, and now commented out like the
+  others); the runner's browser tests could abort when Vite re-optimised `pdfjs-dist` mid-run
+  (it is pre-bundled now); and lint findings in code written while CI was unavailable are
+  addressed, each `nolint` with its reason. CI can also be started by hand (`workflow_dispatch`).
+
 ## [0.1.0] - 2026-10-09
 
 First public release: everything below is what exists today. Blerg is pre-1.0, so expect
@@ -278,5 +289,6 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/blerglab/blerg-ai/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/blerglab/blerg-ai/releases/tag/v0.1.0

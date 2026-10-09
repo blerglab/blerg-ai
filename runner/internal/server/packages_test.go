@@ -49,7 +49,7 @@ func TestPackagesRoutes(t *testing.T) {
 	_, tarball := packagesFixture(t)
 
 	rec := packagesGet(t, "/packages/blerglab-chat-0.1.0.tgz")
-	if rec.Code != http.StatusOK || string(rec.Body.Bytes()) != string(tarball) {
+	if rec.Code != http.StatusOK || rec.Body.String() != string(tarball) {
 		t.Fatalf("tarball = %d %q", rec.Code, rec.Body.String())
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "application/gzip" {

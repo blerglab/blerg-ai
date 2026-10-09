@@ -311,15 +311,15 @@ func TestTranslatePluginDirs(t *testing.T) {
 	}
 	// A snapshot reached through a symlinked state dir (macOS /var, a linked
 	// $HOME) still translates: both sides are resolved first.
-	real := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(real, "mp", "sp", "2"), 0o755); err != nil {
+	resolved := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(resolved, "mp", "sp", "2"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(resolved, link); err != nil {
 		t.Skip("symlinks not supported")
 	}
-	got = translatePluginDirs([]string{filepath.Join(real, "mp", "sp", "2")}, link)
+	got = translatePluginDirs([]string{filepath.Join(resolved, "mp", "sp", "2")}, link)
 	if !slices.Equal(got, []string{sandboxPluginPath + "/mp/sp/2"}) {
 		t.Fatalf("symlinked snapshot: got %v", got)
 	}
@@ -327,9 +327,9 @@ func TestTranslatePluginDirs(t *testing.T) {
 
 // A workshop under a symlinked state dir hands out loadable snapshot paths.
 func TestWorkshopUnderASymlinkedStateDir(t *testing.T) {
-	real := t.TempDir()
+	resolved := t.TempDir()
 	link := filepath.Join(t.TempDir(), "state")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(resolved, link); err != nil {
 		t.Skip("symlinks not supported")
 	}
 	allow, _ := pluginspec.ParseAllowlist("")
@@ -456,7 +456,7 @@ func TestAgentSpawnLoadsPluginsUnlessRestricted(t *testing.T) {
 			var p protocol.StartStagePayload
 			_ = json.Unmarshal(ev.Payload, &p)
 			for _, s := range p.Stages {
-				stages = append(stages, s.ID+":"+string(s.State)+":"+s.Detail)
+				stages = append(stages, s.ID+":"+s.State+":"+s.Detail)
 			}
 		}
 	}

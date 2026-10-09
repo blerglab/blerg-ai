@@ -271,7 +271,7 @@ func (a *API) buildInsights(ctx context.Context, now, from, to time.Time, owner,
 	resp.Tokens = summariseTokens(tokenRows, byID, prices, visible)
 	resp.Crons = summariseCrons(cronRuns, now)
 	if jm := a.hub.JobManager(); jm != nil {
-		st := jm.Status()
+		st := jm.Status() //nolint:contextcheck // bounded by the JobManager client timeout and deliberately not tied to the caller, like the status endpoint
 		resp.Cluster = &insightsCluster{
 			Active: st.ActiveSessions, Max: st.MaxSessions,
 			PeakConcurrent: peakConcurrent(agent, "cluster", from, to, now),

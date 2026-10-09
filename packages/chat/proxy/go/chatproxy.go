@@ -195,7 +195,7 @@ func (p *proxy) forward(w http.ResponseWriter, r *http.Request, method, path str
 		http.Error(w, "runner unreachable", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	copyHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
@@ -242,7 +242,7 @@ func (p *proxy) eventsLive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runner unreachable", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	copyHeaders(w, resp)
 	if resp.StatusCode != http.StatusOK {
 		w.WriteHeader(resp.StatusCode)
@@ -426,7 +426,7 @@ func (c *HTTPRunnerClient) Do(ctx context.Context, method, path string, body io.
 	if c == nil || c.BaseURL == "" {
 		return nil, ErrNoClient
 	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(c.BaseURL, "/")+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(c.BaseURL, "/")+path, body) //nolint:gosec // G704: BaseURL is the runner origin the operator configured, path one of this proxy's fixed routes
 	if err != nil {
 		return nil, err
 	}
@@ -440,5 +440,5 @@ func (c *HTTPRunnerClient) Do(ctx context.Context, method, path string, body io.
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	return hc.Do(req)
+	return hc.Do(req) //nolint:gosec // G704: same request; the target is the configured runner, not caller input
 }

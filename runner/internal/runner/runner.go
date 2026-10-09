@@ -441,7 +441,7 @@ func initNewRepo(cfg Config, workDir, cloneURL string) error {
 		{"remote", "add", "origin", cloneURL},
 	} {
 		if out, err := gitRun(workDir, args...); err != nil {
-			return fmt.Errorf("init new repository: git %s: %v: %s", args[0], err, scrubToken(out, cfg.GitToken))
+			return fmt.Errorf("init new repository: git %s: %w: %s", args[0], err, scrubToken(out, cfg.GitToken))
 		}
 	}
 	return nil

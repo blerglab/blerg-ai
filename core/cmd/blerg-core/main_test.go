@@ -327,7 +327,11 @@ func TestValidateSecrets(t *testing.T) {
 func TestUsersCLI(t *testing.T) {
 	st := mainTestStore(t)
 	// runUsers opens its own pool from DATABASE_URL; point it at this test's schema.
-	t.Setenv("DATABASE_URL", os.Getenv("DATABASE_URL")+"&options=-csearch_path%3D"+mainTestSchema)
+	sep := "?"
+	if strings.Contains(os.Getenv("DATABASE_URL"), "?") {
+		sep = "&"
+	}
+	t.Setenv("DATABASE_URL", os.Getenv("DATABASE_URL")+sep+"options=-csearch_path%3D"+mainTestSchema)
 	_ = st
 	var out bytes.Buffer
 	if code := runUsers([]string{"create", "--subject", "eve", "--role", "member"}, &out); code != 0 {

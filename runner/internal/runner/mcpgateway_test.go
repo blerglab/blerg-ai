@@ -207,7 +207,7 @@ func TestConfigFromEnvConsumesInteractionVariable(t *testing.T) {
 		t.Errorf("pod spawn interaction = %q", s.Interaction)
 	}
 	for v, want := range map[string]string{
-		"interactive": protocol.InteractionInteractive, " Interactive ": protocol.InteractionInteractive,
+		"interactive": protocol.InteractionInteractive, " Interactive ": protocol.InteractionInteractive, //nolint:gocritic // mapKey: the padding is the point, the value is trimmed
 		"UNATTENDED": protocol.InteractionUnattended,
 		// Anything else is no mode at all, which the agent host reads as interactive.
 		"": "", "1": "", "watched": "",

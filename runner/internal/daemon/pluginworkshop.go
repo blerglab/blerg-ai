@@ -99,7 +99,7 @@ func NewPluginWorkshop(stateDir string) *pluginWorkshop {
 	}
 	home, _ := os.UserHomeDir()
 	w := newPluginWorkshop(filepath.Join(stateDir, pluginWorkshopDir), home, allow)
-	if err := os.RemoveAll(w.sessionsDir()); err != nil {
+	if err := os.RemoveAll(w.sessionsDir()); err != nil { //nolint:gosec // G703: stateDir is the daemon's own state directory, not caller input
 		log.Printf("daemon: plugins: sweeping old session snapshots: %v", err)
 	}
 	return w
@@ -187,7 +187,7 @@ func (w *pluginWorkshop) prepare(ctx context.Context, sessionID string, entries 
 func (w *pluginWorkshop) prepareOnce(ctx context.Context, entries []pluginspec.Entry, mayRefresh bool) ([]string, pluginsinstall.Result, bool) {
 	// 0755: snapshots are mounted into sandbox containers and must be
 	// readable there; the workshop holds no secrets (settings.json carries none).
-	if err := os.MkdirAll(w.dir, 0o755); err != nil {
+	if err := os.MkdirAll(w.dir, 0o755); err != nil { //nolint:gosec // G301: snapshots are mounted into sandbox containers and must be readable there
 		res := pluginsinstall.Result{Total: len(entries)}
 		for _, e := range entries {
 			res.Failed = append(res.Failed, safePluginName(e.Plugin))
@@ -273,7 +273,7 @@ func (w *pluginWorkshop) release(sessionID string) {
 }
 
 // linkTree recreates src under dst: directories are made, regular files are
-// hardlinked (or copied when linking fails), symlinks are recreated as they
+// hard-linked (or copied when linking fails), symlinks are recreated as they
 // are, anything else is skipped. src is a verified plugin directory.
 func linkTree(src, dst string) error {
 	return filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
@@ -287,15 +287,15 @@ func linkTree(src, dst string) error {
 		target := filepath.Join(dst, rel)
 		switch {
 		case d.IsDir():
-			return os.MkdirAll(target, 0o755)
+			return os.MkdirAll(target, 0o755) //nolint:gosec // G301: read by the sandbox; the workshop holds no secrets
 		case d.Type()&os.ModeSymlink != 0:
 			link, err := os.Readlink(p)
 			if err != nil {
 				return err
 			}
-			return os.Symlink(link, target)
+			return os.Symlink(link, target) //nolint:gosec // G122: src is the verified plugin directory the daemon just wrote
 		case d.Type().IsRegular():
-			if err := os.Link(p, target); err == nil {
+			if err := os.Link(p, target); err == nil { //nolint:gosec // G122: same tree
 				return nil
 			}
 			return copyFile(p, target)
@@ -305,7 +305,7 @@ func linkTree(src, dst string) error {
 }
 
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) //nolint:gosec // G304: src comes from the walk over the verified plugin directory
 	if err != nil {
 		return err
 	}
@@ -314,7 +314,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fi.Mode().Perm()|0o444)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fi.Mode().Perm()|0o444) //nolint:gosec // G304: dst is under the daemon's own snapshot directory
 	if err != nil {
 		return err
 	}
@@ -362,7 +362,7 @@ func (w *pluginWorkshop) stampDue(name string) bool {
 
 func (w *pluginWorkshop) stamp(name string) {
 	p := filepath.Join(w.dir, name)
-	if err := os.WriteFile(p, nil, 0o644); err != nil {
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
 		return
 	}
 	_ = os.Chtimes(p, w.now(), w.now())
@@ -416,7 +416,7 @@ func (w *pluginWorkshop) verifiedInstallPath(installed map[string][]installedRec
 	if !filepath.IsAbs(p) {
 		return "", fmt.Errorf("install path %q is not absolute", p)
 	}
-	real, err := filepath.EvalSymlinks(p)
+	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
 		return "", fmt.Errorf("install path: %w", err)
 	}
@@ -424,14 +424,14 @@ func (w *pluginWorkshop) verifiedInstallPath(installed map[string][]installedRec
 	if err != nil {
 		return "", fmt.Errorf("plugin cache: %w", err)
 	}
-	rel, err := filepath.Rel(cache, real)
+	rel, err := filepath.Rel(cache, resolved)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("install path %q is outside the plugin cache", p)
 	}
-	if fi, err := os.Stat(filepath.Join(real, ".claude-plugin", "plugin.json")); err != nil || !fi.Mode().IsRegular() {
+	if fi, err := os.Stat(filepath.Join(resolved, ".claude-plugin", "plugin.json")); err != nil || !fi.Mode().IsRegular() {
 		return "", fmt.Errorf("install path %q has no .claude-plugin/plugin.json", p)
 	}
-	return real, nil
+	return resolved, nil
 }
 
 // translatePluginDirs maps snapshot paths to where a sandbox container sees

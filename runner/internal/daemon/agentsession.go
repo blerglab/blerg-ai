@@ -486,15 +486,17 @@ const WorkspaceInitialised = "initialised"
 
 func (h *AgentHost) SpawnResumed(msg protocol.SpawnSession, events []agent.RestoredEvent, wsState string) {
 	note := ""
-	if wsState == "empty" {
+	switch wsState {
+	case "empty":
 		// A "No repository" cluster session (runner.WorkspaceEmpty): nothing
 		// to clone, and nothing survived the old pod.
 		note = "[system] Session resumed after a restart. This session has no repository, so its workspace is a new, empty directory: nothing written before the restart survived. Re-create anything you still need."
-	} else if wsState == WorkspaceInitialised {
+	case WorkspaceInitialised:
 		// A "New repository" cluster session whose repository still does not
 		// exist (runner.WorkspaceInitialised): nothing could be cloned back.
 		note = "[system] Session resumed after a restart. This session's repository could not be cloned (it was never created on its git host, or is not reachable), so the workspace is a new, empty repository again: nothing written before the restart survived. Re-create anything you still need, and create the remote before pushing."
-	} else if wsState != "resumed-from-wip" {
+	case "resumed-from-wip":
+	default:
 		note = "[system] Session resumed after a restart. The workspace is a fresh clone: committed work on the wip branch survived, but any uncommitted changes from before the restart are gone. Re-verify workspace state before continuing."
 	}
 	h.spawn(msg, events, note, nil)

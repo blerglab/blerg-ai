@@ -30,6 +30,7 @@ export default defineConfig({
       'zustand',
       'react-markdown',
       'remark-gfm',
+      'pdfjs-dist',
     ],
   },
   test: {

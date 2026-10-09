@@ -161,6 +161,9 @@ type API struct {
 	// fetchPlugins fetches an account's always-on plugin list for a daemon session. nil = core's
 	// internal endpoint; tests set it.
 	fetchPlugins func(ctx context.Context, accountID string, proof coreProof) ([]pluginspec.Entry, error)
+	// fetchTokenName asks core for an agent token's label (startedby.go). nil = the HTTP
+	// lookup; tests set it.
+	fetchTokenName func(ctx context.Context, accountID, tokenID string) (string, error)
 }
 
 // SetEmbedder configures the knowledge-search embedder (nil = keyword fallback).
@@ -325,6 +328,8 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	if row.CronID != nil {
 		info.CronID = *row.CronID
 	}
+	info.StartedBy = startedByOf(&row)
+	info.Interaction = effectiveInteraction(&row)
 	return info
 }
 
@@ -626,6 +631,10 @@ type spawnSessionRequest struct {
 	// (mcpstart.go). Only this route, for a signed-in person, accepts it. Absent or
 	// empty means none.
 	MCP []MCPSelection `json:"mcp,omitempty"`
+	// Interaction says whether a person is reading the session's chat as it works:
+	// "interactive" (the default here: the launch sheet is a person) or "unattended".
+	// Anything else is a 400 (interaction.go).
+	Interaction string `json:"interaction,omitempty"`
 }
 
 // noRepoProblem is what is wrong with a no_repo start that also names a
@@ -698,6 +707,14 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
+	// The launch sheet is a person: interactive unless the request says nobody will be reading.
+	// From here on req.Interaction is the resolved mode.
+	interaction, interactionErr := resolveInteraction(req.Interaction, true, false)
+	if interactionErr != nil {
+		writeAPIError(w, interactionErr)
+		return
+	}
+	req.Interaction = interaction
 	// model and effort end up as engine CLI arguments on every runtime, so
 	// both are checked here, before anything is recorded or sent.
 	// A daemon's reported model list only applies to a session on it.
@@ -866,6 +883,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 					log.Printf("cluster SetSessionNewRepo %s: %v", sessionID, err)
 				}
 			}
+			recordInteraction(r.Context(), a.dbPool, sessionID, req.Interaction)
 		}
 		if a.dbPool != nil {
 			recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
@@ -885,8 +903,10 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		// progress panel follows.
 		spec := SessionJobSpec{
 			MCPGateway: gateway,
-			// Every grant session runs restricted (mcpstart.go).
-			RestrictTools: gateway != nil,
+			// A launch-sheet session is watched: it keeps its tools, settings and plugins,
+			// connections or not (docs/design/interactive-mcp-sessions.md).
+			RestrictTools: false,
+			Interaction:   req.Interaction,
 			SessionID:     sessionID, Repo: req.Repo, Title: req.Title,
 			Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.InitialPrompt,
 			ExtraEnv: withClusterSessionToken(r.Context(), a.dbPool, sessionID, nil),
@@ -1029,6 +1049,8 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		// sandboxed terminal session gets (spec §3).
 		Sandbox: req.Runtime == "docker",
 		Engine:  req.Engine,
+		// Interactive unless the caller said nobody is reading (interaction.go).
+		Interaction: req.Interaction,
 		SessionToken: a.spawnSessionToken(r.Context(), sessionID, daemon, folder, req.Title, req.Model,
 			sessionOriginFor(principal.Sub, grant != nil, "")),
 	}
@@ -1038,6 +1060,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			log.Printf("SetSessionPosture %s: %v", sessionID, err)
 		}
 		recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
+		recordInteraction(r.Context(), a.dbPool, sessionID, req.Interaction)
 		// The engine too, as the cluster and v1 paths already do: the
 		// in-session model switcher asks for the session engine's model list.
 		if req.Engine != "" {
@@ -1070,10 +1093,11 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, apiErr)
 			return
 		}
-		msg.RestrictTools = true // every grant session runs restricted (mcpstart.go)
+		// A launch-sheet session is watched: it keeps its tools, settings and plugins,
+		// connections or not (docs/design/interactive-mcp-sessions.md).
 	}
-	// Always-on plugins (non-secret): only for a Claude agent-kind session with no grant, on a
-	// daemon that can load them. Resolved after the grant so a granted session never gets any.
+	// Always-on plugins (non-secret): only for a Claude agent-kind session, on a daemon that can
+	// load them.
 	var pluginNote string
 	msg.Plugins, pluginNote = a.daemonPlugins(r.Context(), daemon, principal.Sub, proofFromPrincipal(principal), req.Kind, req.Engine, msg.RestrictTools)
 
@@ -1139,6 +1163,7 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 			log.Printf("cluster SetSessionEngine %s: %v", sessionID, err)
 		}
 		recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
+		recordInteraction(r.Context(), a.dbPool, sessionID, req.Interaction)
 	}
 	var gateway *protocol.MCPGatewayConfig
 	if grant != nil {
@@ -1150,8 +1175,9 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 	}
 	spec := SessionJobSpec{
 		MCPGateway: gateway,
-		// Every grant session runs restricted (mcpstart.go).
-		RestrictTools: gateway != nil,
+		// A launch-sheet session is watched: not restricted (docs/design/interactive-mcp-sessions.md).
+		RestrictTools: false,
+		Interaction:   req.Interaction,
 		SessionID:     sessionID, NoRepo: true, Title: req.Title,
 		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.InitialPrompt,
 		ExtraEnv:          withClusterSessionToken(r.Context(), a.dbPool, sessionID, nil),

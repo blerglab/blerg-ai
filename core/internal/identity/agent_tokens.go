@@ -142,6 +142,45 @@ func (s *Service) CreateAgentToken(ctx context.Context, accountID, name, preset 
 	if !ok {
 		return AgentTokenRecord{}, "", ErrUnknownPreset
 	}
+	return s.createAgentToken(ctx, accountID, name, p.Aud, p.Caps, expiresIn)
+}
+
+// RemintAgentToken replaces one of accountID's tokens with a fresh one of the same name,
+// audience, capabilities and lifetime: the old row is revoked (and its "sub" entry written, so
+// it stops verifying at once), then a new token is minted and returned exactly as
+// CreateAgentToken returns one. A tool whose token was revoked gets a new value to paste
+// without the owner re-choosing anything. Not found, or another account's: ErrNotFound.
+func (s *Service) RemintAgentToken(ctx context.Context, accountID, id string) (AgentTokenRecord, string, error) {
+	if !agentTokenIDShape.MatchString(id) || !agentTokenIDShape.MatchString(accountID) {
+		return AgentTokenRecord{}, "", ErrNotFound
+	}
+	var name, aud string
+	var caps []string
+	var createdAt, expiresAt time.Time
+	err := s.st.Pool().QueryRow(ctx,
+		`SELECT name, aud, caps, created_at, expires_at FROM agent_tokens
+		  WHERE id = $1 AND account_id = $2 AND kind = 'token'`, id, accountID).
+		Scan(&name, &aud, &caps, &createdAt, &expiresAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AgentTokenRecord{}, "", ErrNotFound
+		}
+		return AgentTokenRecord{}, "", err
+	}
+	if err := s.RevokeAgentToken(ctx, accountID, id); err != nil {
+		return AgentTokenRecord{}, "", err
+	}
+	lifetime := expiresAt.Sub(createdAt)
+	if lifetime <= 0 || lifetime > MaxAgentTokenDays*24*time.Hour {
+		lifetime = DefaultAgentTokenDays * 24 * time.Hour
+	}
+	return s.createAgentToken(ctx, accountID, name, aud, caps, lifetime)
+}
+
+// createAgentToken is CreateAgentToken after the preset is resolved: the caps asked for are
+// narrowed to the account's role, the live-token cap is checked, and the token is minted and
+// recorded.
+func (s *Service) createAgentToken(ctx context.Context, accountID, name, aud string, wantCaps []string, expiresIn time.Duration) (AgentTokenRecord, string, error) {
 	state, err := s.AccountState(ctx, accountID)
 	if err != nil {
 		return AgentTokenRecord{}, "", err
@@ -149,7 +188,7 @@ func (s *Service) CreateAgentToken(ctx context.Context, accountID, name, preset 
 	if state.Disabled {
 		return AgentTokenRecord{}, "", ErrAccountDisabled
 	}
-	caps := intersectCaps(p.Caps, PlatformRoleCaps[state.Role])
+	caps := intersectCaps(wantCaps, PlatformRoleCaps[state.Role])
 	if expiresIn <= 0 {
 		expiresIn = DefaultAgentTokenDays * 24 * time.Hour
 	}
@@ -179,7 +218,7 @@ func (s *Service) CreateAgentToken(ctx context.Context, accountID, name, preset 
 	expiresAt := time.Now().Add(expiresIn)
 	raw, err := s.mintLiveAgentToken(ctx, AgentTokenInput{
 		Sub:        id,
-		Aud:        p.Aud,
+		Aud:        aud,
 		Caps:       caps,
 		OnBehalfOf: accountID,
 		Lineage:    accountID,
@@ -189,12 +228,12 @@ func (s *Service) CreateAgentToken(ctx context.Context, accountID, name, preset 
 		return AgentTokenRecord{}, "", err
 	}
 
-	rec := AgentTokenRecord{ID: id, AccountID: accountID, Name: name, Aud: p.Aud, Caps: caps}
+	rec := AgentTokenRecord{ID: id, AccountID: accountID, Name: name, Aud: aud, Caps: caps}
 	if err := s.st.Pool().QueryRow(ctx,
 		`INSERT INTO agent_tokens (id, account_id, name, aud, caps, token_hash, expires_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7)
 		 RETURNING created_at, expires_at`,
-		id, accountID, name, p.Aud, caps, agentTokenHash(raw), expiresAt,
+		id, accountID, name, aud, caps, agentTokenHash(raw), expiresAt,
 	).Scan(&rec.CreatedAt, &rec.ExpiresAt); err != nil {
 		return AgentTokenRecord{}, "", err
 	}

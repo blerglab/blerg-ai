@@ -462,6 +462,12 @@ type outcome struct {
 	outcome string
 }
 
+// toolChangedMessage is the refusal when a tool's live definition no longer matches the hash the
+// session pinned: the tool is off until a person selects it again, in a new session.
+func toolChangedMessage(tool string) string {
+	return "tool " + tool + " changed on the server since this session selected it, so it is off here; ask the person to start a new session and select it again"
+}
+
 func refuse(mode, tool, out string, code int, msg string) outcome {
 	return outcome{rpcErr: &rpcError{Code: code, Message: msg}, tool: tool, mode: mode, outcome: out}
 }
@@ -685,8 +691,13 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 			if rerr != nil {
 				return upstreamRPCError(mode, p.Name, rerr)
 			}
-			if !ok || hash != entry.Hash {
+			if !ok {
 				return unknown
+			}
+			if hash != entry.Hash {
+				// The server changed this tool since the session selected it. Say so: "unknown
+				// tool" sends an agent into retries, while the fix is on the person's side.
+				return refuse(mode, p.Name, "refused", codeInvalidParams, toolChangedMessage(p.Name))
 			}
 		}
 		if mode == ModePropose {

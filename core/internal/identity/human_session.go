@@ -31,7 +31,7 @@ var ErrSessionRevoked = errors.New("identity: session revoked or unknown")
 // theft-detection: a legitimate client never has a reason to reuse a token it already rotated
 // away from, so this is treated as evidence of a stolen/duplicated token and the entire
 // rotation chain is revoked.
-var ErrSessionReplayed = errors.New("identity: rotated-out refresh token replayed; chain revoked")
+var ErrSessionReplayed = errors.New("identity: rotated-out refresh token reused; its browser session is revoked")
 
 // ErrAccountDisabled is returned when the account's disabled_at is set (reconcile removed it
 // from the org, or an admin deactivated it). Login and refresh both refuse such accounts.
@@ -57,16 +57,6 @@ func (s *Service) AccountState(ctx context.Context, accountID string) (AccountSt
 	a.Disabled = disabledAt != nil
 	return a, nil
 }
-
-// replayGraceWindow is how long after a legitimate rotation a client may still present the
-// prior (now rotated-out) refresh token before it's treated as a replay/theft signal. This
-// tolerates lost 302 redirects and multi-tab races that legitimately double-refresh close
-// together: within the window, as long as the successor session this token was rotated into is
-// still live, the caller simply gets a fresh access token minted against that existing
-// successor session (no new refresh token, no rows touched, no third token issued) instead of
-// the whole chain being killed. Outside the window, or if the successor is no longer live, the
-// strict chain-kill still applies.
-const replayGraceWindow = 60 * time.Second
 
 func hashToken(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
@@ -200,14 +190,22 @@ func (s *Service) IssueRefreshToken(ctx context.Context, accountID, userAgent, i
 // set as the new cookie value.
 //
 // If the presented token matches a row that was already rotated out (revoked_at AND replaced_by
-// both set), that is either theft (a stolen/duplicated token being replayed) or a legitimate
-// double-refresh race (a lost 302, two tabs refreshing close together) — the two are
-// indistinguishable from the row alone. Within replayGraceWindow of the original rotation, and
-// only if the successor session (replaced_by) is still live, this is treated as the benign case:
-// a fresh access token is minted against that existing successor session and returned with an
-// empty newRefresh (no new row, no third token). Outside the window, or if the successor is no
-// longer live, the whole chain is revoked and ErrSessionReplayed is returned. Any other revoked,
-// expired, or unknown token returns ErrSessionRevoked.
+// both set), one of two things is true:
+//
+//  1. The browser never got the rotation. The response that carried the successor cookie was
+//     lost (a frame torn down on a timeout, a connection that dropped after core committed, a
+//     second tab that raced the first), so the browser still holds the old token and the
+//     successor has NEVER been presented (its last_used_at is null). The rotation is redone:
+//     the never-used successor is revoked ('superseded') and a new successor is issued in the
+//     same chain. The browser ends up where it should have been; nobody else loses anything,
+//     and no clock is involved — a tab that wakes an hour later is treated the same.
+//  2. Otherwise the successor has been presented, so two parties have held the same token:
+//     reuse, the theft signal. The CHAIN is revoked — every row of this browser's session and,
+//     through a "sid" entry in the shared revocations table, every access token it minted — and
+//     ErrSessionReplayed is returned. The person's other devices, and the agent tokens their
+//     tools hold, are untouched: a reused refresh token says nothing about them.
+//
+// Any other revoked, expired, or unknown token returns ErrSessionRevoked.
 func (s *Service) RefreshAccessToken(ctx context.Context, rawRefreshToken, audience string) (access, newRefresh string, err error) {
 	tx, err := s.st.Pool().Begin(ctx)
 	if err != nil {
@@ -226,39 +224,40 @@ func (s *Service) RefreshAccessToken(ctx context.Context, rawRefreshToken, audie
 	}
 
 	if revokedAt != nil && replacedBy != nil {
-		if time.Since(*revokedAt) < replayGraceWindow {
-			var succRevokedAt, succExpiresAt *time.Time
-			if err := tx.QueryRow(ctx, `SELECT revoked_at, expires_at FROM human_sessions WHERE id = $1`, *replacedBy).
-				Scan(&succRevokedAt, &succExpiresAt); err != nil {
+		var succRevokedAt, succExpiresAt, succUsedAt *time.Time
+		if err := tx.QueryRow(ctx, `SELECT revoked_at, expires_at, last_used_at FROM human_sessions WHERE id = $1 FOR UPDATE`, *replacedBy).
+			Scan(&succRevokedAt, &succExpiresAt, &succUsedAt); err != nil {
+			return "", "", err
+		}
+		succLive := succRevokedAt == nil && succExpiresAt != nil && succExpiresAt.After(time.Now())
+		if succLive && succUsedAt == nil {
+			// Case 1: the rotation never reached the browser. Redo it from the successor the
+			// browser never saw: that row is superseded, a new one takes its place.
+			log.Printf("identity: refresh token presented again %s after a rotation its browser never received (chain %.8s); redoing the rotation",
+				time.Since(*revokedAt).Round(time.Second), chainID)
+			access, newRefresh, err = s.rotateTx(ctx, tx, *replacedBy, accountID, chainID, audience, "superseded")
+			if err != nil {
 				return "", "", err
 			}
-			if succRevokedAt == nil && succExpiresAt != nil && succExpiresAt.After(time.Now()) {
-				// Grace window, and the successor this token was rotated into is still
-				// live: treat as a benign double-refresh, not theft. No rows are touched
-				// (the transaction is rolled back via the defer above) — just mint a
-				// fresh access token against the existing successor session.
-				access, err = s.MintHumanAccessTokenForSession(ctx, accountID, audience, chainID)
-				if err != nil {
-					return "", "", err
-				}
-				return access, "", nil
+			// The presented token was used, whatever its state.
+			if _, err := tx.Exec(ctx, `UPDATE human_sessions SET last_used_at = now() WHERE id = $1`, id); err != nil {
+				return "", "", err
 			}
+			if err := tx.Commit(ctx); err != nil {
+				return "", "", err
+			}
+			return access, newRefresh, nil
 		}
-		// Outside the grace window, or the successor is no longer live: indistinguishable
-		// from theft. Commit first (nothing was written yet in this branch — releases the
-		// FOR UPDATE row lock) then call RevokeAccountEverywhere: every live session for the
-		// account, not just this chain, AND the account's "sub" in the shared revocations
-		// table, so already-minted access tokens stop verifying immediately too (controller
-		// ruling carried from Task 8 — now that "sub" revocation is reversible via Unrevoke,
-		// a subsequent successful login clears it, so this is no longer a permanent lockout).
+		// Case 2: reuse. Commit first (nothing was written in this branch — it releases the
+		// FOR UPDATE row locks), then revoke the chain. Said out loud, with which chain and how
+		// stale the token was: that is what tells a stolen cookie from a browser that kept an
+		// old one.
 		if err := tx.Commit(ctx); err != nil {
 			return "", "", err
 		}
-		// Said out loud because it signs the person out of every device: which login chain it was and how
-		// stale the presented token was are what tell a stolen token from a browser that kept an old cookie.
-		log.Printf("identity: rotated-out refresh token replayed (chain %.8s, rotated %s ago); revoking every session of the account",
+		log.Printf("identity: rotated-out refresh token reused (chain %.8s, rotated %s ago); revoking that browser session only (other devices and agent tokens untouched)",
 			chainID, time.Since(*revokedAt).Round(time.Second))
-		if err := s.RevokeAccountEverywhere(ctx, accountID); err != nil {
+		if err := s.RevokeChain(ctx, chainID, "reuse"); err != nil {
 			return "", "", err
 		}
 		return "", "", ErrSessionReplayed
@@ -267,30 +266,53 @@ func (s *Service) RefreshAccessToken(ctx context.Context, rawRefreshToken, audie
 		return "", "", ErrSessionRevoked
 	}
 
-	newRaw, newHash, err := newRefreshToken()
-	if err != nil {
-		return "", "", err
-	}
-	var newID string
-	if err := tx.QueryRow(ctx, `INSERT INTO human_sessions (account_id, token_hash, chain_id, expires_at, last_used_at, user_agent, ip)
-		SELECT account_id, $2, chain_id, expires_at, now(), user_agent, ip FROM human_sessions WHERE id = $1 RETURNING id::text`,
-		id, newHash).Scan(&newID); err != nil {
-		return "", "", err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE human_sessions SET revoked_at = now(), replaced_by = $2, last_used_at = now() WHERE id = $1`, id, newID); err != nil {
-		return "", "", err
-	}
-
-	// Mint BEFORE committing: a mint failure here must roll the whole rotation back rather
-	// than leaving a committed rotation with no usable access token.
-	access, err = s.MintHumanAccessTokenForSession(ctx, accountID, audience, chainID)
+	access, newRefresh, err = s.rotateTx(ctx, tx, id, accountID, chainID, audience, "rotated")
 	if err != nil {
 		return "", "", err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", err
 	}
+	return access, newRefresh, nil
+}
+
+// rotateTx rotates the live row fromID inside tx: a new row is issued in the same chain,
+// carrying forward the original's user_agent/ip and absolute expires_at, and fromID is revoked
+// with the given reason, replaced_by the new row, and marked used. The successor starts with no
+// last_used_at: it has not been presented until the browser comes back with it, which is how
+// RefreshAccessToken tells a lost rotation from a reused token. The access token is minted
+// before the caller commits, so a mint failure rolls the whole rotation back.
+func (s *Service) rotateTx(ctx context.Context, tx pgx.Tx, fromID, accountID, chainID, audience, reason string) (access, newRaw string, err error) {
+	newRaw, newHash, err := newRefreshToken()
+	if err != nil {
+		return "", "", err
+	}
+	var newID string
+	if err := tx.QueryRow(ctx, `INSERT INTO human_sessions (account_id, token_hash, chain_id, expires_at, user_agent, ip)
+		SELECT account_id, $2, chain_id, expires_at, user_agent, ip FROM human_sessions WHERE id = $1 RETURNING id::text`,
+		fromID, newHash).Scan(&newID); err != nil {
+		return "", "", err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE human_sessions SET revoked_at = now(), revoke_reason = $3, replaced_by = $2, last_used_at = now() WHERE id = $1`, fromID, newID, reason); err != nil {
+		return "", "", err
+	}
+	access, err = s.MintHumanAccessTokenForSession(ctx, accountID, audience, chainID)
+	if err != nil {
+		return "", "", err
+	}
 	return access, newRaw, nil
+}
+
+// RevokeChain ends one browser session: every row of the rotation chain is revoked with the
+// reason, and a "sid" entry in the shared revocations table stops the access tokens it minted
+// from verifying anywhere. The scope of a detected refresh-token reuse.
+func (s *Service) RevokeChain(ctx context.Context, chainID, reason string) error {
+	if _, err := s.st.Pool().Exec(ctx,
+		`UPDATE human_sessions SET revoked_at = now(), revoke_reason = $2 WHERE chain_id = $1 AND revoked_at IS NULL`,
+		chainID, reason); err != nil {
+		return err
+	}
+	return s.Revoke(ctx, "sid", chainID)
 }
 
 // SessionExpiresAt looks up the (absolute, login-anchored) expires_at of the live human_sessions
@@ -330,7 +352,7 @@ func (s *Service) SessionMustChangePassword(ctx context.Context, rawRefreshToken
 // RevokeHumanSession marks one refresh token's session revoked ("log out this device").
 func (s *Service) RevokeHumanSession(ctx context.Context, rawRefreshToken string) error {
 	_, err := s.st.Pool().Exec(ctx,
-		`UPDATE human_sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`,
+		`UPDATE human_sessions SET revoked_at = now(), revoke_reason = 'logout' WHERE token_hash = $1 AND revoked_at IS NULL`,
 		hashToken(rawRefreshToken))
 	return err
 }
@@ -341,7 +363,7 @@ func (s *Service) RevokeHumanSession(ctx context.Context, rawRefreshToken string
 // RevokeAccountEverywhere instead.
 func (s *Service) RevokeAllSessions(ctx context.Context, accountID string) error {
 	_, err := s.st.Pool().Exec(ctx,
-		`UPDATE human_sessions SET revoked_at = now() WHERE account_id = $1 AND revoked_at IS NULL`,
+		`UPDATE human_sessions SET revoked_at = now(), revoke_reason = 'logout_all' WHERE account_id = $1 AND revoked_at IS NULL`,
 		accountID)
 	return err
 }

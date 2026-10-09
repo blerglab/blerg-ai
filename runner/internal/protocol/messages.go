@@ -153,6 +153,28 @@ type SessionInfo struct {
 	// CronID is the cron that started the session (migration 023); absent for every other
 	// session. The UI badges such a session as a cron run.
 	CronID string `json:"cron_id,omitempty"`
+	// StartedBy says the session was not started by the person in the app: a tool with an
+	// agent token (Name is the owner's label for it), a cron, or the operator key. Absent for
+	// a session the person launched. The app keeps such sessions in their own section.
+	StartedBy *StartedBy `json:"started_by,omitempty"`
+	// Interaction is the session's interaction mode: InteractionInteractive (a person reads the
+	// chat as it works) or InteractionUnattended (nobody does). The effective value, never "".
+	Interaction string `json:"interaction,omitempty"`
+}
+
+// A session's interaction mode, decided by the server at start and told to the engine in its
+// system prompt. Interactive: a person is reading the chat as the session works and answers
+// there. Unattended: nobody is (a board card run, a cron, a tool's job).
+const (
+	InteractionInteractive = "interactive"
+	InteractionUnattended  = "unattended"
+)
+
+// StartedBy is who started a session when it was not the person: Kind "agent", "cron" or
+// "runner_key"; Name the agent token's label, when known.
+type StartedBy struct {
+	Kind string `json:"kind"`
+	Name string `json:"name,omitempty"`
 }
 
 // EndedBy is who ended a session: the principal kind ("human", "agent",
@@ -494,6 +516,11 @@ type SpawnSession struct {
 	// DaemonHello.Plugins; the daemon drops it again for any session it would
 	// not load plugins into. Absent for every other session.
 	Plugins []pluginspec.Entry `json:"plugins,omitempty"`
+	// Interaction is the session's interaction mode (InteractionInteractive or
+	// InteractionUnattended), which the daemon states in an agent session's system prompt.
+	// Empty from a server older than the field, which a daemon reads as interactive; a daemon
+	// older than the field ignores it.
+	Interaction string `json:"interaction,omitempty"`
 }
 
 // MCPGatewayConfig is a session's MCP gateway grant as delivered to a daemon
@@ -607,15 +634,6 @@ type BrowserSessionStateChanged = SessionStateChanged
 // (Shares the same wire type as SessionEnded.)
 type BrowserSessionEnded = SessionEnded
 
-// PreviewUpdated delivers an updated HTML preview to the browser.
-type PreviewUpdated struct {
-	Type string `json:"type"` // "preview_updated"
-	HTML string `json:"html"`
-	// SessionID is the session that pushed the preview, when the pusher said
-	// so. A preview from a private session reaches only its owner's browsers.
-	SessionID string `json:"session_id,omitempty"`
-}
-
 // HistoryDone is sent to the browser after history replay is complete for a
 // subscribe_session. The browser uses it to trigger a resize, ensuring the
 // SIGWINCH-triggered PTY redraw happens after history is rendered, not before.
@@ -699,6 +717,8 @@ type BrowserSpawnSession struct {
 	TicketID string `json:"ticket_id,omitempty"`
 	Kind     string `json:"kind,omitempty"` // "" (tmux) | "agent"
 	Model    string `json:"model,omitempty"`
+	// Interaction: "interactive" (the default for a browser's start) or "unattended".
+	Interaction string `json:"interaction,omitempty"`
 }
 
 // BrowserResizeSession asks the server to resize a session.

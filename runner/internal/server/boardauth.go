@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
+	"log"
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
@@ -53,6 +56,7 @@ func (a *API) authMessaging(w http.ResponseWriter, r *http.Request) (boardSessio
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return "", false
 	}
+	a.slideTokenExpiry(r.Context(), row)
 
 	for _, cap := range row.Capabilities {
 		if cap == "message" {
@@ -62,6 +66,21 @@ func (a *API) authMessaging(w http.ResponseWriter, r *http.Request) (boardSessio
 
 	writeError(w, http.StatusForbidden, "forbidden")
 	return "", false
+}
+
+// slideTokenExpiry keeps a session's token alive for as long as the session uses it: a
+// validated token with less than half of sessionTokenTTL left is pushed out to a full
+// sessionTokenTTL again (db.SlideBoardTokenExpiry). The token was minted with a fixed life, but
+// a session may run for days, and a session that could no longer publish, ask or list its files
+// after a day was the result. Session end still revokes it. A failure here only means the slide
+// did not happen this time; the request itself goes on.
+func (a *API) slideTokenExpiry(ctx context.Context, row db.BoardTokenRow) {
+	if time.Until(row.ExpiresAt) >= sessionTokenTTL/2 {
+		return
+	}
+	if _, err := db.SlideBoardTokenExpiry(ctx, a.dbPool, row.ID, sessionTokenTTL); err != nil {
+		log.Printf("session token %.8s: could not extend expiry: %v", row.ID, err)
+	}
 }
 
 // boardActor is who authenticated a board-surface request. Exactly one of
@@ -126,6 +145,7 @@ func (a *API) authBrowserOrBoard(w http.ResponseWriter, r *http.Request, boardID
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return boardActor{}, false
 	}
+	a.slideTokenExpiry(r.Context(), row)
 	if boardID != "" && row.BoardID != boardID {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return boardActor{}, false

@@ -139,8 +139,8 @@ func TestChangePasswordFlow(t *testing.T) {
 // shape auth_handlers_test.go/human_session_test.go's own test checkers use.
 type testRevChecker map[string]bool
 
-func (c testRevChecker) Revoked(kid, lineage, sub string) bool {
-	return c["kid:"+kid] || c["lineage:"+lineage] || c["sub:"+sub]
+func (c testRevChecker) Revoked(kid, lineage, sub, sid string) bool {
+	return c["kid:"+kid] || c["lineage:"+lineage] || c["sub:"+sub] || c["sid:"+sid]
 }
 func (testRevChecker) StaleBeyondCeiling() bool { return false }
 

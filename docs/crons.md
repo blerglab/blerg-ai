@@ -92,7 +92,8 @@ or held is skipped.
 ## What an unattended run can and cannot do
 
 An unattended run reads untrusted text with nobody watching, so it is contained more tightly than an
-interactive session:
+interactive session (a session you launch yourself keeps its tools even with connections; see
+[mcp-connections.md](mcp-connections.md#how-a-session-sees-a-connection-the-gateway)):
 
 - **Where it runs.** A cluster pod or the Docker sandbox. Never the bare host.
 - **Tools.** Only file tools (read, write, edit, search) plus the MCP tools you allowed for that
@@ -123,7 +124,7 @@ sender of that content.
 
 A session started by a cron, and any session with MCP connections, is visible **only to the account
 that started it**, on every surface: the session list, live updates, transcripts, terminal output,
-screenshots, previews, events, push notifications and completion webhooks. Other people on the same
+screenshots, events, push notifications and completion webhooks. Other people on the same
 install, including administrators, do not see it, because its content can include the results of
 your tools.
 

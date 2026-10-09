@@ -269,6 +269,7 @@ function AgentTokens({ site }: { site: Site | null }) {
   const [days, setDays] = useState(String(DEFAULT_EXPIRY_DAYS));
   const [creating, setCreating] = useState(false);
   const [revoking, setRevoking] = useState<string | null>(null);
+  const [reminting, setReminting] = useState<string | null>(null);
   // The one-time reveal. Cleared by "Done" and by nothing else re-populating it.
   const [created, setCreated] = useState<CreatedToken | null>(null);
   const [copied, setCopied] = useState(false);
@@ -343,6 +344,29 @@ function AgentTokens({ site }: { site: Site | null }) {
       setError("Could not reach the server. Please try again.");
     } finally {
       setCreating(false);
+    }
+  };
+
+  // Re-mint: the same token (name, preset, lifetime) with a new value, the old one revoked in
+  // the same step. For a tool whose token stopped working: paste the new value, done.
+  const remint = async (id: string) => {
+    setReminting(id);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/tokens/${encodeURIComponent(id)}/remint`, { method: "POST" });
+      if (!res.ok) {
+        const detail = await backendError(res);
+        setError(detail ?? `Failed to re-mint token (${res.status}).`);
+        return;
+      }
+      const body: CreatedToken = await res.json();
+      setCreated(body);
+      setCopied(false);
+      await refresh();
+    } catch {
+      setError("Could not reach the server. Please try again.");
+    } finally {
+      setReminting(null);
     }
   };
 
@@ -516,14 +540,25 @@ function AgentTokens({ site }: { site: Site | null }) {
                       {/* A revoked token is already dead; revoking it again would be a no-op
                           request against an endpoint that is deliberately idempotent. */}
                       {!t.revoked_at && (
-                        <button
-                          type="button"
-                          className="btn btn-quiet"
-                          onClick={() => revoke(t.id)}
-                          disabled={revoking === t.id}
-                        >
-                          {revoking === t.id ? "Revoking…" : "Revoke"}
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn-quiet"
+                            onClick={() => remint(t.id)}
+                            disabled={reminting === t.id || revoking === t.id}
+                            title="Revoke this token and mint a new one with the same name, preset and lifetime"
+                          >
+                            {reminting === t.id ? "Re-minting…" : "Re-mint"}
+                          </button>{" "}
+                          <button
+                            type="button"
+                            className="btn btn-quiet"
+                            onClick={() => revoke(t.id)}
+                            disabled={revoking === t.id || reminting === t.id}
+                          >
+                            {revoking === t.id ? "Revoking…" : "Revoke"}
+                          </button>
+                        </>
                       )}
                     </td>
                   </tr>

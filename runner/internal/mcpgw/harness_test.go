@@ -343,7 +343,8 @@ var defaultTools = []fakeTool{
 func newHarness(t *testing.T, mutate func(*Config), tools ...fakeTool) *harness {
 	t.Helper()
 	if len(tools) == 0 {
-		tools = defaultTools
+		// A copy: a test that edits a tool (setDescription) must not change the next test's upstream.
+		tools = append([]fakeTool(nil), defaultTools...)
 	}
 	pool := testPool(t)
 	clock := &fakeClock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}

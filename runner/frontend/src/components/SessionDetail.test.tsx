@@ -371,7 +371,7 @@ describe('SessionDetail', () => {
     // Terminal tab is active by default — messages not yet visible
     expect(screen.queryByText('Message from A')).not.toBeInTheDocument()
 
-    // Switch to Chat tab
+    // Switch to the Messages tab
     fireEvent.click(screen.getByTestId('tab-chat'))
 
     // Only session A's messages are visible
@@ -379,7 +379,21 @@ describe('SessionDetail', () => {
     expect(screen.queryByText('Message from B')).not.toBeInTheDocument()
   })
 
-  it('replying from the Chat tab POSTs to /api/messages/{id}/reply', async () => {
+  it('an agent session has one view and no tabs: its messages are in its conversation', () => {
+    seedSession({ id: 'sess-agent', kind: 'agent' })
+    renderDetail('sess-agent')
+    expect(screen.queryByTestId('tab-chat')).toBeNull()
+    expect(screen.queryByTestId('tab-terminal')).toBeNull()
+  })
+
+  it('a terminal session keeps its Messages tab', () => {
+    seedSession({ id: 'sess-term' })
+    renderDetail('sess-term')
+    expect(screen.getByTestId('tab-chat')).toHaveTextContent('Messages')
+    expect(screen.getByTestId('tab-terminal')).toHaveTextContent('Terminal')
+  })
+
+  it('replying from the Messages tab POSTs to /api/messages/{id}/reply', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -391,7 +405,7 @@ describe('SessionDetail', () => {
     })
     renderDetail('sess-a')
 
-    // Switch to Chat tab
+    // Switch to the Messages tab
     fireEvent.click(screen.getByTestId('tab-chat'))
 
     const input = screen.getByRole('textbox')
@@ -425,6 +439,22 @@ describe('SessionDetail', () => {
     seedSession({ kind: 'agent', runtime: 'daemon' })
     renderDetail()
     expect(screen.getByTestId('posture-banner')).toHaveTextContent('Agent session — runs unsandboxed on workstation as you, no permission prompts, using your engine login')
+  })
+
+  it('labels a session started unattended', () => {
+    seedSession({ kind: 'agent', interaction: 'unattended' })
+    renderDetail()
+    const label = screen.getByTestId('detail-unattended')
+    expect(label).toHaveTextContent('Unattended')
+    expect(label).toHaveAttribute('title', 'Started unattended: the agent does not wait for you in the chat')
+  })
+  it.each([
+    ['an interactive session', { interaction: 'interactive' as const }],
+    ['a session from before the field', {}],
+  ])('shows no Unattended label for %s', (_name, over) => {
+    seedSession({ kind: 'agent', ...over })
+    renderDetail()
+    expect(screen.queryByTestId('detail-unattended')).not.toBeInTheDocument()
   })
 
   it('does not carry the chat draft from one agent session to the next', () => {

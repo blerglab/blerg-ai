@@ -23,15 +23,21 @@ package server
 //     sandbox, never on the bare host, on a daemon that reports mcp_gateway, with the gateway
 //     configured (BLERG_RUNNER_MCP_GW_ADDR) and its address for sessions set
 //     (BLERG_RUNNER_MCP_GW_URL).
-//   - Restricted sessions. Every cron session (grant or not) and every grant session is
-//     started with RestrictTools (protocol.SpawnSession, or restrictToolsEnvVar in a pod's Job),
-//     set only server-side, never from a request. The daemon or pod then runs Claude with the
-//     built-in tool allow-list (file tools only), --strict-mcp-config (no ambient MCP server),
-//     and an empty --setting-sources plus --disable-slash-commands, so none of the developer's
-//     settings, hooks, plugins or skills load (daemon.ccHardeningFlags has the evidence). A
-//     daemon whose hello lacks restrict_tools would ignore the field and run the session open,
-//     so it is refused for a grant or a cron start (checkRestrictTarget) and the scheduler's
-//     pre-flight treats it as no capacity.
+//   - Restricted sessions follow who is watching, not the grant
+//     (docs/design/interactive-mcp-sessions.md). Every cron session (grant or not) and every
+//     board-started grant session (StartSession with Grant) is started with RestrictTools
+//     (protocol.SpawnSession, or restrictToolsEnvVar in a pod's Job), set only server-side,
+//     never from a request, and recorded in sessions.restrict_tools for a resume. The daemon or
+//     pod then runs Claude with the built-in tool allow-list (file tools only),
+//     --strict-mcp-config (no ambient MCP server), and an empty --setting-sources plus
+//     --disable-slash-commands, so none of the developer's settings, hooks, plugins or skills
+//     load (daemon.ccHardeningFlags has the evidence). A launch-sheet session with connections
+//     (POST /api/sessions, human principal) is NOT restricted: it keeps its tools, settings and
+//     plugins, and only the grant bounds what the MCP servers may be asked; it still runs with
+//     --strict-mcp-config and the gateway config directory denied to the file tools. A daemon
+//     whose hello lacks restrict_tools would ignore the field and run a restricted session
+//     open, so it is refused for a grant or a cron start (checkRestrictTarget) and the
+//     scheduler's pre-flight treats it as no capacity.
 //   - Every connection must be the caller's own (core's list) and every selected tool's hash
 //     must equal the hash in a live upstream tools/list at this moment.
 //   - The raw gateway tokens travel only inside the per-session Kubernetes Secret (cluster) or

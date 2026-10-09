@@ -107,6 +107,38 @@ Sessions already running keep the folder they started in; only new sessions
 records (`<repos root>/.blerg-runner/sessions/`) move with the root, so a
 daemon restart still recovers them.
 
+### What a daemon restart does to running sessions
+
+Restarting the daemon (an update with `install.sh install`, a crash, a reboot of the service)
+does not end the sessions it hosts:
+
+- **Terminal sessions** live in tmux and are reattached.
+- **Agent sessions on Claude Code** are hosted again from a recovery record in the daemon's state
+  directory (`~/.blerg-runner-daemon/agents/`, one 0600 file per session, holding the session's
+  token and environment). The same session continues, with the same Claude conversation
+  (`claude --resume`). The step that was running is lost: the agent is told it was cut off and
+  must not repeat a command that may have caused the restart, and the chat says so. An
+  interactive session then waits for your next message; an unattended one is asked to continue,
+  once.
+- **Not brought back:** a sandboxed agent session, a session with MCP connections, a cron's
+  session, and sessions on other engines. They end as before.
+
+The server gives a daemon 20 seconds to come back before it marks anything: within that, its
+sessions look as they did, a message you type is kept and delivered when the daemon returns, and
+a board following one of them notices nothing. A daemon away for longer has its sessions shown
+as errored ("daemon disconnected") until it reconnects. A session you stop in the app while the
+daemon is down stays stopped. A daemon that stays away for more than 30 minutes still gets its
+sessions back, but their `blerg-runner` tokens have been revoked by then.
+
+Only one daemon process uses the recovery records: a second daemon started by the same user
+while the first is running (a build run by hand, say) keeps none and recovers nothing, and says
+so in its log.
+
+The restart that installs a daemon with this behaviour over one without it still ends the agent
+sessions running at that moment: the old daemon kept no records. Updating the daemon from inside
+one of its own agent sessions works from then on; the session's turn is cut off when the
+installer restarts the service, and it picks up from your next message.
+
 ### Cloning a repository you name
 
 In the launch sheet's Repository box you can type any `owner/name` (GitHub,

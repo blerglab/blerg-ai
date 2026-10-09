@@ -401,11 +401,18 @@ func (h *artifactsHandler) artifact(w http.ResponseWriter, r *http.Request, sid 
 	return row
 }
 
+// The read, download and delete bodies below take the session id their caller has already
+// authenticated: a signed-in person on the browser routes (person), or the runner contract's
+// principal on the agent-token routes (runner_files.go). Same bytes, same headers, same 404s,
+// whichever credential opened the door.
+
 func (h *artifactsHandler) list(w http.ResponseWriter, r *http.Request) {
-	sid, ok := h.person(w, r)
-	if !ok {
-		return
+	if sid, ok := h.person(w, r); ok {
+		h.listSession(w, r, sid)
 	}
+}
+
+func (h *artifactsHandler) listSession(w http.ResponseWriter, r *http.Request, sid string) {
 	rows, err := db.ListArtifacts(r.Context(), h.api.dbPool, sid)
 	if err != nil {
 		log.Printf("artifacts list: %v", err)
@@ -425,10 +432,12 @@ func (h *artifactsHandler) download(w http.ResponseWriter, r *http.Request) { h.
 func (h *artifactsHandler) raw(w http.ResponseWriter, r *http.Request)      { h.serve(w, r, true) }
 
 func (h *artifactsHandler) serve(w http.ResponseWriter, r *http.Request, raw bool) {
-	sid, ok := h.person(w, r)
-	if !ok {
-		return
+	if sid, ok := h.person(w, r); ok {
+		h.serveSession(w, r, sid, raw)
 	}
+}
+
+func (h *artifactsHandler) serveSession(w http.ResponseWriter, r *http.Request, sid string, raw bool) {
 	row := h.artifact(w, r, sid)
 	if row == nil {
 		return
@@ -460,10 +469,12 @@ func (h *artifactsHandler) serve(w http.ResponseWriter, r *http.Request, raw boo
 }
 
 func (h *artifactsHandler) remove(w http.ResponseWriter, r *http.Request) {
-	sid, ok := h.person(w, r)
-	if !ok {
-		return
+	if sid, ok := h.person(w, r); ok {
+		h.removeSession(w, r, sid)
 	}
+}
+
+func (h *artifactsHandler) removeSession(w http.ResponseWriter, r *http.Request, sid string) {
 	row := h.artifact(w, r, sid)
 	if row == nil {
 		return

@@ -1,0 +1,97 @@
+/* The PDF pages of the review mode: a canvas per page with pdf.js's text layer over it (transparent
+   text, so a selection is real text) and the request highlights over that. Only --chat-* tokens
+   here (the theme contract); the text layer's own geometry is set inline by PdfPages. */
+
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.pdf-page {
+  position: relative;
+  width: 100%;
+  background: #fff;
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--chat-fg) 25%, transparent);
+  border: 1px solid var(--chat-border);
+  box-sizing: content-box;
+  overflow: hidden;
+}
+
+.pdf-page canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* pdf.js's text layer: absolutely positioned runs of transparent text, scaled per run. */
+.pdf-page .textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  z-index: 1;
+}
+
+.pdf-page .textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+.pdf-page .textLayer .markedContent {
+  display: contents;
+}
+
+.pdf-page .textLayer ::selection {
+  background: color-mix(in srgb, var(--chat-accent) 35%, transparent);
+}
+
+/* The highlights: one box per line of a matched quote, under the text layer so text stays
+   selectable but above the canvas; the box itself takes the pointer for hover. */
+.pdf-hl-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.pdf-hl {
+  position: absolute;
+  pointer-events: auto;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--chat-warning) 30%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--chat-warning) 45%, transparent);
+}
+
+.pdf-hl.done {
+  background: color-mix(in srgb, var(--chat-success) 25%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--chat-success) 40%, transparent);
+}
+
+.pdf-hl.declined {
+  background: color-mix(in srgb, var(--chat-muted-2) 20%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--chat-muted-2) 35%, transparent);
+}
+
+.pdf-hl.focus {
+  background: color-mix(in srgb, var(--chat-accent) 30%, transparent);
+  box-shadow: 0 0 0 2px var(--chat-accent);
+}
+
+.pdf-page-placeholder {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--chat-surface-2) 30%, #fff);
+}

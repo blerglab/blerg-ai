@@ -666,6 +666,40 @@ describe('LaunchSheet — Run column rules', () => {
     expect(screen.getByTestId('runtime-docker')).not.toBeDisabled()
   })
 
+  // Unattended: one box, off by default, and the launch always says which.
+  it('launches interactive unless Unattended is ticked', async () => {
+    await renderSheet()
+    const box = screen.getByTestId('unattended-toggle')
+    expect(box).not.toBeChecked()
+    expect(screen.getByLabelText(/Unattended/)).toBe(box)
+    expect(screen.getByTestId('launch-unattended')).toHaveTextContent(
+      'Nobody is watching: the agent decides and finishes on its own instead of discussing and waiting for you.',
+    )
+    fireEvent.click(screen.getByText(/Launch/))
+    await waitFor(() => expect(captureBody.value).toBeDefined())
+    expect(captureBody.value!.interaction).toBe('interactive')
+  })
+
+  it('launches unattended when the box is ticked', async () => {
+    await renderSheet()
+    fireEvent.click(screen.getByTestId('unattended-toggle'))
+    expect(screen.getByTestId('unattended-toggle')).toBeChecked()
+    fireEvent.click(screen.getByText(/Launch/))
+    await waitFor(() => expect(captureBody.value).toBeDefined())
+    expect(captureBody.value!.interaction).toBe('unattended')
+  })
+
+  it('offers Unattended for an agent session only, and a terminal launch sends none', async () => {
+    await renderSheet()
+    fireEvent.click(screen.getByTestId('unattended-toggle'))
+    fireEvent.click(screen.getByTestId('kind-tmux'))
+    expect(screen.queryByTestId('unattended-toggle')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText(/Launch/))
+    await waitFor(() => expect(captureBody.value).toBeDefined())
+    expect(captureBody.value!.kind).toBe('tmux')
+    expect('interaction' in captureBody.value!).toBe(false)
+  })
+
   it('shows the permissions toggle only for a terminal session in the sandbox', async () => {
     await renderSheet()
     // Agent kind: a note, no toggle.
@@ -1812,6 +1846,8 @@ describe('LaunchSheet MCP servers', () => {
     fireEvent.click(await screen.findByTestId('mcp-customize-calendar'))
     await screen.findByTestId('mcp-tool-calendar-read')
     fireEvent.change(screen.getByLabelText('calendar read mode'), { target: { value: 'allow' } })
+    // A session with connections is private to the person, and keeps its tools.
+    expect(screen.getByTestId('launch-mcp-private')).toHaveTextContent(/private to you/)
     const body = await launch()
     expect(body.mcp).toEqual([{ connection: 'c1', tools: { read: { mode: 'allow', hash: 'h-read' } } }])
   })

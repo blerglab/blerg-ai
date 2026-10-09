@@ -346,11 +346,23 @@ func TestBuildSystemPromptLayers(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, "CLAUDE.md"), []byte("PROJECT RULES"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	prompt := BuildSystemPrompt(workDir, homeDir, nil, agent.DiscoverAgentTypes(workDir, homeDir))
-	for _, want := range []string{"check_in", "USER RULES", "PROJECT RULES", "general-purpose"} {
+	prompt := BuildSystemPrompt(workDir, homeDir, nil, agent.DiscoverAgentTypes(workDir, homeDir), "")
+	for _, want := range []string{"check_in", "USER RULES", "PROJECT RULES", "general-purpose", "This session is interactive"} {
 		if !containsStr(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
 		}
+	}
+	// The mode's paragraph comes before the person's own instructions, and an unattended
+	// session gets the other one.
+	if indexOf(prompt, "This session is interactive") > indexOf(prompt, "USER RULES") {
+		t.Fatal("the interaction paragraph must come before the user's instructions")
+	}
+	unattended := BuildSystemPrompt(workDir, homeDir, nil, nil, protocol.InteractionUnattended)
+	if !containsStr(unattended, "This session is unattended") || containsStr(unattended, "This session is interactive") {
+		t.Fatalf("an unattended session's prompt states the wrong mode")
+	}
+	if interactive := BuildSystemPrompt(workDir, homeDir, nil, nil, protocol.InteractionInteractive); !containsStr(interactive, "This session is interactive") {
+		t.Fatalf("an interactive session's prompt does not say so")
 	}
 }
 

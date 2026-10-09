@@ -45,7 +45,7 @@ describe('SessionList — where sessions run', () => {
   beforeEach(() => {
     localStorage.clear()
     useSessionStore.setState({ daemons: [], sessions: [], statusChangedAt: {}, serverVersion: '' })
-    useMessageStore.setState({ messages: [], lastSeenAt: Date.now() + 9_999_999 })
+    useMessageStore.setState({ messages: [] })
   })
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -133,7 +133,7 @@ describe('SessionList — focus across runtimes', () => {
   beforeEach(() => {
     localStorage.clear()
     useSessionStore.setState({ daemons: [], sessions: [], statusChangedAt: {}, serverVersion: '' })
-    useMessageStore.setState({ messages: [], lastSeenAt: Date.now() + 9_999_999 })
+    useMessageStore.setState({ messages: [] })
     stubCluster({ configured: true, max_sessions: 5, active_sessions: 2 })
   })
   afterEach(() => {

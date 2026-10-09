@@ -133,13 +133,21 @@ Paths are relative to the runner's `base_url`.
 | `GET` | `/api/runner/me` | credential introspection | `404` when the contract is not configured |
 | `GET` | `/api/models/{engine}` | the models (and each one's effort levels) a session on that engine can use | see [Model lists](#model-lists); also readable with a browser session |
 | `POST` | `/api/runner/start` | start a session | `202 {session_id}`; honours `Idempotency-Key` |
-| `GET` | `/api/runner/sessions/{id}` | status | `{lifecycle, runtime, resumable, auto_stop, error_reason, end_reason, ended_by}` |
+| `GET` | `/api/runner/sessions/{id}` | status | `{lifecycle, runtime, resumable, auto_stop, interaction, error_reason, end_reason, ended_by}` |
 | `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?}` → `202`; resumes a disconnected cluster session |
 | `POST` | `/api/runner/sessions/{id}/interrupt` | cancel the in-flight turn | `202`; `409` when there is no live runtime |
 | `POST` | `/api/runner/sessions/{id}/stop` | end the session | `200 {"status":"stopped"}`; idempotent. Finished work **must** call this or cluster session slots leak |
-| `GET` | `/api/runner/sessions/{id}/events` | transcript window | `?after_seq=&limit=` → `{events, has_more}` |
+| `GET` | `/api/runner/sessions/{id}/events` | transcript window | `?after_seq=&limit=` → `{events, has_more}`; `?before_seq=&limit=` pages backwards → adds `has_older, first_seq, server_time` |
 | `GET` | `/api/runner/sessions/{id}/events/stream` | the same events as SSE | resumable with `Last-Event-ID` |
+| `GET` | `/api/runner/sessions/{id}/events/live` | the live transcript as SSE: replay, events, typing deltas, status | see [Following a session](#following-a-session) |
 | `GET` | `/api/runner/sessions/{id}/result` | structured outcome | one object instead of a replayed transcript |
+| `GET` | `/api/runner/sessions/{id}/artifacts` | the session's files | `{artifacts: [...]}`, newest first; see [Session files](#session-files) |
+| `GET` | `/api/runner/sessions/{id}/artifacts/{aid}/raw` | one file's bytes for a viewer | server-chosen type, `nosniff`, `CSP: sandbox` |
+| `GET` | `/api/runner/sessions/{id}/artifacts/{aid}/download` | one file's bytes as an attachment | `Content-Disposition` with its name |
+| `DELETE` | `/api/runner/sessions/{id}/artifacts/{aid}` | delete one file | `204`; any origin |
+| `POST` | `/api/runner/sessions/{id}/uploads` | attach a person's file | raw body + `X-Artifact-Name` → `201`; the app vouches for the person |
+| `GET` | `/packages/` | the UI packages this runner serves | public; see [UI package](#ui-package) |
+| `GET` | `/packages/{file}` | a package tarball | public, immutable |
 | `POST` | `/mcp` | MCP server (JSON-RPC 2.0) | the same seven operations as tools |
 
 Every `/api/runner/sessions/{id}` route answers `404 session not found` for an id that does not
@@ -165,6 +173,7 @@ exist — and for one the calling credential may not see (see
 | `callback_url` | no | where to POST the result when the session ends |
 | `callback_secret` | no | HMAC key signing that callback. Stored to sign with; never returned by any endpoint, never logged |
 | `auto_stop` | no | one-shot: end the session as soon as its first turn is done. `false` by default |
+| `interaction` | no | `interactive` or `unattended`: whether a person is reading the session's chat as it works. `unattended` by default on this contract. See [Interactive and unattended](#interactive-and-unattended) |
 
 Validation, and the status each failure answers with:
 
@@ -178,7 +187,8 @@ Validation, and the status each failure answers with:
   [`BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE=true`](#server-cmdserver) — the desktop compose stack does,
   a cluster install does not, so there a loopback callback is refused here rather than accepted and
   then silently undeliverable).
-- `400` — malformed JSON, or a malformed `Idempotency-Key`.
+- `400` — malformed JSON, a malformed `Idempotency-Key`, or an `interaction` that is neither
+  `interactive` nor `unattended`.
 - `401` — missing, expired, revoked or under-capable credential. `404` — the contract is not
   configured, or (on the session routes) no such session.
 - `503` — nothing can take the session: no connected daemon has the repo, the cluster refused the
@@ -213,6 +223,33 @@ A later turn on an auto-stopped session — a re-delivered event, a session that
 another — changes nothing: the stop happens exactly once, and a session that was already stopped,
 ended or failed is left alone. Leave the flag off (the default) whenever you intend to send the
 session more messages.
+
+### Interactive and unattended
+
+An agent session runs its engine headless, and an engine in that mode assumes nobody is watching:
+it treats a remark as a work order and says nothing between tool calls. Whether somebody is
+watching is a fact about the session, so it is set when the session starts, as `interaction`, and
+the engine is told in its system prompt:
+
+- `interactive`: a person is reading the chat as the session works, and answers there. The agent is
+  told that everything it writes appears in their chat as it is written, to answer a remark or a
+  question and talk it through before changing anything, to ask and end its turn when the decision
+  is theirs, and to say what it is about to do and what it found as it goes.
+- `unattended`: nobody is reading. The agent is told not to stop and wait for an answer in the
+  chat, to make the reasonable decision and write down the assumption it made, and to end with a
+  summary that stands on its own. `blerg-runner ask` still reaches a person for a decision only
+  they can make.
+
+`POST /api/runner/start` and the `start_session` MCP tool default to `unattended`, which is what a
+tool's job or a board card run is; pass `interaction: "interactive"` when a person will follow the
+session as a conversation. A session started in the app (the launch sheet, `POST /api/sessions`)
+defaults to `interactive` and accepts the same field. A session a cron starts is always
+`unattended`, whatever was asked. Any other value is a `400`.
+
+The mode is fixed at start, kept across a cluster resume, and reported back as `interaction` by
+`GET …/sessions/{id}` and in the session objects of `GET /api/sessions`. A restricted session (a
+cron's, or one the board starts with MCP connections) gets no appended system prompt at all, as
+before. A daemon older than the field ignores it and behaves as it always did.
 
 ### Lifecycle
 
@@ -347,6 +384,27 @@ after 15 s of silence. When the session becomes terminal the stream sends a fina
 `event: end` whose `data` is the full result body, then closes. A `404` for an unknown session is
 an ordinary error response, never an empty stream.
 
+**Live stream.** `GET …/events/live` is what the runner's own browser gets over its websocket,
+for the credential that started the session: it is fed by the hub, not by polling the table, so
+it carries the typing deltas and the status changes the polling stream cannot. It is what a chat
+UI (`@blerglab/chat`, below) wants; a broker that only needs the durable record should keep
+using `…/events/stream`. Frames are `event: <type>` + `data: <json>`, with `id: <seq>` on
+persisted events only:
+
+| Frame | Data | When |
+|---|---|---|
+| `agent_event` | the event as the browser receives it: `{type, session_id, client_event_id, seq, ts, kind, payload}`; a typing delta has `transient: true` and no `seq` | the opening page, then live |
+| `replay_done` | `{session_id, last_seq, has_more, server_time}`; with `tail=1` also `older: true, has_older, first_seq` | once, after the opening page |
+| `status` | `{session_id, status}` — `starting`, `running`, `waiting`, `idle`, `disconnected`, `stopped`, `ended` or `error` — plus `message`, `end_reason`, `ended_by` when known | once at open, then on every change |
+| `end` | the result body | when the session is over; the stream then closes |
+
+`?after_seq=N` replays forward from a cursor; `?tail=1&limit=200` opens from the end of the
+transcript with the newest page, and the older part follows from
+`GET …/events?before_seq=<first_seq>&limit=` (oldest first, `has_older` until the start). An
+event may arrive both in the replay and live; deduplicate on `client_event_id`, as the browser
+does. A `: keepalive` comment goes out after 15 s of silence. A `404` for a session the
+credential may not see is an ordinary error response, never an empty stream.
+
 **Webhook.** A session started with a `callback_url` gets one `POST` of the same result body when
 it reaches a terminal lifecycle — including a session that died before it began, and a session
 ended by `stop`.
@@ -395,6 +453,45 @@ return the same object, with every field always present:
 `last_assistant_message` is the newest completed assistant turn (streaming deltas are not
 persisted), found within the last 400 events. `artifacts` is reserved and always empty in v1.
 There is deliberately no `callback_secret` field.
+
+### Session files
+
+The files of a session — what its agent published with `blerg-runner publish`, and what a person
+attached from the chat — are reachable with the same credential that drives it, under the same
+rule as `message`: an agent token reaches the sessions its owner started, a private session only
+its owner, and anything else is the uniform `404`. The handlers are the browser routes' own, so
+the bytes, the server-classified content type, the hardening headers (`nosniff`,
+`Content-Security-Policy: sandbox`, `no-store`) and the caps are identical.
+
+| Request | Answers |
+|---|---|
+| `GET …/artifacts` | `{artifacts: [{id, name, size, content_type, view, origin, version, latest_version, created_at}]}`, newest first. `origin` is `agent` or `user`; a file published again under the same name is the next `version` of it |
+| `GET …/artifacts/{aid}/raw` | the bytes for an in-app viewer: images and PDFs with their type, everything else as `application/octet-stream` |
+| `GET …/artifacts/{aid}/download` | the bytes as an attachment, named after the file (an older version as `<stem>-v<N><ext>`) |
+| `DELETE …/artifacts/{aid}` | `204`. Whoever may see the session may delete its files, whichever origin they came from |
+| `POST …/uploads` | the body is the file, `X-Artifact-Name` (percent-encoded) or `?name=` its name; stored with `origin: user` and attributed to the account the credential acts for. `201` with the stored file (`previous` is the version it follows). 25 MiB per file, 20 attachments and 200 MiB per session, 20 versions per name; `409` on an ended session or a reached cap |
+
+An `artifact` event in the transcript announces each file the agent publishes, with the same
+fields as a list entry minus `latest_version` and `created_at`.
+
+### UI package
+
+The chat surface the runner's own web app is built on is a package, `@blerglab/chat`, that an
+app built on this contract can install from the runner itself and wire to its own backend. A
+build that packed it (the frontend build writes `frontend/dist/packages/manifest.json`, the
+tarball and the README beside it) serves:
+
+| Request | Answers |
+|---|---|
+| `GET /packages/` | `{packages: [{name, version, file, sha512, url}]}` |
+| `GET /packages/<file>` | the tarball, `application/gzip`, `Cache-Control: public, max-age=31536000, immutable`. `npm i <url>` works from anywhere that reaches the runner; `sha512` is the integrity string for a lockfile |
+| `GET /packages/@blerglab/chat/README.md` | the package's README, `text/markdown` |
+
+and `GET /agents` advertises it as `ui.chat_package: {name, version, url, sha512, docs_url}`
+(the Markdown rendering gets a "UI" section), so a session reading the manifest learns what to
+install, how to pin it and where to read. All of it is public, like `/agents`; only the names
+the manifest lists are ever served. A build without the package serves nothing, carries no `ui`
+field, and answers `404` on `/packages/`.
 
 ### MCP
 
@@ -865,7 +962,8 @@ requires reading Go source to discover.
 Set by the runner itself on a session, never by you: `BLERG_RUNNER_MCP_CONFIG` (the JSON of the
 session's MCP server entries and gateway tokens, from a per-session Secret for a pod, written to a
 `0600` file and then removed from the environment before the agent starts) and
-`BLERG_RUNNER_RESTRICT_TOOLS` (the built-in tool allow-list of a restricted session). Neither is
+`BLERG_RUNNER_RESTRICT_TOOLS` (the built-in tool allow-list of a restricted session: a cron's, or a
+board-started session with connections; a launch-sheet session is never restricted). Neither is
 accepted from a request's `env`.
 
 Not environment variables, but worth knowing they exist: the session reconciler's windows are
@@ -884,7 +982,7 @@ dropped after 30 min. See ["When nobody is watching"](#what-runs-as-you-means) a
 | `BLERG_RUNNER_DAEMON_NAME` | no | hostname | how this daemon identifies itself |
 | `BLERG_RUNNER_DAEMON_MODE` | no | `local` | daemon mode tag |
 | `BLERG_RUNNER_SERVER_HTTP` | no | — | server's HTTP base, for the messages/data-plane APIs |
-| `BLERG_RUNNER_PREVIEW_URL` | no | — | preview link surfaced to sessions |
+| `BLERG_RUNNER_PREVIEW_URL` | no | — | **deprecated**: only read to derive the server URL when `BLERG_RUNNER_SERVER_HTTP` is unset (a value ending in `/api/preview` gives the base before it, and the daemon logs a line asking you to set `BLERG_RUNNER_SERVER_HTTP`). It is not passed to sessions |
 | `ANTHROPIC_API_KEY` | no | — | enables the native tool-calling loop (metered) — used by a host Claude agent session only when `claude` is not on the daemon's PATH (with `claude` installed, it runs your Claude Code login) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | no | — | enables the subscription-billed claude-code driver instead |
 | `BLERG_RUNNER_AGENT_BUDGET_USD` | no | `25` | hard per-session cost cap for the native loop |

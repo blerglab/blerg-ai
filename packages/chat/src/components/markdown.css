@@ -1,0 +1,138 @@
+/* Rendered chat Markdown. Compact: this lives inside chat cards, so block
+   margins are tight and the first/last child sit flush with the card edge. */
+.md {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+
+.md p,
+.md ul,
+.md ol,
+.md blockquote,
+.md .md-codeblock,
+.md .md-card,
+.md .md-table-wrap {
+  margin: 0 0 0.6em;
+}
+
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+  margin: 0.8em 0 0.4em;
+  line-height: 1.25;
+  font-weight: 650;
+}
+.md h1 { font-size: 1.3em; }
+.md h2 { font-size: 1.18em; }
+.md h3 { font-size: 1.06em; }
+.md h4, .md h5, .md h6 { font-size: 1em; }
+
+.md ul, .md ol { padding-left: 1.4em; }
+.md li + li { margin-top: 0.15em; }
+.md li > p { margin: 0; }
+.md li input[type='checkbox'] { margin: 0 0.35em 0 0; vertical-align: middle; }
+
+.md a {
+  color: var(--chat-info);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md blockquote {
+  padding: 0.1em 0 0.1em 0.8em;
+  border-left: 3px solid var(--chat-border);
+  color: var(--chat-muted);
+}
+
+.md hr {
+  border: none;
+  border-top: 1px solid var(--chat-border);
+  margin: 0.8em 0;
+}
+
+.md code {
+  font-family: var(--chat-font-mono);
+  font-size: 0.92em;
+  background: color-mix(in srgb, var(--chat-border) 45%, transparent);
+  border-radius: 4px;
+  padding: 0.08em 0.35em;
+}
+
+.md-codeblock {
+  position: relative;
+}
+
+.md-codeblock pre {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--chat-bg);
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  overflow-x: auto;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs);
+  line-height: 1.45;
+}
+
+.md-codeblock pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+.md-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: var(--chat-surface-2);
+  color: var(--chat-muted);
+  border: 1px solid var(--chat-border);
+  border-radius: 5px;
+  font-size: 11px;
+  padding: 1px 7px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.md-codeblock:hover .md-copy,
+.md-copy:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .md-copy { opacity: 0.8; }
+}
+
+/* A card fence whose body did not parse: the raw block, and one line saying why. */
+.md-card-note {
+  margin: 2px 0 0;
+  font-size: var(--chat-text-xs);
+  color: var(--chat-muted-2);
+}
+
+.md-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+.md table {
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+.md th, .md td {
+  border: 1px solid var(--chat-border);
+  padding: 3px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.md th {
+  background: color-mix(in srgb, var(--chat-border) 35%, transparent);
+  font-weight: 600;
+}
+
+.md-link-inert {
+  text-decoration: underline dotted;
+}

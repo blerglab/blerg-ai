@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import SessionList from './components/SessionList'
+import UpdateBanner from './components/UpdateBanner'
 import SessionsHome from './components/SessionsHome'
 import SessionDetail from './components/SessionDetail'
-import ChatRollup from './components/ChatRollup'
 import LaunchSheet from './components/LaunchSheet'
-import { PreviewTab } from './components/PreviewTab'
 import ClusterStatus from './components/ClusterStatus'
 import Insights from './components/Insights'
 import CronsPage from './components/CronsPage'
@@ -161,23 +160,6 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
         Boards
       </button>
       <button
-        onClick={() => navigate('/preview')}
-        style={{
-          flex: 1,
-          padding: '12px',
-          textAlign: 'center',
-          color: isActive('/preview') ? 'var(--chalk)' : 'var(--fog-dim)',
-          fontSize: '14px',
-          cursor: 'pointer',
-          background: 'none',
-          border: 'none',
-          fontFamily: 'inherit',
-          letterSpacing: '0.05em',
-        }}
-      >
-        Preview
-      </button>
-      <button
         onClick={() => navigate('/crons')}
         style={{
           flex: 1,
@@ -272,9 +254,7 @@ function Layout() {
 
   const routes = (
     <Routes>
-      {/* The Chat inbox is not offered in the navigation for now; it stays reachable by URL. */}
       <Route path="/" element={<Navigate to="/sessions" replace />} />
-      <Route path="/chat" element={<ChatRollup />} />
       {/* On a phone /sessions IS the list. Beside the sidebar it would be a second copy of it, so the
           wide layout shows a prompt instead. */}
       <Route
@@ -288,7 +268,6 @@ function Layout() {
       <Route path="/boards/:id" element={<BoardView />} />
       <Route path="/boards/:id/ticket/:ticketId" element={<TicketDetail />} />
       <Route path="/boards/:id/archive" element={<ArchiveView />} />
-      <Route path="/preview" element={<PreviewTab />} />
       <Route path="/cluster" element={<ClusterStatus />} />
       <Route path="/crons" element={<CronsPage />} />
       <Route path="/proposals" element={<Proposals />} />
@@ -306,6 +285,7 @@ function Layout() {
           paddingBottom: '60px',
         }}
       >
+        <UpdateBanner />
         <AppHeader />
         {routes}
         <TabBar clusterConfigured={clusterConfigured} />
@@ -326,6 +306,7 @@ function Layout() {
         overflow: 'hidden',
       }}
     >
+      <UpdateBanner />
       <AppHeader />
       <div style={{ display: 'flex', flexDirection: 'row', flex: 1, minHeight: 0 }}>
         <SessionList variant="sidebar" onNewSession={() => setLaunchOpen(true)} />

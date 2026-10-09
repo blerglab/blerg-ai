@@ -12,6 +12,7 @@ var toolDefs = []map[string]any{
 			"Poll get_session, or pass callback_url to be told when it ends. " +
 			"For a one-shot task, pass auto_stop: the runner ends the session itself when the first turn is done, " +
 			"so get_result reports terminal with the answer in last_assistant_message. " +
+			"A session you start is unattended unless you pass interaction: \"interactive\" (only when a person will follow its chat as it works). " +
 			"ALWAYS pass idempotency_key when a retry is possible: the same key replays the first start instead of spawning a second session.",
 		"inputSchema": obj(props{
 			"repo":            str("repo to work in: a folder name, or org/name. Required unless no_repo is true"),
@@ -23,6 +24,7 @@ var toolDefs = []map[string]any{
 			"engine":          str("coding engine (empty = claude)"),
 			"runtime":         strEnum(`where to run it: "cluster" (a cluster Job), "docker" (the local sandbox container on a connected daemon) or "daemon" (that daemon's bare host). Empty = cluster where one is configured, else docker when the daemon has the sandbox image, else daemon. The sandbox has no git credentials (its agent can commit but not push) — pass "daemon" for work that must push or needs the host`, "cluster", "docker", "daemon"),
 			"auto_stop":       boolean("one-shot: stop the session as soon as its first turn is done (default false, i.e. it stays up for more messages)"),
+			"interaction":     strEnum(`whether a person is reading the session's chat as it works: "unattended" (the default: the agent decides, notes its assumptions and ends with a summary that stands on its own) or "interactive" (a person is reading and answers in the chat, so the agent talks things through and asks before changing anything). Any other value is refused`, "interactive", "unattended"),
 			"idempotency_key": str("retry key, up to 128 characters: the same key and body replays the original start"),
 			"callback_url":    str("https URL POSTed the result when the session reaches a terminal state (plain http only to localhost, and only on an install that allows private callback targets)"),
 			"callback_secret": str("HMAC key signing that callback; stored, never returned by any endpoint"),

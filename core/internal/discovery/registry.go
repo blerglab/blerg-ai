@@ -83,6 +83,7 @@ func (r *Registry) Aggregate(ctx context.Context) (agentsmanifest.AggregateManif
 			e.MCPURL = stored.MCPURL
 			e.Auth = stored.Auth
 			e.Operations = stored.Operations
+			e.UI = stored.UI
 		}
 		out.Components = append(out.Components, e)
 	}

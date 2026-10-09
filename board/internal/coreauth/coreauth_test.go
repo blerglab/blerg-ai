@@ -19,8 +19,8 @@ import (
 // anything, matching a freshly-refreshed coreauth.Client.
 type fakeRev struct{}
 
-func (fakeRev) Revoked(_, _, _ string) bool { return false }
-func (fakeRev) StaleBeyondCeiling() bool    { return false }
+func (fakeRev) Revoked(_, _, _, _ string) bool { return false }
+func (fakeRev) StaleBeyondCeiling() bool       { return false }
 
 // mint signs a core-minted-style token: header {"alg":"EdDSA","kid":kid} and
 // the given claims, exactly like blerg-core would produce.
@@ -196,7 +196,7 @@ func TestClientRevocationScopedByIssuedAt(t *testing.T) {
 	// A "kid" entry is unconditional (the client only has core-1's key, so use
 	// the set directly).
 	c.revMu.RLock()
-	dead := c.revoked.RevokedFor("core-dead", "", "anyone", time.Now().Unix()+3600)
+	dead := c.revoked.RevokedFor("core-dead", "", "anyone", "", time.Now().Unix()+3600)
 	c.revMu.RUnlock()
 	if !dead {
 		t.Fatal("kid revocation must apply regardless of iat")

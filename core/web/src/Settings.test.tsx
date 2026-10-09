@@ -106,6 +106,20 @@ function buildTokenFetchMock(
         json: () => Promise.resolve({ ...created, token: "blergat_secret_value" }),
       });
     }
+    if (url.startsWith("/api/tokens/") && url.endsWith("/remint") && method === "POST") {
+      const id = url.slice("/api/tokens/".length, -"/remint".length);
+      const old = store.tokens.find((t) => t.id === id)!;
+      store.tokens = store.tokens.map((t) =>
+        t.id === id ? { ...t, revoked_at: "2026-09-20T00:00:00Z" } : t,
+      );
+      const created = tokenFixture({ id: id + "_v2", name: old.name, aud: old.aud });
+      store.tokens = [...store.tokens, created];
+      return Promise.resolve({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ ...created, token: "blergat_reminted_value" }),
+      });
+    }
     if (url.startsWith("/api/tokens/") && method === "DELETE") {
       const id = url.slice("/api/tokens/".length);
       store.tokens = store.tokens.map((t) =>
@@ -336,6 +350,26 @@ describe("Settings — agent tokens", () => {
     );
     // A revoked token offers no second Revoke.
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+
+  it("re-mints a token: the old row is revoked, the new value is revealed once under the same name", async () => {
+    store.tokens = [tokenFixture({ id: "tok_9", name: "literary-agent" })];
+    render(<Settings />);
+    await screen.findByText("literary-agent");
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-mint" }));
+
+    const reveal = await screen.findByLabelText("New token");
+    expect((reveal as HTMLInputElement).value).toBe("blergat_reminted_value");
+    await waitFor(() => {
+      // The name also appears in the reveal panel; only table rows carry a status.
+      const rows = screen
+        .getAllByText("literary-agent")
+        .map((el) => el.closest("tr"))
+        .filter((r): r is HTMLTableRowElement => r !== null);
+      expect(rows.some((r) => r.textContent?.includes("Revoked"))).toBe(true);
+      expect(rows.some((r) => r.textContent?.includes("Active"))).toBe(true);
+    });
   });
 
   it("says the session expired rather than claiming there are no tokens, on a 401", async () => {

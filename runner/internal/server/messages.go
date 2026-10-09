@@ -158,8 +158,8 @@ func (a *API) pushForMessage(sess db.SessionRow, msg db.MessageRow) {
 	case "note":
 		heading = label + " — note"
 	}
-	// Land on the roll-up chat (mobile "/"), where the user can read and reply.
-	SendPush(a.dbPool, heading, msg.Body, "/")
+	// Land on the session, where the user can read and reply.
+	SendPush(a.dbPool, heading, msg.Body, "/sessions/"+sess.ID)
 }
 
 type answerResponse struct {

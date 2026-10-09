@@ -52,9 +52,9 @@ func reportWorkspaceReady(ctx context.Context, cfg Config, stages *stageReporter
 		log.Printf("runner: plugins: ignoring BLERG_RUNNER_PLUGINS: %v", cfg.PluginsErr)
 	}
 	engineActive := active(protocol.StageEngine, "Starting the engine")
-	// A session holding an MCP gateway grant runs unattended on untrusted text
-	// with a narrowed tool list: no plugin (code, hooks, MCP servers of its
-	// own) is installed into it, whatever the operator's always-on list says.
+	// A restricted session runs unattended on untrusted text with a narrowed
+	// tool list: no plugin (code, hooks, MCP servers of its own) is installed
+	// into it, whatever the operator's always-on list says.
 	if len(cfg.Plugins) == 0 || cfg.skipsUserConfig() || (cfg.Engine != "" && cfg.Engine != pluginspec.EngineClaude) {
 		stages.report(done(protocol.StageClone), engineActive)
 		return

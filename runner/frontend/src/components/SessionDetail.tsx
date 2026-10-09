@@ -1,4 +1,5 @@
 import { useParams, useNavigate } from 'react-router-dom'
+import { isAutomated, startedByLabel } from '../lib/startedBy'
 import { useRef, useState, useEffect, useMemo } from 'react'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { useToastStore } from '../hooks/useToastStore'
@@ -9,19 +10,17 @@ import { arrowSeq, KEY_SEQ, type ArrowDir } from '../terminalKeys'
 import { sessionViewportBox } from '../terminalRenderer'
 import TerminalDOMView, { type TerminalHandle } from './TerminalDOMView'
 import AgentChatView from './AgentChatView'
-import { MessageThread } from './ChatRollup'
+import { MessageThread } from './MessageThread'
 import { apiFetch } from '../apiFetch'
-import StartProgress from './StartProgress'
+import { StartProgress, placeholderAttempt, describeSessionEnd } from '@blerglab/chat'
 import CapabilitiesPanel from './CapabilitiesPanel'
-import { placeholderAttempt } from '../lib/startStages'
-import { describeSessionEnd } from '../lib/sessionEnd'
 import { isNoRepo, repoLabel } from '../lib/noRepo'
 
 // PendingStart is the start panel shown before the server has announced the
 // session; its clock starts when it first shows.
 function PendingStart() {
   const [since] = useState(() => Date.now())
-  return <StartProgress attempt={placeholderAttempt(since)} canStop={false} />
+  return <StartProgress attempt={placeholderAttempt(since)} />
 }
 
 export default function SessionDetail() {
@@ -162,6 +161,8 @@ export default function SessionDetail() {
   // deletes the Job and marks the session stopped.
   const isActive = session.status === 'running' || session.status === 'idle' || session.status === 'waiting' || session.status === 'starting' || session.status === 'disconnected'
   const isAgent = session.kind === 'agent'
+  // The Messages tab exists for terminal sessions only (see the tab toggle below).
+  const showMessages = !isAgent && activeTab === 'chat'
   const endLine = describeSessionEnd(session)
 
   // A live cluster session can be paused: its pod is freed, the session stays and a message resumes it.
@@ -267,6 +268,11 @@ export default function SessionDetail() {
             </div>
           )}
           <div style={{ fontSize: 12, color: 'var(--fog)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {isAutomated(session) && <span data-testid="detail-started-by">started by {startedByLabel(session)} · </span>}
+            {/* Fixed at start; an interactive session is the ordinary case and goes unmarked. */}
+            {session.interaction === 'unattended' && (
+              <span data-testid="detail-unattended" title="Started unattended: the agent does not wait for you in the chat">Unattended · </span>
+            )}
             {daemon?.name ?? session.daemon_id} · {session.project_path}
             {session.model ? ` · ${session.model.replace(/^claude-/, '')}` : ''}
             {session.effort ? ` · ${session.effort}` : ''}
@@ -467,8 +473,11 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {/* Tab toggle — Terminal / Chat */}
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--stone)', background: 'var(--basalt)', flexShrink: 0 }}>
+      {/* Tab toggle — Terminal / Messages. Terminal sessions only: an agent session shows its
+          asks, updates and notes in its own conversation and is answered from its composer, so
+          it has one view and no tabs. A terminal has no conversation, so the messages its
+          `blerg-runner ask/update/note` sends (and the box to answer an ask) are a tab. */}
+      {!isAgent && <div style={{ display: 'flex', borderBottom: '1px solid var(--stone)', background: 'var(--basalt)', flexShrink: 0 }}>
         <button
           data-testid="tab-terminal"
           onClick={() => setActiveTab('terminal')}
@@ -485,7 +494,7 @@ export default function SessionDetail() {
             fontWeight: activeTab === 'terminal' ? 600 : 400,
           }}
         >
-          {isAgent ? 'Session' : 'Terminal'}
+          Terminal
         </button>
         <button
           data-testid="tab-chat"
@@ -503,12 +512,12 @@ export default function SessionDetail() {
             fontWeight: activeTab === 'chat' ? 600 : 400,
           }}
         >
-          Chat
+          Messages
         </button>
-      </div>
+      </div>}
 
-      {/* Terminal / agent region — always mounted; hidden when chat tab is active */}
-      <div style={{ position: 'relative', flex: 1, overflow: 'hidden', minHeight: 0, ...(activeTab === 'chat' ? { display: 'none' } : {}) }}>
+      {/* Terminal / agent region — always mounted; hidden when the Messages tab is active */}
+      <div style={{ position: 'relative', flex: 1, overflow: 'hidden', minHeight: 0, ...(showMessages ? { display: 'none' } : {}) }}>
         {isAgent
           // Keyed by id: draft, pending turn and notices belong to one
           // session and must not carry over when the route switches sessions.
@@ -516,8 +525,8 @@ export default function SessionDetail() {
           : <TerminalDOMView sessionId={sessionId ?? ''} ref={termRef} />}
       </div>
 
-      {/* Chat region — only rendered when chat tab is active */}
-      {activeTab === 'chat' && (
+      {/* Messages — only rendered when its tab is active */}
+      {showMessages && (
         <div style={{ flex: 1, overflow: 'auto', minHeight: 0, background: 'var(--basalt)' }}>
           <MessageThread messages={sessionMessages} hideSessionLabel />
         </div>

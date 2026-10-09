@@ -1,0 +1,45 @@
+/* The theming contract of @blerglab/chat. Every stylesheet in the package reads these and
+   nothing else (theme/tokens.test.ts enforces it). An app themes the chat by setting them — in
+   its own stylesheet, through blerg.css, or with a ThemeTokens object on ChatView — and light or
+   dark follows whatever the app's values do. The values here are only a fallback: a neutral dark
+   scheme so a chat with no theme at all still reads. */
+:root {
+  /* Surfaces, from the page back to the raised card. */
+  --chat-bg: #0f1217;
+  --chat-surface: #171b22;
+  --chat-surface-2: #1f242d;
+
+  /* Text. */
+  --chat-fg: #f0f3f7;
+  --chat-muted: #bfc7d2;
+  --chat-muted-2: #8a94a3;
+
+  /* The accent (actions, the person's own messages) and the text drawn on top of it. */
+  --chat-accent: #ff6a3d;
+  --chat-accent-fg: #ffffff;
+
+  /* Status. */
+  --chat-success: #63d68b;
+  --chat-warning: #e8b13d;
+  --chat-info: #4c9bff;
+  --chat-danger: #ff6b63;
+
+  /* Lines and shape. */
+  --chat-border: #313a48;
+  --chat-radius: 10px;
+
+  /* Type. */
+  --chat-font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --chat-font-mono: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+  --chat-text-xs: 12px;
+  --chat-text-sm: 13px;
+
+  /* The spacing unit: paddings and gaps are multiples of it. 1 = the runner's density. */
+  --chat-density: 1;
+
+  /* One background per kind of card. */
+  --chat-card-user-bg: color-mix(in srgb, var(--chat-accent) 10%, var(--chat-surface-2));
+  --chat-card-assistant-bg: var(--chat-surface);
+  --chat-card-tool-bg: var(--chat-bg);
+  --chat-card-system-bg: var(--chat-surface-2);
+}

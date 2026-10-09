@@ -317,16 +317,15 @@ func (d Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		// leaving a known-dead value sitting in the browser for a future request to retry.
 		http.SetCookie(w, d.cookie(refreshCookieName, "", http.SameSiteStrictMode, -1))
 		if errors.Is(err, identity.ErrSessionReplayed) {
-			// The request that tripped the account-wide revocation: where it came from, for diagnosing it.
-			log.Printf("auth: refresh replay from ip=%s ua=%q return_to=%s", d.clientIP(r), r.UserAgent(), returnTo)
+			// The request that tripped the revocation of its browser session: where it came from, for diagnosing it.
+			log.Printf("auth: refresh token reuse from ip=%s ua=%q return_to=%s", d.clientIP(r), r.UserAgent(), returnTo)
 		}
-		writeSignInRequired(w, r, returnTo, "expired", "Your session has expired or was signed out everywhere.")
+		writeSignInRequired(w, r, returnTo, "expired", "Your session has expired or was signed out.")
 		return
 	}
-	// RefreshAccessToken rotates the session and returns the new raw token — except inside the
-	// replay-grace window (a benign double-refresh against a still-live successor session),
-	// where newRefresh is empty and no rotation happened: the browser's existing cookie is
-	// still the successor's own value, so nothing needs to change here.
+	// RefreshAccessToken rotates the session and returns the new raw token (a rotation the
+	// browser never received is simply redone, so a presented stale cookie gets a new value
+	// too). The empty case is kept for a transport that mints without rotating.
 	if newRefresh != "" {
 		// Session lifetime is absolute from login, not reset on every rotation: size Max-Age
 		// to the session's REMAINING lifetime (expires_at - now), not a fresh full TTL, so the

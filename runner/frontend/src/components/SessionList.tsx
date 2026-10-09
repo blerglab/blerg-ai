@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { isAutomated, startedByLabel } from '../lib/startedBy'
 import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
 import type { SessionInfo, SessionStatus, DaemonInfo } from '../types'
@@ -123,6 +124,114 @@ function RepoSection({
   )
 }
 
+const AUTOMATED_OPEN_KEY = 'blerg.sidebar.automatedOpen'
+
+function readAutomatedOpen(): boolean {
+  try { return localStorage.getItem(AUTOMATED_OPEN_KEY) === '1' } catch { return false }
+}
+
+// Sessions started by a tool (an agent token), a cron or the operator key: one collapsible
+// section, grouped by who started them, newest first, with a header that says how many are
+// running so they are never out of sight. Collapsed by default; the choice is remembered.
+function AutomatedSection({
+  sessions,
+  activeSessionId,
+  isSidebar,
+  daemons,
+}: {
+  sessions: SessionInfo[]
+  activeSessionId: string | undefined
+  isSidebar: boolean
+  daemons: DaemonInfo[]
+}) {
+  const [expanded, setExpanded] = useState(readAutomatedOpen)
+  function toggle() {
+    setExpanded(e => {
+      try { localStorage.setItem(AUTOMATED_OPEN_KEY, e ? '0' : '1') } catch { /* no storage */ }
+      return !e
+    })
+  }
+  const running = sessions.filter(s => ACTIVE_STATUSES.has(s.status)).length
+  const recent = sessions.length - running
+  const bySource = new Map<string, SessionInfo[]>()
+  for (const s of [...sessions].sort((a, b) => (b.ended_at ?? b.started_at).localeCompare(a.ended_at ?? a.started_at))) {
+    const key = startedByLabel(s)
+    const list = bySource.get(key) ?? []
+    list.push(s)
+    bySource.set(key, list)
+  }
+
+  return (
+    <div data-testid="automated-section" style={{ marginTop: 8, borderTop: '1px solid var(--basalt)', paddingTop: 10 }}>
+      <button
+        onClick={toggle}
+        aria-expanded={expanded}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          width: '100%',
+          background: 'none',
+          border: 'none',
+          padding: '4px 0',
+          cursor: 'pointer',
+          marginBottom: expanded ? 10 : 0,
+          textAlign: 'left',
+        }}
+      >
+        <span style={{
+          color: 'var(--stone)',
+          fontSize: '0.65rem',
+          display: 'inline-block',
+          transform: expanded ? 'rotate(90deg)' : 'none',
+          transition: 'transform 0.15s',
+          flexShrink: 0,
+        }}>▶</span>
+        <span style={{
+          color: 'var(--stone)',
+          fontSize: '0.72rem',
+          fontWeight: 700,
+          letterSpacing: '0.1em',
+          textTransform: 'uppercase',
+          flex: 1,
+        }}>
+          Automated
+        </span>
+        <span data-testid="automated-summary" style={{ color: running > 0 ? 'var(--amber)' : 'var(--stone)', fontSize: '0.7rem' }}>
+          {running > 0 ? `${running} running` : ''}{running > 0 && recent > 0 ? ' · ' : ''}{recent > 0 ? `${recent} recent` : ''}
+        </span>
+      </button>
+
+      {expanded && (
+        <div>
+          {[...bySource.entries()].map(([source, list]) => (
+            <div key={source} data-testid={`automated-group-${source}`} style={{ marginBottom: 10 }}>
+              <div style={{
+                color: 'var(--stone)',
+                fontSize: '0.68rem',
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                marginBottom: 5,
+              }}>
+                {source}
+              </div>
+              {list.map(session => (
+                <SessionCard
+                  key={session.id}
+                  session={session}
+                  daemon={daemons.find(d => d.id === session.daemon_id)}
+                  active={isSidebar && session.id === activeSessionId}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function HistorySection({
   sessions,
   activeSessionId,
@@ -203,7 +312,6 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
   const location = useLocation()
   const activeSessionId = location.pathname.match(/^\/sessions\/([^/]+)/)?.[1]
   const isSidebar = variant === 'sidebar'
-  const isPreviewActive = location.pathname === '/preview'
   const isCronsActive = location.pathname.startsWith('/crons')
   const isProposalsActive = location.pathname.startsWith('/proposals')
   const isInsightsActive = location.pathname.startsWith('/insights')
@@ -284,9 +392,15 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
   const searchActive = query.trim().length > 0
   const q = query.trim().toLowerCase()
 
+  // Sessions a tool, a cron or the operator key started are the person's to see, not the kind
+  // they drive: they get a section of their own, active and ended alike, out of the repo
+  // groups and out of History.
+  const automatedSessions = sessions.filter(isAutomated)
+  const ownSessions = sessions.filter(s => !isAutomated(s))
+
   // Separate active from done sessions.
-  const activeSessions = sessions.filter(s => ACTIVE_STATUSES.has(s.status))
-  const doneSessions = sessions.filter(s => !ACTIVE_STATUSES.has(s.status))
+  const activeSessions = ownSessions.filter(s => ACTIVE_STATUSES.has(s.status))
+  const doneSessions = ownSessions.filter(s => !ACTIVE_STATUSES.has(s.status))
 
   // When a query is active, filter active sessions by title or repo (case-insensitive).
   // An empty query leaves all sessions through so focus logic applies normally.
@@ -625,6 +739,15 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
           />
         ))}
 
+        {automatedSessions.length > 0 && (
+          <AutomatedSection
+            sessions={automatedSessions}
+            activeSessionId={activeSessionId}
+            isSidebar={isSidebar}
+            daemons={daemons}
+          />
+        )}
+
         {/* History — all stopped/error sessions, collapsed by default.
             doneSessions are intentionally passed unfiltered: search is scoped
             to the active session tree and History is excluded from search. */}
@@ -635,31 +758,6 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
             isSidebar={isSidebar}
             daemons={daemons}
           />
-        )}
-
-        {/* Preview nav item (sidebar only) */}
-        {isSidebar && (
-          <div
-            onClick={() => navigate('/preview')}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '10px 14px',
-              marginTop: 8,
-              borderRadius: 8,
-              cursor: 'pointer',
-              background: isPreviewActive ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'transparent',
-              border: isPreviewActive ? `1px solid var(--blaze)` : '1px solid transparent',
-              color: isPreviewActive ? 'var(--amber)' : 'var(--fog)',
-              fontSize: '0.9rem',
-              fontWeight: isPreviewActive ? 700 : 500,
-              letterSpacing: '0.05em',
-            }}
-          >
-            <span style={{ fontSize: '1rem' }}>⊞</span>
-            <span>Preview</span>
-          </div>
         )}
 
         {/* Crons nav item (sidebar only) */}

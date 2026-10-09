@@ -107,12 +107,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # packages/chat, runner/frontend and board/web are one npm workspace rooted at the
+        # repository (one lockfile, `npm ci` at the root); core/web installs on its own.
         include:
           - dir: core/web
+            install: core/web
             browser: false
           - dir: board/web
+            install: .
+            browser: false
+          - dir: packages/chat
+            install: .
             browser: false
           - dir: runner/frontend
+            install: .
             browser: true
     defaults:
       run:
@@ -123,8 +131,9 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+          cache-dependency-path: ${{ matrix.install }}/package-lock.json
       - run: npm ci
+        working-directory: ${{ matrix.install }}
       # runner/frontend has a vitest "browser" project that needs a real Chromium.
       - name: Install Chromium for browser tests
         if: matrix.browser
@@ -155,6 +164,7 @@ jobs:
           python3 -m pytest -q blerg_runner_board_test.py
       - run: ./scripts/scrub.sh
       - run: ./scripts/scrub_test.sh
+      - run: ./scripts/release-public_test.sh
       - name: Documentation links
         run: |
           ./scripts/check_links_test.sh

@@ -7,15 +7,6 @@ import { sessionLabel } from '../notify'
 
 interface MessageStore {
   messages: MessageInfo[]
-  lastSeenAt: number
-}
-
-function getInitialLastSeen(): number {
-  try {
-    const stored = localStorage.getItem('blerg-runner.messages.lastSeen')
-    if (stored) return parseInt(stored, 10)
-  } catch { /* ignore (SSR / blocked storage) */ }
-  return Date.now()
 }
 
 export const useMessageStore = create<MessageStore>(() => {
@@ -36,7 +27,7 @@ export const useMessageStore = create<MessageStore>(() => {
     useToastStore.getState().addToast({
       title: `${label} · ${msg.message.kind}`,
       body: msg.message.body,
-      url: '/',
+      url: `/sessions/${msg.message.session_id}`,
       variant: 'message',
     })
 
@@ -50,7 +41,7 @@ export const useMessageStore = create<MessageStore>(() => {
     }))
   })
 
-  return { messages: [], lastSeenAt: getInitialLastSeen() }
+  return { messages: [] }
 })
 
 // ─── Selectors ────────────────────────────────────────────────────────────────
@@ -68,16 +59,4 @@ export function selectOpenCount(state: MessageStore): number {
  */
 export function selectBySession(sessionId: string): (state: MessageStore) => MessageInfo[] {
   return (state) => state.messages.filter(m => m.session_id === sessionId)
-}
-
-/** Count of messages created after the last time the user viewed the Chat roll-up. */
-export function selectUnreadCount(state: MessageStore): number {
-  return state.messages.filter(m => Date.parse(m.created_at) > state.lastSeenAt).length
-}
-
-/** Mark all messages as seen — sets lastSeenAt to now and persists to localStorage. */
-export function markAllSeen(): void {
-  const now = Date.now()
-  try { localStorage.setItem('blerg-runner.messages.lastSeen', String(now)) } catch { /* ignore */ }
-  useMessageStore.setState({ lastSeenAt: now })
 }

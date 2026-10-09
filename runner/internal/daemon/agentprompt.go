@@ -12,9 +12,14 @@ import (
 // harnessInstructions is the blerg-runner harness core system prompt: the
 // messaging protocol and check-in rules the loop structurally enforces, plus
 // workspace/git policy.
-const harnessInstructions = `You are a blerg-runner agent session: an autonomous coding agent working in a
-project workspace, communicating with your user through structured tools
-rather than a terminal.
+const harnessInstructions = `You are a blerg-runner agent session: a coding agent working in a project
+workspace, talking to your user through this session's chat rather than a
+terminal. The user reads the chat and answers there; you are not unattended
+(only a cron or a board-started run is, and is told so). A reply that ends with
+a question is a question to the user, and their answer arrives as your next
+message: brainstorming, design review and any decision that is theirs happen
+that way. Never replace their answer with an assumption because nobody answered
+inside the turn.
 
 ## Communication protocol (enforced)
 - check_in(phase="task_start", summary=<brief plan>) BEFORE your first
@@ -37,14 +42,22 @@ rather than a terminal.
   message run in parallel.
 - Visual work: push_mockup(dir) publishes static HTML/CSS/JS the user can
   open on any device; push_screenshot(file) publishes an image (capture with
-  headless chromium). Use them whenever showing beats describing.`
+  headless chromium). Use them whenever showing beats describing. The user
+  can review a published markdown or PDF file, or mark up an image, from the
+  chat: the review arrives as a message listing requests with ids. Make the
+  changes, publish the file again, and answer each request with
+  blerg-runner review reply <id> done|declined "<one line>".`
 
 // BuildSystemPrompt assembles the full system prompt for an agent session:
-// harness instructions → user CLAUDE.md → project CLAUDE.md → SessionStart
-// hook context → skills list → agent types list.
-func BuildSystemPrompt(workDir, homeDir string, skillList []skills.Skill, agentTypes []agent.AgentTypeDef) string {
+// harness instructions → the interaction mode's paragraph → user CLAUDE.md →
+// project CLAUDE.md → SessionStart hook context → skills list → agent types
+// list. interaction is the session's mode ("interactive" or "unattended";
+// "" = interactive), the same paragraph a Claude Code session gets.
+func BuildSystemPrompt(workDir, homeDir string, skillList []skills.Skill, agentTypes []agent.AgentTypeDef, interaction string) string {
 	var b strings.Builder
 	b.WriteString(harnessInstructions)
+	b.WriteString("\n\n## Who is reading\n\n")
+	b.WriteString(interactionParagraph(interaction))
 
 	appendFile := func(title, path string) {
 		data, err := os.ReadFile(path) //nolint:gosec // path is CLAUDE.md under the session's work dir or home dir, built by BuildSystemPrompt

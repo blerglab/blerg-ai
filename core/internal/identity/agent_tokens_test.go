@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -528,5 +529,41 @@ func TestAgentTokenHashIsHexSHA256OfTheToken(t *testing.T) {
 	}
 	if count != 0 {
 		t.Error("the raw token appears in the agent_tokens row")
+	}
+}
+
+// Re-minting replaces a token with a fresh one of the same name, audience, caps and lifetime:
+// the old value stops working at once, the new one works, and the owner re-chose nothing.
+func TestRemintAgentToken(t *testing.T) {
+	ctx := context.Background()
+	svc, st := agentTokenSvc(t)
+	acct := insertAccount(t, st, "reminter", "member")
+	old, oldRaw, err := svc.CreateAgentToken(ctx, acct, "literary-agent", "run-sessions", 30*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, raw, err := svc.RemintAgentToken(ctx, acct, old.ID)
+	if err != nil {
+		t.Fatalf("remint: %v", err)
+	}
+	if raw == "" || raw == oldRaw || fresh.ID == old.ID {
+		t.Fatal("a re-mint must produce a new token with a new id")
+	}
+	if fresh.Name != old.Name || fresh.Aud != old.Aud || !slices.Equal(fresh.Caps, old.Caps) {
+		t.Fatalf("re-minted token differs: %+v vs %+v", fresh, old)
+	}
+	if d := fresh.ExpiresAt.Sub(fresh.CreatedAt).Round(time.Hour); d != 30*24*time.Hour {
+		t.Fatalf("lifetime = %v, want the original 30 days", d)
+	}
+	if live, _ := svc.AgentTokenLive(ctx, acct, old.ID); live {
+		t.Fatal("the old token is still live after a re-mint")
+	}
+	if live, _ := svc.AgentTokenLive(ctx, acct, fresh.ID); !live {
+		t.Fatal("the new token is not live")
+	}
+	// Another account's, or an unknown id: not found, nothing minted.
+	other := insertAccount(t, st, "remint-other", "member")
+	if _, _, err := svc.RemintAgentToken(ctx, other, fresh.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("re-mint of another account's token: %v, want ErrNotFound", err)
 	}
 }

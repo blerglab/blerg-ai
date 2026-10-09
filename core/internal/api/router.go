@@ -343,6 +343,7 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("POST /api/tokens", requireHumanPrincipal(deps.handleCreateToken, deps, "card.read"))
 	mux.HandleFunc("GET /api/tokens", requireHumanPrincipal(deps.handleListTokens, deps, "card.read"))
 	mux.HandleFunc("DELETE /api/tokens/{id}", requireHumanPrincipal(deps.handleRevokeToken, deps, "card.read"))
+	mux.HandleFunc("POST /api/tokens/{id}/remint", requireHumanPrincipal(deps.handleRemintToken, deps, "card.read"))
 
 	mux.HandleFunc("POST /api/projects/{id}/members", requirePrincipal(func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := principalFromCtx(r.Context())

@@ -656,7 +656,7 @@ func TestSymlinkTargetsMatchMonorepoLayout(t *testing.T) {
 // The instructions every Claude Code session reads tell it about `publish` and where the format
 // guide is, in a sentence or two (the guide itself is `publish --help`).
 func TestManagedBlockMentionsPublish(t *testing.T) {
-	for _, want := range []string{"`blerg-runner publish <file>`", "`blerg-runner publish --help`", "file", "`blerg-runner fetch --all`", "same name again creates a new version", "publish it again under the same name", "screenshot it and publish the PNG"} {
+	for _, want := range []string{"`blerg-runner publish <file>`", "`blerg-runner publish --help`", "file", "`blerg-runner fetch --all`", "same name again creates a new version", "publish it again under the same name", "screenshot it and publish the PNG", "`blerg-runner unpublish <name>`"} {
 		if !strings.Contains(managedBlock, want) {
 			t.Errorf("managed block does not mention %q", want)
 		}

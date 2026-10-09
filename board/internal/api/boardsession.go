@@ -103,6 +103,8 @@ func (a *API) handleSpawnBoardSession(w http.ResponseWriter, r *http.Request, p 
 		Prompt: prompt,
 		Model:  model,
 		GitURL: gitURL,
+		// The person who opened the drawer is in the chat.
+		Interaction: interactionForRole("board"),
 		Env: map[string]string{
 			"BLERG_BOARD_URL":   a.runner.AgentURL,
 			"BLERG_BOARD_TOKEN": rawTok,

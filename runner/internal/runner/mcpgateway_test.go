@@ -85,9 +85,10 @@ func TestPodSpawnCarriesGateway(t *testing.T) {
 	}
 }
 
-// A grant session installs no plugins and downloads no user config bundle
-// (which carries the user's plugins, hooks and settings).
-func TestGrantSessionSkipsPluginsAndUserConfig(t *testing.T) {
+// A restricted session installs no plugins and downloads no user config bundle
+// (which carries the user's plugins, hooks and settings); a grant alone does
+// neither (docs/design/interactive-mcp-sessions.md).
+func TestRestrictedSessionSkipsPluginsAndUserConfig(t *testing.T) {
 	installed := false
 	install := func(context.Context, Config, []pluginspec.Entry) PluginResult {
 		installed = true
@@ -95,22 +96,22 @@ func TestGrantSessionSkipsPluginsAndUserConfig(t *testing.T) {
 	}
 	fs := &fakeSender{}
 	r := &stageReporter{s: fs, sessionID: "sid"}
-	cfg := Config{Plugins: []pluginspec.Entry{ent("a")}, MCPGateway: &protocol.MCPGatewayConfig{}}
+	cfg := Config{Plugins: []pluginspec.Entry{ent("a")}, MCPGateway: &protocol.MCPGatewayConfig{}, RestrictTools: true}
 	reportWorkspaceReady(context.Background(), cfg, r, install)
 	if installed {
-		t.Error("a grant session installed plugins")
+		t.Error("a restricted session installed plugins")
 	}
 	if got := strings.Join(stageIDsAndStates(t, fs), " | "); strings.Contains(got, "plugins") {
 		t.Errorf("a plugins stage was reported: %s", got)
 	}
-	cfg.MCPGateway = nil
+	cfg.RestrictTools = false // a grant alone: watched, so plugins and config load
 	reportWorkspaceReady(context.Background(), cfg, r, install)
 	if !installed {
-		t.Error("control: a session without a grant no longer installs plugins")
+		t.Error("a watched grant session no longer installs plugins")
 	}
 
-	if !(Config{MCPGateway: &protocol.MCPGatewayConfig{}}).skipsUserConfig() || cfg.skipsUserConfig() {
-		t.Error("only a grant session skips the user's config bundle")
+	if !(Config{RestrictTools: true}).skipsUserConfig() || cfg.skipsUserConfig() {
+		t.Error("only a restricted session skips the user's config bundle")
 	}
 }
 
@@ -152,15 +153,18 @@ func TestConfigFromEnvConsumesRestrictToolsVariable(t *testing.T) {
 	}
 }
 
-// A restricted pod's synthesised spawn carries RestrictTools (a grant implies
-// it), and it skips plugins and the user's config bundle like a grant pod.
+// A restricted pod's synthesised spawn carries RestrictTools; a grant alone
+// does not imply it (docs/design/interactive-mcp-sessions.md).
 func TestPodSpawnCarriesRestrictTools(t *testing.T) {
 	if s := podSpawn(Config{SessionID: "s1", Repo: "r", RestrictTools: true}, "/w"); !s.RestrictTools || s.MCPGateway != nil {
 		t.Fatalf("restrict-only spawn = %+v", s)
 	}
 	g := &protocol.MCPGatewayConfig{BaseURL: "http://gw:1", Servers: []protocol.MCPGatewayServer{{Name: "a", Token: "t"}}}
-	if s := podSpawn(Config{SessionID: "s1", Repo: "r", MCPGateway: g}, "/w"); !s.RestrictTools {
-		t.Errorf("a grant pod's spawn is not restricted: %+v", s)
+	if s := podSpawn(Config{SessionID: "s1", Repo: "r", MCPGateway: g}, "/w"); s.RestrictTools || s.MCPGateway == nil {
+		t.Errorf("a grant alone must carry the grant and no restriction: %+v", s)
+	}
+	if s := podSpawn(Config{SessionID: "s1", Repo: "r", MCPGateway: g, RestrictTools: true}, "/w"); !s.RestrictTools {
+		t.Errorf("a restricted grant pod's spawn is not restricted: %+v", s)
 	}
 	if s := podSpawn(Config{SessionID: "s1", Repo: "r"}, "/w"); s.RestrictTools {
 		t.Errorf("a plain pod's spawn is restricted: %+v", s)
@@ -178,5 +182,49 @@ func TestPodSpawnCarriesRestrictTools(t *testing.T) {
 	reportWorkspaceReady(context.Background(), Config{Plugins: []pluginspec.Entry{ent("a")}, RestrictTools: true}, r, install)
 	if installed {
 		t.Error("a restricted session installed plugins")
+	}
+}
+
+// The pod reads the interaction mode from ONE plain variable and unsets it at once, like the
+// restriction, and its spawn carries it to the agent host.
+func TestConfigFromEnvConsumesInteractionVariable(t *testing.T) {
+	t.Setenv(daemon.InteractionEnvVar, "unattended")
+	cfg := ConfigFromEnv()
+	if cfg.Interaction != protocol.InteractionUnattended {
+		t.Fatalf("Interaction = %q, want unattended", cfg.Interaction)
+	}
+	if v, ok := os.LookupEnv(daemon.InteractionEnvVar); ok {
+		t.Fatalf("variable still set (%q)", v)
+	}
+	out, err := exec.Command("env").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), daemon.InteractionEnvVar) {
+		t.Errorf("interaction variable present in a child's environment")
+	}
+	if s := podSpawn(cfg, "/w"); s.Interaction != protocol.InteractionUnattended {
+		t.Errorf("pod spawn interaction = %q", s.Interaction)
+	}
+	for v, want := range map[string]string{
+		"interactive": protocol.InteractionInteractive, " Interactive ": protocol.InteractionInteractive,
+		"UNATTENDED": protocol.InteractionUnattended,
+		// Anything else is no mode at all, which the agent host reads as interactive.
+		"": "", "1": "", "watched": "",
+	} {
+		t.Setenv(daemon.InteractionEnvVar, v)
+		if got := ConfigFromEnv().Interaction; got != want {
+			t.Errorf("value %q: Interaction = %q, want %q", v, got, want)
+		}
+		if _, ok := os.LookupEnv(daemon.InteractionEnvVar); ok {
+			t.Errorf("value %q: variable still set", v)
+		}
+	}
+	_ = os.Unsetenv(daemon.InteractionEnvVar)
+	if got := ConfigFromEnv().Interaction; got != "" {
+		t.Errorf("an unset variable gave Interaction %q", got)
+	}
+	if s := podSpawn(Config{SessionID: "s1", Repo: "r"}, "/w"); s.Interaction != "" {
+		t.Errorf("a pod with no mode spawned with %q", s.Interaction)
 	}
 }

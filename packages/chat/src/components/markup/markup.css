@@ -1,0 +1,232 @@
+/* MarkupMode: the draw-over of an image inside the artifact viewer. Tokens only (--chat-*). */
+
+.markup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
+  outline: none;
+  font-family: var(--chat-font);
+  color: var(--chat-fg);
+}
+
+/* ── toolbar ─────────────────────────────────────────────────────────────── */
+
+.markup-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 8px 0 2px;
+}
+
+.markup-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.markup-tool {
+  background: none;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--chat-text-xs);
+  padding: 4px 10px;
+  min-height: 30px;
+  white-space: nowrap;
+}
+
+.markup-tool:hover,
+.markup-tool:focus-visible {
+  border-color: color-mix(in srgb, var(--chat-accent) 55%, transparent);
+}
+
+.markup-tool[aria-pressed='true'] {
+  background: var(--chat-accent);
+  border-color: var(--chat-accent);
+  color: var(--chat-accent-fg);
+}
+
+.markup-tool:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.markup-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  box-shadow: 0 0 0 1px var(--chat-border);
+}
+
+.markup-swatch.is-accent { background: var(--chat-accent); }
+.markup-swatch.is-danger { background: var(--chat-danger); }
+.markup-swatch.is-info { background: var(--chat-info); }
+
+.markup-swatch[aria-pressed='true'],
+.markup-swatch:focus-visible {
+  border-color: var(--chat-surface);
+  box-shadow: 0 0 0 2px var(--chat-fg);
+  outline: none;
+}
+
+.markup-width {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.markup-width[aria-pressed='true'] {
+  border-color: var(--chat-accent);
+  background: color-mix(in srgb, var(--chat-accent) 18%, transparent);
+}
+
+.markup-width-dot {
+  display: block;
+  border-radius: 50%;
+  background: var(--chat-fg);
+}
+
+/* ── stage ───────────────────────────────────────────────────────────────── */
+
+.markup-stage {
+  position: relative;
+  align-self: center;
+  max-width: 100%;
+  line-height: 0;
+  background: var(--chat-surface-2);
+  border: 1px solid var(--chat-border);
+  border-radius: var(--chat-radius);
+  overflow: hidden;
+}
+
+.markup-image {
+  display: block;
+  max-width: 100%;
+  max-height: min(60vh, 720px);
+  width: auto;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.markup-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.markup-stage[data-tool='pin'] .markup-canvas {
+  cursor: pointer;
+}
+
+/* ── pins ────────────────────────────────────────────────────────────────── */
+
+.markup-pins {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.markup-pin {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.markup-pin-badge {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin-top: 3px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--chat-accent);
+  color: var(--chat-accent-fg);
+  font-size: var(--chat-text-xs);
+  font-weight: 700;
+}
+
+.markup-note {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  font: inherit;
+  font-size: var(--chat-text-sm);
+  color: var(--chat-fg);
+  background: var(--chat-surface-2);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  min-height: 32px;
+}
+
+.markup-note:focus {
+  outline: none;
+  border-color: var(--chat-accent);
+}
+
+/* ── actions ─────────────────────────────────────────────────────────────── */
+
+.markup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.markup-status {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--chat-text-sm);
+  color: var(--chat-muted);
+}
+
+.markup-send {
+  background: var(--chat-accent);
+  border: 1px solid var(--chat-accent);
+  border-radius: 6px;
+  color: var(--chat-accent-fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--chat-text-sm);
+  padding: 5px 14px;
+  min-height: 30px;
+}
+
+.markup-send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 899px) {
+  .markup-toolbar {
+    gap: 6px 10px;
+  }
+  .markup-image {
+    max-height: 55vh;
+  }
+}

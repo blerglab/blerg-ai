@@ -82,6 +82,23 @@ func MintSessionToken(ctx context.Context, pool *pgxpool.Pool, sessionID string,
 	return hex.EncodeToString(rawBytes), nil
 }
 
+// SlideBoardTokenExpiry moves a live token's expires_at out to now()+ttl when less than half of
+// ttl is left. A session's messaging token is minted with a fixed life, but a session may run for
+// days; every use of the token while the session lives pushes its expiry along, and session end
+// still revokes it (RevokeBoardTokensForSession). A revoked or already-distant token is left as it
+// is. Returns whether the row was extended.
+func SlideBoardTokenExpiry(ctx context.Context, pool *pgxpool.Pool, id string, ttl time.Duration) (bool, error) {
+	now := time.Now()
+	tag, err := pool.Exec(ctx, `
+		UPDATE board_tokens SET expires_at = $2
+		 WHERE id = $1 AND revoked_at IS NULL AND expires_at < $3`,
+		id, now.Add(ttl), now.Add(ttl/2))
+	if err != nil {
+		return false, fmt.Errorf("SlideBoardTokenExpiry: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // ValidateBoardToken hashes the raw hex token and looks it up by token_hash.
 // Returns ErrTokenInvalid if not found, revoked, or expired. A session token
 // (no board) comes back with BoardID == "".

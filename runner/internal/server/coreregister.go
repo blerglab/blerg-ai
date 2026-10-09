@@ -44,16 +44,17 @@ func StartCoreRegistration(ctx context.Context, coreURL, registerKey, selfURL, v
 	// aggregate GET /agents documents the runner from exactly this payload, so
 	// anything missing here is missing from every agent's view of the install.
 	// Core overwrites last_seen, stale and auth.token_endpoint, which are its to
-	// know. Nothing in it is a secret.
+	// know. Nothing in it is a secret. The entry is built afresh for every
+	// attempt: parts of it (the UI package) are learned after startup, and a
+	// heartbeat must carry what the runner knows now, not what it knew first.
 	SetComponentVersion(version)
-	body := RunnerManifest(selfURL)
 
 	client := &http.Client{Timeout: coreRegisterTimeout}
 
 	for {
 		backoff := coreRegisterRetryFloor
 		for {
-			if err := registerOnce(ctx, client, coreURL, registerKey, body); err != nil {
+			if err := registerOnce(ctx, client, coreURL, registerKey, RunnerManifest(selfURL)); err != nil {
 				log.Printf("core registration: %v (retrying in %s)", err, backoff)
 				select {
 				case <-ctx.Done():

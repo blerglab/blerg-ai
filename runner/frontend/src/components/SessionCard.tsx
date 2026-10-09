@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom'
 import type { SessionInfo, DaemonInfo } from '../types'
 import { send } from '../ws'
 import { repoLabel } from '../lib/noRepo'
+import { startedByLabel } from '../lib/startedBy'
 
 interface Props {
   session: SessionInfo
@@ -140,7 +141,7 @@ export default function SessionCard({ session, active }: Props) {
   const unread = !!session.unread
   const flashing = isWaiting && unread
   const hasDetails = (status === 'error' && !!session.error_reason)
-    || !!(session.runtime && RUNTIME_CHIP[session.runtime]) || !!kindChipLabel(session.kind) || !!session.model || !!session.cron_id
+    || !!(session.runtime && RUNTIME_CHIP[session.runtime]) || !!kindChipLabel(session.kind) || !!session.model || !!session.cron_id || !!session.started_by
 
   return (
     <div
@@ -254,6 +255,11 @@ export default function SessionCard({ session, active }: Props) {
       {session.cron_id && (
         <span data-testid="cron-badge" title="Started by a cron" style={{ ...chipStyle, color: 'var(--amber)', borderColor: 'var(--amber)' }}>
           cron
+        </span>
+      )}
+      {session.started_by && session.started_by.kind !== 'cron' && !session.cron_id && (
+        <span data-testid="started-by-chip" title={`Started by ${startedByLabel(session)}`} style={{ ...chipStyle, color: 'var(--amber)', borderColor: 'var(--amber)' }}>
+          {startedByLabel(session)}
         </span>
       )}
       {session.runtime && RUNTIME_CHIP[session.runtime] && (

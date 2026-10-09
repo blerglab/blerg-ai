@@ -3,7 +3,7 @@ package identity
 import "time"
 
 // IssuedAtRevocationChecker is the timestamp-aware extension of RevocationChecker.
-// Verify prefers it when the checker implements it: a "sub" or "lineage" revocation
+// Verify prefers it when the checker implements it: a "sub", "lineage" or "sid" revocation
 // then applies only to tokens issued at or before the revocation's revoked_at, so a
 // token minted AFTER the revocation (a re-login following a password change, logout-all,
 // theft detection or reconcile re-enable) verifies even against a consumer whose cached
@@ -14,9 +14,9 @@ import "time"
 // semantics, which is the fail-closed direction.
 type IssuedAtRevocationChecker interface {
 	RevocationChecker
-	// RevokedFor reports whether a token with the given kid/lineage/sub and iat (unix
+	// RevokedFor reports whether a token with the given kid/lineage/sub/sid and iat (unix
 	// seconds) is revoked.
-	RevokedFor(kid, lineage, sub string, issuedAt int64) bool
+	RevokedFor(kid, lineage, sub, sid string, issuedAt int64) bool
 }
 
 // RevocationSet is the shared in-memory shape of core's revocation list: "kind:value" →
@@ -33,7 +33,7 @@ func (s RevocationSet) Add(kind, value string, revokedAt time.Time) {
 
 // Revoked implements RevocationChecker's legacy, unconditional check: any matching
 // entry revokes regardless of when the token was issued.
-func (s RevocationSet) Revoked(kid, lineage, sub string) bool {
+func (s RevocationSet) Revoked(kid, lineage, sub, sid string) bool {
 	if _, ok := s["kid:"+kid]; ok {
 		return true
 	}
@@ -47,13 +47,18 @@ func (s RevocationSet) Revoked(kid, lineage, sub string) bool {
 			return true
 		}
 	}
+	if sid != "" {
+		if _, ok := s["sid:"+sid]; ok {
+			return true
+		}
+	}
 	return false
 }
 
 // RevokedFor implements IssuedAtRevocationChecker: kid entries are unconditional;
-// lineage and sub entries apply to tokens whose iat is at or before revoked_at
+// lineage, sub and sid entries apply to tokens whose iat is at or before revoked_at
 // (equality fails closed, as does a missing iat, since 0 <= anything).
-func (s RevocationSet) RevokedFor(kid, lineage, sub string, issuedAt int64) bool {
+func (s RevocationSet) RevokedFor(kid, lineage, sub, sid string, issuedAt int64) bool {
 	if _, ok := s["kid:"+kid]; ok {
 		return true
 	}
@@ -64,6 +69,12 @@ func (s RevocationSet) RevokedFor(kid, lineage, sub string, issuedAt int64) bool
 	}
 	if sub != "" {
 		if at, ok := s["sub:"+sub]; ok && revocationApplies(at, issuedAt) {
+			return true
+		}
+	}
+	// sid: one browser session (rotation chain), the scope of a detected refresh-token reuse.
+	if sid != "" {
+		if at, ok := s["sid:"+sid]; ok && revocationApplies(at, issuedAt) {
 			return true
 		}
 	}

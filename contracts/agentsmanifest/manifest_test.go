@@ -42,6 +42,42 @@ func fullEntry() ComponentEntry {
 				Summary: "Read session status.",
 			},
 		},
+		UI: &UIInfo{ChatPackage: &PackageInfo{
+			Name:    "@blerglab/chat",
+			Version: "0.1.0",
+			URL:     "https://runner.example.test/packages/blerglab-chat-0.1.0.tgz",
+			SHA512:  "sha512-AAAA",
+			DocsURL: "https://runner.example.test/packages/@blerglab/chat/README.md",
+		}},
+	}
+}
+
+// The UI field names what an app installs: every key an installer needs is spelled out, and a
+// component with no UI omits the field rather than sending an empty object.
+func TestUIInfoJSON(t *testing.T) {
+	b, err := json.Marshal(fullEntry())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	var ui map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(raw["ui"], &ui); err != nil {
+		t.Fatalf("unmarshal ui: %v", err)
+	}
+	for _, key := range []string{"name", "version", "url", "sha512", "docs_url"} {
+		if _, ok := ui["chat_package"][key]; !ok {
+			t.Errorf("ui.chat_package is missing key %q, got %s", key, raw["ui"])
+		}
+	}
+	b, err = json.Marshal(ComponentEntry{Name: "blerg-board"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), `"ui"`) {
+		t.Errorf("a component with no UI must omit the field, got %s", b)
 	}
 }
 

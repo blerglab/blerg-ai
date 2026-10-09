@@ -70,6 +70,19 @@ func TestSessionModelPerRole(t *testing.T) {
 		t.Errorf("board chat model without an override = %q, want board-default", got)
 	}
 
+	// Each of those three said who is in the chat: nobody watches a card's
+	// run; a person opened the discussion and the board session to talk.
+	if len(fake.started) != 3 {
+		t.Fatalf("started %d sessions, want 3", len(fake.started))
+	}
+	for i, want := range []struct{ what, mode string }{
+		{"a card run", "unattended"}, {"a discussion", "interactive"}, {"the board session", "interactive"},
+	} {
+		if got := fake.started[i].Interaction; got != want.mode {
+			t.Errorf("%s started with interaction %q, want %s", want.what, got, want.mode)
+		}
+	}
+
 	// PATCH the board's discuss/chat models — the acceptance criterion: they
 	// take effect on the next spawn of those roles and leave workers alone.
 	resp := request(t, srv, "PATCH", "/api/boards/"+board.ID, cookie, nil, map[string]string{

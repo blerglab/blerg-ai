@@ -183,7 +183,7 @@ func TestHashMismatchRefreshesBeforeRefusing(t *testing.T) {
 	h.clock.Advance(h.gw.cfg.HashCacheTTL + time.Second) // the cached (matching) listing has expired
 	_, before, _ := h.up.snapshot()
 	for range 5 {
-		if r := h.callTool(gh, "echo", nil); r.errMessage() != "unknown tool" {
+		if r := h.callTool(gh, "echo", nil); !strings.Contains(r.errMessage(), "changed on the server") {
 			t.Fatalf("changed tool: %s", r.raw)
 		}
 	}

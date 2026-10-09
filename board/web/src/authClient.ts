@@ -80,15 +80,27 @@ export function redirectToRefresh(returnTo: string): void {
 // and runner are always one site (subdomains of one domain, or one host on different ports), so it is
 // carried. When the frame gets no token (signed out, cookie not sent, core unreachable) the caller
 // falls back to the full-page redirect, exactly as before.
+//
+// Every refresh ROTATES the cookie, so the browser must end up holding the cookie core last issued.
+// Two rules keep it that way. One refresh at a time across the tabs of this origin: a Web Lock is
+// held for the frame's whole life, so a second tab waits instead of racing (core heals a race, but
+// it should not have to). And a frame is never torn down while its request is in flight: a caller
+// that waited long enough gives up and falls back, but the frame stays until it loads, so the
+// cookie core set on its way back is taken up rather than lost. A rotation whose response is lost
+// is what makes a browser present a stale cookie later.
 
 /** Renew this long before the token expires. */
 const RENEW_BEFORE_MS = 90_000;
-/** Give up on one frame after this long. */
+/** How long a caller waits on one frame before falling back. */
 const SILENT_TIMEOUT_MS = 15_000;
+/** How long a frame nobody is waiting on may stay, so a slow answer can still land its cookie. */
+const SILENT_LINGER_MS = 120_000;
 /** Retry a failed scheduled renewal after this long, while the token is still good. */
 const RENEW_RETRY_MS = 30_000;
 /** The page core redirects the frame to: a static page of this origin that does nothing. */
 export const SILENT_REFRESH_PAGE = "/silent-refresh.html";
+/** The Web Lock every tab of this origin takes to refresh. */
+export const REFRESH_LOCK = "blerg.auth.refresh";
 
 // tokenExpiryMs is a cheap, UNVERIFIED read of the token's exp claim, for scheduling only.
 function tokenExpiryMs(token: string): number | null {
@@ -102,48 +114,83 @@ function tokenExpiryMs(token: string): number | null {
   }
 }
 
+// silentFrame loads core's refresh in a hidden frame. `answered` settles when the frame has loaded
+// (true with a token stored, false otherwise); `done` settles when the frame is gone — after its
+// answer, or after SILENT_LINGER_MS if it never loads. A caller waits on `answered` for at most
+// SILENT_TIMEOUT_MS; the frame itself is never cut short, so a rotation core committed is not lost.
+function silentFrame(): { answered: Promise<boolean>; done: Promise<void> } {
+  let settle!: (ok: boolean) => void;
+  let gone!: () => void;
+  const answered = new Promise<boolean>((resolve) => { settle = resolve; });
+  const done = new Promise<void>((resolve) => { gone = resolve; });
+  const frame = document.createElement("iframe");
+  frame.setAttribute("aria-hidden", "true");
+  frame.tabIndex = -1;
+  frame.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden";
+  let settled = false;
+  const finish = (ok: boolean) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(linger);
+    frame.remove();
+    settle(ok);
+    gone();
+  };
+  const linger = setTimeout(() => finish(false), SILENT_LINGER_MS);
+  frame.addEventListener("load", () => {
+    try {
+      // Reading the frame's location throws while it is still on core's origin (core answered with
+      // its sign-in page or an error): that is "no token", not a failure to report.
+      const loc = frame.contentWindow!.location;
+      const match = loc.origin === location.origin ? loc.hash.match(/access_token=([^&]+)/) : null;
+      if (match) {
+        accessToken = decodeURIComponent(match[1]);
+        finish(true);
+        return;
+      }
+    } catch {
+      /* cross-origin: no token */
+    }
+    finish(false);
+  });
+  const returnTo = location.origin + SILENT_REFRESH_PAGE;
+  frame.src = `${coreOrigin()}/auth/refresh?return_to=${encodeURIComponent(returnTo)}`;
+  document.body.appendChild(frame);
+  return { answered, done };
+}
+
+// withRefreshLock runs fn while holding this origin's refresh lock, so tabs refresh one after
+// another. Without Web Locks (an old browser, a test) fn just runs.
+function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  if (!locks || typeof locks.request !== "function") return fn();
+  return locks.request(REFRESH_LOCK, fn);
+}
+
+// silentRefresh: one frame, the lock held until the frame is gone, and the caller's answer no later
+// than SILENT_TIMEOUT_MS.
 function silentRefresh(): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    const frame = document.createElement("iframe");
-    frame.setAttribute("aria-hidden", "true");
-    frame.tabIndex = -1;
-    frame.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden";
-    let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      frame.remove();
+    let resolved = false;
+    const report = (ok: boolean) => {
+      if (resolved) return;
+      resolved = true;
       resolve(ok);
     };
-    const timer = setTimeout(() => finish(false), SILENT_TIMEOUT_MS);
-    frame.addEventListener("load", () => {
-      try {
-        // Reading the frame's location throws while it is still on core's origin (core answered with
-        // its sign-in page or an error): that is "no token", not a failure to report.
-        const loc = frame.contentWindow!.location;
-        const match = loc.origin === location.origin ? loc.hash.match(/access_token=([^&]+)/) : null;
-        if (match) {
-          accessToken = decodeURIComponent(match[1]);
-          finish(true);
-          return;
-        }
-      } catch {
-        /* cross-origin: no token */
-      }
-      finish(false);
-    });
-    const returnTo = location.origin + SILENT_REFRESH_PAGE;
-    frame.src = `${coreOrigin()}/auth/refresh?return_to=${encodeURIComponent(returnTo)}`;
-    document.body.appendChild(frame);
+    void withRefreshLock(async () => {
+      const { answered, done } = silentFrame();
+      const timer = setTimeout(() => report(false), SILENT_TIMEOUT_MS);
+      answered.then(report, () => report(false)).finally(() => clearTimeout(timer));
+      await done;
+    }).catch(() => report(false));
   });
 }
 
 let inflight: Promise<boolean> | null = null;
 
 /** ensureFreshToken gets a new access token without leaving the page. Resolves true when one was
- *  stored, false when the caller should fall back to redirectToRefresh. Concurrent calls share one
- *  frame. */
+ *  stored, false when the caller should fall back to redirectToRefresh. Concurrent calls in this
+ *  tab share one frame; other tabs of this origin wait their turn on the refresh lock. */
 export function ensureFreshToken(): Promise<boolean> {
   if (!inflight) {
     inflight = silentRefresh().finally(() => {

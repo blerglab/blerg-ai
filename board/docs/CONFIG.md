@@ -210,6 +210,12 @@ token, so it runs as that person on their own engine credential (for Hermes,
 their own endpoint). The runner does the credential fetch; board never sees
 the credential.
 
+Each start also says whether a person is in the chat (`interaction` on
+`POST /api/runner/start`). **Discuss** and the board session are started
+`interactive`: the agent talks things over and waits for answers. Everything
+else — a card's **Run**, reviewers, standing agents, anything the dispatcher
+starts — is `unattended`: the agent decides, finishes and summarises.
+
 - Only a signed-in person can set the token, and only their own — board
   checks it is a live `run-sessions` token whose owner is the person saving
   it. Any board admin can remove it. It is write-only: no endpoint (REST or

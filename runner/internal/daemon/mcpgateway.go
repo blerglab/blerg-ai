@@ -51,6 +51,12 @@ const MCPGatewayEnvVar = "BLERG_RUNNER_MCP_CONFIG"
 // builder drops it, so no child process sees it.
 const RestrictToolsEnvVar = "BLERG_RUNNER_RESTRICT_TOOLS"
 
+// InteractionEnvVar is the plain environment variable a cluster pod receives with its
+// session's interaction mode ("interactive" or "unattended", protocol.SpawnSession.Interaction).
+// Not a secret. The pod entrypoint reads it and unsets it (runner.ConfigFromEnv) and the
+// session environment builder drops it, so no child process sees it.
+const InteractionEnvVar = "BLERG_RUNNER_INTERACTION"
+
 // maxMCPGatewayServers caps the connections one grant may name (an account has
 // at most 20).
 const maxMCPGatewayServers = 20

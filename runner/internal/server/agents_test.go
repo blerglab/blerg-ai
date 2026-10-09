@@ -104,7 +104,13 @@ func TestRunnerManifestOperations(t *testing.T) {
 		"stop":          "POST /api/runner/sessions/{id}/stop",
 		"events":        "GET /api/runner/sessions/{id}/events",
 		"events_stream": "GET /api/runner/sessions/{id}/events/stream",
+		"events_live":   "GET /api/runner/sessions/{id}/events/live",
 		"result":        "GET /api/runner/sessions/{id}/result",
+		"files_list":    "GET /api/runner/sessions/{id}/artifacts",
+		"file_raw":      "GET /api/runner/sessions/{id}/artifacts/{aid}/raw",
+		"file_download": "GET /api/runner/sessions/{id}/artifacts/{aid}/download",
+		"file_delete":   "DELETE /api/runner/sessions/{id}/artifacts/{aid}",
+		"upload":        "POST /api/runner/sessions/{id}/uploads",
 		"me":            "GET /api/runner/me",
 	}
 	for name, route := range want {

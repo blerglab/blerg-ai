@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getAccessToken, consumeAccessTokenFromFragment, coreOrigin, ensureFreshToken, startTokenRenewal, SILENT_REFRESH_PAGE } from "./authClient";
+import { getAccessToken, consumeAccessTokenFromFragment, coreOrigin, ensureFreshToken, startTokenRenewal, SILENT_REFRESH_PAGE, REFRESH_LOCK } from "./authClient";
 
 describe("authClient", () => {
   beforeEach(() => {
@@ -195,11 +195,62 @@ describe("silent renewal", () => {
     await expect(p).resolves.toBe(false);
   });
 
-  it("gives up on a frame that never answers", async () => {
+  it("gives up waiting on a slow frame, but leaves the frame to finish so a late answer still lands", async () => {
     const p = ensureFreshToken();
     await vi.advanceTimersByTimeAsync(15_001);
     await expect(p).resolves.toBe(false);
+    // The request is still in flight: tearing the frame down here is how a rotation core already
+    // committed gets lost, and the browser is then left holding a stale cookie.
+    expect(removed).toHaveLength(0);
+    answerWithToken(frames[0], "late-token");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getAccessToken()).toBe("late-token");
+    expect(removed).toEqual([frames[0]]);
+  });
+
+  it("removes a frame that never loads at all, eventually", async () => {
+    const p = ensureFreshToken();
+    await vi.advanceTimersByTimeAsync(15_001);
+    await expect(p).resolves.toBe(false);
+    await vi.advanceTimersByTimeAsync(120_000);
     expect(removed).toHaveLength(1);
+  });
+
+  it("takes the origin's refresh lock for the frame's whole life, so other tabs wait their turn", async () => {
+    // A fake Web Locks API: requests queue, and each callback holds the lock until it settles.
+    const waiting: Array<() => void> = [];
+    let held = false;
+    const request = vi.fn(async (name: string, cb: () => Promise<unknown>) => {
+      expect(name).toBe(REFRESH_LOCK);
+      if (held) await new Promise<void>((r) => waiting.push(r));
+      held = true;
+      try {
+        return await cb();
+      } finally {
+        held = false;
+        waiting.shift()?.();
+      }
+    });
+    vi.stubGlobal("navigator", { ...navigator, locks: { request } });
+    try {
+      // "Another tab" holds the lock while this tab asks.
+      let releaseOther!: () => void;
+      void request(REFRESH_LOCK, () => new Promise<void>((r) => { releaseOther = r; }));
+      await vi.advanceTimersByTimeAsync(0);
+      const p = ensureFreshToken();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames).toHaveLength(0); // waiting: no frame until the other tab is done
+      releaseOther();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames).toHaveLength(1);
+      expect(held).toBe(true); // and the lock is ours until the frame is gone
+      answerWithToken(frames[0], "after-the-other-tab");
+      await expect(p).resolves.toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(held).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("shares one frame between callers that ask at the same time", async () => {

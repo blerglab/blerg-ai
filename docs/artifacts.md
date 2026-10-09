@@ -26,6 +26,15 @@ Hint: if a preview would help the user, publish a pdf, html or markdown version 
 Claude Code session reads point at it, so the agent picks a format you can read without
 downloading. The link opens the session with that file in the viewer.
 
+## Inline in the chat
+
+An image (up to 10 MiB) is drawn in its card, and a video or audio file gets a play tile; the
+same goes for an image, video or audio file you attach to a message, once it is in the Files
+list. Click the picture or the tile to open the file in the viewer — a video or audio file
+starts playing at once. Everything else keeps the plain card with **View** and **Download**.
+Previews are fetched through the same authenticated route as the viewer, when the card scrolls
+into view, and only once per file.
+
 ## What the app can show
 
 Each file gets a **view** from its name (and, for images and PDFs, its first bytes). Anything the
@@ -95,8 +104,9 @@ The first publish of a name prints no version note.
 ## Limits
 
 - 25 MiB per file.
-- 50 files per session, every version counting as a file. A 51st is refused; delete one in the Files
-  panel first.
+- 50 files per session, every version counting as a file. A 51st is refused. The agent frees a slot
+  itself with `blerg-runner unpublish <name>` (`blerg-runner files` lists what it published); a file
+  you attached is yours to delete, from the Files panel.
   Together that is up to about 1.25 GiB per session, so on a shared machine or cluster node give the
   runner's data a disk quota (see [`SECURITY.md`](../SECURITY.md)).
 - 20 versions per file name (per side). A 21st is refused with "This file already has 20 versions;
@@ -135,6 +145,11 @@ never trusted:
   font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-src 'none'`),
   which cuts off the network (no `fetch`, no images or scripts from elsewhere) and stops the page
   submitting a form, changing where its links point, or embedding another page.
+- In the chat, an HTML file (up to 2 MB) also shows as a small preview in its card: the page
+  itself, laid out at desktop width and scaled down. It runs in the same sandbox with the same
+  policy, and from the chat it cannot be clicked, scrolled or focused: a cover over it opens the
+  viewer, which is where the page can be used. The preview only exists while its card is near
+  the visible part of the chat.
 
 ## Attaching a file to a board card
 
@@ -168,7 +183,7 @@ from the chat box, and the session's agent fetches them into its working folder.
   pasting them. Each file uploads immediately and shows as a chip under the box with its size and a
   remove button; removing a chip deletes the upload. Send is disabled while an upload is running.
 - **Limits:** 25 MiB per file (larger ones are refused in the browser), 10 files per message, and
-  per session at most 20 uploaded files and 200 MiB in total. These are separate from the agent's
+  per session at most 100 uploaded files and 200 MiB in total. These are separate from the agent's
   own 50 files; uploading is refused once the session has ended. Name handling and the content type
   work exactly as for an agent's files (the server decides the type; folders in names are dropped).
 - **What the agent sees:** your text, then a blank line and one line naming the files, for example
@@ -192,6 +207,34 @@ from the chat box, and the session's agent fetches them into its working folder.
 The routes behind this: `POST /api/sessions/{id}/uploads` (a signed-in person), and, for the agent's
 token, `GET /api/sessions/{id}/attachments` and `GET /api/sessions/{id}/attachments/{aid}/file`
 (always `application/octet-stream`, `nosniff`).
+
+## Review and mark-up
+
+A published file can be answered precisely, without quoting by hand. Open it in the viewer:
+
+- **Review** (markdown and PDF). The document is shown as it reads: rendered markdown, or the
+  PDF's real pages. Select a passage and press **N** (or **Request change**) to ask for a change
+  there; the request is anchored to the quote, the heading above it, and for a PDF the page. For a
+  markdown file the source is beside the page and can be edited directly; **Changes** marks your
+  edits on the page. Requests list in the margin and their quotes are highlighted. **Submit** sends
+  everything to the session in one message: the requests, each with an id, and your edits as a
+  diff with the edited copy attached.
+- **Mark up** (images, the session's or your own). Pen, arrow, box, and numbered pins with a note
+  each. **Send** attaches the marked-up image and puts the pins' notes in the message.
+
+The session makes the changes, publishes the file again, and answers each request as done or
+declined with a line; the answers show beside your requests the next time you open the review.
+
+What is stored: `<file>.review.json`, uploaded beside the file on every submit (the requests,
+their anchors, and the diff), and the session's copy of the same name with its replies. The viewer
+merges the two: your requests and wording, the session's status and reply. A review submit counts
+against your upload limits like any attachment (one or two files), and a file keeps at most 20
+versions, so a long-running review of one file may need old `.review.json` versions deleted from
+the Files panel.
+
+On the session's side the commands are `blerg-runner review list [<file>]` and
+`blerg-runner review reply <id> done|declined "<line>"`; `blerg-runner review --help` explains the
+loop. Design: [`docs/design/feedback-tools.md`](design/feedback-tools.md).
 
 ## Where the files are
 

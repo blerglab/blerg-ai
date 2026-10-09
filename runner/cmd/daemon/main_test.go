@@ -64,3 +64,27 @@ func TestPrependPath(t *testing.T) {
 		})
 	}
 }
+
+// TestServerHTTPSetting: BLERG_RUNNER_SERVER_HTTP wins as it is; without it the
+// base is derived from a deprecated BLERG_RUNNER_PREVIEW_URL ending in
+// /api/preview, and from nothing else.
+func TestServerHTTPSetting(t *testing.T) {
+	for _, c := range []struct {
+		name, serverHTTP, previewURL, want string
+		derived                            bool
+	}{
+		{"neither set", "", "", "", false},
+		{"server http only", "http://runner.example.test", "", "http://runner.example.test", false},
+		{"server http wins", "http://runner.example.test", "http://other.example.test/api/preview", "http://runner.example.test", false},
+		{"derived from the preview url", "", "http://runner.example.test/api/preview", "http://runner.example.test", true},
+		{"trailing slash and spaces", "", " https://runner.example.test/base/api/preview/ ", "https://runner.example.test/base", true},
+		{"not the preview endpoint", "", "http://runner.example.test/preview", "", false},
+		{"only the suffix", "", "/api/preview", "", false},
+	} {
+		got, derived := serverHTTPSetting(c.serverHTTP, c.previewURL)
+		if got != c.want || derived != c.derived {
+			t.Errorf("%s: serverHTTPSetting(%q, %q) = %q, %v; want %q, %v",
+				c.name, c.serverHTTP, c.previewURL, got, derived, c.want, c.derived)
+		}
+	}
+}

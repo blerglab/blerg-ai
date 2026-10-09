@@ -69,8 +69,20 @@ var runnerOperations = []agentsmanifest.Operation{
 		Summary: "Read a window of the session transcript from a cursor (after_seq)."},
 	{Name: "events_stream", Method: "GET", Path: "/api/runner/sessions/{id}/events/stream", Cap: coreAuthRunnerCap, Idempotent: true,
 		Summary: "The same events as a Server-Sent Events stream, resumable with Last-Event-ID."},
+	{Name: "events_live", Method: "GET", Path: "/api/runner/sessions/{id}/events/live", Cap: coreAuthRunnerCap, Idempotent: true,
+		Summary: "The live transcript as Server-Sent Events: a replay page, then every event, typing delta and status change as it happens."},
 	{Name: "result", Method: "GET", Path: "/api/runner/sessions/{id}/result", Cap: coreAuthRunnerCap, Idempotent: true,
 		Summary: "The structured outcome: terminal state, branch, last assistant message."},
+	{Name: "files_list", Method: "GET", Path: "/api/runner/sessions/{id}/artifacts", Cap: coreAuthRunnerCap, Idempotent: true,
+		Summary: "The session's files (published by the agent or attached by a person), newest first, with versions."},
+	{Name: "file_raw", Method: "GET", Path: "/api/runner/sessions/{id}/artifacts/{aid}/raw", Cap: coreAuthRunnerCap, Idempotent: true,
+		Summary: "One file's bytes for an in-app viewer, with the server-chosen content type."},
+	{Name: "file_download", Method: "GET", Path: "/api/runner/sessions/{id}/artifacts/{aid}/download", Cap: coreAuthRunnerCap, Idempotent: true,
+		Summary: "One file's bytes as an attachment."},
+	{Name: "file_delete", Method: "DELETE", Path: "/api/runner/sessions/{id}/artifacts/{aid}", Cap: coreAuthRunnerCap, Idempotent: true,
+		Summary: "Delete one of the session's files, whichever origin it came from."},
+	{Name: "upload", Method: "POST", Path: "/api/runner/sessions/{id}/uploads", Cap: coreAuthRunnerCap,
+		Summary: "Attach a person's file to the session (raw body, X-Artifact-Name header), for the agent to fetch."},
 	{Name: "me", Method: "GET", Path: "/api/runner/me", Cap: coreAuthRunnerCap, Idempotent: true,
 		Summary: "What the calling credential is: kind, subject, audience, capabilities, expiry."},
 }
@@ -102,6 +114,8 @@ func RunnerManifest(baseURL string) agentsmanifest.ComponentEntry {
 			Accepts: []string{"agent_token", "runner_key"},
 		},
 		Operations: runnerOperations,
+		// The chat package, when this build packed one (packages.go).
+		UI: runnerUIInfo(base),
 	}
 }
 
@@ -181,5 +195,16 @@ func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
 	mux.HandleFunc("POST /api/runner/sessions/{id}/stop", a.HandleRunnerStop)
 	mux.HandleFunc("GET /api/runner/sessions/{id}/events", a.HandleRunnerEvents)
 	mux.HandleFunc("GET /api/runner/sessions/{id}/events/stream", a.HandleRunnerEventStream)
+	mux.HandleFunc("GET /api/runner/sessions/{id}/events/live", a.HandleRunnerEventsLive)
 	mux.HandleFunc("GET /api/runner/sessions/{id}/result", a.HandleRunnerResult)
+	// Session files for the same credential (runner_files.go).
+	mux.HandleFunc("GET /api/runner/sessions/{id}/artifacts", a.HandleRunnerFilesList)
+	mux.HandleFunc("GET /api/runner/sessions/{id}/artifacts/{aid}/raw", a.HandleRunnerFileRaw)
+	mux.HandleFunc("GET /api/runner/sessions/{id}/artifacts/{aid}/download", a.HandleRunnerFileDownload)
+	mux.HandleFunc("DELETE /api/runner/sessions/{id}/artifacts/{aid}", a.HandleRunnerFileDelete)
+	mux.HandleFunc("POST /api/runner/sessions/{id}/uploads", a.HandleRunnerUpload)
+	// The UI package the manifest advertises (packages.go): public, like /agents.
+	mux.HandleFunc("GET /packages/{$}", handlePackagesIndex)
+	mux.HandleFunc("GET /packages/{file}", handlePackageFile)
+	mux.HandleFunc("GET /packages/{scope}/{name}/README.md", handlePackageReadme)
 }

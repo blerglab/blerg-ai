@@ -10,6 +10,9 @@ Environment=BLERG_RUNNER_DAEMON_TOKEN=__DAEMON_TOKEN__
 Environment=BLERG_RUNNER_REPOS_ROOT=__REPOS_ROOT__
 __EXTRA_ENV__
 Restart=on-failure
+# Stop the daemon first and its engine processes only once it has gone: the daemon records which
+# sessions were mid-turn, and an engine that died first would make it record that none were.
+KillMode=mixed
 RestartSec=5
 
 [Install]

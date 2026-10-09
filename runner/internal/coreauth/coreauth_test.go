@@ -132,7 +132,7 @@ func TestClientRevocationScopedByIssuedAt(t *testing.T) {
 	if err := verify("u2", revokedAt.Unix()-1); err != nil {
 		t.Fatalf("unrelated sub: %v, want ok", err)
 	}
-	if !c.RevokedFor("k-dead", "", "anyone", time.Now().Unix()+3600) {
+	if !c.RevokedFor("k-dead", "", "anyone", "", time.Now().Unix()+3600) {
 		t.Fatal("kid revocation must apply regardless of iat")
 	}
 }

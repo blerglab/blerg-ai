@@ -73,6 +73,29 @@ type ComponentEntry struct {
 
 	Auth       *AuthInfo   `json:"auth,omitempty"`
 	Operations []Operation `json:"operations,omitempty"`
+
+	// UI is what the component offers an app that wants to show its surfaces:
+	// today the runner's chat package. Absent when the component serves none.
+	UI *UIInfo `json:"ui,omitempty"`
+}
+
+// UIInfo is the UI a component distributes for apps built on it.
+type UIInfo struct {
+	// ChatPackage is the npm package that renders a session's chat
+	// (@blerglab/chat), served by the component itself.
+	ChatPackage *PackageInfo `json:"chat_package,omitempty"`
+}
+
+// PackageInfo is one installable npm package: what to install, how to pin it
+// and where to read about it. URL is the tarball (`npm i <url>` works from
+// anywhere that reaches the component); SHA512 is the tarball's integrity
+// string (`sha512-<base64>`, as a lockfile records it).
+type PackageInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	URL     string `json:"url"`
+	SHA512  string `json:"sha512"`
+	DocsURL string `json:"docs_url"`
 }
 
 // MarshalJSON renders nil Capabilities as an empty array, for the same reason

@@ -514,10 +514,16 @@ type SessionJobSpec struct {
 	// no always-on plugins (pluginsWanted).
 	MCPGateway *protocol.MCPGatewayConfig
 	// RestrictTools makes the pod run Claude Code hardened (tool allow-list, no ambient MCP, no
-	// user settings, plugins, hooks or skills): set for every cron session and every session
-	// with a grant. The Job carries it as the plain env value restrictToolsEnvVar=1 (not a
-	// secret); the pod reads and unsets it at once. Set only in process.
+	// user settings, plugins, hooks or skills): set for every unattended session — a cron's, or
+	// one the board started with a grant — never for a launch-sheet session. The Job carries it
+	// as the plain env value restrictToolsEnvVar=1 (not a secret); the pod reads and unsets it
+	// at once. Set only in process.
 	RestrictTools bool
+	// Interaction is the session's interaction mode ("interactive" or "unattended",
+	// interaction.go). The Job carries it as the plain env value of interactionEnvVar (not a
+	// secret); the pod reads and unsets it at once, and states it in the engine's system prompt.
+	// Empty sets nothing, which the pod reads as interactive.
+	Interaction string
 	// NoOperatorFallback is set for a cron's session (spec 7.4): the shared operator Secret must
 	// never supply this session's credentials. CreateSessionJob then fails with
 	// ErrNoPersonalCredential, creating no Secret and no Job, whenever the owner's personal
@@ -986,11 +992,17 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	}
 	// A grant implies the restriction, so a session that reaches here with one and no flag
 	// (a caller that forgot) is still restricted.
-	if spec.RestrictTools || spec.MCPGateway != nil {
+	if spec.RestrictTools {
 		if _, dup := spec.ExtraEnv[restrictToolsEnvVar]; dup {
 			return fmt.Errorf("env key %s is reserved", restrictToolsEnvVar)
 		}
 		env = append(env, map[string]any{"name": restrictToolsEnvVar, "value": "1"})
+	}
+	if spec.Interaction != "" {
+		if _, dup := spec.ExtraEnv[interactionEnvVar]; dup {
+			return fmt.Errorf("env key %s is reserved", interactionEnvVar)
+		}
+		env = append(env, map[string]any{"name": interactionEnvVar, "value": spec.Interaction})
 	}
 
 	// sessionData collects everything that must never appear as a literal
@@ -1565,12 +1577,17 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 		// A resumed cron session is still a cron's: it never falls back to the operator credential
 		// (a resume by anyone but the owner has no account, and so no credential, and fails).
 		NoOperatorFallback: row.CronID != nil,
-		// A resumed cron session is still restricted (a grant session is, below).
-		RestrictTools: row.CronID != nil,
+		// A resumed session is restricted exactly when it was started so (migration 036): a
+		// cron's, or a board-started grant session. A launch-sheet session with connections
+		// comes back with its tools.
+		RestrictTools: row.CronID != nil || db.GetSessionRestrictTools(ctx, pool, sessionID),
+		// The mode the session was started in (migration 038); a row from before it is read
+		// by who started it (effectiveInteraction).
+		Interaction: effectiveInteraction(row),
 	}
 	if len(grants) > 0 {
 		// New tokens for the new pod, replacing the old ones in one transaction: the old
-		// tokens died with the old pod. No always-on plugins for a grant session.
+		// tokens died with the old pod.
 		gateway, err := reissueGrants(ctx, h, pool, sessionID, launcher, requesterSessionID, grants)
 		if err != nil {
 			log.Printf("resume %s: re-issue MCP grants: %v", sessionID, err)
@@ -1579,7 +1596,6 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 			return
 		}
 		spec.MCPGateway = gateway
-		spec.RestrictTools = true
 	}
 	jm.ResolvePlugins(ctx, &spec)
 	announceClusterStart(ctx, h, pool, sessionID, row.Repo, true, pluginStage(spec.Plugins, spec.PluginsNote))

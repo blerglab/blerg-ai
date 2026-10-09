@@ -93,6 +93,7 @@ func TestRegisterAndAggregateMarksStale(t *testing.T) {
 	err := reg.Register(ctx, agentsmanifest.ComponentEntry{
 		Name: name, BaseURL: "http://board", Version: "v0.1.0",
 		ContractVersion: "v0", Capabilities: []string{"mcp", "forge.change_requests"},
+		UI: &agentsmanifest.UIInfo{ChatPackage: &agentsmanifest.PackageInfo{Name: "@blerglab/chat", Version: "0.1.0", URL: "http://board/packages/chat.tgz"}},
 	})
 	if err != nil {
 		t.Fatalf("register: %v", err)
@@ -104,6 +105,10 @@ func TestRegisterAndAggregateMarksStale(t *testing.T) {
 	e := find(agg, name)
 	if e == nil || e.Stale {
 		t.Fatalf("fresh entry missing or stale: %+v", e)
+	}
+	// The self-described UI package survives the round trip through the stored manifest.
+	if e.UI == nil || e.UI.ChatPackage == nil || e.UI.ChatPackage.Name != "@blerglab/chat" {
+		t.Fatalf("ui package lost in aggregate: %+v", e.UI)
 	}
 	// After the TTL elapses, the entry is marked stale (not evicted).
 	time.Sleep(80 * time.Millisecond)

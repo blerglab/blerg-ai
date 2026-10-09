@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { createBoard } from '../lib/boardApi'
 import { apiFetch } from '../apiFetch'
-import { useBackdropClose } from '../hooks/useBackdropClose'
+import { useBackdropClose } from '@blerglab/chat'
 
 interface RepoInfo {
   name: string

@@ -31,7 +31,7 @@ describe('SessionList', () => {
   beforeEach(() => {
     localStorage.clear()
     useSessionStore.setState({ daemons: [], sessions: [], statusChangedAt: {}, serverVersion: '' })
-    useMessageStore.setState({ messages: [], lastSeenAt: Date.now() + 9_999_999 })
+    useMessageStore.setState({ messages: [] })
   })
 
   it('carries the cron badge through to the list and links to the crons page in the sidebar', () => {
@@ -40,6 +40,9 @@ describe('SessionList', () => {
       makeSession({ id: 'b', status: 'running', title: 'By hand' }),
     ])
     renderList({ variant: 'sidebar' })
+    // A cron's session lives in the Automated section (collapsed until opened), with its badge.
+    expect(screen.queryByTestId('cron-badge')).toBeNull()
+    fireEvent.click(screen.getByText('Automated'))
     expect(screen.getAllByTestId('cron-badge')).toHaveLength(1)
     expect(screen.getByTestId('crons-nav')).toHaveTextContent('Crons')
   })
@@ -531,5 +534,39 @@ describe('History order', () => {
     expect(titles[2].compareDocumentPosition(titles[1]) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
     expect(screen.queryByText('alpha')).toBeNull()
     expect(screen.queryByText('beta')).toBeNull()
+  })
+})
+
+describe('Automated sessions', () => {
+  it('keeps tool-, cron- and key-started sessions out of the repo groups and History, in a collapsed section that counts them', () => {
+    useSessionStore.setState({
+      sessions: [
+        makeSession({ id: 'mine', status: 'running', repo: '/r/widget', title: 'Mine' }),
+        makeSession({ id: 'done', status: 'stopped', repo: '/r/widget', title: 'Mine, ended', ended_at: '2026-10-01T10:00:00Z' }),
+        makeSession({ id: 't1', status: 'running', repo: '/r/widget', title: 'Smoke test', started_by: { kind: 'agent', name: 'literary-agent' } }),
+        makeSession({ id: 't2', status: 'stopped', repo: '/r/widget', title: 'Nightly', started_by: { kind: 'agent', name: 'literary-agent' }, ended_at: '2026-10-02T10:00:00Z' }),
+        makeSession({ id: 'c1', status: 'stopped', repo: '/r/widget', title: 'Cron run', cron_id: 'cron-1', ended_at: '2026-10-03T10:00:00Z' }),
+        makeSession({ id: 'k1', status: 'running', repo: '/r/widget', title: 'Operator', started_by: { kind: 'runner_key' } }),
+      ],
+      daemons: [makeDaemon({ id: 'd1' })],
+    } as never)
+    renderList()
+    // Collapsed: the section header counts, the cards are not drawn.
+    expect(screen.getByTestId('automated-summary')).toHaveTextContent('2 running · 2 recent')
+    expect(screen.queryByText('Smoke test')).toBeNull()
+    expect(screen.getByText('Mine')).toBeInTheDocument()
+    // History holds only the person's own ended session.
+    fireEvent.click(screen.getByText('History'))
+    expect(screen.getByText('Mine, ended')).toBeInTheDocument()
+    expect(screen.queryByText('Nightly')).toBeNull()
+    expect(screen.queryByText('Cron run')).toBeNull()
+    // Opened: grouped by who started them, the token by its name.
+    fireEvent.click(screen.getByText('Automated'))
+    const tool = screen.getByTestId('automated-group-literary-agent')
+    expect(tool).toHaveTextContent('Smoke test')
+    expect(tool).toHaveTextContent('Nightly')
+    expect(screen.getByTestId('automated-group-cron')).toHaveTextContent('Cron run')
+    expect(screen.getByTestId('automated-group-operator key')).toHaveTextContent('Operator')
+    expect(screen.getAllByTestId('started-by-chip').length).toBeGreaterThan(0)
   })
 })

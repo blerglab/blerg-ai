@@ -69,6 +69,9 @@ func ccSteeringEnabled() bool { return os.Getenv("BLERG_CLAUDE_STEERING") != "0"
 type steerQueued struct {
 	text, source string
 	retried      bool // already failed to reach a process once
+	// adopt: this is the first message after an adoption, so the line written to the engine
+	// carries the adoption note (claudeadopt.go). It stays set across a retry.
+	adopt bool
 }
 
 type awaitMsg struct {
@@ -147,6 +150,7 @@ func (d *claudeCodeDriver) Run(ctx context.Context) {
 		d.sm.Lock()
 		pending := d.steer.sq
 		d.steer.sq = nil
+		d.rearmAdoptNoteLocked(pending)
 		d.sm.Unlock()
 		for _, m := range pending {
 			d.enqueueLegacy(m.text, m.source)
@@ -252,10 +256,15 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 		d.sm.Unlock()
 		return // the world changed under us: look again
 	}
+	if d.adoptPending {
+		d.steer.sq[0].adopt, d.adoptPending = true, false
+	}
 	m := d.steer.sq[0]
+	// engineText is computed at every write, not once: after a refused resume the retry must
+	// carry the "conversation could not be restored" note instead.
 	line, err := json.Marshal(map[string]any{
 		"type": "user", "uuid": uuid,
-		"message": map[string]any{"role": "user", "content": m.text},
+		"message": map[string]any{"role": "user", "content": d.engineText(m.text, m.adopt)},
 	})
 	if err != nil {
 		d.steer.sq = d.steer.sq[1:]
@@ -313,8 +322,8 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 	var opts []ccOption
 	if d.restrict {
 		opts = append(opts, withRestrictTools())
-	} else if d.mcpFile == nil {
-		opts = append(opts, withSessionGuide())
+	} else {
+		opts = append(opts, withSessionGuide(), withInteraction(d.interaction))
 	}
 	if d.mcpFile != nil {
 		path, err := d.mcpFile.Ensure()
@@ -368,6 +377,9 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 	d.sm.Unlock()
 	go d.writer(p)
 	go d.reader(ctx, p, stdout)
+	if !d.prefix.enabled() {
+		d.reportEngine(cmd.Process.Pid, true) // in a sandbox this is `docker exec`, not the engine
+	}
 	return p, nil
 }
 
@@ -494,11 +506,7 @@ func (d *claudeCodeDriver) onInit(p *ccProc, ev *ccLine, line []byte) {
 	d.steer.turnSeq++ // a turn is starting: timers armed for an earlier one are stale
 	d.stopTimerLocked(&d.steer.settleTimer)
 	d.sm.Unlock()
-	if ev.SessionID != "" {
-		d.mu.Lock()
-		d.ccSessionID = ev.SessionID
-		d.mu.Unlock()
-	}
+	d.setCCSessionID(ev.SessionID)
 	d.markRunning("agent turn")
 	if pl, ok := claudeInitCapabilities(line, d.skills, d.workDir, d.home); ok {
 		d.caps.emit(d.emitter, pl)
@@ -542,10 +550,27 @@ func (d *claudeCodeDriver) onUser(ev *ccLine) {
 		d.emit("user_message", agent.UserMessagePayload{Text: m.text, Source: m.source})
 	case lateSettled || !isString || strings.HasPrefix(strings.TrimSpace(echo), "<local-command"):
 		// already shown, or the CLI's own rendering of a command's output
+	case harnessInjected(echo):
+		// The CLI's own user-role messages (a subagent's completion, a system reminder): kept
+		// in the transcript as source "system", which the chat does not show as the person.
+		d.emit("user_message", agent.UserMessagePayload{Text: echo, Source: "system"})
 	default:
 		// A message nobody here wrote (a hook, a resumed history): show it as the user's.
 		d.emit("user_message", agent.UserMessagePayload{Text: echo, Source: "chat"})
 	}
+}
+
+// harnessInjected reports whether a user-role message is one Claude Code wrote itself: a
+// background task's completion (<task-notification>), a system reminder, or a notice it labels
+// as not user input. Such text is never the person's.
+func harnessInjected(text string) bool {
+	s := strings.TrimSpace(text)
+	for _, p := range []string{"<task-notification>", "<system-reminder>", "[SYSTEM NOTIFICATION", "<command-name>"} {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
@@ -576,11 +601,7 @@ func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
 	}
 	d.sm.Unlock()
 
-	if ev.SessionID != "" {
-		d.mu.Lock()
-		d.ccSessionID = ev.SessionID
-		d.mu.Unlock()
-	}
+	d.setCCSessionID(ev.SessionID)
 	stop := "end_turn"
 	if interrupted {
 		stop = "interrupted"
@@ -814,6 +835,14 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 	badResume := !shuttingDown && !killed && !intentional && !p.sawInit && strings.Contains(noise, "No conversation found")
 	if probe {
 		d.steer.legacy = true
+		// The message that carried the adoption note never reached an engine: the per-turn
+		// engine's first message carries it instead.
+		for _, a := range left {
+			if a.adopt {
+				d.adoptPending = true
+			}
+		}
+		d.rearmAdoptNoteLocked(d.steer.sq)
 	}
 	// Decide the fate of the messages the process never consumed while still holding the lock, and put the
 	// ones that get another go back BEFORE announcing the exit, so nothing newer can overtake them.
@@ -847,10 +876,11 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 	d.sm.Unlock()
 	close(p.done)
 
+	if p.cmd != nil && p.cmd.Process != nil && !d.prefix.enabled() {
+		d.reportEngine(p.cmd.Process.Pid, false)
+	}
 	if badResume {
-		d.mu.Lock()
-		d.ccSessionID = "" // that conversation is gone: the retry starts a fresh one
-		d.mu.Unlock()
+		d.clearCCSessionID() // that conversation is gone: the retry starts a fresh one
 	}
 	if shuttingDown || killed {
 		d.prefix.clearPID(p.pidFile)

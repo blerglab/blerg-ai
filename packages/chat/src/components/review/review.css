@@ -1,0 +1,344 @@
+/* The review mode of the artifact viewer: source | page | requests on a desktop, one pane at a
+   time (Source / Page toggle) on a narrow screen. Tokens only (theme/tokens.test.ts). */
+
+.artifact-viewer.is-review {
+  width: min(1280px, 100%);
+}
+
+.review-mode {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  outline: none;
+}
+
+.review-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.review-pane-toggle {
+  display: none;
+  gap: 0;
+}
+.review-pane-toggle .artifact-btn:first-child {
+  border-radius: 6px 0 0 6px;
+}
+.review-pane-toggle .artifact-btn:last-child {
+  border-radius: 0 6px 6px 0;
+  margin-left: -1px;
+}
+
+.review-bar .artifact-btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--chat-accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--chat-accent) 55%, transparent);
+}
+
+.review-spacer {
+  flex: 1;
+}
+
+.review-notice {
+  font-size: var(--chat-text-sm);
+  color: var(--chat-muted);
+}
+.review-notice-ok {
+  color: var(--chat-success);
+}
+.review-notice-bad {
+  color: var(--chat-danger);
+}
+
+.review-submit {
+  border-color: color-mix(in srgb, var(--chat-accent) 55%, transparent);
+}
+
+/* ── the request form ──────────────────────────────────────────────────────── */
+
+.review-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--chat-warning) 55%, var(--chat-border));
+  border-radius: 8px;
+  background: var(--chat-surface-2);
+}
+
+.review-form-text {
+  font: inherit;
+  font-size: var(--chat-text-sm);
+  color: var(--chat-fg);
+  background: var(--chat-bg);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.review-form-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* ── panes ─────────────────────────────────────────────────────────────────── */
+
+.review-panes {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) 240px;
+  gap: 12px;
+}
+.review-pdf-mode .review-panes {
+  grid-template-columns: minmax(0, 1fr) 240px;
+}
+
+.review-source,
+.review-page-col,
+.review-margin {
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.review-page-col,
+.review-margin {
+  overflow: auto;
+}
+
+.review-pane-title {
+  font-size: var(--chat-text-xs);
+  color: var(--chat-muted-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* the source */
+
+.review-source-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0 6px;
+  font-size: var(--chat-text-xs);
+}
+
+.review-editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  background: var(--chat-bg);
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs);
+  line-height: 1.5;
+}
+
+.review-gutter {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 8px 10px 10px;
+  text-align: right;
+  color: var(--chat-muted-2);
+  user-select: none;
+  border-right: 1px solid var(--chat-border);
+  will-change: transform;
+}
+
+.review-textarea {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--chat-fg);
+  font: inherit;
+  line-height: inherit;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+
+/* the page: the same reading width and type as the plain markdown viewer */
+
+.review-page {
+  padding-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.review-diff {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--chat-bg);
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-del {
+  background: color-mix(in srgb, var(--chat-danger) 22%, transparent);
+  text-decoration: line-through;
+  text-decoration-color: var(--chat-danger);
+}
+.diff-ins {
+  background: color-mix(in srgb, var(--chat-success) 24%, transparent);
+}
+
+/* highlights of the requests' quotes on the page */
+
+::highlight(chat-review-open) {
+  background-color: color-mix(in srgb, var(--chat-warning) 30%, transparent);
+}
+::highlight(chat-review-done) {
+  background-color: color-mix(in srgb, var(--chat-success) 28%, transparent);
+}
+::highlight(chat-review-declined) {
+  background-color: color-mix(in srgb, var(--chat-muted-2) 28%, transparent);
+}
+::highlight(chat-review-focus) {
+  background-color: color-mix(in srgb, var(--chat-warning) 55%, transparent);
+  text-decoration: underline;
+  text-decoration-color: var(--chat-warning);
+}
+
+/* ── the margin ────────────────────────────────────────────────────────────── */
+
+.review-empty {
+  margin: 8px 0;
+  color: var(--chat-muted-2);
+  font-size: var(--chat-text-sm);
+}
+
+.review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.review-request {
+  padding: 8px 10px;
+  border: 1px solid var(--chat-border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--chat-surface);
+  font-size: var(--chat-text-sm);
+}
+.review-request.status-open { border-left-color: var(--chat-warning); }
+.review-request.status-done { border-left-color: var(--chat-success); }
+.review-request.status-declined { border-left-color: var(--chat-muted-2); }
+.review-request.review-focus {
+  background: color-mix(in srgb, var(--chat-warning) 10%, var(--chat-surface));
+  border-color: color-mix(in srgb, var(--chat-warning) 55%, var(--chat-border));
+}
+
+.review-request-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.review-badge {
+  font-size: var(--chat-text-xs);
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.review-badge-open {
+  color: var(--chat-warning);
+  border-color: color-mix(in srgb, var(--chat-warning) 45%, transparent);
+}
+.review-badge-done {
+  color: var(--chat-success);
+  border-color: color-mix(in srgb, var(--chat-success) 45%, transparent);
+}
+.review-badge-declined {
+  color: var(--chat-muted-2);
+  border-color: color-mix(in srgb, var(--chat-muted-2) 45%, transparent);
+}
+
+.review-delete {
+  background: none;
+  border: none;
+  color: var(--chat-muted-2);
+  cursor: pointer;
+  font: inherit;
+  padding: 0 2px;
+  line-height: 1;
+}
+.review-delete:hover,
+.review-delete:focus-visible {
+  color: var(--chat-danger);
+}
+
+.review-quote {
+  margin: 6px 0;
+  padding: 0 0 0 8px;
+  border-left: 2px solid var(--chat-border);
+  color: var(--chat-muted);
+  font-style: italic;
+}
+
+.review-where {
+  margin: 0 0 4px;
+  color: var(--chat-muted-2);
+  font-size: var(--chat-text-xs);
+}
+
+.review-text {
+  margin: 0;
+}
+
+.review-reply {
+  margin: 6px 0 0;
+  padding-top: 6px;
+  border-top: 1px dashed var(--chat-border);
+  color: var(--chat-muted);
+}
+.review-reply::before {
+  content: "↳ ";
+  color: var(--chat-muted-2);
+}
+
+/* ── narrow: one pane at a time ───────────────────────────────────────────── */
+
+@media (max-width: 700px) {
+  .review-pane-toggle {
+    display: inline-flex;
+  }
+  .review-panes,
+  .review-pdf-mode .review-panes {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+  .review-margin {
+    max-height: 40%;
+  }
+  .review-markdown[data-pane="page"] .review-source {
+    display: none;
+  }
+  .review-markdown[data-pane="source"] .review-page-col,
+  .review-markdown[data-pane="source"] .review-margin {
+    display: none;
+  }
+}

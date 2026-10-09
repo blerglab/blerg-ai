@@ -4,13 +4,16 @@
 # repository root, covers all four Go modules.
 GOLANGCI_LINT ?= golangci-lint
 LINT_CONFIG   := $(CURDIR)/.golangci.yml
-FRONTENDS     := core/web board/web runner/frontend
+# packages/chat, runner/frontend and board/web are one npm workspace rooted here (`npm ci` at the
+# repository root installs all three); core/web has its own install.
+FRONTENDS     := core/web board/web packages/chat runner/frontend
 
 fmt:    ; gofmt -w ./contracts ./core ./board ./runner
 
 # Everything the CI lint steps run: the Go linter on contracts + core (through
 # go.work) and on runner and board (standalone modules, workspace off), then
-# ESLint in each frontend. The frontends need `npm ci` to have been run.
+# ESLint in each frontend. The frontends need `npm ci` to have been run (at the root for the
+# workspace, in core/web for that one).
 lint: lint-go lint-web
 
 lint-go:

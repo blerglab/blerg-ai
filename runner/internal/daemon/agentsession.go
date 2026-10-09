@@ -60,6 +60,10 @@ type AgentHostConfig struct {
 	// session's always-on plugins (SpawnSession.Plugins) are installed. nil —
 	// the cluster pod's, and a daemon without a state dir — loads none.
 	Plugins *pluginWorkshop
+	// RecordsDir is where recovery records of agent sessions are kept (agentrecord.go), so a
+	// session survives a restart of the daemon process. "" — the cluster pod's, and a daemon
+	// with no state directory — keeps none.
+	RecordsDir string
 }
 
 // reposRoot is the repos root in effect now.
@@ -79,6 +83,19 @@ type AgentHost struct {
 
 	mu       sync.Mutex
 	sessions map[string]*agentSession
+
+	// frozen stops every recovery-record write once the daemon is stopping (Freeze).
+	frozen atomic.Bool
+	// Adoption after a daemon restart (agentadopt.go), all guarded by mu. adopting are the
+	// recorded sessions not hosted again yet: they are reported as this daemon's (the server
+	// must not write them off while they are being brought back) and messages for them are
+	// held. adoptFailed are those that could not be hosted; their end is reported once the
+	// daemon is connected.
+	adopting    map[string]*adoptingSession
+	adoptFailed []string
+	// connected is closed the first time the daemon has a connection to its server.
+	connected     chan struct{}
+	connectedOnce sync.Once
 }
 
 type agentSession struct {
@@ -97,6 +114,8 @@ type agentSession struct {
 	// engine is the session's engine id ("" = Claude): the rules every
 	// in-session model/effort change is checked against (changeModel).
 	engine string
+	// record is the session's recovery record (nil: not recoverable, see recordable).
+	record *recordKeeper
 }
 
 // The two reasons a sandboxed agent-kind spawn is refused: the Claude
@@ -187,7 +206,8 @@ func NewAgentHost(sender Sender, cfg AgentHostConfig) *AgentHost {
 			cfg.HomeDir = h
 		}
 	}
-	return &AgentHost{sender: sender, cfg: cfg, sessions: make(map[string]*agentSession)}
+	return &AgentHost{sender: sender, cfg: cfg, sessions: make(map[string]*agentSession),
+		adopting: make(map[string]*adoptingSession), connected: make(chan struct{})}
 }
 
 // ─── Event emitter with pending buffer ───────────────────────────────────────
@@ -454,7 +474,7 @@ func (m *httpMessenger) pollAnswer(ctx context.Context, id string) {
 // ─── Host lifecycle ──────────────────────────────────────────────────────────
 
 // Spawn starts an agent-kind session for a spawn_session message.
-func (h *AgentHost) Spawn(msg protocol.SpawnSession) { h.spawn(msg, nil, "") }
+func (h *AgentHost) Spawn(msg protocol.SpawnSession) { h.spawn(msg, nil, "", nil) }
 
 // SpawnResumed starts a session with provider context rebuilt from persisted
 // transcript events (pod/daemon restart). wsState describes the workspace
@@ -477,10 +497,22 @@ func (h *AgentHost) SpawnResumed(msg protocol.SpawnSession, events []agent.Resto
 	} else if wsState != "resumed-from-wip" {
 		note = "[system] Session resumed after a restart. The workspace is a fresh clone: committed work on the wip branch survived, but any uncommitted changes from before the restart are gone. Re-verify workspace state before continuing."
 	}
-	h.spawn(msg, events, note)
+	h.spawn(msg, events, note, nil)
 }
 
-func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEvent, note string) {
+// spawn hosts a session. With ad (agentadopt.go) it hosts one AGAIN, from a recovery record,
+// after a daemon restart: the same environment, tools and driver, but nothing that belongs to a
+// start — no session_started (it would reset the row to "starting"), no start-stage events, no
+// initial prompt, no state change — and a refusal is returned in ad instead of being sent as the
+// session's error.
+func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEvent, note string, ad *adoptRequest) {
+	fail := func(reason string) {
+		if ad != nil {
+			ad.failed = reason
+			return
+		}
+		h.sendError(msg.SessionID, reason)
+	}
 	h.mu.Lock()
 	if _, dup := h.sessions[msg.SessionID]; dup {
 		h.mu.Unlock()
@@ -491,7 +523,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// Checked here as well as in Manager.handleSpawnSession: the cluster pod
 	// (cmd/runner) calls Spawn directly, never through the Manager.
 	if problem := spawnModelProblem(msg); problem != "" {
-		h.sendError(msg.SessionID, problem)
+		fail(problem)
 		return
 	}
 	workDir := msg.ProjectPath
@@ -502,7 +534,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		// ReposRoot.
 		wd, err := resolveProjectPath(h.cfg.reposRoot(), msg.Repo)
 		if err != nil {
-			h.sendError(msg.SessionID, "invalid folder path")
+			fail("invalid folder path")
 			return
 		}
 		workDir = wd
@@ -512,19 +544,19 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// that bypass it (recovery with a stale path). Name the repo, not just the
 	// path — this text becomes the session's error_reason.
 	if _, err := os.Stat(workDir); err != nil {
-		h.sendError(msg.SessionID, fmt.Sprintf("workspace not found for repo %q: %s is missing — clone it under this daemon's repos root", msg.Repo, workDir))
+		fail(fmt.Sprintf("workspace not found for repo %q: %s is missing — clone it under this daemon's repos root", msg.Repo, workDir))
 		return
 	}
 
 	// Which driver runs this session is one decision (chooseAgentDriver),
 	// shared with the engine preflight and recovery.
 	if msg.Sandbox && msg.Engine == "openclaw" {
-		h.sendError(msg.SessionID, sandboxOpenclawRefusal)
+		fail(sandboxOpenclawRefusal)
 		return
 	}
 	kind, refusal := h.driverFor(msg)
 	if kind == driverNone {
-		h.sendError(msg.SessionID, refusal)
+		fail(refusal)
 		return
 	}
 	cliEngine := kind == driverCLI
@@ -536,24 +568,24 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	if msg.Sandbox && useClaudeCode {
 		cred, ok := sandboxClaudeCredentialEnv(h.cfg.APIKey)
 		if !ok {
-			h.sendError(msg.SessionID, sandboxNoClaudeCredentialRefusal)
+			fail(sandboxNoClaudeCredentialRefusal)
 			return
 		}
 		sandboxCred = cred
 	}
 
 	if msg.RestrictTools && !useClaudeCode {
-		h.sendError(msg.SessionID, restrictToolsNeedsClaudeRefusal)
+		fail(restrictToolsNeedsClaudeRefusal)
 		return
 	}
 	if msg.MCPGateway != nil {
 		if !useClaudeCode {
-			h.sendError(msg.SessionID, mcpGatewayNeedsClaudeRefusal)
+			fail(mcpGatewayNeedsClaudeRefusal)
 			return
 		}
 		// The error names the problem, never a token.
 		if err := ValidateMCPGateway(msg.MCPGateway); err != nil {
-			h.sendError(msg.SessionID, err.Error())
+			fail(err.Error())
 			return
 		}
 	}
@@ -576,10 +608,22 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		if ev.Kind == "status_changed" {
 			if p, ok := ev.Payload.(agent.StatusPayload); ok {
 				sess.status.Store(p.Status)
+				sess.record.setTurnActive(p.Status == "running")
 			}
 		}
 		if ev.Kind == "turn_done" && h.cfg.OnTurnDone != nil {
 			h.cfg.OnTurnDone(msg.SessionID)
+		}
+		// What the recovery record keeps up with (a nil record ignores it all).
+		switch p := ev.Payload.(type) {
+		case agent.TurnDonePayload:
+			if ev.Kind == "turn_done" {
+				sess.record.turnEnded(p.StopReason)
+			}
+		case agent.ModelChangedPayload:
+			if ev.Kind == "model_changed" {
+				sess.record.setModel(p.Model, p.Effort)
+			}
 		}
 		// A driver failure is an agent *event*; only session_state_changed
 		// reaches SetSessionError, which is the only thing that writes
@@ -643,9 +687,12 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	var pluginDirs []string
 	if len(msg.Plugins) > 0 {
 		stages := daemonStageReporter{sender: h.sender, sessionID: msg.SessionID}
+		if ad != nil {
+			stages.sender = nil // an adoption is not a start: there is no start panel to fill
+		}
 		reason := ""
 		switch {
-		case msg.RestrictTools || msg.MCPGateway != nil:
+		case msg.RestrictTools:
 			reason = "not loaded: a restricted session runs without plugins"
 		case !useClaudeCode || msg.Kind != "agent":
 			reason = "not loaded: only Claude Code agent sessions load plugins"
@@ -653,6 +700,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			reason = "not loaded: this daemon has no plugin workshop (no state directory)"
 		}
 		if reason != "" {
+			if ad != nil {
+				ad.pluginsLost = true
+			}
 			stages.report(protocol.StartStage{ID: protocol.StagePlugins, Label: "Installing plugins", State: protocol.StageStateWarning, Detail: reason})
 		} else {
 			stages.report(protocol.StartStage{ID: protocol.StagePlugins, Label: "Installing plugins",
@@ -672,6 +722,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			state := protocol.StageStateDone
 			if len(res.Failed)+len(res.Skipped) > 0 {
 				state = protocol.StageStateWarning
+				if ad != nil {
+					ad.pluginsLost = true
+				}
 			}
 			stages.report(protocol.StartStage{ID: protocol.StagePlugins, Label: "Installing plugins", State: state, Detail: res.Detail()})
 		}
@@ -696,7 +749,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		if err != nil {
 			cancel()
 			releasePlugins()
-			h.sendError(msg.SessionID, "could not start the sandbox container: "+err.Error())
+			fail("could not start the sandbox container: " + err.Error())
 			return
 		}
 		prefix = sandboxExecPrefix(container)
@@ -709,10 +762,13 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	var mcpFile *mcpConfigFile
 	var ccOpts []ccOption
 	if msg.RestrictTools {
-		// A grant session is restricted too: the driver adds the flags for it
-		// as soon as it has a config source, RestrictTools or not.
+		// Restricted (a cron's, or a board-started grant session). A grant alone
+		// is not: the driver adds only the grant's own flags for it.
 		ccOpts = append(ccOpts, withRestrictTools())
 	}
+	// Whether a person is reading the chat as the session works: the driver says so in the
+	// system prompt of every unrestricted turn ("" from an older server is interactive).
+	ccOpts = append(ccOpts, withInteraction(msg.Interaction))
 	if len(pluginDirs) > 0 {
 		ccOpts = append(ccOpts, withPluginDirs(pluginDirs))
 	}
@@ -724,7 +780,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				removeSandboxContainer(msg.SessionID)
 			}
 			releasePlugins()
-			h.sendError(msg.SessionID, err.Error())
+			fail(err.Error())
 			return
 		}
 		ccOpts = append(ccOpts, withMCPConfigSource(mcpFile))
@@ -763,7 +819,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		Provider:  provider,
 		Emitter:   emitter,
 		Registry:  registry,
-		System:    BuildSystemPrompt(workDir, h.cfg.HomeDir, skillList, agentTypes) + dataPlaneCtx,
+		System:    BuildSystemPrompt(workDir, h.cfg.HomeDir, skillList, agentTypes, msg.Interaction) + dataPlaneCtx,
 		Model:     model,
 		Effort:    msg.Effort,
 		Messenger: messenger,
@@ -784,6 +840,14 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		cc := newClaudeCodeDriver(workDir, model, msg.Effort, emitter, env, ccOpts...)
 		cc.skills, cc.home = skillList, h.cfg.HomeDir
 		driver = cc
+		if h.recordable(msg) {
+			sess.record = h.keepRecord(msg, workDir, model, ad)
+			cc.onSessionID = sess.record.setClaudeSessionID
+			cc.onEngine = sess.record.setEngine
+		}
+		if ad != nil {
+			cc.adopt(ad.resumeID, adoption{hadConversation: ad.rec.ClaudeSessionID != "", cutOff: ad.rec.TurnActive})
+		}
 	default:
 		loop = agent.NewLoop(cfg)
 		loop.AddTool(agent.AgentTool(loop, agentTypes, agent.DefaultSpawn))
@@ -800,7 +864,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			mcpFile.Remove()
 			removeSandboxContainer(msg.SessionID)
 			releasePlugins()
-			h.sendError(msg.SessionID, sandboxUnsupportedDriverRefusal)
+			fail(sandboxUnsupportedDriverRefusal)
 			return
 		}
 		sb.useSandbox(prefix)
@@ -834,11 +898,13 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 	}()
 
-	_ = h.sender.Send(protocol.SessionStarted{
-		Type: "session_started", SessionID: msg.SessionID,
-		ProjectPath: workDir, Repo: msg.Repo, Title: msg.Title, Model: model,
-		Kind: "agent",
-	})
+	if ad == nil {
+		_ = h.sender.Send(protocol.SessionStarted{
+			Type: "session_started", SessionID: msg.SessionID,
+			ProjectPath: workDir, Repo: msg.Repo, Title: msg.Title, Model: model,
+			Kind: "agent",
+		})
+	}
 	// What the session has loaded, for the Skills & plugins panel. Claude
 	// Code reports its own from each turn's init line (claudeCodeDriver); the
 	// native loop knows its lists; other engines may have a best-effort
@@ -856,6 +922,10 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	}
 	driver.Start()
 	go driver.Run(ctx)
+	if ad != nil {
+		h.finishAdoption(ad, sess, driver, msg)
+		return
+	}
 	if note != "" {
 		driver.Enqueue(note, "chat")
 	}
@@ -885,6 +955,13 @@ func (h *AgentHost) get(sessionID string) *agentSession {
 func (h *AgentHost) UserMessage(sessionID, text, source string) {
 	sess := h.get(sessionID)
 	if sess == nil {
+		// Being brought back after a restart: the message waits for it.
+		if h.holdForAdoption(sessionID, text, source) {
+			return
+		}
+		// Not a session this daemon is hosting (it ended, or it was lost in a restart and could
+		// not be adopted). Say so in its transcript rather than swallowing the message.
+		h.reportUndelivered(sessionID)
 		return
 	}
 	if source == "" {
@@ -970,6 +1047,7 @@ func (h *AgentHost) Kill(sessionID string) {
 	if sess.plugins {
 		h.cfg.Plugins.release(sessionID) // after the container: the snapshot was mounted in it
 	}
+	sess.record.delete() // killed for good: nothing to host again after a restart
 	_ = h.sender.Send(protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: 0})
 }
 
@@ -997,9 +1075,16 @@ func (h *AgentHost) ResendPending() {
 func (h *AgentHost) ActiveIDs() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	ids := make([]string, 0, len(h.sessions))
+	ids := make([]string, 0, len(h.sessions)+len(h.adopting))
 	for id := range h.sessions {
 		ids = append(ids, id)
+	}
+	// Sessions still being brought back after a restart are this daemon's too: left out, the
+	// server would end them as "no longer reported" while they are being restored.
+	for id := range h.adopting {
+		if _, hosted := h.sessions[id]; !hosted {
+			ids = append(ids, id)
+		}
 	}
 	return ids
 }

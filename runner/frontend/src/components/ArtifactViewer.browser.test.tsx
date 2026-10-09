@@ -1,15 +1,12 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { render } from '@testing-library/react'
-import ArtifactViewer from './ArtifactViewer'
+import { ArtifactViewer, type TransportFiles } from '@blerglab/chat'
 
 // A real browser is the only place the HTML artifact's sandbox can be checked: jsdom neither
 // enforces `sandbox` nor CSP. The page below tries everything a hostile file would, from inside
 // the viewer's iframe, and reports what happened back with postMessage (which a sandboxed frame
-// may still do).
-vi.mock('../apiFetch', () => ({
-  apiFetch: () => Promise.resolve(new Response(PAGE)),
-}))
-
+// may still do). The viewer is the package's; the runner keeps this test because the runner is
+// where a published file is first shown to a person.
 const PAGE = `<!doctype html><html><body><script>
 const out = {}
 const done = () => parent.postMessage({ artifactProbe: out }, '*')
@@ -26,7 +23,13 @@ fetch('/api/sessions').then(() => { out.fetch = 'reached' }, () => { out.fetch =
 })
 </script></body></html>`
 
-afterEach(() => { vi.restoreAllMocks() })
+const files: TransportFiles = {
+  list: async () => [],
+  raw: async () => new Blob([PAGE], { type: 'text/html' }),
+  download: async () => {},
+  remove: async () => {},
+  upload: async () => { throw new Error('not in this test') },
+}
 
 describe('ArtifactViewer html sandbox (real browser)', () => {
   it('runs the page’s script but cuts it off from the app and the network', async () => {
@@ -38,6 +41,7 @@ describe('ArtifactViewer html sandbox (real browser)', () => {
     render(
       <ArtifactViewer
         sessionId="s1"
+        files={files}
         artifact={{ id: 'a1', name: 'probe.html', size: 500, content_type: 'text/html', view: 'html' }}
         onClose={() => {}}
       />,

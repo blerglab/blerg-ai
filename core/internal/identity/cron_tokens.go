@@ -100,6 +100,24 @@ func (s *Service) revokeTokenOfKind(ctx context.Context, accountID, id, kind str
 	return s.Revoke(ctx, "sub", id)
 }
 
+// AgentTokenName is the name the owner gave token id, "" when it is not accountID's. The name
+// is the owner's own label (shown back to them by the runner as who started a session), never
+// a secret.
+func (s *Service) AgentTokenName(ctx context.Context, accountID, id string) (string, error) {
+	if !agentTokenIDShape.MatchString(id) || !agentTokenIDShape.MatchString(accountID) {
+		return "", nil
+	}
+	var name string
+	err := s.st.Pool().QueryRow(ctx, `SELECT name FROM agent_tokens WHERE id = $1 AND account_id = $2`, id, accountID).Scan(&name)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return name, nil
+}
+
 // AgentTokenStatus reports whether id is a token of accountID's (owned) and, if so, whether it is
 // live: unrevoked, unexpired and its account not disabled. A token that is not accountID's, or
 // does not exist, is owned=false, so a caller can answer both with one uniform not-found.

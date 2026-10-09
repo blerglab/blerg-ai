@@ -135,6 +135,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/reviews/{id}/resolve", authed(a.handleResolveReview))
 
 	a.runnerRoutes(mux, authed)
+	a.chatRoutes(mux, authed)
 	a.boardSessionRoutes(mux, authed)
 	a.boardRunRoutes(mux, authed)
 	a.standingAgentRoutes(mux, authed)

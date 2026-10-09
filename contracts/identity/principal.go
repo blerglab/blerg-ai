@@ -28,6 +28,6 @@ type KeySet map[string]ed25519.PublicKey
 // was issued); a checker that also implements IssuedAtRevocationChecker (revocations.go)
 // gets the timestamp-aware check instead.
 type RevocationChecker interface {
-	Revoked(kid, lineage, sub string) bool
+	Revoked(kid, lineage, sub, sid string) bool
 	StaleBeyondCeiling() bool
 }

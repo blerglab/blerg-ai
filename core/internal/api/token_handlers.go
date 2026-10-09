@@ -177,6 +177,59 @@ func (d Deps) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRemintToken is POST /api/tokens/{id}/remint: revoke the named token and mint a fresh
+// one of the same name, audience, capabilities and lifetime, answering exactly as POST
+// /api/tokens does (the new value, shown once). Guarded like a mint: same origin, the login
+// limiter, a human principal with card.read.
+func (d Deps) handleRemintToken(w http.ResponseWriter, r *http.Request) {
+	if !d.requireSameOrigin(w, r) {
+		return
+	}
+	svc, ok := d.identitySvc()
+	if !ok {
+		http.Error(w, "identity service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	principal, ok := principalFromCtx(r.Context())
+	if !ok {
+		http.Error(w, "missing principal", http.StatusUnauthorized)
+		return
+	}
+	ip := d.clientIP(r)
+	if allowed, retryAfter := d.LoginLimiter.Allow(ip, principal.Sub); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		http.Error(w, "too many attempts — try again later", http.StatusTooManyRequests)
+		return
+	}
+	rec, raw, err := svc.RemintAgentToken(r.Context(), principal.Sub, r.PathValue("id"))
+	switch {
+	case errors.Is(err, identity.ErrNotFound):
+		d.LoginLimiter.Fail(ip, principal.Sub)
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	case errors.Is(err, identity.ErrAccountDisabled):
+		http.Error(w, "account disabled", http.StatusForbidden)
+		return
+	case errors.Is(err, identity.ErrTooManyTokens):
+		writeJSONStatus(w, http.StatusConflict, map[string]string{
+			"error": "too many active agent tokens (limit 50); revoke one first",
+		})
+		return
+	case err != nil:
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSONStatus(w, http.StatusCreated, createdTokenResponse{
+		ID:        rec.ID,
+		Token:     raw,
+		Name:      rec.Name,
+		Aud:       rec.Aud,
+		Caps:      rec.Caps,
+		ExpiresAt: rec.ExpiresAt.Format(time.RFC3339),
+		CreatedAt: rec.CreatedAt.Format(time.RFC3339),
+	})
+}
+
 // handleListTokens is GET /api/tokens: the caller's own tokens, metadata only. Read-only, so
 // no same-origin guard (a cross-site read cannot see the response — core sends no CORS headers
 // anywhere) and no rate limit.

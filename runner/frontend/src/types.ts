@@ -92,6 +92,19 @@ export interface SessionInfo {
   ended_by?: EndedBy | null;
   // The cron that started this session (crons, spec 7.6); absent for every other session.
   cron_id?: string;
+  // Who started the session when it was not the person in the app: a tool with an agent token
+  // (name = the owner's label for it), a cron, or the operator key. Absent for the person's own.
+  started_by?: StartedBy | null;
+  // Whether a person is reading the chat live. Chosen at start and fixed for the session's life:
+  // "interactive" (the agent discusses, narrates, asks and waits) or "unattended" (nobody is
+  // watching: it decides, notes its assumptions, finishes and summarises). Absent from a runner
+  // or daemon older than the field.
+  interaction?: 'interactive' | 'unattended';
+}
+
+export interface StartedBy {
+  kind: 'agent' | 'cron' | 'runner_key' | string;
+  name?: string;
 }
 
 export interface EndedBy {
@@ -350,11 +363,6 @@ export interface SessionEnded {
   ended_by?: EndedBy | null;
 }
 
-export interface PreviewUpdated {
-  type: "preview_updated";
-  html: string;
-}
-
 export interface HistoryDone {
   type: "history_done";
   session_id: string;
@@ -465,7 +473,6 @@ export type ServerMessage =
   | SessionMetaChanged
   | SessionTitleChanged
   | SessionEnded
-  | PreviewUpdated
   | HistoryDone
   | FocusStolen
   | FocusGranted

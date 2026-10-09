@@ -42,12 +42,27 @@ func TestCCTurnArgsWithAndWithoutMCPConfig(t *testing.T) {
 	if got := ccTurnArgs("do it", "claude-opus-5-5", "max", "cc-1", withMCPConfigPath("")); !slices.Equal(got, base) {
 		t.Fatalf("an empty config path changed the argv: %v", got)
 	}
+	// A grant alone: the gateway's servers and nothing ambient, the config directory kept
+	// from the file tools, and no allow-list, settings or slash-command flags (the session
+	// is watched: docs/design/interactive-mcp-sessions.md).
 	want := append(slices.Clone(base), "--mcp-config=/tmp/x/mcp.json", "--strict-mcp-config",
-		"--tools=Read,Write,Edit,Glob,Grep", "--setting-sources=", "--disable-slash-commands",
-		wantDenyFlag("/tmp/x"))
+		"--disallowedTools="+strings.Join(ccGrantDenyRules("/tmp/x"), ","))
 	got := ccTurnArgs("do it", "claude-opus-5-5", "max", "cc-1", withMCPConfigPath("/tmp/x/mcp.json"))
 	if !slices.Equal(got, want) {
 		t.Fatalf("grant argv:\n%v\nwant %v", got, want)
+	}
+	for _, a := range got {
+		if strings.HasPrefix(a, "--tools=") || strings.HasPrefix(a, "--setting-sources") || a == "--disable-slash-commands" {
+			t.Fatalf("a grant alone restricted the turn: %v", got)
+		}
+	}
+	if !slices.Contains(ccGrantDenyRules("/tmp/x"), "Read(//tmp/x/**)") || !slices.Contains(ccGrantDenyRules("/tmp/x"), "Read(//tmp/blerg-mcp-*/**)") {
+		t.Errorf("grant deny rules lack the config directory: %v", ccGrantDenyRules("/tmp/x"))
+	}
+	for _, r := range ccGrantDenyRules("/tmp/x") {
+		if !slices.Contains(ccPathDenyRules("/tmp/x"), r) {
+			t.Errorf("restricted rules lack the grant rule %q", r)
+		}
 	}
 	if got[0] != "-p" || got[1] != "do it" {
 		t.Errorf("-p <text> must stay first: %v", got)
@@ -380,8 +395,11 @@ func TestDriverRegeneratesMissingConfigEachTurn(t *testing.T) {
 	}
 	for _, l := range lines {
 		if !strings.Contains(l, "--mcp-config=") || !strings.Contains(l, "--strict-mcp-config") ||
-			!strings.Contains(l, "--tools=Read,Write,Edit,Glob,Grep --setting-sources= --disable-slash-commands") {
+			!strings.Contains(l, "--disallowedTools=Read(//tmp/blerg-mcp-*/**)") {
 			t.Errorf("turn lacks the grant flags: %s", l)
+		}
+		if strings.Contains(l, "--tools=") || strings.Contains(l, "--setting-sources=") {
+			t.Errorf("a grant alone restricted the turn: %s", l)
 		}
 		if strings.Contains(l, "tok-") {
 			t.Errorf("a token reached argv: %s", l)
@@ -525,8 +543,11 @@ func TestSandboxAgentSpawnDeliversGrant(t *testing.T) {
 		t.Errorf("config body: %s", body)
 	}
 	raw, _ := os.ReadFile(claudeLog)
-	if !strings.Contains(string(raw), "--mcp-config="+entries[0]) || !strings.Contains(string(raw), "--tools=Read,Write,Edit,Glob,Grep") {
+	if !strings.Contains(string(raw), "--mcp-config="+entries[0]) || !strings.Contains(string(raw), "--strict-mcp-config") {
 		t.Errorf("turn argv lacks the in-container config path: %s", raw)
+	}
+	if strings.Contains(string(raw), "--tools=") {
+		t.Errorf("a launch-sheet grant session was restricted: %s", raw)
 	}
 
 	host.Kill("s-grant")
@@ -748,8 +769,8 @@ func TestSessionEnvNeverCarriesGatewayVariable(t *testing.T) {
 	}
 }
 
-// An unrestricted turn gets the session guide in --append-system-prompt=... form; a restricted
-// or granted turn does not (it has no shell); a plain call without the option is unchanged.
+// An unrestricted turn gets the session guide in --append-system-prompt=... form, grant or not;
+// a restricted turn does not (it has no shell); a plain call without the option is unchanged.
 func TestCCTurnArgsSessionGuide(t *testing.T) {
 	plain := ccTurnArgs("do it", "", "", "")
 	for _, a := range plain {
@@ -758,19 +779,24 @@ func TestCCTurnArgsSessionGuide(t *testing.T) {
 		}
 	}
 	got := ccTurnArgs("do it", "", "", "", withSessionGuide())
-	want := "--append-system-prompt=" + ccSessionGuide
+	// The guide, then the interaction mode's paragraph; no stated mode is interactive.
+	want := "--append-system-prompt=" + ccSystemPromptFor("")
 	if got[len(got)-1] != want || got[0] != "-p" || got[1] != "do it" {
 		t.Fatalf("guide not appended after the existing flags with -p first: %v", got)
 	}
 	for _, opts := range [][]ccOption{
 		{withSessionGuide(), withRestrictTools()},
-		{withSessionGuide(), withMCPConfigPath("/tmp/x/mcp.json")},
+		{withSessionGuide(), withRestrictTools(), withMCPConfigPath("/tmp/x/mcp.json")},
 	} {
 		for _, a := range ccTurnArgs("do it", "", "", "", opts...) {
 			if strings.HasPrefix(a, "--append-system-prompt") {
 				t.Fatalf("a restricted turn got the guide: %v", a)
 			}
 		}
+	}
+	granted := ccTurnArgs("do it", "", "", "", withSessionGuide(), withMCPConfigPath("/tmp/x/mcp.json"))
+	if granted[len(granted)-1] != want {
+		t.Fatalf("a watched grant turn (it has a shell) must get the guide: %v", granted)
 	}
 }
 

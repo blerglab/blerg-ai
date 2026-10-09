@@ -263,8 +263,6 @@ func loopbackURL(raw string) (*url.URL, bool) {
 //     the runner's service URL, which the messaging CLI prefers over every
 //     other source. A remote server URL is forwarded as-is and SERVER_HTTP is
 //     left alone: the CLI derives the right https URL from it.
-//   - BLERG_RUNNER_PREVIEW_URL pointing at loopback is dropped: unreachable,
-//     and the CLI never gets to it once SERVER_HTTP is set.
 func sandboxNetworkEnv(env []string) []string {
 	localServer := false
 	for _, kv := range env {
@@ -278,10 +276,6 @@ func sandboxNetworkEnv(env []string) []string {
 		case localServer && (strings.HasPrefix(kv, "BLERG_RUNNER_SERVER_URL=") ||
 			strings.HasPrefix(kv, "BLERG_RUNNER_SERVER_HTTP=")):
 			continue
-		case strings.HasPrefix(kv, "BLERG_RUNNER_PREVIEW_URL="):
-			if _, loop := loopbackURL(strings.TrimPrefix(kv, "BLERG_RUNNER_PREVIEW_URL=")); loop {
-				continue
-			}
 		case strings.HasPrefix(kv, "BLERG_BOARD_URL="):
 			if u, loop := loopbackURL(strings.TrimPrefix(kv, "BLERG_BOARD_URL=")); loop {
 				kv = "BLERG_BOARD_URL=" + sandboxBoardURL + u.EscapedPath()

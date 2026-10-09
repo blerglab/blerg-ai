@@ -8,7 +8,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CapabilityGroup, CapabilityItem } from '../types'
 import { CAPABILITY_GROUPS, capabilityCount, matchesQuery, type CapabilitiesReport } from '../lib/capabilities'
-import { useBackdropClose } from '../hooks/useBackdropClose'
+import { useBackdropClose } from '@blerglab/chat'
 import './CapabilitiesPanel.css'
 
 // Groups longer than this start collapsed.

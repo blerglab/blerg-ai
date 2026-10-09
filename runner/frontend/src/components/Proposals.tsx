@@ -11,7 +11,7 @@ import {
   usePendingProposals,
 } from '../lib/proposals'
 import type { ProposalInfo, ProposalState } from '../types'
-import { TimeLabel } from './TimeLabel'
+import { TimeLabel } from '@blerglab/chat'
 
 const button: CSSProperties = {
   background: 'var(--scree)', border: '1px solid var(--stone)', borderRadius: 6, color: 'var(--fog)',

@@ -113,6 +113,13 @@ func writeComponent(b *strings.Builder, e ComponentEntry, level int) {
 		b.WriteString("\n")
 	}
 
+	if e.UI != nil && e.UI.ChatPackage != nil {
+		p := e.UI.ChatPackage
+		b.WriteString(sub + " UI\n\n")
+		b.WriteString("To give an app a chat over this contract, install `" + cell(p.Name) + "@" + cell(p.Version) +
+			"` from " + p.URL + " (integrity `" + cell(p.SHA512) + "`) and read " + p.DocsURL + ".\n\n")
+	}
+
 	if e.OpenAPIURL != "" || e.MCPURL != "" || e.DocsURL != "" {
 		b.WriteString(sub + " Machine-readable\n\n")
 		if e.DocsURL != "" {

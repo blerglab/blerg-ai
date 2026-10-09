@@ -16,8 +16,8 @@ type fakeRev struct {
 	revoked bool
 }
 
-func (f fakeRev) Revoked(_, _, _ string) bool { return f.revoked }
-func (f fakeRev) StaleBeyondCeiling() bool    { return f.stale }
+func (f fakeRev) Revoked(_, _, _, _ string) bool { return f.revoked }
+func (f fakeRev) StaleBeyondCeiling() bool       { return f.stale }
 
 // mint is a test helper that signs claims with a header we control (to forge alg/kid).
 func mint(t *testing.T, priv ed25519.PrivateKey, hdr map[string]string, c Claims) string {

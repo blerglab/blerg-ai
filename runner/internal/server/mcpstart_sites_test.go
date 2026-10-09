@@ -376,8 +376,10 @@ func TestGrantJobSpecHoldsNoTokenOnlyASecretRef(t *testing.T) {
 	})
 	sid := fx.sessionID(rec)
 	cfg := fx.secretConfig(sid)
-	if len(fx.k8s.pluginRequests) != 1 {
-		t.Errorf("the grant session fetched plugins (%d requests): they must be off", len(fx.k8s.pluginRequests))
+	// A launch-sheet grant session is watched: it gets the always-on plugins like the control
+	// (docs/design/interactive-mcp-sessions.md).
+	if len(fx.k8s.pluginRequests) != 2 {
+		t.Errorf("the launch-sheet grant session fetched plugins %d times in all, want 2 (control + grant)", len(fx.k8s.pluginRequests))
 	}
 	if len(fx.k8s.created) != 2 {
 		t.Fatalf("%d Jobs created", len(fx.k8s.created))
@@ -411,8 +413,11 @@ func TestGrantJobSpecHoldsNoTokenOnlyASecretRef(t *testing.T) {
 	if ref["name"] != sessionSecretName(sid) || ref["key"] != "BLERG_RUNNER_MCP_CONFIG" || ref["optional"] != false {
 		t.Errorf("secretKeyRef = %v", ref)
 	}
+	if _, ok := env["BLERG_RUNNER_PLUGINS"]; !ok {
+		t.Error("a launch-sheet grant session pod gets no BLERG_RUNNER_PLUGINS env")
+	}
 	for name := range env {
-		if strings.Contains(name, "PLUGIN") || strings.Contains(name, "PREVIEW") {
+		if strings.Contains(name, "PREVIEW") {
 			t.Errorf("a grant session pod gets env %s", name)
 		}
 	}

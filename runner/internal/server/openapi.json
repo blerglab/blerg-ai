@@ -11,7 +11,8 @@
   "tags": [
     { "name": "discovery", "description": "Finding out what this component is and how to talk to it." },
     { "name": "identity", "description": "What the calling credential is." },
-    { "name": "sessions", "description": "The session contract: start, drive, follow, collect." }
+    { "name": "sessions", "description": "The session contract: start, drive, follow, collect." },
+    { "name": "files", "description": "A session's files: what the agent published and what a person attached." }
   ],
   "paths": {
     "/agents": {
@@ -191,6 +192,7 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "The session has ended and takes no messages.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
           "503": { "$ref": "#/components/responses/DaemonBusy" }
         }
       }
@@ -242,7 +244,7 @@
         "operationId": "events",
         "tags": ["sessions"],
         "summary": "Read a window of the session transcript from a cursor.",
-        "description": "Poll with `after_seq` set to the highest `seq` you have seen. `has_more` is true when the window was truncated by `limit`.",
+        "description": "Poll with `after_seq` set to the highest `seq` you have seen. `has_more` is true when the window was truncated by `limit`. With `before_seq` the window is instead the `limit` events just before that sequence number (0 = the end of the transcript), oldest first, and the reply adds `has_older`, `first_seq` and `server_time` — the page a chat loads above what the live stream opened with.",
         "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
         "parameters": [
           { "$ref": "#/components/parameters/SessionId" },
@@ -252,6 +254,13 @@
             "required": false,
             "description": "Return only events with a higher sequence number. Default 0 (from the start).",
             "schema": { "type": "integer", "format": "int64", "default": 0 }
+          },
+          {
+            "name": "before_seq",
+            "in": "query",
+            "required": false,
+            "description": "Page backwards: the `limit` events with a lower sequence number, oldest first; 0 means from the end. Takes precedence over `after_seq`.",
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "limit",
@@ -305,6 +314,188 @@
         }
       }
     },
+    "/api/runner/sessions/{id}/events/live": {
+      "get": {
+        "operationId": "events_live",
+        "tags": ["sessions"],
+        "summary": "The live transcript as Server-Sent Events: a replay page, then every event, typing delta and status change as it happens.",
+        "description": "What the runner's own browser gets over its websocket, for the credential that started the session — straight from the hub, not a database poll. Frames are `event: <type>` + `data: <json>`, with `id: <seq>` on persisted events only. `agent_event`: an AgentEvent (`type, session_id, client_event_id, seq, ts, kind, payload`; `transient: true` on a typing delta, which has no seq and is never persisted — the same `client_event_id` may arrive twice across the replay and the live feed, so deduplicate on it). `replay_done`: once after the opening page (`session_id, last_seq, has_more, server_time`; with `tail=1` also `older: true, has_older, first_seq`). `status`: `{session_id, status}` (`starting, running, waiting, idle, disconnected, stopped, ended, error`), plus `message`, `end_reason`, `ended_by` when known — once at open, then on every change. `end`: the Result body when the session is over; the stream then closes. A `: keepalive` comment is sent every 15 s of silence. The hub carries a session's deltas only while its host is connected to this runner; for the durable record alone use events/stream.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/SessionId" },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "required": false,
+            "description": "Replay forward from this sequence number (exclusive). Default 0: from the start. Ignored with `tail=1`.",
+            "schema": { "type": "integer", "format": "int64", "default": 0 }
+          },
+          {
+            "name": "tail",
+            "in": "query",
+            "required": false,
+            "description": "`1` replays the newest `limit` events instead, marking the page `older` so a client pages backwards with `GET …/events?before_seq=<first_seq>`.",
+            "schema": { "type": "string", "enum": ["1"] }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Size of the opening page. Default 200, maximum 400.",
+            "schema": { "type": "integer", "default": 200, "maximum": 400 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An event stream.",
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/artifacts": {
+      "get": {
+        "operationId": "files_list",
+        "tags": ["files"],
+        "summary": "The session's files (published by the agent or attached by a person), newest first, with versions.",
+        "description": "The same list the runner's browser shows in its Files panel. A file published again under the same name and origin is the next `version` of it; `latest_version` is the highest version of that name.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+        "responses": {
+          "200": {
+            "description": "The session's files.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["artifacts"],
+                  "properties": { "artifacts": { "type": "array", "items": { "$ref": "#/components/schemas/Artifact" } } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/artifacts/{aid}/raw": {
+      "get": {
+        "operationId": "file_raw",
+        "tags": ["files"],
+        "summary": "One file's bytes for an in-app viewer, with the server-chosen content type.",
+        "description": "Hardened exactly as the browser route is: the stored (server-classified) content type for images, PDFs and the text types that are safe to render, `application/octet-stream` for anything else; always `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox`, `Cache-Control: private, no-store`.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/ArtifactId" }],
+        "responses": {
+          "200": { "description": "The bytes.", "content": { "*/*": { "schema": { "type": "string", "format": "binary" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/artifacts/{aid}/download": {
+      "get": {
+        "operationId": "file_download",
+        "tags": ["files"],
+        "summary": "One file's bytes as an attachment.",
+        "description": "`Content-Disposition: attachment` with the file's name — the plain name for the newest version of it, `<stem>-v<N><ext>` for an older one. Same hardening headers as the raw route.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/ArtifactId" }],
+        "responses": {
+          "200": { "description": "The bytes.", "content": { "*/*": { "schema": { "type": "string", "format": "binary" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/artifacts/{aid}": {
+      "delete": {
+        "operationId": "file_delete",
+        "tags": ["files"],
+        "summary": "Delete one of the session's files, whichever origin it came from.",
+        "description": "A file is deleted by whoever may see the session. Idempotent in effect: a file that is already gone is a 404.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/ArtifactId" }],
+        "responses": {
+          "204": { "description": "Deleted." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/uploads": {
+      "post": {
+        "operationId": "upload",
+        "tags": ["files"],
+        "summary": "Attach a person's file to the session (raw body, X-Artifact-Name header), for the agent to fetch.",
+        "description": "The body is the file; the name comes from `X-Artifact-Name` (percent-encoded) or `?name=`, sanitised to a base name. The content type is classified by the server from the name and bytes — the request's `Content-Type` is never used. Stored with `origin: user`, attributed to the account the credential acts for (the app vouches for the person). Caps, as on the browser route: 25 MiB per file, 20 attachments and 200 MiB per session, 20 versions per name; an ended session takes no more.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/SessionId" },
+          { "name": "X-Artifact-Name", "in": "header", "required": false, "description": "The file's name, percent-encoded. `?name=` is the alternative.", "schema": { "type": "string" } },
+          { "name": "name", "in": "query", "required": false, "description": "The file's name when the header is not sent.", "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "*/*": { "schema": { "type": "string", "format": "binary" } } } },
+        "responses": {
+          "201": {
+            "description": "Stored.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StoredArtifact" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "The session has ended, or a cap is reached (files, bytes, or versions of this name).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "413": { "description": "The file is larger than 25 MiB.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/packages/": {
+      "get": {
+        "operationId": "packages",
+        "tags": ["discovery"],
+        "summary": "The UI packages this runner distributes.",
+        "description": "No authentication. `{packages: [{name, version, file, sha512, url}]}` — the same package GET /agents advertises as `ui.chat_package`. 404 when this build packed none.",
+        "responses": {
+          "200": {
+            "description": "The package list.",
+            "content": { "application/json": { "schema": { "type": "object", "required": ["packages"], "properties": { "packages": { "type": "array", "items": { "type": "object", "required": ["name", "version", "file", "sha512", "url"], "properties": { "name": { "type": "string" }, "version": { "type": "string" }, "file": { "type": "string" }, "sha512": { "type": "string" }, "url": { "type": "string" } } } } } } } }
+          },
+          "404": { "description": "No package is packed into this build." }
+        }
+      }
+    },
+    "/packages/{file}": {
+      "get": {
+        "operationId": "package_tarball",
+        "tags": ["discovery"],
+        "summary": "A package tarball, by the name the package list gives it.",
+        "description": "No authentication. `npm i <this url>` installs it. Served with `Content-Type: application/gzip` and `Cache-Control: public, max-age=31536000, immutable` — the name carries the version, so a new version is a new URL. Only names the package list contains are served; anything else is 404.",
+        "parameters": [{ "name": "file", "in": "path", "required": true, "schema": { "type": "string" }, "description": "The `file` of a package list entry, e.g. `blerglab-chat-0.1.0.tgz`." }],
+        "responses": {
+          "200": { "description": "The tarball.", "content": { "application/gzip": { "schema": { "type": "string", "format": "binary" } } } },
+          "404": { "description": "Not a packed package." }
+        }
+      }
+    },
+    "/packages/{scope}/{name}/README.md": {
+      "get": {
+        "operationId": "package_readme",
+        "tags": ["discovery"],
+        "summary": "A package's README, as Markdown.",
+        "description": "No authentication. The `docs_url` of `ui.chat_package`: `/packages/@blerglab/chat/README.md`.",
+        "parameters": [
+          { "name": "scope", "in": "path", "required": true, "schema": { "type": "string" }, "description": "The package scope, e.g. `@blerglab`." },
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" }, "description": "The package name within the scope, e.g. `chat`." }
+        ],
+        "responses": {
+          "200": { "description": "The README.", "content": { "text/markdown": { "schema": { "type": "string" } } } },
+          "404": { "description": "Not a packed package." }
+        }
+      }
+    },
     "/api/runner/sessions/{id}/result": {
       "get": {
         "operationId": "result",
@@ -331,6 +522,13 @@
         "required": true,
         "description": "The session id returned by the start operation.",
         "schema": { "type": "string", "format": "uuid" }
+      },
+      "ArtifactId": {
+        "name": "aid",
+        "in": "path",
+        "required": true,
+        "description": "A file id from the session's file list (or an `artifact` event's payload).",
+        "schema": { "type": "string" }
       }
     },
     "securitySchemes": {
@@ -363,7 +561,7 @@
       "IdempotencyConflict": { "description": "The Idempotency-Key was already used with a different request body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "ServerError": { "description": "The session could not be recorded (database or idempotency store unavailable). The request was not started; retry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "NoRuntime": { "description": "No runtime can take the session: no cluster capacity, no connected daemon has the repo, or an idempotency record raced — retry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "DaemonBusy": { "description": "The session's host is not accepting messages right now; retry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+      "DaemonBusy": { "description": "The session's host is not connected (a desktop daemon restarting; Retry-After is set) or is not accepting messages right now. The message was not delivered; retry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
     },
     "schemas": {
       "ModelList": {
@@ -454,13 +652,19 @@
           },
           "auto_stop": {
             "type": "boolean",
-            "description": "One-shot: the runner stops the session itself once the first turn after the prompt is done — same effect as POST /stop, so `result.terminal` becomes true and the completion webhook fires without the caller stopping anything. Defaults to false: an interactive session stays up waiting for more messages."
+            "description": "One-shot: the runner stops the session itself once the first turn after the prompt is done — same effect as POST /stop, so `result.terminal` becomes true and the completion webhook fires without the caller stopping anything. Defaults to false: the session stays up waiting for more messages."
+          },
+          "interaction": {
+            "type": "string",
+            "enum": ["interactive", "unattended"],
+            "default": "unattended",
+            "description": "Whether a person is reading the session's chat as it works. `unattended` (the default on this contract): nobody is, so the agent is told not to stop and wait for an answer in the chat, to make the reasonable decision, note its assumption and end with a summary that stands on its own. `interactive`: a person is reading and answers in the chat, so the agent is told to talk a remark through before changing anything, to ask and end its turn when the decision is theirs, and to say what it is doing as it works. Pass `interactive` when the session is a conversation a person will follow as it happens. Any other value is a 400. A session a cron starts is always `unattended`. The mode is fixed at start and reported back as `interaction` by GET /api/runner/sessions/{id}."
           }
         }
       },
       "Status": {
         "type": "object",
-        "required": ["lifecycle", "runtime", "resumable", "auto_stop", "error_reason", "end_reason", "ended_by"],
+        "required": ["lifecycle", "runtime", "resumable", "auto_stop", "interaction", "error_reason", "end_reason", "ended_by"],
         "properties": {
           "lifecycle": { "$ref": "#/components/schemas/Lifecycle" },
           "runtime": {
@@ -470,6 +674,7 @@
           },
           "resumable": { "type": "boolean", "description": "Whether the next message can revive a dead session." },
           "auto_stop": { "type": "boolean", "description": "Whether this session was started one-shot: the runner ends it when its first turn is done." },
+          "interaction": { "type": "string", "enum": ["interactive", "unattended"], "description": "The session's interaction mode, as decided at start: `interactive` (a person is reading its chat as it works, and the agent was told so) or `unattended` (nobody is). Never empty: a session started before the mode was recorded reads `interactive` when a person started it in the app and `unattended` when a tool, a cron or the runner key did." },
           "error_reason": { "type": "string", "description": "Why it failed; empty unless the lifecycle is `error`." },
           "end_reason": { "$ref": "#/components/schemas/EndReason" },
           "ended_by": { "$ref": "#/components/schemas/EndedBy" }
@@ -497,7 +702,40 @@
         "required": ["events", "has_more"],
         "properties": {
           "events": { "type": "array", "items": { "$ref": "#/components/schemas/Event" } },
-          "has_more": { "type": "boolean" }
+          "has_more": { "type": "boolean", "description": "Forward paging only: the window was truncated by `limit`. Always false for a `before_seq` page." },
+          "has_older": { "type": "boolean", "description": "`before_seq` pages only: events older than this page remain." },
+          "first_seq": { "type": "integer", "format": "int64", "description": "`before_seq` pages only: the oldest seq in this page (0 when empty) — the next page's `before_seq`." },
+          "server_time": { "type": "string", "format": "date-time", "description": "`before_seq` pages only: the server's clock when the page was read." }
+        }
+      },
+      "Artifact": {
+        "type": "object",
+        "required": ["id", "name", "size", "content_type", "view", "origin", "version", "latest_version", "created_at"],
+        "properties": {
+          "id": { "type": "string", "description": "The file id (`aid` in the file routes)." },
+          "name": { "type": "string" },
+          "size": { "type": "integer", "format": "int64" },
+          "content_type": { "type": "string", "description": "Classified by the server from the name and bytes, never taken from the uploader." },
+          "view": { "type": "string", "enum": ["markdown", "text", "json", "csv", "image", "pdf", "audio", "video", "html", "none"], "description": "How a chat should show it; `none` means download only." },
+          "origin": { "type": "string", "enum": ["agent", "user"], "description": "`agent`: published by the session. `user`: attached by a person." },
+          "version": { "type": "integer", "description": "1 for the first file of this name and origin, then 2, 3, …" },
+          "latest_version": { "type": "integer", "description": "The highest version of this name and origin." },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "StoredArtifact": {
+        "type": "object",
+        "required": ["id", "name", "size", "content_type", "view", "origin", "version", "latest_version", "previous"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "size": { "type": "integer", "format": "int64" },
+          "content_type": { "type": "string" },
+          "view": { "type": "string" },
+          "origin": { "type": "string", "const": "user" },
+          "version": { "type": "integer" },
+          "latest_version": { "type": "integer", "description": "Always this file's own version: the newest of its name." },
+          "previous": { "type": ["integer", "null"], "description": "The version this one follows; null for the first of its name." }
         }
       },
       "Event": {
@@ -607,6 +845,24 @@
                 "summary": { "type": "string" },
                 "cap": { "type": "string" },
                 "idempotent": { "type": "boolean" }
+              }
+            }
+          },
+          "ui": {
+            "type": "object",
+            "description": "The UI this runner distributes for apps built on it. Absent when this build packed no package.",
+            "properties": {
+              "chat_package": {
+                "type": "object",
+                "required": ["name", "version", "url", "sha512", "docs_url"],
+                "description": "The npm package that renders a session's chat over this contract. `npm i <url>` installs it; `sha512` is the tarball's integrity string for a lockfile; `docs_url` is its README.",
+                "properties": {
+                  "name": { "type": "string", "const": "@blerglab/chat" },
+                  "version": { "type": "string" },
+                  "url": { "type": "string" },
+                  "sha512": { "type": "string" },
+                  "docs_url": { "type": "string" }
+                }
               }
             }
           }

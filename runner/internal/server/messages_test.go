@@ -324,6 +324,15 @@ func TestMessagesBoardToken(t *testing.T) {
 		t.Errorf("message session_id = %q, want token's session %q", row.SessionID, sessionID)
 	}
 
+	// 1b. Using the token with less than half its life left pushed its expiry out to a full
+	// sessionTokenTTL: a session that runs for days keeps its token (the hour-long mint above
+	// was well inside that half).
+	if tok, err := db.ValidateBoardToken(ctx, pool, msgToken); err != nil {
+		t.Fatalf("ValidateBoardToken after use: %v", err)
+	} else if left := time.Until(tok.ExpiresAt); left < sessionTokenTTL-time.Minute {
+		t.Errorf("token life after use = %s, want about %s (the expiry slides while the session uses it)", left, sessionTokenTTL)
+	}
+
 	// 2. Board token WITHOUT message cap → 403.
 	rec = postMsg(boardOnlyToken, `{"session_id":"`+sessionID+`","kind":"update","body":"x"}`)
 	if rec.Code != http.StatusForbidden {

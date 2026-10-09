@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import * as wsMock from '../test/wsMock'
-import { useMessageStore, selectOpenCount, selectBySession, selectUnreadCount, markAllSeen } from './useMessageStore'
+import { useMessageStore, selectOpenCount, selectBySession } from './useMessageStore'
 import { useToastStore } from './useToastStore'
 import { useSessionStore } from './useSessionStore'
 import { makeSession } from '../test/fixtures'
@@ -26,7 +26,7 @@ function makeMessage(over: Partial<MessageInfo> = {}): MessageInfo {
 
 describe('useMessageStore', () => {
   beforeEach(() => {
-    useMessageStore.setState({ messages: [], lastSeenAt: 0 })
+    useMessageStore.setState({ messages: [] })
     localStorage.clear()
   })
 
@@ -138,58 +138,11 @@ describe('useMessageStore', () => {
   })
 })
 
-// ── selectUnreadCount and markAllSeen ──────────────────────────────────────────
-
-describe('selectUnreadCount and markAllSeen', () => {
-  beforeEach(() => {
-    useMessageStore.setState({ messages: [], lastSeenAt: 0 })
-    localStorage.clear()
-  })
-
-  it('selectUnreadCount counts messages created after lastSeenAt', () => {
-    const cutoff = new Date('2026-06-23T09:00:00Z').getTime()
-    useMessageStore.setState({
-      messages: [
-        makeMessage({ id: '1', created_at: '2026-06-23T10:00:00Z' }), // after cutoff → unread
-        makeMessage({ id: '2', created_at: '2026-06-23T08:00:00Z' }), // before cutoff → read
-      ],
-      lastSeenAt: cutoff,
-    })
-    expect(selectUnreadCount(useMessageStore.getState())).toBe(1)
-  })
-
-  it('selectUnreadCount returns 0 when lastSeenAt is after all messages', () => {
-    const future = new Date('2026-06-24T00:00:00Z').getTime()
-    useMessageStore.setState({
-      messages: [makeMessage({ id: '1', created_at: '2026-06-23T10:00:00Z' })],
-      lastSeenAt: future,
-    })
-    expect(selectUnreadCount(useMessageStore.getState())).toBe(0)
-  })
-
-  it('markAllSeen sets lastSeenAt to now and clears unread count', () => {
-    useMessageStore.setState({
-      messages: [makeMessage({ id: '1', created_at: '2026-06-23T10:00:00Z' })],
-      lastSeenAt: 0,
-    })
-    expect(selectUnreadCount(useMessageStore.getState())).toBe(1)
-    markAllSeen()
-    expect(selectUnreadCount(useMessageStore.getState())).toBe(0)
-  })
-
-  it('markAllSeen persists lastSeenAt to localStorage', () => {
-    markAllSeen()
-    const stored = localStorage.getItem('blerg-runner.messages.lastSeen')
-    expect(stored).toBeTruthy()
-    expect(parseInt(stored!, 10)).toBeGreaterThan(0)
-  })
-})
-
 // ── message_created toast ──────────────────────────────────────────────────────
 
 describe('message_created toast', () => {
   beforeEach(() => {
-    useMessageStore.setState({ messages: [], lastSeenAt: 0 })
+    useMessageStore.setState({ messages: [] })
     useToastStore.setState({ toasts: [] })
     useSessionStore.setState({
       daemons: [],
@@ -217,7 +170,7 @@ describe('message_created toast', () => {
     const toasts = useToastStore.getState().toasts
     expect(toasts).toHaveLength(1)
     expect(toasts[0].variant).toBe('message')
-    expect(toasts[0].url).toBe('/')
+    expect(toasts[0].url).toBe('/sessions/sess-a')
     expect(toasts[0].title).toContain('My Project')
     expect(toasts[0].title).toContain('ask')
     expect(toasts[0].body).toBe('What next?')
@@ -244,7 +197,7 @@ describe('message_created toast', () => {
   })
 
   it('message_created de-dupe does NOT fire a toast for already-present messages', () => {
-    useMessageStore.setState({ messages: [makeMessage({ id: 'dup' })], lastSeenAt: 0 })
+    useMessageStore.setState({ messages: [makeMessage({ id: 'dup' })] })
     wsMock.emit({
       type: 'message_created',
       message: makeMessage({ id: 'dup' }),

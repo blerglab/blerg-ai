@@ -77,9 +77,10 @@ never as "nothing is revoked".
 011; existing rows backfill to the migration time), and `GET /revocations` emits it as
 `revoked_at` (RFC3339) next to `kind`/`value`. Consumers — board and runner's `coreauth`
 clients and core's own snapshot checker, all via `contracts/identity.RevocationSet` — apply a
-`sub` or `lineage` entry only to tokens whose `iat` is **at or before** `revoked_at`
-(equality and a missing `iat` fail closed); `kid` entries are unconditional. So after a
-password change, `logout-all`, replay detection or a reconcile disable, every token issued
+`sub`, `lineage` or `sid` entry only to tokens whose `iat` is **at or before** `revoked_at`
+(equality and a missing `iat` fail closed); `kid` entries are unconditional. `sid` names one
+browser session (rotation chain): a detected refresh-token reuse revokes that and nothing else.
+So after a password change, `logout-all`, reuse detection or a reconcile disable, every token issued
 up to that moment is dead everywhere, while the token a subsequent successful login mints
 verifies on board/runner immediately — even though their cached list may still carry the
 `sub` entry for up to one 60 s poll. Re-revoking an existing entry moves `revoked_at`
@@ -100,9 +101,8 @@ admin directly. A disabled account gets `403 Forbidden` at `/auth/login` even
 with the right password, and its refresh fails with `ErrAccountDisabled`
 (existing session rows are not enough — minting a fresh access token is
 refused too). A successful login clears any stale "sub" revocation left over
-from a prior disable or a detected refresh-token replay, so re-enabling an
-account (or a user simply logging back in once reconcile sees them back in
-the org) is not a permanent lockout.
+from a prior disable, so re-enabling an account (or a user simply logging back
+in once reconcile sees them back in the org) is not a permanent lockout.
 
 Both vars below have NO safe default, so both ship unset and must be configured
 per install. `install/k8s/core-deployment.yaml` and
@@ -162,13 +162,22 @@ session is revoked (with `replaced_by` pointing at the new row) and a new cookie
 in the same response, inheriting the original session's `user_agent`/`ip` and its absolute
 `expires_at`/`chain_id` lineage `BLERG_CORE_SESSION_TTL` controls (see above — rotation narrows
 the cookie's `Max-Age`, it never resets it). Presenting an already-rotated-out refresh token
-again (e.g. a copied/stolen cookie replayed after the legitimate client already rotated past it)
-is usually theft and revokes the entire rotation chain — every session descended from the same
-original login is killed and every device tied to it is forced to sign in again — UNLESS it
-happens within a 60-second grace window of the rotation AND the successor session is still live,
-in which case it's treated as a benign double-refresh race (a lost redirect, two tabs refreshing
-close together): the caller gets a fresh access token against the existing successor session, no
-new row is created, and the cookie is left untouched. `POST /auth/logout-all` (gated behind a
+again means one of two things, told apart by whether its successor was ever presented
+(`last_used_at`):
+
+- **The browser never got the rotation** (a hidden refresh frame torn down on a timeout, a
+  connection dropped after core committed, two tabs racing): the successor has never been
+  presented, so the rotation is redone — the never-used successor is revoked with
+  `revoke_reason = 'superseded'` and a new cookie is issued in the same chain. No clock is
+  involved: a phone tab that wakes an hour later is treated the same as one that raced a second
+  ago. Nobody is signed out.
+- **Reuse**: the successor has been presented, so two parties have held the same token. The
+  rotation chain — that one browser session — is revoked (`revoke_reason = 'reuse'`, and a
+  `sid` entry in the shared revocations table kills the access tokens it minted everywhere).
+  The person's other devices stay signed in and their agent tokens keep working: a reused
+  refresh token says nothing about them. The operator log names the chain and the token's age.
+
+`POST /auth/logout-all` (gated behind a
 human bearer token, not the refresh cookie) does the same thing on demand: it revokes every live
 session for the caller's account, plus the account's `sub` in the shared revocations table (so
 already-minted access tokens on other devices, not just future refresh attempts, stop verifying

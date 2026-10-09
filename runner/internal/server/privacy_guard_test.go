@@ -41,6 +41,8 @@ var routeDecisions = map[string]string{
 	"GET /api/sessions/{id}/artifacts/{aid}/download": "person only; canSeeAccount, a private session answers the uniform 404",
 	"GET /api/sessions/{id}/artifacts/{aid}/raw":      "person only; canSeeAccount, a private session answers the uniform 404",
 	"DELETE /api/sessions/{id}/artifacts/{aid}":       "person only; canSeeAccount, a private session answers the uniform 404",
+	"GET /api/sessions/{id}/files":                    "the session's own credential (agentSession: its messaging token, whose session must equal the path); a person's token is refused",
+	"DELETE /api/sessions/{id}/files/{aid}":           "the session's own credential (agentSession), and only a file the session itself published",
 	"POST /api/sessions/{id}/uploads":                 "person only (agent token 403); canSeeAccount, a private session answers the uniform 404",
 	"GET /api/sessions/{id}/attachments":              "the session's own credential (its token's session must equal the path) or the daemon token; a person's token is refused",
 	"GET /api/sessions/{id}/attachments/{aid}/file":   "the session's own credential (its token's session must equal the path) or the daemon token; only user-origin files, else the uniform 404",
@@ -51,23 +53,29 @@ var routeDecisions = map[string]string{
 	"POST /api/runner/sessions/{id}/stop":         "requireSessionAccess -> canSee",
 	"GET /api/runner/sessions/{id}/events":        "requireSessionAccess -> canSee",
 	"GET /api/runner/sessions/{id}/events/stream": "requireSessionAccess -> canSee",
+	"GET /api/runner/sessions/{id}/events/live":   "requireSessionAccess -> canSee before any frame; the hub watcher carries the principal's account, so broadcasts are scoped like a socket's and MarkPrivate evicts a foreign one",
 	"GET /api/runner/sessions/{id}/result":        "requireSessionAccess -> canSee",
+	// ── session files on the runner contract (runner_files.go) ──
+	"GET /api/runner/sessions/{id}/artifacts":                "runnerSessionFiles: requireSessionAccess -> canSee, then the browser route's body",
+	"GET /api/runner/sessions/{id}/artifacts/{aid}/raw":      "runnerSessionFiles: requireSessionAccess -> canSee, then the browser route's body",
+	"GET /api/runner/sessions/{id}/artifacts/{aid}/download": "runnerSessionFiles: requireSessionAccess -> canSee, then the browser route's body",
+	"DELETE /api/runner/sessions/{id}/artifacts/{aid}":       "runnerSessionFiles: requireSessionAccess -> canSee, then the browser route's body",
+	"POST /api/runner/sessions/{id}/uploads":                 "runnerSessionFiles: requireSessionAccess -> canSee, then the browser route's body",
 	// ── sockets ──
 	"/ws/browser": "outbound: BroadcastToBrowsers scopes by the payload's session; initial_state filters with canSeeAccount/ListMessagesFor; inbound: every frame naming a session passes accountCanSee",
 	"/ws/daemon":  "daemon -> server only; the daemon is a machine credential and receives no other session's data",
 	"/mcp":        "MCP tools call the runner-contract functions (requireSessionAccess -> canSee)",
-	// ── messages (session -> user roll-up) ──
+	// ── messages (session -> user) ──
 	"GET /api/messages":              "db.ListMessagesFor(viewer): private sessions' messages are the owner's alone",
 	"POST /api/messages":             "session's own credential (daemon token, or a board token bound to that session); broadcast is scoped, push skips private",
 	"GET /api/messages/{id}/answer":  "session's own credential; a board token must own the message",
 	"POST /api/messages/{id}/reply":  "coreActorCanSeeMessage for a person; daemon token and the session's board token are the session's side",
 	"POST /api/messages/{id}/expire": "session's own credential; a board token must own the message",
-	// ── artifacts and previews ──
+	// ── artifacts ──
 	"POST /api/screenshots": "daemon token; stored under an unguessable id with no session association",
 	"GET /s/":               "screenshot served by unguessable id; carries no session id and is not enumerable",
 	"POST /api/mockups":     "daemon token; stored under an unguessable id with no session association",
 	"GET /m/":               "mockup served by unguessable id; carries no session id and is not enumerable",
-	"POST /api/preview":     "daemon token; a push that names a session is scoped like any broadcast (unattributed pushes are the known gap)",
 	// ── push ──
 	"POST /api/push/subscribe":       "stores a browser subscription; names no session",
 	"GET /api/push/vapid-public-key": "public key; names no session",
@@ -76,7 +84,7 @@ var routeDecisions = map[string]string{
 // sessionDataPrefixes are routes that carry session data without having
 // "session" in their pattern. They are held to routeDecisions too.
 var sessionDataPrefixes = []string{
-	"/api/messages", "/api/screenshots", "/api/mockups", "/api/preview", "/api/push",
+	"/api/messages", "/api/screenshots", "/api/mockups", "/api/push",
 	"/s/", "/m/", "/mcp", "/ws/",
 }
 
@@ -122,14 +130,14 @@ var emitDecisions = map[string]emitDecision{
 	"columns.go:HandlePatchColumn:BroadcastBoard":                {1, whyBoard},
 	"columns.go:HandlePostColumn:BroadcastBoard":                 {1, whyBoard},
 	"daemon_conn.go:daemonReadPump:FanOutSessionOutput":          {2, whySubscribers},
-	"daemon_conn.go:handleDaemonDisconnect:BroadcastJSON":        {1, whyScoped + "; a daemon_disconnected keeps only the sessions each socket may see"},
+	"daemon_conn.go:finishDaemonDisconnect:BroadcastJSON":        {1, whyScoped + "; a daemon_disconnected keeps only the sessions each socket may see"},
 	"daemon_conn.go:setSessionStatusEnd:broadcastWithEnd":        {1, whyScoped},
+	"events_live.go:HandleRunnerEventsLive:Subscribe":            {1, "requireSessionAccess (canSee) precedes the subscription; the same id is registered as a browser under the principal's account, so MarkPrivate evicts it like any foreign socket"},
 	"jobreconcile.go:broadcastReconciledStatus:broadcastWithEnd": {1, whyScoped},
 	"messages.go:HandlePostMessageExpire:BroadcastJSON":          {1, whyScoped},
 	"messages.go:HandlePostMessageReply:BroadcastJSON":           {1, whyScoped},
 	"messages.go:HandlePostMessages:BroadcastJSON":               {1, whyScoped},
 	"messages.go:pushForMessage:SendPush":                        {1, whyPush},
-	"preview.go:HandlePreview:BroadcastJSON":                     {1, whyScoped + "; the push carries the session when the pusher names it (unattributed pushes are the known gap)"},
 	"sessionend.go:broadcastWithEnd:BroadcastJSON":               {1, whyScoped},
 	"sessionend.go:broadcastWithEnd:BroadcastJSONPerAccount":     {1, whyScoped},
 	"sessions.go:HandleSessionEnded:BroadcastJSON":               {1, whyScoped},

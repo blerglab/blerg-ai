@@ -152,6 +152,32 @@ func startBody(t *testing.T, k *BlergRunner) map[string]any {
 	return got
 }
 
+// The interaction mode is the caller's to say: sent as `interaction` when set,
+// left out (the runner's own default) when not.
+func TestBlergRunnerStartSendsInteraction(t *testing.T) {
+	for _, mode := range []string{"interactive", "unattended"} {
+		var body map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"session_id":"ext-1"}`))
+		}))
+		k := NewBlergRunner(srv.URL, "shared-key", "")
+		_, err := k.Start(context.Background(), StartRequest{Repo: "app", Token: "automation-tok", Interaction: mode})
+		srv.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body["interaction"] != mode {
+			t.Errorf("start interaction = %v, want %s", body["interaction"], mode)
+		}
+	}
+	// startBody's request sets none.
+	if v, ok := startBody(t, NewBlergRunner("", "shared-key", ""))["interaction"]; ok {
+		t.Errorf("a start with no Interaction sent interaction = %v, want the key omitted", v)
+	}
+}
+
 // Start is made under the per-call token — never the shared key — and carries
 // the engine; every other verb keeps using the shared key.
 func TestBlergRunnerStartUsesPerCallTokenAndEngine(t *testing.T) {

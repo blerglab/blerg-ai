@@ -39,6 +39,18 @@ export function onOpen(handler: () => void): () => void {
   return () => { openHandlers.delete(handler) }
 }
 
+const closeHandlers = new Set<() => void>()
+
+export function onClose(handler: () => void): () => void {
+  closeHandlers.add(handler)
+  return () => { closeHandlers.delete(handler) }
+}
+
+/** Whether the mocked socket is open (see setSocketOpen). */
+export function connected(): boolean {
+  return socketOpen
+}
+
 // ── Test-only controls ────────────────────────────────────────────────────────
 
 /** Dispatch a server→browser message to all registered handlers for its type. */
@@ -51,9 +63,12 @@ export function flushOpen(): void {
   openHandlers.forEach(h => h())
 }
 
-/** Control whether onOpen fires immediately on registration (socket state). */
+/** Control whether onOpen fires immediately on registration (socket state). Going from open to
+ *  closed fires the onClose handlers, as a real drop would. */
 export function setSocketOpen(open: boolean): void {
+  const dropped = socketOpen && !open
   socketOpen = open
+  if (dropped) closeHandlers.forEach(h => h())
 }
 
 /** Reset call history and socket state. Call in beforeEach. */

@@ -572,7 +572,6 @@ func TestPrivateSession_BrowserSocketOutbound(t *testing.T) {
 	f.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: msgInfo})
 	f.hub.BroadcastJSON(protocol.SessionReadChanged{Type: "session_read_changed", SessionID: f.privSession})
 	f.hub.BroadcastJSON(protocol.SessionStarChanged{Type: "session_star_changed", SessionID: f.privSession, Starred: true})
-	f.hub.BroadcastJSON(protocol.PreviewUpdated{Type: "preview_updated", HTML: "<b>secret preview</b>", SessionID: f.privSession})
 	f.hub.BroadcastTitleChanged(f.privSession, "secret retitle")
 	f.hub.BroadcastJSONPerAccount(func(string) any {
 		return protocol.SessionEnded{Type: "session_ended", SessionID: f.privSession}
@@ -586,7 +585,7 @@ func TestPrivateSession_BrowserSocketOutbound(t *testing.T) {
 	gotB := b.until(t, "marker-model")
 	gotA := a.until(t, "marker-model")
 
-	for _, secret := range []string{"secret title", "secret-model", "secret body", "secret preview", "secret retitle", "secret text"} {
+	for _, secret := range []string{"secret title", "secret-model", "secret body", "secret retitle", "secret text"} {
 		if anyContains(gotB, secret) {
 			t.Errorf("B received %q: %v", secret, gotB)
 		}
@@ -735,38 +734,6 @@ func TestPrivateSession_NotBoundToTickets(t *testing.T) {
 	}
 	if got, _ := db.GetTicketCard(ctx, f.pool, tk.ID); got.SessionID != nil {
 		t.Error("marking a session private must unbind it from its ticket")
-	}
-}
-
-// The preview endpoint: a push naming a private session is delivered to the
-// owner alone and does not become the shared latest preview.
-func TestPrivateSession_Preview(t *testing.T) {
-	f := newPrivFixture(t)
-	owner := &BrowserConn{ID: "p-owner", AccountID: privAcctA, send: make(chan []byte, 8)}
-	other := &BrowserConn{ID: "p-other", AccountID: privAcctB, send: make(chan []byte, 8)}
-	f.hub.RegisterBrowser(owner)
-	f.hub.RegisterBrowser(other)
-
-	push := func(sid, html string) {
-		body, _ := json.Marshal(map[string]string{"session_id": sid, "html": html})
-		req := httptest.NewRequest("POST", "/api/preview", strings.NewReader(string(body)))
-		req.Header.Set("Authorization", "Bearer "+spawnTokenDaemonTok)
-		rec := httptest.NewRecorder()
-		f.hub.HandlePreview(spawnTokenDaemonTok)(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("preview status %d", rec.Code)
-		}
-	}
-	push(f.privSession, "<i>secret</i>")
-	if len(other.send) != 0 || len(owner.send) != 1 {
-		t.Errorf("private preview delivery: other=%d owner=%d", len(other.send), len(owner.send))
-	}
-	if strings.Contains(f.hub.Preview(), "secret") {
-		t.Error("a private session's preview became the shared latest")
-	}
-	push(f.pubSession, "<i>shared</i>")
-	if len(other.send) != 1 || f.hub.Preview() != "<i>shared</i>" {
-		t.Errorf("non-private preview must behave as before: other=%d preview=%q", len(other.send), f.hub.Preview())
 	}
 }
 

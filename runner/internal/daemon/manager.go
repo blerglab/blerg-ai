@@ -37,7 +37,6 @@ type ManagerConfig struct {
 	ReposRoot        string
 	ReposRootSetting *ReposRootSetting
 	DaemonName       string
-	PreviewURL       string
 	DaemonToken      string
 	ServerHTTP       string
 	GithubOrg        string
@@ -57,6 +56,11 @@ type ManagerConfig struct {
 
 	// Command overrides the default claude command. Used in tests.
 	Command []string
+
+	// AgentRecordsDir is where recovery records of agent sessions are kept, so they survive a
+	// restart of the daemon process (AgentRecordsDir(DaemonStateDir()) on a real daemon). ""
+	// keeps none.
+	AgentRecordsDir string
 }
 
 // withReposRootSetting fills in ReposRootSetting from ReposRoot when the
@@ -262,6 +266,8 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 		// Always-on plugins land in the daemon's own state dir, never in
 		// the person's ~/.claude (pluginworkshop.go).
 		Plugins: NewPluginWorkshop(DaemonStateDir()),
+		// Recovery records of agent sessions (agentrecord.go); "" keeps none.
+		RecordsDir: cfg.AgentRecordsDir,
 	})
 	if apiKey != "" {
 		log.Printf("manager: agent sessions enabled (Claude: the claude CLI when installed, else the native loop, budget $%.0f/session)", budget)
@@ -298,6 +304,18 @@ func (m *Manager) handleAgentUserMessage(raw []byte) {
 	var msg protocol.AgentUserMessage
 	if err := json.Unmarshal(raw, &msg); err != nil || m.agents == nil {
 		return
+	}
+	// The agent host reports a message for a session it is not hosting. That must not be said
+	// of a session that is simply not an agent session (a terminal one), nor of one whose spawn
+	// is still preparing its workspace or plugins: those are dropped, as they always were.
+	if !m.agents.Has(msg.SessionID) {
+		m.mu.Lock()
+		_, terminal := m.sessions[msg.SessionID]
+		_, starting := m.pendingSpawns[msg.SessionID]
+		m.mu.Unlock()
+		if terminal || starting {
+			return
+		}
 	}
 	m.agents.UserMessage(msg.SessionID, msg.Text, msg.Source)
 }
@@ -503,8 +521,11 @@ func sanitizedEnviron(extra ...string) []string {
 	for _, e := range base {
 		// The master token, and a pod's gateway grant (MCPGatewayEnvVar; the pod
 		// entrypoint unsets it as well): neither may reach any child process.
+		// BLERG_RUNNER_PREVIEW_URL is a deprecated daemon setting (an older env
+		// file may still carry it); a session gets BLERG_RUNNER_SERVER_HTTP instead.
 		if !strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") && !strings.HasPrefix(e, MCPGatewayEnvVar+"=") &&
-			!strings.HasPrefix(e, RestrictToolsEnvVar+"=") {
+			!strings.HasPrefix(e, "BLERG_RUNNER_PREVIEW_URL=") &&
+			!strings.HasPrefix(e, RestrictToolsEnvVar+"=") && !strings.HasPrefix(e, InteractionEnvVar+"=") {
 			out = append(out, e)
 		}
 	}
@@ -560,8 +581,7 @@ func extraEnvPairs(sessionToken string, extra map[string]string) []string {
 
 // sessionEnv returns sanitizedEnviron() augmented with the Blerg Runner vars
 // the session needs. BLERG_RUNNER_SESSION_ID is always injected (unique per
-// session); BLERG_RUNNER_PREVIEW_URL and BLERG_RUNNER_SERVER_HTTP only when
-// the corresponding config field is non-empty. sessionToken (the server-minted
+// session); BLERG_RUNNER_SERVER_HTTP only when the config field is non-empty. sessionToken (the server-minted
 // per-session messaging credential) becomes BLERG_RUNNER_SESSION_TOKEN and
 // extra is appended verbatim.
 //
@@ -578,7 +598,6 @@ func extraEnvPairs(sessionToken string, extra map[string]string) []string {
 func (m *Manager) sessionEnv(sessionID string, assist bool, boardID, boardToken, sessionToken string, extra map[string]string) []string {
 	return buildSessionEnv(sessionEnvOpts{
 		SessionID:    sessionID,
-		PreviewURL:   m.config.PreviewURL,
 		ServerHTTP:   m.config.ServerHTTP,
 		Assist:       assist,
 		BoardID:      boardID,
@@ -598,7 +617,6 @@ func (m *Manager) sessionEnv(sessionID string, assist bool, boardID, boardToken,
 // drives.
 type sessionEnvOpts struct {
 	SessionID    string
-	PreviewURL   string
 	ServerHTTP   string
 	Assist       bool
 	BoardID      string
@@ -615,9 +633,6 @@ func buildSessionEnv(o sessionEnvOpts) []string {
 		env = prependPathInEnv(env, filepath.Join(home, ".local", "bin"))
 	}
 
-	if o.PreviewURL != "" {
-		env = append(env, "BLERG_RUNNER_PREVIEW_URL="+o.PreviewURL)
-	}
 	env = append(env, "BLERG_RUNNER_SESSION_ID="+o.SessionID)
 	if o.ServerHTTP != "" {
 		env = append(env, "BLERG_RUNNER_SERVER_HTTP="+o.ServerHTTP)
@@ -1356,6 +1371,37 @@ func (m *Manager) startStatePoller(id string, tracker *StateTracker) {
 	}()
 }
 
+// AdoptAgentSessions brings back the agent sessions a previous run of the daemon left recovery
+// records for, resuming each one's Claude conversation. Called once, at process start, BEFORE
+// the daemon connects: the recorded sessions are claimed at once (so the hello lists them and
+// the server keeps their rows) and hosted again in the background, which can take a while when
+// a session's plugins have to be reinstalled. done, when set, is called once they have all been
+// dealt with (the daemon sends a heartbeat then, so the server learns their real state at once).
+// It returns how many sessions were claimed.
+func (m *Manager) AdoptAgentSessions(done func()) int {
+	if m.agents == nil {
+		return 0
+	}
+	n := m.agents.BeginAdoption()
+	if n > 0 {
+		go func() {
+			m.agents.RunAdoption()
+			if done != nil {
+				done()
+			}
+		}()
+	}
+	return n
+}
+
+// FreezeAgentRecords stops every recovery-record write. The daemon calls it first thing when
+// told to stop (AgentHost.Freeze).
+func (m *Manager) FreezeAgentRecords() {
+	if m.agents != nil {
+		m.agents.Freeze()
+	}
+}
+
 // ReattachSessions reattaches to persistent tmux sessions left by a prior daemon
 // run, resuming output streaming for each. It is idempotent — already-managed
 // sessions are skipped — so it is safe to call on every (re)connection. After
@@ -1375,6 +1421,9 @@ func (m *Manager) ReattachSessions() {
 	// events the server hasn't acked yet.
 	if m.agents != nil {
 		m.agents.ResendPending()
+		// There is a server to talk to: sessions a restart could not bring back have their end
+		// reported, and a cut-off turn waiting to be continued may be (agentadopt.go).
+		m.agents.NoteConnected()
 	}
 	// Ship the user's agent config to the server so runner pods (which have
 	// no ~/.claude) can download it. Best-effort, off the reattach path.
@@ -1698,6 +1747,12 @@ func (m *Manager) handleKillSession(raw []byte) {
 	if m.agents != nil && m.agents.Has(msg.SessionID) {
 		m.agents.Kill(msg.SessionID)
 		return
+	}
+	// An agent session this daemon is not hosting may still have a recovery record (it was
+	// stopped while the daemon was down, and the server is saying so now): without this the
+	// record would bring it back at every start.
+	if m.agents != nil {
+		m.agents.DropRecord(msg.SessionID)
 	}
 	// Tear down the recovery record and the persistent tmux session
 	// unconditionally — even if we are not currently managing this session. A kill

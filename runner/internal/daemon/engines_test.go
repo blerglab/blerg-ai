@@ -34,15 +34,23 @@ func TestEngineRegistryLookup(t *testing.T) {
 
 // TestAvailableEngineDetection exercises the config-file half of each
 // *AlreadyConfigured/*AlreadyLoggedIn check by pointing HOME at a scratch
-// directory — the binary-presence half is left to whatever's actually
-// installed on the machine running the test (all four are real CLIs, not
-// mockable via PATH tricks without losing the point of the check).
+// directory. The binary-presence half only looks the CLI up on PATH, so a
+// scratch PATH of empty stubs stands in for all four; the result then does
+// not depend on which engines the machine running the test has installed.
 func TestAvailableEngineDetection(t *testing.T) {
 	if _, err := os.Stat("/usr/bin/env"); err != nil {
 		t.Skip("needs a real filesystem for HOME redirection")
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	bin := t.TempDir()
+	for _, name := range []string{"claude", "codex", "hermes", "openclaw"} {
+		mustWrite(t, filepath.Join(bin, name), "#!/bin/sh\n")
+		if err := os.Chmod(filepath.Join(bin, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
 
 	if claudeAvailable() {
 		t.Error("claudeAvailable() = true with no ~/.claude/.credentials.json")

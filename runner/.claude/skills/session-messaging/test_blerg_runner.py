@@ -1056,6 +1056,25 @@ class AttachmentStubHandler(http.server.BaseHTTPRequestHandler):
             aid = self.path[len(base) + 1:-len("/file")]
             if aid in self.server.files:
                 return self._reply(200, self.server.files[aid][1], "application/octet-stream")
+        if self.path == "/api/sessions/sess-fetch/files":
+            # What the session published: server.published maps id -> (name, size, version, latest).
+            items = [{"id": i, "name": n, "size": s, "content_type": "application/pdf", "version": v, "latest_version": l}
+                     for i, (n, s, v, l) in getattr(self.server, "published", {}).items()]
+            used = len(items) + len(self.server.files)
+            return self._reply(200, json.dumps({"files": items, "used": used, "limit": 50}).encode())
+        self._reply(404, b'{"error":"not found"}')
+
+    def do_DELETE(self):
+        self.server.recorded.append({"path": self.path, "auth": self.headers.get("Authorization", ""), "method": "DELETE"})
+        base = "/api/sessions/sess-fetch/files/"
+        if self.path.startswith(base):
+            aid = self.path[len(base):]
+            published = getattr(self.server, "published", {})
+            if aid in published:
+                del published[aid]
+                return self._reply(204, b"")
+            if aid in self.server.files:  # a person's attachment
+                return self._reply(403, b'{"error":"a person attached this file"}')
         self._reply(404, b'{"error":"not found"}')
 
 
@@ -1283,3 +1302,306 @@ class TestFetch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestFilesAndUnpublish(TestFetch):
+    """`files` and `unpublish` share the fetch stub: server.published is what the session published."""
+
+    def setUp(self):
+        super().setUp()
+        self.server.published = {
+            "c" * 32: ("report.md", 2048, 1, 2),
+            "d" * 32: ("report.md", 4096, 2, 2),
+            "e" * 32: ("chart.png", 9000, 1, 1),
+        }
+
+    def _cli(self, cmd, args, **kw):
+        env = os.environ.copy()
+        for k, v in self._env(**kw).items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+        return subprocess.run([sys.executable, SCRIPT, cmd] + args, capture_output=True, text=True,
+                              timeout=15, env=env, cwd=self.tmp.name)
+
+    def test_files_lists_the_sessions_files_and_the_slot_count(self):
+        result = self._cli("files", [])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("report.md  v2 (latest)  (4.0 KB)", result.stdout)
+        self.assertIn("report.md  v1  (2.0 KB)", result.stdout)
+        self.assertIn("chart.png", result.stdout)
+        # 3 published + the 2 attachments the stub lists.
+        self.assertIn("5 of 50 file slots used", result.stdout)
+        self.assertTrue(all(r["auth"] == "Bearer sess-tok" for r in self.server.recorded))
+
+    def test_unpublish_by_name_removes_the_newest_version(self):
+        result = self._cli("unpublish", ["report.md"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Removed report.md v2 (4.0 KB)", result.stdout)
+        self.assertIn("4 of 50 file slots used", result.stdout)
+        deletes = [r for r in self.server.recorded if r.get("method") == "DELETE"]
+        self.assertEqual([r["path"].rsplit("/", 1)[1] for r in deletes], ["d" * 32])
+        self.assertNotIn("d" * 32, self.server.published)
+        self.assertIn("c" * 32, self.server.published)
+
+    def test_unpublish_all_versions_and_by_id(self):
+        result = self._cli("unpublish", ["report.md", "--all-versions"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("c" * 32, self.server.published)
+        self.assertNotIn("d" * 32, self.server.published)
+        result = self._cli("unpublish", ["e" * 32])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Removed chart.png", result.stdout)
+
+    def test_unpublish_refuses_an_unknown_name_and_a_persons_attachment(self):
+        result = self._cli("unpublish", ["nothing.txt"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no file 'nothing.txt' published by this session", result.stderr)
+        # An attachment's id is not among the session's files: not found, nothing deleted.
+        result = self._cli("unpublish", ["a" * 32])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no file", result.stderr)
+        self.assertEqual([r for r in self.server.recorded if r.get("method") == "DELETE"], [])
+
+    def test_noop_when_not_under_blerg(self):
+        result = self._cli("files", [], BLERG_RUNNER_SESSION_ID=None, BLERG_RUNNER_SERVER_HTTP=None,
+                           BLERG_RUNNER_SESSION_TOKEN=None, BLERG_RUNNER_PREVIEW_URL=None, BLERG_RUNNER_SERVER_URL=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("not running under blerg runner", result.stderr.lower())
+
+
+# ── review (a person's review of a published file) ───────────────────────────
+
+class ReviewStubHandler(AttachmentStubHandler):
+    """The fetch stub plus POST /api/sessions/{id}/artifacts, so `review reply` can publish."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b""
+        self.server.recorded.append({
+            "method": "POST", "path": self.path, "auth": self.headers.get("Authorization", ""),
+            "name": self.headers.get("X-Artifact-Name", ""), "body": body,
+        })
+        if self.path != "/api/sessions/sess-fetch/artifacts":
+            return self._reply(404, b'{"error":"not found"}')
+        if self.server.publish_status:
+            return self._reply(self.server.publish_status, json.dumps({"error": self.server.publish_error}).encode())
+        self.server.publish_count += 1
+        resp = json.dumps({"id": "f" * 32, "name": self.headers.get("X-Artifact-Name", ""),
+                           "version": self.server.publish_count, "previous": self.server.publish_count - 1 or None,
+                           "view": "json", "url": "/sessions/sess-fetch?artifact=" + "f" * 32}).encode()
+        self._reply(201, resp)
+
+
+def _review_file(name, requests, version=3, edit=None):
+    out = {"version": 1, "file": {"name": name, "artifactId": "a" * 32, "artifactVersion": version},
+           "requests": requests, "submittedAt": "2026-10-06T10:00:00Z"}
+    if edit:
+        out["edit"] = edit
+    return json.dumps(out).encode()
+
+
+def _req(rid, text, quote=None, heading=None, page=None, status="open", reply=None, pin=None):
+    anchor = {"kind": "region" if pin else "text"}
+    if quote is not None:
+        anchor["quote"] = quote
+    if heading is not None:
+        anchor["heading"] = heading
+    if page is not None:
+        anchor["page"] = page
+    if pin is not None:
+        anchor["pin"] = pin
+    r = {"id": rid, "anchor": anchor, "text": text, "status": status, "createdAt": "2026-10-06T09:00:00Z"}
+    if reply is not None:
+        r["reply"] = reply
+    return r
+
+
+class TestReview(unittest.TestCase):
+    """`review list` merges the person's review file with the session's replies and shows what is
+    still open; `review reply` records an answer and publishes `<file>.review.json`."""
+
+    _env = TestFetch._env
+    _stop = TestFetch._stop
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ReviewStubHandler)
+        self.server.recorded = []
+        self.server.status = 0
+        self.server.listed_size = {}
+        self.server.versions = {}
+        self.server.publish_count = 0
+        self.server.publish_status = 0
+        self.server.publish_error = ""
+        self.server.published = {}
+        self.server.files = {
+            "a" * 32: ("report.md", b"# Report\n\nedited by the person\n"),
+            "b" * 32: ("report.md.review.json", _review_file("report.md", [
+                _req("k7x2", "this is the median, not the mean", quote="the mean rose by 12%", heading="Results", page=2),
+                _req("m3q9", "say how many weeks", quote="we sampled weekly", heading="Method"),
+            ], edit={"artifactId": "a" * 32, "diff": "@@ -1 +1 @@\n-a\n+b\n"})),
+        }
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._stop)
+
+    def _review(self, args, **kw):
+        env = os.environ.copy()
+        for k, v in self._env(**kw).items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+        return subprocess.run([sys.executable, SCRIPT, "review"] + args, capture_output=True, text=True,
+                              timeout=15, env=env, cwd=self.tmp.name)
+
+    def _published(self):
+        return [r for r in self.server.recorded if r.get("method") == "POST"]
+
+    def _state(self, name="report.md"):
+        with open(os.path.join(self.tmp.name, "attachments", ".reviews", name + ".review.json"), "rb") as f:
+            return json.load(f)
+
+    # list ──
+    def test_list_shows_each_open_request_with_its_id_place_quote_and_ask(self):
+        result = self._review(["list"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], "report.md (v3): 2 open requests")
+        self.assertEqual(lines[1], '  [k7x2] under "Results", page 2 "the mean rose by 12%" — this is the median, not the mean')
+        self.assertEqual(lines[2], '  [m3q9] under "Method" "we sampled weekly" — say how many weeks')
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(r["auth"] == "Bearer sess-tok" for r in self.server.recorded))
+        self.assertEqual(self._published(), [])
+
+    def test_list_merges_the_sessions_replies_and_hides_answered_requests(self):
+        # The session's copy (what it last published) says k7x2 is done; the person's file still has it open.
+        os.makedirs(os.path.join(self.tmp.name, "attachments", ".reviews"))
+        with open(os.path.join(self.tmp.name, "attachments", ".reviews", "report.md.review.json"), "wb") as f:
+            f.write(_review_file("report.md", [
+                _req("k7x2", "this is the median, not the mean", quote="the mean rose by 12%", status="done", reply="fixed"),
+            ]))
+        self.server.published = {"c" * 32: ("report.md.review.json", 300, 1, 1)}
+        result = self._review(["list", "report.md"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("report.md (v3): 1 open request\n", result.stdout)
+        self.assertIn("[m3q9]", result.stdout)
+        self.assertNotIn("[k7x2]", result.stdout)
+
+    def test_list_takes_the_newest_version_of_the_persons_review_file(self):
+        self.server.files["c" * 32] = ("report.md.review.json", _review_file("report.md", [
+            _req("z1z1", "newer ask", quote="x" * 80),
+        ], version=4))
+        self.server.versions = {"b" * 32: (1, 2), "c" * 32: (2, 2), "a" * 32: (1, 1)}
+        result = self._review(["list"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("report.md (v4): 1 open request", result.stdout)
+        self.assertIn('[z1z1] (no place) "' + "x" * 59 + '…" — newer ask', result.stdout)
+        self.assertNotIn("k7x2", result.stdout)
+
+    def test_list_with_nothing_open_says_so_and_exits_zero(self):
+        self.server.files["b" * 32] = ("report.md.review.json", _review_file("report.md", [
+            _req("k7x2", "x", status="declined", reply="no"),
+        ]))
+        result = self._review(["list"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "no open requests\n")
+        result = self._review(["list", "other.md"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "no open requests: no review of other.md\n")
+
+    def test_list_mentions_a_published_copy_this_folder_cannot_read(self):
+        self.server.published = {"c" * 32: ("report.md.review.json", 300, 1, 1)}
+        result = self._review(["list"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 open requests", result.stdout)
+        self.assertIn("another folder", result.stderr)
+
+    def test_a_pin_of_a_marked_up_image_is_shown_by_its_number(self):
+        self.server.files["d" * 32] = ("shot.png.review.json", _review_file("shot.png", [
+            _req("p1p1", "the title is clipped", pin=1),
+        ], version=1))
+        result = self._review(["list", "shot.png"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "shot.png (v1): 1 open request\n  [p1p1] pin 1 — the title is clipped\n")
+
+    # reply ──
+    def test_reply_records_status_and_line_and_publishes_the_merged_file_under_the_right_name(self):
+        result = self._review(["reply", "k7x2", "done", "Changed mean to median in Results"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Replied to [k7x2] in report.md: done — Changed mean to median in Results", result.stdout)
+        self.assertIn("Published report.md.review.json", result.stdout)
+        self.assertIn("1 open request left in report.md", result.stdout)
+        posts = self._published()
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["path"], "/api/sessions/sess-fetch/artifacts")
+        self.assertEqual(posts[0]["name"], "report.md.review.json")
+        body = json.loads(posts[0]["body"])
+        self.assertEqual(body["file"], {"name": "report.md", "artifactId": "a" * 32, "artifactVersion": 3})
+        self.assertEqual(body["edit"]["artifactId"], "a" * 32)  # the person's fields are kept
+        by_id = {r["id"]: r for r in body["requests"]}
+        self.assertEqual(by_id["k7x2"]["status"], "done")
+        self.assertEqual(by_id["k7x2"]["reply"], "Changed mean to median in Results")
+        self.assertEqual(by_id["k7x2"]["text"], "this is the median, not the mean")
+        self.assertEqual(by_id["m3q9"]["status"], "open")
+        self.assertNotIn("reply", by_id["m3q9"])
+        self.assertEqual(self._state(), body)
+
+    def test_replies_accumulate_and_a_second_reply_to_an_id_overwrites(self):
+        self.assertEqual(self._review(["reply", "k7x2", "done", "first"]).returncode, 0)
+        self.assertEqual(self._review(["reply", "m3q9", "declined", "six weeks is in the appendix"]).returncode, 0)
+        result = self._review(["reply", "k7x2", "declined", "on reflection it is the mean"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("No open requests left in report.md", result.stdout)
+        posts = self._published()
+        self.assertEqual([p["name"] for p in posts], ["report.md.review.json"] * 3)
+        by_id = {r["id"]: r for r in json.loads(posts[-1]["body"])["requests"]}
+        self.assertEqual((by_id["k7x2"]["status"], by_id["k7x2"]["reply"]), ("declined", "on reflection it is the mean"))
+        self.assertEqual((by_id["m3q9"]["status"], by_id["m3q9"]["reply"]), ("declined", "six weeks is in the appendix"))
+        listed = self._review(["list"])
+        self.assertEqual(listed.stdout, "no open requests\n")
+
+    def test_reply_to_an_unknown_id_fails_and_publishes_nothing(self):
+        result = self._review(["reply", "nope", "done", "x"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blerg-runner review: no request 'nope'", result.stderr)
+        self.assertIn("review list", result.stderr)
+        self.assertEqual(self._published(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "attachments", ".reviews")))
+
+    def test_reply_needs_a_known_status_and_a_non_empty_line(self):
+        result = self._review(["reply", "k7x2", "maybe", "x"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("done", result.stderr)
+        result = self._review(["reply", "k7x2", "done", "   "])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("non-empty line", result.stderr)
+        self.assertEqual(self._published(), [])
+
+    def test_a_refused_publish_is_one_clear_line(self):
+        self.server.publish_status = 409
+        self.server.publish_error = "This file already has 20 versions; delete an old one first."
+        result = self._review(["reply", "k7x2", "done", "x"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blerg-runner publish: This file already has 20 versions", result.stderr)
+        self.assertEqual(len(result.stderr.strip().splitlines()), 1, result.stderr)
+
+    # the rest ──
+    def test_noop_when_not_under_blerg(self):
+        result = self._review(["list"], BLERG_RUNNER_SESSION_ID=None, BLERG_RUNNER_SERVER_HTTP=None,
+                              BLERG_RUNNER_SESSION_TOKEN=None, BLERG_RUNNER_PREVIEW_URL=None, BLERG_RUNNER_SERVER_URL=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("not running under blerg runner", result.stderr.lower())
+
+    def test_help_explains_the_loop(self):
+        for args in (["review", "--help"], ["--help"]):
+            result = run_blerg_runner(args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            low = " ".join(result.stdout.split())
+            for needle in ("apply it first", "author's own wording", "each request", "the file the review was published from",
+                           "Publish the file again", "review reply <id> done|declined", "review list"):
+                self.assertIn(needle, low, args)

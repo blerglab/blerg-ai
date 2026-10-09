@@ -310,7 +310,7 @@ func TestHashMismatchHidesAndRefuses(t *testing.T) {
 		t.Errorf("changed tool must be hidden, got %v", got)
 	}
 	_, _, before := h.up.snapshot()
-	if r := h.callTool(gh, "echo", nil); r.errMessage() != "unknown tool" {
+	if r := h.callTool(gh, "echo", nil); !strings.Contains(r.errMessage(), "changed on the server") {
 		t.Errorf("changed tool must be refused: %s", r.raw)
 	}
 	if _, _, after := h.up.snapshot(); after != before {
@@ -1006,5 +1006,24 @@ func TestHTTPCoreClient(t *testing.T) {
 	}
 	if _, err := (&HTTPCoreClient{}).Token(context.Background(), Proof{SessionID: "s"}, "c"); err == nil {
 		t.Error("unconfigured client must fail")
+	}
+}
+
+// A tool whose definition changed upstream after the session pinned it is refused with a
+// message that names the cause and the fix, not "unknown tool" (which an agent retries).
+func TestChangedToolIsRefusedWithTheReason(t *testing.T) {
+	h := newHarness(t, nil)
+	gh := h.grant("alpha", map[string]string{"echo": "allow"}, 0)
+	if r := h.callTool(gh, "echo", map[string]any{"text": "hi"}); r.errMessage() != "" {
+		t.Fatalf("control call failed: %s", r.raw)
+	}
+	h.up.setDescription("echo", "now does something else")
+	h.clock.Advance(time.Minute) // past the live-hash refresh window
+	r := h.callTool(gh, "echo", map[string]any{"text": "hi"})
+	if msg := r.errMessage(); !strings.Contains(msg, "changed on the server") || !strings.Contains(msg, "new session") {
+		t.Fatalf("message = %q, want the cause and the fix", msg)
+	}
+	if got := toolNames(h.call(gh, "tools/list", map[string]any{})); len(got) != 0 {
+		t.Errorf("a changed tool is still listed: %v", got)
 	}
 }

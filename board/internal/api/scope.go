@@ -126,6 +126,18 @@ var routeScopes = map[string]routeScope{
 	"POST /api/runner-sessions/{id}/message":      {scopeSession, "message session"},
 	"POST /api/runner-sessions/{id}/interrupt":    {scopeSession, "interrupt session"},
 	"POST /api/runner-sessions/{id}/model":        {scopeSession, "re-model session; the literal \"self\" is refused (a core token owns no session)"},
+	// The chat proxy: one session's stream, messages and files, passed through to the runner.
+	"GET /api/chat/sessions/{id}":                          {scopeSession, "chat: session status"},
+	"GET /api/chat/sessions/{id}/events/live":              {scopeSession, "chat: live event stream"},
+	"GET /api/chat/sessions/{id}/events":                   {scopeSession, "chat: event pages"},
+	"POST /api/chat/sessions/{id}/messages":                {scopeSession, "chat: a person's message (the handler refuses a non-human)"},
+	"POST /api/chat/sessions/{id}/stop":                    {scopeSession, "chat: end the session"},
+	"POST /api/chat/sessions/{id}/interrupt":               {scopeSession, "chat: interrupt the turn"},
+	"GET /api/chat/sessions/{id}/artifacts":                {scopeSession, "chat: the session's files"},
+	"GET /api/chat/sessions/{id}/artifacts/{aid}/raw":      {scopeSession, "chat: a file's bytes"},
+	"GET /api/chat/sessions/{id}/artifacts/{aid}/download": {scopeSession, "chat: a file's download"},
+	"DELETE /api/chat/sessions/{id}/artifacts/{aid}":       {scopeSession, "chat: delete a file"},
+	"POST /api/chat/sessions/{id}/uploads":                 {scopeSession, "chat: a person's attachment (the handler refuses a non-human)"},
 }
 
 // RouteScopeDecision reports the reason recorded for a mux pattern's

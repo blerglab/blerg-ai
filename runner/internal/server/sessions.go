@@ -120,6 +120,8 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	effort := "" // the launch effort, recorded on the row at spawn
 	engine := ""
 	cronID := "" // set when a cron started the session, so the badge shows from the first message
+	var startedBy *protocol.StartedBy
+	interaction := ""
 	if pool != nil {
 		if row, err := db.GetSession(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("session_started GetSession %s: %v", msg.SessionID, err)
@@ -132,6 +134,8 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 			}
 			engine = derefOrEmpty(row.Engine)
 			cronID = derefOrEmpty(row.CronID)
+			startedBy = startedByOf(row)
+			interaction = effectiveInteraction(row)
 			if kind == "" {
 				kind = row.Kind
 			}
@@ -159,6 +163,8 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 			Kind:        kind,
 			Runtime:     runtime,
 			CronID:      cronID,
+			StartedBy:   startedBy,
+			Interaction: interaction,
 		},
 	})
 }

@@ -227,6 +227,31 @@ drainLoop:
 // read backwards from the end of the transcript instead: a long transcript is
 // shown from its newest events at once and the older ones follow in pages.
 func replayAgentEvents(ctx context.Context, _ *Hub, bc *BrowserConn, pool *pgxpool.Pool, msg protocol.SubscribeAgentEvents) {
+	rows, done := replayAgentEventsPage(ctx, pool, msg)
+	for _, r := range rows {
+		raw, err := json.Marshal(replayedAgentEvent(r))
+		if err != nil {
+			continue
+		}
+		select {
+		case bc.send <- raw:
+		case <-ctx.Done():
+			return
+		}
+	}
+	done.ServerTime = time.Now().UTC().Format(time.RFC3339Nano)
+	if raw, err := json.Marshal(done); err == nil {
+		select {
+		case bc.send <- raw:
+		case <-ctx.Done():
+		}
+	}
+}
+
+// replayAgentEventsPage reads the window a subscribe asks for and builds its replay_done marker
+// (ServerTime left for the sender to stamp). Shared with the runner contract's live stream
+// (events_live.go), so the two surfaces page a transcript identically.
+func replayAgentEventsPage(ctx context.Context, pool *pgxpool.Pool, msg protocol.SubscribeAgentEvents) ([]db.AgentEventRow, protocol.AgentEventsReplayDone) {
 	done := protocol.AgentEventsReplayDone{
 		Type: "agent_events_replay_done", SessionID: msg.SessionID, LastSeq: msg.AfterSeq,
 	}
@@ -263,28 +288,15 @@ func replayAgentEvents(ctx context.Context, _ *Hub, bc *BrowserConn, pool *pgxpo
 			log.Printf("agent replay %s: %v", msg.SessionID, err)
 		}
 	}
-	for _, r := range rows {
-		ev := protocol.AgentEvent{
-			Type: "agent_event", SessionID: r.SessionID, ClientEventID: r.ClientEventID,
-			Seq: r.Seq, Ts: r.Ts.UTC().Format(time.RFC3339Nano),
-			Kind: r.Kind, Payload: json.RawMessage(r.Payload),
-		}
-		raw, err := json.Marshal(ev)
-		if err != nil {
-			continue
-		}
-		select {
-		case bc.send <- raw:
-		case <-ctx.Done():
-			return
-		}
-	}
-	done.ServerTime = time.Now().UTC().Format(time.RFC3339Nano)
-	if raw, err := json.Marshal(done); err == nil {
-		select {
-		case bc.send <- raw:
-		case <-ctx.Done():
-		}
+	return rows, done
+}
+
+// replayedAgentEvent is a persisted row as the browser receives it.
+func replayedAgentEvent(r db.AgentEventRow) protocol.AgentEvent {
+	return protocol.AgentEvent{
+		Type: "agent_event", SessionID: r.SessionID, ClientEventID: r.ClientEventID,
+		Seq: r.Seq, Ts: r.Ts.UTC().Format(time.RFC3339Nano),
+		Kind: r.Kind, Payload: json.RawMessage(r.Payload),
 	}
 }
 

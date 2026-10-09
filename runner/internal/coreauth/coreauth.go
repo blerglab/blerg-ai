@@ -162,10 +162,10 @@ func (e *httpStatusError) Error() string {
 
 // Revoked implements identity.RevocationChecker (unconditional; identity.Verify
 // prefers RevokedFor below).
-func (c *Client) Revoked(kid, lineage, sub string) bool {
+func (c *Client) Revoked(kid, lineage, sub, sid string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.revoked.Revoked(kid, lineage, sub)
+	return c.revoked.Revoked(kid, lineage, sub, sid)
 }
 
 // RevokedFor implements identity.IssuedAtRevocationChecker: a sub/lineage
@@ -173,10 +173,10 @@ func (c *Client) Revoked(kid, lineage, sub string) bool {
 // minted by a re-login after a password change / logout-all verifies here
 // even before the next 60 s revocation poll drops the entry. kid entries stay
 // unconditional.
-func (c *Client) RevokedFor(kid, lineage, sub string, issuedAt int64) bool {
+func (c *Client) RevokedFor(kid, lineage, sub, sid string, issuedAt int64) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.revoked.RevokedFor(kid, lineage, sub, issuedAt)
+	return c.revoked.RevokedFor(kid, lineage, sub, sid, issuedAt)
 }
 
 // StaleBeyondCeiling implements identity.RevocationChecker: true once the

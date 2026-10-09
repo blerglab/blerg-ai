@@ -198,6 +198,9 @@ type internalTokenStatusRequest struct {
 type internalTokenStatusResponse struct {
 	Live      bool   `json:"live"`
 	AccountID string `json:"account_id"`
+	// Name is the owner's label for their own token (the runner shows it as who started a
+	// session); absent for a token that is not the account's.
+	Name string `json:"name,omitempty"`
 }
 
 // handleInternalTokenStatus is POST /internal/tokens/status: whether token_id is a live token of
@@ -230,5 +233,11 @@ func (d Deps) handleInternalTokenStatus(w http.ResponseWriter, r *http.Request) 
 		live = false
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, internalTokenStatusResponse{Live: live, AccountID: body.AccountID})
+	name := ""
+	if owned {
+		if n, err := svc.AgentTokenName(r.Context(), body.AccountID, body.TokenID); err == nil {
+			name = n
+		}
+	}
+	writeJSON(w, internalTokenStatusResponse{Live: live, AccountID: body.AccountID, Name: name})
 }

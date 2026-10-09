@@ -94,8 +94,10 @@ func TestPlainSessionIsNotRestricted(t *testing.T) {
 	}
 }
 
-// Every grant session is restricted too, on every path that attaches one.
-func TestGrantSessionsAreRestricted(t *testing.T) {
+// Restriction follows who is watching (docs/design/interactive-mcp-sessions.md): a
+// board-started grant session (StartSession with a Grant) is restricted; a launch-sheet session
+// with connections (POST /api/sessions) is not, on the daemon and on both cluster paths.
+func TestGrantSessionsRestrictedOnlyWhenUnattended(t *testing.T) {
 	ctx := context.Background()
 	fx := newMCPFx(t)
 	if _, apiErr := fx.api.StartSession(ctx, fx.owner(),
@@ -114,8 +116,9 @@ func TestGrantSessionsAreRestricted(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("launch sheet: %d %s", rec.Code, rec.Body.String())
 	}
-	if err := json.Unmarshal(<-fx.dc.send, &msg); err != nil || !msg.RestrictTools {
-		t.Errorf("launch-sheet daemon spawn: restrict_tools = %v (%v)", msg.RestrictTools, err)
+	msg.RestrictTools = false // omitempty: an absent field leaves the previous decode's value
+	if err := json.Unmarshal(<-fx.dc.send, &msg); err != nil || msg.RestrictTools {
+		t.Errorf("launch-sheet daemon spawn: restrict_tools = %v (%v), want a watched session with its tools", msg.RestrictTools, err)
 	}
 	for _, body := range []map[string]any{
 		{"repo": "acme/widget", "runtime": "cluster", "kind": "agent", "mcp": fx.selection()},
@@ -128,8 +131,12 @@ func TestGrantSessionsAreRestricted(t *testing.T) {
 		if len(fx.k8s.created) != before+1 {
 			t.Fatalf("no Job for %v", body)
 		}
-		if e, ok := jobEnv(t, fx.k8s.created[before])[restrictToolsEnvVar]; !ok || e["value"] != "1" {
-			t.Errorf("cluster Job for %v lacks %s=1", body, restrictToolsEnvVar)
+		env := jobEnv(t, fx.k8s.created[before])
+		if _, ok := env[restrictToolsEnvVar]; ok {
+			t.Errorf("cluster launch-sheet Job for %v carries %s: a watched session keeps its tools", body, restrictToolsEnvVar)
+		}
+		if _, ok := env[mcpGatewayEnvVar]; !ok {
+			t.Errorf("cluster launch-sheet Job for %v lacks the grant", body)
 		}
 	}
 }
@@ -152,6 +159,60 @@ func TestResumedCronSessionIsRestricted(t *testing.T) {
 	}
 	if e, ok := jobEnv(t, cf.k8s.created[1])[restrictToolsEnvVar]; !ok || e["value"] != "1" {
 		t.Errorf("the resumed cron Job lacks %s=1", restrictToolsEnvVar)
+	}
+}
+
+// A resumed session is restricted exactly when it was started so (migration 036): a launch-sheet
+// session with connections comes back with its tools and its grant; a board-started grant
+// session comes back restricted.
+func TestResumedGrantSessionKeepsItsRestriction(t *testing.T) {
+	ctx := context.Background()
+	fx := newMCPFx(t)
+	disconnect := func(sid string) {
+		if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET status = 'disconnected' WHERE id = $1`, sid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Launch sheet, cluster: watched.
+	rec := fx.do(fx.api.HandlePostSessions, fx.human(), map[string]any{"repo": "acme/widget", "runtime": "cluster", "kind": "agent", "mcp": fx.selection()})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("launch sheet: %d %s", rec.Code, rec.Body.String())
+	}
+	sid := fx.sessionID(rec)
+	if db.GetSessionRestrictTools(ctx, fx.pool, sid) {
+		t.Fatal("a launch-sheet grant session was recorded as restricted")
+	}
+	disconnect(sid)
+	n := len(fx.k8s.created)
+	resumeClusterSession(ctx, fx.hub, fx.pool, sid, "carry on", mcpAcct, testSID)
+	if len(fx.k8s.created) != n+1 {
+		t.Fatalf("%d Jobs after the resume, want %d", len(fx.k8s.created), n+1)
+	}
+	env := jobEnv(t, fx.k8s.created[n])
+	if _, ok := env[restrictToolsEnvVar]; ok {
+		t.Errorf("a resumed launch-sheet grant session was restricted")
+	}
+	if _, ok := env[mcpGatewayEnvVar]; !ok {
+		t.Errorf("the resume lost the grant")
+	}
+	// Board-started with a grant, cluster: unattended, recorded, and restricted again on resume.
+	res, apiErr := fx.api.StartSession(ctx, fx.owner(),
+		RunnerStartRequest{Repo: "acme/widget", Prompt: "p", Runtime: "cluster", Grant: fx.mustGrant(clusterTarget())}, "")
+	if apiErr != nil {
+		t.Fatalf("StartSession cluster: %v", apiErr)
+	}
+	bsid := res.SessionID
+	n = len(fx.k8s.created)
+	if !db.GetSessionRestrictTools(ctx, fx.pool, bsid) {
+		t.Fatal("a board-started grant session was not recorded as restricted")
+	}
+	disconnect(bsid)
+	resumeClusterSession(ctx, fx.hub, fx.pool, bsid, "carry on", mcpAcct, testSID)
+	if len(fx.k8s.created) != n+1 {
+		t.Fatalf("%d Jobs after the board resume, want %d", len(fx.k8s.created), n+1)
+	}
+	if e, ok := jobEnv(t, fx.k8s.created[n])[restrictToolsEnvVar]; !ok || e["value"] != "1" {
+		t.Errorf("the resumed board-started grant Job lacks %s=1", restrictToolsEnvVar)
 	}
 }
 

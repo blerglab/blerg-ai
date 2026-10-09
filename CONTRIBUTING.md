@@ -135,8 +135,8 @@ under the directory, including caches you put there.
 ## Running from source
 
 The whole stack (core, board, runner and the workstation daemon) is run with the desktop
-installer, which builds it from your checkout: see the Install section of the
-[README](README.md). It needs Docker.
+installer, which builds it from your checkout: see
+[`install/desktop/README.md`](install/desktop/README.md). It needs Docker.
 
 For core alone, with any Postgres (Docker's from `make db-up`, or your own):
 
@@ -151,6 +151,14 @@ make run
 The first boot logs the one-time admin password once (`BLERG_BOOTSTRAP_ADMIN_PASSWORD`).
 Every variable is listed in [`core/docs/CONFIG.md`](core/docs/CONFIG.md). Running the board
 and runner servers from source is not covered here.
+
+The board and runner frontends run in dev mode, with hot reload, against a stack that is already
+up (core for the board; core and board for the runner):
+
+```
+cd board/web && npm ci && npm run dev
+cd runner/frontend && npm ci && npm run dev
+```
 
 ## What we look for in a change
 
@@ -189,17 +197,19 @@ breaking changes (each one called out in the changelog); a patch release contain
 The root [`VERSION`](VERSION) file holds the current version and [`CHANGELOG.md`](CHANGELOG.md)
 records what changed, in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
-To cut a release, from an up-to-date `main` with CI green:
+Maintainers develop in a private repository and publish each release here as a single commit
+on top of this repository's `main`. Pull requests merged here are merged back into the private
+repository before the next release, so they carry forward. To cut a release, from the private
+repository's up-to-date `main` with CI green:
 
-1. Move the `Unreleased` entries in `CHANGELOG.md` under a new `## [X.Y.Z] - YYYY-MM-DD`
+1. Merge this repository's `main` into it (`git fetch public && git merge public/main`).
+2. Move the `Unreleased` entries in `CHANGELOG.md` under a new `## [X.Y.Z] - YYYY-MM-DD`
    heading, and update the compare links at the bottom.
-2. Put `X.Y.Z` in `VERSION`.
-3. Commit both as `release: vX.Y.Z` through a pull request, and merge it.
-4. Tag the merge commit `vX.Y.Z` and push the tag.
+3. Put `X.Y.Z` in `VERSION`, and commit both.
+4. Run `scripts/release-public.sh vX.Y.Z` to build and inspect the release commit, then
+   `scripts/release-public.sh --push vX.Y.Z` to push it as `main`, tag it `vX.Y.Z`, and merge
+   it back. The script documents its checks and configuration at the top.
 5. Create a GitHub release for the tag, using that version's changelog entry as the notes.
-
-The repository has no release automation and no `make release` target; the steps above are the
-whole process.
 
 **How a running service reports its version.** Each service is stamped at build time from a
 `VERSION` build argument, and reports `dev` when none was given.

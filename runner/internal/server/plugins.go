@@ -101,12 +101,21 @@ func pluginAllowlistFromEnv() (pluginspec.Allowlist, string) {
 	return a, raw
 }
 
-// pluginsWanted: only Claude sessions with a known spawning account get always-on plugins.
-// A session with an MCP grant gets none: the pod would ignore them (it skips user config when
-// a grant is present) and a plugin's own MCP servers must never widen a grant session.
-// A cron session (NoOperatorFallback) gets none either: nobody is watching it.
+// pluginsRestricted: a restricted session (a cron's, or a board-started grant session) loads
+// none of the person's settings, and so no plugins: nobody is watching it, and a plugin's own
+// code and MCP servers must never widen it. A grant alone does not restrict
+// (docs/design/interactive-mcp-sessions.md).
+func pluginsRestricted(spec SessionJobSpec) bool {
+	return spec.RestrictTools || spec.NoOperatorFallback
+}
+
+// pluginsNoteRestricted is the start panel's reason when a restricted session has no plugins stage.
+const pluginsNoteRestricted = "not loaded: a restricted session runs without plugins"
+
+// pluginsWanted: only unrestricted Claude sessions with a known spawning account get always-on
+// plugins.
 func pluginsWanted(spec SessionJobSpec) bool {
-	return spec.MCPGateway == nil && !spec.RestrictTools && !spec.NoOperatorFallback && spec.SpawningAccountID != "" && (spec.Engine == "" || spec.Engine == pluginspec.EngineClaude)
+	return !pluginsRestricted(spec) && spec.SpawningAccountID != "" && (spec.Engine == "" || spec.Engine == pluginspec.EngineClaude)
 }
 
 // ResolvePlugins fills spec.Plugins (and PluginsNote when the list could not be used) exactly
@@ -119,6 +128,9 @@ func (j *JobManager) ResolvePlugins(ctx context.Context, spec *SessionJobSpec) {
 	spec.PluginsResolved = true
 	spec.Plugins, spec.PluginsNote = nil, ""
 	if !pluginsWanted(*spec) {
+		if pluginsRestricted(*spec) && spec.SpawningAccountID != "" {
+			spec.PluginsNote = pluginsNoteRestricted
+		}
 		return
 	}
 	if j.personalCredentialsWired() && !spec.proof().valid() {
@@ -164,11 +176,15 @@ func resolvePluginList(list []pluginspec.Entry, allow pluginspec.Allowlist, who 
 }
 
 // daemonPlugins resolves the always-on plugin list for a session sent to a workstation daemon:
-// the same predicate as the cluster's pluginsWanted (a Claude agent-kind session, with a known
-// account, neither restricted nor granted), plus the daemon must have said in its hello that it
-// honours SpawnSession.Plugins. Never fails the start: a list that could not be loaded gives a
-// note for the start panel and a session without plugins. The daemon re-checks every entry.
+// the same predicate as the cluster's pluginsWanted (an unrestricted Claude agent-kind session
+// with a known account; a grant alone does not restrict), plus the daemon must have said in its
+// hello that it honours SpawnSession.Plugins. Never fails the start: a list that could not be
+// loaded gives a note for the start panel and a session without plugins. The daemon re-checks
+// every entry.
 func (a *API) daemonPlugins(ctx context.Context, d *DaemonConn, accountID string, proof coreProof, kind, engine string, restricted bool) ([]pluginspec.Entry, string) {
+	if restricted && kind == "agent" && accountID != "" && (engine == "" || engine == pluginspec.EngineClaude) {
+		return nil, pluginsNoteRestricted
+	}
 	if d == nil || !d.CanPlugins() || kind != "agent" || restricted || accountID == "" ||
 		(engine != "" && engine != pluginspec.EngineClaude) || a.coreURL == "" || a.coreInternalKey == "" {
 		return nil, ""

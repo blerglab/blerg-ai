@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { playwright } from '@vitest/browser-playwright'
+import { chatAliases } from './vite.config'
 
 // Two test projects:
 //   • unit    — fast, jsdom, fake timers. Pure logic + DOM-structure tests.
@@ -11,6 +12,7 @@ import { playwright } from '@vitest/browser-playwright'
 //               through precisely because they were never under a real browser.
 // Browser tests are named *.browser.test.tsx and excluded from the unit project.
 export default defineConfig({
+  resolve: { alias: chatAliases },
   // Pre-bundle these so the browser project doesn't trigger a mid-run Vite
   // re-optimize (which aborts the first test with "Failed to fetch dynamically
   // imported module").
@@ -34,6 +36,7 @@ export default defineConfig({
     projects: [
       {
         plugins: [react()],
+        resolve: { alias: chatAliases },
         test: {
           name: 'unit',
           environment: 'jsdom',
@@ -47,6 +50,7 @@ export default defineConfig({
       },
       {
         plugins: [react()],
+        resolve: { alias: chatAliases },
         test: {
           name: 'browser',
           include: ['src/**/*.browser.test.{ts,tsx}'],

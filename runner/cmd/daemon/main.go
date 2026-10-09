@@ -64,22 +64,42 @@ func main() {
 
 	client := daemon.NewWSClient(cfg)
 
+	// Recovery records of agent sessions belong to one daemon process at a time: a second
+	// daemon run by the same user (a build started by hand) keeps none and recovers nothing.
+	agentRecordsDir := daemon.AgentRecordsDir(daemon.DaemonStateDir())
+	if !daemon.LockAgentRecords(agentRecordsDir) {
+		agentRecordsDir = ""
+	}
+
+	serverHTTP, fromPreviewURL := serverHTTPSetting(os.Getenv("BLERG_RUNNER_SERVER_HTTP"), os.Getenv("BLERG_RUNNER_PREVIEW_URL"))
+	if fromPreviewURL {
+		log.Printf("blerg-runner-daemon: BLERG_RUNNER_PREVIEW_URL is deprecated; set BLERG_RUNNER_SERVER_HTTP=%s instead (derived from it for now)", serverHTTP)
+	}
+
 	mgr := daemon.NewManager(client, daemon.ManagerConfig{
 		ReposRoot:        cfg.ReposRoot,
 		ReposRootSetting: reposRoot,
 		DaemonName:       cfg.DaemonName,
-		PreviewURL:       os.Getenv("BLERG_RUNNER_PREVIEW_URL"),
 		DaemonToken:      cfg.DaemonToken,
-		ServerHTTP:       os.Getenv("BLERG_RUNNER_SERVER_HTTP"),
+		ServerHTTP:       serverHTTP,
 
 		SandboxNetwork: sandboxNetworkSetting(),
 		RepoRoot:       repoRoot,
 
 		AllowHostCredentialClone: cfg.AllowHostCredentialClone,
+
+		AgentRecordsDir: agentRecordsDir,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// First thing on a stop signal, before anything is torn down: no more recovery-record
+	// writes. The engines die with the daemon and report their turns over as they go; that must
+	// not erase what the next daemon needs to know about the turns that were cut off.
+	go func() {
+		<-ctx.Done()
+		mgr.FreezeAgentRecords()
+	}()
 
 	log.Printf("blerg-runner-daemon: starting (name=%s mode=%s repos_root=%s from %s)",
 		cfg.DaemonName, cfg.DaemonMode, cfg.ReposRoot, reposRootSource)
@@ -95,12 +115,21 @@ func main() {
 	// (re)connect, so Claude sessions survive a daemon restart.
 	client.SetOnConnect(func() {
 		prober.Kick()
+		// The hello says which sessions are alive, not what they are doing: a heartbeat now
+		// moves a session the server marked lost straight to its real state.
+		client.RequestHeartbeat()
 		mgr.ReattachSessions()
 	})
 
 	// Report per-session detector state in each heartbeat so the server can
 	// self-heal a dropped session_state_changed event.
 	client.SetSessionStates(mgr.SessionStates)
+
+	// Claim the agent sessions the previous run of the daemon left behind, before connecting:
+	// the hello then lists them and the server keeps their rows while they are hosted again.
+	if n := mgr.AdoptAgentSessions(client.RequestHeartbeat); n > 0 {
+		log.Printf("blerg-runner-daemon: recovering %d agent session(s) from before the restart", n)
+	}
 
 	client.Run(ctx, mgr.ActiveSessionIDs)
 
@@ -138,6 +167,25 @@ func sandboxNetworkSetting() string {
 		return ""
 	}
 	return v
+}
+
+// serverHTTPSetting is the server's HTTP base the daemon works with:
+// BLERG_RUNNER_SERVER_HTTP when it is set. When it is not, an older install may
+// still have only the deprecated BLERG_RUNNER_PREVIEW_URL (…/api/preview) in
+// its env file; the base is then that URL without the suffix, and derived is
+// true so the caller can say so. The same rule as the blerg-runner CLI's own
+// fallback, so a session reaches the server it always did.
+func serverHTTPSetting(serverHTTP, previewURL string) (base string, derived bool) {
+	if serverHTTP != "" {
+		return serverHTTP, false
+	}
+	preview := strings.TrimRight(strings.TrimSpace(previewURL), "/")
+	if rest, ok := strings.CutSuffix(preview, "/api/preview"); ok {
+		if base = strings.TrimRight(rest, "/"); base != "" {
+			return base, true
+		}
+	}
+	return "", false
 }
 
 func envOr(key, fallback string) string {

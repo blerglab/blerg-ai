@@ -45,7 +45,7 @@ slug() {
 # anchors_of <file>: one slug per heading, outside code fences, with GitHub's
 # numeric suffix for repeats.
 anchors_of() {
-  awk '/^(```|~~~)/ { fence = !fence; next } !fence && /^#{1,6}[ \t]/ {
+  awk '/^(```|~~~)/ { fence = !fence; next } !fence && /^(#|##|###|####|#####|######)[ \t]/ {
          sub(/^#+[ \t]+/, ""); sub(/[ \t]+#*[ \t]*$/, ""); print }' "$1" \
   | while IFS= read -r h; do slug "$h"; echo; done \
   | awk 'NF { n = seen[$0]++; print (n ? $0 "-" n : $0) }'
@@ -60,8 +60,8 @@ links_of() {
     {
       line = $0
       gsub(/`[^`]*`/, "", line)
-      if (match(line, /^ {0,3}\[[^]]+\]:[ \t]+[^ \t]+/)) {
-        t = substr(line, RSTART, RLENGTH); sub(/^ {0,3}\[[^]]+\]:[ \t]+/, "", t)
+      if (match(line, /^( |  |   )?\[[^]]+\]:[ \t]+[^ \t]+/)) {
+        t = substr(line, RSTART, RLENGTH); sub(/^( |  |   )?\[[^]]+\]:[ \t]+/, "", t)
         print NR "\t" t
       }
       while (match(line, /\]\([^)]*\)/)) {

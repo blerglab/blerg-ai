@@ -220,7 +220,7 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 	sv := h.serverVersion
 	h.mu.RUnlock()
 
-	// Roll-up messages (open + recent), so the Chat surface is populated on load.
+	// Messages (open + recent), so each session's thread is populated on load.
 	messageInfos := []protocol.MessageInfo{}
 	if dbPool != nil {
 		if rows, err := db.ListMessagesFor(ctx, dbPool, defaultMessageLimit, bc.AccountID); err != nil {
@@ -492,6 +492,13 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 				continue
 			}
 			if h.FindDaemonForSession(msg.SessionID) == nil {
+				// A desktop daemon that is away for a moment (a restart): the message waits
+				// for it instead of being dropped (daemongrace.go).
+				if held, err := json.Marshal(protocol.AgentUserMessage{
+					Type: "agent_user_message", SessionID: msg.SessionID, Text: msg.Text, Source: msg.Source,
+				}); err == nil && h.HoldForAwayDaemon(msg.SessionID, held) {
+					continue
+				}
 				// Disconnected cluster session: re-create the runner Job with
 				// this message as the resume prompt. bc.AccountID is passed so
 				// the resume only re-mints personal credentials when the
@@ -588,6 +595,11 @@ func (h *Hub) forwardBrowserSpawn(_ *BrowserConn, msg protocol.BrowserSpawnSessi
 	if dc == nil {
 		return "", fmt.Errorf("daemon %s not found", msg.DaemonID)
 	}
+	// A browser's start is interactive unless it says otherwise (interaction.go).
+	interaction, apiErr := resolveInteraction(msg.Interaction, true, false)
+	if apiErr != nil {
+		return "", fmt.Errorf("rejected interaction %q: %s", msg.Interaction, apiErr.Message)
+	}
 	sessionID = newUUID()
 	fwd, err := json.Marshal(protocol.SpawnSession{
 		Type:          "spawn_session",
@@ -598,11 +610,13 @@ func (h *Hub) forwardBrowserSpawn(_ *BrowserConn, msg protocol.BrowserSpawnSessi
 		Cols:          80,
 		Rows:          24,
 		InitialPrompt: msg.InitialPrompt,
+		Interaction:   interaction,
 		SessionToken:  mintSpawnSessionToken(context.Background(), dbPool, sessionID, dc, msg.Repo, msg.Title, ""),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal spawn_session: %w", err)
 	}
+	recordInteraction(context.Background(), dbPool, sessionID, interaction)
 	select {
 	case dc.send <- fwd:
 	default:

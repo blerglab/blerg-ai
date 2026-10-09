@@ -7,7 +7,7 @@ import { coreOrigin } from '../authClient'
 import RunColumn from './RunColumn'
 import McpPicker from './McpPicker'
 import type { McpSelectionEntry } from '../types'
-import { useBackdropClose } from '../hooks/useBackdropClose'
+import { useBackdropClose } from '@blerglab/chat'
 import { defaultRuntime, runtimeDisabledReason } from '../lib/runtimes'
 import type { RunRuntime, RunKind, RunEngine } from '../lib/runtimes'
 import { useEngineModels, defaultModel, effectiveEffort, isModelIdFor, isEffortToken, FREE_TEXT_MODEL_ENGINES } from '../lib/engineModels'
@@ -116,6 +116,10 @@ const itemBase: React.CSSProperties = {
   cursor: 'pointer',
   color: 'var(--chalk)',
 }
+
+// What ticking Unattended changes, said under the box.
+const UNATTENDED_HELP =
+  'Nobody is watching: the agent decides and finishes on its own instead of discussing and waiting for you.'
 
 // The pre-launch "this will create…" note: a new folder, or No repository's
 // scratch folder (or, on the cluster, its empty workspace).
@@ -334,6 +338,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // "This machine, unsandboxed" runs as you, with full filesystem access — an
   // explicit, required acknowledgement rather than a silent default.
   const [agentAck, setAgentAck] = useState(false)
+  // Unattended: nobody will be reading the chat, so the agent decides and
+  // finishes on its own. Off by default — a session launched from here has
+  // its person in front of it. An agent session's choice only: a terminal
+  // session has no chat to wait in.
+  const [unattended, setUnattended] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [autoName] = useState(() => randomSessionName())
@@ -797,6 +806,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           kind,
           runtime,
           engine: engine !== 'claude' ? engine : undefined,
+          // Always said for an agent session, so the choice is the sheet's and
+          // not a server default; fixed for the session's life.
+          interaction: kind === 'agent' ? (unattended ? 'unattended' : 'interactive') : undefined,
           // Only when something is selected, and only where a grant can run at all.
           mcp: mcpAvailable && mcp.length > 0 ? mcp : undefined,
         }),
@@ -1186,11 +1198,40 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               />
             </div>
 
+            {/* Interaction: whether anyone will be reading the chat. A
+                terminal session has no chat, so the choice is not offered. */}
+            {kind === 'agent' && (
+              <label
+                data-testid="launch-unattended"
+                style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: '0.8rem', color: 'var(--chalk)', marginBottom: 20, cursor: 'pointer' }}
+              >
+                <input
+                  type="checkbox"
+                  data-testid="unattended-toggle"
+                  checked={unattended}
+                  onChange={e => setUnattended(e.target.checked)}
+                />
+                <span>
+                  Unattended
+                  <span style={{ display: 'block', color: 'var(--fog)', fontSize: 12, marginTop: 2 }}>
+                    {UNATTENDED_HELP}
+                  </span>
+                </span>
+              </label>
+            )}
+
             {/* MCP servers: all unchecked, every tool off, until the person chooses */}
             <div style={{ marginBottom: 20 }} data-testid="launch-mcp">
               <span style={sectionLabel}>MCP Servers</span>
               {mcpAvailable ? (
-                <McpPicker value={mcp} onChange={setMcp} />
+                <>
+                  <McpPicker value={mcp} onChange={setMcp} />
+                  {mcp.length > 0 && (
+                    <div data-testid="launch-mcp-private" style={{ color: 'var(--fog)', fontSize: 12, marginTop: 6 }}>
+                      A session with MCP servers is private to you. It keeps its shell, settings and plugins; only the tools above are bounded.
+                    </div>
+                  )}
+                </>
               ) : (
                 <div data-testid="launch-mcp-unavailable" style={{ color: 'var(--fog)', fontSize: 13 }}>
                   MCP servers are available for Claude agent sessions in a cluster pod or the local sandbox, not on this machine unsandboxed, not for other engines, and not for terminal sessions.

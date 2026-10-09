@@ -80,11 +80,32 @@ type Config struct {
 	MCPGateway    *protocol.MCPGatewayConfig
 	MCPGatewayErr error
 
-	// RestrictTools (daemon.RestrictToolsEnvVar, "1"): the session is a cron's
-	// or holds a grant, so Claude runs with the tool allow-list, no ambient MCP
-	// server and none of the user's settings, plugins, hooks or skills, grant
-	// or no grant. Plain, not secret; read and unset at once like the grant.
+	// RestrictTools (daemon.RestrictToolsEnvVar, "1"): the session is unattended
+	// (a cron's, or board-started with a grant), so Claude runs with the tool
+	// allow-list, no ambient MCP server and none of the user's settings,
+	// plugins, hooks or skills. A grant alone does not restrict. Plain, not
+	// secret; read and unset at once like the grant.
 	RestrictTools bool
+
+	// Interaction (daemon.InteractionEnvVar): the session's interaction mode, "interactive"
+	// or "unattended", stated in the engine's system prompt. Empty (a server older than the
+	// variable, or a value that is neither) is read as interactive by the agent host. Plain,
+	// not secret; read and unset at once like the restriction.
+	Interaction string
+}
+
+// takeInteractionEnv consumes daemon.InteractionEnvVar: one of the two modes, or "".
+func takeInteractionEnv() string {
+	raw, present := os.LookupEnv(daemon.InteractionEnvVar)
+	if !present {
+		return ""
+	}
+	_ = os.Unsetenv(daemon.InteractionEnvVar)
+	switch mode := strings.ToLower(strings.TrimSpace(raw)); mode {
+	case protocol.InteractionInteractive, protocol.InteractionUnattended:
+		return mode
+	}
+	return ""
 }
 
 // takeRestrictToolsEnv consumes daemon.RestrictToolsEnvVar: "1" or "true" (any case) restricts.
@@ -123,20 +144,20 @@ func takeMCPGatewayEnv() (*protocol.MCPGatewayConfig, error) {
 	return &cfg, nil
 }
 
-// skipsUserConfig: a session with a grant runs unattended on untrusted text,
-// so it does not load the user's downloaded ~/.claude bundle (settings, hooks,
+// skipsUserConfig: a restricted session runs unattended on untrusted text, so
+// it does not load the user's downloaded ~/.claude bundle (settings, hooks,
 // plugin cache, agent definitions), which is code and configuration the
-// session's tool list does not cover.
-func (c Config) skipsUserConfig() bool { return c.MCPGateway != nil || c.RestrictTools }
+// session's tool list does not cover. A watched session with a grant loads it.
+func (c Config) skipsUserConfig() bool { return c.RestrictTools }
 
 // podSpawn is the pod's synthesised spawn_session for its one agent session.
 func podSpawn(cfg Config, workDir string) protocol.SpawnSession {
 	spawn := protocol.SpawnSession{
 		Type: "spawn_session", SessionID: cfg.SessionID, Repo: cfg.Repo,
 		Title: cfg.Title, Model: cfg.Model, Effort: cfg.Effort, Engine: cfg.Engine, Kind: "agent",
-		MCPGateway: cfg.MCPGateway,
-		// A grant implies the restriction.
-		RestrictTools: cfg.RestrictTools || cfg.MCPGateway != nil,
+		MCPGateway:    cfg.MCPGateway,
+		RestrictTools: cfg.RestrictTools,
+		Interaction:   cfg.Interaction,
 	}
 	if cfg.NoRepo {
 		// No Repo to resolve a path from: hand the host the directory itself.
@@ -150,6 +171,7 @@ func ConfigFromEnv() Config {
 	gateway, gatewayErr := takeMCPGatewayEnv()
 	return Config{
 		RestrictTools: takeRestrictToolsEnv(),
+		Interaction:   takeInteractionEnv(),
 		MCPGateway:    gateway,
 		MCPGatewayErr: gatewayErr,
 		Plugins:       plugins,
@@ -641,7 +663,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("%s", detail)
 	}
 	if cfg.skipsUserConfig() {
-		log.Printf("runner: MCP gateway grant: not loading the user's Claude config bundle")
+		log.Printf("runner: restricted session: not loading the user's Claude config bundle")
 	} else if err := daemon.DownloadConfigBundle(ctx, cfg.ServerHTTP, cfg.DaemonToken, cfg.Home); err != nil {
 		log.Printf("runner: config bundle: %v (continuing without user config)", err)
 	}

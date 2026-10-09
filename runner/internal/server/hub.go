@@ -343,7 +343,6 @@ type Hub struct {
 	sessionPTYCols       map[string]int                    // sessionID → current PTY cols
 	boardSubs            map[string]map[string]bool        // boardID → set[browserID]
 	lastActivity         time.Time                         // last time any browser reported user interaction
-	preview              string                            // latest pushed HTML; empty if none
 	serverVersion        string
 	jobs                 *JobManager // cluster runner Jobs; nil = runtime unavailable
 	// completionNotifier fires a session's completion webhook (webhook.go).
@@ -363,6 +362,8 @@ type Hub struct {
 	privacy privacyGate
 	// mcpStart is how a session start reaches the MCP gateway (mcpstart.go).
 	mcpStart mcpStartHolder
+	// away are the desktop daemons inside their disconnect grace period (daemongrace.go).
+	away awayDaemons
 }
 
 // NewHub creates a ready-to-use Hub.
@@ -714,20 +715,6 @@ func (h *Hub) BroadcastTitleChanged(sessionID, title string) {
 		return
 	}
 	h.BroadcastToBrowsers(data)
-}
-
-// SetPreview stores the latest preview HTML and broadcasts it to browsers.
-func (h *Hub) SetPreview(html string) {
-	h.mu.Lock()
-	h.preview = html
-	h.mu.Unlock()
-}
-
-// Preview returns the current preview HTML.
-func (h *Hub) Preview() string {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.preview
 }
 
 // Subscribe registers a browser channel to receive output for a session.

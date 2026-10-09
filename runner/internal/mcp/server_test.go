@@ -273,7 +273,7 @@ func TestMCPToolsList(t *testing.T) {
 	}
 	tools, _ := res["tools"].([]any)
 	want := map[string][]string{
-		"start_session":     {"repo", "prompt", "title", "model", "effort", "engine", "runtime", "idempotency_key", "callback_url", "callback_secret", "git_url", "provider", "env", "auto_stop", "no_repo"},
+		"start_session":     {"repo", "prompt", "title", "model", "effort", "engine", "runtime", "idempotency_key", "callback_url", "callback_secret", "git_url", "provider", "env", "auto_stop", "no_repo", "interaction"},
 		"get_session":       {"session_id"},
 		"send_message":      {"session_id", "text"},
 		"interrupt_session": {"session_id"},
@@ -535,11 +535,36 @@ func TestMCPStartSessionAutoStop(t *testing.T) {
 		t.Errorf("get_session auto_stop = %v, want true", status["auto_stop"])
 	}
 
-	// The default is unchanged: a start that says nothing is interactive.
+	// The default is unchanged: a start that says nothing stays up for more messages.
 	plain := toolJSON(t, call(t, srv, "start_session", map[string]any{"repo": "org/proj", "prompt": "chat"}))
 	plainID, _ := plain["session_id"].(string)
 	status = toolJSON(t, call(t, srv, "get_session", map[string]any{"session_id": plainID}))
 	if status["auto_stop"] != false {
 		t.Errorf("get_session auto_stop = %v for a default start, want false", status["auto_stop"])
+	}
+}
+
+// start_session takes interaction: a tool's session is unattended unless it says a person is
+// reading, get_session reports the mode, and an unknown value is refused.
+func TestMCPStartSessionInteraction(t *testing.T) {
+	srv := clusterMCPServer(t)
+	for asked, want := range map[string]string{"": "unattended", "unattended": "unattended", "interactive": "interactive"} {
+		args := map[string]any{"repo": "org/proj", "prompt": "p"}
+		if asked != "" {
+			args["interaction"] = asked
+		}
+		started := toolJSON(t, call(t, srv, "start_session", args))
+		id, _ := started["session_id"].(string)
+		if id == "" {
+			t.Fatalf("start_session (interaction %q) returned no session_id: %v", asked, started)
+		}
+		status := toolJSON(t, call(t, srv, "get_session", map[string]any{"session_id": id}))
+		if status["interaction"] != want {
+			t.Errorf("asked %q: get_session interaction = %v, want %q", asked, status["interaction"], want)
+		}
+	}
+	res := call(t, srv, "start_session", map[string]any{"repo": "org/proj", "prompt": "p", "interaction": "watched"})
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Errorf("an unknown interaction was accepted: %v", res)
 	}
 }

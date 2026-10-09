@@ -129,6 +129,9 @@ type RunnerStartRequest = runnerStartRequest
 type APIError struct {
 	Status  int
 	Message string
+	// RetryAfter, when positive, is sent as the Retry-After header (seconds): the failure is
+	// expected to clear by itself.
+	RetryAfter int
 	// Cause is what a caller in this process can match on (errors.Is / errors.As) to tell one
 	// failure from another with the same status; it never reaches a response body. Nil for
 	// almost every error.
@@ -150,7 +153,12 @@ func apiErrorCause(status int, cause error, format string, args ...any) *APIErro
 }
 
 // writeAPIError renders an APIError exactly as the handlers always have.
-func writeAPIError(w http.ResponseWriter, e *APIError) { writeError(w, e.Status, e.Message) }
+func writeAPIError(w http.ResponseWriter, e *APIError) {
+	if e.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(e.RetryAfter))
+	}
+	writeError(w, e.Status, e.Message)
+}
 
 // AuthorizeRunner is authRunner for callers outside this package (the MCP
 // server). It writes the failure response itself, like authRunner.
@@ -232,6 +240,11 @@ type runnerStartRequest struct {
 	// caller gets a terminal result and its callback without having to stop
 	// the session. Default false — an interactive session is unchanged.
 	AutoStop bool `json:"auto_stop"`
+	// Interaction says whether a person is reading the session's chat as it works:
+	// "interactive" or "unattended" (interaction.go). Absent means unattended on this
+	// contract, which is what a tool's job is; a cron's session is unattended whatever is
+	// asked. Anything else is a 400. omitempty keeps an older request's idempotency hash.
+	Interaction string `json:"interaction,omitempty"`
 	// NoRepo starts a session tied to no repository (repo, git_url and
 	// provider must then be absent). Explicit, never inferred from a blank
 	// repo: without it a blank repo is still "repo is required". On the
@@ -532,6 +545,12 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	if msg := cronStartProblem(req); msg != "" { // cronstart.go: what a cron's start must look like
 		return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", msg)
 	}
+	// Checked here, before the idempotency claim; applied only after the request is hashed, so
+	// a request that does not state a mode hashes as it did before the field existed.
+	interaction, apiErr := resolveInteraction(req.Interaction, false, req.CronID != "")
+	if apiErr != nil {
+		return StartResponse{}, apiErr
+	}
 	if req.NoRepo {
 		if msg := noRepoProblem(req.Repo, req.GitURL, req.Provider, false, false); msg != "" {
 			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", msg)
@@ -611,6 +630,7 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 		}
 	}
 
+	req.Interaction = interaction
 	if apiErr := a.startRunnerSession(ctx, req, principal, sessionID); apiErr != nil {
 		if idemKey != "" && a.dbPool != nil {
 			// Nothing runs under this key, so it must not answer a retry with
@@ -709,6 +729,7 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 				log.Printf("runner SetSessionTokenID %s: %v", sessionID, err)
 			}
 		}
+		a.recordStartedBy(ctx, sessionID, principal, req.CronID)
 		if req.CallbackURL != "" || req.CallbackSecret != "" {
 			if err := db.SetSessionCallback(ctx, a.dbPool, sessionID, req.CallbackURL, req.CallbackSecret); err != nil {
 				log.Printf("runner SetSessionCallback %s: %v", sessionID, err)
@@ -719,6 +740,7 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 				log.Printf("runner SetSessionAutoStop %s: %v", sessionID, err)
 			}
 		}
+		recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
 	}
 	// A cron's session is marked (cron_id) and made private, after its account is recorded.
 	if apiErr := a.markCronSession(ctx, req, sessionID); apiErr != nil {
@@ -735,10 +757,18 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 			return apiErr
 		}
 	}
+	// Unattended: every cron session and every board-started grant session runs restricted
+	// (mcpstart.go). Recorded so a resume rebuilds the same Job.
+	restricted := req.Grant != nil || req.CronID != ""
+	if restricted && a.dbPool != nil {
+		if err := db.SetSessionRestrictTools(ctx, a.dbPool, sessionID); err != nil {
+			log.Printf("SetSessionRestrictTools %s: %v", sessionID, err)
+		}
+	}
 	spec := SessionJobSpec{
-		MCPGateway: gateway,
-		// Every cron session and every grant session runs restricted (mcpstart.go).
-		RestrictTools: req.Grant != nil || req.CronID != "",
+		MCPGateway:    gateway,
+		RestrictTools: restricted,
+		Interaction:   req.Interaction,
 		SessionID:     sessionID, Repo: req.Repo, Title: req.Title,
 		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.Prompt,
 		ExtraEnv:          withClusterSessionToken(ctx, a.dbPool, sessionID, req.Env),
@@ -853,6 +883,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 			if err := db.SetSessionTokenID(ctx, a.dbPool, sessionID, tokenID); err != nil {
 				log.Printf("runner start: SetSessionTokenID %s: %v", sessionID, err)
 			}
+			a.recordStartedBy(ctx, sessionID, principal, req.CronID)
 		}
 		if err := db.SetSessionKind(ctx, a.dbPool, sessionID, "agent"); err != nil {
 			log.Printf("runner start: SetSessionKind %s: %v", sessionID, err)
@@ -874,6 +905,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 				log.Printf("runner start: SetSessionAutoStop %s: %v", sessionID, err)
 			}
 		}
+		recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
 	}
 	// A cron's session is marked (cron_id) and made private, after its account is recorded.
 	if apiErr := a.markCronSession(ctx, req, sessionID); apiErr != nil {
@@ -902,7 +934,9 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		Plugins:    plugins,
 		// Every cron session and every grant session runs restricted (mcpstart.go).
 		RestrictTools: req.Grant != nil || req.CronID != "",
-		Type:          "spawn_session", SessionID: sessionID, Repo: req.Repo, Title: req.Title,
+		// Unattended unless the caller said a person is reading (interaction.go).
+		Interaction: req.Interaction,
+		Type:        "spawn_session", SessionID: sessionID, Repo: req.Repo, Title: req.Title,
 		// DaemonForRepo picked a daemon that already has the folder, so no
 		// clone is needed; the provider lets it refuse a checkout whose
 		// origin is a different provider's repository.
@@ -1019,7 +1053,10 @@ func (a *API) SessionStatus(ctx context.Context, principal RunnerPrincipal, sess
 		// Which mode this session is in, so a caller polling a one-shot
 		// session knows the runner will end it rather than waiting for a stop
 		// that is never coming.
-		"auto_stop":    row.AutoStop,
+		"auto_stop": row.AutoStop,
+		// Whether a person is reading the session's chat as it works ("interactive") or
+		// nobody is ("unattended"): what the engine was told at start.
+		"interaction":  effectiveInteraction(row),
 		"error_reason": errorReason,
 		"end_reason":   endReason,
 		"ended_by":     endedBy,
@@ -1079,6 +1116,16 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 			return nil, apiErrorf(http.StatusServiceUnavailable, "daemon send buffer full — retry")
 		}
 	}
+	// No daemon is connected for this session. Only a disconnected cluster session can be
+	// resumed by a message; for anything else the message has nowhere to go, and answering
+	// "ok" (as this used to) told the caller it had been delivered when it had been dropped.
+	awaited, err := db.SessionAwaitsDaemon(ctx, a.dbPool, sessionID)
+	if err != nil {
+		return nil, apiErrorf(http.StatusInternalServerError, "session lookup failed")
+	}
+	if apiErr := undeliverable(row, awaited); apiErr != nil {
+		return nil, apiErr
+	}
 	// The resume carries the OWNER of this call, so an agent token resuming its
 	// own session re-mints that account's personal credentials rather than
 	// falling back to the shared operator Secret. The static runner key has no
@@ -1094,6 +1141,26 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	}
 	resumeClusterSession(ctx, a.hub, a.dbPool, sessionID, text, principal.spawningAccountID(), principal.proof().SessionID)
 	return map[string]any{"ok": true, "resumed": true}, nil
+}
+
+// undeliverable is why a message cannot reach a session no daemon is connected for, or nil when
+// it is a disconnected cluster session (which a message resumes).
+//
+//   - A session that is live, or was marked lost when its daemon's connection dropped
+//     (awaitsDaemon: a desktop daemon restarting, a laptop asleep), is waiting for its host:
+//     503 with Retry-After, because it clears when the daemon is back.
+//   - Any other session has ended — stopped, finished, or failed for a reason of its own (a
+//     spawn the daemon refused) — and takes no message: 409. "Retry" would never succeed.
+func undeliverable(row *db.SessionRow, awaitsDaemon bool) *APIError {
+	if row.Status == "disconnected" {
+		return nil
+	}
+	if terminalSessionStatus(row.Status) && (row.Status != "error" || !awaitsDaemon) {
+		return apiErrorf(http.StatusConflict, "session has ended")
+	}
+	e := apiErrorf(http.StatusServiceUnavailable, "the session's host is not connected — retry shortly")
+	e.RetryAfter = 5
+	return e
 }
 
 // HandleRunnerStop ends a session for good: delete the Job (pod and all)
@@ -1224,12 +1291,60 @@ func (a *API) HandleRunnerEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	body, apiErr := a.Events(r.Context(), principal, r.PathValue("id"), afterSeq, limit)
+	var body map[string]any
+	var apiErr *APIError
+	// before_seq pages backwards (the older part of a transcript the live stream opened from its
+	// end); it is the chat's loadOlder and has no MCP counterpart, so it is a sibling of Events
+	// rather than a mode of it.
+	if raw := r.URL.Query().Get("before_seq"); raw != "" {
+		beforeSeq, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || beforeSeq < 0 {
+			writeError(w, http.StatusBadRequest, "before_seq must be a non-negative integer")
+			return
+		}
+		body, apiErr = a.EventsBefore(r.Context(), principal, r.PathValue("id"), beforeSeq, limit)
+	} else {
+		body, apiErr = a.Events(r.Context(), principal, r.PathValue("id"), afterSeq, limit)
+	}
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// EventsBefore is the transcript window just before beforeSeq (0 = the end of the transcript),
+// oldest first, at most limit events (<=0 or >400 means 200): `{events, has_more:false,
+// has_older, first_seq, server_time}` — the same page the websocket's before_seq replay sends,
+// for a client paging backwards from the live stream's opening tail.
+func (a *API) EventsBefore(ctx context.Context, principal RunnerPrincipal, sessionID string, beforeSeq int64, limit int) (map[string]any, *APIError) {
+	if _, apiErr := a.requireSessionAccess(ctx, principal, sessionID); apiErr != nil {
+		return nil, apiErr
+	}
+	if limit <= 0 || limit > 400 {
+		limit = 200
+	}
+	rows, more, err := db.ListAgentEventsBefore(ctx, a.dbPool, sessionID, beforeSeq, limit)
+	if err != nil {
+		return nil, apiErrorf(http.StatusInternalServerError, "event query failed")
+	}
+	events := make([]map[string]any, 0, len(rows))
+	for _, ev := range rows {
+		events = append(events, map[string]any{
+			"seq":     ev.Seq,
+			"ts":      ev.Ts.UTC().Format("2006-01-02T15:04:05.000Z"),
+			"kind":    ev.Kind,
+			"payload": json.RawMessage(ev.Payload),
+		})
+	}
+	var firstSeq int64
+	if len(rows) > 0 {
+		firstSeq = rows[0].Seq
+	}
+	return map[string]any{
+		"events": events, "has_more": false, "has_older": more, "first_seq": firstSeq,
+		"server_time": time.Now().UTC().Format(time.RFC3339Nano),
+	}, nil
 }
 
 // Events is the transcript window: events after afterSeq, at most limit of

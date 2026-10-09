@@ -14,6 +14,10 @@ interface SessionStore {
   daemons: DaemonInfo[]
   sessions: SessionInfo[]
   serverVersion: string
+  /** The server version this page was loaded from (the first one it was told). */
+  loadedVersion: string
+  /** The server has since reported a different version: this tab runs an old copy of the app. */
+  updated: boolean
   // Tracks when each session last changed status (ms). Set on state_changed and
   // initial load. Used by the UI to show time-in-current-state.
   statusChangedAt: Record<string, number>
@@ -40,7 +44,15 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     for (const s of msg.sessions) {
       statusChangedAt[s.id] = now
     }
-    set({ daemons: msg.daemons, sessions: msg.sessions, statusChangedAt, serverVersion: msg.server_version ?? "" })
+    const serverVersion = msg.server_version ?? ""
+    // The page was loaded from one version of the server; a reconnect that reports another
+    // means the server was updated under it, and this tab is still running the old app.
+    const loaded = get().loadedVersion || serverVersion
+    set({
+      daemons: msg.daemons, sessions: msg.sessions, statusChangedAt, serverVersion,
+      loadedVersion: loaded,
+      updated: loaded !== "" && serverVersion !== "" && serverVersion !== loaded,
+    })
   })
 
   onMessage<DaemonConnected>('daemon_connected', (msg) => {
@@ -222,6 +234,8 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     daemons: [],
     sessions: [],
     serverVersion: "",
+    loadedVersion: "",
+    updated: false,
     statusChangedAt: {},
     pendingSessionIds: {},
     failedSessions: {},

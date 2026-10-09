@@ -23,15 +23,20 @@ import (
 
 // Limits on what people attach, separate from (and in addition to) the agent's artifacts.
 var (
-	maxUploadsPerSession           = 20
+	maxUploadsPerSession           = 100
 	maxUploadBytesPerSession int64 = 200 << 20
 )
 
 func (h *artifactsHandler) userUpload(w http.ResponseWriter, r *http.Request) {
-	sid, account, ok := h.personAccount(w, r)
-	if !ok {
-		return
+	if sid, account, ok := h.personAccount(w, r); ok {
+		h.userUploadSession(w, r, sid, account)
 	}
+}
+
+// userUploadSession stores a person's attachment to an authenticated session. account is who it
+// is attributed to: the signed-in person on the browser route, the account an agent token acts for
+// on the runner contract (runner_files.go), where the app vouches for the person.
+func (h *artifactsHandler) userUploadSession(w http.ResponseWriter, r *http.Request, sid, account string) {
 	info := h.store(w, r, sid, artifactIntake{
 		origin: db.OriginUser, uploadedBy: account, noun: "uploaded files",
 		maxFiles: maxUploadsPerSession, maxTotal: maxUploadBytesPerSession,

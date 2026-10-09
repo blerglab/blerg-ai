@@ -1,25 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
-import { useStickToBottom } from "./useStickToBottom";
+import { SessionChat, type RunnerSession } from "./SessionChat";
 
-export interface RunnerSession {
-  id: string;
-  runner: string;
-  external_session_id: string;
-  lifecycle: string;
-  role: string; // "worker" | "reviewer"
-  resumable: boolean;
-  created_at: string;
-}
-
-export interface RunnerEvent {
-  seq: number;
-  ts: string;
-  kind: string;
-  payload: Record<string, unknown>;
-}
+export type { RunnerSession } from "./SessionChat";
 
 // ── md-lite: enough formatting for agent prose, no dependency ────────────────
 // Handles: fenced ``` code blocks, `inline code`, **bold**, bare links,
@@ -113,182 +97,6 @@ function Blocks({ text }: { text: string }) {
   return <>{out}</>;
 }
 
-// isKickoff: the runner-generated role brief handed to the session at spawn.
-// The runner tags it `source: "chat"`, which separates it cleanly from the two
-// other kinds of user_turn — `human` (composer input) and `blerg-board` (mid-session
-// automation relays, e.g. "the worker pushed an update addressing your
-// findings"). Those relays explain why the agent suddenly acts and MUST stay
-// visible; only the brief is metadata.
-export function isKickoff(e: RunnerEvent): boolean {
-  return e.kind === "user_turn" && String(e.payload?.source ?? "") === "chat";
-}
-
-// kinds ChatEvent actually draws; everything else is plumbing the state chip
-// already covers.
-const RENDERED_KINDS = ["user_turn", "assistant_turn", "tool_call", "tool_result", "error"];
-
-// transcript: the two lists a chat view needs, derived once from the raw
-// stream.
-//
-//   shown  — what the transcript draws, in order, the brief included as its
-//            collapsed line.
-//   spoken — what counts as conversation: `shown` minus the brief.
-//
-// Every "has anything happened yet?" question — StartingHint, the typing dots,
-// lastSpokenKind — must be asked of `spoken`, never of the raw stream. The
-// brief lands within seconds of spawn, well before the agent says anything, so
-// counting it collapses the loading state for the whole cold start.
-export function transcript(events: RunnerEvent[]): { shown: RunnerEvent[]; spoken: RunnerEvent[] } {
-  const shown = events.filter((e) => RENDERED_KINDS.includes(e.kind));
-  return { shown, spoken: shown.filter((e) => !isKickoff(e)) };
-}
-
-// speakerFor: honest attribution. Kickoff prompts and automation come from
-// blerg-board; only composer input from a logged-in human is "you".
-function speakerFor(p: Record<string, unknown>): { label: string; cls: string } {
-  const source = String(p.source ?? "");
-  if (source === "human" || source === "ask_answer") return { label: "you", cls: "you" };
-  return { label: "blerg-board", cls: "blerg-board" };
-}
-
-// toolSummary compresses a tool_call payload to "Bash · make test" style.
-function toolSummary(p: Record<string, unknown>): string {
-  const tool = String(p.tool ?? p.name ?? "tool");
-  const input = (p.input ?? {}) as Record<string, unknown>;
-  const detail =
-    input.command ?? input.file_path ?? input.path ?? input.pattern ??
-    input.query ?? input.url ?? "";
-  return detail ? `${tool} · ${String(detail).slice(0, 90)}` : tool;
-}
-
-function resultSummary(p: Record<string, unknown>): string {
-  let out = String(p.output ?? p.content ?? "");
-  if (out.startsWith('"')) {
-    try { const v = JSON.parse(out); if (typeof v === "string") out = v; } catch { /* raw */ }
-  }
-  const line = out.split("\n").find((l) => l.trim()) ?? "";
-  return (p.is_error ? "✗ " : "") + line.slice(0, 100);
-}
-
-// KickoffLine: the role brief the runner handed the session at spawn, as one
-// collapsed line — session metadata, not conversation, so it wears the tool
-// line's dim monospace rather than a message bubble. Collapsed on every mount
-// (including after the board drawer is minimized and restored); expanding is a
-// pure reveal that changes no counts and reorders nothing.
-function KickoffLine({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="kickoff">
-      <button className="toolline kickoff-toggle" onClick={() => setOpen(!open)}
-        aria-expanded={open} title="the prompt this session was started with">
-        {open ? "▾" : "▸"} session brief · {text.length.toLocaleString()} chars
-      </button>
-      {open && <div className="kickoff-body"><MdText text={text} /></div>}
-    </div>
-  );
-}
-
-// ChatEvent renders one event in chat form. Status noise is dropped —
-// lifecycle lives in the state chip.
-export function ChatEvent({ e }: { e: RunnerEvent }) {
-  const p = e.payload ?? {};
-  switch (e.kind) {
-    case "user_turn": {
-      if (isKickoff(e)) return <KickoffLine text={String(p.text ?? "")} />;
-      const who = speakerFor(p);
-      return (
-        <div className={`msg ${who.cls}`}>
-          <span className="speaker">{who.label}</span>
-          <MdText text={String(p.text ?? "")} />
-        </div>
-      );
-    }
-    case "assistant_turn":
-      return (
-        <div className="msg agent">
-          <span className="speaker">agent</span>
-          <MdText text={String(p.text ?? p.message ?? "")} />
-        </div>
-      );
-    case "tool_call":
-      return <div className="toolline">▸ {toolSummary(p)}</div>;
-    case "tool_result":
-      return <div className="toolline dim">← {resultSummary(p)}</div>;
-    case "error":
-      return (
-        <div className="msg err">
-          <span className="speaker">error</span>
-          <MdText text={String(p.message ?? "")} />
-        </div>
-      );
-    default:
-      return null; // status/plumbing — the chip shows lifecycle
-  }
-}
-
-// latestModel: the model the session most recently ran, from a turn_done
-// status event (kind "status", payload.model — plumbing kinds without a
-// dedicated mapping get wrapped in source_kind/payload, so this only ever
-// matches the flat turn_done shape).
-export function latestModel(events: RunnerEvent[]): string | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.kind === "status" && typeof e.payload?.model === "string") return e.payload.model as string;
-  }
-  return null;
-}
-
-// lastSpokenKind: the newest event that actually renders as conversation —
-// decides whether the agent still "owes" a reply (→ typing dots). Callers pass
-// transcript().spoken; re-deriving here keeps it honest (and idempotent) if a
-// raw stream is ever passed instead.
-export function lastSpokenKind(events: RunnerEvent[]): string | null {
-  const { spoken } = transcript(events);
-  return spoken.length ? spoken[spoken.length - 1].kind : null;
-}
-
-// PendingMsg: the just-sent message, shown immediately with a send spinner
-// until it appears in the polled event stream.
-export function PendingMsg({ text }: { text: string }) {
-  return (
-    <div className="msg you pending">
-      <span className="speaker">you</span>
-      <MdText text={text} />
-      <span className="sendspin" aria-label="sending" />
-    </div>
-  );
-}
-
-// StartingHint: what "waiting" actually means, with elapsed time so a slow
-// cold start reads as progress, not a hang.
-export function StartingHint({ since }: { since: string }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const iv = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(iv);
-  }, []);
-  const secs = Math.max(0, Math.floor((now - new Date(since).getTime()) / 1000));
-  return (
-    <div className="empty starting-hint">
-      <TypingDots />
-      <p>
-        Session starting — container, repo clone, then the agent reads the
-        board before speaking. Usually under a minute; cold nodes take
-        longer. <span className="mono">{secs}s</span>
-      </p>
-    </div>
-  );
-}
-
-// TypingDots: the agent is working on a reply.
-export function TypingDots() {
-  return (
-    <div className="typing" aria-label="agent is responding">
-      <span /><span /><span />
-    </div>
-  );
-}
-
 export function useCardSessions(cardId: string) {
   const [sessions, setSessions] = useState<RunnerSession[]>([]);
   const load = useCallback(() =>
@@ -313,27 +121,15 @@ export function useCardSessions(cardId: string) {
   };
 }
 
-// Conversation: the session panel body — a parsed chat over the event
-// stream, with composer + interrupt. Rendered natively; the stream is the
-// contract (no iframe, no PTY).
+// Conversation: the session panel of a card. The board's part is which session
+// it is and what can be done about the card — run it, discuss it, run it again;
+// the conversation itself is the shared chat (SessionChat), live from the runner
+// through the board's proxy.
 export function Conversation({ cardId }: { cardId: string }) {
   const { sessions, reload, current } = useCardSessions(cardId);
-  const [events, setEvents] = useState<RunnerEvent[]>([]);
-  const [text, setText] = useState("");
-  const [sent, setSent] = useState<string[]>([]);
-  // a sent message is pending until the stream echoes it back — derived from
-  // the events rather than pruned by an effect
-  const pending = sent.filter((t) =>
-    !events.some((e) => e.kind === "user_turn" && String(e.payload?.text ?? "") === t));
   const [spawning, setSpawning] = useState(false);
   const [error, setError] = useState("");
   const panelRef = useRef<HTMLDivElement>(null);
-  // derived here rather than below so auto-follow keys on the drawn transcript,
-  // not the raw stream — a status event grows `events` without adding a bubble
-  const { shown, spoken } = transcript(events);
-  // resetKey: "Run again" swaps the transcript under the same DOM node, and the
-  // new session starts at its own bottom no matter where you left the old one
-  const { ref: convoRef, onScroll: onConvoScroll, scrollToBottom } = useStickToBottom([shown.length, pending.length], { resetKey: current?.id });
 
   // fleet-table clicks (and future hotkeys) land focus in this composer
   useEffect(() => {
@@ -342,20 +138,13 @@ export function Conversation({ cardId }: { cardId: string }) {
     return () => window.removeEventListener("blerg-board:card-chat-focus", focus);
   }, []);
 
+  // The chat follows the session by itself; the board's own row (which session
+  // is current, its lifecycle chip, whether a rerun is on offer) is polled.
   const currentId = current?.id;
   useEffect(() => {
     if (!currentId) return;
-    let stop = false;
-    const tick = async () => {
-      if (stop) return;
-      try {
-        const evs = await api<RunnerEvent[]>(`/api/runner-sessions/${currentId}/events`);
-        setEvents(evs ?? []);
-      } catch { /* transient */ }
-    };
-    tick();
-    const iv = setInterval(() => { tick(); reload(); }, 3000);
-    return () => { stop = true; clearInterval(iv); };
+    const iv = setInterval(() => { void reload(); }, 3000);
+    return () => clearInterval(iv);
   }, [currentId, reload]);
 
   const spawn = async (mode: "run" | "discuss" = "run") => {
@@ -370,28 +159,6 @@ export function Conversation({ cardId }: { cardId: string }) {
       setSpawning(false);
     }
   };
-
-  const connected = current != null &&
-    !["stopped", "error"].includes(current.lifecycle);
-  const model = latestModel(events);
-
-  const send = async () => {
-    if (!text.trim() || !current) return;
-    const t = text;
-    setText("");
-    setSent((p) => [...p, t]);
-    scrollToBottom(); // sending re-arms auto-follow wherever you were reading
-    try {
-      await api(`/api/runner-sessions/${current.id}/message`, { json: { text: t } });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "send failed");
-      setSent((p) => p.filter((x) => x !== t));
-      setText(t);
-    }
-  };
-
-  const interrupt = () =>
-    current && api(`/api/runner-sessions/${current.id}/interrupt`, { method: "POST" }).catch(() => {});
 
   if (!current) {
     return (
@@ -414,6 +181,7 @@ export function Conversation({ cardId }: { cardId: string }) {
     );
   }
 
+  const over = current.lifecycle === "stopped" || current.lifecycle === "error";
   return (
     <div className="convo-panel" ref={panelRef}>
       {error && <p role="alert" style={{ color: "var(--danger)", fontSize: 13 }}>{error}</p>}
@@ -423,7 +191,7 @@ export function Conversation({ cardId }: { cardId: string }) {
         </span>
         <span className="mono" style={{ color: "var(--fog-dim)", fontSize: 11 }}>
           {current.role === "discuss" ? "discussion · " : ""}{current.runner} · {current.external_session_id.slice(0, 8)}
-          {model ? ` · ${model}` : ""}
+          {current.model ? ` · ${current.model}` : ""}
           {sessions.length > 1 ? ` · attempt ${sessions.length}` : ""}
         </span>
         <span className="spacer" />
@@ -433,33 +201,11 @@ export function Conversation({ cardId }: { cardId: string }) {
             ▶ Run this card
           </button>
         )}
-        {(current.lifecycle === "running" || current.lifecycle === "waiting") && (
-          <button className="btn ghost small" onClick={interrupt}>Interrupt</button>
-        )}
-        {(current.lifecycle === "stopped" || current.lifecycle === "error") && (
+        {over && (
           <button className="btn ghost small" onClick={() => spawn("run")} disabled={spawning}>Run again</button>
         )}
       </div>
-      <div className="convo" ref={convoRef} onScroll={onConvoScroll}>
-        {spoken.length === 0 && connected && <StartingHint since={current.created_at} />}
-        {shown.map((e) => <ChatEvent e={e} key={e.seq} />)}
-        {pending.map((t, i) => <PendingMsg text={t} key={`p${i}`} />)}
-        {pending.length === 0 && spoken.length > 0 && connected &&
-          (current.lifecycle === "running" || current.lifecycle === "starting" ||
-            lastSpokenKind(spoken) === "user_turn") && <TypingDots />}
-      </div>
-      {connected ? (
-        <div style={{ marginTop: 8 }}>
-          <Composer value={text} onChange={setText} onSend={send}
-            disabled={false}
-            placeholder="steer the session… (Shift+Enter for newline)" />
-        </div>
-      ) : (
-        <p className="session-ended-hint">
-          Session ended — the transcript above is the record.
-          {" "}Use “Run again” to start a fresh session on this card.
-        </p>
-      )}
+      <SessionChat session={current} placeholder="steer the session… (Shift+Enter for newline)" />
     </div>
   );
 }

@@ -76,6 +76,14 @@ type SessionRow struct {
 	// CronID (migration 023) is the cron that started the session, nil for every
 	// other session. The UI badges it and the scheduler counts and stops by it.
 	CronID *string
+	// StartedByKind / StartedByName: who started the session (migration 037): "agent" (an agent
+	// token, Name = the owner's label for it), "runner_key", "cron", or "" for the person.
+	StartedByKind string
+	StartedByName string
+	// Interaction (migration 038): "interactive" (a person reads the chat as the session works)
+	// or "unattended" (nobody does). "" on a row started before the column existed; the server
+	// reads that through one rule (server.effectiveInteraction), never directly.
+	Interaction string
 }
 
 // IdempotencyRow is one runner_idempotency record: which session a
@@ -173,7 +181,7 @@ func GetDaemonByName(ctx context.Context, conn *pgxpool.Pool, name string) (*Dae
 // DaemonName is not populated (no join is performed).
 func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*SessionRow, error) {
 	row := conn.QueryRow(ctx, `
-		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text
+		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text, started_by_kind, started_by_name, interaction
 		  FROM sessions
 		 WHERE id = $1
 	`, sessionID)
@@ -182,7 +190,7 @@ func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*Ses
 		&r.Title, &r.Model, &r.Engine, &r.Effort, &r.StartedAt, &r.EndedAt, &r.Unread, &r.Starred, &r.SpawningAccountID,
 		&r.Runtime, &r.SkipPermissions, &r.ErrorReason,
 		&r.TokenID, &r.CallbackURL, &r.CallbackSecret, &r.GitURL, &r.AutoStop, &r.Kind,
-		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID)
+		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID, &r.StartedByKind, &r.StartedByName, &r.Interaction)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -465,7 +473,8 @@ func ListSessions(ctx context.Context, conn *pgxpool.Pool) ([]SessionRow, error)
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
-		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text
+		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
+		       s.started_by_kind, s.started_by_name, s.interaction
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 ORDER BY s.started_at DESC
@@ -482,7 +491,8 @@ func ListSessionsByStatus(ctx context.Context, conn *pgxpool.Pool, status string
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
-		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text
+		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
+		       s.started_by_kind, s.started_by_name, s.interaction
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.status = $1
@@ -581,6 +591,21 @@ func SetSessionDaemonLost(ctx context.Context, conn *pgxpool.Pool, sessionID str
 	}
 	_, err := conn.Exec(ctx, `UPDATE sessions SET daemon_lost_at = now() WHERE id = $1`, sessionID)
 	return err
+}
+
+// SessionAwaitsDaemon reports whether the session was marked lost by its daemon's disconnect and
+// has neither been revived nor finalised since (daemon_lost_at is set): it is waiting for its
+// daemon to come back. False for a session that does not exist.
+func SessionAwaitsDaemon(ctx context.Context, conn *pgxpool.Pool, sessionID string) (bool, error) {
+	if conn == nil {
+		return false, nil
+	}
+	var awaits bool
+	err := conn.QueryRow(ctx, `SELECT daemon_lost_at IS NOT NULL FROM sessions WHERE id = $1`, sessionID).Scan(&awaits)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return awaits, err
 }
 
 // TouchSessionStatusChanged restarts a session's status clock without changing
@@ -699,7 +724,8 @@ func ListSessionsByDaemon(ctx context.Context, conn *pgxpool.Pool, daemonID stri
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
-		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text
+		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
+		       s.started_by_kind, s.started_by_name, s.interaction
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.daemon_id = $1
@@ -727,7 +753,8 @@ func ListSessionsByDaemonMode(ctx context.Context, conn *pgxpool.Pool, mode stri
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
-		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text
+		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
+		       s.started_by_kind, s.started_by_name, s.interaction
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE d.mode = $1
@@ -749,6 +776,7 @@ func scanSessionRows(rows pgx.Rows) ([]SessionRow, error) {
 			&r.ProjectPath, &r.Repo, &r.Title, &r.Model, &r.Engine, &r.Effort, &r.StartedAt, &r.EndedAt, &r.Unread, &r.Starred,
 			&r.Runtime, &r.SkipPermissions, &r.ErrorReason, &r.Kind,
 			&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.SpawningAccountID, &r.Private, &r.CronID,
+			&r.StartedByKind, &r.StartedByName, &r.Interaction,
 		); err != nil {
 			return nil, err
 		}
@@ -1285,6 +1313,28 @@ func SetSessionTokenID(ctx context.Context, conn *pgxpool.Pool, sessionID, token
 	return err
 }
 
+// SetSessionStartedBy records who started a session (migration 037): the start's principal
+// kind and, for an agent token, the owner's label for it. Empty strings leave the columns as
+// they are (a person's start writes nothing).
+func SetSessionStartedBy(ctx context.Context, conn *pgxpool.Pool, sessionID, kind, name string) error {
+	if kind == "" {
+		return nil
+	}
+	_, err := conn.Exec(ctx, `UPDATE sessions SET started_by_kind = $2, started_by_name = $3 WHERE id = $1`, sessionID, kind, name)
+	return err
+}
+
+// SetSessionInteraction records a session's interaction mode (migration 038): "interactive"
+// or "unattended", as the server resolved it at start. A cluster resume reads it back from the
+// row. An empty mode writes nothing.
+func SetSessionInteraction(ctx context.Context, conn *pgxpool.Pool, sessionID, mode string) error {
+	if mode == "" {
+		return nil
+	}
+	_, err := conn.Exec(ctx, `UPDATE sessions SET interaction = $2 WHERE id = $1`, sessionID, mode)
+	return err
+}
+
 // SetSessionCallback stores the completion webhook for a session. The secret
 // is stored raw because it must sign the delivery (HMAC-SHA256); it is never
 // returned by any endpoint and never logged.
@@ -1382,6 +1432,23 @@ func ClaimSessionWebhook(ctx context.Context, conn *pgxpool.Pool, sessionID stri
 func SetSessionGitURL(ctx context.Context, conn *pgxpool.Pool, sessionID, gitURL string) error {
 	_, err := conn.Exec(ctx, `UPDATE sessions SET git_url = NULLIF($2, '') WHERE id = $1`, sessionID, gitURL)
 	return err
+}
+
+// SetSessionRestrictTools records that a session runs restricted (migration 036): a cron's, or
+// one the board started with MCP connections. A cluster resume reads it back.
+func SetSessionRestrictTools(ctx context.Context, conn *pgxpool.Pool, sessionID string) error {
+	_, err := conn.Exec(ctx, `UPDATE sessions SET restrict_tools = true WHERE id = $1`, sessionID)
+	return err
+}
+
+// GetSessionRestrictTools reports whether a session was started restricted. A session that does
+// not exist, or any error, is false.
+func GetSessionRestrictTools(ctx context.Context, conn *pgxpool.Pool, sessionID string) bool {
+	var v bool
+	if err := conn.QueryRow(ctx, `SELECT restrict_tools FROM sessions WHERE id = $1`, sessionID).Scan(&v); err != nil {
+		return false
+	}
+	return v
 }
 
 // SetSessionNewRepo marks a session as launched as "New repository" (migration 035).

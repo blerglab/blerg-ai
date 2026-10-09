@@ -77,9 +77,9 @@ func Verify(token, audience string, keys KeySet, rev RevocationChecker, sensitiv
 	// unconditionally, the fail-closed fallback.
 	var revoked bool
 	if tr, ok := rev.(IssuedAtRevocationChecker); ok {
-		revoked = tr.RevokedFor(hdr.Kid, c.Lineage, c.Sub, c.IssuedAt)
+		revoked = tr.RevokedFor(hdr.Kid, c.Lineage, c.Sub, c.Sid, c.IssuedAt)
 	} else {
-		revoked = rev.Revoked(hdr.Kid, c.Lineage, c.Sub)
+		revoked = rev.Revoked(hdr.Kid, c.Lineage, c.Sub, c.Sid)
 	}
 	if revoked {
 		return Principal{}, ErrRevoked

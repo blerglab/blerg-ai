@@ -101,10 +101,10 @@ func TestVerifyLegacyCheckerStaysUnconditional(t *testing.T) {
 func TestRevocationSetLegacyRevokedIgnoresTimestamp(t *testing.T) {
 	set := RevocationSet{}
 	set.Add("sub", "u1", time.Now().Add(-time.Hour))
-	if !set.Revoked("k1", "", "u1") {
+	if !set.Revoked("k1", "", "u1", "") {
 		t.Fatal("Revoked must be unconditional")
 	}
-	if set.Revoked("k1", "", "u2") || set.Revoked("k1", "L", "") {
+	if set.Revoked("k1", "", "u2", "") || set.Revoked("k1", "L", "", "") {
 		t.Fatal("unrelated principal reported revoked")
 	}
 }

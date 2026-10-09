@@ -1,0 +1,15 @@
+{
+  "name": "blerg-workspace",
+  "private": true,
+  "description": "npm workspace root: the chat package and the two web apps built from it (the runner's and the board's) share one install. core/web keeps its own.",
+  "workspaces": [
+    "packages/chat",
+    "runner/frontend",
+    "board/web"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/chat && npm run pack:manifest -w packages/chat && npm run build -w runner/frontend && npm run build -w board/web",
+    "test": "npm test -w packages/chat && npm test -w runner/frontend && npm test -w board/web",
+    "lint": "npm run lint -w packages/chat && npm run lint -w runner/frontend && npm run lint -w board/web"
+  }
+}

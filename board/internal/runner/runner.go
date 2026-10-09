@@ -27,6 +27,13 @@ type StartRequest struct {
 	// Engine is the coding engine the session runs ("" = the runner's
 	// default, claude).
 	Engine string
+	// Interaction says whether a person is reading the session's chat live:
+	// "interactive" (the agent discusses before acting, narrates as it works,
+	// asks and waits for an answer) or "unattended" (nobody is watching: it
+	// decides, notes its assumptions, finishes and summarises). It is fixed
+	// for the session's life. "" sends nothing and leaves the runner's
+	// default, which for a contract start is unattended.
+	Interaction string
 	// Token is the credential this ONE start is made with: the board's
 	// automation token, a blerg-core agent token its owner minted for
 	// themselves. The runner resolves it to that person's account and runs the
@@ -226,6 +233,9 @@ func (k *BlergRunner) Start(ctx context.Context, r StartRequest) (string, error)
 	}
 	if r.Engine != "" {
 		body["engine"] = r.Engine
+	}
+	if r.Interaction != "" {
+		body["interaction"] = r.Interaction
 	}
 	if k.runtime != "" {
 		body["runtime"] = k.runtime

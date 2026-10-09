@@ -207,6 +207,29 @@ func boardRoleModel(board db.Board, role string) string {
 	return board.Model
 }
 
+// The two interaction modes of the runner contract (`interaction` on
+// POST /api/runner/start).
+const (
+	interactionInteractive = "interactive"
+	interactionUnattended  = "unattended"
+)
+
+// interactionForRole is the ONE rule for which mode a session the board
+// starts runs in. A person opened a discussion or the board session to talk,
+// and is reading the chat: interactive. Everything else is automation's — a
+// card's Run, a review, a standing agent, anything the dispatcher starts —
+// and nobody is watching it: unattended. An unknown role is unattended too,
+// since an agent that waits for an answer nobody will give never finishes.
+//
+//	discuss, board → interactive   worker, reviewer, standing, … → unattended
+func interactionForRole(role string) string {
+	switch role {
+	case "discuss", "board":
+		return interactionInteractive
+	}
+	return interactionUnattended
+}
+
 // detached returns a context that survives its parent's cancellation, with a
 // deadline of its own. For the writes that MUST land once an irreversible
 // side effect has happened elsewhere — a session started on the runner, a
@@ -249,6 +272,9 @@ func (a *API) spawnSession(ctx context.Context, board db.Board, card db.Card, ro
 		Prompt: prompt,
 		Model:  model,
 		GitURL: boardGitURL(board, card.Repos[0]),
+		// By role: a discussion has its person in the chat, a run or a
+		// review does not.
+		Interaction: interactionForRole(role),
 		Env: map[string]string{
 			"BLERG_BOARD_URL":   a.runner.AgentURL,
 			"BLERG_BOARD_TOKEN": rawTok,

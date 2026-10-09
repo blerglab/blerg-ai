@@ -384,8 +384,8 @@ func TestSandboxNetworkEnvRewritesLoopbackURLs(t *testing.T) {
 	}
 }
 
-// Local stack: the daemon's server URL is loopback, so all three host-side
-// URLs are rewritten or dropped.
+// Local stack: the daemon's server URL is loopback, so the host-side URLs are
+// rewritten or dropped.
 func TestSandboxNetworkEnvLocalStackRewritesEverything(t *testing.T) {
 	for _, server := range []string{
 		"ws://localhost:8083/ws/daemon", "ws://127.0.0.1:8083/ws/daemon", "ws://[::1]:8083/ws/daemon",
@@ -395,7 +395,6 @@ func TestSandboxNetworkEnvLocalStackRewritesEverything(t *testing.T) {
 			"BLERG_RUNNER_SERVER_URL=" + server,
 			"BLERG_RUNNER_SERVER_HTTP=http://localhost:8083",
 			"BLERG_RUNNER_SERVER_HTTP_EXTRA=kept",
-			"BLERG_RUNNER_PREVIEW_URL=http://localhost:8083/api/preview",
 			"BLERG_BOARD_URL=http://localhost:8082",
 			"OTHER=1",
 		})
@@ -419,7 +418,6 @@ func TestSandboxNetworkEnvRemoteServerIsUntouched(t *testing.T) {
 		"BLERG_RUNNER_SESSION_ID=s1",
 		"BLERG_RUNNER_SERVER_URL=wss://runner.example.com/ws/daemon",
 		"BLERG_RUNNER_SERVER_HTTP=https://runner.example.com",
-		"BLERG_RUNNER_PREVIEW_URL=https://runner.example.com/api/preview",
 		"BLERG_BOARD_URL=https://board.example.com",
 	}
 	if got := sandboxNetworkEnv(in); !reflect.DeepEqual(got, in) {
@@ -427,12 +425,10 @@ func TestSandboxNetworkEnvRemoteServerIsUntouched(t *testing.T) {
 	}
 }
 
-// Mixed: remote server, loopback board and preview — only the loopback ones
-// change, each on its own.
+// Mixed: remote server, loopback board — only the loopback one changes.
 func TestSandboxNetworkEnvMixedRewritesOnlyLoopback(t *testing.T) {
 	got := sandboxNetworkEnv([]string{
 		"BLERG_RUNNER_SERVER_URL=wss://runner.example.com/ws/daemon",
-		"BLERG_RUNNER_PREVIEW_URL=http://127.0.0.1:8083/api/preview",
 		"BLERG_BOARD_URL=http://localhost:8082",
 	})
 	want := []string{

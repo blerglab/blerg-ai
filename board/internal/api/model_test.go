@@ -43,3 +43,28 @@ func TestBoardRoleModel(t *testing.T) {
 		})
 	}
 }
+
+// TestInteractionForRole pins which sessions the board starts as a
+// conversation: only the two a person opened to talk in. Everything
+// automation starts, and any role nobody has classified, is unattended.
+func TestInteractionForRole(t *testing.T) {
+	cases := []struct {
+		role string
+		want string
+	}{
+		{"worker", "unattended"},
+		{"reviewer", "unattended"},
+		{"standing", "unattended"},
+		{"discuss", "interactive"},
+		{"board", "interactive"},
+		{"", "unattended"},
+		{"whatever", "unattended"},
+	}
+	for _, tc := range cases {
+		t.Run("role="+tc.role, func(t *testing.T) {
+			if got := interactionForRole(tc.role); got != tc.want {
+				t.Errorf("interactionForRole(%q) = %q, want %q", tc.role, got, tc.want)
+			}
+		})
+	}
+}

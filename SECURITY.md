@@ -60,8 +60,8 @@ deploy, but they are not bugs:
 - The Local sandbox mounts your engine logins so the engine can use them; it does not
   protect those credentials from the code the agent runs. A sandbox cron on a desktop
   therefore runs on the host developer's Claude login and on any connected daemon.
-- **A hostile message can still steer an unattended agent.** A cron or a session with MCP
-  connections reads whatever its allowed tools return (mail, tickets, web pages), and that text
+- **A hostile message can still steer an unattended agent.** A cron, or a board-started session
+  with MCP connections, reads whatever its allowed tools return (mail, tickets, web pages), and that text
   can carry instructions, including a forged card or a proposal worded to look routine. The controls are containment, not detection: no shell or web tools,
   file tools only, only the connections and tools you selected, each pinned to its definition,
   capped results and call budgets, private sessions and no fallback to a shared credential. What
@@ -76,6 +76,14 @@ deploy, but they are not bugs:
   A cluster session pod still holds the shared daemon token in its environment (the server has no
   narrower pod credential yet); the rules above keep the file tools away from it, but a bug in the
   engine's permission checks would not. Restricted pods carry no codex or hermes secrets.
+- **A session you launch yourself with MCP connections is not restricted**
+  ([design note](docs/design/interactive-mcp-sessions.md)): it keeps the shell, web and your
+  plugins, and only the connection side is bounded by what you allowed or set to propose. Through
+  the shell it can read its own gateway token — valid for that session and connection only, with
+  the same tool list and budgets, never the upstream credential — and, like every interactive
+  session, the pod's own environment including the shared daemon token. What the shell adds over
+  a restricted session is a way out for data an allowed tool returned; the person watching is the
+  control. Unattended runs stay restricted.
 - **The repository the agent works in.** A restricted session's file tools are denied the checkout's
   `.git` folder (it holds the clone credential in a cluster pod and settings that git executes), and
   may not write the agent-tool config files that the next unrestricted run in that checkout would

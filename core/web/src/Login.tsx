@@ -19,7 +19,7 @@ type ProviderInfo = { id: string };
 export function noticeFor(search: string): string | null {
   const q = new URLSearchParams(search);
   if (q.get("changed") === "1") return "Password changed — sign in again.";
-  if (q.get("reason") === "expired") return "Your session expired or was signed out everywhere. Sign in again.";
+  if (q.get("reason") === "expired") return "Your session expired or was signed out. Sign in again.";
   return null;
 }
 

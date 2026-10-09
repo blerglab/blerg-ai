@@ -28,6 +28,10 @@ func TestRenderComponentMarkdown(t *testing.T) {
 		"## Machine-readable",
 		"https://runner.example.test/openapi.json",
 		"https://runner.example.test/mcp",
+		"## UI",
+		"`@blerglab/chat@0.1.0`",
+		"https://runner.example.test/packages/blerglab-chat-0.1.0.tgz",
+		"https://runner.example.test/packages/@blerglab/chat/README.md",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("markdown is missing %q, got:\n%s", want, got)
@@ -40,7 +44,7 @@ func TestRenderComponentMarkdownWithoutOptionalSections(t *testing.T) {
 	if !strings.HasPrefix(got, "# blerg-board\n") {
 		t.Errorf("want title heading first, got:\n%s", got)
 	}
-	for _, unwanted := range []string{"## Authenticate", "## Operations", "## Machine-readable"} {
+	for _, unwanted := range []string{"## Authenticate", "## Operations", "## Machine-readable", "## UI"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("section %q should be omitted when empty, got:\n%s", unwanted, got)
 		}

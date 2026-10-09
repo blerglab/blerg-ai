@@ -2,8 +2,11 @@ package identity_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"testing"
+	"time"
 
 	cid "github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/core/internal/db"
@@ -83,8 +86,14 @@ func TestHumanAccessTokenRoundTrips(t *testing.T) {
 
 type testChecker map[string]bool
 
-func (c testChecker) Revoked(kid, lineage, sub string) bool {
-	return c["kid:"+kid] || c["lineage:"+lineage] || c["sub:"+sub]
+// hashOf is the test's copy of the token hash the rows are keyed by.
+func hashOf(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func (c testChecker) Revoked(kid, lineage, sub, sid string) bool {
+	return c["kid:"+kid] || c["lineage:"+lineage] || c["sub:"+sub] || c["sid:"+sid]
 }
 func (testChecker) StaleBeyondCeiling() bool { return false }
 
@@ -175,7 +184,7 @@ func TestRevokeAccountEverywhereRevokesExistingAccessToken(t *testing.T) {
 	}
 }
 
-func TestRefreshRotatesAndDetectsReplay(t *testing.T) {
+func TestRefreshRotatesAndDetectsReuse(t *testing.T) {
 	svc, st := newTestService(t)
 	ctx := context.Background()
 	acct := insertAccount(t, st, "rot")
@@ -195,81 +204,121 @@ func TestRefreshRotatesAndDetectsReplay(t *testing.T) {
 		t.Fatalf("successor row user_agent/ip = %q/%q, want %q/%q (rotation must carry attribution forward)", succUA, succIP, "original-ua", "original-ip")
 	}
 
-	// Age the rotated-out row's revoked_at past the grace window so this replay is the
-	// "outside the window" case (see TestReplayWithinGraceWindow... below for the
-	// within-window cases).
-	if _, err := st.Pool().Exec(ctx,
-		`UPDATE human_sessions SET revoked_at = now() - interval '2 minutes' WHERE account_id = $1 AND revoked_at IS NOT NULL`, acct); err != nil {
-		t.Fatal(err)
+	// The browser uses the successor (so it is known to have arrived), then the old token comes
+	// back: two parties have held it. That is reuse, whatever its age.
+	_, raw3, err := svc.RefreshAccessToken(ctx, raw2, "blerg-core")
+	if err != nil {
+		t.Fatalf("second refresh: %v", err)
 	}
 	if _, _, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core"); !errors.Is(err, identity.ErrSessionReplayed) {
-		t.Fatalf("replaying a rotated-out token outside the grace window: %v, want ErrSessionReplayed", err)
+		t.Fatalf("reusing a rotated-out token whose successor was used: %v, want ErrSessionReplayed", err)
 	}
 	var liveCount int
 	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM human_sessions WHERE account_id = $1 AND revoked_at IS NULL`, acct).Scan(&liveCount); err != nil {
 		t.Fatal(err)
 	}
 	if liveCount != 0 {
-		t.Fatalf("live session count after replay outside the grace window = %d, want 0 (whole chain revoked)", liveCount)
+		t.Fatalf("live session count after reuse = %d, want 0 (the chain is revoked)", liveCount)
 	}
-	if _, _, err := svc.RefreshAccessToken(ctx, raw2, "blerg-core"); !errors.Is(err, identity.ErrSessionRevoked) {
-		t.Fatalf("the whole chain must be revoked after replay: %v, want ErrSessionRevoked", err)
+	if _, _, err := svc.RefreshAccessToken(ctx, raw3, "blerg-core"); !errors.Is(err, identity.ErrSessionRevoked) {
+		t.Fatalf("the whole chain must be revoked after reuse: %v, want ErrSessionRevoked", err)
+	}
+	var reason string
+	if err := st.Pool().QueryRow(ctx, `SELECT revoke_reason FROM human_sessions WHERE token_hash = $1`, hashOf(raw3)).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "reuse" {
+		t.Fatalf("revoke_reason of the chain's live row = %q, want reuse", reason)
 	}
 }
 
-// TestReplayWithinGraceWindowMintsAgainstLiveSuccessor covers the benign-double-refresh case:
-// replaying a just-rotated-out token within replayGraceWindow, while its successor session is
-// still live, must mint a fresh access token (not fail) and must NOT rotate again (empty
-// newRefresh, no third row, the successor session untouched).
-func TestReplayWithinGraceWindowMintsAgainstLiveSuccessor(t *testing.T) {
+// TestLostRotationIsRedone covers the benign case: the browser presents the token it still holds
+// because the response that carried its successor never arrived (a torn-down frame, a dropped
+// connection, two tabs racing). The successor was never presented, so the rotation is redone —
+// at any age — and nothing is revoked beyond the successor the browser never saw.
+func TestLostRotationIsRedone(t *testing.T) {
 	svc, st := newTestService(t)
 	ctx := context.Background()
-	acct := insertAccount(t, st, "grace-live")
+	acct := insertAccount(t, st, "lost-rotation")
 	raw1, _ := svc.IssueRefreshToken(ctx, acct, "ua", "ip")
-	access1, raw2, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core")
+	_, raw2, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core")
 	if err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
-	_ = access1
-
-	var countBefore int
-	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM human_sessions WHERE account_id = $1`, acct).Scan(&countBefore); err != nil {
+	// Long after any race window: the device was asleep.
+	if _, err := st.Pool().Exec(ctx,
+		`UPDATE human_sessions SET revoked_at = now() - interval '3 hours' WHERE account_id = $1 AND revoked_at IS NOT NULL`, acct); err != nil {
 		t.Fatal(err)
 	}
 
-	access2, newRefresh, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core")
+	access, raw3, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core")
 	if err != nil {
-		t.Fatalf("replay within grace window against a live successor must succeed: %v", err)
+		t.Fatalf("presenting the old token when its successor was never used must redo the rotation: %v", err)
 	}
-	if access2 == "" {
-		t.Fatal("expected a minted access token")
+	if access == "" || raw3 == "" || raw3 == raw1 || raw3 == raw2 {
+		t.Fatalf("expected a fresh access token and a new refresh token, got access=%v raw3=%v", access != "", raw3 != "")
 	}
-	if newRefresh != "" {
-		t.Fatalf("newRefresh = %q, want empty (no rotation should happen inside the grace window)", newRefresh)
-	}
-
-	var countAfter int
-	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM human_sessions WHERE account_id = $1`, acct).Scan(&countAfter); err != nil {
+	// The never-used successor is superseded; the new one works; the chain is alive.
+	var reason string
+	if err := st.Pool().QueryRow(ctx, `SELECT revoke_reason FROM human_sessions WHERE token_hash = $1`, hashOf(raw2)).Scan(&reason); err != nil {
 		t.Fatal(err)
 	}
-	if countAfter != countBefore {
-		t.Fatalf("row count after grace-window replay = %d, want unchanged %d (no new rows)", countAfter, countBefore)
+	if reason != "superseded" {
+		t.Fatalf("revoke_reason of the lost successor = %q, want superseded", reason)
 	}
-
-	// The successor session (raw2) must still be live and usable.
-	if _, _, err := svc.RefreshAccessToken(ctx, raw2, "blerg-core"); err != nil {
-		t.Fatalf("successor session must still be live after a grace-window replay: %v", err)
+	if _, _, err := svc.RefreshAccessToken(ctx, raw3, "blerg-core"); err != nil {
+		t.Fatalf("the redone rotation's token must work: %v", err)
+	}
+	var liveCount int
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM human_sessions WHERE account_id = $1 AND revoked_at IS NULL`, acct).Scan(&liveCount); err != nil {
+		t.Fatal(err)
+	}
+	if liveCount != 1 {
+		t.Fatalf("live rows after a redone rotation = %d, want 1", liveCount)
+	}
+	// Now the chain has moved on (raw3 was used). The superseded successor turning up after that
+	// means a second holder: reuse.
+	if _, _, err := svc.RefreshAccessToken(ctx, raw2, "blerg-core"); !errors.Is(err, identity.ErrSessionReplayed) {
+		t.Fatalf("the superseded successor presented after the chain moved on: %v, want ErrSessionReplayed", err)
 	}
 }
 
-// TestReplayWithinGraceWindowButSuccessorRevokedStillFails covers the third case: even inside
-// the grace window, if the successor session is no longer live (e.g. already logged out), the
-// replay must still be treated as theft — the grace window only excuses replay against a
-// genuinely still-usable successor.
-func TestReplayWithinGraceWindowButSuccessorRevokedStillFails(t *testing.T) {
+// TestRacingTabsHealWithoutRevocation: two tabs refresh with the same token at once. Both get a
+// rotation (the second is a redo of the first), and whichever cookie the browser keeps, the next
+// refresh works — no chain is revoked, because at no point was a used token presented twice.
+func TestRacingTabsHealWithoutRevocation(t *testing.T) {
 	svc, st := newTestService(t)
 	ctx := context.Background()
-	acct := insertAccount(t, st, "grace-dead")
+	acct := insertAccount(t, st, "race")
+	raw1, _ := svc.IssueRefreshToken(ctx, acct, "ua", "ip")
+	_, tabA, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core")
+	if err != nil {
+		t.Fatalf("tab A: %v", err)
+	}
+	_, tabB, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core")
+	if err != nil {
+		t.Fatalf("tab B (the race): %v", err)
+	}
+	// The browser ended up keeping A's cookie (B's response arrived first, A's last).
+	if _, _, err := svc.RefreshAccessToken(ctx, tabA, "blerg-core"); err != nil {
+		t.Fatalf("refreshing with the cookie the browser kept: %v", err)
+	}
+	var liveCount int
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM human_sessions WHERE account_id = $1 AND revoked_at IS NULL`, acct).Scan(&liveCount); err != nil {
+		t.Fatal(err)
+	}
+	if liveCount != 1 {
+		t.Fatalf("live rows after a healed race = %d, want 1", liveCount)
+	}
+	_ = tabB
+}
+
+// TestReplayAgainstLoggedOutSuccessorIsReuse: a successor that was logged out is no longer live,
+// so the old token coming back is not a lost rotation but a second holder — reuse.
+func TestReplayAgainstLoggedOutSuccessorIsReuse(t *testing.T) {
+	svc, st := newTestService(t)
+	ctx := context.Background()
+	acct := insertAccount(t, st, "succ-dead")
 	raw1, _ := svc.IssueRefreshToken(ctx, acct, "ua", "ip")
 	_, raw2, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core")
 	if err != nil {
@@ -278,9 +327,8 @@ func TestReplayWithinGraceWindowButSuccessorRevokedStillFails(t *testing.T) {
 	if err := svc.RevokeHumanSession(ctx, raw2); err != nil {
 		t.Fatal(err)
 	}
-
 	if _, _, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core"); !errors.Is(err, identity.ErrSessionReplayed) {
-		t.Fatalf("replay within grace window against a dead successor: %v, want ErrSessionReplayed", err)
+		t.Fatalf("replay against a logged-out successor: %v, want ErrSessionReplayed", err)
 	}
 }
 
@@ -309,62 +357,71 @@ func TestMintRefusesDisabledAccount(t *testing.T) {
 	}
 }
 
-// TestReplayRevokesSubAndLoginUnrevokes covers the controller ruling carried from Task 8: now
-// that "sub" revocation is reversible, a detected replay (theft signal) must call
-// RevokeAccountEverywhere — sessions AND the account's "sub" in the shared revocations table —
-// not just kill the rotation chain, so already-minted access tokens stop verifying immediately
-// too. And because a "sub" revocation is no longer permanent, a subsequent successful login
-// must clear it (this is what startHumanSession's Unrevoke call does in the api package; here
-// we exercise the identity-layer primitives it's built on directly).
-func TestReplayRevokesSubAndLoginUnrevokes(t *testing.T) {
+// TestReuseRevokesOnlyItsChain: a detected reuse ends the browser session it happened in — its
+// rows and, through a "sid" entry in the shared revocations table, the access tokens it minted —
+// and nothing else: the person's other devices stay signed in and the agent tokens their tools
+// hold keep working. Neither the account's "sub" nor its "lineage" is revoked.
+func TestReuseRevokesOnlyItsChain(t *testing.T) {
 	svc, st := newTestService(t)
 	ctx := context.Background()
-	acct := insertAccount(t, st, "theft-victim")
-	raw1, _ := svc.IssueRefreshToken(ctx, acct, "ua", "ip")
-	_, raw2, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core")
+	acct := insertAccount(t, st, "reuse-victim")
+	toolToken, _, err := svc.CreateAgentToken(ctx, acct, "tool", "run-sessions", 24*time.Hour)
 	if err != nil {
-		t.Fatalf("first refresh: %v", err)
+		t.Fatalf("agent token: %v", err)
 	}
-	_ = raw2
-
-	// Age the rotated-out row past the grace window so the replay below is the "outside the
-	// window" theft-detection case.
-	if _, err := st.Pool().Exec(ctx,
-		`UPDATE human_sessions SET revoked_at = now() - interval '2 minutes' WHERE account_id = $1 AND revoked_at IS NOT NULL`, acct); err != nil {
+	// Two devices: a phone (chain A) and a laptop (chain B).
+	phone1, _ := svc.IssueRefreshToken(ctx, acct, "phone", "ip-a")
+	laptop1, _ := svc.IssueRefreshToken(ctx, acct, "laptop", "ip-b")
+	phoneAccess1, phone2, err := svc.RefreshAccessToken(ctx, phone1, "blerg-core")
+	if err != nil {
+		t.Fatalf("phone refresh: %v", err)
+	}
+	var phoneChain string
+	if err := st.Pool().QueryRow(ctx, `SELECT chain_id::text FROM human_sessions WHERE token_hash = $1`, hashOf(phone2)).Scan(&phoneChain); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.RefreshAccessToken(ctx, raw1, "blerg-core"); !errors.Is(err, identity.ErrSessionReplayed) {
-		t.Fatalf("replay outside grace window: %v, want ErrSessionReplayed", err)
+	if _, _, err := svc.RefreshAccessToken(ctx, phone2, "blerg-core"); err != nil {
+		t.Fatalf("phone uses its successor: %v", err)
 	}
 
-	// The replay must have revoked the account's "sub", not just the session chain.
+	// The phone's old token comes back from somewhere: reuse on chain A.
+	if _, _, err := svc.RefreshAccessToken(ctx, phone1, "blerg-core"); !errors.Is(err, identity.ErrSessionReplayed) {
+		t.Fatalf("reuse: %v, want ErrSessionReplayed", err)
+	}
+
 	snapshot, err := svc.RevocationSnapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var subRevoked bool
+	var sidRevoked, subRevoked, lineageRevoked bool
 	for _, r := range snapshot {
+		if r.Kind == "sid" && r.Value == phoneChain {
+			sidRevoked = true
+		}
 		if r.Kind == "sub" && r.Value == acct {
 			subRevoked = true
 		}
-	}
-	if !subRevoked {
-		t.Fatal("a detected replay must revoke the account's sub (RevokeAccountEverywhere), not just the session chain")
-	}
-
-	// A subsequent successful login (here: the Unrevoke call startHumanSession makes on
-	// success) clears the stale sub revocation.
-	if err := svc.Unrevoke(ctx, "sub", acct); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err = svc.RevocationSnapshot(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, r := range snapshot {
-		if r.Kind == "sub" && r.Value == acct {
-			t.Fatal("sub revocation must be cleared after a subsequent successful login")
+		if r.Kind == "lineage" && r.Value == acct {
+			lineageRevoked = true
 		}
+	}
+	if !sidRevoked {
+		t.Fatal("a detected reuse must revoke the chain's sid so its minted access tokens stop verifying")
+	}
+	if subRevoked || lineageRevoked {
+		t.Fatalf("a detected reuse must not revoke the account (sub=%v lineage=%v): other devices and agent tokens stay", subRevoked, lineageRevoked)
+	}
+	// The phone's already-minted access token is dead: its sid is revoked and the chain is gone.
+	if _, live, err := svc.HumanSessionLive(ctx, acct, phoneChain); err != nil || live {
+		t.Fatalf("the phone's chain after reuse: live=%v err=%v, want not live", live, err)
+	}
+	_ = phoneAccess1
+	// The laptop is untouched, and so is the tool.
+	if _, _, err := svc.RefreshAccessToken(ctx, laptop1, "blerg-core"); err != nil {
+		t.Fatalf("the laptop's session must survive a reuse on the phone: %v", err)
+	}
+	if live, err := svc.AgentTokenLive(ctx, acct, toolToken.ID); err != nil || !live {
+		t.Fatalf("the account's agent token after a reuse: live=%v err=%v, want live", live, err)
 	}
 }
 

@@ -3,6 +3,35 @@
 How messages, interrupts and pausing work in the chat view of a Claude Code session. (The
 engine-specific notes are at the end.)
 
+## Interactive and unattended
+
+Every agent session is started in one of two modes, and the agent is told which:
+
+- **Interactive**: you are reading the chat as it happens. The agent talks a plan over before it
+  acts on anything large, says what it is doing between tool calls, and when it needs a decision it
+  asks and waits for your answer.
+- **Unattended**: nobody is watching. The agent makes the call itself, notes the assumptions it
+  made, carries the work through to the end, and finishes with a summary of what it did. It does
+  not stop to wait for an answer in the chat.
+
+Who gets which, unless the start says otherwise:
+
+| Started by | Mode |
+| --- | --- |
+| You, from the app's launch sheet | interactive |
+| A tool, through the agent contract or MCP | unattended, unless it asks for interactive |
+| A cron | always unattended |
+| A board card's **Run**, and the board's reviews | unattended |
+| A board card's **Discuss**, and the board session | interactive |
+
+To choose it yourself: tick **Unattended** on the launch sheet (it is offered for an agent session,
+not a terminal one), or send `"interaction": "interactive"` or `"interaction": "unattended"` in the
+body of `POST /api/runner/start`.
+
+The mode is fixed for the session's life: it cannot be changed after the start. A session started
+unattended says **Unattended** under its title on the session page. You can still write to one;
+the message is delivered as usual.
+
 ## Sending a message while the agent works
 
 Press Enter and the message goes straight to the agent; you do not wait for the turn to finish. The
@@ -18,6 +47,13 @@ Two things to know:
   answer, as a new turn.
 
 Several messages sent in a row are delivered together at the next step.
+
+## Pointing at what you mean
+
+When the feedback is about a file the agent published, open the file and use **Review** (a
+markdown or PDF file: select a passage, ask for a change, edit the markdown yourself) or **Mark
+up** (an image: draw on it, drop numbered pins with notes). Both send one message the agent can
+act on line by line. See [Review and mark-up](artifacts.md#review-and-mark-up).
 
 ## Interrupting
 

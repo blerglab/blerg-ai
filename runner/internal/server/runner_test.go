@@ -125,4 +125,37 @@ func TestRunnerEventsEnvelope(t *testing.T) {
 	if out.Events[0].Seq != 1 || out.Events[0].Kind != "assistant_turn" {
 		t.Errorf("first event wrong: %+v", out.Events[0])
 	}
+
+	// before_seq pages backwards from a cursor (0 = the end), oldest first, and says whether
+	// anything older remains — the page a chat loads above what the live stream opened with.
+	req, _ = http.NewRequest("GET", srv.URL+"/api/runner/sessions/"+sessionID+"/events?before_seq=3&limit=1", nil)
+	req.Header.Set("Authorization", "Bearer runner-secret")
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("events before: %d", resp.StatusCode)
+	}
+	var older struct {
+		Events []struct {
+			Seq int64 `json:"seq"`
+		} `json:"events"`
+		HasMore    bool   `json:"has_more"`
+		HasOlder   bool   `json:"has_older"`
+		FirstSeq   int64  `json:"first_seq"`
+		ServerTime string `json:"server_time"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&older); err != nil {
+		t.Fatal(err)
+	}
+	if len(older.Events) != 1 || older.Events[0].Seq != 2 || !older.HasOlder || older.HasMore || older.FirstSeq != 2 || older.ServerTime == "" {
+		t.Fatalf("before page: %+v", older)
+	}
+	req, _ = http.NewRequest("GET", srv.URL+"/api/runner/sessions/"+sessionID+"/events?before_seq=0&limit=5", nil)
+	req.Header.Set("Authorization", "Bearer runner-secret")
+	resp, _ = http.DefaultClient.Do(req)
+	if err := json.NewDecoder(resp.Body).Decode(&older); err != nil {
+		t.Fatal(err)
+	}
+	if len(older.Events) != 3 || older.HasOlder || older.FirstSeq != 1 {
+		t.Fatalf("before page from the end: %+v", older)
+	}
 }

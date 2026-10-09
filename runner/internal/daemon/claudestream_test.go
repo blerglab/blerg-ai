@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -552,5 +554,33 @@ func TestSteeringHandsQueuedMessagesToThePerTurnEngineInOrder(t *testing.T) {
 	a, b, c := index(o, "text:ok:first"), index(o, "text:ok:second"), index(o, "text:ok:third")
 	if a < 0 || b < a || c < b {
 		t.Fatalf("messages must be answered in order, none lost: %v", o)
+	}
+}
+
+// A user-role message the CLI wrote itself — a subagent's completion, a system reminder — is
+// not the person's: it reaches the transcript as source "system" (hidden), never as "chat".
+func TestSteeringKeepsHarnessMessagesOffThePersonsName(t *testing.T) {
+	em := &collectEmitter{}
+	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
+	d.steer.legacy = false
+	p := &ccProc{}
+	d.steer.proc = p
+	for i, text := range []string{
+		"<task-notification>\n<task-id>abc</task-id>\n<summary>Agent \"Research\" finished</summary>\n</task-notification>",
+		"<system-reminder>\nThe file changed on disk.\n</system-reminder>",
+		"[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated event.",
+		"a line a hook injected",
+	} {
+		line := fmt.Sprintf(`{"type":"user","message":{"role":"user","content":%q},"isReplay":true,"uuid":"h%d"}`, text, i)
+		d.onLine(p, []byte(line))
+	}
+	var sources []string
+	for _, ev := range em.snapshot() {
+		if ev.Kind == "user_message" {
+			sources = append(sources, ev.Payload.(agent.UserMessagePayload).Source)
+		}
+	}
+	if want := []string{"system", "system", "system", "chat"}; !slices.Equal(sources, want) {
+		t.Fatalf("sources = %v, want %v", sources, want)
 	}
 }

@@ -80,7 +80,7 @@ type staticRevChecker struct {
 	subs     map[string]bool
 }
 
-func (r staticRevChecker) Revoked(kid, lineage, sub string) bool {
+func (r staticRevChecker) Revoked(kid, lineage, sub, _ string) bool {
 	return r.kids[kid] || r.lineages[lineage] || r.subs[sub]
 }
 

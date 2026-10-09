@@ -1,0 +1,99 @@
+/* The default theme: the contract mapped onto the Blerg palette, so the runner's chat looks
+   exactly as it did before the package. Inside the runner the palette names (--basalt, --scree,
+   --blaze, …) are live and the mapping follows them through light and dark; on their own, the
+   fallbacks are the runner's values, with the same light block the runner's index.css has, so an
+   app can load this file alone and get the Blerg look. This is the one stylesheet in the package
+   allowed to name anything but --chat-* (theme/tokens.test.ts). */
+:root {
+  --chat-bg: var(--basalt, #0d1117);
+  --chat-surface: var(--scree, #161c26);
+  --chat-surface-2: var(--scree-2, #1e2633);
+  --chat-fg: var(--chalk, #f2f6fa);
+  --chat-muted: var(--fog, #c2ccd8);
+  --chat-muted-2: var(--fog-dim, #8b97a7);
+  --chat-accent: var(--blaze, #ff6a3d);
+  --chat-accent-fg: var(--chalk, #f2f6fa);
+  --chat-success: var(--lichen, #63d68b);
+  --chat-warning: var(--amber, #e8b13d);
+  --chat-info: var(--batch, #4c9bff);
+  --chat-danger: var(--danger, #ff6b63);
+  --chat-border: var(--stone, #313d4f);
+  --chat-radius: 10px;
+  --chat-font: var(--body, system-ui, -apple-system, "Segoe UI", sans-serif);
+  --chat-font-mono: var(--mono, ui-monospace, "SF Mono", "Cascadia Mono", monospace);
+  --chat-text-xs: var(--text-xs, 12px);
+  --chat-text-sm: var(--text-sm, 13px);
+  --chat-density: 1;
+  --chat-card-user-bg: color-mix(in srgb, var(--blaze, #ff6a3d) 10%, var(--scree-2, #1e2633));
+  --chat-card-assistant-bg: var(--scree, #161c26);
+  --chat-card-tool-bg: var(--basalt, #0d1117);
+  --chat-card-system-bg: var(--scree-2, #1e2633);
+}
+
+/* Deep Slate — LIGHT, and the explicit data-theme overrides, as index.css has them. Only the
+   fallbacks change: inside the runner the palette names already carry the light values. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --chat-bg: var(--basalt, #eef1f6);
+    --chat-surface: var(--scree, #f7f9fc);
+    --chat-surface-2: var(--scree-2, #ffffff);
+    --chat-fg: var(--chalk, #131820);
+    --chat-muted: var(--fog, #48525f);
+    --chat-muted-2: var(--fog-dim, #6b7684);
+    --chat-accent: var(--blaze, #d9531e);
+    --chat-accent-fg: var(--chalk, #131820);
+    --chat-success: var(--lichen, #2f8a52);
+    --chat-warning: var(--amber, #b7791f);
+    --chat-info: var(--batch, #2f6fd6);
+    --chat-danger: var(--danger, #d24747);
+    --chat-border: var(--stone, #d4dbe5);
+    --chat-radius: 10px;
+    --chat-font: var(--body, system-ui, -apple-system, "Segoe UI", sans-serif);
+    --chat-font-mono: var(--mono, ui-monospace, "SF Mono", "Cascadia Mono", monospace);
+    --chat-text-xs: var(--text-xs, 12px);
+    --chat-text-sm: var(--text-sm, 13px);
+    --chat-density: 1;
+    --chat-card-user-bg: color-mix(in srgb, var(--blaze, #d9531e) 10%, var(--scree-2, #ffffff));
+    --chat-card-assistant-bg: var(--scree, #f7f9fc);
+    --chat-card-tool-bg: var(--basalt, #eef1f6);
+    --chat-card-system-bg: var(--scree-2, #ffffff);
+  }
+}
+:root[data-theme="light"] {
+  --chat-bg: var(--basalt, #eef1f6);
+  --chat-surface: var(--scree, #f7f9fc);
+  --chat-surface-2: var(--scree-2, #ffffff);
+  --chat-fg: var(--chalk, #131820);
+  --chat-muted: var(--fog, #48525f);
+  --chat-muted-2: var(--fog-dim, #6b7684);
+  --chat-accent: var(--blaze, #d9531e);
+  --chat-accent-fg: var(--chalk, #131820);
+  --chat-success: var(--lichen, #2f8a52);
+  --chat-warning: var(--amber, #b7791f);
+  --chat-info: var(--batch, #2f6fd6);
+  --chat-danger: var(--danger, #d24747);
+  --chat-border: var(--stone, #d4dbe5);
+  --chat-card-user-bg: color-mix(in srgb, var(--blaze, #d9531e) 10%, var(--scree-2, #ffffff));
+  --chat-card-assistant-bg: var(--scree, #f7f9fc);
+  --chat-card-tool-bg: var(--basalt, #eef1f6);
+  --chat-card-system-bg: var(--scree-2, #ffffff);
+}
+:root[data-theme="dark"] {
+  --chat-bg: var(--basalt, #0d1117);
+  --chat-surface: var(--scree, #161c26);
+  --chat-surface-2: var(--scree-2, #1e2633);
+  --chat-fg: var(--chalk, #f2f6fa);
+  --chat-muted: var(--fog, #c2ccd8);
+  --chat-muted-2: var(--fog-dim, #8b97a7);
+  --chat-accent: var(--blaze, #ff6a3d);
+  --chat-accent-fg: var(--chalk, #f2f6fa);
+  --chat-success: var(--lichen, #63d68b);
+  --chat-warning: var(--amber, #e8b13d);
+  --chat-info: var(--batch, #4c9bff);
+  --chat-danger: var(--danger, #ff6b63);
+  --chat-border: var(--stone, #313d4f);
+  --chat-card-user-bg: color-mix(in srgb, var(--blaze, #ff6a3d) 10%, var(--scree-2, #1e2633));
+  --chat-card-assistant-bg: var(--scree, #161c26);
+  --chat-card-tool-bg: var(--basalt, #0d1117);
+  --chat-card-system-bg: var(--scree-2, #1e2633);
+}

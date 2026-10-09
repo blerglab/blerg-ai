@@ -184,6 +184,14 @@ func main() {
 		log.Println("cluster agent runtime enabled")
 	}
 
+	// The UI package the frontend build packed beside its dist (GET /packages/,
+	// advertised as ui.chat_package in /agents and in the registration below). A
+	// build without one is the normal case for a workstation install: nothing is
+	// served, nothing is advertised.
+	if err := server.LoadPackages("./frontend/dist/packages"); err != nil {
+		log.Printf("ui packages: %v", err)
+	}
+
 	// Register with blerg-core (disabled unless BLERG_CORE_URL + BLERG_CORE_REGISTER_KEY are set).
 	go server.StartCoreRegistration(ctx, cfg.CoreURL, cfg.CoreRegisterKey, cfg.RunnerSelfURL, version)
 
@@ -243,7 +251,6 @@ func main() {
 	mux.HandleFunc("POST /api/sessions/{id}/pause", api.HandlePauseSession)
 	mux.HandleFunc("PATCH /api/sessions/{id}", api.HandlePatchSession)
 	mux.HandleFunc("GET /api/repos", api.HandleGetRepos)
-	mux.HandleFunc("POST /api/preview", hub.HandlePreview(cfg.DaemonToken))
 	mux.HandleFunc("GET /api/push/vapid-public-key", api.HandleGetVapidPublicKey)
 	mux.HandleFunc("POST /api/push/subscribe", api.HandlePostPushSubscribe)
 	mux.HandleFunc("GET /api/sessions/{id}/agent-events", api.HandleGetAgentEvents)

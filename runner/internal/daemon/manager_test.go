@@ -765,7 +765,6 @@ func TestSessionEnv(t *testing.T) {
 	t.Run("all config vars set", func(t *testing.T) {
 		sender := newRecordingSender(4)
 		mgr := newManagerWithSender(sender, ManagerConfig{
-			PreviewURL:  "http://example.com/preview",
 			DaemonToken: "tok-abc",
 			ServerHTTP:  "http://runner.example.test",
 		})
@@ -776,7 +775,6 @@ func TestSessionEnv(t *testing.T) {
 		want := map[string]string{
 			"BLERG_RUNNER_SESSION_ID":  "sess-x",
 			"BLERG_RUNNER_SERVER_HTTP": "http://runner.example.test",
-			"BLERG_RUNNER_PREVIEW_URL": "http://example.com/preview",
 		}
 		for k, v := range want {
 			needle := k + "=" + v
@@ -789,6 +787,18 @@ func TestSessionEnv(t *testing.T) {
 			}
 			if !found {
 				t.Errorf("sessionEnv missing %q; env = %v", needle, env)
+			}
+		}
+	})
+
+	// An older env file may still set BLERG_RUNNER_PREVIEW_URL for the daemon: it
+	// is not passed on to a session.
+	t.Run("inherited preview URL is not passed on", func(t *testing.T) {
+		t.Setenv("BLERG_RUNNER_PREVIEW_URL", "http://runner.example.test/api/preview")
+		mgr := newManagerWithSender(newRecordingSender(4), ManagerConfig{ServerHTTP: "http://runner.example.test"})
+		for _, e := range mgr.sessionEnv("sess-x", false, "", "", "", nil) {
+			if strings.HasPrefix(e, "BLERG_RUNNER_PREVIEW_URL=") {
+				t.Errorf("sessionEnv carries %q", e)
 			}
 		}
 	})

@@ -112,8 +112,18 @@ sandbox**. A session on the bare host (This machine) is refused, because it has 
 credentials. Connections also need the `claude` engine and a daemon or cluster that supports them;
 the launch is refused with a specific message otherwise.
 
-Sessions that carry connections also run with a restricted built-in tool set (file tools only, no
-shell or web access) and are **private** to the account that started them. See [`crons.md`](crons.md#what-an-unattended-run-can-and-cannot-do).
+A session with connections is **private** to the account that started it. What else it may do
+depends on who is watching ([design note](design/interactive-mcp-sessions.md)):
+
+- A session **you launch from the launch sheet** keeps everything a session without connections
+  has: shell, web, your settings, skills and always-on plugins. Only the MCP side is bounded, by
+  the tools you allowed or set to propose. Its MCP servers are exactly the gateway's (no ambient
+  server from the repository or a plugin), and the file tools are kept away from the gateway
+  config directory. Such a session has a shell, so a hostile message could still make it send
+  what its allowed tools return elsewhere; you are the control, as for any session.
+- An **unattended** run — a cron, or a session the board starts with connections — runs with a
+  restricted built-in tool set (file tools only, no shell or web access) and none of your settings
+  or plugins. See [`crons.md`](crons.md#what-an-unattended-run-can-and-cannot-do).
 
 ## What gets logged
 

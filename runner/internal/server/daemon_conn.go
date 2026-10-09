@@ -170,8 +170,9 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 
 		// ── Step 5: reconcile active_sessions ───────────────────────────────────────
 		// Mark sessions active in the DB but absent from the daemon's list as stopped.
+		var stoppedWhileAway []string
 		if dbPool != nil {
-			reconcileSessions(ctx, h, dbPool, daemonID, boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions), nil)
+			stoppedWhileAway = reconcileSessions(ctx, h, dbPool, daemonID, boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions), nil)
 		}
 
 		// ── Step 6: build DaemonConn and register ─────────────────────────────
@@ -200,6 +201,10 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 		dc.SetAvailableEngines(hello.AvailableEngines)
 		dc.SetEngineModels(hello.EngineModels)
 		h.Register(dc)
+		// Sessions the daemon still has but that were stopped while it was away: tell it so.
+		killStoppedSessions(dc, stoppedWhileAway)
+		// Messages typed for its sessions while it was away (daemongrace.go).
+		h.deliverHeld(dc)
 
 		// Store wsConn on the stack so goroutines below close over it.
 		conn := wsConn
@@ -284,7 +289,7 @@ func daemonReadPump(h *Hub, dc *DaemonConn, conn *websocket.Conn, dbPool *pgxpoo
 					log.Printf("heartbeat update %s: %v", dc.ID, err)
 				}
 				if hbOK {
-					reconcileSessions(ctx, h, dbPool, dc.ID, boundSessionIDs(dc.Mode, dc.Name, hb.ActiveSessions), hb.SessionStates)
+					killStoppedSessions(dc, reconcileSessions(ctx, h, dbPool, dc.ID, boundSessionIDs(dc.Mode, dc.Name, hb.ActiveSessions), hb.SessionStates))
 				}
 			}
 
@@ -537,7 +542,14 @@ func setSessionStatusEnd(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, sess
 // but absent from the report are stopped; sessions the daemon reports alive but
 // the DB has in a terminal state (e.g. errored by a transient disconnect) are
 // revived, because the daemon is authoritative about what is actually running.
-func reconcileSessions(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, daemonID string, activeSessions []string, states map[string]string) {
+//
+// With one exception, which is what it returns: a session that was STOPPED — by its person, by
+// its own agent, or by auto-stop — is not revived by a daemon that still reports it. That
+// happens when the stop was made while the daemon was away (a daemon restart brings its agent
+// sessions back from their recovery records, and its tmux sessions never went away): nobody
+// could tell the daemon then. The ids are returned for the caller to send kill_session for
+// (killStoppedSessions), since during a hello the connection is not registered yet.
+func reconcileSessions(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, daemonID string, activeSessions []string, states map[string]string) (stopped []string) {
 	active := make(map[string]struct{}, len(activeSessions))
 	for _, id := range activeSessions {
 		active[id] = struct{}{}
@@ -547,11 +559,16 @@ func reconcileSessions(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, daemon
 	sessions, err := db.ListSessionsByDaemon(ctx, dbPool, daemonID)
 	if err != nil {
 		log.Printf("reconcile sessions for daemon %s: %v", daemonID, err)
-		return
+		return nil
 	}
 	now := time.Now()
 	for _, s := range sessions {
 		_, reported := active[s.ID]
+		if reported && stoppedForGood(s.Status, s.EndReason) {
+			log.Printf("reconcile: daemon %s still reports session %s, which was stopped (%s) — not revived, kill sent", daemonID, s.ID, *s.EndReason)
+			stopped = append(stopped, s.ID)
+			continue
+		}
 		// A session the daemon still reports alive, long after a stop was
 		// requested for it, did not stop: drop the pending attribution so a
 		// later, unrelated ending is not blamed on that request. Its status
@@ -576,6 +593,44 @@ func reconcileSessions(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, daemon
 		}
 		setSessionStatusEnd(ctx, h, dbPool, s.ID, desired, endedAt, nil, desired == "stopped", end)
 	}
+	return stopped
+}
+
+// stoppedForGood reports whether an end reason is a decision to stop the session, as opposed to
+// the server losing sight of it (daemon_lost, daemon_unreported) or its process ending: only the
+// former must hold against a daemon that reports the session alive.
+//
+// One more case counts as a stop: a row that is "stopped" with the reason daemon_lost. The
+// lost-daemon sweep ends a session as "error"; it only becomes "stopped" when somebody then
+// clears it from the app, and that write keeps the earlier reason (first reason wins).
+func stoppedForGood(status string, endReason *string) bool {
+	if endReason == nil || !terminalSessionStatus(status) {
+		return false
+	}
+	switch *endReason {
+	case db.EndReasonStoppedByUser, db.EndReasonStoppedByAgent, db.EndReasonAutoStopped:
+		return true
+	case db.EndReasonDaemonLost:
+		return status == "stopped"
+	}
+	return false
+}
+
+// killStoppedSessions sends kill_session for each id: the daemon ends the session if it is
+// hosting it and forgets its recovery record either way. Best effort — the next heartbeat that
+// still lists the session sends it again.
+func killStoppedSessions(dc *DaemonConn, ids []string) {
+	for _, id := range ids {
+		raw, err := json.Marshal(protocol.KillSession{Type: "kill_session", SessionID: id})
+		if err != nil {
+			continue
+		}
+		select {
+		case dc.send <- raw:
+		default:
+			log.Printf("daemon %s: send buffer full — kill_session %s deferred to the next heartbeat", dc.ID, id)
+		}
+	}
 }
 
 // handleDaemonDisconnect updates DB state and broadcasts daemon_disconnected to
@@ -589,11 +644,60 @@ func handleDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 	if !h.UnregisterIfCurrent(dc) {
 		return
 	}
+	// A desktop daemon gets a grace period before its sessions are marked lost
+	// (daemongrace.go): most disconnects are a restart that is back in seconds.
+	if dc.Mode != "runner" && daemonLostGrace > 0 {
+		gen := h.away.begin(dc.ID)
+		time.AfterFunc(daemonLostGrace, func() {
+			if h.GetDaemon(dc.ID) != nil {
+				return // back in time: nothing was ever marked
+			}
+			if _, ended := h.away.end(dc.ID, gen); !ended {
+				return // it came back and left again: that absence has its own timer
+			}
+			finishDaemonDisconnect(h, dc, dbPool)
+		})
+		return
+	}
+	finishDaemonDisconnect(h, dc, dbPool)
+}
 
+// finishDaemonDisconnect is what a daemon's disconnect comes to once it is certain (at once for
+// a cluster pod, after the grace period for a desktop daemon): its sessions are marked and
+// browsers are told.
+func finishDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 	ctx := context.Background()
+	affectedSessionIDs := markDaemonSessionsLost(ctx, h, dc, dbPool)
+	if dc.Mode != "runner" && h.GetDaemon(dc.ID) != nil {
+		return // overtaken by the daemon's reconnect: it is not disconnected
+	}
+
+	// A cluster session pod (mode "runner") is never shown to browsers as a
+	// daemon, so its drop is not announced; its sessions' own status changes
+	// (set above) already reach them.
+	if dc.Mode == "runner" {
+		return
+	}
+	// Broadcast daemon_disconnected regardless of DB availability.
+	h.BroadcastJSON(protocol.DaemonDisconnected{
+		Type:               "daemon_disconnected",
+		DaemonID:           dc.ID,
+		AffectedSessionIDs: affectedSessionIDs,
+	})
+}
+
+// markDaemonSessionsLost is the database half of a daemon disconnect, run once the old
+// connection has been unregistered: the daemon is marked disconnected and each of its live
+// sessions lost (or, for a cluster pod, disconnected). It returns the sessions it marked.
+func markDaemonSessionsLost(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) []string {
 	affectedSessionIDs := []string{}
 
 	if dbPool != nil {
+		// The daemon may be back already (a restart takes about a second): then this cleanup
+		// has been overtaken, and neither the daemon nor its sessions are marked.
+		if dc.Mode != "runner" && h.GetDaemon(dc.ID) != nil {
+			return affectedSessionIDs
+		}
 		// Mark daemon as disconnected.
 		if err := db.SetDaemonStatus(ctx, dbPool, dc.ID, "disconnected"); err != nil {
 			log.Printf("set daemon %s disconnected: %v", dc.ID, err)
@@ -610,6 +714,14 @@ func handleDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 			for _, s := range sessions {
 				if !isActiveStatus(s.Status) {
 					continue
+				}
+				// The daemon may have reconnected since this cleanup claimed the old
+				// connection (a restart takes about a second): its hello has then reconciled
+				// these rows, and marking them lost now would undo that until its next
+				// heartbeat — during which the sessions take no status and no message.
+				if dc.Mode != "runner" && h.GetDaemon(dc.ID) != nil {
+					log.Printf("daemon %s reconnected during its disconnect cleanup — remaining sessions left as they are", dc.ID)
+					break
 				}
 				if dc.Mode == "runner" {
 					// Pod death is not session death: the session resumes when
@@ -628,17 +740,5 @@ func handleDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 			}
 		}
 	}
-
-	// A cluster session pod (mode "runner") is never shown to browsers as a
-	// daemon, so its drop is not announced; its sessions' own status changes
-	// (set above) already reach them.
-	if dc.Mode == "runner" {
-		return
-	}
-	// Broadcast daemon_disconnected regardless of DB availability.
-	h.BroadcastJSON(protocol.DaemonDisconnected{
-		Type:               "daemon_disconnected",
-		DaemonID:           dc.ID,
-		AffectedSessionIDs: affectedSessionIDs,
-	})
+	return affectedSessionIDs
 }

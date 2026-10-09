@@ -161,6 +161,64 @@ func TestBoardTokenExpired(t *testing.T) {
 	}
 }
 
+// TestBoardTokenExpirySlides: a token with less than half its life left is pushed out to a full
+// life again; one with plenty left, or a revoked one, is left alone. This is what keeps a
+// session's messaging token alive for as long as the session runs.
+func TestBoardTokenExpirySlides(t *testing.T) {
+	pool := connect(t)
+	ctx := context.Background()
+	setupSchema(t, pool)
+	if err := db.RunMigrations(ctx, pool); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	daemonID := "10000000-0000-0000-0000-000000000005"
+	sessionID := "20000000-0000-0000-0000-000000000005"
+	if err := db.UpsertDaemon(ctx, pool, daemonID, "token-daemon5", "local", "/repos"); err != nil {
+		t.Fatalf("UpsertDaemon: %v", err)
+	}
+	if err := db.InsertSession(ctx, pool, sessionID, daemonID, "running", "/projects/s", "repo-s", "Sliding Session", "claude-3"); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	const ttl = 24 * time.Hour
+
+	// Nearly out: an hour left of a day. Slides to a full day.
+	raw, err := db.MintSessionToken(ctx, pool, sessionID, []string{"message"}, time.Hour)
+	if err != nil {
+		t.Fatalf("MintSessionToken: %v", err)
+	}
+	row, err := db.ValidateBoardToken(ctx, pool, raw)
+	if err != nil {
+		t.Fatalf("ValidateBoardToken: %v", err)
+	}
+	slid, err := db.SlideBoardTokenExpiry(ctx, pool, row.ID, ttl)
+	if err != nil || !slid {
+		t.Fatalf("SlideBoardTokenExpiry on a nearly-out token: slid=%v err=%v, want true", slid, err)
+	}
+	after, err := db.ValidateBoardToken(ctx, pool, raw)
+	if err != nil {
+		t.Fatalf("ValidateBoardToken after slide: %v", err)
+	}
+	if left := time.Until(after.ExpiresAt); left < 23*time.Hour {
+		t.Fatalf("expires_at after slide leaves %s, want about a day", left)
+	}
+	// Plenty left: untouched.
+	slid, err = db.SlideBoardTokenExpiry(ctx, pool, row.ID, ttl)
+	if err != nil || slid {
+		t.Fatalf("SlideBoardTokenExpiry on a fresh token: slid=%v err=%v, want false", slid, err)
+	}
+	// Revoked: never resurrected.
+	if err := db.RevokeBoardTokensForSession(ctx, pool, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE board_tokens SET expires_at = now() + interval '1 minute' WHERE id = $1`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	slid, err = db.SlideBoardTokenExpiry(ctx, pool, row.ID, ttl)
+	if err != nil || slid {
+		t.Fatalf("SlideBoardTokenExpiry on a revoked token: slid=%v err=%v, want false", slid, err)
+	}
+}
+
 // TestBoardTokenRevokeBySession covers that RevokeBoardTokensForSession makes
 // all previously-valid tokens for a session invalid (and is idempotent).
 func TestBoardTokenRevokeBySession(t *testing.T) {

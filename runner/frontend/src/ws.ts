@@ -13,6 +13,7 @@ let backoff = 2000
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 const handlers = new Map<string, Set<(msg: ServerMessage) => void>>()
 const openHandlers = new Set<() => void>()
+const closeHandlers = new Set<() => void>()
 
 function clearReconnectTimer(): void {
   if (reconnectTimer !== null) {
@@ -91,6 +92,13 @@ function connect(): void {
 
   ws.onclose = () => {
     if (socket === ws) socket = null
+    closeHandlers.forEach(h => {
+      try {
+        h()
+      } catch {
+        // ignore handler errors
+      }
+    })
     // A socket that closed without ever opening was almost certainly refused
     // at the upgrade — but that's ambiguous: it could mean the access token
     // we sent has since expired, OR that the server is just unreachable
@@ -160,6 +168,20 @@ export function onOpen(handler: () => void): () => void {
   return () => {
     openHandlers.delete(handler)
   }
+}
+
+// onClose registers a callback fired each time the socket goes down (the chat
+// locks its composer at once instead of at the next refused send).
+export function onClose(handler: () => void): () => void {
+  closeHandlers.add(handler)
+  return () => {
+    closeHandlers.delete(handler)
+  }
+}
+
+/** connected: whether the socket is open right now. */
+export function connected(): boolean {
+  return socket !== null && socket.readyState === WebSocket.OPEN
 }
 
 // Reconnect immediately when the tab/app returns to the foreground. Background

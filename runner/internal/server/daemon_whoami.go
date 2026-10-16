@@ -1,0 +1,43 @@
+package server
+
+import (
+	"errors"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/blerglab/blerg-ai/runner/internal/db"
+)
+
+// HandleDaemonWhoami is GET /api/daemon/whoami: is this bearer a token /ws/daemon would
+// accept? The installer asks it with the token it is about to put into the daemon's service,
+// before it replaces the running daemon, so a token the server would refuse never replaces
+// one that works. It touches no connection and registers nothing.
+//
+// 200 {"ok":true,"mode":"daemon"} for the daemon master token, {"ok":true,"mode":"runtime"} for
+// a session pod's current runtime token; 401 for anything else. The same tokens, and the same
+// checks, as the websocket hello, which has no rate limit either: the tokens are long random
+// strings, so a second place to try one teaches nothing. The reply never holds the token.
+func (a *API) HandleDaemonWhoami(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || raw == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if a.isDaemonToken(raw) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "daemon"})
+		return
+	}
+	if _, err := db.ValidateRuntimeToken(r.Context(), a.dbPool, raw); err != nil {
+		if errors.Is(err, db.ErrTokenInvalid) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		// The database could not answer: that says nothing about the token.
+		log.Printf("daemon whoami: check runtime token: %v", err)
+		writeError(w, http.StatusServiceUnavailable, "could not check the token now; try again")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "runtime"})
+}

@@ -10,7 +10,7 @@ should use the engine contracts rather than assuming Claude Code.
 
 ## Building & testing
 
-Tests need Go 1.25 or newer (see `go.mod`). Use `make test`: it runs `$HOME/go/bin/go`
+Tests need Go 1.26 or newer (see `go.mod`). Use `make test`: it runs `$HOME/go/bin/go`
 when that exists and the `go` on your PATH otherwise.
 
 ## Session state detection — fix tests first

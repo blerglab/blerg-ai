@@ -64,6 +64,17 @@
 #   BLERG_RUNNER_BOARD_MCP_URL             — overrides the board MCP endpoint
 #                                            alone (default: BLERG_RUNNER_BOARD_URL
 #                                            below + /mcp). Absent = the default.
+#   BLERG_RUNNER_MAX_FILE_MB               — file limits in MiB: one file a person
+#   BLERG_RUNNER_MAX_SESSION_UPLOADS_MB      attaches or an agent publishes
+#   BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB    (default "100"), a session's
+#                                            attachments together ("500") and the
+#                                            files a session's agent publishes
+#                                            together ("1024"). Absent = the
+#                                            defaults. Keep the ingress's
+#                                            proxy-body-size (ingress.yaml, 128m)
+#                                            above the per-file limit, and the
+#                                            runner data volume (RUNNER_DATA_SIZE)
+#                                            large enough for the sessions you keep.
 #
 # The MCP gateway (BLERG_RUNNER_MCP_GW_ADDR / _GW_URL in `data` below) is served
 # on its own port (8090), reachable only through the internal-only

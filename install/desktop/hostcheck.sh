@@ -144,3 +144,30 @@ EOF2
   esac
   return 1
 }
+
+# docker_client_no_proxy prints the noProxy that the Docker client would copy into a container:
+# the "proxies" entry of ~/.docker/config.json (or $DOCKER_CONFIG/config.json) for $DOCKER_HOST
+# (default unix:///var/run/docker.sock), else its "default" entry. The same lookup the daemon
+# does for sandbox sessions. Prints nothing, and never fails, when there is no config, no
+# python3, or the file is not readable JSON; it prints only noProxy, never a proxy address.
+docker_client_no_proxy() {
+  local cfg="${DOCKER_CONFIG:-${HOME:-}/.docker}/config.json" host="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+  [ -f "$cfg" ] || return 0
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -I -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        proxies = json.load(f).get("proxies") or {}
+    entry = proxies.get(sys.argv[2])
+    if not isinstance(entry, dict):
+        entry = proxies.get("default")
+    value = entry.get("noProxy", "") if isinstance(entry, dict) else ""
+    if isinstance(value, str):
+        print(",".join(h.strip() for h in value.split(",") if h.strip()))
+except Exception:
+    pass
+' "$cfg" "$host" 2>/dev/null || true
+  fi
+  return 0
+}

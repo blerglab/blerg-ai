@@ -189,6 +189,7 @@ var scopeRegistry = map[string]any{
 	"SessionPaused":        protocol.SessionPaused{},
 	"SessionPausedChanged": protocol.SessionPausedChanged{},
 	"OpenAsks":             protocol.OpenAsks{},
+	"DaemonWelcome":        protocol.DaemonWelcome{},
 }
 
 func TestScopeRegistryIsComplete(t *testing.T) {

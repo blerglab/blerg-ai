@@ -38,12 +38,70 @@ export function isArtifactGone(e: unknown): boolean {
   return e instanceof ArtifactGoneError || (e instanceof Error && e.name === 'ArtifactGoneError')
 }
 
-// 410: listed but gone. 404 (an older server's answer for the same, or a file deleted meanwhile)
-// reads the same to a person.
-function readFailure(status: number, other: string): Error {
-  if (status === 410) return new ArtifactGoneError()
-  if (status === 404) return new Error(FILE_GONE_MESSAGE)
-  return new Error(other)
+/** A file request the server refused. The message is the server's own sentence when it sent one
+ *  (the runner says which step failed and what to do), else a plain fallback; `errorId` is the
+ *  short id the runner also wrote in its log for a failure of its own (absent from an older one). */
+export class FileRequestError extends Error {
+  readonly status: number
+  readonly errorId?: string
+  constructor(message: string, status: number, errorId?: string) {
+    super(message)
+    this.name = 'FileRequestError'
+    this.status = status
+    if (errorId) this.errorId = errorId
+  }
+}
+
+/** What to show for a failed file operation: its message (or the fallback) and the error id to
+ *  show beside it, when the server gave one. */
+export function fileErrorText(e: unknown, fallback: string): { message: string; errorId?: string } {
+  if (!(e instanceof Error) || !e.message) return { message: fallback }
+  const id = (e as { errorId?: unknown }).errorId
+  return typeof id === 'string' && id ? { message: e.message, errorId: id } : { message: e.message }
+}
+
+/** text without control characters (a proxy's ANSI colours and the like); whitespace is kept. */
+function withoutControls(text: string): string {
+  let out = ''
+  for (const ch of text) {
+    const n = ch.charCodeAt(0)
+    if ((n < 32 && n !== 9 && n !== 10 && n !== 13) || (n >= 127 && n < 160)) continue
+    out += ch
+  }
+  return out
+}
+
+/** The sentence and error id of an error reply: the runner's JSON `{error, error_id}`, or the
+ *  text of one that is not JSON (an app's proxy answers `http.Error` in plain text), on one line;
+ *  nothing for an empty reply or a web page. */
+async function replyDetail(r: Response): Promise<{ detail: string; errorId?: string }> {
+  let text: string
+  try {
+    text = await r.text()
+  } catch {
+    return { detail: '' }
+  }
+  try {
+    const j: unknown = JSON.parse(text)
+    const err = (j as { error?: unknown } | null)?.error
+    const id = (j as { error_id?: unknown } | null)?.error_id
+    if (typeof err === 'string' && err.trim()) {
+      return typeof id === 'string' && id ? { detail: err.trim(), errorId: id } : { detail: err.trim() }
+    }
+    return { detail: '' }
+  } catch { /* not JSON */ }
+  const line = withoutControls(text).replace(/\s+/g, ' ').trim()
+  if (line === '' || /^<(!doctype|html)/i.test(line)) return { detail: '' }
+  return { detail: line.length > 200 ? `${line.slice(0, 199)}…` : line }
+}
+
+/** The error a refused read (raw, download) throws. 410: listed but gone. 404 (an older server's
+ *  answer for the same, or a file deleted meanwhile) reads the same to a person. */
+async function readFailure(r: Response, other: string): Promise<Error> {
+  if (r.status === 410) return new ArtifactGoneError()
+  if (r.status === 404) return new Error(FILE_GONE_MESSAGE)
+  const { detail, errorId } = await replyDetail(r)
+  return new FileRequestError(detail || other, r.status, errorId)
 }
 
 /** The file name in a `Content-Disposition: attachment; filename*=UTF-8''...` header, with any
@@ -76,18 +134,20 @@ export function saveBlob(blob: Blob, name: string): void {
   }
 }
 
-/** Why an upload was refused, in words fit to show. */
-async function uploadRefusal(r: Response): Promise<string> {
-  let detail = ''
-  try {
-    const j: unknown = await r.json()
-    detail = ((j as { error?: unknown } | null)?.error as string) ?? ''
-  } catch { /* not JSON */ }
-  if (r.status === 413) return detail || 'That file is larger than 25 MiB.'
-  if (r.status === 409) return detail || 'This session can’t take more files.'
-  if (r.status === 404) return 'This session can’t be found.'
-  return detail || `Upload failed (HTTP ${r.status}).`
+/** Why an upload was refused, in words fit to show, with the server's error id. */
+async function uploadRefusal(r: Response): Promise<FileRequestError> {
+  const { detail, errorId } = await replyDetail(r)
+  const say = (fallback: string) => new FileRequestError(detail || fallback, r.status, errorId)
+  if (r.status === 413) return say('That file is larger than the server takes.')
+  if (r.status === 409) return say('This session can’t take more files.')
+  if (r.status === 404) return new FileRequestError('This session can’t be found.', r.status, errorId)
+  return say(`Upload failed (HTTP ${r.status}).`)
 }
+
+/** What an upload that got no answer at all says: the connection went before the server replied.
+ *  A server or proxy that refuses a large body without reading it ends the upload this way. */
+export const UPLOAD_CUT_OFF_MESSAGE =
+  'The upload was cut off before the server answered: the connection dropped, or something between you and the server refused the file (often its size).'
 
 /** Sends a file like fetch would (same headers) but reports upload progress, which fetch cannot.
  *  Resolves to an ordinary Response. */
@@ -117,7 +177,7 @@ export function uploadWithProgress(
     }
     xhr.onerror = () => {
       signal?.removeEventListener('abort', onAbort)
-      reject(new TypeError('Network error'))
+      reject(new TypeError(UPLOAD_CUT_OFF_MESSAGE))
     }
     xhr.onabort = () => {
       signal?.removeEventListener('abort', onAbort)
@@ -156,7 +216,7 @@ export function createFiles(opts: FilesOptions): TransportFiles {
 
     async raw(sessionId, id) {
       const r = await request(`${artifacts(sessionId)}/${enc(id)}/raw`)
-      if (!r.ok) throw readFailure(r.status, `HTTP ${r.status}`)
+      if (!r.ok) throw await readFailure(r, `Couldn’t load this file (HTTP ${r.status}).`)
       return r.blob()
     },
 
@@ -165,7 +225,7 @@ export function createFiles(opts: FilesOptions): TransportFiles {
      *  else its id. */
     async download(sessionId, id) {
       const r = await request(`${artifacts(sessionId)}/${enc(id)}/download`)
-      if (!r.ok) throw readFailure(r.status, `Download failed (HTTP ${r.status}).`)
+      if (!r.ok) throw await readFailure(r, `Download failed (HTTP ${r.status}).`)
       const saveAs = filenameFromDisposition(r.headers.get('Content-Disposition')) ?? id
       saveBlob(await r.blob(), saveAs)
     },
@@ -176,7 +236,7 @@ export function createFiles(opts: FilesOptions): TransportFiles {
     },
 
     /** Uploads one file to the session as the person's attachment. Throws an Error whose message
-     *  is fit to show. */
+     *  is fit to show (a FileRequestError, with the server's error id, when the server refused). */
     async upload(sessionId, file, onProgress, signal) {
       const headers = {
         ...(await (opts.headers ?? opts.uploadHeaders)?.()),
@@ -186,7 +246,7 @@ export function createFiles(opts: FilesOptions): TransportFiles {
       const r = await uploadWithProgress(`${opts.base(sessionId)}/uploads`, file, headers, onProgress, signal, opts.credentials)
       opts.check?.(r)
       opts.checkUpload?.(r)
-      if (!r.ok) throw new Error(await uploadRefusal(r))
+      if (!r.ok) throw await uploadRefusal(r)
       const j = (await r.json()) as Partial<UploadedFile>
       if (typeof j.id !== 'string') throw new Error('Unexpected reply from the server.')
       return { id: j.id, name: typeof j.name === 'string' ? j.name : file.name, size: typeof j.size === 'number' ? j.size : file.size }

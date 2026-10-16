@@ -1559,6 +1559,14 @@
   margin: 6px 0 0;
 }
 
+/* the server's id for a failure, after its sentence (the runner's log has the same one) */
+.chat-error-id {
+  font-size: 0.9em;
+  opacity: 0.8;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 /* toolbar button */
 .files-toggle {
   background: none;

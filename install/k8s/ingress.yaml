@@ -18,9 +18,11 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    # nginx's default 1m body cap breaks the daemon's agent-config bundle
-    # upload (runner's agentconfig.go accepts up to 80MB) — I2.
-    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    # nginx's default 1m body cap breaks file uploads and the daemon's
+    # agent-config bundle (up to 80MB). The runner takes files up to 100 MiB
+    # (BLERG_RUNNER_MAX_FILE_MB); this leaves room above that. Raise it with
+    # the runner's limit.
+    nginx.ingress.kubernetes.io/proxy-body-size: "128m"
 spec:
   ingressClassName: nginx
   rules:

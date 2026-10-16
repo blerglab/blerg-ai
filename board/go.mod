@@ -1,6 +1,6 @@
 module github.com/blerglab/blerg-ai/board
 
-go 1.25.14
+go 1.26.9
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.61.0

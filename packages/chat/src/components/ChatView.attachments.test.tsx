@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import ChatView from './ChatView'
 import { createFakeTransport, type FakeTransport } from '../test/fakeTransport'
 import { SESSION, bigFile, ev as mk, file, meta, resetChatState, seed } from '../test/chat'
+import { FileRequestError } from '../transport/files'
 import type { SessionMeta } from '../transport/types'
 import type { AgentEvent } from '../types'
 
@@ -95,17 +96,42 @@ describe('composer attachments', () => {
   })
 
   it('says a 413 is too large', async () => {
-    files().uploadImpl = () => Promise.reject(new Error('file is larger than 25 MiB'))
+    files().uploadImpl = () => Promise.reject(new Error('This file is 130 MiB; the runner takes at most 100 MiB per file.'))
     mount()
     attach(file('a.pdf'))
-    expect(await screen.findByRole('alert')).toHaveTextContent('larger than 25 MiB')
+    expect(await screen.findByRole('alert')).toHaveTextContent('the runner takes at most 100 MiB per file')
   })
 
-  it('refuses a file over 25 MiB in the browser without uploading it', async () => {
+  it('without an advertised limit refuses a file over 25 MiB in the browser without uploading it', async () => {
     mount()
     attach(bigFile('huge.iso', 25 * 1024 * 1024 + 1))
     expect(await screen.findByRole('alert')).toHaveTextContent(/huge\.iso.*25 MiB/)
     expect(files().uploads).toHaveLength(0)
+  })
+
+  it('takes the limit the host passes (the runner advertises it)', async () => {
+    render(<ChatView session={SESSION} transport={t.transport} meta={idle} maxFileBytes={100 * 1024 * 1024} />)
+    attach(bigFile('big.iso', 30 * 1024 * 1024))
+    await waitFor(() => expect(files().uploads).toHaveLength(1))
+    attach(bigFile('huge.iso', 100 * 1024 * 1024 + 1))
+    expect(await screen.findByRole('alert')).toHaveTextContent('huge.iso is larger than 100 MiB and can’t be attached.')
+    expect(files().uploads).toHaveLength(1)
+  })
+
+  it('takes the limit from the session meta when the host passes none', async () => {
+    mount({ ...idle, limits: { max_file_bytes: 1024 } })
+    attach(bigFile('k.bin', 2048))
+    expect(await screen.findByRole('alert')).toHaveTextContent('k.bin is larger than 1.0 KB')
+    expect(files().uploads).toHaveLength(0)
+  })
+
+  it('shows the server’s error id beside its sentence', async () => {
+    files().uploadImpl = () => Promise.reject(new FileRequestError('The runner could not save the file because its disk is full; free some space.', 500, 'ab12cd34'))
+    mount()
+    attach(file('a.pdf'))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('a.pdf: The runner could not save the file because its disk is full; free some space. (error id ab12cd34)')
+    expect(within(alert).getByTestId('error-id')).toHaveAttribute('title', expect.stringContaining('log'))
   })
 
   it('takes at most 10 files per message', async () => {

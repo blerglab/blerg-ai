@@ -137,9 +137,10 @@ Paths are relative to the runner's `base_url`.
 | `GET` | `/agents` | manifest | public; `Accept: text/markdown` for the Markdown rendering |
 | `GET` | `/openapi.json` | OpenAPI 3.1 document | public |
 | `GET` | `/api/runner/me` | credential introspection | `404` when the contract is not configured |
+| `GET` | `/api/daemon/whoami` | would `/ws/daemon` accept this **daemon** token? | takes the daemon token, not an agent credential; see [Checking a daemon token](#checking-a-daemon-token) |
 | `GET` | `/api/models/{engine}` | the models (and each one's effort levels) a session on that engine can use | see [Model lists](#model-lists); also readable with a browser session |
 | `POST` | `/api/runner/start` | start a session | `202 {session_id}`; honours `Idempotency-Key` |
-| `GET` | `/api/runner/sessions/{id}` | status | `{lifecycle, runtime, resumable, auto_stop, interaction, error_reason, end_reason, ended_by}` |
+| `GET` | `/api/runner/sessions/{id}` | status | `{lifecycle, runtime, resumable, auto_stop, interaction, error_reason, end_reason, ended_by, limits}`; `limits` is `{max_file_bytes, max_session_upload_bytes, max_session_artifact_bytes}`, what the session's files may weigh (absent before 0.2.1) |
 | `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?}` → `202`; resumes a disconnected cluster session |
 | `POST` | `/api/runner/sessions/{id}/interrupt` | cancel the in-flight turn | `202`; `409` when there is no live runtime |
 | `POST` | `/api/runner/sessions/{id}/stop` | end the session | `200 {"status":"stopped"}`; idempotent. Finished work **must** call this or cluster session slots leak |
@@ -641,7 +642,7 @@ the bytes, the server-classified content type, the hardening headers (`nosniff`,
 | `GET …/artifacts/{aid}/raw` | the bytes for an in-app viewer: images and PDFs with their type, everything else as `application/octet-stream` |
 | `GET …/artifacts/{aid}/download` | the bytes as an attachment, named after the file (an older version as `<stem>-v<N><ext>`) |
 | `DELETE …/artifacts/{aid}` | `204`. Whoever may see the session may delete its files, whichever origin they came from |
-| `POST …/uploads` | the body is the file, `X-Artifact-Name` (percent-encoded) or `?name=` its name; stored with `origin: user` and attributed to the account the credential acts for. `201` with the stored file (`previous` is the version it follows). 25 MiB per file, 20 attachments and 200 MiB per session, 20 versions per name; `409` on an ended session or a reached cap |
+| `POST …/uploads` | the body is the file, `X-Artifact-Name` (percent-encoded) or `?name=` its name; stored with `origin: user` and attributed to the account the credential acts for. `201` with the stored file (`previous` is the version it follows). 100 MiB per file, 100 attachments and 500 MiB per session, 20 versions per name (the sizes are configurable, see below, and the status above reports them); `409` on an ended session or a reached cap, `413` for a file over the limit (the message names both sizes; send `Content-Length` and it is refused before the body is read) |
 
 An `artifact` event in the transcript announces each file the agent publishes, with the same
 fields as a list entry minus `latest_version` and `created_at`.
@@ -881,7 +882,7 @@ The sidebar shows, under **Where sessions run**, a thin meter per limit window f
 workstation daemon can read: the five-hour window ("5h") and the weekly one ("week"), the share
 used, and on hover when it resets; the bar turns amber from 70 % and red from 90 %. Limits belong
 to the provider account the machine is logged in to, not to a session, so the daemon reports them
-per provider (`usage_limits {provider, windows: [{id: "5h"|"7d"|"capped", used_percent,
+per provider (`usage_limits {provider, windows: [{id: "5h"|"7d"|"month"|"day"|"spend-week"|"capped", used_percent,
 resets_at}], fetched_at}` over its socket). The server keeps the latest in memory, carries them in
 `initial_state` as `daemons[].usage_limits` and pushes `daemon_limits_changed {daemon_id,
 usage_limits}` when they change (`GET /api/daemons` carries them too); the cluster runtime reports
@@ -891,7 +892,8 @@ withdraw its meters, and a window whose reset has passed is not drawn. Each bar 
 a spoken name ("Codex 5-hour window, 42% used, resets in 2h 10m, as of 11:50"); on a screen with no
 hover the reset shows as text ("↻2h"). Claude's come from the account usage endpoint the CLI's own
 usage view reads (`GET https://api.anthropic.com/api/oauth/usage`, `anthropic-beta:
-oauth-2025-04-20`; `five_hour` and `seven_day`, each a `utilization` 0–100 and a `resets_at`),
+oauth-2025-04-20`; `five_hour` and `seven_day`, each a `utilization` 0–100 and a `resets_at`, and
+`extra_usage`, the monthly spend limit),
 called with the CLI's sign-in when the daemon connects, every 10 minutes and about 5 seconds after
 a Claude Code turn ends. It reads only when `claude` is installed and
 `~/.claude/.credentials.json` holds a `claudeAiOauth` sign-in (an API key has no such limits), and
@@ -906,7 +908,13 @@ no Claude meter there; the daemon says so once in its log. The meter reads the a
 file, and a daemon started with `CLAUDE_CODE_OAUTH_TOKEN` may run its sessions on another. The
 endpoint and the credential file are the CLI's own internals, not a documented API: they may change
 or refuse such reads at any time, and the meter then goes empty (logged once; nothing else
-breaks). The percentage is floored, as the CLI shows it. When
+breaks). The percentage is floored, as the CLI shows it. A work or enterprise account has no
+five-hour or weekly window; it has a monthly spend limit, which the meter draws as "month" ("Monthly
+spend limit"): the share of the limit used, no reset time (the answer gives none), and "<1%" while
+under one percent. A spend limit that is used up also reads "capped". A subscription with extra usage
+switched on shows the month beside 5h and week, and a daily or weekly spend limit, when the answer has
+one, shows as "day" and "spend wk". Only the share leaves the machine: never the amount spent, the
+limit, the balance or the currency. When
 Claude refuses a call for its limit and says when it resets, the row also reads "capped · resets
 14:00" until then. Only percentages and reset times leave the machine: never the account id, plan,
 credits or the token. A daemon that predates this sends nothing and no meter is drawn; a server that predates it logs
@@ -1188,7 +1196,10 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_DATABASE_URL` | yes | — | Postgres DSN |
 | `BLERG_RUNNER_DAEMON_TOKEN` | yes | — | shared token the daemon presents on `/ws/daemon` |
 | `BLERG_RUNNER_LISTEN_PORT` | no | `8080` | app-level HTTP listen port. Deliberately not `BLERG_RUNNER_PORT` — Kubernetes auto-injects that name (`BLERG_RUNNER_PORT=tcp://<clusterIP>:8080`) into every pod for a `blerg-runner` Service already in the namespace, which would silently clobber a same-named custom var |
-| `BLERG_RUNNER_DATA_DIR` | no | — | directory for runner's on-disk state: published mockups and screenshots, uploaded agent-config bundles, and the files agents publish with `blerg-runner publish` (`artifacts/<session>/…`; see [`docs/artifacts.md`](../docs/artifacts.md)). It needs a persistent volume to keep them across restarts |
+| `BLERG_RUNNER_DATA_DIR` | no | `data` (relative to the working directory) | directory for runner's on-disk state: published mockups and screenshots, uploaded agent-config bundles, and the files agents publish with `blerg-runner publish` (`artifacts/<session>/…`; see [`docs/artifacts.md`](../docs/artifacts.md)). It needs a persistent volume to keep them across restarts, writable by the runner's user (id 65532 in the image); at startup the runner checks this and logs one `STORAGE NOT WRITABLE` line if it is not |
+| `BLERG_RUNNER_MAX_FILE_MB` | no | `100` | the largest file, in MiB, a person may attach or an agent publish. An invalid value keeps the default and logs one line; a value above either session total below is lowered to that total (also logged), so the limit the runner advertises is one a file can actually meet. Behind an ingress or proxy, its body-size limit must be larger (the Kubernetes ingress allows `128m`) |
+| `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB` | no | `500` | the total, in MiB, of the files people attach to one session |
+| `BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB` | no | `1024` | the total, in MiB, of the files one session's agent publishes |
 | `BLERG_RUNNER_KEY` | no | — | board↔runner contract key (must match the board's `BLERG_RUNNER_KEY`) |
 | `BLERG_CORE_URL` / `BLERG_CORE_REGISTER_KEY` | no | — | register with, and validate tokens against, `blerg-core` (the runner works standalone with the static key if unset) |
 | `BLERG_RUNNER_CORE_INTERNAL_KEY` | no | — | must equal core's `BLERG_CORE_INTERNAL_KEY`. Together with `BLERG_CORE_URL`, enables the personal-credential-first session spawn path, the per-person part of `GET /api/repos` (see [Repository list](#repository-list)), and `GET /api/me/credentials` (browser-authed; reports which personal credentials the caller has as `{"engines":[…],"git":bool,"git_providers":["github","gitlab"]}`, presence only — never a value — and `"unavailable":true` when core can't be asked); either unset means runner always uses the shared operator Secret, lists no one's own repositories, and that endpoint always answers `unavailable` |
@@ -1232,7 +1243,7 @@ dropped after 30 min. See ["When nobody is watching"](#what-runs-as-you-means) a
 | `BLERG_RUNNER_SERVER_URL` | yes | — | the server's WS URL to dial |
 | `BLERG_RUNNER_DAEMON_TOKEN` | yes | — | must match the server's value above |
 | `BLERG_RUNNER_REPOS_ROOT` | yes | — | where session checkouts live — the **first-run default**. The folder can be changed from the app (the launch sheet's Run column: "Repos folder → Change"); the daemon saves that choice to `<state dir>/settings.json`, and from then on the saved value wins over this variable on every start. Delete the file (or its `repos_root` key) to go back to the variable |
-| `BLERG_RUNNER_DAEMON_STATE_DIR` | no | `~/.blerg-runner-daemon` | where the daemon keeps its own state (`settings.json`, mode 0600 in a 0700 directory). Deliberately outside the repos root. If it can't be determined or written, changing the repos folder from the app is refused rather than applied until the next restart silently undoes it |
+| `BLERG_RUNNER_DAEMON_STATE_DIR` | no | `~/.blerg-runner-daemon` | where the daemon keeps its own state (`settings.json`, and `connection.json`, see [Checking a daemon token](#checking-a-daemon-token); mode 0600 in a 0700 directory). Deliberately outside the repos root. If it can't be determined or written, changing the repos folder from the app is refused rather than applied until the next restart silently undoes it |
 | `BLERG_RUNNER_DAEMON_NAME` | no | hostname | how this daemon identifies itself |
 | `BLERG_RUNNER_DAEMON_MODE` | no | `local` | daemon mode tag |
 | `BLERG_RUNNER_SERVER_HTTP` | no | — | server's HTTP base, for the messages/data-plane APIs |
@@ -1244,6 +1255,32 @@ dropped after 30 min. See ["When nobody is watching"](#what-runs-as-you-means) a
 | `BLERG_RUNNER_PROVISION_CLAUDE_MD` | no | `false` | true = add/refresh the blerg-runner messaging block in ~/.claude/CLAUDE.md on every start |
 | `BLERG_RUNNER_CLAUDE_USAGE` | no | on | `0` (or `false`/`off`/`no`) = do not read Claude's usage meter from the account usage endpoint with the CLI's sign-in (see [Usage limits](#usage-limits)); Claude then shows only a reactive cap |
 | `BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE` | no | `false` | true = a This machine session may clone a private repository with the launching person's own git token, on the bare host (see [Launching on a repository by name](#launching-on-a-repository-by-name)). While it clones, any other unsandboxed session on this machine could read that token — **only set this on a daemon nobody else uses** |
+
+#### Checking a daemon token
+
+A daemon is told it was accepted: when its `daemon_hello` sets `welcome: true`, the server answers
+an accepted token with `{"type":"daemon_welcome","daemon_id":…,"name":…}` before anything else
+(a session pod's carries its `session_id`), and closes a refused one with `4401`, as before. The
+daemon logs `connected` only on the welcome. A server older than 0.2.1 sends no welcome and ignores
+the hello field; the daemon then takes a connection that stays open for 5 seconds as accepted and
+logs that the server did not confirm it. A 0.2.0 daemon never asks for a welcome, so it gets none.
+For the reconnect backoff (2 s doubling to 60 s), only a confirmed connection, or one open for those
+5 seconds, starts the ladder over; a `4401` never does.
+
+The daemon (not a session pod) writes its connection state to `<state dir>/connection.json`, mode
+0600, through a temporary file and a rename:
+`{"state":"connecting|connected|unconfirmed|refused","server":"<url>","since":"<RFC3339>","detail":"<short reason>","pid":<process id>}`.
+It writes `connecting` before its first dial, so a file another process left is never current. No
+token, ever. `install/desktop/daemon/install.sh status` prints it.
+
+`GET /api/daemon/whoami` with `Authorization: Bearer <daemon token>` checks a token without
+connecting a daemon: `200 {"ok":true,"mode":"daemon"}` for `BLERG_RUNNER_DAEMON_TOKEN`,
+`200 {"ok":true,"mode":"runtime"}` for a session pod's current runtime token, `401` for anything
+else (`503` if a runtime token could not be checked). It has no rate limit, like the websocket
+hello: the tokens are long random strings. A server older than 0.2.1 has no such route and answers
+its web page (`200 text/html`) or a `404`, so a caller must treat only a `200` with a JSON body
+`{"ok":true}` as accepted. The desktop installer asks it before it replaces a running daemon
+(`install/desktop/DAEMON.md`, "Is the daemon connected?").
 
 #### Changing the repos folder while the daemon runs
 

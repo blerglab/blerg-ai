@@ -203,8 +203,7 @@ describe('the session panel: Files, Capabilities and Settings', () => {
     }
     seed()
     await renderPage()
-    await waitFor(() => expect(within(rail()).getByTestId('rail-open-files')).toBeInTheDocument())
-    fireEvent.click(within(rail()).getByTestId('rail-open-files'))
+    fireEvent.click(within(rail()).getByRole('tab', { name: /^Files/ }))
     const panel = within(rail()).getByTestId('rail-files')
     await waitFor(() => expect(within(panel).getAllByTestId('artifact-name')).toHaveLength(2))
   })

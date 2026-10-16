@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent, UserMessagePayload } from "@blerglab/chat";
-import { describeUserMessage } from "./SessionChat";
+import { boardMeta, describeUserMessage } from "./SessionChat";
 
 const ev = { type: "agent_event", session_id: "s", client_event_id: "e", ts: "", kind: "user_message", payload: {} } as AgentEvent;
 const look = (p: UserMessagePayload, first = false) => describeUserMessage(ev, p, { first });
@@ -19,5 +19,17 @@ describe("SessionChat describeUserMessage", () => {
 
   it("the board's own automation speaks as itself", () => {
     expect(look({ text: "review found two problems", source: "blerg-board" })).toEqual({ author: "blerg-board" });
+  });
+});
+
+describe("SessionChat boardMeta", () => {
+  it("fills the start and model from the board's row and keeps the runner's file limits", () => {
+    const limits = { max_file_bytes: 100 * 1024 * 1024, max_session_upload_bytes: 500 * 1024 * 1024 };
+    expect(boardMeta({ status: "running", started_at: "", limits }, { created_at: "2026-10-16T00:00:00Z", model: "m1" })).toEqual({
+      status: "running", started_at: "2026-10-16T00:00:00Z", model: "m1", limits,
+    });
+    expect(boardMeta({ status: "idle", started_at: "a", model: "runner-model" }, { created_at: "b", model: "m1" })).toEqual({
+      status: "idle", started_at: "a", model: "runner-model",
+    });
   });
 });

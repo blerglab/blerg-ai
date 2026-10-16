@@ -11,7 +11,7 @@
 #                          (over a running daemon with agent work in progress it
 #                          lists that work and asks first; --yes skips the question)
 #   install.sh uninstall   stop and remove the service (binary is left in place)
-#   install.sh status      show whether it's running
+#   install.sh status      show whether it's running and its connection state
 #   install.sh preflight   check only (used by blerg-up.sh before doing anything
 #                           else); tries to self-heal a missing systemd --user
 #                           session via sudo. Exit codes: 0 fine, 3 needs a
@@ -45,9 +45,10 @@ Usage: $0 {install [--yes]|uninstall|status|preflight}
   install     build the daemon binary, install and start the service. A
               reinstall over a running daemon that has agent work in
               progress lists it and asks first; --yes reinstalls anyway.
-              With no terminal to ask, it stops with exit code 5
+              With no terminal to ask, it stops with exit code 5. A daemon
+              token the server refuses stops it with exit code 6
   uninstall   stop and remove the service (the binary is left in place)
-  status      show whether it is running
+  status      show whether it is running, and its connection to the server
   preflight   check only (used by blerg-up.sh); tries to start a missing
               systemd --user session via sudo. Exit codes: 0 fine, 3 needs a
               privileged fix, 4 session up but its bus is not, 1 other failure
@@ -99,6 +100,9 @@ BIN_PATH="$BIN_DIR/blerg-runner-daemon"
 # install's exit code when it stopped because agent work is running and there
 # was no terminal to ask (blerg-up.sh says so instead of "didn't work").
 EXIT_WORK_RUNNING=5
+# install's exit code when the server refused the daemon token: before anything
+# was replaced (the running daemon left as it was), or by the daemon it started.
+EXIT_TOKEN_REFUSED=6
 # The build lands here first, and replaces BIN_PATH only once the reinstall goes
 # ahead (put_binary_in_place): a "no" leaves the running daemon's binary alone.
 NEW_BIN_PATH="$BIN_PATH.new"
@@ -160,14 +164,32 @@ go_os() {
   esac
 }
 
+# The Go release go.mod asks for (runner/go.mod). A host go that is older would have to fetch it
+# first, which needs network access the installer cannot rely on, so it is not used.
+GO_MIN_VERSION=1.26.9
+
+# version_ge A B: succeeds when dotted version A >= B (numbers only; a missing part is 0).
+version_ge() {
+  local IFS=. a b i
+  read -ra a <<<"$1"
+  read -ra b <<<"$2"
+  for i in 0 1 2; do
+    if [ "${a[i]:-0}" -gt "${b[i]:-0}" ]; then return 0; fi
+    if [ "${a[i]:-0}" -lt "${b[i]:-0}" ]; then return 1; fi
+  done
+  return 0
+}
+
 find_host_go() {
-  # Mirrors runner/Makefile's own toolchain selection: a pinned go1.25+ at
-  # ~/go/bin/go if present (this repo's module needs 1.25+, hosts often lag),
-  # else whatever `go` is on PATH.
+  # Mirrors runner/Makefile's own toolchain selection: a pinned go at ~/go/bin/go
+  # if present (hosts often lag), else whatever `go` is on PATH. Either must be at
+  # least GO_MIN_VERSION, the release runner/go.mod names.
+  local candidate have
   for candidate in "$HOME/go/bin/go" "$(command -v go 2>/dev/null || true)"; do
     [ -n "$candidate" ] && [ -x "$candidate" ] || continue
-    "$candidate" version 2>/dev/null | grep -qE 'go1\.(2[5-9]|[3-9][0-9]|[1-9][0-9][0-9])' \
-      && { echo "$candidate"; return 0; }
+    have="$("$candidate" version 2>/dev/null | sed -n 's/.* go\([0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\).*/\1/p')"
+    [ -n "$have" ] || continue
+    version_ge "$have" "$GO_MIN_VERSION" && { echo "$candidate"; return 0; }
   done
   return 1
 }
@@ -206,9 +228,9 @@ EOF
       -v "$HOME/.cache/blerg-go":/gopath \
       -v "$HOME/.cache/blerg-gocache":/gocache \
       -v "$REPO_ROOT":/src -w /src/runner \
-      golang:1.25@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 go build -o "/src/bin/blerg-runner-daemon.new" ./cmd/daemon
+      golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 go build -o "/src/bin/blerg-runner-daemon.new" ./cmd/daemon
   else
-    blerg_fail "Need either go >=1.25 or docker on PATH to build the daemon."
+    blerg_fail "Need either go >= $GO_MIN_VERSION or docker on PATH to build the daemon."
     exit 1
   fi
 }
@@ -286,6 +308,227 @@ note_planned_restart() {
     return 0
   fi
   blerg_step "Warning: couldn't note the planned restart in $dir; the sessions it cuts off will be told the daemon stopped unexpectedly."
+  return 0
+}
+
+# --- Does the server accept the daemon token? -------------------------------
+# Before the running daemon is replaced, the token about to be installed is
+# shown to the server's GET /api/daemon/whoami (check_daemon_token); after the
+# service (re)starts, the new daemon's connection.json says how its link went
+# (wait_for_connection). The token travels only in a 0600 header file curl reads
+# (-H @file), never on a command line, and is never printed.
+
+# daemon_http_base: the server's HTTP base from SERVER_URL (ws -> http,
+# wss -> https, without /ws/daemon), e.g. ws://localhost:8083/ws/daemon ->
+# http://localhost:8083.
+daemon_http_base() {
+  local u="$SERVER_URL"
+  case "$u" in
+    wss://*) u="https://${u#wss://}" ;;
+    ws://*)  u="http://${u#ws://}" ;;
+  esac
+  u="${u%%\?*}"; u="${u%%#*}"; u="${u%/}"; u="${u%/ws/daemon}"; u="${u%/}"
+  printf '%s' "$u"
+}
+
+# url_display URL: the URL as messages show it, without user:password@ (a
+# credential someone put into BLERG_RUNNER_SERVER_URL is never printed).
+url_display() {
+  local scheme="" rest="$1"
+  case "$rest" in
+    *://*) scheme="${rest%%://*}://"; rest="${rest#*://}" ;;
+  esac
+  local auth="${rest%%/*}" path=""
+  [ "$auth" = "$rest" ] || path="/${rest#*/}"
+  printf '%s%s%s' "$scheme" "${auth##*@}" "$path"
+}
+
+# with_timeout SECONDS CMD...: CMD, cut off after SECONDS where timeout(1)
+# exists (a sick user bus can block a systemctl call for many seconds).
+with_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi
+}
+
+# url_is_loopback URL: the URL's host is this machine, so a proxy from the
+# shell (a corporate http_proxy) must not be asked for it.
+url_is_loopback() {
+  local h="${1#*://}"
+  h="${h%%/*}"; h="${h##*@}"
+  case "$h" in
+    \[*\]*) h="${h%%]*}"; h="${h#[}" ;;
+    *) h="${h%%:*}" ;;
+  esac
+  case "$h" in
+    localhost|localhost.|127.*|::1) return 0 ;;
+  esac
+  return 1
+}
+
+# The temp files of the token check, removed however the script ends.
+TOKEN_CHECK_HDR=""
+TOKEN_CHECK_BODY=""
+RESTART_MARK=""
+remove_token_check_files() {
+  rm -f "${TOKEN_CHECK_HDR:-}" "${TOKEN_CHECK_BODY:-}" "${TOKEN_CHECK_BODY:+$TOKEN_CHECK_BODY.err}" "${RESTART_MARK:-}"
+}
+trap remove_token_check_files EXIT
+
+token_refused_box() { # what was refused, where the token comes from, how to fix it
+  blerg_box "daemon token refused" <<EOF
+$1
+
+The daemon token is BLERG_RUNNER_DAEMON_TOKEN in $ENV_FILE.
+It must be the same as the server's BLERG_RUNNER_DAEMON_TOKEN. Put the
+server's token there, then run ./daemon/install.sh install again.
+See DAEMON.md, "The server refused the daemon token".
+EOF
+}
+
+# check_daemon_token: ask the server whether it accepts DAEMON_TOKEN. Only a
+# 401 stops the install (exit EXIT_TOKEN_REFUSED, nothing replaced). A server
+# older than 0.2.1 has no such route: it answers its web page (200 text/html)
+# or a 404, and the check is skipped. A server that cannot be reached may
+# simply be down: say so and go on.
+check_daemon_token() {
+  local base url out code ctype err shown
+  base="$(daemon_http_base)"
+  url="$base/api/daemon/whoami"
+  shown="$(url_display "$base")"
+  if ! command -v curl >/dev/null 2>&1; then
+    blerg_step "Couldn't check the daemon token with the server first (curl isn't installed); going on."
+    return 0
+  fi
+  # 0600: umask 077 above.
+  if ! TOKEN_CHECK_HDR="$(mktemp 2>/dev/null)" || ! TOKEN_CHECK_BODY="$(mktemp 2>/dev/null)"; then
+    blerg_step "Couldn't check the daemon token with the server first (no temporary file); going on."
+    return 0
+  fi
+  printf 'Authorization: Bearer %s\n' "$DAEMON_TOKEN" > "$TOKEN_CHECK_HDR"
+  err="$TOKEN_CHECK_BODY.err"
+  # -q first: no ~/.curlrc (a --fail there would hide the 401, a --trace would write the header
+  # to disk). --noproxy for this machine: a corporate proxy in the shell must not get the
+  # localhost check.
+  if url_is_loopback "$base"; then
+    out="$(curl -q -sS --proto =http,https --noproxy '*' --max-time 10 -H "@$TOKEN_CHECK_HDR" -o "$TOKEN_CHECK_BODY" -w '%{http_code} %{content_type}' "$url" 2>"$err")" || out="fail $?"
+  else
+    out="$(curl -q -sS --proto =http,https --max-time 10 -H "@$TOKEN_CHECK_HDR" -o "$TOKEN_CHECK_BODY" -w '%{http_code} %{content_type}' "$url" 2>"$err")" || out="fail $?"
+  fi
+  rm -f "$TOKEN_CHECK_HDR"
+  code="${out%% *}"
+  ctype="${out#* }"
+  case "$code" in
+    fail)
+      blerg_step "Couldn't reach the server at $shown to check the daemon token first ($(head -1 "$err" 2>/dev/null | sed 's/^curl: ([0-9]*) //')); going on - it may simply be down."
+      ;;
+    200)
+      if case "$ctype" in application/json*) true ;; *) false ;; esac &&
+         grep -q '"ok"[[:space:]]*:[[:space:]]*true' "$TOKEN_CHECK_BODY" 2>/dev/null; then
+        blerg_ok "The server at $shown accepts this daemon token."
+      else
+        blerg_step "The server at $shown is older than 0.2.1 and can't check a daemon token first; skipped."
+      fi
+      ;;
+    404)
+      blerg_step "The server at $shown is older than 0.2.1 and can't check a daemon token first; skipped."
+      ;;
+    401)
+      rm -f "$TOKEN_CHECK_BODY" "$err"
+      token_refused_box "The server at $shown refused this daemon token, so nothing
+was installed or restarted: a daemon running now was left as it was."
+      exit "$EXIT_TOKEN_REFUSED"
+      ;;
+    *)
+      blerg_step "The server at $shown answered $code to the daemon token check; going on without it."
+      ;;
+  esac
+  rm -f "$TOKEN_CHECK_BODY" "$err"
+  return 0
+}
+
+# conn_field NAME FILE: a string field of connection.json (one line of JSON the
+# daemon writes), with \" unescaped; conn_pid FILE: its pid.
+conn_field() {
+  sed -nE 's/.*"'"$1"'":"(([^"\\]|\\.)*)".*/\1/p' "$2" 2>/dev/null | sed -e 's/\\"/"/g' | head -1
+}
+conn_pid() { sed -nE 's/.*"pid":([0-9]+).*/\1/p' "$1" 2>/dev/null | head -1; }
+connection_file() { printf '%s/connection.json' "$(daemon_state_dir)"; }
+
+# mark_restart: right before the service (re)starts. A connection.json from
+# before this point (the daemon that is being replaced) is never taken as the
+# new daemon's answer.
+mark_restart() {
+  RESTART_MARK="$(mktemp 2>/dev/null)" || RESTART_MARK=""   # removed on exit (remove_token_check_files)
+}
+
+# conn_file_is_new FILE PID: written by the daemon just started. With its pid
+# known (the service manager says), only that pid's file counts; otherwise one
+# written since mark_restart (not older than the mark: file times can be as
+# coarse as a clock tick, so "the same time" counts).
+conn_file_is_new() {
+  [ -f "$1" ] || return 1
+  if [ -n "$2" ]; then
+    [ "$(conn_pid "$1")" = "$2" ]
+  else
+    [ -n "$RESTART_MARK" ] && [ -f "$RESTART_MARK" ] && ! [ "$RESTART_MARK" -nt "$1" ]
+  fi
+}
+
+# wait_for_connection PID_FN LOG_HINT: up to BLERG_DAEMON_CONNECT_WAIT seconds
+# (default 30) for the new daemon to say how its connection went. connected or
+# unconfirmed: fine. refused: loud, and returns 1. No answer in time: a
+# warning only, never a failure, and it never waits on input.
+wait_for_connection() {
+  local file pid state="" max="${BLERG_DAEMON_CONNECT_WAIT:-30}" deadline
+  case "$max" in ''|*[!0-9]*) max=30 ;; esac
+  # Wall-clock, not a count of tries: on a sick user bus one pid query can block for seconds.
+  deadline=$((SECONDS + max))
+  file="$(connection_file)"
+  blerg_step "Waiting up to ${max}s for the daemon to connect to the server..."
+  while :; do
+    pid="$("$1" 2>/dev/null || true)"
+    case "$pid" in ''|0|*[!0-9]*) pid="" ;; esac
+    if conn_file_is_new "$file" "$pid"; then
+      state="$(conn_field state "$file")"
+      case "$state" in
+        connected)
+          blerg_ok "The daemon is connected: the server accepted its token."
+          return 0 ;;
+        unconfirmed)
+          blerg_ok "The daemon is connected (the server is older than 0.2.1 and does not confirm it)."
+          return 0 ;;
+        refused)
+          token_refused_box "The daemon was installed and started, but the server
+refused its token. It keeps retrying, more and more slowly, until
+the token is fixed. Its log: $2"
+          return 1 ;;
+      esac
+    fi
+    [ "$SECONDS" -ge "$deadline" ] && break
+    sleep 1
+  done
+  blerg_step "Warning: the daemon has not reported a connection after ${max}s (${state:-no report yet})."
+  blerg_step "  It may still be starting. Check: ./daemon/install.sh status, and its log: $2"
+  return 0
+}
+
+# print_connection_state: connection.json in plain words, for `status`.
+print_connection_state() {
+  local file pid state
+  file="$(connection_file)"
+  if [ ! -f "$file" ]; then
+    echo "Connection: no record in $file (a daemon older than 0.2.1 keeps none)."
+    return 0
+  fi
+  state="$(conn_field state "$file")"
+  pid="$(conn_pid "$file")"
+  if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+    echo "Connection: the daemon is not running (process $pid has ended); its last state was:"
+    echo "  ${state:-unknown} - $(conn_field server "$file"), since $(conn_field since "$file")"
+  else
+    echo "Connection: ${state:-unknown} - $(conn_field server "$file"), since $(conn_field since "$file")"
+  fi
+  echo "  $(conn_field detail "$file")"
   return 0
 }
 
@@ -521,6 +764,7 @@ EOF
 
 install_systemd() {
   resolve_config
+  check_daemon_token
   build_binary
   build_sandbox_image_if_missing
   UNIT_DIR="$HOME/.config/systemd/user"
@@ -547,6 +791,7 @@ EOF
   systemctl --user daemon-reload
   systemctl --user enable "$SERVICE_NAME.service"
   note_planned_restart
+  mark_restart
   systemctl --user restart "$SERVICE_NAME.service"
   if ! loginctl enable-linger "$USER" 2>/dev/null; then
     # Usually harmless and only a warning: the daemon is running now, it just
@@ -557,7 +802,10 @@ EOF
   fi
 
   blerg_ok "Installed and started. Logs: journalctl --user -u $SERVICE_NAME -f"
+  wait_for_connection systemd_daemon_pid "journalctl --user -u $SERVICE_NAME -f" || exit "$EXIT_TOKEN_REFUSED"
 }
+
+systemd_daemon_pid() { with_timeout 3 systemctl --user show -p MainPID --value "$SERVICE_NAME.service"; }
 
 # The daemon links these two into your home on every start
 # (runner/internal/daemon/provision.go). Uninstall removes each one only while
@@ -632,10 +880,12 @@ redact_secrets() {
 
 status_systemd() {
   systemctl --user status "$SERVICE_NAME.service" --no-pager -l 2>&1 | redact_secrets || true
+  print_connection_state
 }
 
 install_launchd() {
   resolve_config
+  check_daemon_token
   build_binary
   build_sandbox_image_if_missing
   LABEL="dev.blerg.runner-daemon"
@@ -662,12 +912,16 @@ EOF
   chmod 600 "$PLIST_PATH"
 
   note_planned_restart
+  mark_restart
   launchctl bootout "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
   launchctl enable "gui/$(id -u)/$LABEL"
 
   blerg_ok "Installed and started. Logs: $LOG_DIR/blerg-runner-daemon.log"
+  wait_for_connection launchd_daemon_pid "$LOG_DIR/blerg-runner-daemon.log" || exit "$EXIT_TOKEN_REFUSED"
 }
+
+launchd_daemon_pid() { with_timeout 3 launchctl print "gui/$(id -u)/dev.blerg.runner-daemon" | awk '$1 == "pid" && $2 == "=" { print $3; exit }'; }
 
 uninstall_launchd() {
   LABEL="dev.blerg.runner-daemon"
@@ -679,6 +933,7 @@ uninstall_launchd() {
 
 status_launchd() {
   launchctl print "gui/$(id -u)/dev.blerg.runner-daemon" 2>&1 | redact_secrets | head -20
+  print_connection_state
 }
 
 ensure_systemd_user_session() {

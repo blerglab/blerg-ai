@@ -3,7 +3,8 @@
 // sent). Finished chips are kept per session for the life of the page, so leaving a session and
 // coming back does not lose them (the draft text is what model/storage.ts stores; files are not).
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_BYTES } from '../model/attachments'
+import { formatLimit, MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_BYTES } from '../model/attachments'
+import { fileErrorText } from '../transport/files'
 import type { TransportFiles } from '../transport/types'
 
 export interface AttachmentItem {
@@ -15,6 +16,8 @@ export interface AttachmentItem {
   loaded?: number
   id?: string
   error?: string
+  /** The server's id for the failure (the runner logs it too), when it gave one. */
+  errorId?: string
 }
 
 const kept = new Map<string, AttachmentItem[]>()
@@ -25,7 +28,9 @@ export function resetKeptAttachments() {
   kept.clear()
 }
 
-export function useAttachments(sessionId: string, files: TransportFiles | null) {
+/** maxBytes: the largest file the server takes (the runner advertises it); a larger one is refused
+ *  here, before it is sent. Default MAX_ATTACHMENT_BYTES, an older runner's limit. */
+export function useAttachments(sessionId: string, files: TransportFiles | null, maxBytes: number = MAX_ATTACHMENT_BYTES) {
   const [items, setItems] = useState<AttachmentItem[]>(() => kept.get(sessionId) ?? [])
   const [notice, setNotice] = useState<string | null>(null)
   // The list as the handlers see it right now; every change goes through apply() so it never lags.
@@ -61,8 +66,8 @@ export function useAttachments(sessionId: string, files: TransportFiles | null) 
     const added: AttachmentItem[] = []
     for (const f of chosen) {
       const key = `att${++counter}`
-      if (f.size > MAX_ATTACHMENT_BYTES) {
-        added.push({ key, name: f.name, size: f.size, status: 'error', error: `${f.name} is larger than 25 MiB and can’t be attached.` })
+      if (f.size > maxBytes) {
+        added.push({ key, name: f.name, size: f.size, status: 'error', error: `${f.name} is larger than ${formatLimit(maxBytes)} and can’t be attached.` })
         continue
       }
       if (room <= 0) {
@@ -81,12 +86,13 @@ export function useAttachments(sessionId: string, files: TransportFiles | null) 
         (e: unknown) => {
           aborts.current.delete(key)
           if (ctl.signal.aborted) return
-          patch(key, { status: 'error', error: `${f.name}: ${e instanceof Error ? e.message : 'upload failed.'}` })
+          const { message, errorId } = fileErrorText(e, 'upload failed.')
+          patch(key, { status: 'error', error: `${f.name}: ${message}`, ...(errorId ? { errorId } : {}) })
         },
       )
     }
     if (added.length > 0) apply(cur => [...cur, ...added])
-  }, [sessionId, files, patch, apply])
+  }, [sessionId, files, patch, apply, maxBytes])
 
   /** Drops a chip: cancels an upload in flight, deletes one that finished. */
   const remove = useCallback((key: string) => {

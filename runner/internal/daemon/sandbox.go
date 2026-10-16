@@ -351,6 +351,9 @@ type sandboxRunExtras struct {
 	pluginCache     string
 	codexHome       string
 	codexSourceHome string
+	// noProxy is the NO_PROXY / no_proxy value of a container on the sandbox network; "" =
+	// leave both to Docker. See sandboxNoProxy.
+	noProxy string
 }
 
 // sandboxRunArgs is the `docker run` argument list for a session sandbox:
@@ -388,6 +391,15 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 	}
 	if extras.network != "" {
 		args = append(args, "--network", extras.network)
+	}
+	if extras.noProxy != "" {
+		// Explicit `-e` pairs, both spellings, on purpose. The docker client adds the proxy
+		// variables of ~/.docker/config.json to every container it runs, but only the exact
+		// keys that no `-e` already names (docker/cli ParseProxyConfig). Neither an
+		// --env-file entry nor the BLERG_RUNNER_* allowlist above would stop that, and the
+		// injected NO_PROXY lacks the sandbox's service names, so the messaging CLI would
+		// send http://blerg-runner:8080 to the corporate proxy.
+		args = append(args, "-e", "NO_PROXY="+extras.noProxy, "-e", "no_proxy="+extras.noProxy)
 	}
 	if extras.cliPath != "" {
 		// Read-only: the session runs the CLI, it has no business editing the
@@ -523,6 +535,7 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 		}
 		if exists {
 			extras.network = opts.Network
+			extras.noProxy = sandboxNoProxy(os.Getenv, home)
 			env = sandboxNetworkEnv(env)
 		}
 	}

@@ -84,7 +84,7 @@ export type { AskLive, LiveReport, SubagentLive } from './model/liveState'
 export { doingLine, staleSubagent, subagentModel, subagentStatus, subagentTitle, subagentTokens, tokenLabel } from './model/subagents'
 export type { SubagentStatus } from './model/subagents'
 export type { AskState, Asks } from './model/asks'
-export { MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_BYTES, attachmentNote, composeMessage, splitAttachmentNote } from './model/attachments'
+export { MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_BYTES, attachmentNote, composeMessage, formatLimit, splitAttachmentNote } from './model/attachments'
 export type { UploadedFile } from './model/attachments'
 export {
   HTML_ARTIFACT_CSP,

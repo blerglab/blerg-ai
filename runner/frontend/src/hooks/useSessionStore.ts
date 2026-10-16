@@ -19,6 +19,9 @@ interface SessionStore {
   /** The release version (the VERSION file) and git commit the server was built from; '' when unstamped. */
   serverRelease: string
   serverCommit: string
+  /** The largest file, in bytes, a person may attach: the server's advertised limit; null when it
+   *  advertises none (older than 0.2.1), and the chat then assumes its default. */
+  maxFileBytes: number | null
   /** The server version this page was loaded from (the first one it was told). */
   loadedVersion: string
   /** The server has since reported a different version: this tab runs an old copy of the app. */
@@ -61,6 +64,7 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     set({
       daemons: msg.daemons, sessions: msg.sessions, statusChangedAt, serverVersion,
       serverRelease: msg.server_release ?? "", serverCommit: msg.server_commit ?? "",
+      maxFileBytes: typeof msg.limits?.max_file_bytes === "number" && msg.limits.max_file_bytes > 0 ? msg.limits.max_file_bytes : null,
       loadedVersion: loaded,
       updated: loaded !== "" && key !== "" && key !== loaded,
     })
@@ -276,6 +280,7 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     serverVersion: "",
     serverRelease: "",
     serverCommit: "",
+    maxFileBytes: null,
     loadedVersion: "",
     updated: false,
     statusChangedAt: {},

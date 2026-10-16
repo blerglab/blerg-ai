@@ -203,8 +203,9 @@ right for your cluster. Two common setups:
 `nginx.ingress.kubernetes.io/*` annotations: `proxy-read-timeout` and
 `proxy-send-timeout` of `3600` (needed because the runner's
 `/ws/daemon`/`/ws/browser` are long-lived WebSocket connections, not short
-HTTP requests), and `proxy-body-size: 100m` (nginx's default 1m cap breaks the
-daemon's agent-config bundle upload). If your cluster's controller is Traefik
+HTTP requests), and `proxy-body-size: 128m` (nginx's default 1m cap breaks file
+uploads, which the runner takes up to 100 MiB, and the daemon's agent-config
+bundle upload). If your cluster's controller is Traefik
 (k3s's default) or anything else:
 
 - Change `ingressClassName: nginx` to match (`kubectl get ingressclass`
@@ -325,6 +326,11 @@ so those files survive restarts and deploys.
   grow if its StorageClass has `allowVolumeExpansion: true` — then
   `kubectl -n blerg patch pvc blerg-runner-data -p '{"spec":{"resources":{"requests":{"storage":"20Gi"}}}}'`.
   A size request is not a hard quota on host-path provisioners.
+- **How much a session holds.** By default one session's agent may publish
+  1 GiB of files and be sent 500 MiB of attachments, at most 100 MiB a file
+  (`BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB`, `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`,
+  `BLERG_RUNNER_MAX_FILE_MB` in `configmap.yaml`). Size the claim for the
+  sessions you keep, or lower the limits.
 - **Recreate, not rolling.** A `ReadWriteOnce` volume is mounted by one node at
   a time, so the runner Deployment uses the `Recreate` strategy: a rolling
   update would start the new pod before stopping the old one, and on another
@@ -615,7 +621,7 @@ The actual agent-session daemon — the process that drives your `claude` CLI
 in tmux — is not containerized and does not run in the cluster. Run it on
 your workstation, pointed at the in-cluster runner's `/ws/daemon` endpoint
 through the Ingress. In the foreground, from a checkout of this repository
-(Go ≥ 1.25):
+(Go ≥ 1.26):
 
 ```sh
 export BLERG_RUNNER_SERVER_URL=wss://runner.<DOMAIN>/ws/daemon
@@ -805,7 +811,7 @@ Secret and restart the three Deployments after each `deploy.sh` run.
 | Pods `CrashLoopBackOff` with `exec format error` | `kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.architecture}'` vs. `docker version --format '{{.Server.Arch}}'` | Images were built for the wrong CPU architecture. Build on a matching machine and deploy with a new `TAG`. |
 | `deploy.sh` times out at `rollout status` | `kubectl -n blerg get pods`, then `describe`/`logs` of the failing pod | Usually one of the rows above; the Postgres pod is not in that wait list, so check it too. |
 | Every host answers `404` from the ingress | `kubectl get ingressclass`; `kubectl -n blerg get ingress blerg` shows no `ADDRESS` | The controller is not ingress-nginx or uses another class: edit `ingressClassName` and the annotations in `ingress.yaml` ([Ingress controller](#ingress-controller-check-6-expanded)). |
-| Browser or daemon disconnects and reconnects in a loop; daemon uploads fail with `413` | `kubectl -n blerg get ingress blerg -o yaml` shows the `proxy-*-timeout` and `proxy-body-size` annotations | Your controller ignores the nginx annotations: set its own long WebSocket timeout (3600 s) and a 100m body limit. |
+| Browser or daemon disconnects and reconnects in a loop; daemon uploads fail with `413` | `kubectl -n blerg get ingress blerg -o yaml` shows the `proxy-*-timeout` and `proxy-body-size` annotations | Your controller ignores the nginx annotations: set its own long WebSocket timeout (3600 s) and a 128m body limit (above the runner's per-file limit, `BLERG_RUNNER_MAX_FILE_MB`). |
 | Login loops back to "Sign in required" | Is the page `http://` on a host other than `localhost`? | The refresh cookie is `Secure`: use TLS (`CLUSTER_ISSUER` or a terminator plus `SCHEME=https`) and re-run `deploy.sh` ([TLS](#tls)). |
 | Endless redirect between board/runner and `/auth/refresh`, or refresh answers `400 invalid return_to` | Does the browser's scheme match `SCHEME`? `kubectl -n blerg get configmap blerg-config -o jsonpath='{.data.BLERG_CORE_PUBLIC_URL}'` | Set `SCHEME` to what browsers actually use and re-run `deploy.sh`. |
 | Browser warns about the certificate; `blerg-tls` not ready | `kubectl -n blerg get certificate,order,challenge` | Wait for DNS-01 propagation (minutes); a failing `challenge` says why (DNS, issuer credentials, HTTP-01 not reachable). Check `kubectl get clusterissuer`. |

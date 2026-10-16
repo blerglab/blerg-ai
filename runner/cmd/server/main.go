@@ -177,6 +177,12 @@ func main() {
 		log.Println("BLERG_RUNNER_DATABASE_URL not set — running without database")
 	}
 
+	// A data volume the runner's user cannot write to makes every publish and upload fail with
+	// "storage error"; say so once, loudly, at startup. The runner still starts.
+	if msg := server.StorageProblem(); msg != "" {
+		log.Print(msg)
+	}
+
 	hub := server.NewHub()
 	hub.SetServerVersion(version)
 	hub.SetServerBuild(release, commit)
@@ -195,6 +201,10 @@ func main() {
 	if err := server.LoadPackages("./frontend/dist/packages"); err != nil {
 		log.Printf("ui packages: %v", err)
 	}
+
+	// What one file and a session's files may weigh (BLERG_RUNNER_MAX_FILE_MB and the two per-session
+	// totals); an invalid value keeps the default and is logged.
+	server.ConfigureFileLimits(os.Getenv)
 
 	// Register with blerg-core (disabled unless BLERG_CORE_URL + BLERG_CORE_REGISTER_KEY are set).
 	go server.StartCoreRegistration(ctx, cfg.CoreURL, cfg.CoreRegisterKey, cfg.RunnerSelfURL, version)

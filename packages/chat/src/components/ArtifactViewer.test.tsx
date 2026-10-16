@@ -4,6 +4,7 @@ import ArtifactViewer from './ArtifactViewer'
 import { ChatContext, type ChatContextValue } from './context'
 import { HTML_ARTIFACT_CSP } from '../model/artifacts'
 import { createFakeFiles, type FakeFiles } from '../test/fakeTransport'
+import { FileRequestError } from '../transport/files'
 import type { ArtifactInfo } from '../transport/types'
 
 let blobs: Blob[]
@@ -321,6 +322,16 @@ describe('ArtifactViewer: actions', () => {
     await screen.findByTestId('artifact-text')
     fireEvent.click(screen.getByRole('button', { name: 'Download' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('no longer available')
+  })
+
+  it('a download the server refused shows its sentence and error id', async () => {
+    serve('shown')
+    files.downloadError = new FileRequestError('The runner could not read the file because of an unexpected storage error; try again.', 500, 'c0ffee01')
+    show(art({}))
+    await screen.findByTestId('artifact-text')
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('unexpected storage error; try again. (error id c0ffee01)')
   })
 
   it('closes on Escape and on the close button', async () => {

@@ -132,14 +132,14 @@ for x in mv chmod rm cmp; do p="$(command -v "$x")" && ln -sf "$p" "$inst/bin/$x
 rm -f "$inst/bin/uname"
 printf '#!/bin/sh\n[ "$1" = -m ] && echo x86_64 || echo Linux\n' > "$inst/bin/uname"
 # go: "build -o OUT" writes a daemon whose content is $FAKE_BUILD and that reports no open work.
-printf '#!/bin/sh\n[ "$1" = version ] && { echo "go version go1.26.0 linux/amd64"; exit 0; }\nprintf "#!/bin/sh\\n# %%s\\nexit 0\\n" "$FAKE_BUILD" > "$3"; chmod +x "$3"\n' > "$inst/bin/go"
+printf '#!/bin/sh\n[ "$1" = version ] && { echo "go version go1.26.9 linux/amd64"; exit 0; }\nprintf "#!/bin/sh\\n# %%s\\nexit 0\\n" "$FAKE_BUILD" > "$3"; chmod +x "$3"\n' > "$inst/bin/go"
 # systemctl: is-active answers $FAKE_RUNNING; restart logs what the marker held at that moment.
 printf '#!/bin/sh\ncase "$*" in\n  *is-active*) [ "$FAKE_RUNNING" = 1 ] ;;\n  *restart*) echo "restart marker=$(cat "$BLERG_RUNNER_DAEMON_STATE_DIR/restart-planned" 2>/dev/null)" >> "$FAKE_LOG" ;;\nesac\n' > "$inst/bin/systemctl"
 chmod +x "$inst/bin/uname" "$inst/bin/go" "$inst/bin/systemctl"
 run_install() { # RUNNING BUILD ; runs install.sh install, prints the systemctl log
   rm -rf "$inst/state" "$inst/systemctl.log"
   ( export PATH="$inst/bin" HOME="$inst/home" BLERG_RUNNER_DAEMON_STATE_DIR="$inst/state" FAKE_LOG="$inst/systemctl.log" \
-      FAKE_RUNNING="$1" FAKE_BUILD="$2" BLERG_PROC_VERSION="$tmp/pv-plain" XDG_RUNTIME_DIR="$inst/run"
+      FAKE_RUNNING="$1" FAKE_BUILD="$2" BLERG_PROC_VERSION="$tmp/pv-plain" XDG_RUNTIME_DIR="$inst/run" BLERG_DAEMON_CONNECT_WAIT=0
     unset WSL_DISTRO_NAME CLAUDE_CODE_OAUTH_TOKEN BLERG_RUNNER_SERVER_URL
     "$inst/repo/install/desktop/daemon/install.sh" install </dev/null >"$inst/out" 2>&1 ) || { echo "install.sh failed:"; cat "$inst/out"; }
   cat "$inst/systemctl.log" 2>/dev/null
@@ -150,8 +150,44 @@ run_install() { # RUNNING BUILD ; runs install.sh install, prints the systemctl 
 [ "$(run_install 0 build-b)" = "restart marker=" ] || t "no daemon running, yet a planned-restart marker"
 [ ! -e "$inst/state/restart-planned" ] || t "no daemon running, yet a marker was left"
 
+# --- a host Go older than the release runner/go.mod names is not used: with no docker to fall back
+# to, the install stops and says which Go it needs (the stub reports go1.26.0).
+printf '#!/bin/sh\n[ "$1" = version ] && { echo "go version go1.26.0 linux/amd64"; exit 0; }\nexit 1\n' > "$inst/bin/go-old"
+cp "$inst/bin/go" "$inst/bin/go-new"; cp "$inst/bin/go-old" "$inst/bin/go"; chmod +x "$inst/bin/go"
+run_install 0 build-old >/dev/null
+grep -q 'Need either go >= 1.26.9 or docker' "$inst/out" || t "an old host Go was accepted, or the message does not name the needed Go ($(tail -3 "$inst/out"))"
+cp "$inst/bin/go-new" "$inst/bin/go"; chmod +x "$inst/bin/go"
+[ "$(run_install 1 build-a)" = "restart marker=update" ] || t "a go1.26.9 host was not used for the build"
+
+# --- the Go release the installer requires is the one runner/go.mod names, in both places
+gomod="$(sed -n 's/^go \([0-9.]*\)$/\1/p' ../../runner/go.mod)"
+grep -q "^GO_MIN_VERSION=$gomod\$" daemon/install.sh || t "GO_MIN_VERSION in install.sh is not runner/go.mod's go $gomod"
+grep -q "golang:$gomod@sha256:" daemon/install.sh || t "the installer's Docker fallback image is not golang:$gomod"
+
 # --- the marker for an explicit "no" on the Claude token question
 grep -q 'BLERG_SKIP_CLAUDE_TOKEN_PROMPT' daemon/install.sh || t "skip marker missing from install.sh"
+
+# --- the Docker client config's noProxy, which the compose services keep (blerg-up.sh exports it)
+if command -v python3 >/dev/null 2>&1; then
+  dcfg="$tmp/dockercfg"; mkdir -p "$dcfg"
+  cat > "$dcfg/config.json" <<'JSON'
+{"proxies":{"default":{"httpProxy":"http://proxy.invalid:3128","noProxy":"a.invalid, b.invalid,,"},
+ "unix:///var/run/docker.sock":{"noProxy":"sock.invalid"},"tcp://other.invalid:2376":{"noProxy":"other.invalid"}}}
+JSON
+  [ "$(DOCKER_CONFIG="$dcfg" DOCKER_HOST= docker_client_no_proxy)" = "sock.invalid" ] || t "docker_client_no_proxy: the default socket key is not used"
+  [ "$(DOCKER_CONFIG="$dcfg" DOCKER_HOST=tcp://other.invalid:2376 docker_client_no_proxy)" = "other.invalid" ] || t "docker_client_no_proxy: DOCKER_HOST key not used"
+  [ "$(DOCKER_CONFIG="$dcfg" DOCKER_HOST=tcp://third.invalid:1 docker_client_no_proxy)" = "a.invalid,b.invalid" ] || t "docker_client_no_proxy: no fallback to default / list not trimmed"
+  out="$(DOCKER_CONFIG="$dcfg" DOCKER_HOST=tcp://third.invalid:1 docker_client_no_proxy)"
+  ! grep -q 'proxy.invalid' <<<"$out" || t "docker_client_no_proxy printed a proxy address"
+  printf '{not json' > "$dcfg/config.json"
+  DOCKER_CONFIG="$dcfg" docker_client_no_proxy >/dev/null 2>&1 || t "docker_client_no_proxy must not fail on a broken config"
+  [ -z "$(DOCKER_CONFIG="$dcfg" docker_client_no_proxy)" ] || t "docker_client_no_proxy printed something for a broken config"
+  [ -z "$(DOCKER_CONFIG="$tmp/none" docker_client_no_proxy)" ] || t "docker_client_no_proxy printed something without a config"
+else
+  echo "skip: python3 unavailable, docker_client_no_proxy not tested"
+fi
+grep -q '^BLERG_DOCKER_NO_PROXY="$(docker_client_no_proxy)"' blerg-up.sh && grep -q '^export BLERG_DOCKER_NO_PROXY' blerg-up.sh \
+  || t "blerg-up.sh does not export BLERG_DOCKER_NO_PROXY"
 
 [ "$fail" = 0 ] && echo "hostcheck_test: ok"
 exit "$fail"

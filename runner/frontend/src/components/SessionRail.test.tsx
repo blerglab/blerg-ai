@@ -183,13 +183,14 @@ describe('session side panel', () => {
       expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('1')
     })
 
-    it('the close button in the panel hides it too, and the choice is kept', async () => {
+    it('on a wide screen the panel has no close button of its own: the header toggle closes it', async () => {
       seedSession({ status: 'idle' })
       seedEvents(user())
       localStorage.setItem(RAIL_PREF_KEY, '1')
       await renderPage()
       expect(rail()).toBeVisible()
-      fireEvent.click(within(rail()!).getByRole('button', { name: 'Hide the session panel' }))
+      expect(within(rail()!).queryByRole('button', { name: /hide the session panel|close/i })).toBeNull()
+      fireEvent.click(toggle())
       expect(rail()).not.toBeVisible()
       expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('0')
     })
@@ -424,25 +425,12 @@ describe('session side panel', () => {
       // Idle with nothing in the background: the header names no state.
       expect(screen.queryByTestId('detail-status')).toBeNull()
 
-      fireEvent.click(within(facts).getByTestId('rail-open-insights'))
-      expect(screen.getByRole('dialog', { name: 'Ship it · Insights' })).toBeInTheDocument()
-      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
-
-      // Files and Capabilities are the panel's tabs: the links switch to them, no dialog opens.
-      fireEvent.click(within(facts).getByTestId('rail-open-capabilities'))
-      expect(screen.queryByRole('dialog')).toBeNull()
-      const capabilitiesTab = within(rail()!).getByRole('tab', { name: /^Capabilities/ })
-      expect(capabilitiesTab).toHaveAttribute('aria-selected', 'true')
-      expect(capabilitiesTab).toHaveFocus()
-      expect(within(rail()!).getByTestId('rail-capabilities')).toBeVisible()
-      expect(localStorage.getItem(RAIL_TAB_KEY)).toBe('capabilities')
-
-      fireEvent.click(within(rail()!).getByRole('tab', { name: /^Live/ }))
-      fireEvent.click(within(facts).getByTestId('rail-open-files'))
-      expect(screen.queryByRole('dialog')).toBeNull()
-      expect(within(rail()!).getByRole('tab', { name: /^Files/ })).toHaveAttribute('aria-selected', 'true')
-      expect(within(rail()!).getByTestId('rail-files')).toBeVisible()
-      expect(localStorage.getItem(RAIL_TAB_KEY)).toBe('files')
+      // No links to Insights, Files or Capabilities: the header's Insights button and the panel's own
+      // tabs are the only way to them, so the section does not repeat them.
+      for (const id of ['rail-open-insights', 'rail-open-files', 'rail-open-capabilities']) {
+        expect(within(facts).queryByTestId(id)).toBeNull()
+      }
+      expect(within(facts).queryByRole('button', { name: /Insights|Files|Capabilities/ })).toBeNull()
     })
 
     it('"Show in conversation" brings the subagent card, the task\'s call and the ask card into view', async () => {

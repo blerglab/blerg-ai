@@ -128,9 +128,16 @@ Published report.md as v3 (previous: v2) — viewable in the app
 A name keeps at most 20 versions (the 21st is refused until the user deletes an old one), and every
 version counts toward the 50 files per session.
 
-Failures print one line to stderr and exit non-zero (a missing file, over 25 MiB, the
-session has ended, too many files or versions). Outside Blerg Runner (env vars absent) it prints a
-notice and exits 0 like the other commands.
+Failures print one line to stderr and exit non-zero (a missing file, a file over the runner's
+limit, the session has ended, too many files or versions). Outside Blerg Runner (env vars absent)
+it prints a notice and exits 0 like the other commands.
+
+Every command's failure line says what the server said and where: its sentence, then
+`(HTTP <status> from <url>; error id <id>)`. Give the user the sentence and the error id when the
+failure is the runner's own (its disk or its database): whoever runs Blerg finds the same id in
+the runner's log. A connection error names the address, the reason and which proxy variables are
+set (by name only). Requests to a local server (`localhost`, a loopback address, a one-word name
+such as `blerg-runner`) never go through a proxy; any other address honours the environment's.
 
 **Choose the format for how the user will consume it.** `blerg-runner publish --help` has the
 same guide:
@@ -145,8 +152,9 @@ same guide:
 - Something they will edit in Office => docx/xlsx (download only).
 - An HTML artifact must be **one self-contained file**: inline CSS/JS, images as `data:` URIs.
   It runs in a sandbox with scripts but **cannot load anything from the network**.
-- Limits: 25 MiB per file, 50 files per session. A directory is zipped (skipping `.git`,
-  `node_modules` and symlinks).
+- Limits: by default 100 MiB per file and 1 GiB in total per session (the command asks the runner
+  for its limits and refuses a file over either before sending it; a runner older than 0.2.1 takes
+  25 MiB per file), and 50 files per session. A directory is zipped (skipping `.git`, `node_modules` and symlinks).
 
 ### `blerg-runner files` / `blerg-runner unpublish <name|id> [--version N | --all-versions]`
 

@@ -780,7 +780,6 @@ export default function SessionDetail() {
           mode={narrow ? 'drawer' : 'panel'}
           open={railOpen}
           onClose={closeRail}
-          onInsights={() => setShowInsights(true)}
           onCapabilitiesShown={toolsLook}
           settings={railSettings}
           onOpenArtifact={openArtifact}

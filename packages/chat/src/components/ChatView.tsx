@@ -9,6 +9,7 @@ import { useBackgroundLiveStore } from '../hooks/useBackgroundTasks'
 import { useChatReportStore, type ChatFiles } from '../hooks/useLiveState'
 import { useTicker } from '../hooks/useTicker'
 import { findLatest, groupArtifacts, fileCount } from '../model/artifacts'
+import { MAX_ATTACHMENT_BYTES } from '../model/attachments'
 import { backgroundTasks, runningTasks } from '../model/backgroundTasks'
 import { ClockOffsetContext } from '../model/clockOffset'
 import { liveTurn, oldestLive } from '../model/liveCalls'
@@ -83,6 +84,10 @@ export interface ChatViewProps {
   onLinkedArtifactConsumed?: () => void
   /** The session as the host knows it, when it has a live row (see useSession). */
   meta?: SessionMeta | null
+  /** The largest file, in bytes, a person may attach: the runner's advertised limit (its
+   *  initial_state or session status `limits.max_file_bytes`). A larger file is refused before it
+   *  is sent. Absent: the session meta's `limits`, else MAX_ATTACHMENT_BYTES (an older runner's). */
+  maxFileBytes?: number
   /** What the Files panel's empty state says the agent publishes with. */
   publishHint?: string
   /** How a user message is drawn: who it is from (a host whose automation also messages the
@@ -99,6 +104,8 @@ export interface ChatViewProps {
   backgroundTasks?: 'none'
   className?: string
 }
+
+const positive = (n: number | undefined) => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : undefined)
 
 // pendingSettled: something after the send says the turn is over (or never
 // started): a turn end, an error, or the loop going back to idle.
@@ -179,7 +186,8 @@ export default function ChatView(props: ChatViewProps) {
     setDraftState(text)
     saveDraft(storage, sessionId, text)
   }
-  const attachments = useAttachments(sessionId, files)
+  const maxFileBytes = positive(props.maxFileBytes) ?? positive(meta?.limits?.max_file_bytes) ?? MAX_ATTACHMENT_BYTES
+  const attachments = useAttachments(sessionId, files, maxFileBytes)
   const attachInput = useRef<HTMLInputElement | null>(null)
   const [dragging, setDragging] = useState(false)
   const dragDepth = useRef(0)

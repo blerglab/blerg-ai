@@ -26,6 +26,18 @@ export interface SessionMeta {
   ended_by?: EndedBy | null
   error_reason?: string
   message?: string | null
+  /** What the session's files may weigh, in bytes, when the server says (a runner from 0.2.1 on,
+   *  in its session status). ChatView refuses a larger attachment before sending it; absent, it
+   *  assumes MAX_ATTACHMENT_BYTES. */
+  limits?: FileLimits
+}
+
+/** The runner's file limits, as it advertises them (`limits` in its session status and the
+ *  browser's initial_state). */
+export interface FileLimits {
+  max_file_bytes?: number
+  max_session_upload_bytes?: number
+  max_session_artifact_bytes?: number
 }
 
 /** The end of a replay page: how far it reached and what is left on either side. A tail page

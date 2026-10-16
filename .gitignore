@@ -32,6 +32,9 @@ docs/superpowers/
 credentials*.json
 kubeconfig
 
+# The runner's default data directory when BLERG_RUNNER_DATA_DIR is unset (a dev `go run`).
+/runner/data/
+
 # Local databases.
 *.sqlite
 *.db

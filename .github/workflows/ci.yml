@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with: { go-version: '1.25', check-latest: true }
+        with: { go-version-file: core/go.mod }
       - run: test -z "$(gofmt -l ./contracts ./core ./board ./runner)"
       - run: go vet ./contracts/... ./core/...
       - run: go test ./contracts/... ./core/...
@@ -36,14 +36,17 @@ jobs:
         include:
           - name: contracts-core
             dir: .
+            gomod: core/go.mod
             gowork: ""
             args: ./contracts/... ./core/...
           - name: runner
             dir: runner
+            gomod: runner/go.mod
             gowork: "off"
             args: ./...
           - name: board
             dir: board
+            gomod: board/go.mod
             gowork: "off"
             args: ./...
     name: lint (${{ matrix.name }})
@@ -52,7 +55,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with: { go-version: '1.25', check-latest: true }
+        with:
+          go-version-file: ${{ matrix.gomod }}
       - uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
         with:
           version: v2.13.1
@@ -88,8 +92,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.25'
-          check-latest: true
+          go-version-file: ${{ matrix.module }}/go.mod
           cache-dependency-path: ${{ matrix.module }}/go.sum
       # Some daemon tests drive a real tmux and git; without them they skip.
       - name: Install tmux
@@ -100,7 +103,7 @@ jobs:
           git config --global user.email "ci@example.test"
           git config --global init.defaultBranch main
       - run: go vet ./...
-      - run: go test -p 1 ./...
+      - run: go test -p 1 -timeout 30m ./...
 
   frontend:
     runs-on: ubuntu-latest
@@ -155,6 +158,7 @@ jobs:
         env:
           BLERG_SKIP_KUBECTL: "1"
       - run: bash install/desktop/hostcheck_test.sh
+      - run: bash install/desktop/daemon_install_test.sh
       # The messaging CLI's tests: one is unittest, the other needs pytest.
       - name: Messaging CLI tests
         working-directory: runner/.claude/skills/session-messaging
@@ -162,6 +166,7 @@ jobs:
           python3 -m pip install pytest
           python3 -m unittest test_blerg_runner
           python3 -m pytest -q blerg_runner_board_test.py
+      - run: ./scripts/check_lint_pin.sh
       - run: ./scripts/scrub.sh
       - run: ./scripts/scrub_test.sh
       - run: ./scripts/release-public_test.sh

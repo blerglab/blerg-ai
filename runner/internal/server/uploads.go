@@ -12,20 +12,16 @@ package server
 // The bytes are untrusted: they are only ever served as application/octet-stream + nosniff.
 
 import (
-	"log"
+	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
-// Limits on what people attach, separate from (and in addition to) the agent's artifacts.
-var (
-	maxUploadsPerSession           = 100
-	maxUploadBytesPerSession int64 = 200 << 20
-)
+// The limits on what people attach (maxUploadsPerSession, maxUploadBytesPerSession) are in
+// filelimits.go, beside the agent's.
 
 func (h *artifactsHandler) userUpload(w http.ResponseWriter, r *http.Request) {
 	if sid, account, ok := h.personAccount(w, r); ok {
@@ -53,7 +49,7 @@ func (h *artifactsHandler) userUploadSession(w http.ResponseWriter, r *http.Requ
 func (h *artifactsHandler) agentSession(w http.ResponseWriter, r *http.Request) (string, bool) {
 	a := h.api
 	if a.dbPool == nil {
-		writeError(w, http.StatusServiceUnavailable, "no database")
+		writeError(w, http.StatusServiceUnavailable, noDatabaseMsg)
 		return "", false
 	}
 	tokenSession, ok := a.authMessaging(w, r)
@@ -79,8 +75,7 @@ func (h *artifactsHandler) attachments(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := db.GetSession(r.Context(), h.api.dbPool, sid)
 	if err != nil {
-		log.Printf("attachments GetSession: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "check the session", "attachments GetSession", err)
 		return
 	}
 	if sess == nil {
@@ -89,8 +84,7 @@ func (h *artifactsHandler) attachments(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := db.ListArtifacts(r.Context(), h.api.dbPool, sid)
 	if err != nil {
-		log.Printf("attachments list: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "list the attachments", "attachments list", err)
 		return
 	}
 	type entry struct {
@@ -125,9 +119,14 @@ func (h *artifactsHandler) attachmentFile(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	f, err := os.Open(filepath.Join(artifactDir(sid, row.ID), row.Name))
+	f, err := os.Open(artifactPath(sid, *row))
+	if errors.Is(err, os.ErrNotExist) {
+		// Listed, but its bytes are gone (a data directory that did not survive a restart).
+		writeError(w, http.StatusGone, fileGoneMsg)
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not found")
+		writeStorageFailure(w, "read the file", accessRead, "attachments open "+sid+"/"+row.ID, err)
 		return
 	}
 	defer func() { _ = f.Close() }()

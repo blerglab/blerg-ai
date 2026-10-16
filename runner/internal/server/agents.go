@@ -188,6 +188,8 @@ func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
 
 	// The session contract: every handler calls authRunner itself.
 	mux.HandleFunc("GET /api/runner/me", a.HandleRunnerMe)
+	// The daemon-token check the installer makes before it replaces a daemon (daemon_whoami.go).
+	mux.HandleFunc("GET /api/daemon/whoami", a.HandleDaemonWhoami)
 	mux.HandleFunc("POST /api/runner/start", a.HandleRunnerStart)
 	mux.HandleFunc("GET /api/runner/sessions/{id}", a.HandleRunnerStatus)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/message", a.HandleRunnerMessage)

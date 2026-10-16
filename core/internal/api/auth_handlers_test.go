@@ -778,9 +778,11 @@ func TestLoginIsRateLimited(t *testing.T) {
 // secure context for cookies, so a hardcoded Secure: true silently drops the refresh cookie in
 // Safari on the desktop install (login loops forever at "Sign in required"). Deps.CookieSecure
 // must control the Secure attribute on the cookie the login flow issues, and — since this is a
-// PLAIN http httptest server on purpose — an http.CookieJar (a real browser's own behaviour)
-// only replays a cookie back to the server when Secure is false. That jar behaviour IS the
-// assertion: it's the same reason Safari doesn't send the cookie back over plain http today.
+// PLAIN http httptest server on purpose — Safari's rule (a Secure cookie is never sent back over
+// plain http, not even to localhost) decides whether the refresh request carries the cookie.
+// The test applies that rule itself instead of using net/http/cookiejar: since Go 1.26 the jar
+// follows Chrome and Firefox and sends a Secure cookie to localhost and loopback addresses over
+// http, which is exactly what Safari does not do and what this test models.
 func TestCookieSecureFlag(t *testing.T) {
 	for _, secure := range []bool{false, true} {
 		t.Run(fmt.Sprintf("secure=%v", secure), func(t *testing.T) {
@@ -789,9 +791,7 @@ func TestCookieSecureFlag(t *testing.T) {
 			insertLocalAccount(t, pool, "cookie-user", "s3cret-password")
 			srv := httptest.NewServer(api.NewRouter(deps)) // PLAIN http on purpose
 			defer srv.Close()
-			jar, _ := cookiejar.New(nil)
 			client := srv.Client()
-			client.Jar = jar
 			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 			form := url.Values{"provider_subject": {"cookie-user"}, "password": {"s3cret-password"}}
@@ -805,21 +805,25 @@ func TestCookieSecureFlag(t *testing.T) {
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("login = %d", resp.StatusCode)
 			}
-			var setCookie string
+			var refreshCookie *http.Cookie
 			for _, c := range resp.Cookies() {
 				if c.Name == "blerg_core_refresh" {
-					setCookie = c.Raw
+					refreshCookie = c
 					if c.Secure != secure {
 						t.Fatalf("Set-Cookie Secure=%v, want %v", c.Secure, secure)
 					}
 				}
 			}
-			if setCookie == "" {
+			if refreshCookie == nil {
 				t.Fatal("no refresh cookie in login response")
 			}
-			// Own origin is always an allowed return_to; over plain http the jar only
-			// replays a non-Secure cookie — that is exactly the Safari symptom.
-			resp2, err := client.Get(srv.URL + "/auth/refresh?return_to=" + url.QueryEscape(srv.URL+"/app"))
+			// Own origin is always an allowed return_to. Over plain http Safari replays only a
+			// non-Secure cookie — that is exactly the symptom this guards against.
+			req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/auth/refresh?return_to="+url.QueryEscape(srv.URL+"/app"), nil)
+			if !refreshCookie.Secure {
+				req2.AddCookie(&http.Cookie{Name: refreshCookie.Name, Value: refreshCookie.Value})
+			}
+			resp2, err := client.Do(req2)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1,4 +1,4 @@
-# blerg-board — build & test. Requires the pinned Go toolchain (go >= 1.25).
+# blerg-board — build & test. Requires the pinned Go toolchain (go >= 1.26).
 GO ?= go
 
 .PHONY: build test test-db server cli web lint

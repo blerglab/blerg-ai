@@ -32,8 +32,8 @@ your core, or the runner's own `GET <runner>/agents`) carries `ui.chat_package`:
   "ui": {
     "chat_package": {
       "name": "@blerglab/chat",
-      "version": "0.10.13",
-      "url": "https://runner.example.test/packages/blerglab-chat-0.10.13.tgz",
+      "version": "0.11.0",
+      "url": "https://runner.example.test/packages/blerglab-chat-0.11.0.tgz",
       "sha512": "…",
       "docs_url": "https://runner.example.test/packages/@blerglab/chat/README.md"
     }
@@ -91,7 +91,10 @@ steps:
 
    `path` already includes the query string. The implementation must build the request with
    `ctx` (`http.NewRequestWithContext`) so a browser that goes away cancels the runner request
-   behind it. If the app has no client yet, the file includes `HTTPRunnerClient{BaseURL,
+   behind it. An upload passes the browser's declared size as a `Content-Length` header: set it
+   as the request's `ContentLength` (`req.ContentLength = chatproxy.ContentLength(v)`), because
+   net/http never sends that header from `Header`. Without it the body goes chunked and the
+   runner reads a file up to its limit before it can refuse it. If the app has no client yet, the file includes `HTTPRunnerClient{BaseURL,
    Token}` which does exactly this.
 
 3. **Write `Authorize`**: for the app's own signed-in person (your cookie, your session store),
@@ -181,6 +184,16 @@ the agent marked with `blerg-runner topic`) draws as a thin divider (`▸ <title
 - `theme`: a `ThemeTokens` object instead of a CSS file.
 - `cards`: a registry from `createCardRegistry([...])`; see Cards.
 - `slots`: `header`, `composerActions`, `messageFooter` for your own chrome.
+- `maxFileBytes`: the largest file a person may attach, in bytes; a larger one is refused in the
+  browser, with the limit named, before it is sent (0.11.0). Without it the chat uses the
+  session's `limits.max_file_bytes`, which the runner (0.2.1 on) puts in its session status and
+  the proxy transport reads, and else `MAX_ATTACHMENT_BYTES` (25 MiB, an older runner's limit).
+
+A refused upload or download shows the server's own sentence (the runner says which step failed
+and what to do; a proxy's plain-text answer is shown as it is) and, when the runner gave one, its
+error id in small text after it: the runner's log line for the failure carries the same id. The
+transport throws a `FileRequestError` (`status`, `errorId`); `fileErrorText(e, fallback)` gives
+the words and the id to show.
 
 `createProxyTransport({ baseUrl })` speaks the proxy contract above. Its `files` are present
 (so the Files button and the attach control show) because the proxy forwards the artifact and

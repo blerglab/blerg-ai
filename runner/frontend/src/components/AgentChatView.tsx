@@ -21,6 +21,7 @@ import { effectiveEffort, modelCatalogTarget, useEngineModels } from '../lib/eng
 import { ENGINE_LABELS, RUNTIME_LABELS } from '../lib/runtimes'
 import { repoDetail } from '../lib/noRepo'
 import type { SessionInfo } from '../types'
+import { useSessionStore } from '../hooks/useSessionStore'
 import './AgentChatView.css'
 import ModelCatalogNotice from './ModelCatalogNotice'
 
@@ -121,6 +122,8 @@ export default memo(AgentChatView)
 function AgentChatView({ session, thinking, compact, openArtifact }: Props) {
   const sessionId = session.id
   const transport = blergTransport()
+  // The server's per-file limit (initial_state): the chat refuses a larger attachment before sending it.
+  const maxFileBytes = useSessionStore(s => s.maxFileBytes)
   const [showRules, setShowRules] = useState(false)
   const [linked, setLinked] = useState<string | null>(artifactParam)
   // A request from the History tab, taken once: the chat consumes the link when its viewer opens it.
@@ -210,6 +213,7 @@ function AgentChatView({ session, thinking, compact, openArtifact }: Props) {
       thinking={thinking ? 'shown' : 'hidden'}
       compact={compact}
       filesButton={false}
+      maxFileBytes={maxFileBytes ?? undefined}
       linkedArtifact={linked}
       onLinkedArtifactConsumed={() => { setLinked(null); clearArtifactParam() }}
     />

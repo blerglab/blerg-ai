@@ -136,5 +136,79 @@ print("\n".join(bad))
 fi
 grep -q 'BLERG_RUNNER_MCP_GW_URL' .env.example || { echo "FAIL: .env.example does not document the MCP gateway variables"; fail=1; }
 
+# C1: the runner stores artifacts and uploads in /data as the unprivileged user 65532. The image
+# ships /data owned by it (a new volume inherits that), and a one-shot repairs a volume an
+# earlier install left root-owned; the runner waits for the one-shot. The one-shot touches only
+# the runner's data volume (never the repos folder or another volume), has no ports, and
+# reuses an image the stack already has (no new download).
+grep -qE '^COPY --from=data-dir --chown=65532:65532 /out/data /data$' ../../runner/Dockerfile.server \
+  || { echo "FAIL: runner/Dockerfile.server does not ship /data owned by 65532:65532"; fail=1; }
+if command -v python3 >/dev/null 2>&1; then
+  c1_out="$(BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) \
+            docker compose --env-file /dev/null config --format json | python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+svcs = c["services"]
+bad = []
+init = svcs.get("blerg-runner-data-init")
+if not init:
+    bad.append("no blerg-runner-data-init service")
+else:
+    if str(init.get("user")) != "0":
+        bad.append("the data repair must run as root")
+    vols = [(v.get("source"), v.get("target")) for v in init.get("volumes") or []]
+    if vols != [("blerg-desktop-runner-data", "/data")]:
+        bad.append("the data repair must mount only blerg-desktop-runner-data at /data, got " + json.dumps(vols))
+    if init.get("ports"):
+        bad.append("the data repair must not publish a port")
+    if init.get("image") != svcs["postgres"].get("image"):
+        bad.append("the data repair must reuse the stack image already pulled for postgres (no extra download)")
+    cmd = " ".join(init.get("command") or [])
+    repair = "chown 65532:65532 /data && find /data -xdev ! -user 65532 -exec chown -h 65532:65532 {} +"
+    if not cmd.startswith(repair + " || echo "):
+        bad.append("the data repair command changed (it must be the exact chown + find, then report a failure and still exit 0): " + cmd)
+    if init.get("entrypoint") != ["sh", "-c"]:
+        bad.append("the data repair entrypoint changed: " + json.dumps(init.get("entrypoint")))
+    if init.get("network_mode") != "none":
+        bad.append("the data repair must run with network_mode: none")
+    if init.get("cap_drop") != ["ALL"] or sorted(c.replace("CAP_", "") for c in init.get("cap_add") or []) != ["CHOWN", "DAC_READ_SEARCH"]:
+        bad.append("the data repair must drop all capabilities but CHOWN and DAC_READ_SEARCH: " + json.dumps([init.get("cap_drop"), init.get("cap_add")]))
+    if "no-new-privileges:true" not in (init.get("security_opt") or []):
+        bad.append("the data repair must set no-new-privileges")
+    # postgres:16 declares a data volume of its own; without a tmpfs on it every down + up leaves an anonymous volume.
+    if init.get("tmpfs") != ["/var/lib/postgresql/data"]:
+        bad.append("the data repair must put a tmpfs on the image\x27s own data volume path")
+dep = (svcs["blerg-runner"].get("depends_on") or {}).get("blerg-runner-data-init") or {}
+if dep.get("condition") != "service_completed_successfully":
+    bad.append("blerg-runner must wait for blerg-runner-data-init to complete successfully")
+print("\n".join(bad))
+')"
+  [ -z "$c1_out" ] || { while IFS= read -r l; do echo "FAIL: $l"; done <<<"$c1_out"; fail=1; }
+fi
+
+# R10 / C3: Compose copies the proxy settings of ~/.docker/config.json into every service
+# container; the service names are not reachable through a corporate proxy, so the three
+# services that call each other list them as exceptions (their own environment: wins over the
+# injected value), keeping what the person already has in NO_PROXY / no_proxy.
+np_out="$(NO_PROXY=corp.invalid no_proxy=lower.invalid BLERG_DOCKER_NO_PROXY=dockercfg.invalid BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) \
+          docker compose --env-file /dev/null config --format json | python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+names = "blerg-core,blerg-board,blerg-runner,postgres,localhost,127.0.0.1"
+bad = []
+for svc in ("blerg-core", "blerg-board", "blerg-runner"):
+    env = c["services"][svc]["environment"]
+    for key in ("NO_PROXY", "no_proxy"):
+        v = env.get(key, "")
+        if not v.startswith(names) or "corp.invalid" not in v or "lower.invalid" not in v or not v.endswith(",dockercfg.invalid"):
+            bad.append(svc + " " + key + " is not the service names plus the caller\x27s exceptions: " + v)
+print("\n".join(bad))
+')"
+[ -z "$np_out" ] || { while IFS= read -r l; do echo "FAIL: $l"; done <<<"$np_out"; fail=1; }
+np_plain="$(env -u NO_PROXY -u no_proxy -u BLERG_DOCKER_NO_PROXY BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) docker compose --env-file /dev/null config)"
+grep -qF -- 'NO_PROXY: blerg-core,blerg-board,blerg-runner,postgres,localhost,127.0.0.1' <<<"$np_plain" \
+  || { echo "FAIL: NO_PROXY is not set on the services without a caller value"; fail=1; }
+if grep -E '(NO_PROXY|no_proxy): .*,$' <<<"$np_plain" >/dev/null; then echo "FAIL: a trailing comma in NO_PROXY when the caller has none"; fail=1; fi
+
 [ "$fail" -eq 0 ] && echo ok
 exit "$fail"

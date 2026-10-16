@@ -4,7 +4,7 @@
     "title": "blerg-runner",
     "version": "v1",
     "summary": "Starts and drives coding-agent sessions on a Blerg install.",
-    "description": "The public, agent-facing contract of blerg-runner (contract version v1). Paths are relative to this component's base URL, which GET /agents reports as base_url. The browser and daemon surfaces (WebSockets, board and ticket REST) are deliberately not described here: they are the product's own UI transport, not an API for agents.",
+    "description": "The public, agent-facing contract of blerg-runner (contract version v1). Paths are relative to this component's base URL, which GET /agents reports as base_url. The browser and daemon surfaces (WebSockets, board and ticket REST) are deliberately not described here: they are the product's own UI transport, not an API for agents. The one daemon route here is GET /api/daemon/whoami, the token check an installer (or an agent installing Blerg) makes before it starts a daemon.",
     "x-lifecycle": ["starting", "running", "disconnected", "ended", "error"]
   },
   "servers": [],
@@ -69,6 +69,34 @@
           },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/daemon/whoami": {
+      "get": {
+        "operationId": "daemonWhoami",
+        "tags": ["identity"],
+        "summary": "Whether a daemon token would be accepted, without connecting a daemon.",
+        "description": "Answers for the same tokens the daemon WebSocket (`/ws/daemon`) accepts: the daemon master token (`BLERG_RUNNER_DAEMON_TOKEN`, mode `daemon`) or a session pod's current runtime token (mode `runtime`). It touches no connection and registers nothing. The desktop installer calls it with the token it is about to install, before it replaces the running daemon. Success is a 200 with a JSON body: a server older than 0.2.1 has no such route and answers its web page (200 `text/html`) or a 404, which means only that the check could not be made. The token is never echoed back.",
+        "security": [{ "daemonToken": [] }],
+        "responses": {
+          "200": {
+            "description": "The token is accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["ok", "mode"],
+                  "properties": {
+                    "ok": { "type": "boolean", "const": true },
+                    "mode": { "type": "string", "enum": ["daemon", "runtime"], "description": "`daemon` for the master token, `runtime` for a session pod's runtime token." }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "description": "A runtime token could not be checked (the database did not answer). Says nothing about the token; retry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -436,7 +464,7 @@
         "operationId": "upload",
         "tags": ["files"],
         "summary": "Attach a person's file to the session (raw body, X-Artifact-Name header), for the agent to fetch.",
-        "description": "The body is the file; the name comes from `X-Artifact-Name` (percent-encoded) or `?name=`, sanitised to a base name. The content type is classified by the server from the name and bytes — the request's `Content-Type` is never used. Stored with `origin: user`, attributed to the account the credential acts for (the app vouches for the person). Caps, as on the browser route: 25 MiB per file, 20 attachments and 200 MiB per session, 20 versions per name; an ended session takes no more.",
+        "description": "The body is the file; the name comes from `X-Artifact-Name` (percent-encoded) or `?name=`, sanitised to a base name. The content type is classified by the server from the name and bytes — the request's `Content-Type` is never used. Stored with `origin: user`, attributed to the account the credential acts for (the app vouches for the person). Caps, as on the browser route: 100 MiB per file, 100 attachments and 500 MiB per session, 20 versions per name (the defaults; an operator changes the sizes with `BLERG_RUNNER_MAX_FILE_MB` and `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`, and `GET /api/runner/sessions/{id}` reports the ones in force as `limits`); an ended session takes no more. Send `Content-Length`: a declared size over the limit is refused before the body is read, while an undeclared one is read up to the limit first.",
         "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
         "parameters": [
           { "$ref": "#/components/parameters/SessionId" },
@@ -453,7 +481,8 @@
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "409": { "description": "The session has ended, or a cap is reached (files, bytes, or versions of this name).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-          "413": { "description": "The file is larger than 25 MiB.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+          "413": { "description": "The file is larger than the per-file limit (`limits.max_file_bytes`); `error` names both sizes.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "500": { "description": "The runner could not store the file (its disk or its database); `error` says which and what to do, `error_id` is in the runner's log.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -547,6 +576,11 @@
         "type": "http",
         "scheme": "bearer",
         "description": "The operator's static runner key (BLERG_RUNNER_KEY). A component credential with no owning account; sessions it starts run on the operator's credentials. When it is unset the whole session contract answers 404."
+      },
+      "daemonToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A token the daemon WebSocket accepts: the operator's daemon master token (BLERG_RUNNER_DAEMON_TOKEN) or a session pod's runtime token. Not an agent credential; only GET /api/daemon/whoami takes it here."
       }
     },
     "responses": {
@@ -598,7 +632,20 @@
       "Error": {
         "type": "object",
         "required": ["error"],
-        "properties": { "error": { "type": "string" } }
+        "properties": {
+          "error": { "type": "string", "description": "What went wrong, in a sentence fit to show a person." },
+          "error_id": { "type": "string", "description": "Present on a failure of the runner's own (its storage or database, on the file and topic routes): a short id that is also in the runner's log line for it." }
+        }
+      },
+      "FileLimits": {
+        "type": "object",
+        "required": ["max_file_bytes", "max_session_upload_bytes", "max_session_artifact_bytes"],
+        "description": "What the runner takes in files, in bytes. A client checks a file against these before sending it. Absent from a runner older than 0.2.1, whose limit was 25 MiB per file.",
+        "properties": {
+          "max_file_bytes": { "type": "integer", "format": "int64", "description": "One file, a person's attachment or an agent's published file (default 100 MiB)." },
+          "max_session_upload_bytes": { "type": "integer", "format": "int64", "description": "A session's attachments together (default 500 MiB)." },
+          "max_session_artifact_bytes": { "type": "integer", "format": "int64", "description": "The files a session's agent published, together (default 1 GiB)." }
+        }
       },
       "Principal": {
         "type": "object",
@@ -684,7 +731,8 @@
           "interaction": { "type": "string", "enum": ["interactive", "unattended"], "description": "The session's interaction mode, as decided at start: `interactive` (a person is reading its chat as it works, and the agent was told so) or `unattended` (nobody is). Never empty: a session started before the mode was recorded reads `interactive` when a person started it in the app and `unattended` when a tool, a cron or the runner key did." },
           "error_reason": { "type": "string", "description": "Why it failed; empty unless the lifecycle is `error`." },
           "end_reason": { "$ref": "#/components/schemas/EndReason" },
-          "ended_by": { "$ref": "#/components/schemas/EndedBy" }
+          "ended_by": { "$ref": "#/components/schemas/EndedBy" },
+          "limits": { "$ref": "#/components/schemas/FileLimits" }
         }
       },
       "EndReason": {

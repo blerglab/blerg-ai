@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -44,6 +46,14 @@ func (k *BlergRunner) Raw(ctx context.Context, method, path string, body io.Read
 		return nil, err
 	}
 	for name, v := range headers {
+		// The chat proxy passes an upload's declared size as a header; net/http sends it only
+		// from ContentLength. Declared, the runner can refuse a file over its limit unread.
+		if http.CanonicalHeaderKey(name) == "Content-Length" {
+			if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n >= 0 {
+				req.ContentLength = n
+			}
+			continue
+		}
 		req.Header.Set(name, v)
 	}
 	req.Header.Set("Authorization", "Bearer "+k.key)

@@ -8,6 +8,153 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-16
+
+### Upgrade notes
+- **Reinstall the desktop daemon** to get the connection check: `git pull`, then
+  `./install/desktop/blerg-up.sh` (or `./install/desktop/daemon/install.sh install`). Until then a
+  0.2.0 daemon keeps working against a 0.2.1 server exactly as before (it is sent nothing new).
+- Server and daemons can be upgraded in either order. A 0.2.1 daemon against a 0.2.0 server logs
+  `daemon: link to … open for 5s but not confirmed by the server` and `install.sh status` shows
+  `unconfirmed`; that is expected and fine. Session pods pick the change up with the new runner
+  image; nothing to do.
+- `install.sh install` (and `blerg-up.sh`) now **exits 6** when the server refuses the daemon
+  token. Before anything is replaced the running daemon is left alone; after the restart the new
+  daemon is installed but refused. Fix `BLERG_RUNNER_DAEMON_TOKEN` in `install/desktop/.env` to
+  match the server's and run it again. A daemon with a wrong token now retries once a minute (it
+  used to retry every 2 s) and logs one `daemon: REFUSED:` line.
+- Files are larger now: 100 MiB per file (was 25), 500 MiB of attachments per session (was 200),
+  and a new 1 GiB total for the files one session's agent publishes (there was none). Check your
+  runner data volume size (Kubernetes `blerg-runner-data`, `RUNNER_DATA_SIZE`, default `10Gi`;
+  desktop: the `blerg-desktop-runner-data` Docker volume, on the disk Docker uses) against the
+  sessions you keep, or lower the limits with `BLERG_RUNNER_MAX_FILE_MB`,
+  `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB` and `BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB`.
+- Kubernetes: re-apply the manifests (`deploy.sh`). The ingress body limit goes from `100m` to
+  `128m` so a 100 MiB file fits; a controller other than ingress-nginx needs the same change by
+  hand. The three limit keys are wired, optional, in `runner-deployment.yaml`.
+
+### Security
+- Go 1.26.9 everywhere the build picks a Go: every `go.mod` and `go.work`, the Dockerfiles (pinned
+  by digest), the CI jobs (which now read the version from `go.mod`), the desktop installer's host
+  and container builds, and the session images, whose Go toolchain is copied from the devcontainer
+  build and so moves to 1.26.9 too. This picks up the standard-library fixes released since
+  1.25.14; `govulncheck` reports nothing reachable in any module. `golang.org/x/crypto` moves to
+  v0.56.0 in core and runner.
+- `core/web` test tooling moves to vitest 4, which clears the `npm audit` findings in its
+  development dependencies (they never shipped in the built app).
+
+### Added
+- The daemon keeps the state of its connection (`connecting`, `connected`, `unconfirmed`,
+  `refused`) in `~/.blerg-runner-daemon/connection.json` (mode 0600, no token), and
+  `install/desktop/daemon/install.sh status` prints it.
+- `GET /api/daemon/whoami` on the runner: checks a daemon token without connecting a daemon
+  (`200 {"ok":true,"mode":"daemon"|"runtime"}`, otherwise `401`).
+- Desktop: `install.sh install` (and `blerg-up.sh`) asks the server whether it accepts the daemon
+  token from `install/desktop/.env` before it replaces the running daemon. A refused token stops it
+  with exit code 6 and leaves the running daemon as it was; an older server (no such check) or a
+  server it cannot reach only gets a note. After the restart it waits up to 30 seconds for the new
+  daemon to report its connection and stops with exit code 6 when the server refused it; then
+  `blerg-up.sh` exits 6 as well. Troubleshooting: `install/desktop/DAEMON.md`, "Is the daemon
+  connected?".
+
+### Changed
+- The session panel no longer repeats what is a click away: its Session section drops the Insights,
+  Files and Capabilities links (the header's Insights button and the panel's own tabs open them),
+  and on a wide screen the panel drops its own close button (the header's panel toggle opens and
+  closes it). The drawer on a narrow screen keeps its ✕.
+- The desktop installer uses a host Go only if it is 1.26.9 or newer; otherwise it builds the
+  daemon in a container, as before.
+- `make lint` refuses a golangci-lint other than the version CI pins (v2.13.1), and
+  `scripts/check_lint_pin.sh` (run by CI) keeps the Makefile and the workflow on the same version.
+- Removed `runner/Dockerfile.daemon` and the `make docker-build-daemon` target: the image could not
+  build (it needs the repository root as context) and nothing used it.
+- Runner: the file limits are configurable (`BLERG_RUNNER_MAX_FILE_MB`,
+  `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`, `BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB`, whole MiB; an
+  invalid value keeps the default and logs one line; a per-file limit above a session total is
+  lowered to it, also with one line) and passed through by the desktop compose
+  file, the Kubernetes ConfigMap and the `.env` examples. The runner reports the limits in force as
+  `limits` (`max_file_bytes`, `max_session_upload_bytes`, `max_session_artifact_bytes`) in
+  `GET /api/sessions/{id}/files`, `GET /api/runner/sessions/{id}` and the browser's
+  `initial_state`, so clients can refuse a file that is too big before sending it. A declared size
+  over a limit is refused before the body is read; the 413 names the file's size and the limit.
+
+### Fixed
+- The Claude usage meter works on work and enterprise accounts. Their usage answer has no
+  five-hour or weekly window, only a monthly spend limit, so the Claude row used to vanish. The row
+  now shows "month" (Monthly spend limit) with the share used, "<1%" while under one percent, and
+  "capped" once the limit is used up. A subscription with extra usage switched on shows it beside
+  5h and week. Only the percentage leaves the machine, never an amount, limit or currency. Update the
+  runner server (it carries the web app) and reinstall the desktop daemon: an older server ignores
+  the new window.
+- Lint passes again under Go 1.26: two `//nolint:gosec` comments in the runner's artifact code
+  that the linter now reports as unused are gone.
+- `TestCookieSecureFlag` models Safari's cookie rule itself. Go 1.26's cookie jar sends a Secure
+  cookie to loopback addresses over http, as Chrome and Firefox do, so the jar no longer stood in
+  for Safari. The login code was right and is unchanged.
+- Desktop: a fresh install can store files. The runner image runs as an unprivileged user
+  but shipped no `/data`, so the data volume was created owned by root and every publish and
+  upload failed with "storage error". The image now ships `/data` owned by that user, and a
+  one-shot service in the desktop compose file (`blerg-runner-data-init`, reusing the `postgres:16`
+  image) repairs a volume an earlier install left behind, keeping its files. The runner also logs
+  one `STORAGE NOT WRITABLE` line at startup, naming the directory, the user id, the error and the
+  fix, when it cannot write to its data directory (it still starts).
+- Desktop: container sessions and the stack work behind a corporate proxy. Docker copies the
+  proxy settings of `~/.docker/config.json` into every container, which sent calls to
+  `blerg-runner` and `blerg-board` to the proxy. Sandboxed sessions now get `NO_PROXY` and
+  `no_proxy` as the union of the daemon's, your Docker client config's and Blerg's own service and
+  loopback names (the proxy settings themselves are left alone), and the core, board and runner
+  services of the desktop compose file list the service names as exceptions, keeping your own
+  `NO_PROXY` and the `noProxy` of your Docker client config (`blerg-up.sh` passes it on).
+  Reinstall the daemon and start new sessions for this to apply; see
+  `install/desktop/DAEMON.md` ("Troubleshooting the stack").
+- The daemon no longer says it is connected when the server refused its token. It logged
+  `daemon: connected to …` as soon as it had sent its hello, and the server answered a wrong token
+  only by closing the connection (4401), so a reinstall that kept a stale token looked fine. The
+  server now confirms an accepted daemon with a `daemon_welcome` message (sent only to a daemon
+  whose hello asks for it, so a 0.2.0 daemon sees nothing new; a session pod's carries its
+  session), and the daemon logs `connected` only on it. Against a 0.2.0 server, which sends none,
+  a connection that stays open for 5 seconds is taken as accepted and logged as not confirmed. A
+  refused token is one loud `daemon: REFUSED:` line that says where the token comes from (for a
+  session pod: its runtime token), and it no longer resets the reconnect backoff: a refused daemon
+  slows to one try a minute instead of retrying every 2 seconds.
+- Desktop: `blerg-up.sh --no-daemon` no longer prints the daemon token in its "do this next" box;
+  the command it shows reads the token from `.env`.
+- Runner: a failed upload, publish, fetch or topic says what happened. Failures of the runner's own
+  disk or database on these routes answer with one sentence (which step failed; permission
+  denied, disk full, read-only or missing; what to do) and an `error_id` that is also in the
+  runner's log line, instead of "storage error" or "query failed". A full disk during an upload is
+  reported as one, not as "upload interrupted". An attachment whose bytes are gone answers `410`
+  to the agent, as it already did to a person. The remaining fragment replies on these routes
+  ("session has ended", "file no longer available", "no database", "invalid JSON body") are
+  sentences now.
+- Messaging CLI (`blerg-runner`): requests to a local server or board (`localhost`, a loopback
+  address, a one-word name such as `blerg-runner`) no longer go through a proxy from the
+  environment, so a corporate proxy that Docker injects into a session container cannot swallow
+  them; other addresses still honour the proxy. Every request goes through one helper, and a
+  failure of `publish`, `fetch`, `topic` and the rest says the HTTP status, the server's sentence
+  and error id (or an older server's raw reply, trimmed), the address called (without any
+  user:password), and for a connection error which proxy variables are set (by name only) and
+  whether NO_PROXY covers the host. A malformed proxy variable is reported by name, never quoted:
+  a request that gets no reply is described in fixed words, never in the exception's own text. Every
+  failure line is redacted before it is printed or cut short: user:password in an address,
+  Authorization and Proxy-Authorization values, Bearer and Basic credentials, and the session's and
+  daemon's tokens.
+  `publish` checks a file against the runner's advertised limit (25 MiB from an older runner)
+  instead of its own fixed 25 MiB, and against the session's published total when the runner
+  reports it, streams it with its size declared,
+  and zips a directory against the same limit. Success output is unchanged.
+- Chat (`@blerglab/chat` 0.11.0), runner and board web apps: the attachment limit is a `ChatView`
+  prop, `maxFileBytes`; the runner's app passes the limit its server advertises and the board's
+  chat takes it from the session status its proxy passes through (`MAX_ATTACHMENT_BYTES`, 25 MiB,
+  stays exported as the fallback for an older runner). A refused upload or download shows the
+  server's sentence, and its error id in small text after it, instead of a generic "upload
+  failed"; a proxy's plain-text refusal is shown as it is, and an upload cut off before any answer
+  says so. New exports: `FileRequestError`, `fileErrorText`, `formatLimit`, `FileLimits`.
+- Board, chat proxy: an upload through the board's chat (and the reference proxy in
+  `@blerglab/chat`) carries the browser's `Content-Length` to the runner instead of going chunked,
+  so a file over the runner's limit is refused before it is read. An app with its own
+  `RunnerClient` sets the request's `ContentLength` from that header (`chatproxy.ContentLength`).
+
 ## [0.2.0] - 2026-10-16
 
 ### Upgrade notes
@@ -799,7 +946,8 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/blerglab/blerg-ai/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/blerglab/blerg-ai/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/blerglab/blerg-ai/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/blerglab/blerg-ai/compare/v0.1.0...v0.1.1

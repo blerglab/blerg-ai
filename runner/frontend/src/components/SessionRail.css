@@ -390,10 +390,6 @@
   overflow-wrap: anywhere;
 }
 
-.rail-session-links {
-  margin-top: 10px;
-}
-
 /* The header button that opens and closes the panel, with the count of what needs you or runs. */
 .rail-toggle {
   position: relative;

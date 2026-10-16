@@ -29,7 +29,7 @@ func (a *API) runnerSessionFiles(w http.ResponseWriter, r *http.Request) (runner
 		return runnerPrincipal{}, "", false
 	}
 	if a.dbPool == nil {
-		writeError(w, http.StatusServiceUnavailable, "no database")
+		writeError(w, http.StatusServiceUnavailable, noDatabaseMsg)
 		return runnerPrincipal{}, "", false
 	}
 	// The id becomes a directory name below, so only a canonical uuid gets near a path; the

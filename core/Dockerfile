@@ -4,7 +4,7 @@
 # from the repo root.
 
 # Stage 1: Go binary
-FROM golang:1.25@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 AS build
+FROM golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 AS build
 WORKDIR /src
 COPY . .
 # The release version is the repository's VERSION file; the commit is passed in (the build

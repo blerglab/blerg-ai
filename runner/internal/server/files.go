@@ -12,7 +12,8 @@ import (
 // The session's own files, for the agent side (`blerg-runner files` / `unpublish`):
 //
 //	GET    /api/sessions/{id}/files         the files this session published, newest first,
-//	                                        and how many of the session's file slots are used
+//	                                        how many of the session's file slots are used, and
+//	                                        the size limits (`limits`, filelimits.go)
 //	DELETE /api/sessions/{id}/files/{aid}   remove one file this session published
 //
 // Both take the per-session messaging token (agentSession), like publish and fetch. A session
@@ -36,8 +37,7 @@ func (h *artifactsHandler) files(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := db.GetSession(r.Context(), h.api.dbPool, sid)
 	if err != nil {
-		log.Printf("files GetSession: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "check the session", "files GetSession", err)
 		return
 	}
 	if sess == nil {
@@ -46,8 +46,7 @@ func (h *artifactsHandler) files(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := db.ListArtifacts(r.Context(), h.api.dbPool, sid)
 	if err != nil {
-		log.Printf("files list: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "list the files", "files list", err)
 		return
 	}
 	latest := latestVersions(rows)
@@ -61,7 +60,9 @@ func (h *artifactsHandler) files(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	// used counts every file of the session, the person's attachments included: that is what
 	// the cap is measured against.
-	writeJSON(w, http.StatusOK, map[string]any{"files": out, "used": len(rows), "limit": maxArtifactsPerSession})
+	// limits: what one file and the session's files may weigh, so the CLI refuses a file that is
+	// too big before sending it (filelimits.go).
+	writeJSON(w, http.StatusOK, map[string]any{"files": out, "used": len(rows), "limit": maxArtifactsPerSession, "limits": currentFileLimits()})
 }
 
 func (h *artifactsHandler) unpublish(w http.ResponseWriter, r *http.Request) {
@@ -78,8 +79,7 @@ func (h *artifactsHandler) unpublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := db.DeleteArtifact(r.Context(), h.api.dbPool, sid, row.ID); err != nil {
-		log.Printf("files delete: %v", err)
-		writeError(w, http.StatusInternalServerError, "delete failed")
+		writeDatabaseFailure(w, "delete the file", "files delete", err)
 		return
 	}
 	if err := os.RemoveAll(artifactDir(sid, row.ID)); err != nil {

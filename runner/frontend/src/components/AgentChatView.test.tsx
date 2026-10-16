@@ -4,12 +4,15 @@ import type { ReactNode } from 'react'
 import AgentChatView from './AgentChatView'
 import { makeSession } from '../test/fixtures'
 import * as ws from '../ws'
+import { useSessionStore } from '../hooks/useSessionStore'
 
 const apiFetch = vi.fn()
 vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }))
-vi.mock('../ws', () => ({ send: vi.fn() }))
+vi.mock('../ws', () => ({ send: vi.fn(), onMessage: vi.fn() }))
 vi.mock('@blerglab/chat', () => ({
-  ChatView: ({ slots }: { slots: { header: ReactNode } }) => <div>{slots.header}</div>,
+  ChatView: ({ slots, maxFileBytes }: { slots: { header: ReactNode }; maxFileBytes?: number }) => (
+    <div data-testid="chat" data-max-file-bytes={maxFileBytes ?? 'none'}>{slots.header}</div>
+  ),
   ReadyCard: () => null,
   createBlergTransport: () => ({}),
 }))
@@ -25,6 +28,18 @@ beforeEach(() => {
   apiFetch.mockImplementation((url: string) => Promise.resolve({ ok: true, json: async () => ({
     models: url.startsWith('/api/models/codex?runtime=cluster') ? MODELS : [], source: 'live',
   }) }))
+})
+
+describe('AgentChatView file limit', () => {
+  it('passes the server’s advertised per-file limit to the chat, and nothing when it advertises none', () => {
+    useSessionStore.setState({ maxFileBytes: 100 * 1024 * 1024 })
+    const view = render(<AgentChatView session={makeSession({ kind: 'agent' })} thinking={false} compact={false} />)
+    expect(screen.getByTestId('chat')).toHaveAttribute('data-max-file-bytes', String(100 * 1024 * 1024))
+    view.unmount()
+    useSessionStore.setState({ maxFileBytes: null })
+    render(<AgentChatView session={makeSession({ kind: 'agent' })} thinking={false} compact={false} />)
+    expect(screen.getByTestId('chat')).toHaveAttribute('data-max-file-bytes', 'none')
+  })
 })
 
 describe('AgentChatView model controls', () => {

@@ -41,6 +41,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -49,7 +50,11 @@ import (
 // example "/api/runner/sessions/abc/events/live?tail=1"); headers are
 // request headers to add. The implementation adds the agent token and the
 // runner's base URL, and must honour ctx so a browser that goes away cancels
-// the runner request (http.NewRequestWithContext does this).
+// the runner request (http.NewRequestWithContext does this). A
+// "Content-Length" among the headers is the body's declared size: set it as
+// the request's ContentLength (net/http never sends that header from
+// Header), as HTTPRunnerClient does, so the runner can refuse a file over its
+// limit before reading it.
 type RunnerClient interface {
 	Do(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error)
 }
@@ -390,7 +395,10 @@ func (p *proxy) artifactDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // uploads streams the browser's raw bytes to the runner with the file's
-// name. The runner applies its own size caps; the proxy holds nothing.
+// name. The runner applies its own size caps; the proxy holds nothing. The
+// browser's declared size goes on with the bytes: without it the body is
+// chunked, and the runner reads a file up to its limit before it can refuse
+// it.
 func (p *proxy) uploads(w http.ResponseWriter, r *http.Request) {
 	id, ok := p.gate(w, r)
 	if !ok {
@@ -403,7 +411,20 @@ func (p *proxy) uploads(w http.ResponseWriter, r *http.Request) {
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		headers["Content-Type"] = ct
 	}
+	if r.ContentLength > 0 {
+		headers["Content-Length"] = strconv.FormatInt(r.ContentLength, 10)
+	}
 	p.forward(w, r, http.MethodPost, runnerPath(id, "/uploads", nil), r.Body, headers)
+}
+
+// ContentLength reads a "Content-Length" header value the proxy passed to a
+// RunnerClient: the size, or -1 (unknown, sent chunked) when it is not one.
+func ContentLength(v string) int64 {
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || n < 0 {
+		return -1
+	}
+	return n
 }
 
 // ErrNoClient is returned by HTTPRunnerClient when it was built without a
@@ -431,6 +452,10 @@ func (c *HTTPRunnerClient) Do(ctx context.Context, method, path string, body io.
 		return nil, err
 	}
 	for k, v := range headers {
+		if http.CanonicalHeaderKey(k) == "Content-Length" {
+			req.ContentLength = ContentLength(v)
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 	if c.Token != "" {

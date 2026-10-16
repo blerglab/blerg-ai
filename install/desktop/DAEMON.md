@@ -46,7 +46,8 @@ blerg-runner messaging guidance block there on every start.
 The Claude usage meter is on by default: the daemon reads the account usage
 endpoint the CLI's usage view reads, with the CLI's sign-in from
 `~/.claude/.credentials.json` (read only, never refreshed or written; only
-percentages and reset times reach the server). Set
+percentages and reset times reach the server; a work account's monthly spend limit is the share
+used only, never an amount). Set
 `BLERG_RUNNER_CLAUDE_USAGE=0` to turn it off. Its start-up log line says which.
 The endpoint and the file are the CLI's internals, not a documented API: if
 they change the meter goes empty (logged once). On macOS the CLI's login is in
@@ -503,6 +504,73 @@ but a sandboxed session is not isolated from exfiltrating data over the
 network or hitting other services reachable from your machine. Revisit if
 that tradeoff stops being acceptable for your use case.
 
+## Troubleshooting the stack
+
+### Publishing or uploading a file says "storage error"
+
+From 0.2.1 the message reads "The runner could not save the file because it is not allowed to
+write to its data folder (permission denied)", followed by an error id; the runner's log line for
+that id has the details. Older runners said "storage error".
+
+The runner keeps published files and uploaded attachments in its data volume
+(`blerg-desktop-runner-data`, mounted at `/data`). The runner runs as an unprivileged user
+(id 65532), so the volume has to belong to that user. Installs made before 0.2.1 could end up
+with a volume owned by root, and then every publish and upload failed.
+
+What Blerg does now:
+
+- The runner image ships `/data` owned by 65532, so a new volume starts out right.
+- Every `./blerg-up.sh` runs a small one-shot service (`blerg-runner-data-init`, it reuses the
+  `postgres:16` image the stack already has) that sets the owner of the files in that one volume
+  to 65532 and exits. It does not touch other volumes or your repos folder, and it keeps every file.
+  The runner starts after it finishes.
+- At startup the runner checks that it can write to its data directory. If it cannot, its log
+  has one line that starts with `STORAGE NOT WRITABLE`, naming the directory, the user id and the
+  error: `docker compose -f install/desktop/docker-compose.yml logs blerg-runner`.
+
+What to do: run `./blerg-up.sh` again (or `docker compose up -d` in `install/desktop`) with the
+0.2.1 files, then publish again. If the `STORAGE NOT WRITABLE` line is still in the runner's log,
+the repair could not change the owner: `docker compose logs blerg-runner-data-init` says why (the
+service still ends normally, so the runner and the board start and the runner's line explains).
+Nothing needs deleting; do not remove the volume, it holds your published files and attachments.
+If you changed `BLERG_RUNNER_DATA_DIR` or mounted another folder in place of the volume, make that
+folder writable by user id 65532.
+
+### Container sessions or the stack fail behind a corporate proxy
+
+Docker copies the `proxies` of `~/.docker/config.json` (your corporate `HTTP_PROXY`,
+`HTTPS_PROXY` and `NO_PROXY`) into every container it starts. A proxy cannot reach Blerg's own
+service names (`blerg-runner`, `blerg-board`), so before 0.2.1 the messaging CLI inside a
+container session sent `http://blerg-runner:8080` to the proxy and failed with a
+"connection reset by peer", and the services calling each other could fail the same way.
+
+What Blerg does now:
+
+- A session in the local sandbox gets `NO_PROXY` and `no_proxy` set to: the values in the
+  daemon's own environment, the `noProxy` of your Docker client config (the entry for
+  `DOCKER_HOST`, else `default`), and `blerg-runner,blerg-board,localhost,127.0.0.1`. Your own
+  exceptions are kept. Blerg never adds, changes or removes the proxy itself, so the session
+  still uses the proxy for everything else.
+- In the compose file, `blerg-core`, `blerg-board` and `blerg-runner` list the service names
+  (and `postgres`, `localhost`, `127.0.0.1`) in `NO_PROXY` and `no_proxy`, plus the `NO_PROXY` /
+  `no_proxy` of the shell you run `./blerg-up.sh` from, or of `install/desktop/.env`, and the
+  `noProxy` of your Docker client config, which `./blerg-up.sh` reads and passes on, so your own
+  internal hosts keep working. (A plain `docker compose up -d` without `./blerg-up.sh` does not
+  have the Docker client config part; use `./blerg-up.sh`, or put those hosts in `NO_PROXY`.)
+
+What to check:
+
+- This needs the 0.2.1 daemon: reinstall it with `./daemon/install.sh install` (or run
+  `./blerg-up.sh`), then start a new session. A session that was already running keeps the
+  environment it started with. Inside the new one, `env | grep -i proxy` should show `NO_PROXY`
+  containing `blerg-runner`.
+- After changing `NO_PROXY` for the services, run `./blerg-up.sh` again so the containers are
+  recreated with it.
+- If the daemon itself needs a proxy to reach Blerg's runner, that is separate: set it in the
+  service's environment (see [Files and permissions](#files-and-permissions)), and keep `localhost` in its `NO_PROXY`.
+- Only the exceptions are added. If your proxy blocks the sites a session needs (git, package
+  registries, the model API), ask whoever runs it; Blerg cannot fix that.
+
 ## Always-on plugins
 
 The plugin list a person keeps in core **Settings → Always-on plugins** reaches their desktop
@@ -708,7 +776,7 @@ Installed automatically by `blerg-up.sh`. To manage it directly:
 
 ```
 ./daemon/install.sh install     # build + install + start
-./daemon/install.sh status      # is it running?
+./daemon/install.sh status      # is it running, and is it connected?
 ./daemon/install.sh uninstall   # stop + remove
 journalctl --user -u blerg-runner-daemon -f   # logs
 ```
@@ -812,8 +880,78 @@ export CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token>
 ./daemon/install.sh install
 ```
 
-Requires either a local Go toolchain (1.25+) or Docker (used to cross-compile the
+Requires either a local Go toolchain (1.26+) or Docker (used to cross-compile the
 daemon binary for macOS/arm64 or macOS/amd64, whichever you're on).
+
+## Is the daemon connected?
+
+The daemon logs `daemon: connected to <server> as "<name>"` only once the server has said it
+accepted the daemon token: from 0.2.1 the server sends a confirmation right after the daemon's
+hello. A server older than 0.2.1 sends none, so the daemon waits 5 seconds; if the connection is
+still open by then it is taken as accepted, and the log says it was `not confirmed by the server`.
+A refused token is never logged as connected.
+
+The daemon keeps the state of its connection in `~/.blerg-runner-daemon/connection.json` (mode
+0600; `BLERG_RUNNER_DAEMON_STATE_DIR` moves it), and `./daemon/install.sh status` prints it after
+the service's own status:
+
+| State | What it means |
+|---|---|
+| `connecting` | starting, or reconnecting after the connection dropped; the detail says why |
+| `connected` | the server accepted the daemon token |
+| `unconfirmed` | the connection is open to a server older than 0.2.1, which does not confirm it |
+| `refused` | the server refused the daemon token. It stays this way while the daemon retries, until a connection is up again |
+
+The file holds the server's address, the time the state began, a short reason and the daemon's
+process id; never a token. Only the daemon that owns the state directory writes it (a second one
+started by hand does not), and a session pod in a cluster never writes one.
+
+**What the installer checks.** `install.sh install` (and `blerg-up.sh`, which runs it) asks the
+server whether it accepts the token from `install/desktop/.env` before it replaces the running
+daemon (`GET /api/daemon/whoami`; the token goes to `curl` in a private header file, never on a
+command line, and is never printed):
+
+- **refused**: it stops with exit code 6 and changes nothing; a daemon running now keeps running
+  as it was.
+- **an older server** (no such check; it answers with its web page or a 404): it says the check
+  was skipped and goes on.
+- **the server cannot be reached**: it says so and goes on; the server may simply be down.
+
+After the service restarts it waits up to 30 seconds (`BLERG_DAEMON_CONNECT_WAIT`) for the new
+daemon's `connection.json`; a file the replaced daemon left is not taken as the answer.
+`connected` and `unconfirmed` are fine. `refused` stops it with exit code 6. No answer in time is
+a warning only, with the command to read the daemon's log; it never waits for a key press.
+
+`blerg-up.sh` exits 6 too when the daemon token was refused: the stack is up, but the daemon is
+not connected, and its last box says to fix the token in `.env` and run `./daemon/install.sh
+install`. The installer's messages never show a `user:password@` part of the server URL, and its
+check ignores your `~/.curlrc`.
+
+### The server refused the daemon token
+
+The daemon logs a line that starts with `daemon: REFUSED:` (`the server at ... refused the daemon
+token (close 4401)`), and `install.sh` says `the server refused this daemon token`. The token the
+daemon presents is not the server's `BLERG_RUNNER_DAEMON_TOKEN`.
+
+Where the daemon's token comes from: the installed service's environment
+(`Environment=BLERG_RUNNER_DAEMON_TOKEN` in the systemd unit, or the launchd plist), which
+`install.sh install` copies from `BLERG_RUNNER_DAEMON_TOKEN` in `install/desktop/.env`. A daemon
+you started by hand in a terminal takes it from that shell.
+
+Common causes:
+
+- **A daemon connected to a cluster** (`BLERG_RUNNER_SERVER_URL` is `wss://runner.<DOMAIN>/ws/daemon`):
+  the token in `.env` is not the one in the cluster's `blerg-secrets`, for example after the
+  cluster's secrets were generated again. Put the cluster's value in `.env` (see
+  [Connecting the workstation daemon](../k8s/README.md#connecting-the-workstation-daemon)), then
+  run `./daemon/install.sh install`.
+- **The desktop stack on this machine**: its runner reads the same `.env`, so the runner container
+  is running with an older token. `./blerg-up.sh` starts it again with the current `.env` and then
+  reinstalls the daemon.
+
+A refused daemon keeps trying, more and more slowly (from 2 seconds up to once a minute), so it
+connects by itself once the server has the matching token. When the token in `.env` was the wrong
+one, the daemon needs the new value in its service: run `./daemon/install.sh install`.
 
 ## Verifying an engine actually works
 
@@ -853,7 +991,7 @@ export BLERG_RUNNER_DAEMON_TOKEN=<BLERG_RUNNER_DAEMON_TOKEN from install/desktop
 export BLERG_RUNNER_REPOS_ROOT=<the directory your repos live in — required>
 # either already logged into claude, or:
 export CLAUDE_CODE_OAUTH_TOKEN=<from `claude setup-token`>
-( cd ../../runner && GOWORK=off go run ./cmd/daemon )     # needs Go >= 1.25; or ./daemon/install.sh install builds it in Docker
+( cd ../../runner && GOWORK=off go run ./cmd/daemon )     # needs Go >= 1.26; or ./daemon/install.sh install builds it in Docker
 ```
 
 It has to keep running (in that terminal, in `tmux`/`screen`, whatever you use) for

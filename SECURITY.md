@@ -101,9 +101,12 @@ deploy, but they are not bugs:
   session binding or a private session's owner. Anything that holds it and knows a session id can
   read that session's attached files and add published files to it. Treat the token as able to do
   that, and keep it off any machine you would not trust with every session's files.
-- **Storage.** A session may publish up to 50 files of 25 MiB (about 1.25 GiB), and on Kubernetes the
-  runner's data is an `emptyDir` unless you give it a volume. A runaway agent can fill node
-  ephemeral storage: set ephemeral-storage limits or a quota for the namespace.
+- **Storage.** A session may publish up to 1 GiB of files (50 files, 100 MiB each at most) and be
+  sent up to 500 MiB of attachments, so one session can hold about 1.5 GiB; the three sizes are set
+  with `BLERG_RUNNER_MAX_FILE_MB`, `BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB` and
+  `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`. On Kubernetes the runner's data is an `emptyDir` unless you
+  give it a volume. A runaway agent can fill the volume or node ephemeral storage: size the volume
+  for the sessions you keep, and set ephemeral-storage limits or a quota for the namespace.
 - **HTML artifacts.** A published HTML page runs in a sandboxed frame with no network, no form
   submission and no embedding, but it can still draw a convincing page inside the viewer. Treat a
   file's content as untrusted, as its author is an agent that may have read hostile text.

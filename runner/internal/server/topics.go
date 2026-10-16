@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -58,7 +57,7 @@ type topicStarted struct {
 func (a *API) HandlePostTopic(w http.ResponseWriter, r *http.Request) {
 	sid := r.PathValue("id")
 	if a.dbPool == nil {
-		writeError(w, http.StatusServiceUnavailable, "no database")
+		writeError(w, http.StatusServiceUnavailable, noDatabaseMsg)
 		return
 	}
 	tokenSession, ok := a.authMessaging(w, r)
@@ -75,7 +74,7 @@ func (a *API) HandlePostTopic(w http.ResponseWriter, r *http.Request) {
 	}
 	var req topicRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, "The request body is not valid JSON.")
 		return
 	}
 	var title, outcome string
@@ -104,8 +103,7 @@ func (a *API) HandlePostTopic(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	sess, err := db.GetSession(ctx, a.dbPool, sid)
 	if err != nil {
-		log.Printf("topics GetSession: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "check the session", "topics GetSession", err)
 		return
 	}
 	if sess == nil {
@@ -113,26 +111,23 @@ func (a *API) HandlePostTopic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if terminalSessionStatus(sess.Status) {
-		writeError(w, http.StatusConflict, "session has ended")
+		writeError(w, http.StatusConflict, "This session has ended; topics can be marked only while it runs.")
 		return
 	}
 
 	tx, err := a.dbPool.Begin(ctx)
 	if err != nil {
-		log.Printf("topics begin %s: %v", sid, err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "record the topic", "topics begin "+sid, err)
 		return
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := db.LockTopics(ctx, tx, sid); err != nil {
-		log.Printf("topics lock %s: %v", sid, err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "record the topic", "topics lock "+sid, err)
 		return
 	}
 	latest, n, err := db.TopicState(ctx, tx, sid)
 	if err != nil {
-		log.Printf("topics TopicState %s: %v", sid, err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "record the topic", "topics TopicState "+sid, err)
 		return
 	}
 	// The cap refuses only a start: a done on an open topic is always allowed, so no topic stays open for good.
@@ -169,13 +164,11 @@ func (a *API) HandlePostTopic(w http.ResponseWriter, r *http.Request) {
 	clientEventID := newUUID()
 	seq, _, err := db.AppendAgentEventTx(ctx, tx, sid, clientEventID, "topic", string(raw), at)
 	if err != nil {
-		log.Printf("topics append %s: %v", sid, err)
-		writeError(w, http.StatusInternalServerError, "could not record the topic")
+		writeDatabaseFailure(w, "record the topic", "topics append "+sid, err)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("topics commit %s: %v", sid, err)
-		writeError(w, http.StatusInternalServerError, "could not record the topic")
+		writeDatabaseFailure(w, "record the topic", "topics commit "+sid, err)
 		return
 	}
 	fanOutServerEvent(a.hub, sid, clientEventID, "topic", raw, seq, at)
@@ -279,8 +272,7 @@ func (a *API) HandleGetTopics(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	row, err := db.GetSession(ctx, a.dbPool, sid)
 	if err != nil {
-		log.Printf("topics GetSession: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "check the session", "topics GetSession", err)
 		return
 	}
 	if row == nil || !canSeeAccount(p.Sub, row) {
@@ -295,14 +287,12 @@ func (a *API) HandleGetTopics(w http.ResponseWriter, r *http.Request) {
 	}
 	through, err := db.MaxAgentEventSeq(ctx, a.dbPool, sid)
 	if err != nil {
-		log.Printf("topics MaxAgentEventSeq %s: %v", sid, err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "read the session's history", "topics MaxAgentEventSeq "+sid, err)
 		return
 	}
 	files, newest, err := db.ArtifactStamp(ctx, a.dbPool, sid)
 	if err != nil {
-		log.Printf("topics ArtifactStamp %s: %v", sid, err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "read the session's history", "topics ArtifactStamp "+sid, err)
 		return
 	}
 	etag := topicsETag(through, files, newest, row.Status, row.EndedAt, repoKey, showTokens)
@@ -314,14 +304,12 @@ func (a *API) HandleGetTopics(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := db.ListReelEvents(ctx, a.dbPool, sid, through)
 	if err != nil {
-		log.Printf("topics ListReelEvents %s: %v", sid, err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "read the session's history", "topics ListReelEvents "+sid, err)
 		return
 	}
 	arts, err := db.ListArtifacts(ctx, a.dbPool, sid)
 	if err != nil {
-		log.Printf("topics ListArtifacts %s: %v", sid, err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "read the session's history", "topics ListArtifacts "+sid, err)
 		return
 	}
 	events := make([]topics.Event, 0, len(rows))

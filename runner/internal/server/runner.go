@@ -1021,6 +1021,9 @@ func (a *API) HandleRunnerStatus(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, apiErr)
 		return
 	}
+	// What the session's files may weigh: an app's chat (through its proxy) refuses a file that
+	// is too big before uploading it. Not in SessionStatus, which the MCP tool shares.
+	body["limits"] = currentFileLimits()
 	writeJSON(w, http.StatusOK, body)
 }
 

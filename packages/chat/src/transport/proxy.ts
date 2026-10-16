@@ -22,13 +22,14 @@
 //   polling route's `has_more` stands in, without `first_seq` the first event's seq does, and
 //   without `server_time` the response's Date header.
 // - GET /sessions/{id} is a SessionMeta; a runner status body ({lifecycle, runtime, ...}) is
-//   mapped instead when it has no `status`.
+//   mapped instead when it has no `status`. Its `limits` (the runner's file limits, 0.2.1 on) are
+//   kept either way.
 // - The `end` frame's data may carry `status` (a SessionStatus) or the runner's result body
 //   ({lifecycle}); `error` is reported as 'error', anything else as 'ended'.
 import type { AgentEvent, AgentEventsReplayDone, AssistantTextPayload, EndedBy, SessionStatus } from '../types'
 import { createFiles } from './files'
 import { openSseStream, type SseStream } from './sse'
-import type { OlderPage, SessionMeta, SubscribeHandlers, SubscribeOptions, Transport } from './types'
+import type { FileLimits, OlderPage, SessionMeta, SubscribeHandlers, SubscribeOptions, Transport } from './types'
 
 export interface ProxyTransportOptions {
   /** The proxy's prefix on the app's origin, e.g. '/blerg' (no trailing slash needed). */
@@ -107,7 +108,20 @@ function toMeta(body: Record<string, unknown>): SessionMeta {
     ended_by: endedBy && typeof endedBy === 'object' && typeof (endedBy as EndedBy).kind === 'string' ? (endedBy as EndedBy) : endedBy === null ? null : undefined,
     error_reason: str('error_reason') || undefined,
     message: body.message === null ? null : str('message'),
+    ...(limitsOf(body.limits) ? { limits: limitsOf(body.limits) } : {}),
   }
+}
+
+/** The runner's `limits` object, its byte counts kept only when they are positive numbers;
+ *  undefined when there are none (an older runner). */
+function limitsOf(raw: unknown): FileLimits | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const out: FileLimits = {}
+  for (const k of ['max_file_bytes', 'max_session_upload_bytes', 'max_session_artifact_bytes'] as const) {
+    const v = (raw as Record<string, unknown>)[k]
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) out[k] = v
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 export function createProxyTransport(opts: ProxyTransportOptions): Transport {

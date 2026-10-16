@@ -67,7 +67,8 @@ export interface DaemonInfo {
   usage_limits?: UsageLimits[];
 }
 
-/** One limit window: "5h" (five hours), "7d" (the week) or "capped" (refused until resets_at). */
+/** One limit window: "5h" (five hours), "7d" (the week), "month" (a monthly spend limit; "day" and
+ *  "spend-week" for daily/weekly ones) or "capped" (refused, until resets_at when known). */
 export interface UsageWindow {
   id: string;
   used_percent: number;
@@ -374,6 +375,14 @@ export interface InitialState {
   /** The release version (the VERSION file) and short git commit the server was built from. */
   server_release?: string;
   server_commit?: string;
+  /** What a session's files may weigh, in bytes (from 0.2.1; an older server sends none). */
+  limits?: FileLimits;
+}
+
+export interface FileLimits {
+  max_file_bytes?: number;
+  max_session_upload_bytes?: number;
+  max_session_artifact_bytes?: number;
 }
 
 export interface DaemonConnected {

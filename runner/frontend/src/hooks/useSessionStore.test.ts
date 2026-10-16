@@ -32,6 +32,14 @@ describe('useSessionStore', () => {
     expect(get().serverVersion).toBe('2.1.0')
     expect(get().serverRelease).toBe('0.2.0')
     expect(get().serverCommit).toBe('510d0c0')
+    expect(get().maxFileBytes).toBeNull()
+  })
+
+  it('keeps the per-file limit the server advertises', () => {
+    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [], limits: { max_file_bytes: 104857600, max_session_upload_bytes: 524288000 } })
+    expect(get().maxFileBytes).toBe(104857600)
+    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [], limits: { max_file_bytes: 0 } })
+    expect(get().maxFileBytes).toBeNull()
   })
 
   it('updates a session status on session_state_changed', () => {

@@ -498,7 +498,7 @@ func TestStartSandboxContainerJoinsTheSandboxNetwork(t *testing.T) {
 			t.Errorf("missing %q in %s", want, joined)
 		}
 	}
-	for _, bad := range []string{"BLERG_RUNNER_SERVER_URL", "localhost", "HOME=/x"} {
+	for _, bad := range []string{"BLERG_RUNNER_SERVER_URL", "://localhost", "HOME=/x"} {
 		if strings.Contains(joined, bad) {
 			t.Errorf("must not contain %q: %s", bad, joined)
 		}

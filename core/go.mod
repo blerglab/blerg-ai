@@ -1,12 +1,12 @@
 module github.com/blerglab/blerg-ai/core
 
-go 1.25.14
+go 1.26.9
 
 require (
 	github.com/blerglab/blerg-ai/contracts v0.0.0-00010101000000-000000000000
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/jackc/pgx/v5 v5.10.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/oauth2 v0.30.0
 )
 

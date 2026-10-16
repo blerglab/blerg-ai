@@ -9,9 +9,15 @@ import './UsageMeters.css'
 // reports. Nothing is drawn when nothing reports.
 
 const PROVIDER_NAMES: Record<string, string> = { codex: 'Codex', claude: 'Claude' }
-const WINDOW_LABELS: Record<string, string> = { '5h': '5h', '7d': 'week' }
-const WINDOW_TITLES: Record<string, string> = { '5h': '5-hour window', '7d': 'Weekly window' }
-const WINDOW_ORDER = ['5h', '7d', 'capped']
+const WINDOW_LABELS: Record<string, string> = { '5h': '5h', '7d': 'week', month: 'month', day: 'day', 'spend-week': 'spend wk' }
+const WINDOW_TITLES: Record<string, string> = {
+  '5h': '5-hour window',
+  '7d': 'Weekly window',
+  month: 'Monthly spend limit',
+  day: 'Daily spend limit',
+  'spend-week': 'Weekly spend limit',
+}
+const WINDOW_ORDER = ['5h', '7d', 'month', 'day', 'spend-week', 'capped']
 
 /** The clock time a cap lifts: "14:00", or "Mon 14:00" when that is not within the day. */
 function resetClock(resetsAt: string, now: Date): string {
@@ -26,10 +32,12 @@ function providerName(p: string): string {
 }
 
 /** The windows still worth showing, in a fixed order: a window whose reset has passed is gone (its
- *  percentage is no longer true; the daemon's next read brings the new one), and so is a cap. */
+ *  percentage is no longer true; the daemon's next read brings the new one), and so is a cap. A
+ *  window with no reset time (a spend limit, which resets on the provider's billing cycle, or a
+ *  reached spend limit) stays until the daemon's next read says otherwise. */
 function liveWindows(u: UsageLimits, now: Date): UsageWindow[] {
   return (u.windows ?? [])
-    .filter(w => w.resets_at ? new Date(w.resets_at).getTime() > now.getTime() : w.id !== 'capped')
+    .filter(w => !w.resets_at || new Date(w.resets_at).getTime() > now.getTime())
     .sort((a, b) => WINDOW_ORDER.indexOf(a.id) - WINDOW_ORDER.indexOf(b.id))
 }
 
@@ -42,7 +50,7 @@ function Window({ provider, w, now, fetchedAt }: { provider: string; w: UsageWin
         data-testid="usage-window-capped"
         role="status"
         className="usage-meter usage-meter--danger usage-meter--capped"
-        title={`${providerName(provider)} refused a call for its usage limit${when ? ` · resets ${when}` : ''}`}
+        title={when ? `${providerName(provider)} refused a call for its usage limit · resets ${when}` : `${providerName(provider)} spend limit reached`}
       >
         <span className="usage-meter__dot" />
         capped{w.resets_at ? ` · resets ${resetClock(w.resets_at, now)}` : ''}
@@ -50,6 +58,10 @@ function Window({ provider, w, now, fetchedAt }: { provider: string; w: UsageWin
     )
   }
   const pct = Math.round(Math.min(100, Math.max(0, w.used_percent)))
+  // Between 0 and 1 % is "<1%", not 0 %: some of the limit is used (a work account's first dollars).
+  const underOne = w.used_percent > 0 && w.used_percent < 1
+  const pctText = underOne ? '<1' : String(pct)
+  const spoken = underOne ? 'under 1' : String(pct)
   const label = WINDOW_LABELS[w.id] ?? w.id
   const name = WINDOW_TITLES[w.id] ?? label
   return (
@@ -58,14 +70,14 @@ function Window({ provider, w, now, fetchedAt }: { provider: string; w: UsageWin
       role="progressbar"
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={pct}
-      aria-label={`${providerName(provider)} ${name.toLowerCase()}, ${pct}% used${when ? `, resets ${when}` : ''}${asOf ? `, as of ${asOf}` : ''}`}
+      aria-valuenow={underOne ? Math.round(w.used_percent * 10) / 10 : pct}
+      aria-label={`${providerName(provider)} ${name.toLowerCase()}, ${spoken}% used${when ? `, resets ${when}` : ''}${asOf ? `, as of ${asOf}` : ''}`}
       className={`usage-meter usage-meter--${meterLevel(w.used_percent)}`}
-      title={`${name}: ${pct}% used${when ? ` · resets ${when}` : ''}${asOf ? ` · as of ${asOf}` : ''}`}
+      title={`${name}: ${pctText}% used${when ? ` · resets ${when}` : ''}${asOf ? ` · as of ${asOf}` : ''}`}
     >
       <span className="usage-meter__label" aria-hidden="true">{label}</span>
-      <span className="usage-meter__track" aria-hidden="true"><span className="usage-meter__fill" style={{ width: `${pct}%` }} /></span>
-      <span className="usage-meter__pct" aria-hidden="true">{pct}%</span>
+      <span className="usage-meter__track" aria-hidden="true"><span className="usage-meter__fill" style={{ width: `${underOne ? 2 : pct}%` }} /></span>
+      <span className="usage-meter__pct" aria-hidden="true">{pctText}%</span>
       {/* For a screen with no hover (the phone): the reset as text, its largest unit ("↻2h"; the
           spoken name has it in full). UsageMeters.css shows it there only. */}
       {when && <span className="usage-meter__reset" aria-hidden="true">↻{when.replace(/^in /, '').split(' ')[0]}</span>}

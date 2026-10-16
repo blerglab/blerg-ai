@@ -3,7 +3,7 @@
 // the chat talks to the board's /api/chat proxy with the board's own bearer token, and the board
 // passes each request to the runner for that one session after its own permission check.
 import { useMemo } from "react";
-import { ChatView, createProxyTransport, type DescribeUserMessage, type Transport } from "@blerglab/chat";
+import { ChatView, createProxyTransport, type DescribeUserMessage, type SessionMeta, type Transport } from "@blerglab/chat";
 import "@blerglab/chat/blerg.css";
 import { ensureFreshToken, getAccessToken } from "./authClient";
 import { bounceToRefresh } from "./signIn";
@@ -69,6 +69,14 @@ export const describeUserMessage: DescribeUserMessage = (_ev, p, ctx) => {
   return { author: "blerg-board" };
 };
 
+/** The runner's session status as the chat gets it, completed from the board's own row: when the
+ *  board started it and on which model. Everything else, the runner's advertised file `limits`
+ *  among it (the chat refuses an attachment over `limits.max_file_bytes` before sending it), is
+ *  the runner's. */
+export function boardMeta(m: SessionMeta, row: Pick<RunnerSession, "created_at" | "model">): SessionMeta {
+  return { ...m, started_at: m.started_at || row.created_at, model: m.model ?? (row.model || undefined) };
+}
+
 export function SessionChat({ session, placeholder, readOnly }: {
   session: RunnerSession;
   placeholder?: string;
@@ -82,10 +90,7 @@ export function SessionChat({ session, placeholder, readOnly }: {
     const base = boardTransport();
     return {
       ...base,
-      session: async (id) => {
-        const m = await base.session(id);
-        return { ...m, started_at: m.started_at || created_at, model: m.model ?? (model || undefined) };
-      },
+      session: async (id) => boardMeta(await base.session(id), { created_at, model }),
     };
   }, [created_at, model]);
   return (

@@ -30,9 +30,10 @@ import {
 } from '../model/artifactViews'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { composeMarkupMessage } from '../model/feedback'
-import { FILE_GONE_MESSAGE, isArtifactGone } from '../transport/files'
+import { FILE_GONE_MESSAGE, FileRequestError, fileErrorText, isArtifactGone } from '../transport/files'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { useChat } from './context'
+import ErrorId from './ErrorId'
 import Markdown from './Markdown'
 import MarkupMode from './markup/MarkupMode'
 import ReviewMode from './review/ReviewMode'
@@ -40,7 +41,7 @@ import ReviewMode from './review/ReviewMode'
 type Loaded =
   | { kind: 'text'; text: string }
   | { kind: 'blob'; url: string; blob: Blob }
-  | { kind: 'error' }
+  | { kind: 'error'; message?: string; errorId?: string }
   // The server still lists the file but no longer has its bytes (410, or the list said missing).
   | { kind: 'gone' }
 
@@ -66,7 +67,7 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
   const backdrop = useBackdropClose(onClose)
   const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [showAll, setShowAll] = useState(false)
-  const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [downloadError, setDownloadError] = useState<{ message: string; errorId?: string } | null>(null)
   const [mode, setMode] = useState<Mode>('view')
   // The feedback modes send through the chat; a viewer mounted alone has no send path.
   const chat = useChat()
@@ -101,7 +102,10 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
         url = URL.createObjectURL(typed)
         setLoaded({ kind: 'blob', url, blob: typed })
       } catch (e) {
-        if (!cancelled) setLoaded({ kind: isArtifactGone(e) ? 'gone' : 'error' })
+        if (cancelled) return
+        if (isArtifactGone(e)) setLoaded({ kind: 'gone' })
+        // The server's own sentence when it refused for a reason of its own (its disk, say).
+        else setLoaded(e instanceof FileRequestError ? { kind: 'error', message: e.message, errorId: e.errorId } : { kind: 'error' })
       }
     })()
     return () => {
@@ -116,7 +120,7 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
       await files.download(sessionId, artifact.id)
     } catch (e) {
       if (isArtifactGone(e)) setLoaded({ kind: 'gone' })
-      else setDownloadError(e instanceof Error ? e.message : 'Download failed.')
+      else setDownloadError(fileErrorText(e, 'Download failed.'))
     }
   }
 
@@ -165,7 +169,7 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
             {latest && onOpen && <> <button type="button" className="artifact-link" onClick={() => onOpen(latest)}>View latest</button></>}
           </p>
         )}
-        {downloadError && <div className="artifact-error" role="alert">{downloadError}</div>}
+        {downloadError && <div className="artifact-error" role="alert">{downloadError.message}<ErrorId id={downloadError.errorId} /></div>}
         <div className="artifact-body">
           {gone ? (
             <p className="artifact-status" role="status" data-testid="artifact-gone">
@@ -191,7 +195,9 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
             <p className="artifact-status" data-testid="artifact-loading">Loading…</p>
           ) : loaded.kind === 'error' ? (
             <p className="artifact-status" data-testid="artifact-error">
-              Couldn’t load this file. It may have been deleted — you can still try Download.
+              {loaded.message
+                ? <>{loaded.message}<ErrorId id={loaded.errorId} /></>
+                : 'Couldn’t load this file. It may have been deleted — you can still try Download.'}
             </p>
           ) : loaded.kind === 'blob' ? (
             <BlobView artifact={artifact} url={loaded.url} autoplay={autoplay} />

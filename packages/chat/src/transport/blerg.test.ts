@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, type Mock } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { createBlergTransport, GAP_WAIT_MS, MAX_FORWARD_PAGES, type BlergSocket, type ChatBrowserMessage } from './blerg'
 import type { SubscribeHandlers } from './types'
-import { ArtifactGoneError, isArtifactGone } from './files'
+import { ArtifactGoneError, FileRequestError, fileErrorText, isArtifactGone, UPLOAD_CUT_OFF_MESSAGE } from './files'
 import type { AgentEvent } from '../types'
 import { useSession } from '../hooks/useSession'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
@@ -756,6 +756,62 @@ describe('createBlergTransport files', () => {
     fetch.mockResolvedValue(new Response(JSON.stringify({ artifacts: [] })))
     await t.files!.list('s1')
     expect((fetch.mock.calls[0][1] as RequestInit).headers).toEqual({})
+  })
+
+  it('a refused read says the server’s sentence and keeps its error id', async () => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'The runner could not read the file because of an unexpected storage error; try again.', error_id: '0badf00d' }), { status: 500 }))
+    const e = await t.files!.download('s1', 'a1').catch((x: unknown) => x)
+    expect(e).toBeInstanceOf(FileRequestError)
+    expect((e as FileRequestError).message).toBe('The runner could not read the file because of an unexpected storage error; try again.')
+    expect((e as FileRequestError).errorId).toBe('0badf00d')
+    expect(fileErrorText(e, 'x')).toEqual({ message: (e as Error).message, errorId: '0badf00d' })
+    // A proxy's plain-text refusal is shown as it is; a web page or nothing falls back.
+    fetch.mockResolvedValueOnce(new Response('forbidden\n', { status: 403, headers: { 'Content-Type': 'text/plain' } }))
+    expect(((await t.files!.download('s1', 'a1').catch((x: unknown) => x)) as Error).message).toBe('forbidden')
+    fetch.mockResolvedValueOnce(new Response('<!doctype html><p>gateway</p>', { status: 502 }))
+    expect(((await t.files!.raw('s1', 'a1').catch((x: unknown) => x)) as Error).message).toBe('Couldn’t load this file (HTTP 502).')
+    fetch.mockResolvedValueOnce(new Response('', { status: 500 }))
+    expect(((await t.files!.download('s1', 'a1').catch((x: unknown) => x)) as Error).message).toBe('Download failed (HTTP 500).')
+  })
+
+  function refusingXhr(status: number, body: string, contentType = 'application/json') {
+    return {
+      upload: { onprogress: null },
+      onload: null as (() => void) | null, onerror: null as (() => void) | null, onabort: null, status, responseText: body,
+      open() {}, setRequestHeader() {},
+      getResponseHeader: () => contentType,
+      send() { if (status === 0) this.onerror?.(); else this.onload?.() },
+      abort() {},
+    }
+  }
+
+  it('an upload refusal is the server’s sentence with its error id, plain text included', async () => {
+    const { t } = make()
+    const file = new File(['abc'], 'a.txt')
+    const cases: Array<[number, string, string, string, string | undefined]> = [
+      [413, '{"error":"This file is 130 MiB; the runner takes at most 100 MiB per file."}', 'application/json', 'This file is 130 MiB; the runner takes at most 100 MiB per file.', undefined],
+      [413, '', 'application/json', 'That file is larger than the server takes.', undefined],
+      [500, '{"error":"The runner could not save the file because its disk is full.","error_id":"ab12cd34"}', 'application/json', 'The runner could not save the file because its disk is full.', 'ab12cd34'],
+      [403, 'forbidden\n', 'text/plain; charset=utf-8', 'forbidden', undefined],
+      [502, 'runner unreachable\n', 'text/plain; charset=utf-8', 'runner unreachable', undefined],
+      [502, '\u001b[31mbad gateway\u001b[0m\n', 'text/plain', '[31mbad gateway[0m', undefined],
+      [500, '<html><body>boom</body></html>', 'text/html', 'Upload failed (HTTP 500).', undefined],
+    ]
+    for (const [status, body, ct, message, errorId] of cases) {
+      const xhr = refusingXhr(status, body, ct)
+      vi.stubGlobal('XMLHttpRequest', function FakeXhr() { return xhr })
+      const e = await t.files!.upload('s1', file).catch((x: unknown) => x)
+      expect(e, `${status} ${body}`).toBeInstanceOf(FileRequestError)
+      expect((e as FileRequestError).message).toBe(message)
+      expect((e as FileRequestError).errorId).toBe(errorId)
+      vi.unstubAllGlobals()
+    }
+    // No answer at all: the connection went (a proxy that refused the size cuts it).
+    const xhr = refusingXhr(0, '')
+    vi.stubGlobal('XMLHttpRequest', function FakeXhr() { return xhr })
+    await expect(t.files!.upload('s1', file)).rejects.toThrow(UPLOAD_CUT_OFF_MESSAGE)
+    vi.unstubAllGlobals()
   })
 
   it('uploads raw bytes with the percent-encoded name, reporting progress', async () => {

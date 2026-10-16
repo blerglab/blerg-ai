@@ -70,8 +70,6 @@ func main() {
 		AllowHostCredentialClone: os.Getenv("BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE") == "true",
 	}
 
-	client := daemon.NewWSClient(cfg)
-
 	// Recovery records of agent sessions belong to one daemon process at a time: a second
 	// daemon run by the same user (a build started by hand) keeps none and recovers nothing.
 	agentRecordsDir := daemon.AgentRecordsDir(daemon.DaemonStateDir())
@@ -84,6 +82,11 @@ func main() {
 	if agentRecordsDir != "" {
 		stateDir = daemon.DaemonStateDir()
 	}
+	// The link's state for the installer and `install.sh status` (connection.json), kept by the
+	// daemon that holds the state directory: a second one started by hand does not overwrite it.
+	cfg.ConnectionFile = daemon.ConnectionFilePath(stateDir)
+
+	client := daemon.NewWSClient(cfg)
 	restartCause := daemon.ReadRestartCause(stateDir)
 
 	serverHTTP, fromPreviewURL := serverHTTPSetting(os.Getenv("BLERG_RUNNER_SERVER_HTTP"), os.Getenv("BLERG_RUNNER_PREVIEW_URL"))

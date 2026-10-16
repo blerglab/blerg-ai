@@ -109,18 +109,23 @@ The first publish of a name prints no version note.
 
 ## Limits
 
-- 25 MiB per file.
+- 100 MiB per file (`BLERG_RUNNER_MAX_FILE_MB`). A larger file is refused before it is sent: the
+  command checks it against the limit the runner reports, and says both sizes. It checks the
+  session's 1 GiB total below the same way.
 - 50 files per session, every version counting as a file. A 51st is refused. The agent frees a slot
   itself with `blerg-runner unpublish <name>` (`blerg-runner files` lists what it published); a file
   you attached is yours to delete, from the Files panel.
-  Together that is up to about 1.25 GiB per session, so on a shared machine or cluster node give the
-  runner's data a disk quota (see [`SECURITY.md`](../SECURITY.md)).
+- 1 GiB in total for the files one session published (`BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB`).
+  With the attachments below, one session can hold about 1.5 GiB, so size the runner's data volume
+  for the sessions you keep, and on a shared machine or cluster node give it a disk quota (see
+  [`SECURITY.md`](../SECURITY.md)).
 - 20 versions per file name (per side). A 21st is refused with "This file already has 20 versions;
   delete an old one first."
 - A file name is cut to its base name (no folders), 120 bytes at most, with control characters
   removed.
 - A directory is zipped by the command (skipping `.git`, `node_modules` and symlinks, at most
-  200 MiB of input) and the zip must fit in 25 MiB.
+  eight times the per-file limit of input, 800 MiB by default) and the zip must fit in the per-file
+  limit.
 - Files can only be published while the session is running.
 
 ## Who can see a file
@@ -188,9 +193,14 @@ from the chat box, and the session's agent fetches them into its working folder.
 - **Attach** with the paperclip next to the message box, by dragging files onto the chat, or by
   pasting them. Each file uploads immediately and shows as a chip under the box with its size and a
   remove button; removing a chip deletes the upload. Send is disabled while an upload is running.
-- **Limits:** 25 MiB per file (larger ones are refused in the browser), 10 files per message, and
-  per session at most 100 uploaded files and 200 MiB in total. These are separate from the agent's
-  own 50 files; uploading is refused once the session has ended. Name handling and the content type
+- **Limits:** 100 MiB per file (larger ones are refused in the browser, which says the limit), 10
+  files per message, and per session at most 100 uploaded files and 500 MiB in total
+  (`BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`). These are separate from the agent's own 50 files and
+  1 GiB; uploading is refused once the session has ended. A runner older than 0.2.1 does not report
+  its limits, and the chat then assumes its old 25 MiB.
+- **When an upload or a download fails**, the chat shows what the runner said: which step failed
+  and why (for example that its disk is full, or that it may not write to its data folder) and what
+  to do, followed by a short error id. Whoever runs Blerg finds the same id in the runner's log. Name handling and the content type
   work exactly as for an agent's files (the server decides the type; folders in names are dropped).
 - **What the agent sees:** your text, then a blank line and one line naming the files, for example
   `Attached files (fetch them with: blerg-runner fetch --all): a.pdf (1.2 MB), b.pdf (800 KB)`. If

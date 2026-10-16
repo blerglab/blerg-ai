@@ -186,6 +186,16 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 				}
 			}
 
+			// The token is accepted and the daemon has its id: say so now, before the
+			// reconnect's slower work below (reconcile, kills, token heal, replays), so
+			// the daemon does not read a slow attach as an unconfirmed connection.
+			if hello.Welcome {
+				if err := sendDaemonWelcome(wsConn, daemonID, hello.Name, runtimeToken.SessionID); err != nil {
+					_ = wsConn.Close()
+					return err
+				}
+			}
+
 			// ── Step 5: reconcile active_sessions ───────────────────────────────────────
 			// Mark sessions active in the DB but absent from the daemon's list as stopped.
 			var stoppedWhileAway []string
@@ -262,6 +272,23 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			_ = wsConn.Close()
 		}
 	}
+}
+
+// sendDaemonWelcome writes the daemon_welcome straight to the socket. It runs
+// before the write pump starts, so nothing else writes to conn yet; a session
+// pod's welcome carries its bound session, as every message to it does.
+func sendDaemonWelcome(conn *websocket.Conn, daemonID, name, boundSession string) error {
+	raw, err := json.Marshal(protocol.DaemonWelcome{Type: "daemon_welcome", DaemonID: daemonID, Name: name, SessionID: boundSession})
+	if err != nil {
+		return err
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
+		return err
+	}
+	return conn.SetWriteDeadline(time.Time{})
 }
 
 // daemonWritePump drains dc.send and writes outbound messages to the daemon.

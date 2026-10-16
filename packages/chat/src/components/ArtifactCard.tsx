@@ -8,8 +8,10 @@ import { useChat } from './context'
 import { formatSize, withCsp } from '../model/artifacts'
 import { HTML_PREVIEW_PAGE, loadPreviewText, loadPreviewUrl, previewKind } from '../model/artifactPreview'
 import { isViewable } from '../model/artifactViews'
+import { fileErrorText } from '../transport/files'
 import type { TransportFiles } from '../transport/types'
 import type { ArtifactPayload } from '../types'
+import ErrorId from './ErrorId'
 import { TimeLabel } from './TimeLabel'
 
 /** The inline preview of a file: the image, or a play tile for video and audio. The image is
@@ -152,7 +154,7 @@ function HtmlPreview({ sessionId, files, artifact, onOpen }: {
 export default function ArtifactCard({ payload, ts, eventId }: { payload: ArtifactPayload; ts?: string; eventId?: string }) {
   const chat = useChat()
   const files = chat?.files ?? null
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<{ message: string; errorId?: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const version = payload.version
   const latest = chat?.latestVersion(payload) ?? payload.latest_version ?? version
@@ -165,7 +167,7 @@ export default function ArtifactCard({ payload, ts, eventId }: { payload: Artifa
     try {
       await files.download(chat.sessionId, payload.id)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Download failed.')
+      setError(fileErrorText(e, 'Download failed.'))
     } finally {
       setBusy(false)
     }
@@ -189,7 +191,7 @@ export default function ArtifactCard({ payload, ts, eventId }: { payload: Artifa
         )}
         <TimeLabel ts={ts} className="card-time-end" />
       </div>
-      {error && <div className="artifact-error" role="alert">{error}</div>}
+      {error && <div className="artifact-error" role="alert">{error.message}<ErrorId id={error.errorId} /></div>}
     </div>
   )
 }

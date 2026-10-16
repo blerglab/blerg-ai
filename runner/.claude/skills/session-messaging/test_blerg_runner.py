@@ -594,10 +594,24 @@ class TestDerivation(unittest.TestCase):
 
 class ArtifactStubHandler(http.server.BaseHTTPRequestHandler):
     """Stands in for POST /api/sessions/{id}/artifacts: records the raw body and answers
-    with a scripted status/JSON (server.reply_status, server.reply_json)."""
+    with a scripted status/JSON (server.reply_status, server.reply_json). GET .../files answers
+    the session's limits (server.limits; None = an older runner that reports none)."""
 
     def log_message(self, format, *args):
         pass
+
+    def do_GET(self):
+        self.server.gets.append(self.path)
+        sizes = getattr(self.server, "published_sizes", [])
+        out = {"files": [{"id": f"f{i}", "name": f"f{i}", "size": n} for i, n in enumerate(sizes)], "used": len(sizes), "limit": 50}
+        if self.server.limits is not None:
+            out["limits"] = self.server.limits
+        resp = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -607,6 +621,7 @@ class ArtifactStubHandler(http.server.BaseHTTPRequestHandler):
             "auth": self.headers.get("Authorization", ""),
             "name": self.headers.get("X-Artifact-Name", ""),
             "ctype": self.headers.get("Content-Type", ""),
+            "length": self.headers.get("Content-Length", ""),
             "body": body,
         })
         resp = json.dumps(self.server.reply_json).encode()
@@ -617,15 +632,29 @@ class ArtifactStubHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(resp)
 
 
-def make_artifact_server(view="text", status=201, reply=None):
-    server = http.server.HTTPServer(("127.0.0.1", 0), ArtifactStubHandler)
+def make_artifact_server(view="text", status=201, reply=None, limits=None):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ArtifactStubHandler)
     server.recorded = []
+    server.gets = []
+    server.limits = limits
     server.reply_status = status
     server.reply_json = reply if reply is not None else {
         "id": "a" * 32, "size": 0, "content_type": "text/plain", "view": view,
         "url": "/sessions/sess-pub?artifact=" + "a" * 32,
     }
     return server
+
+
+def serve(server):
+    """Serves server on a thread until the returned stop() is called (which also closes it)."""
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+    def stop():
+        server.shutdown()
+        t.join(timeout=5)
+        server.server_close()
+    return stop
 
 
 class TestPublish(unittest.TestCase):
@@ -653,17 +682,11 @@ class TestPublish(unittest.TestCase):
 
     def _publish(self, args, server=None, **kw):
         server = server or make_artifact_server()
-        t = threading.Thread(target=server.handle_request)
-        t.start()
-        result = run_blerg_runner(["publish"] + args, env_override=self._env(server.server_address[1]), **kw)
-        if t.is_alive():
-            # The CLI never reached the server (validation failed first): unblock the stub.
-            try:
-                socket.create_connection(server.server_address, timeout=2).close()
-            except OSError:
-                pass
-        t.join(timeout=5)
-        server.server_close()
+        stop = serve(server)
+        try:
+            result = run_blerg_runner(["publish"] + args, env_override=self._env(server.server_address[1]), **kw)
+        finally:
+            stop()
         return result, server
 
     def test_noop_when_not_under_blerg(self):
@@ -766,6 +789,7 @@ class TestPublish(unittest.TestCase):
         self.assertEqual(server.recorded, [])
 
     def test_too_large_file_is_refused_before_sending(self):
+        # An older runner reports no limits: 25 MiB is assumed.
         p = self._file("big.bin", b"")
         with open(p, "r+b") as f:
             f.truncate(25 * 1024 * 1024 + 1)  # sparse
@@ -773,6 +797,56 @@ class TestPublish(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("25 MiB", result.stderr)
         self.assertEqual(server.recorded, [])
+        self.assertEqual(server.gets, ["/api/sessions/sess-pub/files"])
+
+    def test_the_advertised_limit_is_the_one_checked(self):
+        p = self._file("big.bin", b"")
+        with open(p, "r+b") as f:
+            f.truncate(30 * 1024 * 1024)  # sparse: over the old 25 MiB, under the advertised 100
+        server = make_artifact_server(limits={"max_file_bytes": 100 * 1024 * 1024, "max_session_upload_bytes": 1})
+        result, _ = self._publish([p], server=server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(server.recorded), 1)
+        self.assertEqual(server.recorded[0]["length"], str(30 * 1024 * 1024))
+        self.assertEqual(len(server.recorded[0]["body"]), 30 * 1024 * 1024)
+
+        small = make_artifact_server(limits={"max_file_bytes": 1024})
+        result, _ = self._publish([self._file("k.bin", b"x" * 2048)], server=small)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("k.bin is 2.0 KB; this runner takes at most 1.0 KB per file", result.stderr)
+        self.assertEqual(small.recorded, [])
+
+    def test_the_sessions_published_total_is_checked_before_sending(self):
+        p = self._file("r.bin", b"x" * 3000)
+        server = make_artifact_server(limits={"max_file_bytes": 10000, "max_session_artifact_bytes": 5000})
+        server.published_sizes = [1500, 1000]
+        result, _ = self._publish([p], server=server)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("r.bin is 2.9 KB, and this session's published files would go over their 4.9 KB total (2.4 KB used); "
+                      "delete one first", result.stderr)
+        self.assertEqual(server.recorded, [])
+        # Under the total it goes.
+        server = make_artifact_server(limits={"max_file_bytes": 10000, "max_session_artifact_bytes": 5000})
+        server.published_sizes = [1000]
+        result, _ = self._publish([p], server=server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(server.recorded), 1)
+
+    def test_a_directory_zip_follows_the_advertised_limit(self):
+        import random
+        root = os.path.join(self.tmp.name, "d")
+        os.makedirs(root)
+        with open(os.path.join(root, "noise.bin"), "wb") as f:
+            f.write(random.Random(1).randbytes(4096))  # does not compress
+        # The zip must fit the per-file limit...
+        result, server = self._publish([root], server=make_artifact_server(limits={"max_file_bytes": 2048}))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the zipped directory is larger than the runner's 2.0 KB per file", result.stderr)
+        self.assertEqual(server.recorded, [])
+        # ...and at most eight times that is read.
+        result, server = self._publish([root], server=make_artifact_server(limits={"max_file_bytes": 256}))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("directory is too large to zip (over 2.0 KB of files)", result.stderr)
 
     def test_server_errors_are_one_clear_line_and_nonzero(self):
         p = self._file("a.txt")
@@ -879,9 +953,7 @@ class TestPublishToCard(unittest.TestCase):
     def _run(self, extra_args, board_env=True, board_status=200, artifact_reply=None, board_url=None):
         art = make_artifact_server(reply=artifact_reply)
         board = make_board_server(status=board_status)
-        threads = [threading.Thread(target=art.handle_request), threading.Thread(target=board.handle_request)]
-        for th in threads:
-            th.start()
+        stops = [serve(art), serve(board)]
         env = {
             "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{art.server_address[1]}",
             "BLERG_RUNNER_SESSION_ID": "sess-pub",
@@ -896,16 +968,11 @@ class TestPublishToCard(unittest.TestCase):
                 "BLERG_BOARD_TOKEN": "board-tok",
                 "BLERG_BOARD_CARD": "card-env",
             })
-        result = run_blerg_runner(["publish", self.path] + extra_args, env_override=env)
-        for srv in (art, board):  # unblock a stub the CLI never called
-            try:
-                socket.create_connection(srv.server_address, timeout=2).close()
-            except OSError:
-                pass
-        for th in threads:
-            th.join(timeout=5)
-        art.server_close()
-        board.server_close()
+        try:
+            result = run_blerg_runner(["publish", self.path] + extra_args, env_override=env)
+        finally:
+            for stop in stops:
+                stop()
         return result, art, board
 
     def test_card_flag_attaches_to_the_sessions_own_card(self):
@@ -930,9 +997,7 @@ class TestPublishToCard(unittest.TestCase):
         # `--card` takes no value, so it cannot swallow the file name that follows it
         art = make_artifact_server()
         board = make_board_server()
-        threads = [threading.Thread(target=art.handle_request), threading.Thread(target=board.handle_request)]
-        for th in threads:
-            th.start()
+        stops = [serve(art), serve(board)]
         env = {
             "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{art.server_address[1]}",
             "BLERG_RUNNER_SESSION_ID": "sess-pub", "BLERG_RUNNER_SESSION_TOKEN": "sess-tok",
@@ -940,11 +1005,11 @@ class TestPublishToCard(unittest.TestCase):
             "BLERG_BOARD_URL": f"http://127.0.0.1:{board.server_address[1]}",
             "BLERG_BOARD_TOKEN": "board-tok", "BLERG_BOARD_CARD": "card-env",
         }
-        result = run_blerg_runner(["publish", "--card", self.path], env_override=env)
-        for th in threads:
-            th.join(timeout=5)
-        art.server_close()
-        board.server_close()
+        try:
+            result = run_blerg_runner(["publish", "--card", self.path], env_override=env)
+        finally:
+            for stop in stops:
+                stop()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(art.recorded), 1)
         self.assertEqual(board.recorded[0]["path"], "/api/cards/card-env")
@@ -1006,7 +1071,7 @@ class TestPublishHelp(unittest.TestCase):
             "something they will edit in Office => docx/xlsx (download only)",
             "An HTML artifact must be ONE self-contained file: inline CSS/JS, images as data: URIs; "
             "it cannot load anything from the network.",
-            "25 MiB",
+            "by default 100 MiB per file and 1 GiB in total per session",
             "50 files per session",
             "Publishing a file with the same name again creates a new version",
             "to revise a file, publish it again under the same name",
@@ -1759,7 +1824,9 @@ class TestTopic(unittest.TestCase):
         server = make_topic_server(status=409, reply={"error": "no topic is open"})
         result = self._run(["--done"], server)
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stderr.strip(), "blerg-runner topic: no topic is open (HTTP 409)")
+        port = server.server_address[1]
+        self.assertEqual(result.stderr.strip(),
+                         f"blerg-runner topic: no topic is open (HTTP 409 from http://127.0.0.1:{port}/api/sessions/sess-top/topics)")
 
     def test_an_older_server_says_so(self):
         server = make_topic_server(status=200, ctype="text/html", raw=b"<!doctype html><title>app</title>")
@@ -1779,6 +1846,281 @@ class TestTopic(unittest.TestCase):
             result = run_blerg_runner(args)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(" ".join(TOPIC_LINE.split()), " ".join(result.stdout.split()), args)
+
+
+class ProxyStubHandler(http.server.BaseHTTPRequestHandler):
+    """Stands in for an HTTP proxy: records the absolute URL it was asked for and answers 201."""
+
+    def log_message(self, format, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        self.server.seen.append(self.path)
+        resp = json.dumps({"id": "m1"}).encode()
+        self.send_response(201)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
+
+
+class TestProxiesAndDiagnostics(unittest.TestCase):
+    """Requests to a local server never go through a proxy; others honour the environment's. A failure
+    says the status, the server's sentence and error id, the address (no user:password) and, for a
+    connection error, which proxy variables are set by name only."""
+
+    def _env(self, server_http, **extra):
+        env = {
+            "BLERG_RUNNER_SERVER_HTTP": server_http,
+            "BLERG_RUNNER_SESSION_ID": "sess-px",
+            "BLERG_RUNNER_SESSION_TOKEN": "sess-tok-0123456789",
+            "BLERG_RUNNER_DAEMON_TOKEN": None, "BLERG_RUNNER_BOARD_TOKEN": None,
+        }
+        for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+            env[k] = None
+        env.update(extra)
+        return env
+
+    def test_a_local_server_is_reached_around_the_proxy(self):
+        dead = f"http://user:secret@127.0.0.1:{_unused_port()}"
+        for host in ("127.0.0.1", "localhost"):
+            server = make_stub_server()
+            stop = serve(server)
+            try:
+                result = run_blerg_runner(["update", "hi"], env_override=self._env(
+                    f"http://{host}:{server.server_address[1]}", HTTP_PROXY=dead, http_proxy=dead, ALL_PROXY=dead))
+            finally:
+                stop()
+            self.assertEqual(result.returncode, 0, f"{host}: {result.stderr}")
+            self.assertEqual([r["path"] for r in server.recorded], ["/api/messages"], host)
+
+    def test_another_host_goes_through_the_environments_proxy(self):
+        proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ProxyStubHandler)
+        proxy.seen = []
+        stop = serve(proxy)
+        try:
+            result = run_blerg_runner(["update", "hi"], env_override=self._env(
+                "http://runner.example.test:8443", http_proxy=f"http://127.0.0.1:{proxy.server_address[1]}"))
+        finally:
+            stop()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(proxy.seen, ["http://runner.example.test:8443/api/messages"])
+
+    def test_a_connection_error_names_the_proxy_variables_never_their_values(self):
+        port = _unused_port()
+        result = run_blerg_runner(["update", "hi"], env_override=self._env(
+            f"http://127.0.0.1:{port}", HTTPS_PROXY="http://user:hunter2pw@proxy.example.test:3128", no_proxy="example.org"))
+        self.assertEqual(result.returncode, 1)
+        err = result.stderr
+        self.assertIn(f"connection error to http://127.0.0.1:{port}/api/messages", err)
+        self.assertIn("proxy variables set: HTTPS_PROXY, no_proxy", err)
+        self.assertIn("127.0.0.1 is dialled directly", err)
+        self.assertNotIn("hunter2pw", err)
+        self.assertNotIn("proxy.example.test", err)
+        self.assertEqual(len(err.strip().splitlines()), 1, err)
+
+        result = run_blerg_runner(["update", "hi"], env_override=self._env(f"http://127.0.0.1:{port}"))
+        self.assertIn("no proxy variables are set", result.stderr)
+
+    def test_a_remote_host_says_whether_no_proxy_covers_it(self):
+        dead = f"http://user:hunter2pw@127.0.0.1:{_unused_port()}"
+        for no_proxy, want in (("", "runner.example.test is not covered by NO_PROXY"),
+                               (".example.test", "runner.example.test is covered by NO_PROXY")):
+            env = self._env("http://runner.example.test:9", http_proxy=dead)
+            if no_proxy:
+                env["NO_PROXY"] = no_proxy
+            result = run_blerg_runner(["update", "hi"], env_override=env, timeout=20)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(want, result.stderr)
+            self.assertNotIn("hunter2pw", result.stderr)
+
+    def test_a_malformed_proxy_variable_is_named_never_printed(self):
+        for bad in ("http:/user:s3cretpw@proxy.example.test:3128", "user:s3cretpw@"):
+            result = run_blerg_runner(["update", "hi"], env_override=self._env(
+                "http://runner.example.test:9", HTTP_PROXY=bad, http_proxy=bad), timeout=20)
+            self.assertEqual(result.returncode, 1, bad)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertNotIn("s3cretpw", result.stderr)
+            self.assertNotIn("proxy.example.test", result.stderr)
+            if bad.startswith("http:/"):  # urllib's ValueError, which quotes the value
+                self.assertIn("a proxy variable or the address is not a valid URL", result.stderr)
+            self.assertIn("proxy variables set: HTTP_PROXY, http_proxy", result.stderr)
+
+    def test_the_scrub_removes_userinfo_up_to_the_last_at(self):
+        import importlib.machinery
+        cli = importlib.machinery.SourceFileLoader("blerg_runner_cli", SCRIPT).load_module()
+        self.assertEqual(cli._scrub("see http://user:p@ss@proxy.example.test:8080/x"), "see http://proxy.example.test:8080/x")
+        self.assertEqual(cli._scrub("http://host.example.test/a@b and https://u@h.example.test"),
+                         "http://host.example.test/a@b and https://h.example.test")
+        self.assertEqual(cli._scrub("bad\x1b[31mred\x1b[0m"), "bad[31mred[0m")
+
+    def test_the_servers_address_is_printed_without_its_userinfo(self):
+        port = _unused_port()
+        result = run_blerg_runner(["update", "hi"], env_override=self._env(f"http://me:pw123456@127.0.0.1:{port}"))
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("pw123456", result.stderr)
+        self.assertIn(f"http://127.0.0.1:{port}/api/messages", result.stderr)
+
+    def test_an_error_reply_gives_the_sentence_the_id_the_status_and_the_url(self):
+        server = make_stub_server(force_error_code=500)
+        server.force_error_body = {"error": "The runner could not record the message because its database did not answer.",
+                                   "error_id": "ab12cd34"}
+        stop = serve(server)
+        try:
+            result = run_blerg_runner(["update", "hi"], env_override=self._env(f"http://127.0.0.1:{server.server_address[1]}"))
+        finally:
+            stop()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr.strip(),
+                         "blerg-runner: The runner could not record the message because its database did not answer. "
+                         f"(HTTP 500 from http://127.0.0.1:{server.server_address[1]}/api/messages; error id ab12cd34)")
+
+    def test_a_token_in_a_reply_is_never_printed(self):
+        server = make_stub_server(force_error_code=401)
+        server.force_error_body = {"error": "bad token sess-tok-0123456789"}
+        stop = serve(server)
+        try:
+            result = run_blerg_runner(["update", "hi"], env_override=self._env(f"http://127.0.0.1:{server.server_address[1]}"))
+        finally:
+            stop()
+        self.assertNotIn("sess-tok-0123456789", result.stderr)
+        self.assertIn("bad token [token]", result.stderr)
+
+    def test_an_older_servers_plain_text_is_shown_trimmed(self):
+        server = make_topic_server(status=502, ctype="text/plain", raw=b"runner unreachable\n" + b"x" * 500)
+        stop = serve(server)
+        try:
+            env = self._env(f"http://127.0.0.1:{server.server_address[1]}")
+            result = run_blerg_runner(["topic", "Build x"], env_override=env)
+        finally:
+            stop()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blerg-runner topic: runner unreachable x", result.stderr)
+        self.assertIn("… (HTTP 502 from", result.stderr)
+        self.assertLess(len(result.stderr), 400)
+
+    def test_publish_failure_carries_the_error_id(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "a.txt")
+            with open(p, "wb") as f:
+                f.write(b"hello")
+            server = make_artifact_server(status=500, reply={
+                "error": "The runner could not save the file because its disk is full; free some space.", "error_id": "0badf00d"})
+            stop = serve(server)
+            try:
+                result = run_blerg_runner(["publish", p], env_override=self._env(f"http://127.0.0.1:{server.server_address[1]}"))
+            finally:
+                stop()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blerg-runner publish: The runner could not save the file because its disk is full", result.stderr)
+        self.assertIn("HTTP 500 from http://127.0.0.1:", result.stderr)
+        self.assertIn("/api/sessions/sess-px/artifacts; error id 0badf00d)", result.stderr)
+
+
+SECRET_SESSION = "Zq7XkP9wLmR2vT4yHs"
+SECRET_DAEMON = "Dm3nWq8ZrT5kYp2xJv"
+SECRET_BASIC = "cHh1c2VyOnB4UGFzc1cwcmQ="  # base64 of a proxy's user:password
+
+
+def _leaks(text, secrets):
+    """The substrings of 4 characters or more of any secret that text contains."""
+    found = set()
+    for sec in secrets:
+        for i in range(len(sec) - 3):
+            if sec[i:i + 4] in text:
+                found.add(sec[i:i + 4])
+    return found
+
+
+class EchoSecretsHandler(http.server.BaseHTTPRequestHandler):
+    """Answers every request with server.status and a body echoing credentials: the session token, an
+    Authorization Bearer header, a Proxy-Authorization Basic header and the daemon token, placed so
+    that a 200-character cut falls inside a token. server.as_json wraps it as the runner's error JSON."""
+
+    def log_message(self, format, *args):
+        pass
+
+    def _answer(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length:
+            self.rfile.read(length)
+        text = ("x" * 190 + f" Bearer {SECRET_SESSION}\r\nAuthorization: Bearer {SECRET_SESSION}\r\n"
+                f"Proxy-Authorization: Basic {SECRET_BASIC}\r\nraw {SECRET_SESSION} daemon {SECRET_DAEMON}\r\n"
+                f"token={SECRET_SESSION} basic {SECRET_BASIC}")
+        if self.server.as_json:
+            body = json.dumps({"error": text, "error_id": SECRET_SESSION}).encode()
+            ctype = "application/json"
+        else:
+            body, ctype = text.encode(), "text/plain"
+        self.send_response(self.server.status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = do_DELETE = do_PATCH = _answer
+
+
+class TestNoSecretIsPrinted(unittest.TestCase):
+    """Whatever a server, a proxy or the environment says, no credential reaches the output: not
+    whole, not cut, not from a malformed proxy variable."""
+
+    def _env(self, server_http, **extra):
+        env = {
+            "BLERG_RUNNER_SERVER_HTTP": server_http,
+            "BLERG_RUNNER_SESSION_ID": "sess-sec",
+            "BLERG_RUNNER_SESSION_TOKEN": SECRET_SESSION,
+            "BLERG_RUNNER_DAEMON_TOKEN": SECRET_DAEMON,
+            "BLERG_RUNNER_BOARD_TOKEN": None,
+        }
+        for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+            env[k] = None
+        env.update(extra)
+        return env
+
+    def test_an_echoing_reply_leaks_nothing_on_any_failure_path(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "a.txt")
+            with open(f, "wb") as fh:
+                fh.write(b"hello")
+            commands = (["update", "hi"], ["note", "hi"], ["publish", f], ["fetch", "--all", "--out", d],
+                        ["fetch", "--list"], ["files"], ["unpublish", "x"], ["topic", "Build x"], ["topic", "--done"],
+                        ["review", "list"])
+            for status in (401, 403, 500, 502):
+                for as_json in (False, True):
+                    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), EchoSecretsHandler)
+                    server.status, server.as_json = status, as_json
+                    stop = serve(server)
+                    try:
+                        for args in commands:
+                            result = run_blerg_runner(args, env_override=self._env(f"http://127.0.0.1:{server.server_address[1]}"))
+                            out = result.stdout + result.stderr
+                            self.assertNotEqual(result.returncode, 0, (args, status, as_json))
+                            self.assertNotIn("Traceback", out, (args, status))
+                            self.assertEqual(_leaks(out, (SECRET_SESSION, SECRET_DAEMON, SECRET_BASIC)), set(),
+                                             (args, status, as_json, out))
+                    finally:
+                        stop()
+
+    def test_a_malformed_proxy_variable_leaks_nothing(self):
+        pw = "PassW0rdX"
+        shapes = ("http://pxq9z.example.test:3128@user:" + pw, "pxq9z.example.test:3128@user:" + pw,
+                  "http://user@pxq9z.example.test:" + pw, f"http://user:{pw}@pxq9z.example.test:80:{pw}",
+                  f"http:/u:{pw}@h", f"http://u:{pw}@[::1", f"http://u:Päss{pw}@höst:3128",
+                  f"http://u:{pw}\n@h:3128", f"socks5://u:{pw}@h:1080", f"http://u:{pw}@h:99999", f"http://u:{pw}@:3128")
+        for bad in shapes:
+            for var in ("HTTP_PROXY", "ALL_PROXY"):
+                result = run_blerg_runner(["update", "hi"], env_override=self._env(
+                    "http://runner.example.test:9", **{var: bad}), timeout=20)
+                out = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 1, (bad, out))
+                self.assertNotIn("Traceback", out, bad)
+                self.assertEqual(_leaks(out, (pw, "pxq9z")), set(), (bad, out))
+                self.assertIn(f"proxy variables set: {var}", out, bad)
 
 
 class TestSessionTokenFile(unittest.TestCase):

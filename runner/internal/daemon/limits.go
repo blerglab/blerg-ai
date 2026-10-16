@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os/exec"
+	"slices"
 	"sync"
 	"time"
 
@@ -327,6 +328,8 @@ func (t *UsageLimitsTracker) providersLocked() []string {
 func (t *UsageLimitsTracker) reportLocked(provider string) protocol.UsageLimits {
 	windows := append([]protocol.UsageWindow{}, t.polled[provider]...)
 	if reset, ok := t.capped[provider]; ok {
+		// A reactive cap knows its reset; it replaces the polled "capped" (a reached spend limit has none).
+		windows = slices.DeleteFunc(windows, func(w protocol.UsageWindow) bool { return w.ID == "capped" })
 		windows = append(windows, protocol.UsageWindow{ID: "capped", UsedPercent: 100, ResetsAt: reset})
 	}
 	fetched := t.fetched[provider]

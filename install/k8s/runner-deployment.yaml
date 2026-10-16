@@ -178,6 +178,16 @@ spec:
             - name: BLERG_RUNNER_MCP_MAX_RESULT_BYTES
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_MAX_RESULT_BYTES, optional: true }
+            # ── File limits (optional; absent = 100 / 500 / 1024 MiB) ───────
+            - name: BLERG_RUNNER_MAX_FILE_MB
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_FILE_MB, optional: true }
+            - name: BLERG_RUNNER_MAX_SESSION_UPLOADS_MB
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_SESSION_UPLOADS_MB, optional: true }
+            - name: BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB, optional: true }
             # ── Cluster runtime (optional) ──────────────────────────────────
             # Every var below is `optional: true`: unset until an operator
             # follows CLUSTER-RUNTIME.md, at which point NewJobManagerFromEnv

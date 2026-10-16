@@ -6,6 +6,7 @@ import { previewKind } from '../model/artifactPreview'
 import { splitAttachmentNote } from '../model/attachments'
 import type { AttachmentItem } from '../hooks/useAttachments'
 import { MediaPreview } from './ArtifactCard'
+import ErrorId from './ErrorId'
 import Markdown from './Markdown'
 import type { CardRegistry } from '../cards/registry'
 
@@ -52,7 +53,7 @@ export function ComposerChips({ items, onRemove }: { items: AttachmentItem[]; on
           >
             ✕
           </button>
-          {i.status === 'error' && i.error && <span className="attach-chip-error" role="alert">{i.error}</span>}
+          {i.status === 'error' && i.error && <span className="attach-chip-error" role="alert">{i.error}<ErrorId id={i.errorId} /></span>}
         </li>
       ))}
     </ul>

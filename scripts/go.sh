@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run any `go` command inside a golang:1.25 container (host Go is too old).
+# Run any `go` command inside a golang:1.26.9 container (host Go is too old).
 # Files are created as the host user so they stay editable; module/build caches
 # persist in ~/.cache; DATABASE_URL points at the Postgres from `make db-up`.
 set -euo pipefail
@@ -14,4 +14,4 @@ exec docker run --rm --network host \
   -v "$ROOT":/src -w /src \
   -v "$HOME/.cache/blerg-go":/gopath \
   -v "$HOME/.cache/blerg-gocache":/gocache \
-  golang:1.25@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 go "$@"
+  golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 go "$@"

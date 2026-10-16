@@ -1,7 +1,7 @@
 # Stage 1: Build Go binary
 # Built from a repo-root context so the `replace github.com/blerglab/blerg-ai/contracts
 # => ../contracts` in runner/go.mod resolves against a real sibling checkout.
-FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS go-builder
+FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS go-builder
 WORKDIR /src
 COPY contracts/ /src/contracts/
 COPY runner/ /src/runner/
@@ -39,9 +39,17 @@ RUN npm run build -w packages/chat \
  && npm run pack:manifest -w packages/chat \
  && npm run build -w runner/frontend
 
-# Stage 3: Final image
+# Stage 3: the data directory. The final image has no shell, so the empty /data the runner
+# stores artifacts and uploads in is made here and copied over with its owner set. A named
+# volume mounted at /data starts out as a copy of that directory: without it Docker creates
+# the mount point owned by root and the nonroot user (65532) could not write a file.
+FROM go-builder AS data-dir
+RUN mkdir -p /out/data
+
+# Stage 4: Final image
 FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 WORKDIR /app
+COPY --from=data-dir --chown=65532:65532 /out/data /data
 COPY --from=go-builder /src/runner/blerg-runner-server ./blerg-runner-server
 COPY --from=frontend-builder /ws/runner/frontend/dist ./frontend/dist
 COPY --from=frontend-builder /ws/packages/chat/dist-packages ./frontend/dist/packages

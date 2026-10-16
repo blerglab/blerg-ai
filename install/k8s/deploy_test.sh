@@ -21,6 +21,14 @@ for want in BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE BLERG_CORE_INTERNAL_KEY BLERG_RUN
   grep -rqF -- "$want" "$tmp" || { echo "FAIL: $want not wired"; fail=1; }
 done
 grep -q 'https://board.blerg.example' "$tmp/configmap.yaml" || { echo "FAIL: SCHEME not applied to public URLs"; fail=1; }
+# The ingress takes a body above the runner's 100 MiB per-file default, and the runner reads its
+# file limits from the ConfigMap.
+grep -qF 'nginx.ingress.kubernetes.io/proxy-body-size: "128m"' "$tmp/ingress.yaml" \
+  || { echo "FAIL: ingress proxy-body-size is not 128m (a 100 MiB file must fit)"; fail=1; }
+for want in BLERG_RUNNER_MAX_FILE_MB BLERG_RUNNER_MAX_SESSION_UPLOADS_MB BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB; do
+  grep -qF -- "key: $want, optional: true" "$tmp/runner-deployment.yaml" \
+    || { echo "FAIL: $want not passed to the runner"; fail=1; }
+done
 
 # Cluster runtime: the agent image flows from AGENT_IMAGE into the ConfigMap,
 # and the rest of the cluster-runtime knobs are pinned there too.

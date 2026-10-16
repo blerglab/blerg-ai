@@ -318,6 +318,26 @@ type DaemonHello struct {
 	// re-validates every entry (models.SanitizeReports): the daemon is
 	// authenticated, but a list is still read from an engine's output.
 	EngineModels map[string]models.Report `json:"engine_models,omitempty"`
+	// Welcome: this daemon understands DaemonWelcome and logs "connected" only
+	// when it arrives. Absent from older daemons, which would log an unknown
+	// message type for it — so the server sends a welcome only to a daemon that
+	// says this. An older server ignores the field and sends none; the daemon
+	// then treats a connection that stays open as accepted, unconfirmed.
+	Welcome bool `json:"welcome,omitempty"`
+}
+
+// DaemonWelcome is the server's answer to an accepted daemon_hello: the token
+// was accepted and the daemon attached. Sent only when the hello set Welcome,
+// before any other message on the connection. Never carries a credential.
+type DaemonWelcome struct {
+	Type     string `json:"type"` // "daemon_welcome"
+	DaemonID string `json:"daemon_id"`
+	// Name is the name the server keeps for this daemon (lowercased; a session
+	// pod's is "runner-<session id>", whatever its hello said).
+	Name string `json:"name"`
+	// SessionID is the bound session of a session pod's connection (whose
+	// write pump delivers only that session's messages); empty otherwise.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // RepoOrigin names a checked-out folder's hosted repository: the git
@@ -382,7 +402,7 @@ type DaemonHeartbeat struct {
 // DaemonLimitsChanged). Limits belong to the provider ACCOUNT the machine is
 // logged in to, not to a session, so a daemon reports them per provider.
 // Only percentages and reset times leave the machine — never an account id,
-// plan or credit balance. An empty Windows clears what was shown for the
+// plan, credit balance, spend amount, spend limit or currency. An empty Windows clears what was shown for the
 // provider (a reactive cap that has expired).
 type UsageLimits struct {
 	Type      string        `json:"type,omitempty"` // "usage_limits" on the daemon's own message
@@ -392,8 +412,12 @@ type UsageLimits struct {
 }
 
 // UsageWindow is one limit window: "5h" (the five-hour window), "7d" (the
-// weekly one) or "capped" (the provider refused a call for its limit, until
-// ResetsAt). UsedPercent is 0–100; ResetsAt is zero when unknown.
+// weekly one), "month" (a work or enterprise account's monthly spend limit),
+// "day" and "spend-week" (its daily and weekly spend limits, when it has them)
+// or "capped" (the provider refused a call for its limit, until ResetsAt; a
+// reached spend limit has no ResetsAt). UsedPercent is 0–100 and only the
+// share: a spend window never carries the amount, the limit or the currency.
+// ResetsAt is zero when unknown; a spend window has none.
 type UsageWindow struct {
 	ID          string    `json:"id"`
 	UsedPercent float64   `json:"used_percent"`
@@ -740,6 +764,17 @@ type InitialState struct {
 	// commit the server was built from; either is empty when the build was not stamped.
 	ServerRelease string `json:"server_release,omitempty"`
 	ServerCommit  string `json:"server_commit,omitempty"`
+	// Limits is what a session's files may weigh on this server; absent from an older one
+	// (a client then assumes 25 MiB per file).
+	Limits *FileLimits `json:"limits,omitempty"`
+}
+
+// FileLimits is what the runner takes in files, in bytes: one file (an agent's or a person's),
+// a session's attachments together, and the files a session's agent published together.
+type FileLimits struct {
+	MaxFileBytes            int64 `json:"max_file_bytes"`
+	MaxSessionUploadBytes   int64 `json:"max_session_upload_bytes"`
+	MaxSessionArtifactBytes int64 `json:"max_session_artifact_bytes"`
 }
 
 // DaemonConnected notifies the browser that a daemon came online.

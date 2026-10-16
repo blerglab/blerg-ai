@@ -726,7 +726,7 @@ func TestArtifactsMissingFileIsGone(t *testing.T) {
 	}
 	for _, route := range []string{"raw", "download"} {
 		rec := fx.get("GET", "/api/sessions/"+fx.sess+"/artifacts/"+lost.ID+"/"+route, fx.human(artUser))
-		if rec.Code != http.StatusGone || strings.TrimSpace(rec.Body.String()) != `{"error":"file no longer available"}` {
+		if rec.Code != http.StatusGone || strings.TrimSpace(rec.Body.String()) != `{"error":"`+fileGoneMsg+`"}` {
 			t.Errorf("%s of a lost file = %d %s, want 410 and the JSON reason", route, rec.Code, rec.Body.String())
 		}
 		if rec := fx.get("GET", "/api/sessions/"+fx.sess+"/artifacts/"+kept.ID+"/"+route, fx.human(artUser)); rec.Code != 200 {

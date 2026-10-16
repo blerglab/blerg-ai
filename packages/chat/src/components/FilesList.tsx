@@ -10,6 +10,8 @@ import { formatSize, groupArtifacts, type ArtifactGroup } from '../model/artifac
 import { ARTIFACT_VIEWS, isViewable } from '../model/artifactViews'
 import type { ArtifactsStatus } from '../hooks/useArtifacts'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
+import { fileErrorText } from '../transport/files'
+import ErrorId from './ErrorId'
 import { TimeLabel } from './TimeLabel'
 
 export interface FilesListProps {
@@ -32,10 +34,10 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
   const listBase = useId()
   const [confirming, setConfirming] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [errors, setErrors] = useState<Record<string, { message: string; errorId?: string }>>({})
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
 
-  const fail = (id: string, msg: string) => setErrors(prev => ({ ...prev, [id]: msg }))
+  const fail = (id: string, err: { message: string; errorId?: string }) => setErrors(prev => ({ ...prev, [id]: err }))
   const clear = (id: string) => setErrors(prev => {
     const { [id]: _gone, ...rest } = prev
     void _gone
@@ -52,7 +54,7 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
     try {
       await files.download(sessionId, a.id)
     } catch (e) {
-      fail(a.id, e instanceof Error ? e.message : 'Download failed.')
+      fail(a.id, fileErrorText(e, 'Download failed.'))
     }
   }
 
@@ -64,7 +66,7 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
       setConfirming(null)
       onChanged()
     } catch {
-      fail(a.id, 'Couldn’t delete this file. Try again.')
+      fail(a.id, { message: 'Couldn’t delete this file. Try again.' })
     } finally {
       setBusy(null)
     }
@@ -105,7 +107,7 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
             <button type="button" className="artifact-btn" onClick={() => { clear(a.id); setConfirming(a.id) }}>Delete</button>
           </div>
         )}
-        {errors[a.id] && <div className="artifact-error" role="alert">{errors[a.id]}</div>}
+        {errors[a.id] && <div className="artifact-error" role="alert">{errors[a.id].message}<ErrorId id={errors[a.id].errorId} /></div>}
       </>
     )
   }

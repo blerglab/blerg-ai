@@ -41,11 +41,7 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
-// Limits. Vars rather than consts so a test can exercise them without moving 25 MiB.
-var (
-	maxArtifactBytes       int64 = 25 << 20
-	maxArtifactsPerSession       = 50
-)
+// The size and count limits are in filelimits.go.
 
 const versionLimitMsg = "This file already has 20 versions; delete an old one first."
 
@@ -106,7 +102,7 @@ type artifactListEntry struct {
 }
 
 // fileGoneMsg is the body of a 410: the row exists, its bytes do not.
-const fileGoneMsg = "file no longer available"
+const fileGoneMsg = "This file is no longer available: the runner still lists it, but its bytes are gone."
 
 // artifactPath is where one artifact's bytes live; sid and the row's id must already be validated.
 func artifactPath(sid string, a db.ArtifactRow) string {
@@ -117,7 +113,7 @@ func artifactPath(sid string, a db.ArtifactRow) string {
 // "does not exist" counts: any other error (permissions, a busy disk) leaves the file listed as
 // present, and the read path answers for itself.
 func artifactFileMissing(sid string, a db.ArtifactRow) bool {
-	_, err := os.Stat(artifactPath(sid, a)) //nolint:gosec // validated session id, our own id, a sanitised base name
+	_, err := os.Stat(artifactPath(sid, a))
 	return errors.Is(err, os.ErrNotExist)
 }
 
@@ -166,7 +162,7 @@ func (h *artifactsHandler) upload(w http.ResponseWriter, r *http.Request) {
 	a := h.api
 	sid := r.PathValue("id")
 	if a.dbPool == nil {
-		writeError(w, http.StatusServiceUnavailable, "no database")
+		writeError(w, http.StatusServiceUnavailable, noDatabaseMsg)
 		return
 	}
 	// The per-session messaging token (or the daemon token): the same credential the
@@ -184,7 +180,7 @@ func (h *artifactsHandler) upload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	info := h.store(w, r, sid, artifactIntake{origin: db.OriginAgent, maxFiles: maxArtifactsPerSession, noun: "files"})
+	info := h.store(w, r, sid, artifactIntake{origin: db.OriginAgent, maxFiles: maxArtifactsPerSession, maxTotal: maxArtifactBytesPerSession, noun: "files"})
 	if info == nil {
 		return
 	}
@@ -222,8 +218,7 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 	ctx := r.Context()
 	sess, err := db.GetSession(ctx, a.dbPool, sid)
 	if err != nil {
-		log.Printf("artifacts upload GetSession: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "check the session", "artifacts upload GetSession", err)
 		return nil
 	}
 	if sess == nil {
@@ -231,34 +226,38 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 		return nil
 	}
 	if terminalSessionStatus(sess.Status) {
-		writeError(w, http.StatusConflict, "session has ended")
+		writeError(w, http.StatusConflict, "This session has ended; files can be added only while it runs.")
 		return nil
 	}
 	name := artifactNameFromRequest(r)
 	if n, err := db.CountArtifactVersions(ctx, a.dbPool, sid, in.origin, name); err != nil {
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "count the file's versions", "artifacts upload CountArtifactVersions", err)
 		return nil
 	} else if n >= db.MaxArtifactVersions {
 		writeError(w, http.StatusConflict, versionLimitMsg)
 		return nil
 	}
-	if n, _, err := db.CountArtifactsOrigin(ctx, a.dbPool, sid, in.origin); err != nil {
-		writeError(w, http.StatusInternalServerError, "query failed")
+	// The size checks come before a byte is read: answered without reading the body, a large
+	// upload is cut off, but the client that checked the advertised limits never sends one.
+	if r.ContentLength > maxArtifactBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, tooLargeMsg(r.ContentLength))
+		return nil
+	}
+	if n, total, err := db.CountArtifactsOrigin(ctx, a.dbPool, sid, in.origin); err != nil {
+		writeDatabaseFailure(w, "count the session's files", "artifacts upload CountArtifactsOrigin", err)
 		return nil
 	} else if n >= in.maxFiles {
 		writeError(w, http.StatusConflict, limitMsg)
 		return nil
-	}
-	if r.ContentLength > maxArtifactBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("file is larger than %d MiB", maxArtifactBytes>>20))
+	} else if in.maxTotal > 0 && r.ContentLength > 0 && total+r.ContentLength > in.maxTotal {
+		writeError(w, http.StatusConflict, totalLimitMsg(in))
 		return nil
 	}
 
 	id := newPublishID()
 	dir := artifactDir(sid, id)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		log.Printf("artifacts upload mkdir: %v", err)
-		writeError(w, http.StatusInternalServerError, "storage error")
+		writeStorageFailure(w, "save the file", accessWrite, "artifacts upload mkdir", err)
 		return nil
 	}
 	fail := func(status int, msg string) *storedArtifact {
@@ -266,23 +265,31 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 		writeError(w, status, msg)
 		return nil
 	}
+	failStorage := func(logContext string, err error) *storedArtifact {
+		_ = os.RemoveAll(dir)
+		writeStorageFailure(w, "save the file", accessWrite, logContext, err)
+		return nil
+	}
 	path := filepath.Join(dir, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // dir is built from a validated uuid and a generated id; name is a sanitised base name
 	if err != nil {
-		log.Printf("artifacts upload create: %v", err)
-		return fail(http.StatusInternalServerError, "storage error")
+		return failStorage("artifacts upload create", err)
 	}
 	sum := sha256.New()
-	size, copyErr := io.Copy(io.MultiWriter(f, sum), http.MaxBytesReader(w, r.Body, maxArtifactBytes))
+	disk := &errWriter{w: f}
+	size, copyErr := io.Copy(io.MultiWriter(disk, sum), http.MaxBytesReader(w, r.Body, maxArtifactBytes))
 	closeErr := f.Close()
 	var tooBig *http.MaxBytesError
 	switch {
+	case disk.err != nil:
+		// The disk failed, not the client: a full disk shows up here, at the first write it refuses.
+		return failStorage("artifacts upload write", disk.err)
 	case errors.As(copyErr, &tooBig):
-		return fail(http.StatusRequestEntityTooLarge, fmt.Sprintf("file is larger than %d MiB", maxArtifactBytes>>20))
+		return fail(http.StatusRequestEntityTooLarge, tooLargeMsg(r.ContentLength))
 	case copyErr != nil:
-		return fail(http.StatusBadRequest, "upload interrupted")
+		return fail(http.StatusBadRequest, "The upload stopped before the whole file arrived; try again.")
 	case closeErr != nil:
-		return fail(http.StatusInternalServerError, "storage error")
+		return failStorage("artifacts upload close", closeErr)
 	}
 	head := make([]byte, 512)
 	if hf, err := os.Open(path); err == nil { //nolint:gosec // same path as above
@@ -305,11 +312,12 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 		return fail(http.StatusConflict, limitMsg)
 	}
 	if errors.Is(err, db.ErrArtifactBytesLimit) {
-		return fail(http.StatusConflict, fmt.Sprintf("this session's %s are already at the %d MiB total; delete one first", in.noun, in.maxTotal>>20))
+		return fail(http.StatusConflict, totalLimitMsg(in))
 	}
 	if err != nil {
-		log.Printf("artifacts upload insert: %v", err)
-		return fail(http.StatusInternalServerError, "store failed")
+		_ = os.RemoveAll(dir)
+		writeDatabaseFailure(w, "record the file", "artifacts upload insert", err)
+		return nil
 	}
 	out := storedArtifact{artifactInfo: artifactInfo{
 		ID: row.ID, Name: row.Name, Size: row.Size, ContentType: row.ContentType, View: view, Origin: originOf(row.Origin), Version: row.Version,
@@ -318,6 +326,11 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 		out.Previous = &row.Previous
 	}
 	return &out
+}
+
+// totalLimitMsg is the 409 for a session whose files of one origin would pass their total.
+func totalLimitMsg(in artifactIntake) string {
+	return fmt.Sprintf("this session's %s would go over their %s total; delete one first", in.noun, sizeText(in.maxTotal))
 }
 
 // artifactNameFromRequest reads the name the agent gave: X-Artifact-Name (percent-encoded,
@@ -379,7 +392,7 @@ func (h *artifactsHandler) personAccount(w http.ResponseWriter, r *http.Request)
 		return "", "", false
 	}
 	if a.dbPool == nil {
-		writeError(w, http.StatusServiceUnavailable, "no database")
+		writeError(w, http.StatusServiceUnavailable, noDatabaseMsg)
 		return "", "", false
 	}
 	sid := r.PathValue("id")
@@ -389,8 +402,7 @@ func (h *artifactsHandler) personAccount(w http.ResponseWriter, r *http.Request)
 	}
 	row, err := db.GetSession(r.Context(), a.dbPool, sid)
 	if err != nil {
-		log.Printf("artifacts GetSession: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "check the session", "artifacts GetSession", err)
 		return "", "", false
 	}
 	if row == nil || !canSeeAccount(p.Sub, row) {
@@ -409,8 +421,7 @@ func (h *artifactsHandler) artifact(w http.ResponseWriter, r *http.Request, sid 
 	}
 	row, err := db.GetArtifact(r.Context(), h.api.dbPool, sid, id)
 	if err != nil {
-		log.Printf("artifacts get: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "find the file", "artifacts get", err)
 		return nil
 	}
 	if row == nil || row.Name != filepath.Base(row.Name) || row.Name == "." || row.Name == ".." {
@@ -434,8 +445,7 @@ func (h *artifactsHandler) list(w http.ResponseWriter, r *http.Request) {
 func (h *artifactsHandler) listSession(w http.ResponseWriter, r *http.Request, sid string) {
 	rows, err := db.ListArtifacts(r.Context(), h.api.dbPool, sid)
 	if err != nil {
-		log.Printf("artifacts list: %v", err)
-		writeError(w, http.StatusInternalServerError, "query failed")
+		writeDatabaseFailure(w, "list the files", "artifacts list", err)
 		return
 	}
 	latest := latestVersions(rows)
@@ -465,12 +475,11 @@ func (h *artifactsHandler) serveSession(w http.ResponseWriter, r *http.Request, 
 	if !raw {
 		var err error
 		if latest, err = db.LatestArtifactVersion(r.Context(), h.api.dbPool, sid, originOf(row.Origin), row.Name); err != nil {
-			log.Printf("artifacts latest version: %v", err)
-			writeError(w, http.StatusInternalServerError, "query failed")
+			writeDatabaseFailure(w, "find the file", "artifacts latest version", err)
 			return
 		}
 	}
-	f, err := os.Open(artifactPath(sid, *row)) //nolint:gosec // validated session id, our own id, a sanitised base name
+	f, err := os.Open(artifactPath(sid, *row))
 	if errors.Is(err, os.ErrNotExist) {
 		// The row survived but the bytes did not (a data directory lost on a restart): say so,
 		// distinctly from a file that was never there or was deleted (404).
@@ -478,8 +487,7 @@ func (h *artifactsHandler) serveSession(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if err != nil {
-		log.Printf("artifacts open %s/%s: %v", sid, row.ID, err)
-		writeError(w, http.StatusInternalServerError, "storage error")
+		writeStorageFailure(w, "read the file", accessRead, "artifacts open "+sid+"/"+row.ID, err)
 		return
 	}
 	defer func() { _ = f.Close() }()
@@ -506,8 +514,7 @@ func (h *artifactsHandler) removeSession(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if _, err := db.DeleteArtifact(r.Context(), h.api.dbPool, sid, row.ID); err != nil {
-		log.Printf("artifacts delete: %v", err)
-		writeError(w, http.StatusInternalServerError, "delete failed")
+		writeDatabaseFailure(w, "delete the file", "artifacts delete", err)
 		return
 	}
 	if err := os.RemoveAll(artifactDir(sid, row.ID)); err != nil {

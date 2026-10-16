@@ -59,6 +59,14 @@ services:
       - "${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_CORE:-8081}:8080"
     environment:
       DATABASE_URL: postgres://blerg:blerg@postgres:5432/blerg_core?sslmode=disable
+      # Docker (Compose) copies the proxy settings of ~/.docker/config.json into every service
+      # container. A corporate proxy cannot resolve the names below, so calls between the
+      # services would be sent to it and fail; list them as exceptions. This replaces the NO_PROXY
+      # Docker would inject, so the person's own exceptions are appended: NO_PROXY / no_proxy of
+      # the shell or .env, and the noProxy of the Docker client config (blerg-up.sh exports that
+      # as BLERG_DOCKER_NO_PROXY).
+      NO_PROXY: blerg-core,blerg-board,blerg-runner,postgres,localhost,127.0.0.1${NO_PROXY:+,${NO_PROXY}}${no_proxy:+,${no_proxy}}${BLERG_DOCKER_NO_PROXY:+,${BLERG_DOCKER_NO_PROXY}}
+      no_proxy: blerg-core,blerg-board,blerg-runner,postgres,localhost,127.0.0.1${NO_PROXY:+,${NO_PROXY}}${no_proxy:+,${no_proxy}}${BLERG_DOCKER_NO_PROXY:+,${BLERG_DOCKER_NO_PROXY}}
       # Shared bootstrap key components present to register with core (POST /components).
       BLERG_CORE_REGISTER_KEY: ${BLERG_CORE_REGISTER_KEY:-}
       # The internal service key board/runner present on privileged core calls,
@@ -107,6 +115,14 @@ services:
       - "${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_BOARD:-8082}:8080"
     environment:
       DATABASE_URL: postgres://blerg:blerg@postgres:5432/blerg_board?sslmode=disable
+      # Docker (Compose) copies the proxy settings of ~/.docker/config.json into every service
+      # container. A corporate proxy cannot resolve the names below, so calls between the
+      # services would be sent to it and fail; list them as exceptions. This replaces the NO_PROXY
+      # Docker would inject, so the person's own exceptions are appended: NO_PROXY / no_proxy of
+      # the shell or .env, and the noProxy of the Docker client config (blerg-up.sh exports that
+      # as BLERG_DOCKER_NO_PROXY).
+      NO_PROXY: blerg-core,blerg-board,blerg-runner,postgres,localhost,127.0.0.1${NO_PROXY:+,${NO_PROXY}}${no_proxy:+,${no_proxy}}${BLERG_DOCKER_NO_PROXY:+,${BLERG_DOCKER_NO_PROXY}}
+      no_proxy: blerg-core,blerg-board,blerg-runner,postgres,localhost,127.0.0.1${NO_PROXY:+,${NO_PROXY}}${no_proxy:+,${no_proxy}}${BLERG_DOCKER_NO_PROXY:+,${BLERG_DOCKER_NO_PROXY}}
       BLERG_BOARD_SERVICE_KEY: ${BLERG_BOARD_SERVICE_KEY:-}
       # Encrypts board automation tokens at rest (base64, 32 bytes). Unset = boards cannot save one.
       BLERG_BOARD_SECRET_KEY: ${BLERG_BOARD_SECRET_KEY:-}
@@ -137,6 +153,31 @@ services:
       blerg-core:
         condition: service_started
 
+  # One-shot that makes the runner's data volume writable by the runner. The runner image runs as
+  # the unprivileged user 65532 and ships /data owned by it, which a NEW volume inherits; a volume
+  # that already holds files from an earlier install (or was made root-owned by one) is not
+  # re-seeded, so this fixes it on every start. It touches only this volume, runs as root for the
+  # few seconds it needs with only the two capabilities it uses, then exits; blerg-runner waits
+  # for it. It reuses postgres:16, which is already on this machine, so it needs no extra
+  # download; that image declares a data volume of its own, so an empty tmpfs sits on that path
+  # (otherwise every `docker compose down` + `up` would leave an anonymous volume behind).
+  # If the repair cannot be done it says so and still exits 0: the runner then starts and logs
+  # STORAGE NOT WRITABLE with the fix, instead of the whole stack refusing to start.
+  blerg-runner-data-init:
+    image: postgres:16
+    user: "0"
+    entrypoint: ["sh", "-c"]
+    command: ["chown 65532:65532 /data && find /data -xdev ! -user 65532 -exec chown -h 65532:65532 {} + || echo 'blerg-runner-data-init: could not give /data to user 65532; the runner will log STORAGE NOT WRITABLE' >&2"]
+    volumes:
+      - blerg-desktop-runner-data:/data
+    tmpfs:
+      - /var/lib/postgresql/data
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    restart: "no"
+
   blerg-runner:
     build:
       context: ../..
@@ -153,6 +194,14 @@ services:
       - "${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_RUNNER:-8083}:8080"
     environment:
       BLERG_RUNNER_DATABASE_URL: postgres://blerg:blerg@postgres:5432/blerg_runner?sslmode=disable
+      # Docker (Compose) copies the proxy settings of ~/.docker/config.json into every service
+      # container. A corporate proxy cannot resolve the names below, so calls between the
+      # services would be sent to it and fail; list them as exceptions. This replaces the NO_PROXY
+      # Docker would inject, so the person's own exceptions are appended: NO_PROXY / no_proxy of
+      # the shell or .env, and the noProxy of the Docker client config (blerg-up.sh exports that
+      # as BLERG_DOCKER_NO_PROXY).
+      NO_PROXY: blerg-core,blerg-board,blerg-runner,postgres,localhost,127.0.0.1${NO_PROXY:+,${NO_PROXY}}${no_proxy:+,${no_proxy}}${BLERG_DOCKER_NO_PROXY:+,${BLERG_DOCKER_NO_PROXY}}
+      no_proxy: blerg-core,blerg-board,blerg-runner,postgres,localhost,127.0.0.1${NO_PROXY:+,${NO_PROXY}}${no_proxy:+,${no_proxy}}${BLERG_DOCKER_NO_PROXY:+,${BLERG_DOCKER_NO_PROXY}}
       # Required: the host daemon must present this token on /ws/daemon.
       BLERG_RUNNER_DAEMON_TOKEN: ${BLERG_RUNNER_DAEMON_TOKEN:-}
       # Enables the board->runner contract (must equal BLERG_RUNNER_KEY above).
@@ -166,6 +215,12 @@ services:
       BLERG_RUNNER_CORE_INTERNAL_KEY: ${BLERG_CORE_INTERNAL_KEY:-}
       BLERG_RUNNER_SELF_URL: http://blerg-runner:8080
       BLERG_RUNNER_DATA_DIR: /data
+      # File limits in MiB: one file (attached or published), a session's attachments
+      # together, and the files a session's agent publishes together. Empty = the defaults
+      # (100, 500, 1024). The files live in the blerg-desktop-runner-data volume.
+      BLERG_RUNNER_MAX_FILE_MB: ${BLERG_RUNNER_MAX_FILE_MB:-}
+      BLERG_RUNNER_MAX_SESSION_UPLOADS_MB: ${BLERG_RUNNER_MAX_SESSION_UPLOADS_MB:-}
+      BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB: ${BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB:-}
       # Completion webhooks may target this machine and the compose network.
       # Everything in this stack is private by definition, so the runner's
       # default refusal to POST results to private/loopback addresses would
@@ -211,6 +266,8 @@ services:
         condition: service_healthy
       blerg-core:
         condition: service_started
+      blerg-runner-data-init:
+        condition: service_completed_successfully
 
 # The local-sandbox network. Agent sessions the host daemon runs in the local
 # sandbox (a docker container per session) join this network, so they reach

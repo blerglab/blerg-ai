@@ -247,6 +247,8 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 		ServerRelease: release,
 		ServerCommit:  commit,
 	}
+	limits := currentFileLimits()
+	msg.Limits = &limits
 	data, err := json.Marshal(msg)
 	if err != nil {
 		log.Printf("browser marshal initial_state: %v", err)

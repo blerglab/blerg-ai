@@ -377,6 +377,13 @@ if [ -z "${BLERG_COMMIT:-}" ]; then
   export BLERG_COMMIT="${BLERG_COMMIT:-dev}"
 fi
 
+# Docker (Compose) copies the proxy settings of ~/.docker/config.json into every service
+# container; docker-compose.yml replaces that NO_PROXY with the service names, so the person's own
+# internal hosts from the Docker client config are carried over here. Exported only (never
+# written to .env), like BLERG_COMMIT; empty when there is no proxy config.
+BLERG_DOCKER_NO_PROXY="$(docker_client_no_proxy)"
+export BLERG_DOCKER_NO_PROXY
+
 blerg_step "Starting desktop stack (postgres, blerg-core, blerg-board, blerg-runner)..."
 RUN_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 docker compose -f "$COMPOSE_FILE" up -d $BUILD_FLAG
@@ -401,7 +408,6 @@ wait_for "blerg-board"  "http://localhost:$PORT_BOARD/"        || STATUS=1
 wait_for "blerg-runner" "http://localhost:$PORT_RUNNER/healthz" || STATUS=1
 
 RUNNER_DIR="$(cd ../../runner && pwd)"
-DAEMON_TOKEN="$(grep '^BLERG_RUNNER_DAEMON_TOKEN=' .env | cut -d= -f2)"
 # Reflect whatever repos root was actually configured (interactively answered, or already in
 # .env from a prior run) rather than a hard-coded guess — a box that prints the wrong directory
 # is worse than no box at all.
@@ -413,6 +419,7 @@ else
 fi
 
 DAEMON_UP=0
+DAEMON_REFUSED=0
 if [ "$INSTALL_DAEMON" -eq 1 ]; then
   blerg_step "Installing the runner daemon as a host service..."
   daemon_rc=0
@@ -424,6 +431,9 @@ if [ "$INSTALL_DAEMON" -eq 1 ]; then
     5) # install.sh's EXIT_WORK_RUNNING: the old daemon is still up, as it was
       DAEMON_UP=1
       blerg_fail "The daemon was not reinstalled: agent work is running; re-run with --yes to reinstall anyway." ;;
+    6) # install.sh's EXIT_TOKEN_REFUSED: the server refused the daemon token in .env (said above)
+      DAEMON_REFUSED=1
+      blerg_fail "The server refused the daemon token in .env; see the message above." ;;
     *) blerg_fail "Daemon service install didn't work — falling back to manual steps (see above for why)." ;;
   esac
 fi
@@ -497,27 +507,51 @@ $ADMIN_HINT
 This shell is done and about to exit - that's success. Go build something.
 EOF
 else
-  blerg_box "do this next" <<EOF
+  if [ "$DAEMON_REFUSED" -eq 1 ]; then
+    DAEMON_STEP="$(cat <<STEP
+1. Fix the daemon token: the server refused BLERG_RUNNER_DAEMON_TOKEN
+   from $PWD/.env (the message above says more). Put the
+   server's token there, then run: ./daemon/install.sh install
+STEP
+)"
+    DAEMON_FOOTER="$(cat <<STEP
+The stack is running, but the daemon is not connected: fix the token
+(step 1), then run ./daemon/install.sh install. This run ends with an
+error (exit code 6) for that reason.
+STEP
+)"
+  else
+    # The token is read from .env by the command itself: this box never prints it.
+    DAEMON_STEP="$(cat <<STEP
 1. Start the runner daemon (new terminal - it runs on this host, not
    in a container, so it can use your own claude CLI login and tmux;
    see DAEMON.md to install it as a persistent service instead):
 
      export BLERG_RUNNER_SERVER_URL=ws://localhost:$PORT_RUNNER/ws/daemon
-     export BLERG_RUNNER_DAEMON_TOKEN=$DAEMON_TOKEN
+     export BLERG_RUNNER_DAEMON_TOKEN="\$(grep '^BLERG_RUNNER_DAEMON_TOKEN=' '$PWD/.env' | cut -d= -f2)"
      $REPOS_ROOT_LINE
      ( cd $RUNNER_DIR && GOWORK=off go run ./cmd/daemon )
 
    Not logged into claude yet? Run 'claude setup-token' first and
    export its output as CLAUDE_CODE_OAUTH_TOKEN before starting it.
+STEP
+)"
+    DAEMON_FOOTER="$(cat <<STEP
+That's it - the board can then claim cards and spawn real agent sessions.
+The stack's running in the background; this shell is done and about to
+exit - that's success, not a crash. Go start that daemon.
+STEP
+)"
+  fi
+  blerg_box "do this next" <<EOF
+$DAEMON_STEP
 
 2. Sign in at http://localhost:$PORT_CORE (click "Sign in"). blerg-core issues
 $ADMIN_HINT
 
 3. You'll be sent to /change-password - pick a real one, then sign in again.
 
-That's it - the board can then claim cards and spawn real agent sessions.
-The stack's running in the background; this shell is done and about to
-exit - that's success, not a crash. Go start that daemon.
+$DAEMON_FOOTER
 EOF
 fi
 
@@ -529,4 +563,11 @@ if [ "$STATUS" -ne 0 ]; then
   blerg_fail "One or more services did not become healthy in time. Check:"
   blerg_fail "  docker compose -f $COMPOSE_FILE logs"
   exit 1
+fi
+
+# The stack is up but the daemon is not: an agent or a script reading the exit code must not take
+# this for a working install. 6 is install.sh's EXIT_TOKEN_REFUSED, passed through.
+if [ "$DAEMON_REFUSED" -eq 1 ]; then
+  blerg_fail "The daemon is not connected: the server refused the daemon token in .env."
+  exit 6
 fi

@@ -24,14 +24,14 @@ Component-specific notes live next to the code, for example
 
 **Prerequisites**
 
-- **Go 1.25 or newer.** Check with `go version`. Go 1.21+ downloads the toolchain named in
+- **Go 1.26 or newer.** Check with `go version`. Go 1.21+ downloads the toolchain named in
   `go.mod` by itself; an older `go` (the one Debian and Ubuntu package is 1.18) cannot, and
   fails with confusing errors. Install a current Go from <https://go.dev/dl/> and put it
   first on your `PATH`.
-- **Node.js 22 or newer** with npm, for the three frontends.
+- **Node.js 22.12 or newer** with npm, for the three frontends.
 - `git`, and `tmux` (some daemon tests drive a real tmux and skip without it).
-- **golangci-lint v2.13.1**, the version CI pins, for `make lint`
-  ([install](https://golangci-lint.run/docs/welcome/install/)). It must be built with Go 1.25 or newer.
+- **golangci-lint v2.13.1**, the version CI pins (named in the `Makefile` too, and `make lint` refuses any other), for `make lint`
+  ([install](https://golangci-lint.run/docs/welcome/install/)). It must be built with Go 1.26 or newer to load this repository's modules (v2.13.1 is).
 - **Docker with Compose v2 is optional.** It is only for `make db-up` (a throwaway
   Postgres), for running the full stack with the desktop installer, and for the
   Compose check in `make check-scripts`, which skips without it.
@@ -124,6 +124,7 @@ fails with "Executable doesn't exist". `npx playwright install chromium` downloa
 BLERG_SKIP_KUBECTL=1 ./install/desktop/compose_test.sh   # skips without `docker compose`
 BLERG_SKIP_KUBECTL=1 ./install/k8s/deploy_test.sh        # skips the kubectl dry-run; no cluster needed
 bash ./install/desktop/hostcheck_test.sh                 # engine preflight; needs no docker
+bash ./install/desktop/daemon_install_test.sh            # the daemon token check and connection wait; stubs only
 (cd runner/.claude/skills/session-messaging && python3 -m unittest test_blerg_runner && python3 -m pytest -q blerg_runner_board_test.py)
 ./scripts/scrub.sh && ./scripts/scrub_test.sh            # no hostnames, addresses or personal paths
 ./scripts/check_links_test.sh && ./scripts/check_links.sh   # doc links and stale references

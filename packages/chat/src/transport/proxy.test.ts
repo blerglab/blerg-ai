@@ -201,6 +201,16 @@ describe('createProxyTransport requests', () => {
     await expect(t.session('s4')).rejects.toThrow('HTTP 404')
   })
 
+  it('session keeps the runner’s file limits (0.2.1 on) and drops what is not a size', async () => {
+    const { r, t } = make()
+    r.on(/\/sessions\/s1$/, () => json({ lifecycle: 'running', limits: { max_file_bytes: 104857600, max_session_upload_bytes: 524288000, max_session_artifact_bytes: 'x' } }))
+    expect((await t.session('s1')).limits).toEqual({ max_file_bytes: 104857600, max_session_upload_bytes: 524288000 })
+    r.on(/\/sessions\/s2$/, () => json({ lifecycle: 'running', limits: { max_file_bytes: -1 } }))
+    expect(await t.session('s2')).not.toHaveProperty('limits')
+    r.on(/\/sessions\/s3$/, () => json({ lifecycle: 'running' }))
+    expect(await t.session('s3')).not.toHaveProperty('limits')
+  })
+
   it('send posts the text and reports whether the app took it', async () => {
     const { r, t } = make()
     let ok = true

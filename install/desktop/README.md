@@ -12,7 +12,7 @@ container. A team sharing one Blerg belongs on the [Kubernetes install](../k8s/R
 - Docker with Compose v2 (Docker Desktop with WSL integration turned on for your distro, or the
   docker engine on Linux with the `docker-compose-plugin` package from Docker's own apt repository;
   `blerg-up.sh` prints the exact steps if `docker compose` is missing), plus `git`, `curl` and
-  `openssl`. The daemon is built with your host Go 1.25 or newer if you have it, and inside a
+  `openssl`. The daemon is built with your host Go 1.26 or newer if you have it, and inside a
   container if you don't. Unsandboxed terminal sessions use the host's `tmux`.
 - **Claude Code or Codex installed and logged in before your first session.** The installer does
   not do this for you. Run `claude` (or `codex`) once and sign in, or run `claude setup-token` and
@@ -115,7 +115,9 @@ machine has used. For Claude the daemon reads the same account usage endpoint th
 view reads (`api.anthropic.com/api/oauth/usage`), with the CLI's sign-in from
 `~/.claude/.credentials.json`: it only reads that file, takes the access token (never the refresh
 token), never refreshes or rewrites it, and sends the token nowhere but Anthropic. Only the
-percentages and reset times reach Blerg. The endpoint and that file are the CLI's internals, not a
+percentages and reset times reach Blerg. A work or enterprise account has a monthly spend limit
+instead of the five-hour and weekly windows: its row shows "month" with the share used (never the
+amount, the limit or the currency). The endpoint and that file are the CLI's internals, not a
 documented API: they may change, and the meter then goes empty (the daemon logs it once; nothing
 else breaks). On macOS the CLI keeps its login in the Keychain, not in that file, so there is no
 Claude meter there (the daemon says so once in its log); a daemon started with
@@ -187,7 +189,7 @@ and `rm -rf ../../bin`. These are left for you to remove by hand, on purpose:
 - `install/desktop/.env`: it holds `BLERG_CORE_LOCAL_KEY`, the stack's secrets and, if you gave
   one, your Claude OAuth token. Delete it once you no longer need a backup; it is the only copy of
   that key.
-- The base images the builds pulled (`postgres:16`, `golang:1.25`, `golang:1.25-bookworm`,
+- The base images the builds pulled (`postgres:16`, `golang:1.26.9`, `golang:1.26.9-bookworm`,
   `node:22-alpine`, `debian:bookworm-slim`, `gcr.io/distroless/static:nonroot`) and Docker's build
   cache (`docker builder prune`). Other projects may use them.
 - `~/.claude`: if it did not exist before Blerg and you don't use Claude Code, it can go;

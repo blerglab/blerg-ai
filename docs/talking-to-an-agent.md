@@ -243,8 +243,8 @@ Terminal sessions have no panel.
   changes (with a link back to all of them).
 - **Running now**: the subagents at work, each with its task, type, model, tokens, what it is doing
   and how long it has run; and the background tasks.
-- **Session**: where it runs, the engine and model, when it started and how long it has lived, with
-  links to its Insights and to the Files and Capabilities tabs.
+- **Session**: where it runs, the engine and model, when it started and how long it has lived. The
+  session's Insights open from the Insights button in the session header.
 - **Settings**: two checkboxes for the chat, kept in your browser. **Show thinking** draws the
   model's thinking in the transcript; **Compact tool calls** folds a run of tool calls into one
   summary row. Both are on until you untick them.

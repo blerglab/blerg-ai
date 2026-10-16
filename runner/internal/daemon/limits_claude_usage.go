@@ -23,7 +23,9 @@ import (
 // GET https://api.anthropic.com/api/oauth/usage with the CLI's OAuth sign-in
 // (Authorization: Bearer <accessToken>, anthropic-beta: oauth-2025-04-20). The
 // answer holds, among much else, five_hour and seven_day, each
-// {"utilization": 0–100, "resets_at": RFC 3339}; only those two are decoded.
+// {"utilization": 0–100, "resets_at": RFC 3339}, and extra_usage, the monthly spend limit of a work
+// or enterprise account (for which five_hour and seven_day are null); only those are decoded, and
+// only shares and reset times are kept of them (see claudeUsageWindows).
 //
 // The sign-in is the CLI's, in ~/.claude/.credentials.json (claudeAiOauth).
 // This source only ever reads that file: it takes the access token and its
@@ -254,9 +256,67 @@ type claudeUsageWindow struct {
 	ResetsAt    *string  `json:"resets_at"`
 }
 
+// claudeExtraUsage is the answer's extra_usage object: the monthly spend limit of a work or
+// enterprise account (or the extra usage a subscription has switched on). Its money fields
+// (currency, decimal_places, credits_ever_enabled) are never decoded, and the amounts are used
+// only to work out a share when the answer gives none: no amount leaves this file.
+type claudeExtraUsage struct {
+	Enabled      bool     // is_enabled was true
+	MonthlyLimit *float64 // in the currency's minor units; only its sign and the ratio are used
+	UsedCredits  *float64
+	Utilization  *float64 // percent, 0–100
+	Reached      bool     // spend_limit_reached was true
+	Daily        *float64 // utilization of a daily / weekly spend limit, when the answer has one
+	Weekly       *float64
+}
+
+// claudeUsageAnswer is what this source decodes of the usage answer. Every field is read on its
+// own and a field in a shape this code does not know is left out: one odd field never costs the
+// others (see lenient).
 type claudeUsageAnswer struct {
-	FiveHour *claudeUsageWindow `json:"five_hour"`
-	SevenDay *claudeUsageWindow `json:"seven_day"`
+	FiveHour *claudeUsageWindow
+	SevenDay *claudeUsageWindow
+	Extra    *claudeExtraUsage
+}
+
+// lenient decodes raw as a T, or returns nil when it is absent, null or not shaped like a T.
+func lenient[T any](raw json.RawMessage) *T {
+	var v *T
+	if len(raw) == 0 || json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	return v
+}
+
+func (a *claudeUsageAnswer) UnmarshalJSON(b []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return err
+	}
+	a.FiveHour = lenient[claudeUsageWindow](m["five_hour"])
+	a.SevenDay = lenient[claudeUsageWindow](m["seven_day"])
+	a.Extra = lenient[claudeExtraUsage](m["extra_usage"])
+	return nil
+}
+
+func (e *claudeExtraUsage) UnmarshalJSON(b []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return err
+	}
+	flag := func(key string) bool { v := lenient[bool](m[key]); return v != nil && *v }
+	spendUtilization := func(key string) *float64 {
+		if w := lenient[claudeUsageWindow](m[key]); w != nil {
+			return w.Utilization
+		}
+		return nil
+	}
+	e.Enabled, e.Reached = flag("is_enabled"), flag("spend_limit_reached")
+	e.MonthlyLimit = lenient[float64](m["monthly_limit"])
+	e.UsedCredits = lenient[float64](m["used_credits"])
+	e.Utilization = lenient[float64](m["utilization"])
+	e.Daily, e.Weekly = spendUtilization("daily"), spendUtilization("weekly")
+	return nil
 }
 
 // fetch calls the endpoint once. A non-200 status comes back with no error; err is a failure to
@@ -305,8 +365,14 @@ func (s *claudeUsageSource) fetch(ctx context.Context, token string) (status int
 }
 
 // claudeUsageWindows maps the answer to the meter's windows: five_hour → "5h", seven_day → "7d",
-// the share used floored to a whole percent as the CLI shows it, the reset in UTC. A window with no utilization is
-// left out; an unreadable reset is left zero.
+// the share used floored to a whole percent as the CLI shows it, the reset in UTC. A window with no
+// utilization is left out; an unreadable reset is left zero.
+//
+// A monthly spend limit (extra_usage enabled with a limit above zero) is "month": the share used,
+// with no reset time, because the answer gives none. A share under 1 % keeps its fraction, so the
+// meter can say "<1%" instead of 0 %. A spend limit that is reached also reports "capped" (no
+// reset). A daily or weekly spend limit with a numeric utilization is "day" / "spend-week".
+// Only the share leaves this function: never an amount, the currency or the limit.
 func claudeUsageWindows(a claudeUsageAnswer) []protocol.UsageWindow {
 	var out []protocol.UsageWindow
 	for _, w := range []struct {
@@ -324,5 +390,45 @@ func claudeUsageWindows(a claudeUsageAnswer) []protocol.UsageWindow {
 		}
 		out = append(out, uw)
 	}
+	return append(out, spendWindows(a.Extra)...)
+}
+
+// spendWindows maps extra_usage to its windows, none for a shape it does not know.
+func spendWindows(e *claudeExtraUsage) []protocol.UsageWindow {
+	if e == nil {
+		return nil
+	}
+	var out []protocol.UsageWindow
+	if e.Enabled && e.MonthlyLimit != nil && *e.MonthlyLimit > 0 {
+		switch {
+		case e.Utilization != nil:
+			out = append(out, protocol.UsageWindow{ID: "month", UsedPercent: spendPercent(*e.Utilization)})
+		case e.UsedCredits != nil:
+			out = append(out, protocol.UsageWindow{ID: "month", UsedPercent: spendPercent(*e.UsedCredits / *e.MonthlyLimit * 100)})
+		case e.Reached:
+			out = append(out, protocol.UsageWindow{ID: "month", UsedPercent: 100})
+		}
+	}
+	for _, w := range []struct {
+		id  string
+		pct *float64
+	}{{"day", e.Daily}, {"spend-week", e.Weekly}} {
+		if w.pct != nil {
+			out = append(out, protocol.UsageWindow{ID: w.id, UsedPercent: spendPercent(*w.pct)})
+		}
+	}
+	if e.Reached {
+		out = append(out, protocol.UsageWindow{ID: "capped", UsedPercent: 100})
+	}
 	return out
+}
+
+// spendPercent clamps a share to 0–100 and floors it to a whole percent, except under 1 %, where
+// the fraction stays (a real 0.7 % is not 0 %).
+func spendPercent(v float64) float64 {
+	p := usedPercent(v)
+	if p < 1 {
+		return p
+	}
+	return math.Floor(p)
 }

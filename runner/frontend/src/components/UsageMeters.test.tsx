@@ -38,6 +38,63 @@ describe('UsageMeters', () => {
     expect(week.title).toBe('Weekly window: 92% used · resets in 3d 4h')
   })
 
+  describe('a spend limit (work or enterprise account)', () => {
+    const spend = (...windows: UsageLimits['windows']): UsageLimits => ({ provider: 'claude', windows })
+
+    it('draws the monthly spend limit with no reset, labelled and named as a spend limit', () => {
+      render(<UsageMeters daemons={[makeDaemon({ usage_limits: [spend({ id: 'month', used_percent: 34 })] })]} now={NOW} />)
+      const month = screen.getByTestId('usage-window-month')
+      expect(month).toHaveTextContent('month')
+      expect(month).toHaveTextContent('34%')
+      expect(month.title).toBe('Monthly spend limit: 34% used')
+      expect(month).toHaveAccessibleName('Claude monthly spend limit, 34% used')
+      expect(month.querySelector('.usage-meter__reset')).toBeNull()
+      expect(month.querySelector('.usage-meter__fill')).toHaveStyle({ width: '34%' })
+    })
+
+    it('says "<1%" for a share under one percent, never 0%', () => {
+      render(<UsageMeters daemons={[makeDaemon({ usage_limits: [spend({ id: 'month', used_percent: 0.7072 })] })]} now={NOW} />)
+      const month = screen.getByTestId('usage-window-month')
+      expect(month).toHaveTextContent('<1%')
+      expect(month).not.toHaveTextContent('0%')
+      expect(month.title).toBe('Monthly spend limit: <1% used')
+      expect(month).toHaveAccessibleName('Claude monthly spend limit, under 1% used')
+    })
+
+    it('still says 0% for a share of exactly zero', () => {
+      render(<UsageMeters daemons={[makeDaemon({ usage_limits: [spend({ id: 'month', used_percent: 0 })] })]} now={NOW} />)
+      expect(screen.getByTestId('usage-window-month')).toHaveTextContent('0%')
+    })
+
+    it('orders 5h, 7d, month, then a cap, and keeps a cap that has no reset time', () => {
+      render(<UsageMeters daemons={[makeDaemon({ usage_limits: [spend(
+        { id: 'capped', used_percent: 100 },
+        { id: 'month', used_percent: 100 },
+        { id: '7d', used_percent: 10, resets_at: at(600) },
+        { id: '5h', used_percent: 20, resets_at: at(60) },
+      )] })]} now={NOW} />)
+      const row = screen.getByTestId('usage-row-claude')
+      expect(within(row).getAllByTestId(/^usage-window-/).map(w => w.dataset.testid)).toEqual([
+        'usage-window-5h', 'usage-window-7d', 'usage-window-month', 'usage-window-capped',
+      ])
+      const capped = screen.getByTestId('usage-window-capped')
+      expect(capped).toHaveTextContent(/^capped$/)
+      expect(capped.title).toBe('Claude spend limit reached')
+    })
+
+    it('draws the daily and weekly spend limits after the month', () => {
+      render(<UsageMeters daemons={[makeDaemon({ usage_limits: [spend(
+        { id: 'spend-week', used_percent: 40 }, { id: 'day', used_percent: 12 }, { id: 'month', used_percent: 25 },
+      )] })]} now={NOW} />)
+      const row = screen.getByTestId('usage-row-claude')
+      expect(within(row).getAllByTestId(/^usage-window-/).map(w => w.dataset.testid)).toEqual([
+        'usage-window-month', 'usage-window-day', 'usage-window-spend-week',
+      ])
+      expect(screen.getByTestId('usage-window-day').title).toBe('Daily spend limit: 12% used')
+      expect(screen.getByTestId('usage-window-spend-week').title).toBe('Weekly spend limit: 40% used')
+    })
+  })
+
   it('colours a window by how much is used', () => {
     expect([0, 69.9, 70, 89.9, 90, 100].map(meterLevel)).toEqual(['quiet', 'quiet', 'warning', 'warning', 'danger', 'danger'])
     render(<UsageMeters daemons={[makeDaemon({ usage_limits: [codex] })]} now={NOW} />)

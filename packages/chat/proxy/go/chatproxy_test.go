@@ -19,6 +19,8 @@ type recorded struct {
 	Path    string // path with query, as the runner received it
 	Headers http.Header
 	Body    string
+	// ContentLength is the size the request declared (-1: sent chunked).
+	ContentLength int64
 }
 
 // stubRunner stands in for the runner: it records every request and answers
@@ -42,6 +44,8 @@ func newStubRunner(t *testing.T) *stubRunner {
 			Path:    r.URL.RequestURI(),
 			Headers: r.Header.Clone(),
 			Body:    string(body),
+
+			ContentLength: r.ContentLength,
 		})
 		respond := s.respond
 		s.mu.Unlock()
@@ -200,6 +204,11 @@ func TestRoutesForward(t *testing.T) {
 				}
 				if got.Headers.Get("Content-Type") != "text/plain" {
 					t.Fatalf("Content-Type = %q", got.Headers.Get("Content-Type"))
+				}
+				// The browser's declared size travels, so the runner can refuse a file
+				// over its limit before reading it.
+				if got.ContentLength != int64(len(tc.body)) {
+					t.Fatalf("runner Content-Length = %d, want %d", got.ContentLength, len(tc.body))
 				}
 			}
 			if tc.name == "messages" && got.Headers.Get("Content-Type") != "application/json" {
@@ -602,5 +611,35 @@ func TestMessageSourceIsSentToTheRunner(t *testing.T) {
 	got := runner.only(t)
 	if got.Body != `{"source":"human","text":"hi"}` {
 		t.Fatalf("runner body = %s, want the proxy's source and the text only", got.Body)
+	}
+}
+
+// An upload the browser sent without a declared size goes on chunked, as it came;
+// a declared one arrives declared.
+func TestUploadsForwardTheDeclaredSize(t *testing.T) {
+	runner := newStubRunner(t)
+	srv, _ := app(t, runner, allow)
+
+	req, err := http.NewRequest("POST", srv.URL+"/blerg/sessions/s1/uploads", io.MultiReader(strings.NewReader("chunk"), strings.NewReader("ed")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Artifact-Name", "a.txt")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := runner.only(t); got.ContentLength != -1 || got.Body != "chunked" {
+		t.Fatalf("undeclared: runner saw length %d body %q", got.ContentLength, got.Body)
+	}
+
+	if got := ContentLength(" 42 "); got != 42 {
+		t.Errorf("ContentLength(42) = %d", got)
+	}
+	for _, bad := range []string{"", "-1", "x", "1.5"} {
+		if got := ContentLength(bad); got != -1 {
+			t.Errorf("ContentLength(%q) = %d, want -1", bad, got)
+		}
 	}
 }

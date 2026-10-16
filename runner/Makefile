@@ -3,7 +3,6 @@
 GO ?= $(shell if [ -x $(HOME)/go/bin/go ]; then echo $(HOME)/go/bin/go; else command -v go; fi)
 
 SERVER_IMAGE     ?= blerg-runner-server:latest
-DAEMON_IMAGE     ?= blerg-runner-daemon:latest
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
@@ -34,29 +33,16 @@ build-frontend:
 
 .PHONY: test
 test:
-	$(GO) test ./...
+	$(GO) test -timeout 30m ./...
 
 # ── docker ─────────────────────────────────────────────────────────────────────
 
 .PHONY: docker-build
-docker-build: docker-build-server docker-build-daemon
+docker-build: docker-build-server
 
 .PHONY: docker-build-server
 docker-build-server: ## Repo-root context required (contracts/ replace) — confirmed by testing
 	cd .. && docker build -f runner/Dockerfile.server -t $(SERVER_IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo dev) .
-
-# NOTE: this target (and Dockerfile.daemon) predates
-# DAEMON.md's current architecture — the daemon "can't be containerized: it
-# needs your own Claude auth and your own tmux, so it always runs directly
-# on the host." Nothing in install/desktop/ or install/k8s/ references any
-# of these; they're vestigial. Left as-is (not fixed, not removed) —
-# confirmed broken the same way the other two were (repo-root context
-# needed) but fixing a build for a deployment model the project no longer
-# uses isn't worth it; deleting it is a bigger call than this pass should
-# make unasked.
-.PHONY: docker-build-daemon
-docker-build-daemon:
-	docker build -f Dockerfile.daemon -t $(DAEMON_IMAGE) --build-arg VERSION=$(VERSION) .
 
 # Deploying to a cluster: use install/k8s/deploy.sh (see install/k8s/README.md).
 

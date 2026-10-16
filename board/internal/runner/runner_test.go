@@ -323,3 +323,36 @@ func TestBlergRunnerEventsDropsUndrawnKinds(t *testing.T) {
 		t.Fatalf("source_kind = %q", wrapped.SourceKind)
 	}
 }
+
+// Raw sends an upload's declared size (the chat proxy's Content-Length header) as the request's
+// own length, so the runner can refuse a file over its limit before reading it; without one the
+// body goes chunked.
+func TestRawSendsTheDeclaredContentLength(t *testing.T) {
+	var gotLen int64
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotLen, gotBody = r.ContentLength, string(b)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	k := NewBlergRunner(srv.URL, "key", "")
+
+	for _, c := range []struct {
+		header string
+		want   int64
+	}{{"7", 7}, {"", -1}, {"junk", -1}} {
+		headers := map[string]string{"X-Artifact-Name": "a.txt"}
+		if c.header != "" {
+			headers["Content-Length"] = c.header
+		}
+		resp, err := k.Raw(context.Background(), http.MethodPost, "/api/runner/sessions/s/uploads", io.MultiReader(strings.NewReader("abc"), strings.NewReader("defg")), headers)
+		if err != nil {
+			t.Fatalf("Raw(%q): %v", c.header, err)
+		}
+		resp.Body.Close()
+		if gotLen != c.want || gotBody != "abcdefg" {
+			t.Errorf("Content-Length %q: runner saw length %d body %q, want %d", c.header, gotLen, gotBody, c.want)
+		}
+	}
+}

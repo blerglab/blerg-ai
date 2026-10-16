@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -379,6 +380,28 @@ func TestUsageLimitsTrackerClaudeEndpointPlusCap(t *testing.T) {
 	tr.stop()
 }
 
+// A reached spend limit reports "capped" with no reset; a later reactive cap (which knows its
+// reset) replaces it rather than doubling it.
+func TestUsageLimitsTrackerReactiveCapReplacesTheSpendCap(t *testing.T) {
+	f := newUsageFixture(t)
+	f.body.Store(usageFixtureBody(t, "limit_reached.json"))
+	sent := make(chan protocol.UsageLimits, 8)
+	tr := newUsageLimitsTracker(func(msg any) error { sent <- msg.(protocol.UsageLimits); return nil },
+		[]limitSource{{provider: "claude", read: f.src.read}})
+	defer tr.stop()
+	tr.poll(context.Background(), nil)
+	m := <-sent
+	if len(m.Windows) != 2 || m.Windows[1] != (protocol.UsageWindow{ID: "capped", UsedPercent: 100}) {
+		t.Fatalf("report = %+v", m)
+	}
+	reset := time.Now().Add(time.Hour)
+	tr.ClaudeRateLimited(reset)
+	m = <-sent
+	if len(m.Windows) != 2 || m.Windows[1] != (protocol.UsageWindow{ID: "capped", UsedPercent: 100, ResetsAt: reset.UTC()}) {
+		t.Fatalf("capped report = %+v", m)
+	}
+}
+
 // A redirect is not followed (the token is for this one endpoint), and is a failure the tracker
 // logs, not a quiet skip.
 func TestClaudeUsageDoesNotFollowARedirect(t *testing.T) {
@@ -452,5 +475,163 @@ func TestUsageLimitsTrackerClaudeBackoffKeepsTheMeter(t *testing.T) {
 	}
 	if m := <-sent; m.Provider != "claude" || len(m.Windows) != 0 {
 		t.Fatalf("after an hour of 429s = %+v, want claude withdrawn", m)
+	}
+}
+
+// usageFixtureBody reads a captured-shape answer from testdata/claude_usage. Currency is masked.
+func usageFixtureBody(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "claude_usage", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestClaudeUsageSpendLimitWindows(t *testing.T) {
+	r5 := time.Date(2026, 10, 15, 18, 59, 59, 655108000, time.UTC)
+	r7 := time.Date(2026, 10, 19, 15, 59, 59, 655127000, time.UTC)
+	cases := []struct {
+		name string
+		body string
+		want []protocol.UsageWindow
+	}{
+		// A work account: no 5h / 7d, only the monthly spend limit. $70.72 of $10,000.00 is under
+		// 1 %, so the fraction is kept (the meter shows "<1%", not 0 %). No reset is given.
+		{"work account", "work_account.json", []protocol.UsageWindow{{ID: "month", UsedPercent: 0.7072}}},
+		// A subscription with extra usage on shows all three; the share is floored like the others.
+		{"subscription with extra usage", "subscription_with_extra.json", []protocol.UsageWindow{
+			{ID: "5h", UsedPercent: 41, ResetsAt: r5}, {ID: "7d", UsedPercent: 67, ResetsAt: r7}, {ID: "month", UsedPercent: 50},
+		}},
+		{"limit reached", "limit_reached.json", []protocol.UsageWindow{{ID: "month", UsedPercent: 100}, {ID: "capped", UsedPercent: 100}}},
+		// No utilization: used_credits / monthly_limit.
+		{"utilization absent", "utilization_absent.json", []protocol.UsageWindow{{ID: "month", UsedPercent: 25}}},
+		{"daily and weekly", "daily_weekly.json", []protocol.UsageWindow{
+			{ID: "month", UsedPercent: 25}, {ID: "day", UsedPercent: 12}, {ID: "spend-week", UsedPercent: 40},
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newUsageFixture(t)
+			f.body.Store(usageFixtureBody(t, c.body))
+			got, err := f.read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(c.want) {
+				t.Fatalf("windows = %+v, want %+v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("window %d = %+v, want %+v", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestClaudeUsageSpendLimitEdgeCases(t *testing.T) {
+	win := func(body string) ([]protocol.UsageWindow, error) {
+		f := newUsageFixture(t)
+		f.body.Store(body)
+		return f.read()
+	}
+	ids := func(ws []protocol.UsageWindow) string {
+		var s []string
+		for _, w := range ws {
+			s = append(s, fmt.Sprintf("%s=%v", w.ID, w.UsedPercent))
+		}
+		return strings.Join(s, ",")
+	}
+	t.Run("a disabled or limitless spend setting adds nothing", func(t *testing.T) {
+		for _, body := range []string{
+			usageFixtureBody(t, "extra_disabled.json"),
+			`{"extra_usage":{"is_enabled":true,"monthly_limit":0,"used_credits":5,"utilization":50}}`,
+			`{"extra_usage":{"is_enabled":true,"monthly_limit":-10,"utilization":50}}`,
+			`{"extra_usage":{"is_enabled":true,"utilization":50}}`,
+			`{"extra_usage":{"is_enabled":false,"monthly_limit":1000,"utilization":50}}`,
+		} {
+			if ws, err := win(body); err == nil || errors.Is(err, errNoUsageLimits) {
+				t.Fatalf("%s: windows %+v, err %v; want a logged failure (no window)", body, ws, err)
+			}
+		}
+	})
+	t.Run("a disabled spend setting leaves the subscription windows alone", func(t *testing.T) {
+		ws, err := win(fakeUsageBody)
+		if err != nil || ids(ws) != "5h=41,7d=67" {
+			t.Fatalf("got %s, %v", ids(ws), err)
+		}
+	})
+	t.Run("a share outside 0-100 is clamped", func(t *testing.T) {
+		ws, err := win(`{"extra_usage":{"is_enabled":true,"monthly_limit":100,"utilization":180}}`)
+		if err != nil || ids(ws) != "month=100" {
+			t.Fatalf("got %s, %v", ids(ws), err)
+		}
+		ws, err = win(`{"extra_usage":{"is_enabled":true,"monthly_limit":100,"used_credits":250}}`)
+		if err != nil || ids(ws) != "month=100" {
+			t.Fatalf("fallback: got %s, %v", ids(ws), err)
+		}
+	})
+	t.Run("an unreadable share is not shown as 0 %", func(t *testing.T) {
+		if ws, err := win(`{"extra_usage":{"is_enabled":true,"monthly_limit":100}}`); err == nil || errors.Is(err, errNoUsageLimits) {
+			t.Fatalf("windows %+v, err %v; want a logged failure (no window)", ws, err)
+		}
+	})
+	t.Run("a reached limit with no readable share is 100 % and reports the cap", func(t *testing.T) {
+		ws, err := win(`{"extra_usage":{"is_enabled":true,"monthly_limit":100,"spend_limit_reached":true}}`)
+		if err != nil || ids(ws) != "month=100,capped=100" {
+			t.Fatalf("got %s, %v", ids(ws), err)
+		}
+	})
+	t.Run("garbage shapes are ignored, not fatal", func(t *testing.T) {
+		for body, want := range map[string]string{
+			`{"extra_usage":"on","five_hour":{"utilization":10}}`:                                                              "5h=10",
+			`{"extra_usage":[1,2],"five_hour":{"utilization":10}}`:                                                             "5h=10",
+			`{"extra_usage":null,"five_hour":{"utilization":10}}`:                                                              "5h=10",
+			`{"five_hour":"x","seven_day":{"utilization":20},"extra_usage":{"is_enabled":"yes","monthly_limit":9}}`:            "7d=20",
+			`{"extra_usage":{"is_enabled":true,"monthly_limit":"1000","utilization":"5"},"five_hour":{"utilization":10}}`:      "5h=10",
+			`{"extra_usage":{"is_enabled":true,"monthly_limit":100,"utilization":"5","used_credits":30}}`:                      "month=30",
+			`{"extra_usage":{"is_enabled":true,"monthly_limit":100,"utilization":5,"daily":"x","weekly":{"utilization":"y"}}}`: "month=5",
+			`{"extra_usage":{"is_enabled":true,"monthly_limit":100,"utilization":5,"daily":{"x":1},"weekly":[3]}}`:             "month=5",
+			`{"extra_usage":{"is_enabled":true,"monthly_limit":100,"utilization":5,"spend_limit_reached":"true"}}`:             "month=5",
+		} {
+			ws, err := win(body)
+			if err != nil || ids(ws) != want {
+				t.Fatalf("%s: got %s, %v; want %s", body, ids(ws), err, want)
+			}
+		}
+	})
+}
+
+// Only percentages and reset times leave the machine: a report built from a work-account answer
+// carries no amount, currency, limit or balance, in any field it marshals.
+func TestClaudeUsageSpendReportCarriesNoAmounts(t *testing.T) {
+	f := newUsageFixture(t)
+	f.body.Store(usageFixtureBody(t, "subscription_with_extra.json"))
+	ws, err := f.read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(protocol.UsageLimits{Type: "usage_limits", Provider: "claude", Windows: ws})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back struct {
+		Windows []map[string]any `json:"windows"`
+	}
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range back.Windows {
+		for k := range w {
+			if k != "id" && k != "used_percent" && k != "resets_at" {
+				t.Fatalf("unexpected field %q in a window: %s", k, raw)
+			}
+		}
+	}
+	for _, leak := range []string{"XXX", "2500", "5000", "currency", "limit\"", "credit", "balance"} {
+		if strings.Contains(string(raw), leak) {
+			t.Fatalf("report mentions %q: %s", leak, raw)
+		}
 	}
 }

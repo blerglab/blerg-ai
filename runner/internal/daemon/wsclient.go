@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"runtime"
@@ -24,6 +25,10 @@ const (
 	defaultHeartbeatInterval = 30 * time.Second
 	defaultReconnectInitial  = 2 * time.Second
 	defaultReconnectMax      = 60 * time.Second
+	defaultUnconfirmedAfter  = 5 * time.Second
+
+	// closeUnauthorized is the close code the server answers a refused token with.
+	closeUnauthorized = 4401
 )
 
 // Config holds the daemon client configuration.
@@ -39,10 +44,19 @@ type Config struct {
 	// ManagerConfig.AllowHostCredentialClone.
 	AllowHostCredentialClone bool
 
+	// ConnectionFile is where the client keeps connection.json (ConnectionState)
+	// up to date; "" keeps none. Never written in mode "runner": a session
+	// pod's HOME is the agent's workspace.
+	ConnectionFile string
+
 	// Tunable timings. Zero values use the package defaults.
 	HeartbeatInterval time.Duration
 	ReconnectInitial  time.Duration
 	ReconnectMax      time.Duration
+	// UnconfirmedAfter is how long a link must stay open without a
+	// daemon_welcome (a server older than 0.2.1 sends none) before it is taken
+	// as accepted, unconfirmed.
+	UnconfirmedAfter time.Duration
 }
 
 func (c *Config) heartbeatInterval() time.Duration {
@@ -66,6 +80,13 @@ func (c *Config) reconnectMax() time.Duration {
 	return defaultReconnectMax
 }
 
+func (c *Config) unconfirmedAfter() time.Duration {
+	if c.UnconfirmedAfter > 0 {
+		return c.UnconfirmedAfter
+	}
+	return defaultUnconfirmedAfter
+}
+
 // WSClient is a WebSocket client that maintains a persistent connection to the
 // blerg-runner server, reconnecting automatically with exponential backoff.
 type WSClient struct {
@@ -81,6 +102,8 @@ type WSClient struct {
 	engineModels   EngineModelSource
 	reposRootFn    func() string
 	hbKick         chan struct{} // RequestHeartbeat: send one now
+	// status is the link's state, mirrored to Config.ConnectionFile.
+	status *connReporter
 
 	// sleep is the injectable backoff wait, so tests can observe/short-circuit
 	// it without real time passing. Returns false if ctx was done.
@@ -153,10 +176,14 @@ func NewWSClient(cfg Config) *WSClient {
 	if cfg.ProtocolVersion == "" {
 		cfg.ProtocolVersion = defaultProtocolVersion
 	}
+	if cfg.DaemonMode == "runner" {
+		cfg.ConnectionFile = ""
+	}
 	return &WSClient{
 		config:   cfg,
 		handlers: make(map[string]func([]byte)),
 		hbKick:   make(chan struct{}, 1),
+		status:   newConnReporter(cfg.ConnectionFile, cfg.ServerURL),
 		sleep: func(ctx context.Context, d time.Duration) bool {
 			select {
 			case <-ctx.Done():
@@ -204,19 +231,36 @@ func (c *WSClient) Run(ctx context.Context, activeSessions func() []string) {
 	backoff := c.config.reconnectInitial()
 	var lastErr string
 	var lastLog time.Time
+	// Before the first dial: whatever an earlier process left in the file is not this one's.
+	c.status.set(ConnStateConnecting, "starting; connecting to the server")
 	for {
-		connected, err := c.connect(ctx, activeSessions)
+		link, err := c.connect(ctx, activeSessions)
 		if ctx.Err() != nil || err == nil {
 			return
 		}
-		if connected {
-			// The link was up at least once: start the ladder over.
+		refused := isRefusal(err)
+		if link.up && !refused {
+			// The link was up (confirmed, or open for the unconfirmed window):
+			// start the ladder over. A refusal never does — a daemon with a
+			// wrong token must not retry every 2 s forever.
 			backoff = c.config.reconnectInitial()
+		}
+		switch {
+		case refused:
+			c.status.set(ConnStateRefused, "the server refused the daemon token (close 4401)")
+		case link.up || c.status.current() != ConnStateRefused:
+			// After a refusal, only a link that is up says anything new about the
+			// token; a server that cannot be reached leaves "refused" standing.
+			c.status.set(ConnStateConnecting, shortDetail("not connected: "+err.Error()))
 		}
 		// Log the first failure, then identical failures once a minute — a
 		// server that's down for an hour must not produce 1800 lines.
 		if err.Error() != lastErr || time.Since(lastLog) > time.Minute {
-			log.Printf("daemon: disconnected (%v); reconnecting in %s", err, backoff)
+			if refused {
+				log.Print(c.refusedLine(backoff))
+			} else {
+				log.Printf("daemon: disconnected (%v); reconnecting in %s", err, backoff)
+			}
 			lastErr, lastLog = err.Error(), time.Now()
 		}
 		if !c.sleep(ctx, backoff) {
@@ -229,6 +273,92 @@ func (c *WSClient) Run(ctx context.Context, activeSessions func() []string) {
 	}
 }
 
+// isRefusal reports whether err is the server's 4401 close: the token was refused.
+func isRefusal(err error) bool {
+	var ce *websocket.CloseError
+	return errors.As(err, &ce) && ce.Code == closeUnauthorized
+}
+
+// refusedLine is the one loud log line for a 4401: what was refused, where that token comes from
+// for this kind of daemon, and that it keeps retrying.
+func (c *WSClient) refusedLine(retry time.Duration) string {
+	server := redactServerURL(c.config.ServerURL)
+	if c.config.DaemonMode == "runner" {
+		return fmt.Sprintf("daemon: REFUSED: the server at %s refused this session pod's runtime token (close 4401): "+
+			"the launch it was issued for has ended or was replaced. Retrying in %s.", server, retry)
+	}
+	return fmt.Sprintf("daemon: REFUSED: the server at %s refused the daemon token (close 4401): this daemon's "+
+		"BLERG_RUNNER_DAEMON_TOKEN is not the server's. It comes from the daemon's environment: for the installed "+
+		"service, install/desktop/daemon/install.sh copies it from BLERG_RUNNER_DAEMON_TOKEN in install/desktop/.env "+
+		"(a daemon started by hand takes it from your shell). Put the server's token there and run install.sh "+
+		"install again. Retrying in %s.", server, retry)
+}
+
+// shortDetail keeps a connection-file detail to one short line.
+func shortDetail(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 200 {
+		s = s[:197] + "..."
+	}
+	return s
+}
+
+// linkResult is how far one connection got: up means the server confirmed it (daemon_welcome)
+// or it stayed open for the unconfirmed window.
+type linkResult struct {
+	up bool
+}
+
+// linkWatch tracks one connection from the written hello until it closes: the welcome, the
+// unconfirmed window, and what each of them logs and records.
+type linkWatch struct {
+	c         *WSClient
+	mu        sync.Mutex
+	confirmed bool // the welcome arrived
+	assumed   bool // the window passed without one
+	closed    bool
+}
+
+// welcome handles daemon_welcome: the token was accepted. Late (after the window) is fine.
+func (w *linkWatch) welcome(raw []byte) {
+	var msg protocol.DaemonWelcome
+	_ = json.Unmarshal(raw, &msg)
+	name := msg.Name
+	if name == "" {
+		name = w.c.config.DaemonName
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.confirmed {
+		return
+	}
+	w.confirmed = true
+	w.c.status.set(ConnStateConnected, shortDetail(fmt.Sprintf("accepted by the server as %q", name)))
+	log.Printf("daemon: connected to %s as %q", redactServerURL(w.c.config.ServerURL), name)
+}
+
+// windowPassed runs when the link has stayed open for the unconfirmed window.
+func (w *linkWatch) windowPassed() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.confirmed || w.assumed {
+		return
+	}
+	w.assumed = true
+	w.c.status.set(ConnStateUnconfirmed, "connected, but the server did not confirm it (a server older than 0.2.1 sends no confirmation); treated as accepted")
+	// Not "daemon: connected to …": that line means the server confirmed the token.
+	log.Printf("daemon: link to %s open for %s but not confirmed by the server (a server older than 0.2.1 sends no confirmation); treating it as accepted",
+		redactServerURL(w.c.config.ServerURL), w.c.config.unconfirmedAfter())
+}
+
+// close ends the watch and reports whether the link was up.
+func (w *linkWatch) close() linkResult {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	return linkResult{up: w.confirmed || w.assumed}
+}
+
 // queued is the queued-spawn report, nil without a provider.
 func (c *WSClient) queued() []string {
 	if c.queuedSessions == nil {
@@ -239,12 +369,12 @@ func (c *WSClient) queued() []string {
 
 // connect dials the server, sends hello, starts the heartbeat goroutine, then
 // reads until the connection closes or ctx is cancelled. It returns whether
-// the dial + hello succeeded (connected) and the error from the read loop
-// (nil error if shutdown was due to ctx cancellation).
-func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) (connected bool, err error) {
+// the link was up (linkResult) and the error from the read loop (nil error if
+// shutdown was due to ctx cancellation).
+func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) (linkResult, error) {
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.config.ServerURL, nil) //nolint:bodyclose // gorilla/websocket: after a successful dial the response body is the connection and is closed with conn
 	if err != nil {
-		return false, err
+		return linkResult{}, err
 	}
 
 	// Send daemon_hello. The connection is not c.conn until the hello is written: the server
@@ -283,6 +413,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	hello.Plugins = pluginsCapability() // SpawnSession.Plugins (pluginworkshop.go)
 	hello.InputReceipts = true
 	hello.SessionTokenFile = true // SessionToken → SessionTokenResult (sessiontoken.go)
+	hello.Welcome = true          // DaemonWelcome (linkWatch): "connected" only once the server says so
 	hello.QueuedSessions = c.queued()
 	// sentModelsGen is the generation of the model lists this connection
 	// has reported; only the heartbeat goroutine touches it after the hello.
@@ -295,7 +426,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	raw, err := json.Marshal(hello)
 	if err != nil {
 		_ = conn.Close()
-		return false, err
+		return linkResult{}, err
 	}
 	c.writeMu.Lock()
 	err = conn.WriteMessage(websocket.TextMessage, raw)
@@ -307,10 +438,14 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	c.writeMu.Unlock()
 	if err != nil {
 		_ = conn.Close()
-		return false, err
+		return linkResult{}, err
 	}
 
-	log.Printf("daemon: connected to %s as %q", c.config.ServerURL, c.config.DaemonName)
+	// Written is not accepted: the server answers a wrong token only by closing with 4401.
+	// "connected" waits for its daemon_welcome, or for the link to stay open for the window.
+	watch := &linkWatch{c: c}
+	window := time.AfterFunc(c.config.unconfirmedAfter(), watch.windowPassed)
+	defer window.Stop()
 
 	// Fire the connect callback (e.g. reattach persistent sessions) without
 	// blocking the read loop. The hello above already reported persistent
@@ -387,7 +522,8 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 		_ = conn.Close()
 	}()
 
-	readErr := c.readLoop(conn)
+	readErr := c.readLoop(conn, watch.welcome)
+	link := watch.close()
 
 	// Stop the heartbeat, then close the conn to unblock any in-progress write.
 	close(hbStop)
@@ -399,14 +535,15 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	c.mu.Unlock()
 
 	if ctx.Err() != nil {
-		return true, nil //nolint:nilerr // the read loop ended because the daemon is shutting down; that is not a failure
+		// The read loop ended because the daemon is shutting down; that is not a failure.
+		readErr = nil
 	}
-	return true, readErr
+	return link, readErr
 }
 
 // readLoop reads messages from conn until it returns an error, dispatching each
-// to the registered handler (if any).
-func (c *WSClient) readLoop(conn *websocket.Conn) error {
+// to the registered handler (if any); daemon_welcome goes to onWelcome.
+func (c *WSClient) readLoop(conn *websocket.Conn, onWelcome func([]byte)) error {
 	type envelope struct {
 		Type string `json:"type"`
 	}
@@ -418,6 +555,10 @@ func (c *WSClient) readLoop(conn *websocket.Conn) error {
 		var env envelope
 		if err := json.Unmarshal(raw, &env); err != nil {
 			log.Printf("daemon: malformed message: %v", err)
+			continue
+		}
+		if env.Type == "daemon_welcome" {
+			onWelcome(raw)
 			continue
 		}
 		c.mu.Lock()

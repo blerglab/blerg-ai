@@ -4,8 +4,17 @@
 // chips instead of raw text.
 import { formatSize } from './artifacts'
 
+/** The per-file limit assumed when the server does not say its own: what a runner older than
+ *  0.2.1 took. A newer one advertises its limit (`limits.max_file_bytes`, 100 MiB by default),
+ *  which a host passes to ChatView as `maxFileBytes`. */
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 export const MAX_ATTACHMENTS_PER_MESSAGE = 10
+
+/** A size limit the way the runner states it: whole MiB as "100 MiB", anything else as a size. */
+export function formatLimit(bytes: number): string {
+  const mib = 1024 * 1024
+  return bytes >= mib && bytes % mib === 0 ? `${bytes / mib} MiB` : formatSize(bytes)
+}
 
 const NOTE_PREFIX = 'Attached files (fetch them with: blerg-runner fetch --all): '
 const GENERIC_LINE = 'Please take a look at the attached files.'

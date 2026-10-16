@@ -18,7 +18,7 @@ import (
 // usageProviders and usageWindowIDs are what a report may name.
 var (
 	usageProviders = map[string]bool{"codex": true, "claude": true}
-	usageWindowIDs = map[string]bool{"5h": true, "7d": true, "capped": true}
+	usageWindowIDs = map[string]bool{"5h": true, "7d": true, "month": true, "day": true, "spend-week": true, "capped": true}
 )
 
 // usageResetHorizon bounds a believable reset time: the longest window is a week.

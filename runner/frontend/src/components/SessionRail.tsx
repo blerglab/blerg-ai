@@ -1,8 +1,7 @@
 // SessionRail: the session page's side panel, in four tabs. Live: what needs the person (the agent's
 // open questions, with a box that answers each; tool changes waiting on a decision), what is running
 // (subagents and background tasks, each with a way to its place in the conversation), the session's
-// facts with links to its Insights and the Files and Capabilities tabs, and the chat's settings (Show
-// thinking, Compact tool calls). History (HistoryTab.tsx): the pieces of work the session did. Files
+// facts, and the chat's settings (Show thinking, Compact tool calls). History (HistoryTab.tsx): the pieces of work the session did. Files
 // (FilesTab.tsx): the session's files. Capabilities (CapabilitiesTab.tsx): what it loaded. A tab other than Live
 // reads the server only while it is on screen. The tab chosen is kept per browser. On a wide screen it is a panel beside the chat; on a narrow one a drawer over it (modal:
 // Esc and the backdrop close it, focus stays inside, the page does not scroll behind it).
@@ -74,7 +73,6 @@ export interface SessionRailProps {
   mode: 'panel' | 'drawer'
   open: boolean
   onClose: () => void
-  onInsights: () => void
   /** The Capabilities tab came on screen: the page reads the tool changes again. */
   onCapabilitiesShown?: () => void
   /** The chat's settings, held by the page (the chat draws what they say) and kept per browser. */
@@ -147,11 +145,6 @@ export default function SessionRail(props: SessionRailProps) {
   const pick = (t: RailTab) => {
     setTab(t)
     writeRailTab(t)
-  }
-  // The Session section's Files and Capabilities links: the tab, chosen, with the focus on it.
-  const goTab = (t: RailTab) => {
-    pick(t)
-    document.getElementById(`${props.id}-tab-${t}`)?.focus()
   }
   const capabilitiesShown = open && tab === 'capabilities'
   const { onCapabilitiesShown } = props
@@ -250,11 +243,6 @@ export default function SessionRail(props: SessionRailProps) {
 
       <Section title="Session" testId="rail-session">
         <SessionFacts session={session} machine={props.machine} now={minute} liveRunning={props.liveRunning ?? null} />
-        <div className="rail-actions rail-session-links">
-          <button type="button" className="rail-link" data-testid="rail-open-insights" onClick={props.onInsights}>Insights</button>
-          {live.files && <button type="button" className="rail-link" data-testid="rail-open-files" onClick={() => goTab('files')}>Files</button>}
-          <button type="button" className="rail-link" data-testid="rail-open-capabilities" onClick={() => goTab('capabilities')}>Capabilities</button>
-        </div>
       </Section>
 
       <Section title="Settings" testId="rail-settings">
@@ -298,11 +286,9 @@ export default function SessionRail(props: SessionRailProps) {
   if (mode === 'drawer') return open ? <Drawer id={props.id} onClose={onClose}>{body}</Drawer> : null
   return (
     <aside id={props.id} className="session-rail panel" aria-label="Session panel" data-testid="session-rail" hidden={!open}>
+      {/* No close button of its own: the header's panel toggle, right above, opens and closes it. */}
       <header className="rail-header">
         <h2 className="rail-heading">Session panel</h2>
-        <button type="button" className="rail-close" aria-label="Hide the session panel" title="Hide the session panel" onClick={onClose}>
-          <PanelIcon />
-        </button>
       </header>
       <div className="rail-body">{body}</div>
     </aside>

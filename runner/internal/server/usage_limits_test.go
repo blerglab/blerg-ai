@@ -105,6 +105,18 @@ func TestUsageLimitsSanitised(t *testing.T) {
 	}
 }
 
+// The spend-limit windows of a work account (no reset time) pass the server's check.
+func TestUsageLimitsKeepsSpendWindows(t *testing.T) {
+	hub, ws, _, bc := sidebarHubFixture(t)
+	handleUsageLimits(hub, ws, protocol.UsageLimits{Provider: "claude", Windows: []protocol.UsageWindow{
+		{ID: "month", UsedPercent: 0.7}, {ID: "day", UsedPercent: 12}, {ID: "spend-week", UsedPercent: 40}, {ID: "capped", UsedPercent: 100},
+	}})
+	w := nextLimitsChanged(t, bc).UsageLimits[0].Windows
+	if len(w) != 4 || w[0].ID != "month" || w[0].UsedPercent != 0.7 || !w[0].ResetsAt.IsZero() || w[3].ID != "capped" {
+		t.Fatalf("windows = %+v", w)
+	}
+}
+
 // GET /api/daemons says the same limits as initial_state.
 func TestGetDaemonsCarriesUsageLimits(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)

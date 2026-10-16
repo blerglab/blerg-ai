@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -213,6 +214,44 @@ func TestAgentHostResumeWithPromptReportsNoIdleFirst(t *testing.T) {
 	}
 }
 
+// The note a resumed session is given about its workspace is the daemon's, not the person's: it
+// is recorded with source "system", never "chat" (drawn as "You").
+func TestAgentHostResumeNoteIsSystem(t *testing.T) {
+	host, sender, _ := newTestHost(t, &scriptedAgentProvider{}, "")
+	host.SpawnResumed(protocol.SpawnSession{SessionID: "s1", Repo: "proj", InitialPrompt: "carry on", Kind: "agent"},
+		nil, "fresh-clone")
+	sender.waitForKind(t, "turn_done")
+	sources := map[string]string{}
+	waitFor := time.Now().Add(5 * time.Second)
+	for len(sources) < 2 && time.Now().Before(waitFor) {
+		for _, ev := range sender.agentEvents() {
+			if ev.Kind != "user_message" {
+				continue
+			}
+			var p agent.UserMessagePayload
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				sources[p.Text] = p.Source
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := sources["carry on"]; got != "chat" {
+		t.Errorf("the person's message source = %q, want chat", got)
+	}
+	found := false
+	for text, src := range sources {
+		if strings.HasPrefix(text, "[system] Session resumed after a restart") {
+			found = true
+			if src != "system" {
+				t.Errorf("restart note source = %q, want system", src)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no restart note among %v", sources)
+	}
+}
+
 func TestAgentHostAckAndResend(t *testing.T) {
 	provider := &scriptedAgentProvider{}
 	host, sender, _ := newTestHost(t, provider, "")
@@ -346,7 +385,7 @@ func TestBuildSystemPromptLayers(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, "CLAUDE.md"), []byte("PROJECT RULES"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	prompt := BuildSystemPrompt(workDir, homeDir, nil, agent.DiscoverAgentTypes(workDir, homeDir), "")
+	prompt := BuildSystemPrompt(workDir, homeDir, nil, agent.DiscoverAgentTypes(workDir, homeDir), "", true)
 	for _, want := range []string{"check_in", "USER RULES", "PROJECT RULES", "general-purpose", "This session is interactive"} {
 		if !containsStr(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
@@ -357,11 +396,11 @@ func TestBuildSystemPromptLayers(t *testing.T) {
 	if indexOf(prompt, "This session is interactive") > indexOf(prompt, "USER RULES") {
 		t.Fatal("the interaction paragraph must come before the user's instructions")
 	}
-	unattended := BuildSystemPrompt(workDir, homeDir, nil, nil, protocol.InteractionUnattended)
+	unattended := BuildSystemPrompt(workDir, homeDir, nil, nil, protocol.InteractionUnattended, true)
 	if !containsStr(unattended, "This session is unattended") || containsStr(unattended, "This session is interactive") {
 		t.Fatalf("an unattended session's prompt states the wrong mode")
 	}
-	if interactive := BuildSystemPrompt(workDir, homeDir, nil, nil, protocol.InteractionInteractive); !containsStr(interactive, "This session is interactive") {
+	if interactive := BuildSystemPrompt(workDir, homeDir, nil, nil, protocol.InteractionInteractive, true); !containsStr(interactive, "This session is interactive") {
 		t.Fatalf("an interactive session's prompt does not say so")
 	}
 }
@@ -692,4 +731,97 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// requestRecorder is a provider that answers "done" and keeps every request it was sent.
+type requestRecorder struct {
+	scriptedAgentProvider
+	reqMu sync.Mutex
+	reqs  []agent.Request
+}
+
+func (r *requestRecorder) Stream(ctx context.Context, req agent.Request) (<-chan agent.StreamEvent, error) {
+	r.reqMu.Lock()
+	r.reqs = append(r.reqs, req)
+	r.reqMu.Unlock()
+	return r.scriptedAgentProvider.Stream(ctx, req)
+}
+
+// A slash skill gives the engine the skill's instructions, but the transcript records what the
+// person typed (not the SKILL.md body as "You"), with the client id the message was sent with.
+func TestAgentHostSlashSkillRecordsTheTypedText(t *testing.T) {
+	provider := &requestRecorder{}
+	host, sender, workDir := newTestHost(t, provider, "")
+	skillDir := filepath.Join(workDir, ".claude", "skills", "review")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: review\ndescription: Review a thing\n---\nREVIEW INSTRUCTIONS for $ARGUMENTS"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	host.Spawn(protocol.SpawnSession{SessionID: "s1", Repo: "proj", Kind: "agent"})
+	host.UserInput("s1", agent.Input{Text: "/review the plan", Source: "chat", ClientID: "cl-1"})
+	um := sender.waitForKind(t, "user_message")
+	var p agent.UserMessagePayload
+	if err := json.Unmarshal(um.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Text != "/review the plan" || p.Source != "chat" || p.ClientID != "cl-1" {
+		t.Fatalf("user_message = %+v, want the typed text with its client id", p)
+	}
+	sender.waitForKind(t, "turn_done")
+	provider.reqMu.Lock()
+	defer provider.reqMu.Unlock()
+	if len(provider.reqs) == 0 {
+		t.Fatal("the engine was never called")
+	}
+	msgs := provider.reqs[0].Messages
+	if got := msgs[len(msgs)-1].Blocks[0].Text; !strings.Contains(got, "REVIEW INSTRUCTIONS for the plan") {
+		t.Fatalf("engine got %q, want the skill's instructions", got)
+	}
+}
+
+func TestAgentHostKillWaitsForDriverCleanupBeforeEndingSession(t *testing.T) {
+	t.Setenv(DaemonStateDirEnv, t.TempDir())
+	sender := &agentTestSender{}
+	done, canceled := make(chan struct{}), make(chan struct{})
+	sess := &agentSession{
+		loop: &fakeRefreshDriver{}, cancel: func() { close(canceled) }, runDone: done,
+		emitter: newWSEmitter(sender, "cleanup-session", nil),
+	}
+	host := &AgentHost{sender: sender, sessions: map[string]*agentSession{"cleanup-session": sess}}
+	killed := make(chan struct{})
+	go func() { host.Kill("cleanup-session"); close(killed) }()
+	<-canceled
+	select {
+	case <-killed:
+		close(done)
+		t.Fatal("Kill returned while the engine was still cleaning up its session files")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(done)
+	select {
+	case <-killed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Kill did not finish after driver cleanup")
+	}
+}
+
+func TestAgentHostKillBoundsUnresponsiveDriverCleanup(t *testing.T) {
+	t.Setenv(DaemonStateDirEnv, t.TempDir())
+	shrink(t, &agentDriverStopTimeout, 20*time.Millisecond)
+	sender := &agentTestSender{}
+	sess := &agentSession{
+		loop: &fakeRefreshDriver{}, cancel: func() {}, runDone: make(chan struct{}),
+		emitter: newWSEmitter(sender, "unresponsive-session", nil),
+	}
+	host := &AgentHost{sender: sender, sessions: map[string]*agentSession{"unresponsive-session": sess}}
+	killed := make(chan struct{})
+	go func() { host.Kill("unresponsive-session"); close(killed) }()
+	select {
+	case <-killed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an unresponsive driver blocked session teardown indefinitely")
+	}
 }

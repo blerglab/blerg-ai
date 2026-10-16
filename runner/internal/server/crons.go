@@ -309,7 +309,7 @@ func (h *cronsHandler) view(ctx context.Context, c *db.Cron) cronView {
 // requires every entry to name its tools with an explicit mode: nothing is taken from a
 // connection's default_tools. It returns the normalised JSON to store. `propose` is accepted and
 // stored as is (proposals are not delivered until they exist).
-func (h *cronsHandler) checkMCP(ctx context.Context, p identity.Principal, raw json.RawMessage) (json.RawMessage, *APIError) {
+func (h *cronsHandler) checkMCP(ctx context.Context, p identity.Principal, raw json.RawMessage, engines ...string) (json.RawMessage, *APIError) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
 		return json.RawMessage("[]"), nil
@@ -331,11 +331,18 @@ func (h *cronsHandler) checkMCP(ctx context.Context, p identity.Principal, raw j
 			return nil, apiErrorf(http.StatusBadRequest,
 				"connection %q selects no tools: a cron must name each tool and its mode explicitly", s.Connection)
 		}
+		if s.Preset != "" {
+			return nil, apiErrorf(http.StatusBadRequest, "connection %q: a cron's tools are chosen one by one; it carries no preset", s.Connection)
+		}
 	}
 	// A cron runs in a cluster pod or the Docker sandbox on an agent session: judge the selection
 	// as a cluster agent session (the daemon and runtime are chosen at fire time).
 	proof := mcpgw.Proof{AccountID: p.Sub, SessionID: p.Sid}
-	if _, apiErr := h.api.resolveGrantProof(ctx, proof, sel, grantTarget{Runtime: runnerRuntimeCluster, Engine: "claude", Kind: "agent"}); apiErr != nil {
+	engine := "claude"
+	if len(engines) > 0 && engines[0] != "" {
+		engine = engines[0]
+	}
+	if _, apiErr := h.api.resolveGrantProof(ctx, proof, sel, grantTarget{Runtime: runnerRuntimeCluster, Engine: engine, Kind: "agent"}); apiErr != nil {
 		return nil, apiErr
 	}
 	out, err := json.Marshal(sel)
@@ -471,8 +478,8 @@ func (h *cronsHandler) create(w http.ResponseWriter, r *http.Request) {
 	if !decodeCronBody(w, r, &req) {
 		return
 	}
-	if req.Engine != "" && req.Engine != "claude" {
-		writeError(w, http.StatusBadRequest, `crons run with the "claude" engine only`)
+	if req.Engine != "" && req.Engine != "claude" && req.Engine != "codex" {
+		writeError(w, http.StatusBadRequest, `crons run with the "claude" or "codex" engine`)
 		return
 	}
 	ctx := r.Context()
@@ -486,7 +493,7 @@ func (h *cronsHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	mcp, apiErr := h.checkMCP(ctx, p, req.MCP)
+	mcp, apiErr := h.checkMCP(ctx, p, req.MCP, req.Engine)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
@@ -503,7 +510,7 @@ func (h *cronsHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row, err := h.sched.CreateCron(ctx, cron.NewCron{
-		Owner: p.Sub, Name: req.Name, Enabled: true, Schedule: req.Schedule, Timezone: req.Timezone, Prompt: req.Prompt,
+		Owner: p.Sub, Name: req.Name, Enabled: true, Schedule: req.Schedule, Timezone: req.Timezone, Prompt: req.Prompt, Engine: req.Engine,
 		Model: req.Model, Effort: req.Effort, Runtime: req.Runtime, DaemonID: req.DaemonID, BoardID: req.BoardID, MCP: mcp,
 		TokenID: tokenID, TokenExpiresAt: exp, GraceSeconds: req.GraceSeconds, MaxRuntimeSeconds: req.MaxRuntimeSeconds,
 	})
@@ -545,19 +552,19 @@ func (h *cronsHandler) patch(w http.ResponseWriter, r *http.Request) {
 	if !decodeCronBody(w, r, &req) {
 		return
 	}
-	if req.Engine != nil && *req.Engine != "claude" {
-		writeError(w, http.StatusBadRequest, `crons run with the "claude" engine only`)
+	if req.Engine != nil && *req.Engine != "claude" && *req.Engine != "codex" {
+		writeError(w, http.StatusBadRequest, `crons run with the "claude" or "codex" engine`)
 		return
 	}
 	patch := cron.CronPatch{
-		Name: req.Name, Enabled: req.Enabled, Schedule: req.Schedule, Timezone: req.Timezone, Prompt: req.Prompt, Model: req.Model, Effort: req.Effort,
+		Name: req.Name, Enabled: req.Enabled, Schedule: req.Schedule, Timezone: req.Timezone, Prompt: req.Prompt, Engine: req.Engine, Model: req.Model, Effort: req.Effort,
 		Runtime: req.Runtime, DaemonID: req.DaemonID, BoardID: req.BoardID, GraceSeconds: req.GraceSeconds, MaxRuntimeSeconds: req.MaxRuntimeSeconds,
 	}
 	// A PATCH that leaves `mcp` as it is (the form sends it back unchanged, or not at all) is not
 	// judged against the live upstreams: a cron whose connection is gone, needs signing in or is
 	// down must stay editable for a prompt or schedule change. Only a real change is validated.
 	if req.MCP != nil && !sameMCP(*req.MCP, c.MCP) {
-		mcp, apiErr := h.checkMCP(r.Context(), p, *req.MCP)
+		mcp, apiErr := h.checkMCP(r.Context(), p, *req.MCP, c.Engine)
 		if apiErr != nil {
 			writeAPIError(w, apiErr)
 			return

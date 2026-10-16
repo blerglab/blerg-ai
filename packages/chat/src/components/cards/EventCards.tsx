@@ -2,12 +2,15 @@
 // switch; the compact timeline and the legacy (one card per call) view both go through it.
 import { memo, useState, type ReactNode } from 'react'
 import type { CardRegistry } from '../../cards/registry'
-import { isHarnessText } from '../../model/harnessText'
+import { isRetryNotice } from '../../model/notices'
+import { topicDividerText } from '../../model/topicMarker'
+import { userMessageShape } from '../../model/userMessages'
 import { parseTs, turnDuration } from '../../model/timeLabel'
 import type {
   AgentEvent,
   ArtifactPayload,
   AssistantTextPayload,
+  AssistantThinkingPayload,
   CheckInPayload,
   CompactionPayload,
   ErrorPayload,
@@ -17,10 +20,13 @@ import type {
   SubagentPayload,
   ToolCallPayload,
   ToolResultPayload,
+  TopicPayload,
   TurnDonePayload,
   UserMessagePayload,
 } from '../../types'
 import ArtifactCard from '../ArtifactCard'
+import AskReply from '../AskReply'
+import { useAsks } from '../askContext'
 import { MessageText } from '../AttachmentChips'
 import Markdown from '../Markdown'
 import { TimeLabel } from '../TimeLabel'
@@ -37,25 +43,75 @@ export interface UserMessageLook {
   brief?: boolean | string
 }
 
+/** Where a user message sits in its session. */
+export interface UserMessageContext {
+  /** It is the session's first message from the person's side (its brief, when an app started the
+   *  session with one): the oldest user message held, with nothing older left on the server. Text
+   *  nobody typed (model/userMessages.ts) never counts. */
+  first: boolean
+}
+
 /** Decides how a user message is drawn; null or undefined leaves it as the person's own. */
-export type DescribeUserMessage = (ev: AgentEvent, payload: UserMessagePayload) => UserMessageLook | null | undefined
+export type DescribeUserMessage = (ev: AgentEvent, payload: UserMessagePayload, context: UserMessageContext) => UserMessageLook | null | undefined
 
 export interface RenderOptions {
   cards?: CardRegistry
   messageFooter?: MessageFooter
   describeUserMessage?: DescribeUserMessage
+  /** The client_event_id of the session's first user message, when it is known (see
+   *  UserMessageContext.first). */
+  firstUserMessage?: string | null
+  /** Which subagent cards the person opened or closed, by call id: kept by the transcript so a card
+   *  drawn again (scrolled out of the window and back) keeps it. */
+  subagentFolds?: Map<string, boolean>
 }
 
 // The prompt a session was started with: metadata more than conversation, so one dim line that
 // opens on demand. Collapsed on every mount; opening it changes nothing else.
-function BriefLine({ label, text, cards }: { label: string; text: string; cards?: CardRegistry }) {
+function BriefLine({ label, text, cards, eventId }: { label: string; text: string; cards?: CardRegistry; eventId?: string }) {
   const [open, setOpen] = useState(false)
   return (
-    <div className="agent-card brief" data-testid="message-brief">
+    <div className="agent-card brief" data-testid="message-brief" data-event-id={eventId}>
       <button type="button" className="brief-toggle" aria-expanded={open} onClick={() => setOpen(o => !o)}>
         <span aria-hidden="true">{open ? '▾' : '▸'}</span> {label} · {text.length.toLocaleString()} chars
       </button>
       {open && <div className="brief-body"><Markdown text={text} cards={cards} /></div>}
+    </div>
+  )
+}
+
+// The agent's question. Open, it has a reply box (when the transport can address an answer) or
+// points at the composer; answered or closed, it says so. Drawn without a chat around it (a host
+// rendering events itself), it is a plain card with the composer hint.
+function AskCard({ ev, cards }: { ev: AgentEvent; cards?: CardRegistry }) {
+  const asks = useAsks()
+  const p = (ev.payload ?? {}) as Partial<MessagingPayload>
+  const body = typeof p.body === 'string' ? p.body : ''
+  const state = asks?.states.get(ev.client_event_id)
+  const open = asks ? state?.open === true : true
+  const answer = asks?.answer
+  return (
+    <div className={`agent-card message kind-ask${open ? ' open' : ' closed'}`} data-testid="ask-card" data-event-id={ev.client_event_id}>
+      <div className="ask-head">
+        <span className="message-kind">question</span>
+        <Markdown text={body} className="message-body" cards={cards} />
+        {open
+          ? !answer && <span className="ask-hint">answer in the composer</span>
+          : <span className="ask-hint" data-testid="ask-closed">{state?.answer ? 'answered' : 'closed'}</span>}
+        <TimeLabel ts={ev.ts} className="card-time-end" />
+      </div>
+      {open && answer && <AskReply answer={answer} messageId={p.message_id || undefined} />}
+    </div>
+  )
+}
+
+// A thinking block: an ordinary assistant card, its text plain with the line breaks kept (it is the
+// model's working, not an answer to format), and "thinking" where the time sits.
+function ThinkingRow({ ev, text }: { ev: AgentEvent; text: string }) {
+  return (
+    <div className="agent-card assistant" data-kind="thinking" data-testid="thinking">
+      <div className="thinking-text">{text}</div>
+      <div className="card-foot"><span className="card-time">thinking · <TimeLabel ts={ev.ts} /></span></div>
     </div>
   )
 }
@@ -72,7 +128,7 @@ export function ToolCard({ call, result, ts }: { call: ToolCallPayload; result?:
   const ok = result ? !result.is_error : undefined
   const url = (call.tool === 'push_mockup' || call.tool === 'push_screenshot') ? publishedURL(result) : null
   return (
-    <div className={`agent-card tool ${ok === false ? 'tool-error' : ''}`} data-testid="tool-card">
+    <div className={`agent-card tool ${ok === false ? 'tool-error' : ''}`} data-testid="tool-card" data-call-id={call.call_id}>
       <button className="tool-header" onClick={() => setOpen(o => !o)}>
         <span className="tool-name">{call.tool}</span>
         <span className="tool-summary">{summarizeInput(call.input)}</span>
@@ -129,6 +185,21 @@ export function turnDoneText(ev: AgentEvent, turnStart?: number) {
 
 export const NO_RESULTS = new Map<string, ToolResultPayload>()
 
+function tokensShort(n: number): string {
+  return n >= 1000 ? `${Math.round(n / 1000).toLocaleString()}k` : String(n)
+}
+
+/** The compaction marker's line: why it ran and how big the context was (a Claude Code
+ *  compaction), or how long the summary is (the native loop's, which keeps one). */
+export function compactionText(p: Partial<CompactionPayload> | null | undefined): string {
+  const parts: string[] = []
+  if (p?.trigger) parts.push(p.trigger)
+  if (typeof p?.pre_tokens === 'number' && p.pre_tokens > 0) parts.push(`${tokensShort(p.pre_tokens)} tokens before`)
+  const summary = typeof p?.summary === 'string' ? p.summary.length : 0
+  if (summary > 0) parts.push(`${summary.toLocaleString()} char summary`)
+  return `Conversation compacted${parts.length ? ` (${parts.join(', ')})` : ''}`
+}
+
 // A card for an event that is neither a tool call nor a group of them. Memoized
 // on the event so appending to the transcript re-renders only what is new.
 export const EventRow = memo(function EventRow({ ev, turnStart, footer, footerStart, options }: {
@@ -153,16 +224,35 @@ export function renderEvent(
   switch (ev.kind) {
     case 'user_message': {
       const p = ev.payload as UserMessagePayload
-      // Harness-injected text (a subagent's completion, a reminder): recorded as "system" by a
-      // current pod, recognised by its shape for older pods and rows.
-      if (p.source === 'system' || isHarnessText(p.text)) return null
-      const look = options.describeUserMessage?.(ev, p)
-      if (look?.brief) {
-        return <BriefLine key={key} label={typeof look.brief === 'string' ? look.brief : 'session brief'} text={p.text} cards={options.cards} />
+      // Text nobody typed: harness text is hidden, the daemon's notes and a command's output are
+      // system cards (model/userMessages.ts).
+      const shape = userMessageShape(p)
+      if (shape.as === 'hidden') return null
+      if (shape.as === 'notice') {
+        return (
+          <div key={key} className="agent-card system-note" data-testid="system-note">
+            <span className="system-label">system</span>
+            <span className="system-text">{shape.text}</span>
+            <TimeLabel ts={ev.ts} className="card-time-end" />
+          </div>
+        )
       }
+      if (shape.as === 'output') {
+        return (
+          <div key={key} className="agent-card system-output" data-testid="system-output">
+            <div className="system-head"><span className="system-label">output</span><TimeLabel ts={ev.ts} className="card-time-end" /></div>
+            <pre className="system-pre">{shape.text}</pre>
+          </div>
+        )
+      }
+      const look = options.describeUserMessage?.(ev, p, { first: !!options.firstUserMessage && ev.client_event_id === options.firstUserMessage })
+      if (look?.brief) {
+        return <BriefLine key={key} label={typeof look.brief === 'string' ? look.brief : 'session brief'} text={p.text} cards={options.cards} eventId={key} />
+      }
+      const answer = p.source === 'ask_answer'
       return (
-        <div key={key} className={`agent-card user source-${p.source}${look?.author ? ' other-author' : ''}`}>
-          <span className="card-author">{look?.author ?? 'You'}</span>
+        <div key={key} className={`agent-card user source-${p.source}${look?.author ? ' other-author' : ''}`} data-event-id={key}>
+          <span className="card-author">{look?.author ?? 'You'}{answer && <span className="card-author-note"> · answer</span>}</span>
           <MessageText text={p.text} cards={options.cards} />
           <div className="card-foot"><TimeLabel ts={ev.ts} /></div>
           {options.messageFooter?.(ev)}
@@ -179,6 +269,10 @@ export function renderEvent(
           {options.messageFooter?.(ev)}
         </div>
       )
+    }
+    case 'assistant_thinking': {
+      const p = ev.payload as AssistantThinkingPayload | null
+      return <ThinkingRow key={key} ev={ev} text={typeof p?.text === 'string' ? p.text : ''} />
     }
     case 'tool_call': {
       const p = ev.payload as ToolCallPayload
@@ -197,14 +291,14 @@ export function renderEvent(
       )
     }
     case 'ask':
+      return <AskCard key={key} ev={ev} cards={options.cards} />
     case 'update':
     case 'note': {
       const p = ev.payload as MessagingPayload
       return (
-        <div key={key} className={`agent-card message kind-${ev.kind}`}>
+        <div key={key} className={`agent-card message kind-${ev.kind}`} data-testid={`message-${ev.kind}`}>
           <span className="message-kind">{ev.kind}</span>
-          <Markdown text={p.body} className="message-body" cards={options.cards} />
-          {ev.kind === 'ask' && <span className="ask-hint">answer in the composer</span>}
+          <Markdown text={typeof p?.body === 'string' ? p.body : ''} className="message-body" cards={options.cards} />
           <TimeLabel ts={ev.ts} className="card-time-end" />
         </div>
       )
@@ -221,7 +315,7 @@ export function renderEvent(
       const p = ev.payload as SubagentPayload
       return (
         <div key={key} className="agent-card subagent">
-          ↳ {p.agent_type} [{p.model}]: {p.summary}
+          ↳ {p.agent_type} [{p.model}]: {p.summary}{p.resumed ? ' (resumed)' : ''}
         </div>
       )
     }
@@ -242,18 +336,40 @@ export function renderEvent(
     }
     case 'error': {
       const p = ev.payload as ErrorPayload
+      if (p?.client_id) {
+        // A message the session dropped: its queued bubble is gone, so this row says what happened.
+        return (
+          <div key={key} className="agent-card error dropped" data-testid="message-dropped">
+            ⚠ Your message was not delivered ({p.message}). Send it again.
+            <TimeLabel ts={ev.ts} className="card-time-end" />
+          </div>
+        )
+      }
+      if (isRetryNotice(ev)) {
+        // The engine is retrying the model API: a notice, the turn goes on.
+        return <div key={key} className="agent-card marker retry-notice" data-testid="retry-notice">↻ {p.message}</div>
+      }
+      if (p?.code === 'api_error') {
+        return (
+          <div key={key} className="agent-card error api-error" data-testid="api-error">
+            <span className="error-label">API error</span> {p.message} <TimeLabel ts={ev.ts} className="card-time-end" />
+          </div>
+        )
+      }
       return (
         <div key={key} className="agent-card error">⚠ {p.message} <TimeLabel ts={ev.ts} className="card-time-end" /></div>
       )
     }
-    case 'compaction': {
-      const p = ev.payload as CompactionPayload
-      return (
-        <div key={key} className="agent-card marker">✂ context compacted ({p.summary.length} char summary)</div>
-      )
-    }
+    case 'compaction':
+      return <div key={key} className="agent-card marker" data-testid="compaction">✂ {compactionText(ev.payload as CompactionPayload)}</div>
     case 'artifact':
-      return <ArtifactCard key={key} payload={ev.payload as ArtifactPayload} ts={ev.ts} />
+      return <ArtifactCard key={key} payload={ev.payload as ArtifactPayload} ts={ev.ts} eventId={key} />
+    case 'topic':
+      return (
+        <div key={key} className="agent-card marker topic-divider" data-testid="topic-divider" data-event-id={key}>
+          {topicDividerText(ev.payload as TopicPayload)}
+        </div>
+      )
     default: {
       const s = ev.payload as StatusPayload
       void s

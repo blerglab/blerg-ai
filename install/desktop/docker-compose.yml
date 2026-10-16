@@ -50,6 +50,7 @@ services:
       dockerfile: core/Dockerfile
       args:
         VERSION: "${BLERG_VERSION:-dev}"
+        COMMIT: "${BLERG_COMMIT:-dev}"
     ports:
       # Loopback by default: Docker publishes straight past the host firewall
       # (ufw/firewalld do NOT protect these ports). Set BLERG_BIND_ADDR=0.0.0.0
@@ -97,6 +98,7 @@ services:
       args:
         VITE_CORE_PORT: "${BLERG_PORT_CORE:-8081}"
         VERSION: "${BLERG_VERSION:-dev}"
+        COMMIT: "${BLERG_COMMIT:-dev}"
     ports:
       # Loopback by default: Docker publishes straight past the host firewall
       # (ufw/firewalld do NOT protect these ports). Set BLERG_BIND_ADDR=0.0.0.0
@@ -142,6 +144,7 @@ services:
       args:
         VITE_CORE_PORT: "${BLERG_PORT_CORE:-8081}"
         VERSION: "${BLERG_VERSION:-dev}"
+        COMMIT: "${BLERG_COMMIT:-dev}"
     ports:
       # Loopback by default: Docker publishes straight past the host firewall
       # (ufw/firewalld do NOT protect these ports). Set BLERG_BIND_ADDR=0.0.0.0

@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
 	"time"
 
@@ -61,13 +62,42 @@ func (a *API) autoStopOnTurnDone(sessionID string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), autoStopTimeout)
 	defer cancel()
-	claimed, err := db.ClaimSessionAutoStop(ctx, a.dbPool, sessionID)
+	err := withLimitResumeActionLock(ctx, a.dbPool, sessionID, func(conn *pgxpool.Conn) error {
+		pending, err := db.HasPendingLimitResume(ctx, conn, sessionID)
+		if err != nil {
+			return err
+		}
+		if pending {
+			return nil
+		}
+		// A person may have queued a replacement message just before the
+		// interrupted turn's delayed turn_done arrives. Until that message's
+		// user_message supplies its new turn ID, keep this old completion from
+		// stopping the queued work. The fence is short and applies only to an
+		// enabled preference; an explicit disable/interrupt still ends normally.
+		retry, err := db.GetLimitResume(ctx, conn, sessionID)
+		if err != nil {
+			return err
+		}
+		if retry.Enabled && retry.State == "armed" && retry.TurnID != "" &&
+			retry.TurnID == retry.CancelledTurnID && retry.CancelledAt != nil &&
+			time.Since(*retry.CancelledAt) >= 0 && time.Since(*retry.CancelledAt) < 2*time.Minute {
+			return nil
+		}
+		claimed, err := db.ClaimSessionAutoStop(ctx, a.dbPool, sessionID)
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			return nil
+		}
+		cancelErr := db.CancelLimitResume(ctx, conn, sessionID)
+		// Once claimed, cleanup must run even if the auxiliary retry row could
+		// not be cleared: the session has already been marked ended.
+		a.stopSessionUnlocked(ctx, sessionID, systemEnd(db.EndReasonAutoStopped))
+		return cancelErr
+	})
 	if err != nil {
-		log.Printf("auto-stop %s: claim: %v", sessionID, err)
-		return
+		log.Printf("auto-stop %s: %v", sessionID, err)
 	}
-	if !claimed {
-		return
-	}
-	a.stopSession(ctx, sessionID, systemEnd(db.EndReasonAutoStopped))
 }

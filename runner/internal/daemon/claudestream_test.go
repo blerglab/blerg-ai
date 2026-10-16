@@ -584,3 +584,20 @@ func TestSteeringKeepsHarnessMessagesOffThePersonsName(t *testing.T) {
 		t.Fatalf("sources = %v, want %v", sources, want)
 	}
 }
+
+// The engine gets an input's Text (a skill's instructions); the transcript records its Shown text
+// (what the person typed) with the client id it was sent with.
+func TestSteeringRecordsShownTextAndClientID(t *testing.T) {
+	d, em, _ := newSteeringDriver(t)
+	d.EnqueueInput(agent.Input{Text: "SKILL BODY", Shown: "/review x", Source: "chat", ClientID: "cl-7"})
+	waitIdle(t, em, 1)
+	o := em.outline()
+	if index(o, "user:/review x") < 0 || index(o, "text:ok:SKILL BODY") < 0 {
+		t.Fatalf("events = %v: want the typed text recorded and the skill body answered", o)
+	}
+	for _, e := range em.snapshot() {
+		if p, ok := e.Payload.(agent.UserMessagePayload); ok && p.ClientID != "cl-7" {
+			t.Fatalf("user_message = %+v, want client id cl-7", p)
+		}
+	}
+}

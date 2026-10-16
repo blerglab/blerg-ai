@@ -72,9 +72,26 @@ things. A selection that matches no preset shows as *Custom*. The crons form has
 an unattended job's tools are chosen one by one.
 
 Each choice is pinned to the tool's **definition hash**. If the server later changes a tool's
-name, description or input schema, the pin no longer matches and the tool disappears from the
-session until you choose it again. A server cannot quietly turn a harmless tool into a different
-one.
+name, description or input schema, the pin no longer matches and the tool is turned off in the
+session: a server cannot quietly turn a harmless tool into a different one. What happens next
+depends on the connection's **Definition changes** setting (core Settings → MCP connections):
+
+- **Ask me** (the default). The change is listed on the runner's Proposals page under *Tool
+  changes*, with the old and the new definition side by side. Accept it and the session gets the
+  tool back with the new definition, without a restart; keep it off and it stays off. A tool the
+  server added after the session started is listed the same way (a tool you left off at launch is
+  not). Changes wait 7 days. The agent is told the tool is unavailable and asked not to lobby you.
+- **Accept automatically.** The runner re-pins a changed tool and grants a new one by the preset
+  you launched with (Allow all grants it, Require approval queues its calls, Customize grants
+  nothing), and records every such event. Use it only for servers your organisation runs: a
+  changed description can steer the agent's use of your other connections and the session's own
+  tools. A server that changes one tool more than three times in an hour is treated as *Ask me*
+  for the rest of the hour. The setting reaches running sessions within five minutes.
+
+Either way the agent sees the new definition only after it lists its tools again; Claude Code
+does that at the start of its next turn (the runner asks it to), so a call made in between is
+refused until then. A definition that cannot be reviewed (hidden characters, over 256 KiB) is
+never re-pinned and cannot be accepted.
 
 You can save a per-connection default selection so the launch sheet starts from it. It is a
 starting point only: it is verified against the server's live tool list every time a session
@@ -133,6 +150,10 @@ depends on who is watching ([design note](design/interactive-mcp-sessions.md)):
 - The gateway records every call (session, connection, tool, allowed or refused, outcome, duration)
   in `mcp_call_log`, and keeps it 90 days. Arguments and results are **not** logged.
 - The credential itself is never logged or written to disk by the gateway.
+- Every change to what a session's grant pins (accepted by you, accepted automatically, declined,
+  expired, throttled) is a **pin event**, kept 180 days. The connection's history (the link under
+  its Definition changes setting) lists them. The call log records refusals of changed tools with
+  outcome `changed`.
 
 ## Network policy
 

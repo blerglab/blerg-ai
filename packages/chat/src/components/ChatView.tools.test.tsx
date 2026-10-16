@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, onTestFinished } from 'vitest'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import ChatView from './ChatView'
@@ -70,7 +70,7 @@ describe('ChatView compact tool calls', () => {
       ev('provider_blocks', {}),
       ev('capabilities', { engine: 'claude', groups: [] }),
       ev('start_stage', { stages: [] }),
-      ev('user_message', { text: 'reminder', source: 'system' }),
+      ev('user_message', { text: '<system-reminder>reminder</system-reminder>', source: 'system' }),
       ...bashRun(2, 3),
       ev('assistant_text', { text: 'in the middle', done: true }),
       ...bashRun(3, 5),
@@ -288,6 +288,9 @@ describe('ChatView compact tool calls', () => {
   })
 
   it('renders a 2,000-event transcript as summary rows only, quickly', () => {
+    // A held transcript this long is drawn on the frame after the skeleton: run frames at once.
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { cb(0); return 1 })
+    onTestFinished(() => { vi.unstubAllGlobals() })
     const events: AgentEvent[] = []
     for (let g = 0; g < 50; g++) {
       events.push(ev('assistant_text', { text: `step ${g}`, done: true }))

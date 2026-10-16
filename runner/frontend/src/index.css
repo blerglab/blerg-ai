@@ -147,17 +147,18 @@ body {
   animation: blerg-spin 0.7s linear infinite;
 }
 
-/* Small inline spinner shown in place of the status dot for running sessions.
-   border-top-color is set inline to the status color. */
-.blerg-runner-status-spinner {
+/* Small inline spinner shown in place of the status dot for running sessions (the sidebar card's
+   glyph, beside "?", "Zz" and "⏱ n"). The card sets color and border-top-color to the status colour;
+   the ring is quiet, the arc turns. */
+.blerg-status-spinner {
   width: 10px;
   height: 10px;
-  border: 2px solid color-mix(in srgb, var(--blaze) 28%, transparent);
+  border: 1.5px solid color-mix(in srgb, currentColor 22%, transparent);
   border-radius: 50%;
   box-sizing: border-box;
   flex-shrink: 0;
   display: inline-block;
-  animation: blerg-spin 0.7s linear infinite;
+  animation: blerg-spin 0.9s linear infinite;
 }
 
 /* "Hey, look at me" sweep for unacknowledged waiting session cards. An orange
@@ -181,7 +182,8 @@ body {
   animation: blerg-waiting-sweep 2.2s linear infinite;
 }
 @media (prefers-reduced-motion: reduce) {
-  .blerg-runner-status-spinner { animation: none; }
+  /* No motion: a static dot in the status colour. */
+  .blerg-status-spinner { animation: none; border: none; background: currentColor; width: 8px; height: 8px; }
   .blerg-runner-waiting-flash { animation: none; background-image: none; }
 }
 

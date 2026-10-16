@@ -106,7 +106,7 @@ describe('McpPicker', () => {
     expect(modeSelect('send').value).toBe('propose')
     expect(screen.getByTestId('mcp-preset-calendar-approval').getAttribute('aria-pressed')).toBe('true')
     expect(emitted[emitted.length - 1]).toEqual([
-      { connection: 'c1', tools: { read: { mode: 'allow', hash: 'h-read' }, list: { mode: 'allow', hash: 'h-list' }, send: { mode: 'propose', hash: 'h-send' } } },
+      { connection: 'c1', tools: { read: { mode: 'allow', hash: 'h-read' }, list: { mode: 'allow', hash: 'h-list' }, send: { mode: 'propose', hash: 'h-send' } }, preset: 'approval' },
     ])
   })
 
@@ -236,5 +236,69 @@ describe('McpPicker', () => {
     fireEvent.click(box)
     expect((screen.getByRole('checkbox', { name: 'broken' }) as HTMLInputElement).disabled).toBe(true)
     expect(emitted[emitted.length - 1]).toEqual([])
+  })
+
+  it('sends the preset last clicked and drops it after a per-tool edit', async () => {
+    const emitted = setup()
+    fireEvent.click(await screen.findByLabelText('calendar'))
+    await screen.findByTestId('mcp-presets-calendar')
+    fireEvent.click(screen.getByTestId('mcp-preset-calendar-approval'))
+    expect(emitted.at(-1)?.[0].preset).toBe('approval')
+    fireEvent.click(screen.getByTestId('mcp-customize-calendar'))
+    fireEvent.change(screen.getByLabelText('calendar send mode'), { target: { value: 'allow' } })
+    // Review Focus 3
+    expect(emitted.at(-1)?.[0].preset).toBeUndefined()
+  })
+
+  it('never sends a preset when requireExplicit is on', async () => {
+    const emitted = setup({ requireExplicit: true })
+    fireEvent.click(await screen.findByLabelText('calendar'))
+    await screen.findByTestId('mcp-tool-calendar-read')
+    fireEvent.change(screen.getByLabelText('calendar read mode'), { target: { value: 'allow' } })
+    expect(emitted.at(-1)?.[0].preset).toBeUndefined()
+  })
+
+  it('shows hidden characters in a tool description as escapes', async () => {
+    apiFetch.mockImplementation((url: string) => {
+      if (url === '/api/mcp/connections') return ok({ connections: CONNS })
+      if (url === '/api/mcp/connections/c1/tools') return ok({ tools: [{ name: 'read', description: 'reads \u202E things', hash: 'h-read' }] })
+      return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: 'x' }) })
+    })
+    setup()
+    fireEvent.click(await screen.findByLabelText('calendar'))
+    await screen.findByTestId('mcp-presets-calendar')
+    fireEvent.click(screen.getByTestId('mcp-customize-calendar'))
+    expect(screen.getByTestId('mcp-tool-calendar-read').textContent).toContain('⟨U+202E⟩')
+  })
+
+  it('shows an unreviewable tool as off and refuses to turn it on', async () => {
+    apiFetch.mockImplementation((url: string) => {
+      if (url === '/api/mcp/connections') return ok({ connections: CONNS })
+      if (url === '/api/mcp/connections/c1/tools') return ok({ tools: [{ name: 'read', description: 'reads', hash: 'h-read', unsafe: 'hidden_chars' }, { name: 'send', description: 'sends', hash: 'h-send' }] })
+      return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: 'x' }) })
+    })
+    const emitted = setup()
+    fireEvent.click(await screen.findByLabelText('calendar'))
+    await screen.findByTestId('mcp-presets-calendar')
+    fireEvent.click(screen.getByTestId('mcp-preset-calendar-allow_all'))
+    expect(Object.keys(emitted.at(-1)?.[0].tools ?? {})).toEqual(['send'])
+    fireEvent.click(screen.getByTestId('mcp-customize-calendar'))
+    expect((screen.getByLabelText('calendar read mode') as HTMLSelectElement).disabled).toBe(true)
+    expect(screen.getByTestId('mcp-tool-calendar-read').textContent).toMatch(/cannot be reviewed/)
+  })
+
+  it('shows hidden characters in a tool name as escapes and flags it', async () => {
+    apiFetch.mockImplementation((url: string) => {
+      if (url === '/api/mcp/connections') return ok({ connections: CONNS })
+      if (url === '/api/mcp/connections/c1/tools') return ok({ tools: [{ name: 'read\u200Bevents', description: 'reads', hash: 'h-read' }] })
+      return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: 'x' }) })
+    })
+    setup()
+    fireEvent.click(await screen.findByLabelText('calendar'))
+    await screen.findByTestId('mcp-presets-calendar')
+    fireEvent.click(screen.getByTestId('mcp-customize-calendar'))
+    const row = screen.getByTestId('mcp-tool-calendar-read\u200Bevents')
+    expect(row.textContent).toContain('⟨U+200B⟩')
+    expect(row.textContent).toMatch(/name has unusual characters/)
   })
 })

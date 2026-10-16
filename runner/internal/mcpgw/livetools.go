@@ -35,7 +35,7 @@ func (g *Gateway) LiveToolHashes(ctx context.Context, proof Proof, connectionID,
 		ProofKind: proof.Kind(), ProofValue: proof.Value(),
 	}
 	st := &grantState{g: g, sem: make(chan struct{}, 1)}
-	tools, rerr, err := st.listUpstream(ctx, gr, hashRefreshMaxPages, false)
+	tools, _, rerr, err := st.listUpstream(ctx, gr, hashRefreshMaxPages, false)
 	if err != nil {
 		return nil, err
 	}
@@ -62,14 +62,18 @@ type ListedTool struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 	Annotations json.RawMessage `json:"annotations,omitempty"`
 	Hash        string          `json:"hash"`
+	// Unsafe is "" or the ClassifyDefinition class that makes the definition unfit to select.
+	Unsafe string `json:"unsafe,omitempty"`
 }
 
-// ListTools is LiveToolHashes with the tools themselves: the same code path and the same
+// ListToolsComplete is LiveToolHashes with the tools themselves: the same code path and the same
 // nothing-stored guarantee (no grant, no token, no credential in the result). A name the
-// upstream lists twice is left out entirely, because its hash matches nothing.
-func (g *Gateway) ListTools(ctx context.Context, proof Proof, connectionID, urlSnapshot string) ([]ListedTool, error) {
+// upstream lists twice is left out entirely, because its hash matches nothing. complete is
+// false when the listing was cut short (page or tool cap), so a tool missing from it may still
+// exist. Unsafe on each tool is "" or the ClassifyDefinition class of its definition.
+func (g *Gateway) ListToolsComplete(ctx context.Context, proof Proof, connectionID, urlSnapshot string) ([]ListedTool, bool, error) {
 	if !proof.Valid() {
-		return nil, errors.New("no liveness proof for the tool listing")
+		return nil, false, errors.New("no liveness proof for the tool listing")
 	}
 	ctx, cancel := context.WithTimeout(ctx, g.cfg.CallTimeout)
 	defer cancel()
@@ -78,12 +82,12 @@ func (g *Gateway) ListTools(ctx context.Context, proof Proof, connectionID, urlS
 		ProofKind: proof.Kind(), ProofValue: proof.Value(),
 	}
 	st := &grantState{g: g, sem: make(chan struct{}, 1)}
-	tools, rerr, err := st.listUpstream(ctx, gr, hashRefreshMaxPages, false)
+	tools, complete, rerr, err := st.listUpstream(ctx, gr, hashRefreshMaxPages, false)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if rerr != nil {
-		return nil, errors.New("the upstream server refused to list its tools")
+		return nil, false, errors.New("the upstream server refused to list its tools")
 	}
 	count := map[string]int{}
 	for _, t := range tools {
@@ -94,7 +98,17 @@ func (g *Gateway) ListTools(ctx context.Context, proof Proof, connectionID, urlS
 		if count[t.Name] > 1 {
 			continue
 		}
-		out = append(out, ListedTool(t))
+		canon, _ := CanonicalTool(t.Name, t.Description, t.InputSchema)
+		out = append(out, ListedTool{
+			Name: t.Name, Description: t.Description, InputSchema: t.InputSchema,
+			Annotations: t.Annotations, Hash: t.Hash, Unsafe: ClassifyDefinition(canon),
+		})
 	}
-	return out, nil
+	return out, complete, nil
+}
+
+// ListTools is ListToolsComplete without the completeness flag.
+func (g *Gateway) ListTools(ctx context.Context, proof Proof, connectionID, urlSnapshot string) ([]ListedTool, error) {
+	tools, _, err := g.ListToolsComplete(ctx, proof, connectionID, urlSnapshot)
+	return tools, err
 }

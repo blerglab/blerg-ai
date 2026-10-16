@@ -30,9 +30,11 @@ type SessionRecord struct {
 	Effort                     string `json:"effort,omitempty"`
 	DangerouslySkipPermissions bool   `json:"dangerously_skip_permissions,omitempty"`
 	Sandbox                    bool   `json:"sandbox,omitempty"`
-	// Engine: "" (Claude Code) | "codex" | "hermes". A recovered "codex" or
-	// "hermes" tmux session always starts fresh (no stored thread/session id
-	// to resume for the interactive case) — see recoverSession.
+	// Codex terminals retain a private native history home. It identifies their
+	// own latest interactive thread, without borrowing another session's history.
+	CodexHome       string `json:"codex_home,omitempty"`
+	CodexSourceHome string `json:"codex_source_home,omitempty"`
+	// Engine: "" (Claude Code) | "codex" | "hermes".
 	Engine        string `json:"engine,omitempty"`
 	Title         string `json:"title,omitempty"`
 	InitialPrompt string `json:"initial_prompt,omitempty"`
@@ -87,20 +89,20 @@ var ownedByDaemon = func(info fs.FileInfo) bool {
 // directory is reported as exists=false, not an error.
 func secureRecordsDir(reposRoot string, create bool) (exists bool, err error) {
 	if create {
-		if err := os.MkdirAll(reposRoot, 0o750); err != nil {
+		if err := os.MkdirAll(reposRoot, 0o750); err != nil { //nolint:gosec // G703: reposRoot is trusted daemon/pod configuration, never a browser or tool path.
 			return false, err
 		}
 	}
 	for _, d := range []string{filepath.Join(reposRoot, ".blerg-runner"), recordsDir(reposRoot)} {
-		info, err := os.Lstat(d)
+		info, err := os.Lstat(d) //nolint:gosec // G703: fixed recovery directories under configured reposRoot; symlink and ownership checks follow.
 		if errors.Is(err, fs.ErrNotExist) {
 			if !create {
 				return false, nil
 			}
-			if err := os.Mkdir(d, 0o700); err != nil {
+			if err := os.Mkdir(d, 0o700); err != nil { //nolint:gosec // G703: fixed recovery directories under configured reposRoot, with private ownership checked below.
 				return false, err
 			}
-			if info, err = os.Lstat(d); err != nil {
+			if info, err = os.Lstat(d); err != nil { //nolint:gosec // G703: rechecks the newly created fixed recovery directory before it is trusted.
 				return false, err
 			}
 		} else if err != nil {

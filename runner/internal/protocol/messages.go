@@ -4,6 +4,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 
@@ -45,6 +46,10 @@ type DaemonInfo struct {
 	// launch UI default its Engine picker to something that will actually
 	// work instead of a client-side guess with no awareness of the daemon.
 	AvailableEngines []string `json:"available_engines"`
+	MCPGateway       bool     `json:"mcp_gateway"`
+	RestrictTools    bool     `json:"restrict_tools"`
+	CodexRestricted  bool     `json:"codex_restricted"`
+	PluginEngines    []string `json:"plugin_engines,omitempty"`
 	// CloneFrom: the daemon can clone a repository named by owner/name or URL
 	// into its repos root (POST /api/sessions "clone"/"git_url"). False for
 	// an older daemon, which the launch UI then offers only its folders and
@@ -54,6 +59,10 @@ type DaemonInfo struct {
 	// clone a private repository with the person's own token (see
 	// DaemonHello.AllowHostCredentialClone). False: only Local sandbox can.
 	AllowHostCredentialClone bool `json:"allow_host_credential_clone"`
+	// UsageLimits is what this daemon last reported about its providers' usage
+	// limits (UsageLimits), one entry per provider that has reported. Absent
+	// when none has.
+	UsageLimits []UsageLimits `json:"usage_limits,omitempty"`
 }
 
 // ClusterStatus summarizes the k8s cluster-runtime's configuration and live
@@ -80,9 +89,9 @@ type ClusterStatus struct {
 	// MaxSessionsDefault is the environment value (BLERG_RUNNER_MAX_SESSIONS),
 	// what the cap returns to when the override is removed.
 	MaxSessionsDefault int `json:"max_sessions_default,omitempty"`
-	// ActiveSessions is the live count of non-terminal session Jobs, from a
-	// real-time k8s API call. -1 means the call failed (RBAC, connectivity)
-	// — "couldn't tell", not "zero".
+	// ActiveSessions is the count of non-terminal session Jobs, from a k8s
+	// API call at most 10 seconds old. -1 means the call failed (RBAC,
+	// connectivity) — "couldn't tell", not "zero".
 	ActiveSessions int `json:"active_sessions"`
 	// AvailableEngines lists the engine IDs whose credential Secret key is
 	// actually present right now — see JobManager.AvailableEngines. OpenClaw
@@ -160,6 +169,13 @@ type SessionInfo struct {
 	// Interaction is the session's interaction mode: InteractionInteractive (a person reads the
 	// chat as it works) or InteractionUnattended (nobody does). The effective value, never "".
 	Interaction string `json:"interaction,omitempty"`
+	// BackgroundTasks is how many background tasks (a background shell, a monitor, a background
+	// subagent) the session's agent has running; absent when none, and for a session that ended.
+	BackgroundTasks int `json:"background_tasks,omitempty"`
+	// PausedReason is why a live session is paused waiting for a message: "restart"
+	// (PausedByRestart), a daemon restart cut off what it was doing and it was not continued by
+	// itself. "" when it is not paused (migration 043).
+	PausedReason string `json:"paused_reason,omitempty"`
 }
 
 // A session's interaction mode, decided by the server at start and told to the engine in its
@@ -198,6 +214,10 @@ type DaemonHello struct {
 	ProtocolVersion string   `json:"protocol_version"`
 	Version         string   `json:"version"`
 	ActiveSessions  []string `json:"active_sessions"`
+	// QueuedSessions are spawns the daemon has received but not started yet
+	// (waiting in its queue, or preparing a clone or plugins): alive, so the
+	// server does not read them as lost. Absent from older daemons.
+	QueuedSessions  []string `json:"queued_sessions,omitempty"`
 	CheckedOutRepos []string `json:"checked_out_repos"` // repo names present on disk in repos_root
 	// RepoRemotes maps a CheckedOutRepos name to the GitHub "org/name" its
 	// origin remote points at. Only recognisable github.com remotes appear;
@@ -233,6 +253,13 @@ type DaemonHello struct {
 	// built-in tool — so the server never sends a grant to a daemon that does
 	// not say this.
 	MCPGateway bool `json:"mcp_gateway,omitempty"`
+	// SessionTokenFile: this daemon handles SessionToken (it writes the token
+	// where the session's blerg-runner reads it, and answers with
+	// SessionTokenResult). Absent from older daemons, which would drop the
+	// message — so the server never sends one to a daemon that does not say this.
+	SessionTokenFile bool `json:"session_token_file,omitempty"`
+	// InputReceipts: accepts correlated input redelivery without executing it twice.
+	InputReceipts bool `json:"input_receipts,omitempty"`
 	// RestrictTools: this daemon honours SpawnSession.RestrictTools (the
 	// built-in tool allow-list, no ambient MCP servers, no user settings,
 	// plugins, hooks or skills). Absent from older daemons, which would ignore
@@ -241,6 +268,9 @@ type DaemonHello struct {
 	// sends RestrictTools to a daemon that does not say this, and treats such a
 	// daemon as unavailable for a cron.
 	RestrictTools bool `json:"restrict_tools,omitempty"`
+	// CodexRestricted supports the isolated Codex file/MCP runtime. Older daemons
+	// must never receive a Codex grant or an unattended Codex session.
+	CodexRestricted bool `json:"codex_restricted,omitempty"`
 	// Plugins: this daemon honours SpawnSession.Plugins (it installs the
 	// account's always-on plugins into a daemon-owned CLAUDE_CONFIG_DIR and
 	// loads them with --plugin-dir). Only a daemon with the claude CLI on its
@@ -249,6 +279,9 @@ type DaemonHello struct {
 	// Plugins to a daemon that does not say this, and the start panel never
 	// promises them.
 	Plugins bool `json:"plugins,omitempty"`
+	// PluginEngines names the native plugin installers this daemon can use.
+	// Absent on older daemons, whose plugins capability means Claude only.
+	PluginEngines []string `json:"plugin_engines,omitempty"`
 	// AllowHostCredentialClone: this daemon's owner allows a named clone to
 	// use the launching person's own git token on the bare host (a This
 	// machine session). Without it the server sends a token only for a
@@ -304,6 +337,8 @@ type DaemonHeartbeat struct {
 	Type           string            `json:"type"`                     // "daemon_heartbeat"
 	ActiveSessions []string          `json:"active_sessions"`          // IDs of currently live sessions
 	SessionStates  map[string]string `json:"session_states,omitempty"` // sessionID → "running"|"idle"|"waiting"
+	// QueuedSessions refreshes DaemonHello's field of the same name.
+	QueuedSessions []string `json:"queued_sessions,omitempty"`
 	// SandboxAvailable reports whether blerg-runner-sandbox:latest is present
 	// on this host — see DaemonInfo.SandboxAvailable. Refreshed every
 	// heartbeat so a manually-removed image doesn't wait for a reconnect.
@@ -340,6 +375,29 @@ type DaemonHeartbeat struct {
 	// change it from the app (set_repos_root) without a reconnect. Absent
 	// from older daemons, meaning unchanged.
 	ReposRoot string `json:"repos_root,omitempty"`
+}
+
+// UsageLimits is a daemon's report of one provider's usage limits on its
+// machine (daemon → server, "usage_limits"; also carried in DaemonInfo and
+// DaemonLimitsChanged). Limits belong to the provider ACCOUNT the machine is
+// logged in to, not to a session, so a daemon reports them per provider.
+// Only percentages and reset times leave the machine — never an account id,
+// plan or credit balance. An empty Windows clears what was shown for the
+// provider (a reactive cap that has expired).
+type UsageLimits struct {
+	Type      string        `json:"type,omitempty"` // "usage_limits" on the daemon's own message
+	Provider  string        `json:"provider"`       // "codex" | "claude"
+	Windows   []UsageWindow `json:"windows"`
+	FetchedAt time.Time     `json:"fetched_at,omitzero"`
+}
+
+// UsageWindow is one limit window: "5h" (the five-hour window), "7d" (the
+// weekly one) or "capped" (the provider refused a call for its limit, until
+// ResetsAt). UsedPercent is 0–100; ResetsAt is zero when unknown.
+type UsageWindow struct {
+	ID          string    `json:"id"`
+	UsedPercent float64   `json:"used_percent"`
+	ResetsAt    time.Time `json:"resets_at,omitzero"`
 }
 
 // ReposRootResult answers a SetReposRoot (daemon → server). OK with the root
@@ -401,11 +459,61 @@ type SessionMetaChanged struct {
 	Effort    string `json:"effort,omitempty"`
 }
 
+// SessionBackgroundChanged tells browsers how many background tasks a session's agent has running
+// now (SessionInfo.BackgroundTasks), each time one starts or ends.
+type SessionBackgroundChanged struct {
+	Type            string `json:"type"` // "session_background_changed"
+	SessionID       string `json:"session_id"`
+	BackgroundTasks int    `json:"background_tasks"`
+}
+
+// SessionNotice tells browsers to show a "the person is needed" toast for a session: it is
+// waiting for input, or it is idle with nothing left running (server/notices.go). The server
+// decides when one is due and words it; a browser shows it as given.
+type SessionNotice struct {
+	Type      string `json:"type"` // "session_notice"
+	SessionID string `json:"session_id"`
+	Status    string `json:"status"` // "waiting" | "idle"
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	URL       string `json:"url"`
+}
+
 // SessionTitleChanged notifies that a session's title has changed.
 type SessionTitleChanged struct {
 	Type      string `json:"type"` // "session_title_changed"
 	SessionID string `json:"session_id"`
 	Title     string `json:"title"`
+}
+
+// PausedByRestart is SessionPaused's reason (and sessions.paused_reason) for a session a daemon
+// restart cut off and did not pick up again by itself.
+const PausedByRestart = "restart"
+
+// SessionPaused is sent by a daemon for an agent session it hosts again after a restart but did
+// not continue by itself: what it was doing was cut off, and it waits for a message (it was
+// waiting for the person, or it had been continued once already). The server keeps the reason
+// on the row (sessions.paused_reason) until the session next runs. Absent from older daemons.
+type SessionPaused struct {
+	Type      string `json:"type"` // "session_paused"
+	SessionID string `json:"session_id"`
+	Reason    string `json:"reason"` // PausedByRestart
+}
+
+// OpenAsks is sent by the server to a daemon after its hello: which of the sessions it reported
+// have a `blerg-runner ask` open. A daemon hosting a session again after a restart does not pick
+// it up by itself when it was waiting for an answer. Absent from older servers.
+type OpenAsks struct {
+	Type       string   `json:"type"` // "open_asks"
+	SessionIDs []string `json:"session_ids"`
+}
+
+// SessionPausedChanged tells browsers that a session's paused reason changed (SessionInfo.PausedReason):
+// set when its daemon reports it paused by a restart, "" once it runs again.
+type SessionPausedChanged struct {
+	Type         string `json:"type"` // "session_paused_changed"
+	SessionID    string `json:"session_id"`
+	PausedReason string `json:"paused_reason"`
 }
 
 // SessionEnded is sent when a session's process exits.
@@ -424,15 +532,17 @@ type SessionEnded struct {
 
 // SpawnSession instructs the daemon to start a new session.
 type SpawnSession struct {
-	Type          string `json:"type"` // "spawn_session"
-	SessionID     string `json:"session_id"`
-	ProjectPath   string `json:"project_path"`
-	Repo          string `json:"repo"`
-	Title         string `json:"title"`
-	Cols          int    `json:"cols"`
-	Rows          int    `json:"rows"`
-	InitialPrompt string `json:"initial_prompt"`
-	Model         string `json:"model,omitempty"`
+	Type                  string `json:"type"` // "spawn_session"
+	SessionID             string `json:"session_id"`
+	ProjectPath           string `json:"project_path"`
+	Repo                  string `json:"repo"`
+	Title                 string `json:"title"`
+	Cols                  int    `json:"cols"`
+	Rows                  int    `json:"rows"`
+	InitialPrompt         string `json:"initial_prompt"`
+	InitialPromptSource   string `json:"initial_prompt_source,omitempty"`
+	InitialPromptClientID string `json:"initial_prompt_client_id,omitempty"`
+	Model                 string `json:"model,omitempty"`
 	// Effort is the launch reasoning effort for a Claude session ("" = the
 	// model's default); one of models.Efforts. Other engines ignore it.
 	Effort                     string `json:"effort,omitempty"`
@@ -563,6 +673,31 @@ type KillSession struct {
 	SessionID string `json:"session_id"`
 }
 
+// SessionToken hands a running session a new per-session messaging token, in
+// place of the one it was spawned with when that one no longer works (revoked
+// by a start race, or never minted). The server sends it on the session's
+// session_started and on every daemon hello/heartbeat that lists a live
+// session without a valid token. The daemon writes Token to the session's
+// token file (daemon SessionTokenPath), which the `blerg-runner` CLI reads
+// before BLERG_RUNNER_SESSION_TOKEN. Token is a secret: never logged.
+type SessionToken struct {
+	Type      string `json:"type"` // "session_token"
+	SessionID string `json:"session_id"`
+	Token     string `json:"token"`
+}
+
+// SessionTokenResult is the daemon's answer to a SessionToken: whether it
+// stored the token where the session's CLI reads it. On OK=false — or no
+// answer within the server's ack timeout — the server revokes that token, so
+// a later heal can try again instead of leaving a live token nobody holds.
+// Error is the daemon's reason, never the token.
+type SessionTokenResult struct {
+	Type      string `json:"type"` // "session_token_result"
+	SessionID string `json:"session_id"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
 // InjectNoteReply is sent from the server to the daemon to inject a note reply
 // into a session's PTY. The daemon gates injection on classifyScreen == "idle";
 // otherwise it queues it in a single-slot pending map (latest-wins).
@@ -601,12 +736,24 @@ type InitialState struct {
 	Sessions      []SessionInfo `json:"sessions"`
 	Messages      []MessageInfo `json:"messages"`
 	ServerVersion string        `json:"server_version"`
+	// ServerRelease is the release version (the VERSION file) and ServerCommit the short git
+	// commit the server was built from; either is empty when the build was not stamped.
+	ServerRelease string `json:"server_release,omitempty"`
+	ServerCommit  string `json:"server_commit,omitempty"`
 }
 
 // DaemonConnected notifies the browser that a daemon came online.
 type DaemonConnected struct {
 	Type   string     `json:"type"` // "daemon_connected"
 	Daemon DaemonInfo `json:"daemon"`
+}
+
+// DaemonLimitsChanged tells browsers a daemon's usage limits changed: its
+// full current set, one entry per provider (empty when none reports).
+type DaemonLimitsChanged struct {
+	Type        string        `json:"type"` // "daemon_limits_changed"
+	DaemonID    string        `json:"daemon_id"`
+	UsageLimits []UsageLimits `json:"usage_limits"`
 }
 
 // DaemonDisconnected notifies the browser that a daemon went offline.
@@ -874,10 +1021,19 @@ type AgentEventAck struct {
 // AgentUserMessage delivers a user message to an agent session
 // (browser → server → daemon).
 type AgentUserMessage struct {
-	Type      string `json:"type"` // "agent_user_message"
-	SessionID string `json:"session_id"`
-	Text      string `json:"text"`
-	Source    string `json:"source,omitempty"` // "" → "chat"
+	ExpectedTurnID string `json:"expected_turn_id,omitempty"`
+	Type           string `json:"type"` // "agent_user_message"
+	SessionID      string `json:"session_id"`
+	Text           string `json:"text"`
+	Source         string `json:"source,omitempty"` // "" → "chat"
+	// ClientID is the sender's id for the message (a browser's queued bubble). The daemon echoes it
+	// as client_id on the message's user_message event, and on the error of a message it dropped.
+	ClientID string `json:"client_id,omitempty"`
+	// AnswerMessageID makes the message the answer to that open ask (an ask card's reply box): the
+	// server answers the ask with Text instead of forwarding it to the engine. Without it, a chat
+	// message answers the session's newest open `blerg-runner ask`, when there is one. Browser →
+	// server only.
+	AnswerMessageID string `json:"answer_message_id,omitempty"`
 }
 
 // SetSessionModel changes an agent session's model/effort
@@ -887,6 +1043,14 @@ type SetSessionModel struct {
 	SessionID string `json:"session_id"`
 	Model     string `json:"model,omitempty"`
 	Effort    string `json:"effort,omitempty"`
+}
+
+// RefreshSessionTools asks the daemon to have the agent list its MCP tools again (server →
+// daemon): a grant's tool definitions changed (docs/design/mcp-tool-changes.md §5.3). The Claude
+// Code driver recycles its long-lived process at the next idle point; other engines ignore it.
+type RefreshSessionTools struct {
+	Type      string `json:"type"` // "refresh_session_tools"
+	SessionID string `json:"session_id"`
 }
 
 // InterruptSession cancels an agent session's in-flight turn
@@ -932,10 +1096,23 @@ type AgentEventsReplayDone struct {
 	ServerTime string `json:"server_time,omitempty"`
 }
 
+// AgentEventsGap tells a browser that live agent events of a session were dropped for it (its
+// buffer was full): the first one missed has seq FromSeq. The browser fetches the transcript from
+// there (subscribe_agent_events with after_seq FromSeq-1), deduplicating on client_event_id, as
+// events after the gap may already have reached it (server → browser).
+type AgentEventsGap struct {
+	Type      string `json:"type"` // "agent_events_gap"
+	SessionID string `json:"session_id"`
+	FromSeq   int64  `json:"from_seq"`
+}
+
 // MessageCreated notifies all browsers of a new session→user message.
 type MessageCreated struct {
 	Type    string      `json:"type"` // "message_created"
 	Message MessageInfo `json:"message"`
+	// Quiet: the message is listed but not toasted — an ask from a session nobody attends
+	// (server/notices.go: headlessSession).
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // MessageAnswered notifies all browsers that a message was answered/closed.

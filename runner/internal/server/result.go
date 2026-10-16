@@ -26,11 +26,10 @@ import (
 // are transient — so the result reports the newest done=true one.
 const assistantTextKind = "assistant_text"
 
-// resultAssistantScanLimit bounds how many of a session's newest events the
-// builder reads looking for the last assistant message. A long session can
-// have thousands of events; the last assistant turn is essentially always
-// within a short tail, and an unbounded read here would be a cheap way to
-// make the runner do expensive work.
+// resultAssistantScanLimit bounds how many of a session's newest assistant_text, error and
+// turn_done events the builder reads looking for the last turn's answer. A long session can have
+// thousands of events; its last turn is essentially always within a short tail, and an unbounded
+// read here would be a cheap way to make the runner do expensive work.
 const resultAssistantScanLimit = 400
 
 // sessionResult is the documented Result schema (openapi.json). Every field is
@@ -139,12 +138,18 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string) (session
 		// The branch a session's work lands on is named from its id by the
 		// session runtime; it is a convention, not a column, so it is derived
 		// the same way here.
-		Branch:               "wip/" + row.ID,
-		LastAssistantMessage: a.lastAssistantMessage(ctx, sessionID),
-		ErrorReason:          derefOrEmpty(row.ErrorReason),
-		AutoStop:             row.AutoStop,
-		StartedAt:            row.StartedAt.UTC().Format(time.RFC3339),
-		Artifacts:            []map[string]any{},
+		Branch:      "wip/" + row.ID,
+		ErrorReason: derefOrEmpty(row.ErrorReason),
+		AutoStop:    row.AutoStop,
+		StartedAt:   row.StartedAt.UTC().Format(time.RFC3339),
+		Artifacts:   []map[string]any{},
+	}
+	var turnErr string
+	res.LastAssistantMessage, turnErr = a.lastTurnAnswer(ctx, sessionID)
+	if res.ErrorReason == "" {
+		// The session did not fail, but its last turn did: that is the reason the caller lacks
+		// an answer.
+		res.ErrorReason = turnErr
 	}
 	if row.EndedAt != nil {
 		ended := row.EndedAt.UTC().Format(time.RFC3339)
@@ -154,32 +159,66 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string) (session
 	return res, nil
 }
 
-// lastAssistantMessage returns the text of the newest completed assistant
-// event, or "" when the session has not produced one yet. A failure to read
-// events is logged and reported as "": the rest of the result (including the
-// error reason a caller most needs when something went wrong) is still worth
-// returning.
-func (a *API) lastAssistantMessage(ctx context.Context, sessionID string) string {
-	rows, err := db.ListAgentEventsTail(ctx, a.dbPool, sessionID, assistantTextKind, resultAssistantScanLimit)
+// lastTurnAnswer reads the session's last turn — the one in progress, or else the last one to end
+// (its turn_done and the events since the turn_done before it) — and returns the main agent's last
+// completed text in it. A turn that failed (stop reason "error") has no answer: the text is "" and
+// failure is that turn's newest error message (never an API retry notice). A text from an
+// earlier turn is never returned. A failure to read events is logged and reported as "": the rest
+// of the result (including the error reason a caller most needs when something went wrong) is
+// still worth returning.
+func (a *API) lastTurnAnswer(ctx context.Context, sessionID string) (text, failure string) {
+	rows, err := db.ListAgentEventsTailKinds(ctx, a.dbPool, sessionID,
+		[]string{assistantTextKind, turnDoneKind, "error"}, resultAssistantScanLimit)
 	if err != nil {
 		log.Printf("runner result %s: assistant event query: %v", sessionID, err)
-		return ""
+		return "", ""
 	}
-	for _, ev := range rows {
-		var payload struct {
-			Text string `json:"text"`
-			Done bool   `json:"done"`
-		}
-		if err := json.Unmarshal([]byte(ev.Payload), &payload); err != nil {
-			continue
-		}
-		// Streaming deltas (done=false) are partial text; only a consolidated
-		// event is the assistant's actual message.
-		if payload.Done && payload.Text != "" {
-			return payload.Text
+	errored, lastErr := false, ""
+scan:
+	for i, ev := range rows { // newest first
+		switch ev.Kind {
+		case turnDoneKind:
+			if i > 0 {
+				// The end of the turn before: the last turn is complete.
+				break scan
+			}
+			var p struct {
+				StopReason string `json:"stop_reason"`
+			}
+			_ = json.Unmarshal([]byte(ev.Payload), &p)
+			errored = p.StopReason == "error"
+		case "error":
+			var p struct {
+				Message string `json:"message"`
+				Code    string `json:"code"`
+			}
+			if json.Unmarshal([]byte(ev.Payload), &p) == nil && lastErr == "" && p.Message != "" && p.Code != "api_retry" {
+				lastErr = p.Message
+			}
+		case assistantTextKind:
+			var payload struct {
+				Text         string `json:"text"`
+				Done         bool   `json:"done"`
+				ParentCallID string `json:"parent_call_id"`
+			}
+			if err := json.Unmarshal([]byte(ev.Payload), &payload); err != nil {
+				continue
+			}
+			// Streaming deltas (done=false) are partial text; only a consolidated
+			// event is the assistant's actual message. A subagent's text (it has a
+			// parent_call_id) is a report to the agent, not the session's answer.
+			if text == "" && payload.Done && payload.Text != "" && payload.ParentCallID == "" {
+				text = payload.Text
+			}
 		}
 	}
-	return ""
+	if errored {
+		if lastErr == "" {
+			lastErr = "the last turn failed"
+		}
+		return "", lastErr
+	}
+	return text, ""
 }
 
 // SessionResult is sessionResult under a name other packages can write down

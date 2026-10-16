@@ -164,4 +164,18 @@ describe('CapabilitiesPanel', () => {
     expect(group.getByText('superpowers')).toBeTruthy()
     expect(group.getByText('frontend-design')).toBeTruthy()
   })
+
+  it('marks the MCP servers group when the session has tool changes pending', () => {
+    render(<CapabilitiesPanel report={report} pendingToolChanges={2} onClose={() => {}} />)
+    const note = screen.getByTestId('caps-mcp-pending')
+    expect(note.textContent).toMatch(/2 tool changes pending/)
+    expect(note.querySelector('a')?.getAttribute('href')).toBe('/proposals')
+  })
+
+  // Review Focus 5: no MCP group in the report, still a pending note.
+  it('shows the pending note even when the report has no MCP group', () => {
+    const noMcp: CapabilitiesReport = { ...report, payload: { ...report.payload, groups: report.payload.groups.filter(g => g.id !== 'mcp') } }
+    render(<CapabilitiesPanel report={noMcp} pendingToolChanges={1} onClose={() => {}} />)
+    expect(screen.getByTestId('caps-mcp-pending').textContent).toMatch(/1 tool change pending/)
+  })
 })

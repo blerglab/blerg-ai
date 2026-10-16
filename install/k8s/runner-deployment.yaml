@@ -25,6 +25,14 @@ metadata:
     app: blerg-runner
 spec:
   replicas: 1
+  # Recreate, not RollingUpdate: /data is a ReadWriteOnce claim (runner-data-pvc.yaml), which one
+  # node mounts at a time. A rolling update starts the new pod before it stops the old one; when
+  # the new pod lands on a different node it waits forever for the volume the old pod holds, and
+  # the old pod is only stopped once the new one is ready, so the rollout deadlocks (and where
+  # both land together, two runners would share one data directory). Recreate stops the old pod
+  # first; a deploy costs a few seconds of runner downtime.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: blerg-runner
@@ -34,6 +42,15 @@ spec:
         app: blerg-runner
     spec:
       serviceAccountName: blerg-runner-agent-launcher
+      # fsGroup hands a volume's files to the runner's group (65532, the container's user below), so
+      # a freshly provisioned, root-owned volume is writable; only re-chowned when its root differs.
+      # It works only on volume types with ownership management (most CSI and block volumes): an
+      # in-tree hostPath volume, such as MicroK8s' microk8s-hostpath class, ignores it. There, if the
+      # runner cannot write /data, fix the claim once with the helper pod in README.md ("Runner
+      # data volume") rather than a root initContainer on every start.
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: blerg-runner
           image: "${REGISTRY}/blerg-runner:${TAG}"
@@ -171,6 +188,21 @@ spec:
             - name: BLERG_RUNNER_AGENT_IMAGE
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_AGENT_IMAGE, optional: true }
+            - name: BLERG_RUNNER_NATIVE_HISTORY
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_NATIVE_HISTORY, optional: true }
+            - name: BLERG_RUNNER_NATIVE_HISTORY_STORAGE_CLASS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_NATIVE_HISTORY_STORAGE_CLASS, optional: true }
+            - name: BLERG_RUNNER_NATIVE_HISTORY_SIZE
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_NATIVE_HISTORY_SIZE, optional: true }
+            - name: BLERG_RUNNER_NATIVE_HISTORY_MAX_CLAIMS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_NATIVE_HISTORY_MAX_CLAIMS, optional: true }
+            - name: BLERG_RUNNER_NATIVE_HISTORY_RETENTION_HOURS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_NATIVE_HISTORY_RETENTION_HOURS, optional: true }
             - name: BLERG_RUNNER_AGENT_NAMESPACE
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_AGENT_NAMESPACE, optional: true }
@@ -236,19 +268,22 @@ spec:
             runAsUser: 65532
             runAsGroup: 65532
             allowPrivilegeEscalation: false
-            # /data (BLERG_RUNNER_DATA_DIR) is the emptyDir volume mounted
-            # below — every write runner does (agentconfig.go, publish.go)
-            # goes there, so the rest of the root filesystem stays read-only.
+            # /data (BLERG_RUNNER_DATA_DIR) is the persistent volume mounted
+            # below — every write runner does (agentconfig.go, publish.go,
+            # artifacts.go) goes there, so the rest of the root filesystem
+            # stays read-only.
             readOnlyRootFilesystem: true
             seccompProfile: {type: RuntimeDefault}
           volumeMounts:
             - name: data
               mountPath: /data
-      # emptyDir loses uploaded agent-config bundles and mockups on pod
-      # restart; swap for a PVC in production.
+      # The runner's files (published and attached files, agent-config bundles, mockups) must
+      # survive a restart: the database indexes them. deploy.sh creates the claim before this
+      # Deployment is applied (runner-data-pvc.yaml).
       volumes:
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: blerg-runner-data
 ---
 apiVersion: v1
 kind: Service

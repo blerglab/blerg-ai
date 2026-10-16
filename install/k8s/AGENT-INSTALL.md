@@ -52,7 +52,7 @@ what the answer becomes.
 | 0 | "Is `kubectl config current-context` (show them the name) the cluster to install into?" | Everything below acts on that cluster. | Confirmation only. |
 | 1 | **Domain and DNS.** "Which domain should Blerg use? I need DNS for `<DOMAIN>`, `board.<DOMAIN>` and `runner.<DOMAIN>` pointing at the ingress controller — do those records (or a `*.<DOMAIN>` wildcard) exist, or will you create them?" | Three hostnames are fixed by `ingress.yaml`. A nested domain (`blerg.example.com`) needs records for the sub-hosts too; a `*.example.com` wildcard does not cover `board.blerg.example.com`. | `DOMAIN=` |
 | 2 | **Registry.** "Which image registry can every node pull from, and can this machine push to it (is `docker login` done)?" | The nodes pull the images, not this machine. MicroK8s' built-in registry is `localhost:32000` — that address only means the registry from a cluster node, so with it `deploy.sh` must run on a node. | `REGISTRY=` |
-| 3 | **Storage class.** Show them `kubectl get storageclass`. "Postgres needs a 5Gi volume from the default StorageClass — is this one right?" | Without a default class the PVC stays `Pending` forever. | Confirmation; the human fixes it if absent. |
+| 3 | **Storage class.** Show them `kubectl get storageclass`. "Postgres needs a 5Gi volume and the runner a 10Gi one (the files sessions publish and people attach) from the default StorageClass — is this one right, and is 10Gi enough?" | Without a default class the PVCs stay `Pending` forever. The runner's size and class apply only when its claim is created. | Confirmation; the human fixes it if absent. `RUNNER_DATA_SIZE=` if they want another size; `RUNNER_DATA_STORAGE_CLASS=<name>` if the runner's volume should come from another class (or there is no default). |
 | 4 | **Ingress class.** Show them `kubectl get ingressclass`. "Is this ingress-nginx with class `nginx`?" | `ingress.yaml` sets `ingressClassName: nginx` and nginx-only annotations (WebSocket timeouts `3600`, body size `100m`). | If not nginx: approval to edit `ingress.yaml` (Install step 2). |
 | 5 | **TLS.** "How is TLS provided: a cert-manager ClusterIssuer (which name?), a proxy or load balancer in front that terminates TLS, or none?" | Login cookies are `Secure`: without TLS, browser login only works at `localhost`. | Issuer: `CLUSTER_ISSUER=<name>`. Terminator: `SCHEME=https` (its certificate must cover all three hosts). None: tell them login will fail from any other host and get an explicit "proceed anyway". |
 | 6 | **Cluster runtime.** "Should agent sessions run as pods in this cluster (the default), or only on workstation daemons? Do you manage the `blerg-runner-agent` Secret with your own secret manager?" | On: builds the agent image and creates the `blerg-runner-sessions` namespace, RBAC and Secret. | `CLUSTER_RUNTIME=off` only if they say no; `AGENT_SECRET_EXTERNAL=1` if they manage the Secret. |
@@ -126,7 +126,9 @@ sed -i 's|^TAG=.*|TAG=<commit>|' install/k8s/.env                 # change an ex
 grep -q '^WEBHOOK_ALLOW_PRIVATE=' install/k8s/.env || echo 'WEBHOOK_ALLOW_PRIVATE=1' >> install/k8s/.env   # add a missing one
 ```
 
-On an upgrade the only line to change is `TAG`.
+On an upgrade the only line to change is `TAG` (plus `RUNNER_DATA_SIZE` /
+`RUNNER_DATA_STORAGE_CLASS` if decision 3 set them and the install has no
+`blerg-runner-data` claim yet — see the upgrade gate).
 
 **Checkpoint:** `grep -v '^#' install/k8s/.env | grep -v '^SECRET_' | grep .`
 prints exactly the settings you agreed with the human, and
@@ -145,7 +147,7 @@ approved; `bash install/k8s/deploy_test.sh` ends with `ok` (it prints
 ### Upgrade gate (upgrades only)
 
 Skip this on a new install. On an upgrade (P11 found `namespace/blerg`), do
-all three before Step 3:
+all four before Step 3:
 
 1. **Record what is running now** — you need it to roll back:
 
@@ -180,7 +182,17 @@ all three before Step 3:
    **Checkpoint:** four files, none of size `0`, all `-rw-------`. Tell the
    human that `blerg-secrets.json` holds every secret of the install.
 
-3. **Get the human's go-ahead** to upgrade from the old tag to `<TAG>`, with
+3. **Runner data volume.** Run `kubectl -n blerg get pvc blerg-runner-data`.
+   `NotFound` means this install predates the runner's data volume: its
+   `/data` was an `emptyDir`. Tell the human: this `deploy.sh` run creates the
+   claim **empty**, so there is nothing to migrate or back up from the old pod;
+   files published or attached before it are already lost (or go with the old
+   pod), stay listed in each session's Files tab marked "no longer available",
+   and cannot be opened. Everything published afterwards is kept. The runner
+   Deployment also switches to the `Recreate` strategy, so each deploy stops
+   the runner for a few seconds. If the claim exists, nothing changes for it.
+
+4. **Get the human's go-ahead** to upgrade from the old tag to `<TAG>`, with
    or without the backup, before running Step 3.
 
 ### Step 3 — run `deploy.sh`
@@ -224,7 +236,8 @@ kubectl -n blerg get pods
 ```
 
 **Checkpoint:** four pods, all `READY 1/1` and `STATUS Running`:
-`blerg-core-…`, `blerg-board-…`, `blerg-runner-…` and `postgres-0`. A restart
+`blerg-core-…`, `blerg-board-…`, `blerg-runner-…` and `postgres-0`; and
+`kubectl -n blerg get pvc blerg-runner-data` shows `STATUS Bound`. A restart
 or two on board or runner in the first seconds is normal (they race core's
 migrations). `ImagePullBackOff`, `Pending` or `CrashLoopBackOff`: stop, see
 [Troubleshooting](#troubleshooting).
@@ -336,7 +349,7 @@ if [ -z "$line" ]; then
   echo "skip login smoke test: bootstrap line not in core's current log"
 else
   pw="${line#*BLERG_BOOTSTRAP_ADMIN_PASSWORD=}"; pw="${pw%% *}"
-  sub="${line#*provider_subject=}"; sub="${sub%%;*}"
+  sub="${line#*username: }"; sub="${sub%%;*}"
   unset line
   jar="$(mktemp)"
   code="$(curl -s -o /dev/null -w '%{http_code}' -c "$jar" \
@@ -402,13 +415,14 @@ Blerg is installed on <cluster context> and all checks passed.
 
 1. Your first login (run this yourself — the output is the admin password):
      kubectl -n blerg logs deploy/blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
-   The line shows the username (provider_subject=...) and a one-time password.
+   The line shows the username (username: ...) and a one-time password.
    It is printed only once, by the first boot. If it is gone:
      kubectl -n blerg exec postgres-0 -- psql -U blerg -d blerg_core -tAc "select provider_subject from accounts where provider='local' and role='admin' order by created_at limit 1"
      kubectl -n blerg exec deploy/blerg-core -- /blerg-core users set-password --subject <username>
 
 2. Open <SCHEME>://<DOMAIN>/, click Sign in, and log in. You will be sent to
-   /change-password: choose a password of 12–72 characters, then sign in again.
+   /change-password: choose your own username and a password of 12–72
+   characters, then sign in again with them.
 
 3. Add your credentials at <SCHEME>://<DOMAIN>/settings: a Claude, Codex or
    Hermes credential and a GitHub token. Sessions run as you, with these.
@@ -479,7 +493,8 @@ Then set `TAG=<OLD_TAG>` in `install/k8s/.env` (as in Step 1) so the next
 kubectl -n blerg scale deploy/blerg-core deploy/blerg-board deploy/blerg-runner statefulset/postgres --replicas=0
 ```
 
-**Uninstalling** deletes the Postgres volume and `blerg-secrets`, including
+**Uninstalling** deletes the Postgres volume, the runner's data volume (every
+published and attached file) and `blerg-secrets`, including
 `BLERG_CORE_LOCAL_KEY`: every account, board, session record and stored
 credential is gone for good. Before running it:
 
@@ -514,6 +529,7 @@ More rows, with background, are in README's "Troubleshooting".
 | `docker push` fails: `http: server gave HTTP response to HTTPS client`, `denied`, or `unauthorized` | P10 | Plain-HTTP registry: the human adds it to this machine's Docker `insecure-registries`. Auth: the human runs `docker login <REGISTRY>`. |
 | Pods `ImagePullBackOff` / `ErrImagePull` | `kubectl -n blerg describe pod <pod>` Events | Nodes cannot pull from `REGISTRY` (address, containerd trust or insecure-registry config, pull credentials). Node configuration is the human's. |
 | `postgres-0` `Pending`; `rollout status` times out | `kubectl -n blerg get pvc` shows `Pending`; P5 | No default StorageClass. The human installs or marks one. On Kubernetes ≥ 1.28 a class-less `Pending` claim then picks up the new default by itself — wait a minute and check again. If it is still `Pending`, with the human's approval (it holds no data yet) delete both so the StatefulSet recreates the claim: `kubectl -n blerg delete pvc/postgres-data-postgres-0 pod/postgres-0`. If the new `postgres-0` stays `Pending` because it caught the old claim while it was terminating, delete `pod/postgres-0` once more. |
+| `blerg-runner-…` `Pending`; `rollout status` times out on the runner | `kubectl -n blerg get pvc blerg-runner-data` shows `Pending`; `kubectl -n blerg describe pvc blerg-runner-data` | No default StorageClass, or `RUNNER_DATA_STORAGE_CLASS` names one that does not exist. With the human's approval: set `RUNNER_DATA_STORAGE_CLASS` (Step 1); stop the runner and delete the still-`Pending` claim (it holds no data yet), waiting until it is gone — `kubectl -n blerg scale deploy/blerg-runner --replicas=0`, `kubectl -n blerg delete pvc blerg-runner-data --wait=false`, `kubectl -n blerg wait --for=delete pvc/blerg-runner-data --timeout=120s` — then re-run `deploy.sh` (it recreates the claim and the runner). Never delete a `Bound` one: it holds the published files. |
 | Pods `CrashLoopBackOff`, log says `exec format error` | P8 | Architecture mismatch. Build on a machine matching the nodes; deploy with a new `TAG`. |
 | `rollout status` times out, board or runner restarting | `kubectl -n blerg logs deploy/blerg-core` | `jwks fetch failed` / `register ... 401` for ~15 s is normal. Longer: look for a migration or database error in core's log. |
 | Components log Postgres `password authentication failed` | Was `SECRET_POSTGRES_PASSWORD` set on an existing install, or `blerg-secrets` deleted? | The data directory keeps its first password. The human restores the original value (`SECRET_POSTGRES_PASSWORD` from their backup) and you re-run `deploy.sh`. |

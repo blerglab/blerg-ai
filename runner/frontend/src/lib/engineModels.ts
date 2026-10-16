@@ -11,7 +11,7 @@
 // MODEL_ID_PATTERNS (the server's rule is the one enforced), a preferred
 // default in DEFAULT_MODEL_PREFIX, a free-text model box for when no list
 // was reported in FREE_TEXT_MODEL_ENGINES.
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../apiFetch'
 import type { EngineModel, ModelList } from '../types'
 
@@ -121,22 +121,57 @@ export function parseModelSource(data: unknown): ModelList['source'] {
 // fetchModelList asks for engine's list; daemonId names the daemon the session
 // would run on (a daemon-reported list is that daemon's own).
 export interface FetchedModelList {
+  refreshing?: boolean
+  error?: string
   models: EngineModel[]
   source: ModelList['source']
   // The engine's whole effort allowlist (for a model typed by hand).
   engineEfforts: string[]
 }
 
-export async function fetchModelList(engine: string, daemonId?: string): Promise<FetchedModelList> {
-  const qs = daemonId ? `?daemon_id=${encodeURIComponent(daemonId)}` : ''
-  const res = await apiFetch(`/api/models/${encodeURIComponent(engineKey(engine))}${qs}`)
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+export type ModelRuntime = 'cluster'
+
+// Every picker identifies where the session runs. The server's model-source
+// registry chooses an account-bound cluster provider or a public catalog;
+// workstation inventories are scoped to the selected daemon.
+export function modelCatalogTarget(runtime?: string, daemonId?: string): { daemonId?: string; runtime?: ModelRuntime } {
+  return runtime === 'cluster' ? { runtime: 'cluster' } : { daemonId: daemonId || undefined }
+}
+
+export async function fetchModelList(engine: string, daemonId?: string, runtime?: ModelRuntime, forceRefresh = false): Promise<FetchedModelList> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error('Loading models timed out. You can use the default model or retry.'))
+      controller.abort()
+    }, 10_000)
+  })
+  try {
+    // The deadline also bounds a stalled auth renewal or response body, even
+    // when the underlying transport does not honor abort.
+    return await Promise.race([requestModelList(engine, daemonId, runtime, forceRefresh, controller.signal), deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function requestModelList(engine: string, daemonId?: string, runtime?: ModelRuntime, forceRefresh = false, signal?: AbortSignal): Promise<FetchedModelList> {
+  const qs = runtime === 'cluster' ? `?runtime=cluster${forceRefresh ? '&refresh=1' : ''}` : daemonId ? `?daemon_id=${encodeURIComponent(daemonId)}` : ''
+  const res = await apiFetch(`/api/models/${encodeURIComponent(engineKey(engine))}${qs}`, signal ? { signal } : undefined)
+  if (!res.ok) {
+    const data = runtime === 'cluster' ? await res.json().catch(() => null) : null
+    throw new Error(typeof data?.error === 'string' ? data.error : `Could not load models (HTTP ${res.status}).`)
+  }
   const data = await res.json()
   const rawEfforts = (data as { engine_efforts?: unknown })?.engine_efforts
   const engineEfforts = Array.isArray(rawEfforts)
     ? rawEfforts.filter((e, i, a): e is string => isEffortToken(e) && a.indexOf(e) === i)
     : []
-  return { models: parseModelList(engine, data), source: parseModelSource(data), engineEfforts }
+  return {
+    models: parseModelList(engine, data), source: parseModelSource(data), engineEfforts,
+    ...(runtime === 'cluster' ? { refreshing: data.refreshing === true, error: typeof data.error === 'string' ? data.error : undefined } : {}),
+  }
 }
 
 export async function fetchModels(engine: string, daemonId?: string): Promise<EngineModel[]> {
@@ -144,6 +179,9 @@ export async function fetchModels(engine: string, daemonId?: string): Promise<En
 }
 
 export interface EngineModelsState {
+  refreshing?: boolean
+  retry?: () => void
+  error?: string
   models: readonly EngineModel[]
   loading: boolean
   // true when the fetch failed and the built-in list (possibly empty) is shown.
@@ -154,46 +192,97 @@ export interface EngineModelsState {
   engineEfforts: readonly string[]
 }
 
+// A place to keep each answer (per engine and daemon) between mounts, so a
+// picker can show the last list at once while asking again underneath.
+export interface ModelListCache {
+  // Discard an in-flight answer if the signed-in account changed.
+  identity?(): string
+  get(engine: string, daemonId?: string, runtime?: ModelRuntime): FetchedModelList | undefined
+  put(engine: string, daemonId: string | undefined, value: FetchedModelList, runtime?: ModelRuntime): void
+}
+
 export interface UseEngineModelsOptions {
+  // A cluster catalog is independent of every workstation catalog.
+  runtime?: ModelRuntime
   // false = don't ask yet (e.g. the daemon the session will run on is still
   // loading): the built-in list shows, still "loading".
   enabled?: boolean
+  // When given (a stable object): the last answer for this engine and daemon
+  // shows at once, not loading, while the server is asked again; each answer
+  // is put back; a failed ask keeps the cached list rather than falling back.
+  cache?: ModelListCache
+}
+
+// toState reads one answer for daemonId. A daemon-reported list (source
+// "daemon") is per workstation, so it is only ever used when daemonId named
+// the daemon: asked without one, the server would answer with whichever
+// daemon reported (or a union of them), which says nothing about where this
+// session runs — that answer is dropped (no list) rather than shown.
+function toState(k: string, daemonId: string | undefined, r: FetchedModelList): { key: string } & EngineModelsState {
+  const usable = r.source === 'daemon' && !daemonId ? [] : r.models
+  return { key: k, models: usable, loading: false, fallback: false, source: r.source, engineEfforts: r.engineEfforts, refreshing: r.refreshing, error: r.error }
 }
 
 // useEngineModels starts on the engine's built-in list (so a picker can render
-// and preselect at once) and swaps in the server's list when it answers.
-// Changing engine or daemon starts over for the new one.
-//
-// A daemon-reported list (source "daemon") is per workstation, so it is only
-// ever used when daemonId named the daemon: asked without one, the server
-// would answer with whichever daemon reported (or a union of them), which
-// says nothing about where this session runs — that answer is dropped (no
-// list) rather than shown.
+// and preselect at once) — or on the cached answer, with opts.cache — and
+// swaps in the server's list when it answers. Changing engine or daemon
+// starts over for the new one.
 export function useEngineModels(engine: string, daemonId?: string, opts?: UseEngineModelsOptions): EngineModelsState {
   const key = engineKey(engine)
   const enabled = opts?.enabled ?? true
-  const stateKey = `${key}\n${daemonId ?? ''}`
-  const [state, setState] = useState<{ key: string } & EngineModelsState>(() => ({
-    key: stateKey, models: builtinModels(key), loading: true, fallback: false, engineEfforts: [],
-  }))
+  const cache = opts?.cache
+  const runtime = opts?.runtime
+  const [reload, setReload] = useState(0)
+  const forceNext = useRef(false)
+  const stateKey = JSON.stringify([key, daemonId ?? '', runtime ?? '', cache?.identity?.() ?? ''])
+  const [state, setState] = useState<{ key: string } & EngineModelsState>(() => {
+    const cached = enabled ? cache?.get(key, daemonId, runtime) : undefined
+    return cached
+      ? toState(stateKey, daemonId, cached)
+      : { key: stateKey, models: builtinModels(key), loading: runtime !== 'cluster', refreshing: runtime === 'cluster', fallback: false, engineEfforts: [] }
+  })
   useEffect(() => {
     if (!enabled) return
     let live = true
-    const k = `${key}\n${daemonId ?? ''}`
-    fetchModelList(key, daemonId)
-      .then(({ models, source, engineEfforts }) => {
-        if (!live) return
-        const usable = source === 'daemon' && !daemonId ? [] : models
-        setState({ key: k, models: usable, loading: false, fallback: false, source, engineEfforts })
-      })
-      .catch(() => { if (live) setState({ key: k, models: builtinModels(key), loading: false, fallback: true, engineEfforts: [] }) })
-    return () => { live = false }
-  }, [key, daemonId, enabled])
-  // Until this engine's (and daemon's) answer lands, show the engine's
-  // built-in list, not the last one's.
-  return enabled && state.key === stateKey
-    ? state
-    : { models: builtinModels(key), loading: true, fallback: false, engineEfforts: [] }
+    let poll: ReturnType<typeof setTimeout> | undefined
+    const identity = cache?.identity?.()
+    const k = stateKey
+    const force = forceNext.current
+    forceNext.current = false
+    const load = (forceRefresh = false) => {
+      void fetchModelList(key, daemonId, runtime, forceRefresh)
+        .then(answer => {
+          if (!live || cache?.identity?.() !== identity) return
+          const kept = cache?.get(key, daemonId, runtime)
+          const shown = (answer.refreshing || answer.error) && answer.models.length === 0 && kept
+            ? { ...answer, models: kept.models, engineEfforts: answer.engineEfforts.length ? answer.engineEfforts : kept.engineEfforts }
+            : answer
+          if (!answer.refreshing && !answer.error) cache?.put(key, daemonId, answer, runtime)
+          setState(toState(k, daemonId, shown))
+          if (runtime === 'cluster' && answer.refreshing) poll = setTimeout(load, 2000)
+        })
+        .catch((err: unknown) => {
+          if (!live || cache?.identity?.() !== identity) return
+          const error = err instanceof Error ? err.message : 'Could not load models.'
+          const kept = cache?.get(key, daemonId, runtime)
+          setState(kept ? { ...toState(k, daemonId, kept), error } : { key: k, models: builtinModels(key), loading: false, fallback: true, engineEfforts: [], error })
+        })
+    }
+    load(force)
+    return () => { live = false; clearTimeout(poll) }
+  }, [key, daemonId, runtime, stateKey, enabled, cache, reload])
+  const retry = runtime === 'cluster' ? () => {
+    forceNext.current = true
+    setState(previous => ({ ...previous, error: undefined, refreshing: true }))
+    setReload(value => value + 1)
+  } : undefined
+  if (enabled && state.key === stateKey) return { ...state, retry }
+  // Until this engine's (and daemon's) answer lands, show its cached list, or
+  // the engine's built-in list — never the last one's.
+  const cached = enabled ? cache?.get(key, daemonId, runtime) : undefined
+  return cached
+    ? { ...toState(stateKey, daemonId, cached), retry }
+    : { models: builtinModels(key), loading: runtime !== 'cluster', refreshing: enabled && runtime === 'cluster', fallback: false, engineEfforts: [], retry }
 }
 
 // ─── Selection rules ─────────────────────────────────────────────────────────

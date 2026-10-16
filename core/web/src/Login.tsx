@@ -15,10 +15,15 @@ import { Wordmark } from "./Shell";
 type ProviderInfo = { id: string };
 
 // noticeFor turns the query string GET /auth/refresh (writeSignInRequired) and
-// ChangePassword.tsx leave behind into the single line shown above the form, or null.
+// ChangePassword.tsx leave behind into the single line shown above the form, or null. user=1
+// means the person picked a new username on that page too.
 export function noticeFor(search: string): string | null {
   const q = new URLSearchParams(search);
-  if (q.get("changed") === "1") return "Password changed — sign in again.";
+  if (q.get("changed") === "1") {
+    return q.get("user") === "1"
+      ? "Password changed — sign in again with your new username."
+      : "Password changed — sign in again.";
+  }
   if (q.get("reason") === "expired") return "Your session expired or was signed out. Sign in again.";
   return null;
 }
@@ -132,7 +137,7 @@ export default function Login() {
           {submitting ? "Signing in…" : "Sign in"}
         </button>
         <p className="auth-hint">
-          First time here? Your username is the provider_subject printed next to BLERG_BOOTSTRAP_ADMIN_PASSWORD in core's log (first boot only) — or whatever your admin created for you.
+          First time here? Your username is printed next to BLERG_BOOTSTRAP_ADMIN_PASSWORD in core's log (first boot only). You choose your own username when you first change the password.
         </p>
       </form>
     </main>

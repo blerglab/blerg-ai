@@ -95,7 +95,9 @@ func TestStreamParsesSSE(t *testing.T) {
 	var blocks []agent.Block
 	var stop string
 	var usage *agent.Usage
+	var order []string
 	for ev := range ch {
+		order = append(order, ev.Kind)
 		switch ev.Kind {
 		case "text_delta":
 			deltas = append(deltas, ev.TextDelta)
@@ -106,6 +108,10 @@ func TestStreamParsesSSE(t *testing.T) {
 		case "error":
 			t.Fatalf("stream error: %v", ev.Err)
 		}
+	}
+	// The thinking block's start is said as it opens, before the block itself.
+	if len(order) < 2 || order[0] != "thinking_start" || order[1] != "block" {
+		t.Fatalf("stream order = %v, want thinking_start then the thinking block", order)
 	}
 	if strings.Join(deltas, "") != "Hello world" {
 		t.Fatalf("deltas = %q", deltas)

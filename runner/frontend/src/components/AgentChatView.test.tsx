@@ -1,0 +1,72 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { ReactNode } from 'react'
+import AgentChatView from './AgentChatView'
+import { makeSession } from '../test/fixtures'
+import * as ws from '../ws'
+
+const apiFetch = vi.fn()
+vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }))
+vi.mock('../ws', () => ({ send: vi.fn() }))
+vi.mock('@blerglab/chat', () => ({
+  ChatView: ({ slots }: { slots: { header: ReactNode } }) => <div>{slots.header}</div>,
+  ReadyCard: () => null,
+  createBlergTransport: () => ({}),
+}))
+vi.mock('./UsageLimitResume', () => ({ default: () => <span>Resume when limit resets</span> }))
+
+const MODELS = [
+  { id: 'fixture-code', name: 'Fixture Code', section: 'main', efforts: ['low', 'ultra'], default_effort: 'low' },
+  { id: 'fixture-fast', name: 'Fixture Fast', section: 'main', efforts: ['low', 'high'], default_effort: 'high' },
+]
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  apiFetch.mockImplementation((url: string) => Promise.resolve({ ok: true, json: async () => ({
+    models: url.startsWith('/api/models/codex?runtime=cluster') ? MODELS : [], source: 'live',
+  }) }))
+})
+
+describe('AgentChatView model controls', () => {
+  it('uses the cluster catalog to switch Codex models and supported efforts', async () => {
+    const session = makeSession({ kind: 'agent', runtime: 'cluster', engine: 'codex', daemon_id: 'pod-session', model: 'fixture-code', effort: 'ultra' })
+    const view = render(<AgentChatView session={session} thinking={false} compact={false} />)
+    await screen.findByRole('option', { name: 'Fixture Fast' })
+    expect(screen.getByRole('option', { name: 'ultra' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Effort'), { target: { value: 'ultra' } })
+    expect(ws.send).toHaveBeenLastCalledWith({ type: 'set_session_model', session_id: session.id, effort: 'ultra' })
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'fixture-fast' } })
+    expect(ws.send).toHaveBeenLastCalledWith({ type: 'set_session_model', session_id: session.id, model: 'fixture-fast', effort: 'high' })
+    view.rerender(<AgentChatView session={{ ...session, model: 'fixture-fast', effort: 'high' }} thinking={false} compact={false} />)
+    expect(screen.queryByRole('option', { name: 'ultra' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Effort')).toHaveValue('high')
+    expect(apiFetch).toHaveBeenCalledWith('/api/models/codex?runtime=cluster', expect.anything())
+  })
+
+  it('keeps automatic resume settings out of the conversation header', () => {
+    render(<AgentChatView session={makeSession({ kind: 'agent', engine: 'codex' })} thinking={false} compact={false} />)
+    expect(screen.queryByText('Resume when limit resets')).not.toBeInTheDocument()
+  })
+
+  it('preserves a supported effort while changing models', async () => {
+    render(<AgentChatView session={makeSession({ kind: 'agent', runtime: 'cluster', engine: 'codex', model: 'fixture-code', effort: 'low' })} thinking={false} compact={false} />)
+    await screen.findByRole('option', { name: 'Fixture Fast' })
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'fixture-fast' } })
+    expect(ws.send).toHaveBeenLastCalledWith({ type: 'set_session_model', session_id: 'sess-a', model: 'fixture-fast', effort: 'low' })
+  })
+
+  it('shows a catalog error and retries without hiding the current model', async () => {
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({ error: 'Reconnect the engine in Settings.' }) })
+    render(<AgentChatView session={makeSession({ kind: 'agent', runtime: 'cluster', engine: 'codex', model: 'fixture-code' })} thinking={false} compact={false} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Reconnect the engine in Settings.')
+    expect(screen.getByLabelText('Model')).toHaveValue('fixture-code')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry models' }))
+    await screen.findByRole('option', { name: 'Fixture Fast' })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('keeps workstation catalogs scoped to their own daemon', async () => {
+    render(<AgentChatView session={makeSession({ kind: 'agent', runtime: 'daemon', engine: 'codex', daemon_id: 'workstation' })} thinking={false} compact={false} />)
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/models/codex?daemon_id=workstation', expect.anything()))
+  })
+})

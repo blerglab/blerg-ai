@@ -11,8 +11,8 @@
 // Only for calls to runner's OWN API (same-origin, /api/...). A genuinely
 // external fetch has no business carrying this token and should keep using
 // the bare global fetch.
-import { ensureFreshToken, getAccessToken, redirectToRefresh } from './authClient'
-import { refreshAlreadyAttempted, markRefreshAttempted } from './refreshGuard'
+import { ensureFreshToken, getAccessToken } from './authClient'
+import { bounceToRefresh } from './signIn'
 
 export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   return send(url, init, false)
@@ -31,9 +31,7 @@ function send(url: string, init: RequestInit | undefined, retried: boolean): Pro
       // The token has most likely just expired. Get a new one without leaving the page and say the
       // request again, once: a reload would throw away what the person is looking at.
       if (!retried && (await ensureFreshToken())) return send(url, init, true)
-      if (!refreshAlreadyAttempted()) {
-        markRefreshAttempted()
-        redirectToRefresh(location.href)
+      if (bounceToRefresh()) {
         // The page is navigating away — never hand the 401 back to the
         // caller to be parsed as a real response. The navigation above wins
         // the race; this just stops any .then()/.json() chain from running
@@ -43,7 +41,8 @@ function send(url: string, init: RequestInit | undefined, retried: boolean): Pro
       // A refresh was already attempted once this page load and we're STILL
       // getting 401s — refreshing again would just loop forever (e.g. core
       // itself is down, or the session is genuinely revoked). Hand the 401
-      // back so the caller/UI can show an error instead of hanging.
+      // back so the caller/UI can show an error instead of hanging (bounceToRefresh
+      // has raised the "Couldn't sign you in" banner).
       return resp
     }
     return resp
@@ -71,9 +70,7 @@ export function apiUpload(
     const onAbort = () => xhr.abort()
     xhr.onload = () => {
       init.signal?.removeEventListener('abort', onAbort)
-      if (xhr.status === 401 && !refreshAlreadyAttempted()) {
-        markRefreshAttempted()
-        redirectToRefresh(location.href)
+      if (xhr.status === 401 && bounceToRefresh()) {
         return // the page is navigating away; never resolve a 401 the caller would parse
       }
       resolve(new Response(xhr.status === 204 ? null : xhr.responseText, {

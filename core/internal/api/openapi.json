@@ -154,6 +154,197 @@
         }
       }
     },
+    "/api/credentials/managed/capabilities": {
+      "get": {
+        "operationId": "managed_credential_capabilities",
+        "tags": [
+          "credentials"
+        ],
+        "summary": "List registered managed login adapters.",
+        "security": [
+          {
+            "humanSession": [
+              "card.read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Safe connection metadata only; never access or refresh tokens.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ManagedCredentialCapability"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/credentials/{engine}/managed/login": {
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "security": [
+          {
+            "humanSession": [
+              "card.read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Safe connection metadata only; never access or refresh tokens.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedLoginStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Attempt not found for this live initiating browser session."
+          },
+          "409": {
+            "description": "Reconnect required or another login is in progress."
+          },
+          "503": {
+            "description": "Credential service unavailable."
+          }
+        },
+        "operationId": "start_managed_login",
+        "summary": "Begin a dedicated device login for Cluster.",
+        "description": "Requires a live human browser session. Device code and attempt belong to that browser chain. Existing workstation login is unchanged.",
+        "parameters": [
+          {
+            "name": "engine",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Registered managed engine; currently codex."
+          }
+        ]
+      }
+    },
+    "/api/credentials/{engine}/managed/login/{attempt}": {
+      "get": {
+        "tags": [
+          "credentials"
+        ],
+        "security": [
+          {
+            "humanSession": [
+              "card.read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Safe connection metadata only; never access or refresh tokens.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedLoginStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Attempt not found for this live initiating browser session."
+          },
+          "409": {
+            "description": "Reconnect required or another login is in progress."
+          },
+          "503": {
+            "description": "Credential service unavailable."
+          }
+        },
+        "operationId": "poll_managed_login",
+        "summary": "Poll a device login owned by this browser.",
+        "parameters": [
+          {
+            "name": "engine",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Registered managed engine; currently codex."
+          },
+          {
+            "name": "attempt",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "credentials"
+        ],
+        "security": [
+          {
+            "humanSession": [
+              "card.read"
+            ]
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Canceled; completed credentials remain connected."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "No matching attempt for this browser."
+          }
+        },
+        "operationId": "cancel_managed_login",
+        "summary": "Cancel this browser’s pending login attempt.",
+        "parameters": [
+          {
+            "name": "engine",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Registered managed engine; currently codex."
+          },
+          {
+            "name": "attempt",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
     "/api/credentials": {
       "get": {
         "operationId": "list_credentials",
@@ -327,12 +518,72 @@
           "caps": { "type": "array", "items": { "type": "string" }, "description": "Exactly the capabilities the token carries and core enforces." }
         }
       },
+      "ManagedCredentialCapability": {
+        "type": "object",
+        "required": [
+          "engine",
+          "kind",
+          "login",
+          "verification_origin"
+        ],
+        "properties": {
+          "engine": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "login": {
+            "type": "boolean"
+          },
+          "verification_origin": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "ManagedLoginStatus": {
+        "type": "object",
+        "required": [
+          "attempt_id",
+          "state",
+          "expires_at",
+          "interval_seconds"
+        ],
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "verification_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "user_code": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "interval_seconds": {
+            "type": "integer"
+          }
+        }
+      },
       "CredentialSummary": {
         "type": "object",
         "required": ["engine", "updated_at"],
         "properties": {
           "engine": { "type": "string", "description": "The credential kind: an agent engine (`claude`, `codex`, `hermes`, `openclaw`) or a git provider (`github`, `gitlab`) whose personal access token lets cluster sessions clone and push as the caller and lists the caller's own repositories in the launch sheet." },
-          "updated_at": { "type": "string", "format": "date-time" }
+          "updated_at": { "type": "string", "format": "date-time" },
+          "kind": { "type": "string", "description": "Opaque import or registered managed adapter kind." },
+          "state": { "type": "string" },
+          "generation": { "type": "string" },
+          "expires_at": { "type": "string", "format": "date-time" }
         }
       }
     }

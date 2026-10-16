@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -779,6 +780,10 @@ func TestWSClientReportsEngineModelsOnConnectAndChange(t *testing.T) {
 	if hello.typ != "daemon_hello" || hello.models["codex"].Models[0].ID != "gpt-a" {
 		t.Fatalf("hello = %+v", hello)
 	}
+	// The heartbeat sent at once after connecting, without the lists the hello carried.
+	if hb := next(); hb.typ != "daemon_heartbeat" || hb.has {
+		t.Fatalf("connect heartbeat = %+v", hb)
+	}
 	// A change goes out at once, carrying the new lists.
 	src.update(map[string]models.Report{"codex": {Models: []models.Model{codexModel("gpt-b")}, FetchedAt: time.Now()}})
 	got := next()
@@ -836,5 +841,38 @@ func TestHungProbeDoesNotBlockHeartbeat(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatalf("only %d heartbeats while a probe hung", n)
 		}
+	}
+}
+
+// A CLI that is installed but exits non-zero says why in its error (the tail
+// of its stderr), so the daemon log can tell "logged out" from "not installed".
+func TestProbeCodexModelsExitErrorCarriesStderr(t *testing.T) {
+	dir := writeScript(t, "codex", `echo "Error: not logged in" >&2; exit 1`)
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	_, err := probeCodexModels(context.Background())
+	if !errors.Is(err, errNoModelList) || !strings.Contains(err.Error(), "not logged in") {
+		t.Errorf("err = %v, want errNoModelList naming the stderr", err)
+	}
+	// Bounded: a chatty failure keeps only a tail.
+	dir = writeScript(t, "codex", `head -c 100000 /dev/zero | tr '\0' x >&2; echo END >&2; exit 1`)
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	_, err = probeCodexModels(context.Background())
+	if err == nil || len(err.Error()) > 1024 || !strings.Contains(err.Error(), "END") {
+		t.Errorf("err = %q (len %d)", err, len(err.Error()))
+	}
+}
+
+// An engine that reports no list is logged once, with the reason, not per probe.
+func TestProbeAllLogsAnEmptyListOnce(t *testing.T) {
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	p := newModelProber(map[string]modelProbe{"codex": func(context.Context) ([]models.Model, error) {
+		return nil, fmt.Errorf("codex: exit status 1: not logged in: %w", errNoModelList)
+	}})
+	p.ProbeAll(context.Background())
+	p.ProbeAll(context.Background())
+	if n := strings.Count(buf.String(), "codex reports no model list"); n != 1 || !strings.Contains(buf.String(), "not logged in") {
+		t.Errorf("log = %q (%d lines)", buf.String(), n)
 	}
 }

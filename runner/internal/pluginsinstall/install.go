@@ -70,6 +70,8 @@ type Result struct {
 	// Names maps a lowercase marketplace source (owner/repo) to the marketplace's own name, as
 	// learned from `claude plugin marketplace list` — the "@name" part of an installed plugin's id.
 	Names map[string]string
+	// Paths maps native Codex plugin ids to CLI-reported install paths, validated by callers.
+	Paths map[string]string
 	// Installed entries, in list order, for callers that need to find them afterwards.
 	Entries []pluginspec.Entry
 	// MarketplaceFailed: a `marketplace add` or the marketplace listing failed, so entries could

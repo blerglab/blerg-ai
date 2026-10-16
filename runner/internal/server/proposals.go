@@ -251,15 +251,21 @@ func (h *proposalsHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not list proposals")
 		return
 	}
+	changes, err := db.CountPendingToolChanges(r.Context(), h.api.dbPool, who.Account)
+	if err != nil {
+		log.Printf("proposals: tool change count: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not list proposals")
+		return
+	}
 	out := make([]proposalView, 0, len(rows))
 	for i := range rows {
 		out = append(out, viewOfProposal(&rows[i]))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"proposals": out, "decided_next": next, "pending_count": pending})
+	writeJSON(w, http.StatusOK, map[string]any{"proposals": out, "decided_next": next, "pending_count": pending, "tool_changes_pending": changes})
 }
 
-// count answers GET /api/proposals/count with only {"pending_count": n}: one cheap query, for the
-// navigation badge's polling.
+// count answers GET /api/proposals/count with {"pending_count": n, "tool_changes_pending": m}: two
+// cheap queries, for the navigation badge's polling.
 func (h *proposalsHandler) count(w http.ResponseWriter, r *http.Request) {
 	who, ok := h.person(w, r)
 	if !ok {
@@ -271,7 +277,13 @@ func (h *proposalsHandler) count(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not count proposals")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"pending_count": pending})
+	changes, err := db.CountPendingToolChanges(r.Context(), h.api.dbPool, who.Account)
+	if err != nil {
+		log.Printf("proposals: tool change count: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not count proposals")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"pending_count": pending, "tool_changes_pending": changes})
 }
 
 func (h *proposalsHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -497,7 +509,7 @@ const proposalGoneReason = "the connection was deleted, so this action can no lo
 // ---- maintenance ---------------------------------------------------------------------------------------
 
 // proposalMaintenance is what one maintenance pass did.
-type proposalMaintenance struct{ Expired, Stale, Pruned int64 }
+type proposalMaintenance struct{ Expired, Stale, Pruned, ChangesExpired, ChangesPruned, EventsPruned, DefinitionsPruned int64 }
 
 // maintainProposals expires pending proposals after 7 days, turns approvals that lost their outcome
 // (executing for too long) into unknown, and prunes decided proposals 30 days after the decision.
@@ -519,6 +531,21 @@ func (a *API) maintainProposals(ctx context.Context) proposalMaintenance {
 	}
 	if rep.Expired+rep.Stale+rep.Pruned > 0 {
 		log.Printf("proposals: expired %d, %d lost their outcome (now unknown), pruned %d", rep.Expired, rep.Stale, rep.Pruned)
+	}
+	if rep.ChangesExpired, err = db.ExpirePendingToolChanges(ctx, a.dbPool, db.ToolChangeExpiry); err != nil {
+		log.Printf("tool changes: expire: %v", err)
+	}
+	if rep.ChangesPruned, err = db.PruneDecidedToolChanges(ctx, a.dbPool, proposalRetention); err != nil {
+		log.Printf("tool changes: prune: %v", err)
+	}
+	if rep.EventsPruned, err = db.PrunePinEvents(ctx, a.dbPool, db.PinEventRetention); err != nil {
+		log.Printf("pin events: prune: %v", err)
+	}
+	if rep.DefinitionsPruned, err = db.PruneToolDefinitions(ctx, a.dbPool, db.PinEventRetention); err != nil {
+		log.Printf("tool definitions: prune: %v", err)
+	}
+	if rep.ChangesExpired+rep.ChangesPruned+rep.EventsPruned+rep.DefinitionsPruned > 0 {
+		log.Printf("tool changes: expired %d, pruned %d; pruned %d pin events and %d definitions", rep.ChangesExpired, rep.ChangesPruned, rep.EventsPruned, rep.DefinitionsPruned)
 	}
 	return rep
 }

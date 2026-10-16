@@ -142,7 +142,8 @@ type API struct {
 	clusterJobMissingGrace time.Duration
 
 	// modelSources backs GET /api/models/{engine} (see SetModelSources).
-	modelSources *models.Registry
+	modelSources  *models.Registry
+	clusterModels clusterModelCache
 
 	// fetchGitToken fetches an account's personal git token for a daemon's
 	// named clone (namedCloneSpawn). nil = core's internal credential fetch;
@@ -265,9 +266,13 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 	// they all already hold — is the least invasive way to give them the
 	// completion webhook without threading an extra argument through each.
 	if hub != nil {
+		if jm := hub.JobManager(); jm != nil {
+			jm.historyPool = dbPool
+		}
 		hub.SetPrivacyPool(dbPool) // lets every broadcast withhold private sessions (privacy.go)
 		hub.SetCompletionNotifier(api.notifyCompletion)
 		hub.SetAutoStopper(api.autoStopOnTurnDone)
+		hub.SetAskSignal(api.waiters.signal)
 	}
 	return api
 }
@@ -330,6 +335,15 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	}
 	info.StartedBy = startedByOf(&row)
 	info.Interaction = effectiveInteraction(&row)
+	// Only a live session has tasks running: whatever an ended one left counted is gone with it.
+	switch row.Status {
+	case "starting", "running", "idle", "waiting":
+		info.BackgroundTasks = row.BackgroundTasks
+	}
+	// Only a session waiting for a message is paused (migration 043).
+	if row.Status == "idle" || row.Status == "waiting" {
+		info.PausedReason = row.PausedReason
+	}
 	return info
 }
 
@@ -359,7 +373,7 @@ func (a *API) HandleGetDaemons(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.authBrowser(w, r); !ok {
 		return
 	}
-	daemons := a.hub.GetAllDaemons()
+	daemons := a.hub.GetHostDaemons()
 	result := make([]protocol.DaemonInfo, 0, len(daemons))
 	for _, d := range daemons {
 		// Cluster-runtime session pods connect as their own ephemeral
@@ -367,7 +381,7 @@ func (a *API) HandleGetDaemons(w http.ResponseWriter, r *http.Request) {
 		// purely so the existing daemon-connection WS routing works
 		// uniformly — they're not a real desktop daemon a user should be
 		// able to pick as a "Run on" target, so exclude them here.
-		if d.Mode == "runner" {
+		if !isHostDaemon(d) {
 			continue
 		}
 		claudeCLI, apiKey := d.HostClaude()
@@ -380,12 +394,18 @@ func (a *API) HandleGetDaemons(w http.ResponseWriter, r *http.Request) {
 			Version:            d.Version,
 			SandboxAvailable:   d.SandboxAvailable(),
 			AvailableEngines:   d.AvailableEngines(),
+			MCPGateway:         d.CanMCPGateway(),
+			RestrictTools:      d.CanRestrictTools(),
+			CodexRestricted:    d.CanCodexRestricted(),
+			PluginEngines:      d.PluginEngines(),
 			ClaudeCLIAvailable: claudeCLI,
 			AnthropicKeySet:    apiKey,
 			CloneFrom:          d.CanCloneTarget(),
 
 			AllowHostCredentialClone: d.AllowsHostCredentialClone(),
 			SandboxClaudeCredential:  d.SandboxClaudeCredential(),
+			// The same as initial_state's (usage_limits.go); omitted when none reported.
+			UsageLimits: nilIfEmpty(d.UsageLimits()),
 		})
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -441,14 +461,27 @@ type internalCredentialListResponse struct {
 // says nothing about whether credentials are stored — reporting it as a
 // definite empty answer would tell the user they have none when they may have
 // several.
+//
+// The answer can be up to a minute old: it shares the repository lister's
+// per-account cache of which kinds are held (UserRepoLister.Kinds).
 func (a *API) HandleGetMyCredentials(w http.ResponseWriter, r *http.Request) {
 	principal, ok := a.authBrowser(w, r)
 	if !ok {
 		return
 	}
 	out := protocol.MyCredentials{Engines: []string{}, GitProviders: []string{}}
-	kinds, found, ok := a.listPersonalCredentialKinds(withCoreProof(r.Context(), proofFromPrincipal(principal)), principal.Sub)
-	if !ok {
+	ctx := withCoreProof(r.Context(), proofFromPrincipal(principal))
+	var kinds []string
+	var found, known bool
+	if a.userRepos != nil {
+		// The repository lister already asks core this, at most once a
+		// minute per account; the launch sheet asks both at once.
+		kinds, known = a.userRepos.Kinds(ctx, principal.Sub)
+		found = known && len(kinds) > 0
+	} else {
+		kinds, found, known = a.listPersonalCredentialKinds(ctx, principal.Sub)
+	}
+	if !known {
 		out.Unavailable = true
 		writeJSON(w, http.StatusOK, out)
 		return
@@ -793,7 +826,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		// whose origin is on GitLab resolves to GitLab, never to a same-named
 		// GitHub guess.
 		if !strings.Contains(req.Repo, "/") && jm.GitHubOrg == "" && jm.ExplicitGitURLBase == "" && req.DaemonID != "" {
-			if d := a.hub.GetDaemon(req.DaemonID); d != nil {
+			if d := a.hub.GetHostDaemon(req.DaemonID); d != nil {
 				if o, ok := d.RepoOrigin(req.Repo); ok && (req.Provider == "" || req.Provider == o.Provider) {
 					req.Repo, req.Provider = o.FullName, o.Provider
 				}
@@ -974,7 +1007,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	daemon := a.hub.GetDaemon(req.DaemonID)
+	daemon := a.hub.GetHostDaemon(req.DaemonID)
 	if daemon == nil {
 		writeError(w, http.StatusNotFound, "daemon not found or not connected")
 		return
@@ -1309,6 +1342,9 @@ func mintSpawnSessionTokenAs(ctx context.Context, pool *pgxpool.Pool, sessionID 
 // sessionTokenEnv is the env var the `blerg-runner` CLI reads its per-session token from.
 const sessionTokenEnv = "BLERG_RUNNER_SESSION_TOKEN" //nolint:gosec // the name of an environment variable, not a credential
 
+// runtimeTokenEnv carries a cluster pod's per-launch runtime token to its daemon.
+const runtimeTokenEnv = "BLERG_RUNNER_DAEMON_TOKEN" //nolint:gosec // the name of an environment variable, not a credential
+
 // withClusterSessionToken returns env plus a freshly minted per-session messaging token, the
 // cluster counterpart of what the daemon exports to a desktop session: the pod image's
 // `blerg-runner` CLI (update, ask, note, publish) authenticates with it, scoped to this one
@@ -1341,6 +1377,21 @@ func withClusterSessionToken(ctx context.Context, pool *pgxpool.Pool, sessionID 
 // session_ended that follows reads as this stop rather than as the process
 // exiting on its own.
 func (a *API) HandleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.authBrowser(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if !a.browserCanSee(r.Context(), p.Sub, id) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if err := withCancelledLimitResume(r.Context(), a.dbPool, id, func() error { a.deleteSessionUnlocked(w, r); return nil }); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "continuation is busy; retry shortly")
+	}
+}
+
+func (a *API) deleteSessionUnlocked(w http.ResponseWriter, r *http.Request) {
 	principal, ok := a.authBrowser(w, r)
 	if !ok {
 		return
@@ -1444,6 +1495,21 @@ func (a *API) HandleDeleteSession(w http.ResponseWriter, r *http.Request) {
 // next message resumes it exactly as it would after an eviction. Whatever the
 // agent was in the middle of is cut off; its conversation is not.
 func (a *API) HandlePauseSession(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.authBrowser(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if !a.browserCanSee(r.Context(), p.Sub, id) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if err := withCancelledLimitResume(r.Context(), a.dbPool, id, func() error { a.pauseSessionUnlocked(w, r); return nil }); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "continuation is busy; retry shortly")
+	}
+}
+
+func (a *API) pauseSessionUnlocked(w http.ResponseWriter, r *http.Request) {
 	principal, ok := a.authBrowser(w, r)
 	if !ok {
 		return

@@ -21,7 +21,12 @@ export const useMessageStore = create<MessageStore>(() => {
     // Zustand updater that React could re-run.
     if (useMessageStore.getState().messages.some(m => m.id === msg.message.id)) return
 
-    // Fire a toast for the newly received live message.
+    // Prepend newest-first.
+    useMessageStore.setState((state) => ({ messages: [msg.message, ...state.messages] }))
+
+    // Fire a toast for the newly received live message — unless the server marks it quiet (an ask
+    // from a session nobody attends).
+    if (msg.quiet) return
     const session = useSessionStore.getState().sessions.find(s => s.id === msg.message.session_id)
     const label = session ? sessionLabel(session) : msg.message.session_id
     useToastStore.getState().addToast({
@@ -30,9 +35,6 @@ export const useMessageStore = create<MessageStore>(() => {
       url: `/sessions/${msg.message.session_id}`,
       variant: 'message',
     })
-
-    // Prepend newest-first.
-    useMessageStore.setState((state) => ({ messages: [msg.message, ...state.messages] }))
   })
 
   onMessage<MessageAnswered>('message_answered', (msg) => {

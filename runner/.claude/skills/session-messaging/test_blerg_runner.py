@@ -41,7 +41,8 @@ class StubHandler(http.server.BaseHTTPRequestHandler):
 
         # If force_error_code is set, return that error for all requests
         if getattr(self.server, 'force_error_code', None):
-            error_body = json.dumps({"error": "forced error"}).encode()
+            error_body = json.dumps(getattr(self.server, 'force_error_body', None)
+                                    or {"error": "forced error"}).encode()
             self.send_response(self.server.force_error_code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(error_body)))
@@ -79,7 +80,8 @@ class StubHandler(http.server.BaseHTTPRequestHandler):
 
         # If force_error_code is set, return that error for all requests
         if getattr(self.server, 'force_error_code', None):
-            error_body = json.dumps({"error": "forced error"}).encode()
+            error_body = json.dumps(getattr(self.server, 'force_error_body', None)
+                                    or {"error": "forced error"}).encode()
             self.send_response(self.server.force_error_code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(error_body)))
@@ -119,7 +121,8 @@ def make_stub_server(message_id="msg-123", answer_text="yes go ahead",
 
 def run_blerg_runner(args, env_override=None, timeout=10):
     """Run the blerg-runner script with given args and optional env overrides."""
-    env = os.environ.copy()
+    # Tests must never inherit the running agent's live token or token-file path.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("BLERG_")}
     if env_override is not None:
         for k, v in env_override.items():
             if v is None:
@@ -1300,8 +1303,6 @@ class TestFetch(unittest.TestCase):
         self.assertIn("fetch", top.stdout)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class TestFilesAndUnpublish(TestFetch):
@@ -1605,3 +1606,266 @@ class TestReview(unittest.TestCase):
             for needle in ("apply it first", "author's own wording", "each request", "the file the review was published from",
                            "Publish the file again", "review reply <id> done|declined", "review list"):
                 self.assertIn(needle, low, args)
+
+
+# ── topic ─────────────────────────────────────────────────────────────────────
+
+TOPIC_LINE = ('When you start a piece of work the user asked for that takes several steps, run '
+              '`blerg-runner topic "<short imperative title>"`; when it is finished or dropped, '
+              '`blerg-runner topic --done "<one-line outcome>"`, and when the work landed commits, pass them: '
+              '`--commit <sha>`. One topic at a time; not for a quick question, '
+              'and not from a subagent.')
+
+
+class TopicStubHandler(http.server.BaseHTTPRequestHandler):
+    """Stands in for POST /api/sessions/{id}/topics: records the body, answers as scripted."""
+
+    def log_message(self, format, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b""
+        self.server.recorded.append({
+            "path": self.path,
+            "auth": self.headers.get("Authorization", ""),
+            "body": json.loads(body) if body else {},
+        })
+        data = self.server.reply_body
+        self.send_response(self.server.reply_status)
+        self.send_header("Content-Type", self.server.reply_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def make_topic_server(status=201, reply=None, ctype="application/json", raw=None):
+    server = http.server.HTTPServer(("127.0.0.1", 0), TopicStubHandler)
+    server.recorded = []
+    server.reply_status = status
+    server.reply_type = ctype
+    server.reply_body = raw if raw is not None else json.dumps(reply or {}).encode()
+    return server
+
+
+class TestTopic(unittest.TestCase):
+    def _run(self, args, server):
+        env = {
+            "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}",
+            "BLERG_RUNNER_SESSION_ID": "sess-top",
+            "BLERG_RUNNER_SESSION_TOKEN": "sess-tok",
+            "BLERG_RUNNER_DAEMON_TOKEN": None,
+            "BLERG_RUNNER_BOARD_TOKEN": None,
+        }
+        t = threading.Thread(target=server.handle_request)
+        t.start()
+        result = run_blerg_runner(["topic"] + args, env_override=env)
+        if t.is_alive():
+            # The CLI refused before sending anything: unblock the stub.
+            try:
+                socket.create_connection(server.server_address, timeout=2).close()
+            except OSError:
+                pass
+        t.join(timeout=5)
+        server.server_close()
+        return result
+
+    def test_start_posts_the_title_and_says_so(self):
+        server = make_topic_server(reply={"id": "tp_1", "title": "Build the History tab", "action": "start", "closed": None})
+        result = self._run(["Build the History tab"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "Topic started: Build the History tab")
+        req = server.recorded[0]
+        self.assertEqual(req["path"], "/api/sessions/sess-top/topics")
+        self.assertEqual(req["auth"], "Bearer sess-tok")
+        self.assertEqual(req["body"], {"action": "start", "title": "Build the History tab"})
+
+    def test_a_start_over_an_open_topic_names_the_one_it_closed(self):
+        server = make_topic_server(reply={"id": "tp_2", "title": "Build x", "action": "start",
+                                          "closed": {"id": "tp_1", "title": "Fix y"}})
+        result = self._run(["Build x"], server)
+        self.assertEqual(result.stdout.strip(), "Topic started: Build x (closed: Fix y)")
+
+    def test_done_with_an_outcome(self):
+        server = make_topic_server(reply={"id": "tp_1", "title": "Build x", "action": "done", "outcome": "Shipped on main"})
+        result = self._run(["--done", "Shipped on main"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["body"], {"action": "done", "outcome": "Shipped on main"})
+        self.assertEqual(result.stdout.strip(), "Topic done: Build x (Shipped on main)")
+
+    def test_done_without_an_outcome(self):
+        server = make_topic_server(reply={"id": "tp_1", "title": "Build x", "action": "done"})
+        result = self._run(["--done"], server)
+        self.assertEqual(server.recorded[0]["body"], {"action": "done", "outcome": ""})
+        self.assertEqual(result.stdout.strip(), "Topic done: Build x")
+
+    def test_done_with_commits_sends_them_in_order(self):
+        server = make_topic_server(reply={"id": "tp_1", "title": "Build x", "action": "done", "outcome": "Shipped",
+                                          "commits": [{"sha": "1a2b3c4"}, {"sha": "9f8e7d6"}]})
+        result = self._run(["--done", "Shipped", "--commit", "1a2b3c4", "--commit", "9f8e7d6"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["body"], {"action": "done", "outcome": "Shipped",
+                                                      "commits": [{"sha": "1a2b3c4"}, {"sha": "9f8e7d6"}]})
+        self.assertEqual(result.stdout.strip(), "Topic done: Build x (Shipped) · 2 commits")
+
+    def test_commits_given_as_one_comma_separated_list(self):
+        server = make_topic_server(reply={"id": "tp_1", "title": "Build x", "action": "done",
+                                          "commits": [{"sha": "1a2b3c4"}]})
+        sha40 = "0123456789abcdef0123456789abcdef01234567"
+        result = self._run(["--done", "--commit", f"1a2b3c4, {sha40}", "--commit", "ABCDEF0"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["body"]["commits"], [{"sha": "1a2b3c4"}, {"sha": sha40}, {"sha": "ABCDEF0"}])
+        self.assertEqual(server.recorded[0]["body"]["outcome"], "")
+        self.assertEqual(result.stdout.strip(), "Topic done: Build x · 1 commit")
+
+    def test_a_bad_sha_is_refused_before_sending(self):
+        for bad in ("1a2b3c", "xyz1234", "1a2b3c4d" * 6, "1a2b3c4,g123456", " , "):
+            server = make_topic_server()
+            result = self._run(["--done", "--commit", bad], server)
+            self.assertNotEqual(result.returncode, 0, bad)
+            self.assertIn("7 to 40 hex", result.stderr, bad)
+            self.assertEqual(server.recorded, [], bad)
+
+    def test_more_than_fifty_commits_are_refused(self):
+        server = make_topic_server()
+        shas = ",".join(f"{i:07x}" for i in range(51))
+        result = self._run(["--done", "--commit", shas], server)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("at most 50", result.stderr)
+        self.assertEqual(server.recorded, [])
+
+    def test_commits_with_a_start_are_refused(self):
+        server = make_topic_server()
+        result = self._run(["Build x", "--commit", "1a2b3c4"], server)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--commit goes with --done", result.stderr)
+        self.assertEqual(server.recorded, [])
+
+    def test_a_title_with_done_is_refused_before_sending(self):
+        server = make_topic_server()
+        result = self._run(["Build x", "--done"], server)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not both", result.stderr)
+        self.assertEqual(server.recorded, [])
+
+    def test_no_title_and_no_done_is_refused(self):
+        server = make_topic_server()
+        result = self._run([], server)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("give a title", result.stderr)
+        self.assertEqual(server.recorded, [])
+
+    def test_nothing_open_is_one_clear_line(self):
+        server = make_topic_server(status=409, reply={"error": "no topic is open"})
+        result = self._run(["--done"], server)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr.strip(), "blerg-runner topic: no topic is open (HTTP 409)")
+
+    def test_an_older_server_says_so(self):
+        server = make_topic_server(status=200, ctype="text/html", raw=b"<!doctype html><title>app</title>")
+        result = self._run(["Build x"], server)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not know topics", result.stderr)
+
+    def test_noop_when_not_under_blerg(self):
+        env = {k: None for k in ("BLERG_RUNNER_SESSION_ID", "BLERG_RUNNER_SERVER_HTTP",
+                                  "BLERG_RUNNER_SESSION_TOKEN", "BLERG_RUNNER_DAEMON_TOKEN", "BLERG_RUNNER_BOARD_TOKEN")}
+        result = run_blerg_runner(["topic", "Build x"], env_override=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("not running under blerg runner", result.stderr.lower())
+
+    def test_help_carries_the_instruction(self):
+        for args in (["topic", "--help"], ["--help"]):
+            result = run_blerg_runner(args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(" ".join(TOPIC_LINE.split()), " ".join(result.stdout.split()), args)
+
+
+class TestSessionTokenFile(unittest.TestCase):
+    """A token the server re-issued (the daemon writes it to the session's token file) is used
+    before BLERG_RUNNER_SESSION_TOKEN, which may be a revoked one the session started with."""
+
+    SID = "0f0e0d0c-0b0a-4908-8706-050403020100"
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _env(self, port, **extra):
+        # A clean environment: nothing from the shell running the tests leaks in.
+        env = {k: None for k in os.environ if k.startswith("BLERG_")}
+        env.update({
+            "HOME": self.tmp.name,
+            "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{port}",
+            "BLERG_RUNNER_SESSION_ID": self.SID,
+        })
+        env.update(extra)
+        return env
+
+    def _write(self, state_dir, token):
+        d = os.path.join(state_dir, "session-tokens")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, self.SID), "w") as f:
+            f.write(token + "\n")
+
+    def _update(self, env, server):
+        # A daemon thread: a CLI that sends nothing must fail the test, not hang it.
+        t = threading.Thread(target=server.handle_request, daemon=True)
+        t.start()
+        result = run_blerg_runner(["update", "hi"], env_override=env)
+        t.join(timeout=5)
+        server.server_close()
+        return result
+
+    def test_file_in_state_dir_wins_over_env(self):
+        server = make_stub_server()
+        state = os.path.join(self.tmp.name, "state")
+        self._write(state, "file-token")
+        env = self._env(server.server_address[1], BLERG_RUNNER_DAEMON_STATE_DIR=state,
+                        BLERG_RUNNER_SESSION_TOKEN="env-token")
+        result = self._update(env, server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["auth"], "Bearer file-token")
+
+    def test_default_state_dir_is_under_home(self):
+        server = make_stub_server()
+        self._write(os.path.join(self.tmp.name, ".blerg-runner-daemon"), "home-token")
+        env = self._env(server.server_address[1], BLERG_RUNNER_SESSION_TOKEN="env-token")
+        result = self._update(env, server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["auth"], "Bearer home-token")
+
+    def test_file_alone_is_enough(self):
+        server = make_stub_server()
+        self._write(os.path.join(self.tmp.name, ".blerg-runner-daemon"), "home-token")
+        result = self._update(self._env(server.server_address[1]), server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["auth"], "Bearer home-token")
+
+    def test_env_token_without_a_file(self):
+        server = make_stub_server()
+        env = self._env(server.server_address[1], BLERG_RUNNER_SESSION_TOKEN="env-token")
+        result = self._update(env, server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["auth"], "Bearer env-token")
+
+    def test_revoked_token_is_named_without_the_token(self):
+        server = make_stub_server(force_error_code=401)
+        server.force_error_body = {"error": "session token revoked or expired", "code": "session_token_revoked"}
+        env = self._env(server.server_address[1], BLERG_RUNNER_SESSION_TOKEN="env-secret-token")
+        result = self._update(env, server)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("token revoked or expired — restart the session or wait for a refreshed token", result.stderr)
+        self.assertNotIn("env-secret-token", result.stderr + result.stdout)
+
+    def test_plain_401_is_not_called_revoked(self):
+        server = make_stub_server(force_error_code=401)
+        env = self._env(server.server_address[1], BLERG_RUNNER_SESSION_TOKEN="env-token")
+        result = self._update(env, server)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("revoked", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

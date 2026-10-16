@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import ChatView from './ChatView'
+import { QUEUED_IDLE_MS, QUEUED_LINGER_MS } from '../hooks/useSession'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
 import { createFakeTransport } from '../test/fakeTransport'
 import { SESSION, ev as mk, meta, resetChatState, seed } from '../test/chat'
@@ -121,11 +122,19 @@ describe('ChatView queued messages and Esc', () => {
   })
 
   it('does not promise steering on an engine that holds the message until the turn ends', async () => {
-    mount(createFakeTransport(), { ...base, engine: 'codex' })
+    mount(createFakeTransport(), { ...base, engine: 'hermes' })
     expect(screen.getByTestId('composer-hint').textContent).toMatch(/Enter queues/)
     const box = type('later')
     await enter(box)
     expect(screen.getByTestId('queued-message').textContent).not.toMatch(/next step/)
+  })
+
+  it('offers mid-turn steering for Codex sessions', async () => {
+    mount(createFakeTransport(), { ...base, engine: 'codex' })
+    expect(screen.getByTestId('composer-hint').textContent).toMatch(/Enter sends/)
+    const box = type('change direction')
+    await enter(box)
+    expect(screen.getByTestId('queued-message').textContent).toMatch(/next step/)
   })
 
   it('puts Attach beside Send, after the text box', () => {
@@ -300,5 +309,122 @@ describe('harness text in the user role', () => {
     expect(screen.queryByText(/Background command finished/)).toBeNull()
     expect(screen.queryByText(/SYSTEM NOTIFICATION/)).toBeNull()
     expect(screen.getByText('a real follow-up')).toBeInTheDocument()
+  })
+})
+
+describe('queued messages matched by their client id', () => {
+  beforeEach(() => {
+    resetChatState()
+    seed(ev(1, 'user_message', { text: 'start', source: 'chat' }))
+  })
+
+  it('sends each message with a client id of its own', async () => {
+    const { t } = mount()
+    const box = type('one')
+    await enter(box)
+    type('two')
+    await enter(box)
+    const ids = t.sentWith.map(s => s.opts?.clientId)
+    expect(ids[0]).toBeTruthy()
+    expect(ids[1]).toBeTruthy()
+    expect(ids[0]).not.toBe(ids[1])
+  })
+
+  it('clears the bubble whose id the event echoes, whatever text was recorded', async () => {
+    const { t } = mount()
+    const box = type('/review the plan')
+    await enter(box)
+    type('and then the tests')
+    await enter(box)
+    const [first, second] = t.sentWith.map(s => s.opts!.clientId!)
+    // The second is recorded first, under another text: only its own bubble goes.
+    act(() => t.emit(ev(10, 'user_message', { text: 'something else entirely', source: 'chat', client_id: second })))
+    const left = screen.getAllByTestId('queued-message')
+    expect(left).toHaveLength(1)
+    expect(left[0].textContent).toContain('/review the plan')
+    act(() => t.emit(ev(11, 'user_message', { text: 'the skill body', source: 'chat', client_id: first })))
+    expect(screen.queryByTestId('queued-message')).toBeNull()
+  })
+
+  it('a dropped message clears its bubble and shows an error row', async () => {
+    const { t } = mount()
+    const box = type('one more thing')
+    await enter(box)
+    const id = t.sentWith[0].opts!.clientId!
+    act(() => t.emit(ev(10, 'error', { message: 'message queue full — dropped', retryable: true, client_id: id })))
+    expect(screen.queryByTestId('queued-message')).toBeNull()
+    expect(screen.getByTestId('message-dropped').textContent).toMatch(/not delivered.*queue full/)
+    // The turn that was running goes on.
+    expect(screen.getByTestId('composer-hint')).toBeInTheDocument()
+  })
+
+  it('a message never recorded under its text no longer holds up the ones after it (an older daemon)', async () => {
+    const { t } = mount()
+    const box = type('/review the plan')
+    await enter(box)
+    type('next')
+    await enter(box)
+    act(() => t.emit(ev(10, 'user_message', { text: 'the whole SKILL.md body', source: 'chat' })))
+    act(() => t.emit(ev(11, 'user_message', { text: 'next', source: 'chat' })))
+    const left = screen.getAllByTestId('queued-message')
+    expect(left).toHaveLength(1)
+    expect(left[0].textContent).toContain('/review the plan')
+  })
+})
+
+describe('a queued message nothing records', () => {
+  beforeEach(() => {
+    resetChatState()
+    seed(ev(1, 'user_message', { text: 'start', source: 'chat' }))
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  })
+  afterEach(() => { vi.useRealTimers() })
+
+  const turnDone = (seq: number) => ev(seq, 'turn_done', {
+    stop_reason: 'end_turn', model: 'm', usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0 },
+  })
+
+  it('gives up once the session has sat idle after a later turn end, says so, then goes', async () => {
+    const { t, rerender } = mount()
+    await enter(type('lost on the way'))
+    act(() => t.emit(turnDone(5)))
+    rerender({ ...base, status: 'idle' })
+    act(() => { vi.advanceTimersByTime(QUEUED_IDLE_MS - 1) })
+    expect(screen.getByTestId('queued-message').textContent).not.toMatch(/may not have been delivered/i)
+    act(() => { vi.advanceTimersByTime(1) })
+    expect(screen.getByTestId('queued-message').textContent).toMatch(/may not have been delivered/i)
+    act(() => { vi.advanceTimersByTime(QUEUED_LINGER_MS) })
+    expect(screen.queryByTestId('queued-message')).toBeNull()
+  })
+
+  it('does not give up while the session is still running, or once its event arrives', async () => {
+    const { t, rerender } = mount()
+    await enter(type('picked up later'))
+    act(() => t.emit(turnDone(5)))
+    act(() => { vi.advanceTimersByTime(QUEUED_IDLE_MS * 2) })
+    expect(screen.getByTestId('queued-message').textContent).not.toMatch(/may not have been delivered/i)
+    rerender({ ...base, status: 'idle' })
+    act(() => t.emit(ev(6, 'user_message', { text: 'picked up later', source: 'chat', client_id: t.sentWith[0].opts!.clientId })))
+    act(() => { vi.advanceTimersByTime(QUEUED_IDLE_MS * 2) })
+    expect(screen.queryByTestId('queued-message')).toBeNull()
+  })
+
+  it('gives up when the send went unanswered', async () => {
+    mount(createFakeTransport(), { ...base, status: 'idle' })
+    await enter(type('anyone there?'))
+    act(() => { vi.advanceTimersByTime(20_000) })
+    expect(screen.getByTestId('send-notice')).toBeInTheDocument()
+    expect(screen.getByTestId('queued-message').textContent).toMatch(/may not have been delivered/i)
+    act(() => { vi.advanceTimersByTime(QUEUED_LINGER_MS) })
+    expect(screen.queryByTestId('queued-message')).toBeNull()
+  })
+
+  it('a message once recorded does not come back when the transcript is loaded again', async () => {
+    const { t } = mount()
+    await enter(type('recorded'))
+    act(() => t.emit(ev(7, 'user_message', { text: 'recorded', source: 'chat', client_id: t.sentWith[0].opts!.clientId })))
+    expect(screen.queryByTestId('queued-message')).toBeNull()
+    act(() => useTranscriptStore.getState().resetEvents(SESSION))
+    expect(screen.queryByTestId('queued-message')).toBeNull()
   })
 })

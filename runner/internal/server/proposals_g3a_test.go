@@ -148,10 +148,10 @@ func TestProposalCountIsCheapAndExact(t *testing.T) {
 	fx.insert("send", `{}`)
 	fx.decide(a.ID, "done", time.Minute)
 	rec := fx.req("GET", "/api/proposals/count", fx.human(), "")
-	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"pending_count":1}` {
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"pending_count":1,"tool_changes_pending":0}` {
 		t.Fatalf("count = %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := fx.req("GET", "/api/proposals/count", fx.otherHuman(), ""); strings.TrimSpace(rec.Body.String()) != `{"pending_count":0}` {
+	if rec := fx.req("GET", "/api/proposals/count", fx.otherHuman(), ""); strings.TrimSpace(rec.Body.String()) != `{"pending_count":0,"tool_changes_pending":0}` {
 		t.Errorf("another account's count = %s", rec.Body.String())
 	}
 }

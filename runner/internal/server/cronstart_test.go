@@ -210,7 +210,7 @@ func TestCronStartProblem(t *testing.T) {
 	for name, mut := range map[string]func(*RunnerStartRequest){
 		"bare host":         func(r *RunnerStartRequest) { r.Runtime = "daemon" },
 		"empty runtime":     func(r *RunnerStartRequest) { r.Runtime = "" },
-		"other engine":      func(r *RunnerStartRequest) { r.Engine = "codex" },
+		"other engine":      func(r *RunnerStartRequest) { r.Engine = "hermes" },
 		"default engine":    func(r *RunnerStartRequest) { r.Engine = "" },
 		"with a repo":       func(r *RunnerStartRequest) { r.NoRepo = false },
 		"interactive":       func(r *RunnerStartRequest) { r.AutoStop = false },

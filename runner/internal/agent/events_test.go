@@ -57,3 +57,23 @@ func TestNewEventMintsUUIDAndTimestamp(t *testing.T) {
 		t.Fatal("UUIDs must be unique")
 	}
 }
+
+// Typing deltas and a thinking block's start and end are sent live only; everything else persists.
+func TestIsTransient(t *testing.T) {
+	cases := []struct {
+		ev   Event
+		want bool
+	}{
+		{Event{Kind: "assistant_text", Payload: AssistantTextPayload{Text: "a"}}, true},
+		{Event{Kind: "assistant_text", Payload: AssistantTextPayload{Text: "a", Done: true}}, false},
+		{Event{Kind: KindThinkingStarted, Payload: ThinkingPayload{}}, true},
+		{Event{Kind: KindThinkingDone, Payload: ThinkingPayload{ParentCallID: "toolu_1"}}, true},
+		{Event{Kind: "assistant_thinking", Payload: AssistantThinkingPayload{Text: "t"}}, false},
+		{Event{Kind: "error", Payload: ErrorPayload{Message: "m", Retryable: true, Code: ErrorCodeAPIRetry, Attempt: 2}}, false},
+	}
+	for _, c := range cases {
+		if got := IsTransient(c.ev); got != c.want {
+			t.Errorf("IsTransient(%s %+v) = %v, want %v", c.ev.Kind, c.ev.Payload, got, c.want)
+		}
+	}
+}

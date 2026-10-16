@@ -33,6 +33,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -85,6 +86,28 @@ type pluginWorkshop struct {
 // honoured only with the claude CLI on the daemon's PATH (the workshop installs
 // with it) and a state dir to keep the workshop in.
 func pluginsCapability() bool { return claudeOnPath() && DaemonStateDir() != "" }
+
+// pluginEnginesCapability names native installers this daemon can actually launch. The
+// legacy boolean stays Claude-only, so an older server cannot promise Codex plugin support.
+func pluginEnginesCapability() []string {
+	if DaemonStateDir() == "" {
+		return nil
+	}
+	var out []string
+	if claudeOnPath() {
+		out = append(out, "claude")
+	}
+	for _, id := range engineOrder {
+		spec := engineRegistry[id]
+		if spec.PreparePlugins == nil {
+			continue
+		}
+		if _, err := exec.LookPath(resolveEngineBinary(id, false)); err == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
 
 // NewPluginWorkshop builds the workshop under stateDir ("" → nil), sweeping
 // the snapshots of sessions a previous daemon process left behind. The

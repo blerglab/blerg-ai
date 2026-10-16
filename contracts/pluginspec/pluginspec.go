@@ -15,8 +15,11 @@ import (
 	"strings"
 )
 
-// EngineClaude is the only engine that can register plugins today.
-const EngineClaude = "claude"
+// Supported native plugin engines.
+const (
+	EngineClaude = "claude"
+	EngineCodex  = "codex"
+)
 
 // MaxEntries is the most plugins one account may register per engine.
 const MaxEntries = 20
@@ -59,6 +62,12 @@ func ValidMarketplaceSource(s string) bool {
 	}
 	return repo != "." && repo != ".."
 }
+
+// SupportsEngine reports whether a native plugin installer is registered for this engine.
+func SupportsEngine(engine string) bool { return engine == EngineClaude || engine == EngineCodex }
+
+// ValidateCodex uses the same deliberately narrow marketplace/name grammar as Claude.
+func ValidateCodex(e Entry) error { return ValidateClaude(e) }
 
 // ValidateClaude checks an entry's shape for the claude engine.
 func ValidateClaude(e Entry) error {

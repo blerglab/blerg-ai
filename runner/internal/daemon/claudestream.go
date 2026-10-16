@@ -41,6 +41,9 @@ import (
 var (
 	// ccIdleShutdown closes the process of a session that has been idle this long (it restarts with --resume).
 	ccIdleShutdown = 10 * time.Minute
+	// ccIdleMaxDeferrals is how many times in a row the idle shutdown waits another ccIdleShutdown because
+	// background tasks are running (6: an hour), so a task that never reports its end cannot keep a process.
+	ccIdleMaxDeferrals = 6
 	// ccInterruptKillAfter is how long an interrupt may go unacknowledged before the process is killed.
 	ccInterruptKillAfter = 5 * time.Second
 	// ccInterruptResultAfter is how long an ACKNOWLEDGED interrupt may take to end the turn (cutting a tool
@@ -67,8 +70,8 @@ const (
 func ccSteeringEnabled() bool { return os.Getenv("BLERG_CLAUDE_STEERING") != "0" }
 
 type steerQueued struct {
-	text, source string
-	retried      bool // already failed to reach a process once
+	agent.Input
+	retried bool // already failed to reach a process once
 	// adopt: this is the first message after an adoption, so the line written to the engine
 	// carries the adoption note (claudeadopt.go). It stays set across a retry.
 	adopt bool
@@ -124,7 +127,11 @@ type steerState struct {
 	killTimer      *time.Timer
 	settleTimer    *time.Timer
 	idleTimer      *time.Timer
-	wake           chan struct{}
+	// idleDeferrals counts the idle shutdowns put off in a row for background tasks (reset when the
+	// timer is armed afresh); deferLogged says the deferral was logged once for this session.
+	idleDeferrals int
+	deferLogged   bool
+	wake          chan struct{}
 }
 
 func (d *claudeCodeDriver) steering() bool {
@@ -153,7 +160,7 @@ func (d *claudeCodeDriver) Run(ctx context.Context) {
 		d.rearmAdoptNoteLocked(pending)
 		d.sm.Unlock()
 		for _, m := range pending {
-			d.enqueueLegacy(m.text, m.source)
+			d.enqueueLegacy(m.Input)
 		}
 		d.runLegacy(ctx)
 	}
@@ -161,21 +168,38 @@ func (d *claudeCodeDriver) Run(ctx context.Context) {
 
 // Enqueue accepts a message. It never blocks.
 func (d *claudeCodeDriver) Enqueue(text, source string) {
-	if source == "" {
-		source = "chat"
+	d.EnqueueInput(agent.Input{Text: text, Source: source})
+}
+
+// EnqueueInput accepts a message (agent.Input). It never blocks.
+func (d *claudeCodeDriver) EnqueueInput(in agent.Input) {
+	if in.Source == "" {
+		in.Source = "chat"
 	}
+	background := d.backgroundRunning()
+	d.mu.Lock()
+	legacyBusy := d.cmd != nil
+	d.mu.Unlock()
 	d.sm.Lock()
+	if in.ExpectedTurnID != "" && (in.ExpectedTurnID != d.usageTurnID || legacyBusy || d.steer.running || len(d.steer.sq) > 0 || len(d.steer.awaiting) > 0 || len(d.queue) > 0 || background > 0) {
+		d.sm.Unlock()
+		d.emit("error", staleLimitResumeError())
+		return
+	}
+	if in.Source != "system" {
+		d.heardFromPerson = true
+	}
 	if d.steer.legacy {
 		d.sm.Unlock()
-		d.enqueueLegacy(text, source)
+		d.enqueueLegacy(in)
 		return
 	}
 	if len(d.steer.sq)+len(d.steer.awaiting) >= ccMaxPending {
 		d.sm.Unlock()
-		d.emit("error", agent.ErrorPayload{Message: "message queue full — dropped", Retryable: true})
+		d.emit("error", queueFullError(in))
 		return
 	}
-	d.steer.sq = append(d.steer.sq, steerQueued{text: text, source: source})
+	d.steer.sq = append(d.steer.sq, steerQueued{Input: in})
 	d.sm.Unlock()
 	d.signal()
 }
@@ -251,6 +275,7 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 		return
 	}
 	uuid := ccUUID()
+	background := d.backgroundRunning()
 	d.sm.Lock()
 	if d.steer.proc != p || p.dying || p.stdinClosed || len(d.steer.sq) == 0 {
 		d.sm.Unlock()
@@ -260,11 +285,17 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 		d.steer.sq[0].adopt, d.adoptPending = true, false
 	}
 	m := d.steer.sq[0]
+	if m.ExpectedTurnID != "" && (m.ExpectedTurnID != d.usageTurnID || d.steer.running || len(d.steer.awaiting) > 0 || len(d.steer.sq) > 1 || background > 0) {
+		d.steer.sq = d.steer.sq[1:]
+		d.sm.Unlock()
+		d.emit("error", staleLimitResumeError())
+		return
+	}
 	// engineText is computed at every write, not once: after a refused resume the retry must
 	// carry the "conversation could not be restored" note instead.
 	line, err := json.Marshal(map[string]any{
 		"type": "user", "uuid": uuid,
-		"message": map[string]any{"role": "user", "content": d.engineText(m.text, m.adopt)},
+		"message": map[string]any{"role": "user", "content": d.engineText(m.Text, m.adopt)},
 	})
 	if err != nil {
 		d.steer.sq = d.steer.sq[1:]
@@ -290,7 +321,7 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 
 // failMessage makes sure a message that could not be delivered still shows in the transcript, then says why.
 func (d *claudeCodeDriver) failMessage(m steerQueued, why string) {
-	d.emit("user_message", agent.UserMessagePayload{Text: m.text, Source: m.source})
+	d.emitTurnMessage(m.Payload())
 	d.emit("error", agent.ErrorPayload{Message: why, Retryable: true})
 }
 
@@ -349,6 +380,7 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 
 	pidFile := fmt.Sprintf("%s.%s.%d", sandboxTurnPIDFile, tag, gen)
 	opts = append(opts, withPluginDirs(d.pluginDirs))
+	opts = append(opts, withCLIFlags(d.cliFlags(ctx))...)
 	cmd := d.prefix.commandPID(ctx, d.workDir, "claude", pidFile, ccSessionArgs(model, effort, resume, opts...)...)
 	cmd.Env = d.env
 	stdin, err := cmd.StdinPipe()
@@ -453,6 +485,9 @@ func (d *claudeCodeDriver) killProc(p *ccProc) {
 // ── events ───────────────────────────────────────────────────────────────────
 
 func (d *claudeCodeDriver) onLine(p *ccProc, line []byte) {
+	if ccSkipStreamLine(line) {
+		return
+	}
 	d.sm.Lock()
 	gone := p.dying || p.killedByDriver
 	d.sm.Unlock()
@@ -472,10 +507,18 @@ func (d *claudeCodeDriver) onLine(p *ccProc, line []byte) {
 	case "system":
 		if ev.Subtype == "init" {
 			d.onInit(p, &ev, line)
+		} else {
+			d.onSystem(&ev, line)
 		}
 	case "assistant":
 		d.markRunning("agent turn")
 		d.emitAssistantBlocks(&ev)
+	case "stream_event":
+		// A think that opens a turn the CLI began on its own shows the session working at once,
+		// not only when its assistant line arrives (as the think ends).
+		if d.onStreamEvent(&ev) == agent.KindThinkingStarted {
+			d.markRunning("agent turn")
+		}
 	case "user":
 		d.onUser(&ev)
 	case "result":
@@ -504,6 +547,7 @@ func (d *claudeCodeDriver) onInit(p *ccProc, ev *ccLine, line []byte) {
 	d.sm.Lock()
 	p.sawInit, p.inTurn = true, true
 	d.steer.turnSeq++ // a turn is starting: timers armed for an earlier one are stale
+	d.apiErr = ""
 	d.stopTimerLocked(&d.steer.settleTimer)
 	d.sm.Unlock()
 	d.setCCSessionID(ev.SessionID)
@@ -514,7 +558,21 @@ func (d *claudeCodeDriver) onInit(p *ccProc, ev *ccLine, line []byte) {
 }
 
 func (d *claudeCodeDriver) onUser(ev *ccLine) {
+	// A subagent's user lines (its tool results, its prompt) are never the person's message.
+	if ev.ParentToolUseID != "" {
+		d.emitToolResults(ev)
+		return
+	}
+	d.noticeTaskNotifications(ev)
 	if !ev.IsReplay {
+		if s, ok := ev.text(); ok {
+			if out, ok := localCommandOutput(s); ok {
+				if out != "" {
+					d.emit("user_message", agent.UserMessagePayload{Text: out, Source: "system"})
+				}
+				return
+			}
+		}
 		d.emitToolResults(ev)
 		return
 	}
@@ -545,19 +603,48 @@ func (d *claudeCodeDriver) onUser(ev *ccLine) {
 	}
 	d.sm.Unlock()
 	d.markRunning("turn")
+	if out, ok := localCommandOutput(echo); isString && ok {
+		// A slash command's output (/context, /cost): shown as a system card, never as the person.
+		if matched {
+			d.emitTurnMessage(m.Payload())
+		}
+		if out != "" {
+			d.emit("user_message", agent.UserMessagePayload{Text: out, Source: "system"})
+		}
+		return
+	}
 	switch {
 	case matched:
-		d.emit("user_message", agent.UserMessagePayload{Text: m.text, Source: m.source})
+		d.emitTurnMessage(m.Payload())
 	case lateSettled || !isString || strings.HasPrefix(strings.TrimSpace(echo), "<local-command"):
-		// already shown, or the CLI's own rendering of a command's output
+		// already shown, or the CLI's own rendering of a command (its caveat)
 	case harnessInjected(echo):
 		// The CLI's own user-role messages (a subagent's completion, a system reminder): kept
 		// in the transcript as source "system", which the chat does not show as the person.
 		d.emit("user_message", agent.UserMessagePayload{Text: echo, Source: "system"})
 	default:
 		// A message nobody here wrote (a hook, a resumed history): show it as the user's.
-		d.emit("user_message", agent.UserMessagePayload{Text: echo, Source: "chat"})
+		d.emitTurnMessage(agent.UserMessagePayload{Text: echo, Source: "chat", TurnID: ev.UUID})
 	}
+}
+
+// localCommandOutput is the output of a slash command the CLI ran itself, from the user line it
+// writes for it (`<local-command-stdout>…</local-command-stdout>`, or stderr), with the tags taken
+// off; false for any other text.
+func localCommandOutput(text string) (string, bool) {
+	s := strings.TrimSpace(text)
+	for _, tag := range []string{"local-command-stdout", "local-command-stderr"} {
+		open, closing := "<"+tag+">", "</"+tag+">"
+		if !strings.HasPrefix(s, open) {
+			continue
+		}
+		s = strings.TrimPrefix(s, open)
+		if i := strings.LastIndex(s, closing); i >= 0 {
+			s = s[:i]
+		}
+		return strings.TrimSpace(s), true
+	}
+	return "", false
 }
 
 // harnessInjected reports whether a user-role message is one Claude Code wrote itself: a
@@ -603,15 +690,20 @@ func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
 
 	d.setCCSessionID(ev.SessionID)
 	stop := "end_turn"
-	if interrupted {
+	switch {
+	case interrupted:
 		stop = "interrupted"
-	} else if ev.IsError {
-		// A TURN outcome (the model could not finish), not a driver failure: the session takes the next message.
-		msg := firstN(ev.Result, 2000)
-		if msg == "" {
-			msg = "claude-code turn failed" + turnFailureDetail(noise)
+		d.takeAPIError()
+	case ev.IsError:
+		// A TURN outcome (the model could not finish), not a driver failure: the session takes the next
+		// message. Its reason is the result text or its first listed error; an API error the turn already
+		// reported is not repeated.
+		stop = "error"
+		if e, ok := d.resultError(ev, noise); ok {
+			d.emit("error", e)
 		}
-		d.emit("error", agent.ErrorPayload{Message: msg, Retryable: true})
+	default:
+		d.takeAPIError()
 	}
 	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: p.model, Usage: ev.ccUsage()})
 	if !settle {
@@ -656,7 +748,7 @@ func (d *claudeCodeDriver) settleFired(gen, turn int) {
 	closeNow := d.idleLocked(p)
 	d.sm.Unlock()
 	for _, a := range left {
-		d.emit("user_message", agent.UserMessagePayload{Text: a.text, Source: a.source})
+		d.emitTurnMessage(a.Payload())
 	}
 	d.syncStatus("turn_done")
 	if closeNow {
@@ -767,20 +859,52 @@ func (d *claudeCodeDriver) idleLocked(p *ccProc) bool {
 		return true
 	}
 	d.stopIdleTimerLocked()
+	d.steer.idleDeferrals = 0
 	gen := p.gen
 	d.steer.idleTimer = time.AfterFunc(ccIdleShutdown, func() { d.idleFired(gen) })
 	return false
 }
 
+// idleFired closes an idle process, unless it is running background tasks: closing it would end them, so
+// the shutdown waits another ccIdleShutdown, at most ccIdleMaxDeferrals times in a row. Past that the
+// process is closed as usual and its tasks are reported stopped (procExited).
 func (d *claudeCodeDriver) idleFired(gen int) {
+	running := d.backgroundRunning() // subMu before sm: never both at once
 	d.sm.Lock()
 	p := d.steer.proc
 	if d.steer.closed || p == nil || p.gen != gen || !d.isIdleLocked(p) {
 		d.sm.Unlock()
 		return
 	}
+	if running > 0 && d.steer.idleDeferrals < ccIdleMaxDeferrals {
+		d.steer.idleDeferrals++
+		logIt := !d.steer.deferLogged
+		d.steer.deferLogged = true
+		d.steer.idleTimer = time.AfterFunc(ccIdleShutdown, func() { d.idleFired(gen) })
+		d.sm.Unlock()
+		if logIt {
+			log.Printf("claude-code: idle shutdown deferred: %d background tasks running", running)
+		}
+		return
+	}
 	d.sm.Unlock()
 	d.closeStdin(p)
+}
+
+// backgroundIdle is called when the last background task has ended: an idle session gets the ordinary
+// idle shutdown again, counted from now.
+func (d *claudeCodeDriver) backgroundIdle() {
+	d.sm.Lock()
+	p := d.steer.proc
+	if d.steer.legacy || d.steer.closed || p == nil {
+		d.sm.Unlock()
+		return
+	}
+	closeNow := d.idleLocked(p)
+	d.sm.Unlock()
+	if closeNow {
+		d.closeStdin(p)
+	}
 }
 
 // closeStdin shuts an idle process down cleanly; that exit is not a crash. A process that does not leave
@@ -849,6 +973,8 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 	var retry, fail []awaitMsg
 	switch {
 	case shuttingDown || killed || probe:
+	case badResume && d.requireNativeResume:
+		fail = left
 	case intentional: // closed with something still unconsumed (nothing was lost): deliver it again
 		retry = left
 	default:
@@ -879,8 +1005,12 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 	if p.cmd != nil && p.cmd.Process != nil && !d.prefix.enabled() {
 		d.reportEngine(p.cmd.Process.Pid, false)
 	}
-	if badResume {
+	if badResume && !d.requireNativeResume {
 		d.clearCCSessionID() // that conversation is gone: the retry starts a fresh one
+	}
+	if !shuttingDown {
+		// The tasks it left running in the background ended with it (the session ending says so itself).
+		d.endBackgroundTasks()
 	}
 	if shuttingDown || killed {
 		d.prefix.clearPID(p.pidFile)
@@ -891,10 +1021,10 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 		// This CLI cannot stream: the session continues on the per-turn engine.
 		log.Printf("claude-code: the CLI does not support streaming input; using one process per turn")
 		for _, a := range left {
-			d.enqueueLegacy(a.text, a.source)
+			d.enqueueLegacy(a.Input)
 		}
 		for _, m := range pending {
-			d.enqueueLegacy(m.text, m.source)
+			d.enqueueLegacy(m.Input)
 		}
 	case intentional:
 	default:
@@ -906,6 +1036,9 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 			msg += turnFailureDetail(noise)
 			if badResume {
 				msg = "the earlier Claude conversation could not be resumed — continuing in a new one" + turnFailureDetail(noise)
+				if d.requireNativeResume {
+					msg = "The retained native Claude conversation could not be resumed. A new conversation was not started."
+				}
 			}
 			d.emit("error", agent.ErrorPayload{Message: msg, Retryable: true})
 			if wasInTurn { // a turn was under way (not merely a message that never got consumed)

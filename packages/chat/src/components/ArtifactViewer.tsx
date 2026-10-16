@@ -30,6 +30,7 @@ import {
 } from '../model/artifactViews'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { composeMarkupMessage } from '../model/feedback'
+import { FILE_GONE_MESSAGE, isArtifactGone } from '../transport/files'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { useChat } from './context'
 import Markdown from './Markdown'
@@ -40,6 +41,8 @@ type Loaded =
   | { kind: 'text'; text: string }
   | { kind: 'blob'; url: string; blob: Blob }
   | { kind: 'error' }
+  // The server still lists the file but no longer has its bytes (410, or the list said missing).
+  | { kind: 'gone' }
 
 /** What the dialog's body shows: the file, its review (markdown, pdf) or a draw-over (image). */
 type Mode = 'view' | 'review' | 'markup'
@@ -81,7 +84,7 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
   useEffect(() => dialogRef.current?.focus(), [])
 
   useEffect(() => {
-    if (!previewable || !spec) return
+    if (artifact.missing || !previewable || !spec) return // a file listed as missing is not fetched
     let cancelled = false
     let url: string | null = null
     void (async () => {
@@ -97,22 +100,23 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
         const typed = new Blob([buf], { type: blobTypeFor(view, artifact.content_type) })
         url = URL.createObjectURL(typed)
         setLoaded({ kind: 'blob', url, blob: typed })
-      } catch {
-        if (!cancelled) setLoaded({ kind: 'error' })
+      } catch (e) {
+        if (!cancelled) setLoaded({ kind: isArtifactGone(e) ? 'gone' : 'error' })
       }
     })()
     return () => {
       cancelled = true
       if (url) URL.revokeObjectURL(url)
     }
-  }, [sessionId, files, artifact.id, artifact.content_type, view, previewable, spec])
+  }, [sessionId, files, artifact.id, artifact.content_type, artifact.missing, view, previewable, spec])
 
   async function download() {
     setDownloadError(null)
     try {
       await files.download(sessionId, artifact.id)
     } catch (e) {
-      setDownloadError(e instanceof Error ? e.message : 'Download failed.')
+      if (isArtifactGone(e)) setLoaded({ kind: 'gone' })
+      else setDownloadError(e instanceof Error ? e.message : 'Download failed.')
     }
   }
 
@@ -124,7 +128,8 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
   }
 
   // Which feedback mode this file takes, once its bytes are here.
-  const ready = loaded !== null && loaded.kind !== 'error'
+  const gone = artifact.missing === true || loaded?.kind === 'gone'
+  const ready = loaded !== null && loaded.kind !== 'error' && !gone
   const feedback: Exclude<Mode, 'view'> | null =
     !chat || !ready ? null : view === 'markdown' || view === 'pdf' ? 'review' : view === 'image' ? 'markup' : null
 
@@ -151,7 +156,7 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
           ) : feedback === 'markup' ? (
             <button type="button" className="artifact-btn" onClick={() => setMode('markup')}>Mark up</button>
           ) : null}
-          <button type="button" className="artifact-btn" onClick={() => void download()}>Download</button>
+          {!gone && <button type="button" className="artifact-btn" onClick={() => void download()}>Download</button>}
           <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
         </header>
         {isOlder && (
@@ -162,7 +167,11 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
         )}
         {downloadError && <div className="artifact-error" role="alert">{downloadError}</div>}
         <div className="artifact-body">
-          {mode === 'review' && loaded && loaded.kind !== 'error' ? (
+          {gone ? (
+            <p className="artifact-status" role="status" data-testid="artifact-gone">
+              {FILE_GONE_MESSAGE} Its bytes were not kept on the server, so it can’t be viewed or downloaded.
+            </p>
+          ) : mode === 'review' && ready ? (
             <ReviewMode
               artifact={artifact}
               text={loaded.kind === 'text' ? loaded.text : undefined}

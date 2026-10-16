@@ -1,0 +1,3 @@
+.usage-limit-resume { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem; font-size: .8rem; }
+.usage-limit-resume label { display: inline-flex; align-items: center; gap: .3rem; cursor: pointer; }
+.usage-limit-resume [role="status"] { opacity: .8; }

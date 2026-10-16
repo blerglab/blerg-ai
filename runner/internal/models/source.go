@@ -32,6 +32,10 @@ type Model struct {
 
 // List is what GET /api/models/{engine} serves.
 type List struct {
+	// Refreshing means a background runtime catalog refresh is in progress.
+	Refreshing bool `json:"refreshing,omitempty"`
+	// Error is a safe refresh failure; an existing model list remains usable.
+	Error     string     `json:"error,omitempty"`
 	Models    []Model    `json:"models"`
 	Source    string     `json:"source"` // SourceLive | SourceBuiltin | SourceDaemon | SourceNone
 	FetchedAt *time.Time `json:"fetched_at"`

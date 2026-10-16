@@ -304,8 +304,17 @@ func (k *BlergRunner) SetModel(ctx context.Context, id, model string) error {
 }
 
 // kindMap folds blerg-runner's event vocabulary onto blerg-board's closed set. Unmapped
-// kinds become "status" (visible but unstyled) except provider_blocks, which
-// is dropped (raw model blocks — heavy and redundant with assistant_text).
+// kinds become "status" (visible but unstyled) except the droppedKinds, which
+// blerg-board does not draw and so does not store.
+// droppedKinds: provider_blocks (raw model blocks — heavy and redundant with
+// assistant_text), assistant_thinking (the model's working, not its answer),
+// subagent_update (running totals that only feed the chat's subagent card) and
+// background_task_started / _done (they only feed the chat's background strip).
+var droppedKinds = map[string]bool{
+	"provider_blocks": true, "assistant_thinking": true, "subagent_update": true,
+	"background_task_started": true, "background_task_done": true,
+}
+
 var kindMap = map[string]string{
 	"user_message":   "user_turn",
 	"assistant_text": "assistant_turn",
@@ -332,7 +341,7 @@ func (k *BlergRunner) Events(ctx context.Context, id string, afterSeq int64, lim
 	}
 	mapped := make([]Event, 0, len(out.Events))
 	for _, ev := range out.Events {
-		if ev.Kind == "provider_blocks" {
+		if droppedKinds[ev.Kind] {
 			continue
 		}
 		if m, ok := kindMap[ev.Kind]; ok {

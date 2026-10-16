@@ -223,10 +223,10 @@ func (a *API) HandlePutDaemonReposRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, problem)
 		return
 	}
-	dc := a.hub.GetDaemon(daemonID)
+	dc := a.hub.GetHostDaemon(daemonID)
 	// A cluster session pod connects as its own per-session "daemon"; it is
 	// not a workstation anyone configures (GET /api/daemons hides it too).
-	if dc == nil || dc.Mode == "runner" {
+	if dc == nil {
 		writeError(w, http.StatusNotFound, "daemon not connected")
 		return
 	}

@@ -59,6 +59,24 @@ describe('FilesPanel', () => {
     expect(within(docx).getByRole('button', { name: 'Download' })).toBeInTheDocument()
   })
 
+  it('draws a file whose bytes are gone as disabled: no View or Download, Delete still there', async () => {
+    const lost: ArtifactInfo = { id: 'lost1', name: 'plan.md', size: 10, content_type: 'text/markdown', view: 'markdown', missing: true }
+    const p = setup([lost, items[1]])
+    const [row, ok] = screen.getAllByTestId('artifact-row')
+    const main = within(row).getByTestId('artifact-missing')
+    expect(main).toHaveAttribute('aria-disabled', 'true')
+    expect(main).toHaveAttribute('title', 'plan.md is no longer available')
+    expect(row).toHaveTextContent('no longer available')
+    expect(within(row).queryByRole('button', { name: 'View' })).toBeNull()
+    expect(within(row).queryByRole('button', { name: 'Download' })).toBeNull()
+    expect(within(ok).queryByTestId('artifact-missing')).toBeNull()
+    expect(within(ok).getByRole('button', { name: 'Download' })).toBeInTheDocument()
+    fireEvent.click(within(row).getByRole('button', { name: 'Delete' }))
+    fireEvent.click(within(row).getByRole('button', { name: 'Yes, delete' }))
+    await waitFor(() => expect(p.onChanged).toHaveBeenCalled())
+    expect(files.removed).toEqual(['lost1'])
+  })
+
   it('opens a file in the viewer', () => {
     const p = setup()
     fireEvent.click(within(screen.getAllByTestId('artifact-row')[0]).getByRole('button', { name: 'View' }))

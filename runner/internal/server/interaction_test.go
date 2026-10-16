@@ -279,6 +279,7 @@ func TestClusterJobCarriesInteractionAndResumeKeepsIt(t *testing.T) {
 		if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET status = 'disconnected' WHERE id = $1`, sid); err != nil {
 			t.Fatal(err)
 		}
+		fx.k8s.finishSessionJob(sid)
 		n := len(fx.k8s.created)
 		resumeClusterSession(ctx, fx.hub, fx.pool, sid, "carry on", mcpAcct, testSID)
 		if len(fx.k8s.created) != n+1 {

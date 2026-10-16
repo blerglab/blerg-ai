@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { startTransition, useCallback, useEffect, useOptimistic, useState } from 'react'
 import { isAutomated, startedByLabel } from '../lib/startedBy'
 import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
@@ -9,6 +9,11 @@ import { getFocus, setFocus } from '../lib/sidebarPrefs'
 import { NotificationsButton } from '../App'
 import { repoLabel } from '../lib/noRepo'
 import { ProposalsBadge } from './Proposals'
+import { OpenSessionContext } from '../lib/openSession'
+import { prefetchLaunchData } from '../lib/launchCache'
+import { formatBuild } from '../lib/buildInfo'
+import UsageMeters from './UsageMeters'
+import { displayState, waitingBannerText } from '../lib/displayState'
 
 interface Props {
   onNewSession?: () => void
@@ -20,107 +25,54 @@ const ACTIVE_STATUSES = new Set<SessionStatus>(['starting', 'running', 'idle', '
 // The persisted focus for "the cluster" (every other value is a daemon id).
 const CLUSTER_FOCUS = 'cluster'
 
-function statusSortKey(status: SessionStatus): number {
-  if (status === 'waiting') return 0
-  if (status === 'running') return 1
-  if (status === 'starting') return 2
-  if (status === 'idle') return 3
-  return 4
+// The order of the active list: newest started first, and nothing else. A session's state (it
+// flips between running and idle all day) never moves its card; the status glyph shows it.
+function byNewestStarted(a: SessionInfo, b: SessionInfo): number {
+  return new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
 }
 
-// Returns true if a repo's sessions have anything the user should act on.
-function isActiveRepo(sessions: SessionInfo[]): boolean {
-  return sessions.some(s => s.status === 'waiting' || s.status === 'running' || s.status === 'starting')
-}
-
-function RepoSection({
-  repo,
-  sessions,
-  activeSessionId,
-  isSidebar,
-  daemons,
-}: {
-  repo: string
-  sessions: SessionInfo[]
-  activeSessionId: string | undefined
-  isSidebar: boolean
-  daemons: DaemonInfo[]
-}) {
-  const counts = sessions.reduce<Record<string, number>>((acc, s) => {
-    if (ACTIVE_STATUSES.has(s.status)) acc[s.status] = (acc[s.status] ?? 0) + 1
-    return acc
-  }, {})
-
-  const STATUS_COLORS: Record<string, string> = {
-    waiting: 'var(--amber)',
-    running: 'var(--lichen)',
-    starting: 'var(--batch)',
-    idle: 'var(--fog-dim)',
+// A pill of the "Where sessions run" row: compact, and selected when it is the focus.
+function placePillStyle(selected: boolean, muted = false): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
+    background: selected ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'none',
+    color: selected ? 'var(--amber)' : muted ? 'var(--fog-dim)' : 'var(--fog)',
+    border: `1px solid ${selected ? 'var(--blaze)' : 'var(--stone)'}`,
+    borderRadius: 20,
+    padding: '2px 9px',
+    fontSize: '0.72rem',
+    fontWeight: 600,
+    lineHeight: '18px',
+    whiteSpace: 'nowrap',
   }
+}
 
-  const rollupParts = (['waiting', 'running', 'starting', 'idle'] as const)
-    .filter(s => counts[s] > 0)
-    .map(s => ({ status: s, count: counts[s] }))
+function PlaceDot({ on }: { on: boolean }) {
+  return <span style={{ width: 6, height: 6, borderRadius: '50%', background: on ? 'var(--lichen)' : 'var(--fog-dim)', display: 'inline-block', flexShrink: 0 }} />
+}
 
-  const sorted = [...sessions].sort((a, b) => {
-    const statusDiff = statusSortKey(a.status) - statusSortKey(b.status)
-    if (statusDiff !== 0) return statusDiff
-    // most-recent-first tiebreak
-    return new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
-  })
-
+function PlacePill({ testId, selected, disabled = false, title, onSelect, children }: {
+  testId: string
+  selected: boolean
+  disabled?: boolean
+  title: string
+  onSelect: () => void
+  children: React.ReactNode
+}) {
   return (
-    <div style={{ marginBottom: 12 }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          width: '100%',
-          padding: '4px 0',
-          marginBottom: 8,
-          textAlign: 'left',
-        }}
-      >
-        <span style={{
-          color: 'var(--fog-dim)',
-          fontSize: '0.65rem',
-          transition: 'transform 0.15s',
-          display: 'inline-block',
-          transform: 'rotate(90deg)',
-          flexShrink: 0,
-        }}>▶</span>
-        <span style={{
-          color: 'var(--fog)',
-          fontSize: '0.75rem',
-          fontWeight: 700,
-          letterSpacing: '0.08em',
-          textTransform: 'uppercase',
-          flex: 1,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}>
-          {repo}
-        </span>
-        <span style={{ display: 'flex', gap: 5, flexShrink: 0, alignItems: 'center' }}>
-          {rollupParts.map(({ status, count }) => (
-            <span key={status} style={{ color: STATUS_COLORS[status], fontSize: '0.7rem', fontWeight: 600 }}>
-              {count} {status}
-            </span>
-          ))}
-        </span>
-      </div>
-
-      {sorted.map(session => (
-        <SessionCard
-          key={session.id}
-          session={session}
-          daemon={daemons.find(d => d.id === session.daemon_id)}
-          active={isSidebar && session.id === activeSessionId}
-        />
-      ))}
-    </div>
+    <button
+      type="button"
+      data-testid={testId}
+      aria-pressed={selected}
+      disabled={disabled}
+      title={title}
+      onClick={onSelect}
+      style={{ ...placePillStyle(selected, disabled), cursor: disabled ? 'default' : 'pointer' }}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -307,10 +259,20 @@ function HistorySection({
 }
 
 export default function SessionList({ onNewSession, variant = 'page' }: Props) {
-  const { daemons, sessions, serverVersion } = useSessionStore()
+  const { daemons, sessions, serverVersion, serverRelease, serverCommit } = useSessionStore()
+  const build = formatBuild({ version: serverVersion, release: serverRelease, commit: serverCommit })
   const navigate = useNavigate()
   const location = useLocation()
-  const activeSessionId = location.pathname.match(/^\/sessions\/([^/]+)/)?.[1]
+  const routeSessionId = location.pathname.match(/^\/sessions\/([^/]+)/)?.[1]
+  // The row clicked is highlighted at once: the switch to a session renders as a transition (the
+  // router's), and until it commits the location still names the session being left.
+  const [activeSessionId, setOptimisticActive] = useOptimistic(routeSessionId)
+  const openSession = useCallback((id: string) => {
+    startTransition(() => {
+      setOptimisticActive(id)
+      navigate(`/sessions/${id}`)
+    })
+  }, [navigate, setOptimisticActive])
   const isSidebar = variant === 'sidebar'
   const isCronsActive = location.pathname.startsWith('/crons')
   const isProposalsActive = location.pathname.startsWith('/proposals')
@@ -385,7 +347,8 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
     setFocus(id)
   }
 
-  const waitingCount = sessions.filter(s => s.status === 'waiting').length
+  // Waiting for input: a session working in the background is not, whatever its count.
+  const waitingCount = sessions.filter(s => displayState(s) === 'waiting').length
 
   // ── Search state ────────────────────────────────────────────────────────────
   const [query, setQuery] = useState('')
@@ -413,11 +376,7 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
   // Starred active sessions — ignores focus, respects search.
   const starredActive = filteredActiveSessions
     .filter(s => s.starred)
-    .sort((a, b) => {
-      const statusDiff = statusSortKey(a.status) - statusSortKey(b.status)
-      if (statusDiff !== 0) return statusDiff
-      return new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
-    })
+    .sort(byNewestStarted)
 
   // A search spans every place to run; otherwise the focus narrows the list.
   const inFocus = (s: SessionInfo) => {
@@ -426,29 +385,14 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
     return s.daemon_id === effectiveFocus && s.runtime !== 'cluster'
   }
 
-  // Group the active sessions by repository, across every runtime. Starred
-  // sessions are excluded — they render in the Starred section above. Where a
-  // session runs is on its card (the runtime chip), not a grouping.
-  const repoMap = new Map<string, SessionInfo[]>()
-  for (const s of filteredActiveSessions) {
-    if (s.starred || !inFocus(s)) continue
-    // Every no-repo session groups under "No repository", not under its own
-    // scratch folder name.
-    const key = repoLabel(s.repo)
-    const list = repoMap.get(key) ?? []
-    list.push(s)
-    repoMap.set(key, list)
-  }
-
-  // Sort repos: active ones first (have waiting/running sessions), then by name.
-  const repoGroups = [...repoMap.entries()].sort(([aName, aSessions], [bName, bSessions]) => {
-    const aActive = isActiveRepo(aSessions) ? 0 : 1
-    const bActive = isActiveRepo(bSessions) ? 0 : 1
-    if (aActive !== bActive) return aActive - bActive
-    return aName.localeCompare(bName)
-  })
+  // The active sessions, one card after the next across every runtime and repo (each card says
+  // its own org/repo). Starred sessions are excluded — they render in the Starred section above.
+  const listed = filteredActiveSessions
+    .filter(s => !s.starred && inFocus(s))
+    .sort(byNewestStarted)
 
   return (
+    <OpenSessionContext.Provider value={openSession}>
     <div style={isSidebar ? {
       width: 300,
       flexShrink: 0,
@@ -486,8 +430,13 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
             textTransform: 'uppercase',
           }}>Sessions</span>
         </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <NotificationsButton />
         <button
           onClick={onNewSession}
+          // About to open the sheet: warm what it opens on (lib/launchCache).
+          onPointerEnter={prefetchLaunchData}
+          onFocus={prefetchLaunchData}
           style={{
             background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))',
             color: 'var(--amber)',
@@ -502,21 +451,21 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
         >
           + New
         </button>
+        </div>
       </div>
 
-      {/* Where sessions run — one compact, wrapping summary: the cluster (when
-          configured) and each workstation daemon. Cluster session pods are
-          never listed. */}
+      {/* Where sessions run — ONE row of compact pills that show each place's status and are
+          the focus filter too (All first, then the cluster when configured, then each workstation
+          daemon; cluster session pods are never listed), with the usage meters beneath. */}
       <div
         data-testid="runtime-strip"
         style={{
           display: 'flex',
-          flexWrap: 'wrap',
+          flexDirection: 'column',
           gap: 6,
           padding: '8px 16px',
           borderBottom: '1px solid var(--stone)',
           background: 'var(--basalt)',
-          alignItems: 'center',
         }}
       >
         {!cluster.configured && workstations.length === 0 ? (
@@ -525,132 +474,74 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
           </span>
         ) : (
           <>
-            <span style={{ width: '100%', color: 'var(--fog-dim)', fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-              Where sessions run
-            </span>
-            {cluster.configured && (
-              <Link
-                to="/cluster"
-                data-testid="cluster-pill"
-                title="Open the Cluster page"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  background: 'color-mix(in srgb, var(--lichen) 22%, var(--basalt))',
-                  border: '1px solid color-mix(in srgb, var(--lichen) 35%, var(--scree))',
-                  borderRadius: 20,
-                  padding: '3px 10px',
-                  textDecoration: 'none',
-                }}
-              >
-                <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--lichen)', display: 'inline-block', flexShrink: 0 }} />
-                <span style={{ fontSize: '0.8rem', color: 'var(--chalk)' }}>
-                  {clusterActive !== null && cluster.max !== null
-                    ? `Cluster · ${clusterActive}/${cluster.max} running`
-                    : clusterActive !== null
-                      ? `Cluster · ${clusterActive} running`
-                      : 'Cluster'}
-                </span>
-              </Link>
-            )}
-            {workstations.map(d => {
-              const connected = d.status === 'connected'
-              return (
-                <div key={d.id} data-testid={`daemon-pill-${d.id}`} style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  background: connected ? 'color-mix(in srgb, var(--lichen) 22%, var(--basalt))' : 'var(--basalt)',
-                  border: `1px solid ${connected ? 'color-mix(in srgb, var(--lichen) 35%, var(--scree))' : 'var(--stone)'}`,
-                  borderRadius: 20,
-                  padding: '3px 10px',
-                }}>
-                  <span style={{
-                    width: 7,
-                    height: 7,
-                    borderRadius: '50%',
-                    background: connected ? 'var(--lichen)' : 'var(--fog-dim)',
-                    display: 'inline-block',
-                    flexShrink: 0,
-                  }} />
-                  <span style={{ fontSize: '0.8rem', color: connected ? 'var(--chalk)' : 'var(--fog)' }}>
+            <div
+              data-testid="place-pills"
+              role="group"
+              aria-label="Where sessions run"
+              style={{ display: 'flex', flexWrap: 'wrap', gap: 5, alignItems: 'center' }}
+            >
+              {places > 1 && (
+                <PlacePill
+                  testId="focus-pill-all"
+                  selected={effectiveFocus === null}
+                  title="Sessions everywhere"
+                  onSelect={() => handleSetFocus(null)}
+                >
+                  All
+                </PlacePill>
+              )}
+              {cluster.configured && (() => {
+                const count = clusterActive !== null && cluster.max !== null
+                  ? `${clusterActive}/${cluster.max}`
+                  : clusterActive !== null ? `${clusterActive}` : ''
+                const title = clusterActive !== null
+                  ? `${clusterActive}${cluster.max !== null ? ` of ${cluster.max}` : ''} cluster sessions running`
+                  : 'Cluster'
+                const body = (
+                  <>
+                    <PlaceDot on />
+                    Cluster{count && <span style={{ color: 'var(--fog-dim)', fontVariantNumeric: 'tabular-nums' }}> {count}</span>}
+                  </>
+                )
+                // The only place: nothing to filter, so the pill opens the Cluster page.
+                return places > 1 ? (
+                  <PlacePill testId="focus-pill-cluster" selected={effectiveFocus === CLUSTER_FOCUS} title={`${title} · show only these`} onSelect={() => handleSetFocus(CLUSTER_FOCUS)}>
+                    {body}
+                  </PlacePill>
+                ) : (
+                  <Link to="/cluster" data-testid="focus-pill-cluster" title={`${title} · open the Cluster page`} style={{ ...placePillStyle(false), textDecoration: 'none' }}>
+                    {body}
+                  </Link>
+                )
+              })()}
+              {workstations.map(d => {
+                const connected = d.status === 'connected'
+                const versionDiffers = !!d.version && !!serverVersion && d.version !== serverVersion
+                const title = `${d.name} · ${d.mode}${d.version ? ` · ${d.version}` : ''}${connected ? '' : ' · not connected'}`
+                const body = (
+                  <>
+                    <PlaceDot on={connected} />
                     {d.name}
+                    {versionDiffers && <span style={{ color: 'var(--blaze)' }}>{d.version}</span>}
+                  </>
+                )
+                return places > 1 ? (
+                  <PlacePill key={d.id} testId={`focus-pill-${d.id}`} selected={effectiveFocus === d.id} disabled={!connected}
+                    title={connected ? `${title} · show only these` : title} onSelect={() => handleSetFocus(d.id)}>
+                    {body}
+                  </PlacePill>
+                ) : (
+                  <span key={d.id} data-testid={`focus-pill-${d.id}`} title={title} style={placePillStyle(false, !connected)}>
+                    {body}
                   </span>
-                  <span style={{ fontSize: '0.7rem', color: 'var(--fog-dim)' }}>
-                    {d.mode}
-                  </span>
-                  {d.version && (
-                    <span style={{ fontSize: '0.7rem', color: d.version && serverVersion && d.version !== serverVersion ? 'var(--blaze)' : 'var(--fog-dim)' }}>
-                      {d.version}
-                    </span>
-                  )}
-                </div>
-              )
-            })}
+                )
+              })}
+            </div>
+            {/* The providers' usage limits, as the daemons report them (none: nothing drawn) */}
+            <UsageMeters daemons={workstations} />
           </>
         )}
       </div>
-      <div style={{ padding: '2px 16px 6px', fontSize: '0.7rem', color: 'var(--fog-dim)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <span>server {serverVersion || "dev"}</span>
-        <NotificationsButton />
-      </div>
-
-      {/* Focus pill row — only when there is more than one place to run */}
-      {places > 1 && (
-        <div
-          data-testid="focus-pill-row"
-          style={{
-            display: 'flex',
-            gap: 6,
-            padding: '6px 16px',
-            borderBottom: '1px solid var(--basalt)',
-            background: 'var(--basalt)',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-          }}
-        >
-          <button
-            data-testid="focus-pill-all"
-            onClick={() => handleSetFocus(null)}
-            style={{
-              background: effectiveFocus === null ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'none',
-              color: effectiveFocus === null ? 'var(--amber)' : 'var(--fog-dim)',
-              border: effectiveFocus === null ? '1px solid var(--blaze)' : '1px solid var(--stone)',
-              borderRadius: 20,
-              padding: '2px 10px',
-              fontSize: '0.72rem',
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            All
-          </button>
-
-          {[
-            ...(cluster.configured ? [{ key: CLUSTER_FOCUS, label: 'Cluster' }] : []),
-            ...connectedWorkstations.map(d => ({ key: d.id, label: d.name })),
-          ].map(({ key, label }) => (
-            <button
-              key={key}
-              data-testid={`focus-pill-${key}`}
-              onClick={() => handleSetFocus(key)}
-              style={{
-                background: effectiveFocus === key ? 'color-mix(in srgb, var(--lichen) 22%, var(--basalt))' : 'none',
-                color: effectiveFocus === key ? 'var(--lichen)' : 'var(--fog-dim)',
-                border: effectiveFocus === key ? '1px solid color-mix(in srgb, var(--lichen) 35%, var(--scree))' : '1px solid var(--stone)',
-                borderRadius: 20,
-                padding: '2px 10px',
-                fontSize: '0.72rem',
-                fontWeight: 600,
-                cursor: 'pointer',
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
 
       {/* Search input */}
       <div style={{
@@ -678,9 +569,9 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
         />
       </div>
 
-      {/* Orange waiting banner */}
+      {/* Orange waiting banner: sessions waiting for input */}
       {waitingCount > 0 && (
-        <div style={{
+        <div data-testid="waiting-banner" style={{
           background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))',
           borderBottom: '1px solid var(--blaze)',
           padding: '10px 16px',
@@ -693,7 +584,7 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
           letterSpacing: '0.05em',
         }}>
           <span>⚡</span>
-          <span>{waitingCount} session{waitingCount !== 1 ? 's' : ''} waiting for input</span>
+          <span style={{ flex: 1, minWidth: 0 }}>{waitingBannerText(waitingCount)}</span>
         </div>
       )}
 
@@ -728,16 +619,18 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
           </div>
         )}
 
-        {repoGroups.map(([repo, repoSessions]) => (
-          <RepoSection
-            key={repo}
-            repo={repo}
-            sessions={repoSessions}
-            activeSessionId={activeSessionId}
-            isSidebar={isSidebar}
-            daemons={daemons}
-          />
-        ))}
+        {listed.length > 0 && (
+          <div data-testid="session-list" style={{ marginBottom: 12 }}>
+            {listed.map(session => (
+              <SessionCard
+                key={session.id}
+                session={session}
+                daemon={daemons.find(d => d.id === session.daemon_id)}
+                active={isSidebar && session.id === activeSessionId}
+              />
+            ))}
+          </div>
+        )}
 
         {automatedSessions.length > 0 && (
           <AutomatedSection
@@ -842,6 +735,30 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
           </div>
         )}
       </div>
+
+      {/* The build, at the foot of the list (the sidebar and the phone's list alike) */}
+      {build.main && (
+        <div
+          data-testid="build-version"
+          title={build.title || undefined}
+          style={{
+            marginTop: 'auto',
+            // In the sidebar it stays in view as the list scrolls; on the phone it ends the page
+            // (a fixed tab bar covers the bottom edge).
+            ...(isSidebar ? { position: 'sticky' as const, bottom: 0 } : {}),
+            padding: '8px 16px',
+            borderTop: '1px solid var(--stone)',
+            background: 'var(--basalt)',
+            fontSize: '0.7rem',
+            color: 'var(--fog-dim)',
+            fontFamily: 'var(--mono)',
+          }}
+        >
+          Blerg {build.main}
+          {build.commit && <span style={{ opacity: 0.7 }}> · {build.commit}</span>}
+        </div>
+      )}
     </div>
+    </OpenSessionContext.Provider>
   )
 }

@@ -8,31 +8,18 @@ import RunColumn from './RunColumn'
 import McpPicker from './McpPicker'
 import type { McpSelectionEntry } from '../types'
 import { useBackdropClose } from '@blerglab/chat'
-import { defaultRuntime, runtimeDisabledReason } from '../lib/runtimes'
+import { defaultRuntime, runtimeDisabledReason, ACK_AGENT, ACK_TERMINAL } from '../lib/runtimes'
 import type { RunRuntime, RunKind, RunEngine } from '../lib/runtimes'
-import { useEngineModels, defaultModel, effectiveEffort, isModelIdFor, isEffortToken, FREE_TEXT_MODEL_ENGINES } from '../lib/engineModels'
+import { useEngineModels, modelCatalogTarget, defaultModel, effectiveEffort, isModelIdFor, isEffortToken, FREE_TEXT_MODEL_ENGINES } from '../lib/engineModels'
 import { parseRepoInput, predictCloneFolder, fullName, providerLabel, PROVIDER_LABELS } from '../lib/repoRef'
 import type { RepoRef } from '../lib/repoRef'
 import { SCRATCH_PREFIX, NO_REPO_LABEL, newScratchSuffix, validScratchSuffix } from '../lib/noRepo'
+import {
+  readLaunchCache, isFresh, fetchRepos, fetchDaemons, fetchCluster, fetchCreds, fetchMcpConnections,
+  launchMcpConnections, launchModelsCache, patchCachedDaemon, storeRepos, reposPartFrom,
+} from '../lib/launchCache'
+import type { RepoInfo, DaemonApiInfo, ClusterStatusApi, MyCredentialsApi, ReposPart, LaunchCacheData } from '../lib/launchCache'
 import './LaunchSheet.css'
-
-interface RepoInfo {
-  name: string
-  full_name: string
-  checked_out: string[]
-  is_local?: boolean
-  // The git provider full_name lives on ("github", "gitlab", …). Set on every
-  // hosted entry and on a local folder whose origin is known; absent only on
-  // an unresolved local folder. Sent back with a cluster launch so the pod
-  // clones from the right host.
-  provider?: string
-  // Local-only folders: the owner/name the daemon read from the folder's
-  // origin remote (the folder's name need not match it). full_name is set to
-  // it when known; cloneable === false means full_name is only the bare
-  // folder name, which a cluster pod cannot clone.
-  remote?: string
-  cloneable?: boolean
-}
 
 function repoKey(r: RepoInfo): string {
   return (r.is_local ? 'local:' + r.name + ':' : '') + (r.provider ?? '') + ':' + r.full_name
@@ -40,57 +27,6 @@ function repoKey(r: RepoInfo): string {
 
 const CLUSTER_REPO_UNRESOLVED =
   'This folder has no GitHub or GitLab remote the cluster can clone — enter org/name'
-
-interface DaemonApiInfo {
-  id: string
-  name: string
-  mode: string
-  repos_root: string
-  status: string
-  sandbox_available: boolean
-  available_engines: string[]
-  // What the daemon can run a host Claude agent session on: its `claude`
-  // CLI (the user's login) or, failing that, an API key. Absent from older
-  // daemons — then nothing is claimed either way.
-  claude_cli_available?: boolean
-  anthropic_key_set?: boolean
-  // A Local sandbox Claude session would find a credential on this daemon:
-  // a host ~/.claude login to mount, or CLAUDE_CODE_OAUTH_TOKEN /
-  // ANTHROPIC_API_KEY in the daemon's environment. false = such a launch is
-  // refused. Absent from older daemons — then nothing is claimed either way.
-  sandbox_claude_credential?: boolean
-  // The daemon can clone a repository named by owner/name or URL into its
-  // repos folder. Absent/false for an older daemon (or server): it is then
-  // offered only its folders and the listed repositories.
-  clone_from?: boolean
-  // The daemon's owner lets a This machine session clone a private
-  // repository with the person's own token. Otherwise only Local sandbox
-  // does: on the bare host another session could read the token mid-clone.
-  allow_host_credential_clone?: boolean
-}
-
-interface ClusterStatusApi {
-  configured: boolean
-  available_engines?: string[]
-  // Whether the operator's Secret carries a shared git token. A user with
-  // their own GitHub credential doesn't need it; a user without one can only
-  // clone public repositories when it is absent.
-  git_configured?: boolean
-}
-
-// MyCredentials mirrors GET /api/me/credentials: which personal credentials
-// the signed-in account has in blerg-core, presence only. `engines` never
-// includes a git provider's kind ("github", "gitlab") — those are reported
-// separately as `git` (any) and `git_providers` (which), because they gate
-// cloning rather than engine choice. A response with `unavailable: true`
-// (core unreachable/unconfigured), or a failed fetch, is stored as null =
-// "unknown", which suppresses every hard block below.
-interface MyCredentialsApi {
-  engines: string[]
-  git: boolean
-  git_providers?: string[]
-  unavailable?: boolean
-}
 
 interface LaunchSheetProps {
   open: boolean
@@ -230,6 +166,51 @@ const engineOrder = ['claude', 'codex', 'hermes', 'openclaw'] as const
 // The engine ids this sheet will accept out of localStorage.
 const ENGINE_IDS = engineOrder
 
+// The daemon to pre-select so the Run column can speak concretely about it
+// (sandbox image, engine availability) before a repo is chosen — and when the
+// runtime is the sandbox, one that actually has the image, so the sheet does
+// not open on its own "no sandbox image" warning.
+function preferredDaemon(list: DaemonApiInfo[], runtime: RunRuntime | null): DaemonApiInfo | null {
+  return (runtime === 'docker' ? (list.find(d => d.sandbox_available) ?? list[0]) : list[0]) ?? null
+}
+
+// What the sheet opens on, from the first daemons and cluster status it has
+// (cached or fetched) — picked once per open; later answers only correct a
+// pick that became impossible (see the fetch effect).
+//
+// The engine is suggested from what the first daemon actually has configured
+// — but only when nobody has picked one on this browser yet. Once a person
+// picks (or the picker's own saveDefault call fires), their choice always
+// wins over this one-time suggestion. Resolved before the runtime, which
+// depends on it. The runtime is never the unsandboxed host when something
+// safer is available; a remembered OpenClaw lands on This machine rather than
+// on a card the sheet then disables — pickEngine does the same when the
+// choice is made here instead of remembered.
+function pickDefaults(daemonList: DaemonApiInfo[], clusterConfigured: boolean): { engine: RunEngine; runtime: RunRuntime; daemon: DaemonApiInfo | null } {
+  let engine: RunEngine = loadDefault(LAST_ENGINE_KEY, ENGINE_IDS, 'claude')
+  if (!hasStoredPreference(LAST_ENGINE_KEY)) {
+    const available: string[] = daemonList[0]?.available_engines ?? []
+    const suggestion = engineOrder.find(id => available.includes(id))
+    if (suggestion) engine = suggestion
+  }
+  const runtime = engine === 'openclaw' ? 'daemon' : defaultRuntime(daemonList, clusterConfigured)
+  return { engine, runtime, daemon: preferredDaemon(daemonList, runtime) }
+}
+
+// Where each of the sheet's four answers stands: still on its way with
+// nothing to show ('waiting'), shown from the cache while a refresh is on its
+// way ('cached'), answered this open or moments ago ('fresh'), or its
+// refresh failed ('failed' — the cached value, if any, stays).
+type PartState = 'waiting' | 'cached' | 'fresh' | 'failed'
+type PartName = 'repos' | 'daemons' | 'cluster' | 'creds'
+const PART_LABELS: Record<PartName, string> = {
+  repos: 'repositories', daemons: 'daemons', cluster: 'cluster', creds: 'credentials',
+}
+
+function partState(p: LaunchCacheData[PartName]): PartState {
+  return !p ? 'waiting' : isFresh(p) ? 'fresh' : 'cached'
+}
+
 export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const navigate = useNavigate()
   const addPendingSession = useSessionStore(s => s.addPendingSession)
@@ -238,11 +219,29 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // The parent remounts this component (via a `key` tied to `open`) each time
   // the sheet opens, so all form state below starts fresh from its initial
   // value — no synchronous state resets in an effect (which the
-  // react-hooks/set-state-in-effect rule disallows). `loading` therefore starts
-  // true and is only cleared once the fetch settles.
-  const [repos, setRepos] = useState<RepoInfo[]>([])
-  const [daemons, setDaemons] = useState<DaemonApiInfo[]>([])
-  const [loading, setLoading] = useState(true)
+  // react-hooks/set-state-in-effect rule disallows). What the sheet last knew
+  // (lib/launchCache) seeds it, read once here at mount, and the defaults are
+  // picked from it at once when it has daemons or a cluster status.
+  const [boot] = useState(() => {
+    // The closed sheet (mounted hidden) uses none of it, and so asks nothing.
+    const cache: LaunchCacheData = open ? readLaunchCache() : { modelsByKey: {} }
+    return {
+      cache,
+      parts: {
+        repos: partState(cache.repos),
+        daemons: partState(cache.daemons),
+        cluster: partState(cache.cluster),
+        creds: partState(cache.creds),
+      } satisfies Record<PartName, PartState>,
+      hasAny: !!(cache.repos || cache.daemons || cache.cluster || cache.creds),
+      defaults: cache.daemons || cache.cluster
+        ? pickDefaults(cache.daemons?.value ?? [], !!cache.cluster?.value.configured)
+        : null,
+    }
+  })
+  const [parts, setParts] = useState<Record<PartName, PartState>>(boot.parts)
+  const [repos, setRepos] = useState<RepoInfo[]>(() => boot.cache.repos?.value.repos ?? [])
+  const [daemons, setDaemons] = useState<DaemonApiInfo[]>(() => boot.cache.daemons?.value ?? [])
   const [search, setSearch] = useState('')
   const [selectedRepo, setSelectedRepo] = useState<RepoInfo | null>(null)
   // "No repository" is the default pick: a session tied to no repository.
@@ -262,7 +261,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // read on; a URL names its own.
   const [freeTextMode, setFreeTextMode] = useState(false)
   const [freeTextProvider, setFreeTextProvider] = useState('github')
-  const [selectedDaemon, setSelectedDaemon] = useState<DaemonApiInfo | null>(null)
+  const [selectedDaemon, setSelectedDaemon] = useState<DaemonApiInfo | null>(() => boot.defaults?.daemon ?? null)
   const [initialPrompt, setInitialPrompt] = useState('')
   // MCP servers and tools chosen for this session (McpPicker). Empty: none, and no `mcp` is sent.
   const [mcp, setMcp] = useState<McpSelectionEntry[]>([])
@@ -272,7 +271,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [kind, setKind] = useState<RunKind>('agent')
   // Which CLI actually drives the session. Orthogonal to kind/runtime — either
   // engine can run as a terminal or agent session, on any runtime below.
-  const [engine, setEngine] = useState<RunEngine>(() => loadDefault(LAST_ENGINE_KEY, ENGINE_IDS, 'claude'))
+  const [engine, setEngine] = useState<RunEngine>(() => boot.defaults?.engine ?? loadDefault(LAST_ENGINE_KEY, ENGINE_IDS, 'claude'))
   // Model + effort, for whichever engine is picked (the list itself is read
   // below, once the runtime and daemon are known). pickedModels[engine] is
   // what the person chose from that engine's list (else what was
@@ -290,21 +289,24 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     Object.fromEntries(ENGINE_IDS.map(e => [e, loadStored(perEngineKey(LAST_EFFORT_KEY, e), isEffortToken)])))
   const pickedModel = pickedModels[engine] ?? null
   const explicitEffort = explicitEfforts[engine] ?? null
-  // Where a session actually runs, for both kinds (spec §2). The initial value
-  // is only a placeholder: the real default lands from defaultRuntime() once
-  // /api/daemons and /api/cluster/status answer, and never picks the
-  // unsandboxed host when something safer is available.
-  const [runtime, setRuntime] = useState<RunRuntime>('daemon')
+  // Where a session actually runs, for both kinds (spec §2). Without cached
+  // data the initial value is only a placeholder: the real default lands from
+  // pickDefaults() once /api/daemons and /api/cluster/status answer, and never
+  // picks the unsandboxed host when something safer is available.
+  const [runtime, setRuntime] = useState<RunRuntime>(() => boot.defaults?.runtime ?? 'daemon')
   // The model list: GET /api/models/{engine}, asked about the selected daemon
   // (Codex's and Hermes's lists are what that daemon probed; Claude's ignores
   // it). The engine's built-in list shows until it answers, and if it fails.
-  // A cluster session runs on no daemon, so it asks with none — and the hook
-  // never uses a daemon-reported list asked for without a daemon. On a
+  // Cluster Codex asks its own runtime to probe with the launching account’s
+  // credentials; an unscoped daemon catalog is never used for cluster. On a
   // daemon runtime it waits until a daemon is selected rather than ask
   // without one.
   const onCluster = runtime === 'cluster'
   const listDaemonId = onCluster ? undefined : selectedDaemon?.id
-  const engineModels = useEngineModels(engine, listDaemonId, { enabled: onCluster || !!selectedDaemon })
+  // Asked at once — of the cached daemon, when the sheet opened from cache —
+  // and each answer is kept per engine and daemon for the next open.
+  const catalogTarget = modelCatalogTarget(runtime, listDaemonId)
+  const engineModels = useEngineModels(engine, catalogTarget.daemonId, { enabled: open && (onCluster || !!selectedDaemon), cache: launchModelsCache, runtime: catalogTarget.runtime })
   const listModels = engineModels.models
   const selectedModel = listModels.find(m => m.id === pickedModel) ?? defaultModel(engine, listModels)
   // No list for an engine whose CLI takes a model name (an older daemon, a
@@ -313,13 +315,14 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // the engine takes effort — an effort from its allowlist, Auto by default.
   // Its own state, never the list pick's, and it starts empty again whenever
   // the engine or where it runs changes.
-  const freeTextModelOffered = listModels.length === 0 && !engineModels.loading && FREE_TEXT_MODEL_ENGINES.has(engine)
   const typedKey = `${engine}\n${runtime}\n${listDaemonId ?? ''}`
   const [typed, setTyped] = useState<{ key: string, model: string, effort: string }>({ key: typedKey, model: '', effort: '' })
   // Engine, runtime or daemon changed: start the typed name over (React's
   // adjust-state-while-rendering pattern — no effect, no stale frame).
   if (typed.key !== typedKey) setTyped({ key: typedKey, model: '', effort: '' })
   const typedHere = typed.key === typedKey ? typed : { key: typedKey, model: '', effort: '' }
+  // A background catalog must never replace a model the person already typed.
+  const freeTextModelOffered = (listModels.length === 0 && !engineModels.loading || typedHere.model.trim() !== '') && FREE_TEXT_MODEL_ENGINES.has(engine)
   const freeTextModel = freeTextModelOffered ? typedHere.model.trim() : ''
   const freeTextModelInvalid = freeTextModel !== '' && !isModelIdFor(engine, freeTextModel)
   const freeTextEffort = freeTextModelOffered && engineModels.engineEfforts.includes(typedHere.effort) ? typedHere.effort : undefined
@@ -328,6 +331,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // the life of this sheet. A ref, not state: nothing renders from it, and it
   // is only read inside event handlers/effects.
   const runtimePickedRef = useRef(false)
+  // Likewise a daemon the person picked: a refresh never swaps it for another
+  // (if it has gone, Launch says so instead).
+  const daemonPickedRef = useRef(false)
   // The Repository search box doubles as the free-text org/name entry on
   // cluster runtime; the unresolved-folder message focuses it.
   const repoInputRef = useRef<HTMLInputElement>(null)
@@ -347,96 +353,166 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [error, setError] = useState<string | null>(null)
   const [autoName] = useState(() => randomSessionName())
   const [name, setName] = useState('')
-  const [clusterStatus, setClusterStatus] = useState<ClusterStatusApi | null>(null)
-  const [myCreds, setMyCreds] = useState<MyCredentialsApi | null>(null)
+  const [clusterStatus, setClusterStatus] = useState<ClusterStatusApi | null>(() => boot.cache.cluster?.value ?? null)
+  const [myCreds, setMyCreds] = useState<MyCredentialsApi | null>(() => boot.cache.creds?.value ?? null)
   // GET /api/repos answered with stale_at: a GitHub/GitLab list (usually the
   // person's own, from their token) failed to refresh — typically a revoked
   // or mistyped token. Without saying so the picker just looks empty.
-  const [reposStale, setReposStale] = useState(false)
+  const [reposStale, setReposStale] = useState(() => boot.cache.repos?.value.stale ?? false)
   const [reposStaleDismissed, setReposStaleDismissed] = useState(false)
-  // The list has arrived (possibly empty): the empty-state hint waits for it
-  // so it doesn't flash while the first fetch is still in flight.
-  const [reposLoaded, setReposLoaded] = useState(false)
+  // The list has arrived (possibly empty), or failed: until then the column
+  // shows a skeleton, and the empty-state hint waits so it doesn't flash.
+  const [reposLoaded, setReposLoaded] = useState(() => !!boot.cache.repos)
+  // The latest picks, for the fetch callbacks below, which outlive the render
+  // that started them (written in an effect, never during render).
+  const latest = useRef({ runtime, engine, kind })
+  useEffect(() => { latest.current = { runtime, engine, kind } })
+  // The body shows at once from anything cached; on a cold start as soon as
+  // daemons and cluster status have answered (the repository list streams in
+  // after, under a skeleton), never waiting on the repository list.
+  const showBody = boot.hasAny || (parts.daemons !== 'waiting' && parts.cluster !== 'waiting')
+  const refreshingParts = (Object.keys(parts) as PartName[]).filter(p => parts[p] === 'cached')
 
+  // A daemon's repos folder change (applyReposRoot below) refetches the list;
+  // only the latest answer counts — the mount's own included.
+  const reposRefetch = useRef(0)
+
+  // Four independent requests — none waits for another. A part answered
+  // within FRESH_MS (a prefetch on hovering "+ New") is not asked again.
   useEffect(() => {
     if (!open) return
+    let live = true
+    const setPart = (name: PartName, st: PartState) => setParts(p => ({ ...p, [name]: st }))
+    const loadFailed = (err: unknown) => setError('Failed to load data: ' + (err instanceof Error ? err.message : String(err)))
+    // The daemons and cluster status known so far, for picking defaults
+    // (once, from the first of both) and correcting picks.
+    const known = {
+      daemons: boot.cache.daemons?.value,
+      cluster: boot.cache.cluster?.value,
+      daemonsSettled: !!boot.cache.daemons,
+      clusterSettled: !!boot.cache.cluster,
+    }
+    let defaultsApplied = !!boot.defaults
 
-    Promise.all([
-      apiFetch('/api/repos').then(r => r.json()),
-      apiFetch('/api/daemons').then(r => r.json()),
-      apiFetch('/api/cluster/status').then(r => r.json()),
-      // Personal credentials are advisory: a failure here must never fail the
-      // whole sheet, so it resolves to null ("unknown") instead of rejecting.
-      apiFetch('/api/me/credentials')
-        .then(r => r.json())
-        .then((c: MyCredentialsApi) => (c && !c.unavailable ? c : null))
-        .catch(() => null),
-    ])
-      .then(([repoData, daemonData, clusterData, credsData]) => {
-        const daemonList = daemonData as DaemonApiInfo[]
-        setRepos(repoData.repos ?? [])
-        setReposLoaded(true)
-        setReposStale(!!repoData.stale_at)
-        setDaemons(daemonList)
-        setClusterStatus(clusterData)
-        setMyCreds(credsData)
-        // Suggest an engine default from what the first daemon actually has
-        // configured — but only when nobody has picked one on this browser
-        // yet. Once a person picks (or the picker's own saveDefault call
-        // fires), their choice always wins over this one-time suggestion.
-        // Resolved before the runtime default below, which depends on it.
-        let effectiveEngine = loadDefault(LAST_ENGINE_KEY, ENGINE_IDS, 'claude')
-        if (!hasStoredPreference(LAST_ENGINE_KEY)) {
-          const available: string[] = daemonList[0]?.available_engines ?? []
-          const suggestion = engineOrder.find(id => available.includes(id))
-          if (suggestion) {
-            setEngine(suggestion)
-            effectiveEngine = suggestion
-          }
-        }
-        // The runtime default depends on data that only just arrived, so it is
-        // applied here — and only when nobody has picked one yet, so a refresh
-        // can never move a choice out from under someone (spec §1). OpenClaw
-        // runs only on the host, so a remembered OpenClaw lands on This
-        // machine rather than on a card the sheet then disables — pickEngine
-        // does the same when the choice is made here instead of remembered.
-        const nextRuntime: RunRuntime | null = runtimePickedRef.current
-          ? null
-          : effectiveEngine === 'openclaw'
-            ? 'daemon'
-            : defaultRuntime(daemonList, !!(clusterData as ClusterStatusApi)?.configured)
-        if (nextRuntime) setRuntime(nextRuntime)
-        // Pre-select a daemon so the Run column can speak concretely about it
-        // (sandbox image, engine availability) before a repo is chosen — and
-        // when the default is the sandbox, one that actually has the image, so
-        // the sheet does not open on its own "no sandbox image" warning.
-        const preferred = nextRuntime === 'docker'
-          ? (daemonList.find(d => d.sandbox_available) ?? daemonList[0])
-          : daemonList[0]
+    const settle = () => {
+      if (!known.daemonsSettled || !known.clusterSettled) return
+      const daemonList = known.daemons ?? []
+      const clusterConfigured = !!known.cluster?.configured
+      if (!defaultsApplied) {
+        defaultsApplied = true
+        const d = pickDefaults(daemonList, clusterConfigured)
+        if (!hasStoredPreference(LAST_ENGINE_KEY)) setEngine(d.engine)
+        // Only when nobody has picked a runtime yet, so a refresh can never
+        // move a choice out from under someone (spec §1).
+        if (!runtimePickedRef.current) setRuntime(d.runtime)
+        const preferred = preferredDaemon(daemonList, runtimePickedRef.current ? null : d.runtime)
         if (preferred) setSelectedDaemon(preferred)
+        return
+      }
+      // Later answers only correct a pick that became impossible, and never
+      // one the person made.
+      const { runtime: rt, engine: eng, kind: k } = latest.current
+      let nextRuntime = rt
+      if (!runtimePickedRef.current &&
+          runtimeDisabledReason(rt, { clusterConfigured, daemons: daemonList, engine: eng, kind: k }) !== null) {
+        nextRuntime = eng === 'openclaw' ? 'daemon' : defaultRuntime(daemonList, clusterConfigured)
+        if (nextRuntime !== rt) setRuntime(nextRuntime)
+      }
+      setSelectedDaemon(cur => {
+        const now = cur && daemonList.find(d => d.id === cur.id)
+        if (now) return now
+        if (cur && daemonPickedRef.current) return cur
+        return preferredDaemon(daemonList, nextRuntime)
       })
-      .catch(err => {
-        setError('Failed to load data: ' + err.message)
+    }
+
+    if (boot.parts.repos !== 'fresh') {
+      const seq = reposRefetch.current
+      fetchRepos()
+        .then((v: ReposPart) => {
+          if (!live) return
+          // Overtaken by a repos-folder change: that answer is the list now.
+          if (seq === reposRefetch.current) {
+            setRepos(v.repos)
+            setReposStale(v.stale)
+          }
+          setReposLoaded(true)
+          setPart('repos', 'fresh')
+        })
+        .catch(err => {
+          if (!live) return
+          setReposLoaded(true)
+          setPart('repos', 'failed')
+          if (!boot.cache.repos) loadFailed(err)
+        })
+    }
+    if (boot.parts.daemons !== 'fresh') {
+      fetchDaemons()
+        .then(list => {
+          if (!live) return
+          setDaemons(list)
+          known.daemons = list
+          known.daemonsSettled = true
+          setPart('daemons', 'fresh')
+          settle()
+        })
+        .catch(err => {
+          if (!live) return
+          known.daemonsSettled = true
+          setPart('daemons', 'failed')
+          if (!boot.cache.daemons) loadFailed(err)
+          settle()
+        })
+    }
+    if (boot.parts.cluster !== 'fresh') {
+      fetchCluster()
+        .then(c => {
+          if (!live) return
+          setClusterStatus(c)
+          known.cluster = c
+          known.clusterSettled = true
+          setPart('cluster', 'fresh')
+          settle()
+        })
+        .catch(err => {
+          if (!live) return
+          known.clusterSettled = true
+          setPart('cluster', 'failed')
+          if (!boot.cache.cluster) loadFailed(err)
+          settle()
+        })
+    }
+    if (boot.parts.creds !== 'fresh') {
+      fetchCreds().then(c => {
+        if (!live) return
+        setMyCreds(c)
+        setPart('creds', 'fresh')
       })
-      .finally(() => setLoading(false))
-  }, [open])
+    }
+    // The MCP connection list, in parallel with the rest: McpPicker shows it
+    // (from cache at once) when its section mounts, and shares this request.
+    if (!isFresh(boot.cache.mcpConnections)) fetchMcpConnections().catch(() => { /* McpPicker says so */ })
+    return () => { live = false }
+  }, [open, boot])
 
   // A daemon's repos folder was changed from the Run column: every "will
   // clone to …" hint must now name the new folder, and the repo list must be
   // what is on disk there — the server already has it from the daemon.
   // Changes in quick succession each refetch; only the latest answer counts,
-  // so a slow earlier one can't put back the previous folder's list.
-  const reposRefetch = useRef(0)
+  // so a slow earlier one (or the sheet's first fetch) can't put back the
+  // previous folder's list.
   const applyReposRoot = (daemonId: string, reposRoot: string) => {
     setDaemons(ds => ds.map(d => (d.id === daemonId ? { ...d, repos_root: reposRoot } : d)))
     setSelectedDaemon(d => (d && d.id === daemonId ? { ...d, repos_root: reposRoot } : d))
+    patchCachedDaemon(daemonId, { repos_root: reposRoot })
     const seq = ++reposRefetch.current
     apiFetch('/api/repos')
-      .then(r => r.json())
-      .then(data => {
+      .then(reposPartFrom)
+      .then(next => {
         if (seq !== reposRefetch.current) return
-        setRepos(data.repos ?? [])
-        setReposStale(!!data.stale_at)
+        setRepos(next.repos)
+        setReposStale(next.stale)
+        storeRepos(next)
       })
       .catch(() => { /* the old list stays; the next open refreshes it */ })
   }
@@ -468,9 +544,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
       : daemonEnginesHere(selectedDaemon, runtime, kind)
 
   const engineMissingHere = availableEnginesHere !== null && !availableEnginesHere.includes(engine)
-  // A hard block is only honest when we actually know what this person has.
-  // With myCreds unknown, the softer advisory warning stands instead.
-  const clusterEngineBlocked = runtime === 'cluster' && myCreds !== null && engineMissingHere
+  // A hard block is only honest when we actually know what this person has —
+  // as of now: with myCreds unknown, or only cached and still refreshing, the
+  // softer advisory warning stands instead.
+  const clusterFacts = parts.creds === 'fresh' && parts.cluster === 'fresh'
+  const clusterEngineBlocked = runtime === 'cluster' && myCreds !== null && engineMissingHere && clusterFacts
   // Neither the person's own GitHub credential nor a shared operator token:
   // the pod can still clone public repos, so this warns rather than blocks.
   // Nothing is cloned with No repository, so it does not apply there.
@@ -646,16 +724,28 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const scratchNameProblem = scratchNameInvalid
     ? `The scratch folder name after ${SCRATCH_PREFIX} must be 1-64 letters, digits, '-' or '_', starting with a letter or digit.`
     : null
-  const blockedReason = runtimeBlockedReason ?? hostClaudeBlockedReason ?? cloneByNameUnsupported ?? clonePlanProblem ?? scratchNameProblem
+  // A daemon from the cache may have gone since: Launch waits for a fresh
+  // /api/daemons to say the selected one is still connected (the server
+  // refuses an unknown daemon anyway; this says so before Launch).
+  const daemonGone = needsDaemon && !!selectedDaemon && parts.daemons === 'fresh' && !daemons.some(d => d.id === selectedDaemon.id)
+  const daemonUnconfirmedReason = !needsDaemon || !selectedDaemon
+    ? null
+    : daemonGone
+      ? `${selectedDaemon.name} is no longer connected — pick another daemon.`
+      : parts.daemons === 'fresh'
+        ? null
+        : parts.daemons === 'failed'
+          ? `Couldn't check that ${selectedDaemon.name} is still connected — close and reopen to try again.`
+          : `Checking that ${selectedDaemon.name} is still connected…`
+  const blockedReason = runtimeBlockedReason ?? hostClaudeBlockedReason ?? cloneByNameUnsupported ?? clonePlanProblem ?? scratchNameProblem ?? daemonUnconfirmedReason
 
   const canSubmit = hasRepoChoice &&
     (!needsDaemon || selectedDaemon !== null) && !submitting &&
     (runtime !== 'daemon' || agentAck) && !clusterEngineBlocked && blockedReason === null &&
     !clusterRepoUnresolved && !freeTextModelInvalid
 
-  // A grant is refused on the bare host and for any engine but Claude, and only an agent
-  // session can carry one (the gateway is reached through Claude's MCP config).
-  const mcpAvailable = (runtime === 'cluster' || runtime === 'docker') && engine === 'claude' && kind === 'agent'
+  const mcpEngineAvailable = engine === 'claude' || (engine === 'codex' && (runtime === 'cluster' || selectedDaemon?.codex_restricted === true))
+  const mcpAvailable = (runtime === 'cluster' || runtime === 'docker') && mcpEngineAvailable && kind === 'agent'
 
   // ── Run column handlers ────────────────────────────────────────────────────
   // Any deliberate pick pins the runtime for the life of this sheet.
@@ -798,7 +888,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           // model takes one and it isn't Auto. An engine with no model list
           // sends only a typed model name, if any — never a guessed one — and
           // otherwise runs on its account's own default.
-          model: selectedModel?.id ?? (freeTextModel || undefined),
+          model: freeTextModelOffered ? (freeTextModel || undefined) : selectedModel?.id,
           effort: selectedEffort,
           dangerously_skip_permissions: dangerouslySkipPermissions,
           // Both are always explicit now (spec §2) — the server's "empty means
@@ -849,9 +939,16 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           </button>
         </div>
 
-        {loading ? (
+        {/* Shown from the cache while its refresh is on its way. */}
+        {showBody && refreshingParts.length > 0 && (
+          <div data-testid="launch-refreshing" role="status" style={{ color: 'var(--fog-dim)', fontSize: '0.75rem', marginTop: -10, marginBottom: 10 }}>
+            Refreshing {refreshingParts.map(p => PART_LABELS[p]).join(', ')}…
+          </div>
+        )}
+        {!showBody ? (
           <div style={{ color: 'var(--fog)', padding: 32, textAlign: 'center' }}>Loading...</div>
         ) : (
+          <>
           <div className="launch-body">
           {/* Column: Repository */}
           {/* data-phone-order mirrors the CSS `order` in the max-width:899px
@@ -1088,6 +1185,16 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     </>
                   )}
                 </div>
+                {/* The list is still on its way (cold start): placeholders,
+                    not an empty list that then jumps. */}
+                {!reposLoaded && [0, 1, 2].map(i => (
+                  <div
+                    key={`skeleton-${i}`}
+                    data-testid="repos-skeleton"
+                    aria-hidden="true"
+                    style={{ ...itemBase, cursor: 'default', height: 38, opacity: 0.45 - i * 0.12 }}
+                  />
+                ))}
                 {filteredRepos.map(repo => (
                   <div
                     key={repoKey(repo)}
@@ -1225,7 +1332,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               <span style={sectionLabel}>MCP Servers</span>
               {mcpAvailable ? (
                 <>
-                  <McpPicker value={mcp} onChange={setMcp} />
+                  <McpPicker value={mcp} onChange={setMcp} connections={launchMcpConnections} />
                   {mcp.length > 0 && (
                     <div data-testid="launch-mcp-private" style={{ color: 'var(--fog)', fontSize: 12, marginTop: 6 }}>
                       A session with MCP servers is private to you. It keeps its shell, settings and plugins; only the tools above are bounded.
@@ -1234,46 +1341,10 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                 </>
               ) : (
                 <div data-testid="launch-mcp-unavailable" style={{ color: 'var(--fog)', fontSize: 13 }}>
-                  MCP servers are available for Claude agent sessions in a cluster pod or the local sandbox, not on this machine unsandboxed, not for other engines, and not for terminal sessions.
+                  MCP servers are available for Claude and Codex agent sessions in a cluster pod or an updated local sandbox, not on this machine unsandboxed. Choose an agent session in a supported sandbox to select connections.
                 </div>
               )}
             </div>
-
-            {/* Submit */}
-            <button
-              onClick={handleSubmit}
-              disabled={!canSubmit}
-              style={{
-                width: '100%',
-                background: canSubmit ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
-                color: canSubmit ? 'var(--amber)' : 'var(--fog-dim)',
-                border: `1px solid ${canSubmit ? 'var(--blaze)' : 'var(--stone)'}`,
-                borderRadius: 8,
-                padding: '12px',
-                fontWeight: 700,
-                fontSize: '0.95rem',
-                cursor: canSubmit ? 'pointer' : 'not-allowed',
-                fontFamily: 'inherit',
-                letterSpacing: '0.05em',
-              }}
-            >
-              {noRepoMode ? 'Launch Session' : newFolderMode ? 'Create & Launch →' : isCheckedOut || selectedRepo?.is_local || cloneFolder?.present ? 'Launch Session' : 'Clone & Launch →'}
-            </button>
-
-            {/* Say why, next to the button that is refusing: a disabled Launch
-                with the reason three columns away reads as a broken sheet. */}
-            {(blockedReason ?? (clusterRepoUnresolved ? CLUSTER_REPO_UNRESOLVED : null)) && (
-              <div
-                data-testid="launch-blocked-reason"
-                style={{ color: 'var(--fog)', marginTop: 8, fontSize: 13 }}
-              >
-                {blockedReason ?? CLUSTER_REPO_UNRESOLVED}
-              </div>
-            )}
-
-            {error && (
-              <div style={{ color: 'var(--danger)', marginTop: 8, fontSize: 13 }}>{error}</div>
-            )}
           </div>
 
           {/* Column: Run — every runtime/kind/engine choice, nothing hidden */}
@@ -1284,9 +1355,12 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             onKindChange={pickKind}
             engine={engine}
             onEngineChange={pickEngine}
-            models={listModels}
+            models={freeTextModelOffered ? [] : listModels}
             modelsLoading={engineModels.loading}
             modelsFallback={engineModels.fallback}
+            modelsError={catalogTarget.runtime === 'cluster' ? engineModels.error : undefined}
+            modelsRefreshing={catalogTarget.runtime === 'cluster' && engineModels.refreshing}
+            onModelsRetry={engineModels.retry}
             model={selectedModel?.id ?? ''}
             onModelChange={pickModel}
             effort={selectedEffort}
@@ -1299,7 +1373,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               : undefined}
             daemons={daemons}
             selectedDaemon={selectedDaemon}
-            onDaemonChange={d => setSelectedDaemon(d as DaemonApiInfo)}
+            onDaemonChange={d => { daemonPickedRef.current = true; setSelectedDaemon(d as DaemonApiInfo) }}
             onReposRootChanged={applyReposRoot}
             clusterConfigured={!!clusterStatus?.configured}
             availableEnginesHere={availableEnginesHere}
@@ -1315,8 +1389,6 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             ) : undefined}
             dangerouslySkipPermissions={dangerouslySkipPermissions}
             onSkipPermissionsChange={setDangerouslySkipPermissions}
-            ack={agentAck}
-            onAckChange={setAgentAck}
             daemonNotes={
               <>
                 {cloneRef && cloneFolder && selectedDaemon && needsDaemon && (
@@ -1440,6 +1512,65 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             }
           />
           </div>
+          <div className="launch-footer" data-testid="launch-footer">
+          <div className="launch-footer-action" data-testid="launch-footer-action">
+          {/* The acknowledgement sits in the footer, directly above the button it
+              gates, so it is in view whenever it applies. Only where the session
+              genuinely runs as you, with nothing between it and your filesystem. */}
+          {runtime === 'daemon' && (
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: '0.8rem', color: 'var(--amber)', marginBottom: 12 }}>
+              <input
+                type="checkbox"
+                data-testid="agent-ack"
+                checked={agentAck}
+                onChange={e => setAgentAck(e.target.checked)}
+              />
+              {kind === 'agent' ? ACK_AGENT : ACK_TERMINAL}
+            </label>
+          )}
+
+          {/* Submit */}
+          <button
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+            style={{
+              width: '100%',
+              background: canSubmit ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
+              color: canSubmit ? 'var(--amber)' : 'var(--fog-dim)',
+              border: `1px solid ${canSubmit ? 'var(--blaze)' : 'var(--stone)'}`,
+              borderRadius: 8,
+              padding: '12px',
+              fontWeight: 700,
+              fontSize: '0.95rem',
+              cursor: canSubmit ? 'pointer' : 'not-allowed',
+              fontFamily: 'inherit',
+              letterSpacing: '0.05em',
+            }}
+          >
+            {noRepoMode ? 'Launch Session' : newFolderMode ? 'Create & Launch →' : isCheckedOut || selectedRepo?.is_local || cloneFolder?.present ? 'Launch Session' : 'Clone & Launch →'}
+          </button>
+          </div>
+
+          {/* Say why, next to the button that is refusing: a disabled Launch
+              with the reason three columns away reads as a broken sheet. On
+              desktop it sits to the left of the button (the footer's left two
+              columns); on a phone it stacks under it. */}
+          <div className="launch-footer-note">
+          {(blockedReason ?? (clusterRepoUnresolved ? CLUSTER_REPO_UNRESOLVED : null)) && (
+            <div
+              data-testid="launch-blocked-reason"
+              style={{ color: 'var(--fog)', marginTop: 8, fontSize: 13 }}
+            >
+              {blockedReason ?? CLUSTER_REPO_UNRESOLVED}
+            </div>
+          )}
+
+          {error && (
+            <div style={{ color: 'var(--danger)', marginTop: 8, fontSize: 13 }}>{error}</div>
+          )}
+          </div>
+          </div>
+          </>
         )}
       </div>
     </div>

@@ -92,6 +92,8 @@ type fakeProvider struct {
 	err      error
 	calls    atomic.Int32
 	tokens   []string
+	// block, when set, holds every ListMine until it is closed.
+	block chan struct{}
 }
 
 func (f *fakeProvider) ID() string                                   { return f.id }
@@ -103,8 +105,17 @@ func (f *fakeProvider) TokenUser() string                            { return "u
 func (f *fakeProvider) CloneURL(o, n, _ string) string {
 	return "https://" + f.host + "/" + o + "/" + n + ".git"
 }
+func (f *fakeProvider) CommitURL(o, n, sha string) string {
+	return "https://" + f.host + "/" + o + "/" + n + "/commit/" + sha
+}
 func (f *fakeProvider) ListMine(_ context.Context, token string) ([]gitprovider.Repo, error) {
 	f.calls.Add(1)
+	f.mu.Lock()
+	block := f.block
+	f.mu.Unlock()
+	if block != nil {
+		<-block
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tokens = append(f.tokens, token)
@@ -201,9 +212,11 @@ func TestUserRepoListerPerAccountAndCached(t *testing.T) {
 	if gh.calls.Load() != 1 || gl.calls.Load() != 1 || vault.fetches.Load() != 2 {
 		t.Errorf("cached call refetched: gh=%d gl=%d fetches=%d", gh.calls.Load(), gl.calls.Load(), vault.fetches.Load())
 	}
-	// After the TTL: refetched.
+	// After the TTL: refetched (in the background — the expired list is
+	// served meanwhile).
 	*now = now.Add(4 * time.Minute)
 	l.List(context.Background(), "alice")
+	l.bg.Wait()
 	if gh.calls.Load() != 2 || gl.calls.Load() != 2 {
 		t.Errorf("expired cache not refreshed: gh=%d gl=%d", gh.calls.Load(), gl.calls.Load())
 	}
@@ -233,6 +246,8 @@ func TestUserRepoListerDegradesPerProvider(t *testing.T) {
 	*now = now.Add(6 * time.Minute)
 	gl.set([]gitprovider.Repo{{Provider: "gitlab", Owner: "grp", Name: "proj"}}, nil)
 	gh.set(nil, errors.New("github api: status 502"))
+	l.List(context.Background(), "alice") // GitHub's expired list refreshes in the background
+	l.bg.Wait()
 	repos, stale = l.List(context.Background(), "alice")
 	if names(repos) != "github:alice/tool,gitlab:grp/proj" || stale == nil {
 		t.Fatalf("degraded = %s stale=%v", names(repos), stale)

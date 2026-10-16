@@ -112,6 +112,7 @@ describe('ChatView', () => {
     await act(async () => {})
     expect(screen.getByRole('textbox')).not.toBeDisabled()
     expect(screen.getByTestId('ready-card')).toHaveTextContent('opus-5')
+    act(() => t.replayDone())
     act(() => t.setStatus('waiting'))
     expect(screen.getByTestId('waiting')).toBeInTheDocument()
     act(() => t.setStatus('stopped'))
@@ -351,6 +352,7 @@ describe('ChatView working indicator', () => {
   })
 
   it('starts optimistically on send, ticks, and clears on turn_done', async () => {
+    seed()
     const t = createFakeTransport()
     const { rerender } = render(<ChatView session={SESSION} transport={t.transport} meta={meta()} />)
     expect(screen.queryByTestId('working')).not.toBeInTheDocument()
@@ -381,15 +383,18 @@ describe('ChatView working indicator', () => {
   })
 
   it('clears on interrupt', async () => {
+    seed()
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta()} />)
     await sendMessage('go')
+    expect(screen.getByTestId('working')).toBeInTheDocument()
     await act(async () => { fireEvent.click(screen.getByText(/Stop/)) })
     expect(t.interrupts).toBe(1)
     expect(screen.queryByTestId('working')).not.toBeInTheDocument()
   })
 
   it('does not start for a settings command, but a bare /model is a prompt', async () => {
+    seed()
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta()} />)
     await sendMessage('/model claude-opus-5')
@@ -400,6 +405,7 @@ describe('ChatView working indicator', () => {
   })
 
   it('takes the host’s own list of no-turn commands', async () => {
+    seed()
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta()} noTurnCommands={/^\/persona\s+\S/} />)
     await sendMessage('/persona reviewer')
@@ -450,6 +456,7 @@ describe('ChatView working indicator', () => {
   })
 
   it('gives up on a message nothing answers', async () => {
+    seed()
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta()} />)
     await sendMessage('go')
@@ -460,6 +467,7 @@ describe('ChatView working indicator', () => {
   })
 
   it('keeps working once the session answers (status or events)', async () => {
+    seed()
     const t = createFakeTransport()
     const { rerender } = render(<ChatView session={SESSION} transport={t.transport} meta={meta()} />)
     await sendMessage('go')
@@ -492,6 +500,7 @@ describe('ChatView working indicator', () => {
 
   it('keeps a compact indicator in the toolbar while text streams', () => {
     ingest(ev({ kind: 'assistant_text', transient: true, payload: { text: 'part', done: false } }))
+    seed()
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'running' })} />)
     expect(screen.queryByTestId('working')).not.toBeInTheDocument()
@@ -499,6 +508,7 @@ describe('ChatView working indicator', () => {
   })
 
   it('shows "Waiting for your answer" — not working — while the agent waits', () => {
+    seed()
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'waiting' })} />)
     expect(screen.getByTestId('waiting')).toHaveTextContent('Waiting for your answer')
@@ -513,6 +523,7 @@ describe('ChatView working indicator', () => {
       addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
     })) as unknown as typeof window.matchMedia
     try {
+      seed()
       const t = createFakeTransport()
       render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'running' })} />)
       const w = screen.getByTestId('working')
@@ -521,5 +532,50 @@ describe('ChatView working indicator', () => {
     } finally {
       window.matchMedia = original
     }
+  })
+})
+
+describe('ChatView and the replay of a long history', () => {
+  beforeEach(() => {
+    resetChatState()
+  })
+
+  it('shows no working or waiting line while the history comes in, and the final state after', async () => {
+    const t = createFakeTransport({ meta: { status: 'idle' } })
+    render(<ChatView session={SESSION} transport={t.transport} />)
+    await act(async () => {})
+    const none = () => {
+      expect(screen.queryByTestId('working')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('working-compact')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('waiting')).not.toBeInTheDocument()
+    }
+    const batch = (from: number) => [
+      ev({ seq: from, kind: 'user_message', payload: { text: `m${from}`, source: 'chat' } }),
+      ev({ seq: from + 1, kind: 'status_changed', payload: { status: 'running', reason: 'turn' } }),
+    ]
+    act(() => { t.setStatus('running'); for (const e of batch(1)) t.emit(e) })
+    none()
+    act(() => { t.replayDone({ lastSeq: 2, hasMore: true }) })
+    act(() => { t.setStatus('waiting') })
+    none()
+    act(() => { for (const e of batch(3)) t.emit(e); t.setStatus('running') })
+    none()
+    act(() => { t.setStatus('idle'); t.replayDone({ lastSeq: 4, hasMore: false }) })
+    none()
+    expect(screen.getByRole('textbox')).not.toBeDisabled()
+    // A status that arrives after the replay shows as it always did.
+    act(() => { t.setStatus('running') })
+    expect(screen.getByTestId('working')).toBeInTheDocument()
+    act(() => { t.setStatus('waiting') })
+    expect(screen.getByTestId('waiting')).toBeInTheDocument()
+  })
+
+  it('does not lock the composer when the link drops mid-replay', async () => {
+    const t = createFakeTransport({ meta: { status: 'idle' } })
+    render(<ChatView session={SESSION} transport={t.transport} />)
+    await act(async () => {})
+    act(() => { t.setStatus('idle') })
+    act(() => { t.setConnected(false) })
+    expect(screen.getByRole('textbox')).not.toBeDisabled()
   })
 })

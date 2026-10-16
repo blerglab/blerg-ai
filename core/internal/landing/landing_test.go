@@ -37,3 +37,19 @@ func TestVersionFallsBackToDev(t *testing.T) {
 		t.Fatalf("Version() = %q, want abc123", got)
 	}
 }
+
+func TestReleaseAndCommitDefaultEmptyAndHonourEnv(t *testing.T) {
+	t.Setenv("BLERG_RELEASE", "")
+	t.Setenv("BLERG_COMMIT", "")
+	if got := landing.Release(); got != "" {
+		t.Fatalf("Release() = %q, want empty when unstamped", got)
+	}
+	if got := landing.Commit(); got != "" {
+		t.Fatalf("Commit() = %q, want empty when unstamped", got)
+	}
+	t.Setenv("BLERG_RELEASE", "0.2.0")
+	t.Setenv("BLERG_COMMIT", "510d0c0")
+	if landing.Release() != "0.2.0" || landing.Commit() != "510d0c0" {
+		t.Fatalf("Release/Commit = %q/%q, want 0.2.0/510d0c0", landing.Release(), landing.Commit())
+	}
+}

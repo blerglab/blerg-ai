@@ -136,3 +136,48 @@ func TestHubBroadcastStillWorks(t *testing.T) {
 		t.Fatalf("unexpected broadcast payload: %s", msg)
 	}
 }
+
+// A connection's keepalive policy is fixed at its handshake. Restoring test
+// defaults while an older socket drains must neither race its pong handler nor
+// replace its live read deadline with the next connection's policy.
+func TestHubKeepalivePolicySurvivesDefaultsRestore(t *testing.T) {
+	restore := api.SetKeepaliveIntervals(10*time.Millisecond, 500*time.Millisecond)
+	defer restore()
+	srv, boardID, token := wsSetup(t)
+	conn := dialWS(t, srv, boardID, token)
+	pinged := make(chan struct{}, 8)
+	conn.SetPingHandler(func(data string) error {
+		select {
+		case pinged <- struct{}{}:
+		default:
+		}
+		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(time.Second))
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-pinged:
+	case <-done:
+		t.Fatal("connection closed before first keepalive")
+	case <-time.After(2 * time.Second):
+		t.Fatal("missing initial keepalive")
+	}
+	restoreNext := api.SetKeepaliveIntervals(time.Hour, time.Nanosecond)
+	defer restoreNext()
+	for range 3 {
+		select {
+		case <-pinged:
+		case <-done:
+			t.Fatal("active connection adopted restored keepalive defaults")
+		case <-time.After(2 * time.Second):
+			t.Fatal("active keepalive stopped after defaults changed")
+		}
+	}
+}

@@ -39,7 +39,7 @@ describe('SessionCard', () => {
   })
 
   it('puts status + name on the first row and the chips on a second row', () => {
-    renderCard(makeSession({ title: 'My task', status: 'idle', runtime: 'cluster', kind: 'agent', model: 'claude-sonnet-5' }))
+    renderCard(makeSession({ title: 'My task', status: 'idle', runtime: 'cluster', kind: 'tmux', model: 'claude-sonnet-5' }))
     const nameRow = screen.getByText('My task').parentElement!
     expect(nameRow).toContainElement(screen.getByTestId('status-dot'))
     expect(nameRow).toContainElement(screen.getByTestId('star-toggle'))
@@ -50,6 +50,74 @@ describe('SessionCard', () => {
     expect(screen.getByTestId('runtime-chip').parentElement).toBe(screen.getByTestId('model-chip').parentElement)
   })
 
+  it('shows how many background tasks a running session has, on the chips row', () => {
+    renderCard(makeSession({ title: 'My task', status: 'running', background_tasks: 2 }))
+    const chip = screen.getByTestId('background-chip')
+    expect(chip.textContent).toBe('\u23F12')
+    expect(chip).toHaveAttribute('title', '2 background tasks running')
+    expect(screen.getByText('My task').parentElement).not.toContainElement(chip)
+  })
+
+  it('an idle session with background tasks shows the background state: the ⏱ count in the status slot, once, words only in its name', () => {
+    renderCard(makeSession({ title: 'My task', status: 'idle', background_tasks: 2 }))
+    const glyph = screen.getByTestId('status-dot')
+    expect(glyph).toHaveAttribute('data-status', 'background')
+    expect(glyph.textContent).toBe('\u23F12')
+    expect(glyph).toHaveAttribute('title', 'working in background, 2 tasks')
+    expect(screen.getByRole('img', { name: 'working in background, 2 tasks' })).toBe(glyph)
+    expect(screen.getByText('My task').parentElement).toContainElement(glyph)
+    // Not idle's Zz, no second ⏱ chip, and no words on the card.
+    expect(glyph).not.toHaveTextContent('Zz')
+    expect(screen.queryByTestId('background-chip')).toBeNull()
+    expect(screen.queryByText(/working in background/)).toBeNull()
+  })
+
+  it('gives every status glyph the same slot, so the names line up', () => {
+    const widths: string[] = []
+    for (const over of [{ status: 'idle' as const }, { status: 'waiting' as const }, { status: 'running' as const }, { status: 'idle' as const, background_tasks: 12 }, { status: 'stopped' as const }]) {
+      const { unmount } = renderCard(makeSession(over))
+      widths.push(screen.getByTestId('status-slot').style.width)
+      unmount()
+    }
+    expect(new Set(widths)).toEqual(new Set(['22px']))
+  })
+
+  it('reads a count past nine as "9+", in the slot and on the chip', () => {
+    const { unmount } = renderCard(makeSession({ status: 'idle', background_tasks: 12 }))
+    expect(screen.getByTestId('status-dot').textContent).toBe('\u23F19+')
+    expect(screen.getByTestId('status-dot')).toHaveAttribute('title', 'working in background, 12 tasks')
+    unmount()
+    renderCard(makeSession({ status: 'running', background_tasks: 12 }))
+    expect(screen.getByTestId('background-chip').textContent).toBe('\u23F19+')
+  })
+
+  it('keeps the second line when a session with no chips goes into the background, so the card keeps its height', () => {
+    const bare = { title: '', repo: 'widget', kind: undefined, runtime: undefined, model: undefined }
+    const { container, rerender } = renderCard(makeSession({ ...bare, status: 'running', background_tasks: 1 }))
+    const lines = () => (container.firstElementChild as HTMLElement).children.length
+    expect(lines()).toBe(2)
+    rerender(
+      <MemoryRouter initialEntries={['/']}>
+        <SessionCard session={makeSession({ ...bare, status: 'idle', background_tasks: 1 })} daemon={makeDaemon()} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('status-dot')).toHaveAttribute('data-status', 'background')
+    expect(screen.queryByTestId('background-chip')).toBeNull()
+    expect(lines()).toBe(2)
+  })
+
+  it('names one background task in the singular, and shows none for an ended session or a count of 0', () => {
+    const { unmount } = renderCard(makeSession({ status: 'running', background_tasks: 1 }))
+    expect(screen.getByTestId('background-chip')).toHaveAttribute('title', '1 background task running')
+    unmount()
+    const second = renderCard(makeSession({ status: 'stopped', background_tasks: 3 }))
+    expect(screen.queryByTestId('background-chip')).toBeNull()
+    second.unmount()
+    renderCard(makeSession({ status: 'idle', background_tasks: 0 }))
+    expect(screen.queryByTestId('background-chip')).toBeNull()
+    expect(screen.getByTestId('status-dot')).toHaveTextContent('Zz')
+  })
+
   it('renders a status dot', () => {
     renderCard(makeSession({ status: 'running' }))
     expect(screen.getByTestId('status-dot')).toBeInTheDocument()
@@ -58,6 +126,17 @@ describe('SessionCard', () => {
   it('status dot title carries the status name for accessibility', () => {
     renderCard(makeSession({ status: 'waiting' }))
     expect(screen.getByTestId('status-dot')).toHaveAttribute('title', 'waiting')
+  })
+
+  it('shows a session a restart left paused with the waiting "?", its tooltip saying why', () => {
+    const { unmount } = renderCard(makeSession({ status: 'idle', paused_reason: 'restart' }))
+    const glyph = screen.getByTestId('status-dot')
+    expect(glyph).toHaveTextContent('?')
+    expect(glyph).toHaveAttribute('title', 'paused by a restart')
+    unmount()
+    // Running again: its own glyph, whatever the row still says.
+    renderCard(makeSession({ status: 'running', paused_reason: 'restart' }))
+    expect(screen.getByTestId('status-dot')).not.toHaveAttribute('title', 'paused by a restart')
   })
 
   it('renders a model chip when model is set', () => {
@@ -84,6 +163,31 @@ describe('SessionCard', () => {
     expect(container.querySelector('[data-active="true"]')).toBeInTheDocument()
   })
 
+  it('says its org/repo in small muted text on the chips row, and nothing for a no-repo session', () => {
+    const { unmount } = renderCard(makeSession({ title: 'My task', repo: 'blerglab/blerg', runtime: 'cluster' }))
+    const repo = screen.getByTestId('session-repo')
+    expect(repo).toHaveTextContent('blerglab/blerg')
+    expect(repo.title).toBe('blerglab/blerg')
+    expect(repo.parentElement).toBe(screen.getByTestId('runtime-chip').parentElement)
+    expect(repo).toHaveStyle({ color: 'var(--fog-dim)' })
+    // Two lines at most: the repo and the chips share one line that never wraps; the repo gives
+    // way (ellipsis, full name in its title), the chips keep their size.
+    expect(repo.parentElement).toHaveStyle({ flexWrap: 'nowrap', overflow: 'hidden' })
+    expect(repo).toHaveStyle({ flex: '0 1 auto', minWidth: '0', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
+    // The chips keep their size: only the repo gives way, so a chip is never cut at the card's edge.
+    expect(screen.getByTestId('runtime-chip')).toHaveStyle({ flexShrink: '0' })
+    unmount()
+    for (const r of ['', '.scratch-granite-8000']) {
+      const { unmount: u } = renderCard(makeSession({ title: 'My task', repo: r }))
+      expect(screen.queryByTestId('session-repo')).toBeNull()
+      u()
+    }
+    // An untitled session is named by its repo already: no second line saying it again.
+    renderCard(makeSession({ title: '', repo: 'widget' }))
+    expect(screen.getAllByText('widget')).toHaveLength(1)
+    expect(screen.queryByTestId('session-repo')).toBeNull()
+  })
+
   it('falls back to the repo name when there is no title', () => {
     renderCard(makeSession({ title: '', repo: 'widget' }))
     expect(screen.getByText('widget')).toBeInTheDocument()
@@ -96,9 +200,14 @@ describe('SessionCard', () => {
   })
 
   describe('status indicators', () => {
-    it('running renders a spinner', () => {
+    it('running renders a spinner', async () => {
       renderCard(makeSession({ status: 'running' }))
       expect(screen.getByTestId('status-dot')).toHaveClass('blerg-status-spinner')
+      // The class is styled: a running card with an unstyled spinner shows no glyph at all.
+      // (The app's tsconfig has no Node types: the file system comes in untyped.)
+      const fs = (await import(/* @vite-ignore */ 'node:' + 'fs')) as { readFileSync(p: string, enc: 'utf8'): string }
+      const appCss = fs.readFileSync('src/index.css', 'utf8') // vitest runs from runner/frontend
+      expect(appCss).toMatch(/\.blerg-status-spinner\s*\{[^}]*animation:\s*blerg-spin/)
     })
 
     it('waiting renders a question mark', () => {
@@ -202,7 +311,8 @@ describe('SessionCard', () => {
     it('labels a cluster session', () => {
       renderCard(makeSession({ runtime: 'cluster', kind: 'agent' }))
       expect(screen.getByTestId('runtime-chip')).toHaveTextContent('Cluster')
-      expect(screen.getByTestId('kind-chip')).toHaveTextContent('Agent')
+      // An agent session is the default kind: no chip says so (Terminal, the exception, does).
+      expect(screen.queryByTestId('kind-chip')).not.toBeInTheDocument()
     })
 
     it('labels a sandboxed session', () => {

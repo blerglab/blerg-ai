@@ -97,6 +97,10 @@ type Connection struct {
 	LastVerifiedAt *time.Time      `json:"last_verified_at"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
+	// PinPolicy is how the runner treats a tool whose definition changed after a session pinned
+	// it, or a tool the launch never saw: "strict" asks the person, "auto_accept" re-pins and
+	// grants by the session's recorded preset (docs/design/mcp-tool-changes.md §3.5).
+	PinPolicy string `json:"pin_policy"`
 }
 
 // CreateInput is what a person supplies to add a connection.
@@ -114,6 +118,7 @@ type PatchInput struct {
 	DefaultTools json.RawMessage
 	Secret       *string // replaces a static secret
 	HeaderName   *string // static only
+	PinPolicy    *string // "strict" or "auto_accept"
 }
 
 // Proof names the live principal that authorised a secret fetch (exactly one is set); it is
@@ -130,6 +135,30 @@ type SecretResult struct {
 	Value      string
 	// ExpiresAt is nil for a static secret.
 	ExpiresAt *time.Time
+	PinPolicy string
+}
+
+// ConnectionEvent is a settings change on a connection that must stay visible: today only a
+// pin_policy flip. Rows outlive the connection and are pruned with the access log.
+type ConnectionEvent struct {
+	ID        int64     `json:"id"`
+	Action    string    `json:"action"`
+	FromValue string    `json:"from_value"`
+	ToValue   string    `json:"to_value"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Pin policies.
+const (
+	PinPolicyStrict     = "strict"
+	PinPolicyAutoAccept = "auto_accept"
+)
+
+func validatePinPolicy(p string) error {
+	if p != PinPolicyStrict && p != PinPolicyAutoAccept {
+		return invalid(`pin_policy must be "strict" or "auto_accept"`)
+	}
+	return nil
 }
 
 // Service owns the mcp_connections lifecycle.
@@ -159,13 +188,13 @@ func NewService(st db.Store, backend keybackend.Backend, policy netguard.Policy)
 }
 
 const cols = `id::text, name, url, auth_kind, coalesce(header_name,''), secret_ciphertext IS NOT NULL,
-	coalesce(oauth_meta->>'issuer',''), default_tools, status, last_verified_at, created_at, updated_at`
+	coalesce(oauth_meta->>'issuer',''), default_tools, status, last_verified_at, created_at, updated_at, pin_policy`
 
 func scan(row pgx.Row) (Connection, error) {
 	var c Connection
 	var tools []byte
 	err := row.Scan(&c.ID, &c.Name, &c.URL, &c.AuthKind, &c.HeaderName, &c.HasSecret, &c.OAuthIssuer,
-		&tools, &c.Status, &c.LastVerifiedAt, &c.CreatedAt, &c.UpdatedAt)
+		&tools, &c.Status, &c.LastVerifiedAt, &c.CreatedAt, &c.UpdatedAt, &c.PinPolicy)
 	if err != nil {
 		return Connection{}, err
 	}
@@ -447,7 +476,7 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 	if !uuidRe.MatchString(id) {
 		return Connection{}, ErrNotFound
 	}
-	if in.Name == nil && in.DefaultTools == nil && in.Secret == nil && in.HeaderName == nil {
+	if in.Name == nil && in.DefaultTools == nil && in.Secret == nil && in.HeaderName == nil && in.PinPolicy == nil {
 		return Connection{}, invalid("nothing to change")
 	}
 	var tools []byte
@@ -462,6 +491,11 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 			return Connection{}, err
 		}
 	}
+	if in.PinPolicy != nil {
+		if err := validatePinPolicy(*in.PinPolicy); err != nil {
+			return Connection{}, err
+		}
+	}
 
 	tx, err := s.st.Pool().Begin(ctx)
 	if err != nil {
@@ -471,8 +505,8 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 	if err := lockAccount(ctx, tx, accountID); err != nil {
 		return Connection{}, err
 	}
-	var kind string
-	err = tx.QueryRow(ctx, `SELECT auth_kind FROM mcp_connections WHERE id = $1 AND account_id = $2 FOR UPDATE`, id, accountID).Scan(&kind)
+	var kind, policy string
+	err = tx.QueryRow(ctx, `SELECT auth_kind, pin_policy FROM mcp_connections WHERE id = $1 AND account_id = $2 FOR UPDATE`, id, accountID).Scan(&kind, &policy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Connection{}, ErrNotFound
 	}
@@ -526,6 +560,15 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 			return Connection{}, err
 		}
 	}
+	if in.PinPolicy != nil && *in.PinPolicy != policy {
+		if _, err := tx.Exec(ctx, `UPDATE mcp_connections SET pin_policy = $1, updated_at = now() WHERE id = $2`, *in.PinPolicy, id); err != nil {
+			return Connection{}, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO mcp_connection_events (account_id, connection_id, action, from_value, to_value)
+			VALUES ($1, $2, 'pin_policy', $3, $4)`, accountID, id, policy, *in.PinPolicy); err != nil {
+			return Connection{}, err
+		}
+	}
 	c, err := scan(tx.QueryRow(ctx, `SELECT `+cols+` FROM mcp_connections WHERE id = $1`, id))
 	if err != nil {
 		return Connection{}, err
@@ -534,6 +577,33 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 		return Connection{}, err
 	}
 	return c, nil
+}
+
+// ListConnectionEvents lists one of the account's connections' settings events, newest first.
+// Another account's connection, or an unknown one, is ErrNotFound.
+func (s *Service) ListConnectionEvents(ctx context.Context, accountID, id string, limit int) ([]ConnectionEvent, error) {
+	if _, err := s.Get(ctx, accountID, id); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	rows, err := s.st.Pool().Query(ctx, `SELECT id, action, coalesce(from_value,''), coalesce(to_value,''), created_at
+		FROM mcp_connection_events WHERE account_id = $1 AND connection_id = $2 ORDER BY created_at DESC, id DESC LIMIT $3`,
+		accountID, id, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ConnectionEvent{}
+	for rows.Next() {
+		var e ConnectionEvent
+		if err := rows.Scan(&e.ID, &e.Action, &e.FromValue, &e.ToValue, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // Delete removes one of the account's connections, or reports ErrNotFound. The row is deleted
@@ -576,13 +646,13 @@ func (s *Service) FetchSecret(ctx context.Context, accountID, id string, proof P
 	if !uuidRe.MatchString(id) {
 		return SecretResult{}, ErrNotFound
 	}
-	var url, kind, status string
+	var url, kind, status, policy string
 	var header *string
 	var ct []byte
 	var keyID *string
 	err := s.st.Pool().QueryRow(ctx,
-		`SELECT url, auth_kind, status, header_name, secret_ciphertext, key_id FROM mcp_connections WHERE id = $1 AND account_id = $2`,
-		id, accountID).Scan(&url, &kind, &status, &header, &ct, &keyID)
+		`SELECT url, auth_kind, status, header_name, secret_ciphertext, key_id, pin_policy FROM mcp_connections WHERE id = $1 AND account_id = $2`,
+		id, accountID).Scan(&url, &kind, &status, &header, &ct, &keyID, &policy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SecretResult{}, ErrNotFound
 	}
@@ -605,9 +675,14 @@ func (s *Service) FetchSecret(ctx context.Context, accountID, id string, proof P
 
 	if kind == "oauth" {
 		// Decrypted (and, inside the refresh window, refreshed) under the connection's row lock.
-		return s.oauthAccessToken(ctx, accountID, id)
+		res, err := s.oauthAccessToken(ctx, accountID, id)
+		if err != nil {
+			return SecretResult{}, err
+		}
+		res.PinPolicy = policy
+		return res, nil
 	}
-	res := SecretResult{URL: url}
+	res := SecretResult{URL: url, PinPolicy: policy}
 	if kind == "static" {
 		if keyID == nil || len(ct) == 0 {
 			return SecretResult{}, errors.New("mcpconn: static connection has no secret")
@@ -631,14 +706,21 @@ func nullable(s string) *string {
 	return &s
 }
 
-// PruneAccessLog deletes access-log rows older than maxAge and returns how many.
+// PruneAccessLog deletes access-log rows and mcp_connection_events rows older than maxAge and
+// returns how many in total.
 func (s *Service) PruneAccessLog(ctx context.Context, maxAge time.Duration) (int64, error) {
 	tag, err := s.st.Pool().Exec(ctx,
 		`DELETE FROM mcp_secret_access_log WHERE fetched_at < now() - make_interval(secs => $1)`, maxAge.Seconds())
 	if err != nil {
 		return 0, err
 	}
-	return tag.RowsAffected(), nil
+	n := tag.RowsAffected()
+	tag, err = s.st.Pool().Exec(ctx,
+		`DELETE FROM mcp_connection_events WHERE created_at < now() - make_interval(secs => $1)`, maxAge.Seconds())
+	if err != nil {
+		return n, err
+	}
+	return n + tag.RowsAffected(), nil
 }
 
 // CountQueryURLs counts connections whose stored URL carries a query string or a fragment. New

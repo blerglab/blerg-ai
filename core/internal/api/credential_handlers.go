@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 )
 
 // validEngines is the closed set the runner actually knows how to inject (see
@@ -80,8 +81,12 @@ func (d Deps) handleStoreCredential(w http.ResponseWriter, r *http.Request) {
 // credentialSummaryResponse is what GET /api/credentials returns per credential — engine and
 // last-updated timestamp only. Never ciphertext, never plaintext (§5).
 type credentialSummaryResponse struct {
-	Engine    string `json:"engine"`
-	UpdatedAt string `json:"updated_at"`
+	Engine     string     `json:"engine"`
+	UpdatedAt  string     `json:"updated_at"`
+	Kind       string     `json:"kind"`
+	State      string     `json:"state"`
+	Generation string     `json:"generation"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 }
 
 // handleListCredentials lists the caller's own credentials (metadata only). Gated behind
@@ -103,7 +108,7 @@ func (d Deps) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]credentialSummaryResponse, 0, len(list))
 	for _, c := range list {
-		out = append(out, credentialSummaryResponse{Engine: c.Engine, UpdatedAt: c.UpdatedAt.Format(rfc3339Milli)})
+		out = append(out, credentialSummaryResponse{Engine: c.Engine, UpdatedAt: c.UpdatedAt.Format(rfc3339Milli), Kind: c.Kind, State: c.State, Generation: c.Generation, ExpiresAt: c.ExpiresAt})
 	}
 	writeJSON(w, out)
 }

@@ -4,6 +4,7 @@ import { apiFetch } from "./apiFetch";
 import { getAccessToken } from "./authClient";
 import { mustChangePassword } from "./claims";
 import PluginsSection from "./PluginsSection";
+import ManagedCredentials, { type ManagedCredentialSummary } from "./ManagedCredentials";
 import McpConnectionsSection from "./McpConnectionsSection";
 import Shell, { useSite, type Site } from "./Shell";
 
@@ -105,7 +106,7 @@ const KIND_HELP: Record<Kind, React.ReactNode> = {
   ),
 };
 
-type CredentialSummary = { engine: string; updated_at: string };
+type CredentialSummary = ManagedCredentialSummary;
 
 // SESSION_EXPIRED is what a 401 that reached a caller means. apiFetch normally answers a 401 by
 // navigating to core's /auth/refresh and never resolving, so a 401 only lands here when the
@@ -572,23 +573,210 @@ function AgentTokens({ site }: { site: Site | null }) {
   );
 }
 
+// ── account ──────────────────────────────────────────────────────────────────
+//
+// Who you are signed in as, and — for a local (password) account — a way to change the
+// username you sign in with: POST /auth/username behind the current password
+// (core/internal/api/auth_handlers.go's handleChangeUsername). A github/oidc account's username
+// is the identity provider's, so there is no form for it. Sessions survive a rename; the new
+// name is for the next sign-in.
+
+// GET /api/me's human body (api.meResponse), the fields this section reads.
+type Me = { provider: string; provider_subject: string };
+
+const PROVIDER_LABELS: Record<string, string> = {
+  local: "Username and password",
+  github: "GitHub",
+  oidc: "Single sign-on",
+};
+
+const USERNAME_HELP =
+  "This is the name you sign in with. Lowercase letters, digits, dots, dashes and underscores.";
+
+async function loadMe(): Promise<{ me?: Me; error?: string }> {
+  try {
+    const res = await apiFetch("/api/me");
+    if (res.status === 401) return { error: SESSION_EXPIRED };
+    if (!res.ok) return { error: `Could not load your account (${res.status}).` };
+    const body = (await res.json()) as Partial<Me> | null;
+    if (typeof body?.provider !== "string" || typeof body?.provider_subject !== "string") {
+      return { error: "Could not load your account." };
+    }
+    return { me: { provider: body.provider, provider_subject: body.provider_subject } };
+  } catch {
+    return { error: "Could not reach the server. Please try again." };
+  }
+}
+
+function AccountSection() {
+  const [me, setMe] = useState<Me | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [changed, setChanged] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadMe().then((r) => {
+      if (cancelled) return;
+      if (r.me) setMe(r.me);
+      else if (r.error) setLoadError(r.error);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!me || username === "" || password === "") return;
+    setSaving(true);
+    setError(null);
+    setChanged(false);
+    try {
+      // passthrough401: a 401 here is usually a wrong current password (marked by
+      // X-Blerg-Error), which apiFetch's refresh-on-401 would turn into a page navigation.
+      const res = await apiFetch(
+        "/auth/username",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password, provider_subject: username }),
+        },
+        { passthrough401: true },
+      );
+      if (res.status === 401) {
+        setError(
+          res.headers?.get?.("X-Blerg-Error") === "invalid_credentials"
+            ? "Current password is incorrect."
+            : SESSION_EXPIRED,
+        );
+        return;
+      }
+      if (res.status === 429) {
+        setError("Too many attempts — wait a few minutes and try again.");
+        return;
+      }
+      if (!res.ok) {
+        // Invalid (400) and taken (409) come back in core's own words.
+        setError((await backendError(res)) ?? `Could not change username (${res.status}).`);
+        return;
+      }
+      const body = (await res.json().catch(() => null)) as { provider_subject?: unknown } | null;
+      const now = typeof body?.provider_subject === "string" ? body.provider_subject : username;
+      setMe({ ...me, provider_subject: now });
+      setUsername("");
+      setPassword("");
+      setChanged(true);
+    } catch {
+      setError("Could not reach the server. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const providerLabel = me ? (PROVIDER_LABELS[me.provider] ?? me.provider) : "";
+
+  return (
+    <section className="section">
+      <p className="eyebrow">Settings</p>
+      <h2 className="section-title">Account</h2>
+      {loadError && (
+        <p className="field-error" role="alert">
+          {loadError}
+        </p>
+      )}
+      {me && (
+        <div className="card">
+          <p className="card-help">
+            Username: <strong className="mono">{me.provider_subject}</strong>
+          </p>
+          <p className="card-help">
+            Sign-in: <span>{providerLabel}</span>
+          </p>
+          {me.provider !== "local" ? (
+            <p className="card-help">Your username comes from {providerLabel}.</p>
+          ) : (
+            <form className="card-form" onSubmit={submit}>
+              <label className="field" htmlFor="account-username">
+                <span className="field-label">New username</span>
+                <input
+                  id="account-username"
+                  type="text"
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  maxLength={64}
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  aria-describedby="account-username-help"
+                />
+              </label>
+              <p className="field-help" id="account-username-help">
+                {USERNAME_HELP}
+              </p>
+              <label className="field" htmlFor="account-password">
+                <span className="field-label">Current password</span>
+                <input
+                  id="account-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </label>
+              {error && (
+                <p className="field-error" role="alert">
+                  {error}
+                </p>
+              )}
+              {changed && (
+                <p className="field-help" role="status">
+                  Username changed. Use it next time you sign in.
+                </p>
+              )}
+              <div className="card-actions">
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={saving || username === "" || password === ""}
+                >
+                  {saving ? "Changing…" : "Change username"}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 const emptyDrafts = (): Record<Kind, string> =>
   Object.fromEntries(KINDS.map((k) => [k, ""])) as Record<Kind, string>;
 
 // loadCredentials fetches which credentials are configured. Exactly one of the fields is set.
-async function loadCredentials(): Promise<{ configured?: Set<string>; error?: string }> {
+async function loadCredentials(): Promise<{ configured?: Set<string>; summaries?: CredentialSummary[]; error?: string }> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    // apiFetch attaches the bearer token and, on a 401, sends the page to
-    // core's /auth/refresh instead of resolving — so the branches below only
-    // ever see a real, non-auth failure.
-    const res = await apiFetch("/api/credentials");
-    if (res.status === 401) return { error: SESSION_EXPIRED };
-    if (!res.ok) return { error: `Failed to load credential status (${res.status}).` };
-    const list: CredentialSummary[] = await res.json();
-    return { configured: new Set(list.map((c) => c.engine)) };
+    return await Promise.race([
+      (async () => {
+        const res = await apiFetch("/api/credentials", { signal: controller.signal });
+        if (res.status === 401) return { error: SESSION_EXPIRED };
+        if (!res.ok) return { error: `Failed to load credential status (${res.status}).` };
+        const list: CredentialSummary[] = await res.json();
+        return { configured: new Set(list.map((c) => c.engine)), summaries: list };
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => { controller.abort(); reject(new Error("Credential status deadline")); }, 12_000);
+      }),
+    ]);
   } catch {
     return { error: "Could not reach the server. Please try again." };
-  }
+  } finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
 export default function Settings() {
@@ -605,6 +793,7 @@ export default function Settings() {
 function SettingsScreen() {
 
   const [configured, setConfigured] = useState<Set<string>>(new Set());
+  const [summaries, setSummaries] = useState<CredentialSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<Kind, string>>(emptyDrafts);
@@ -617,9 +806,10 @@ function SettingsScreen() {
     setLoading(true);
     setError(null);
     const r = await loadCredentials();
-    if (r.configured) setConfigured(r.configured);
+    if (r.configured) { setConfigured(r.configured); setSummaries(r.summaries ?? []); }
     else if (r.error) setError(r.error);
     setLoading(false);
+    return !!r.configured;
   };
 
   // First load: the initial state is already "loading, no error".
@@ -627,7 +817,7 @@ function SettingsScreen() {
     let cancelled = false;
     loadCredentials().then((r) => {
       if (cancelled) return;
-      if (r.configured) setConfigured(r.configured);
+      if (r.configured) { setConfigured(r.configured); setSummaries(r.summaries ?? []); }
       else if (r.error) setError(r.error);
       setLoading(false);
     });
@@ -682,14 +872,16 @@ function SettingsScreen() {
 
   return (
     <Shell site={site} aside={<a className="btn btn-quiet" href="/app">Home</a>}>
+      <AccountSection />
       <section className="section">
-        <p className="eyebrow">Settings</p>
+        <p className="eyebrow">Sessions</p>
         <h2 className="section-title">Credentials</h2>
         <p className="section-help">
           Used by cluster-runtime sessions, which run as you. Desktop sessions use them differently by kind: the engine credentials aren't needed there, because a desktop session uses the engine login already on your machine; the GitHub and GitLab tokens are, because the launch sheet lists your repositories with them and clones a private one with them (always in a Local sandbox session; on This machine only if the daemon's owner allowed it).
         </p>
         {loading && <p className="muted">Loading…</p>}
         {error && <p className="field-error" role="alert">{error}</p>}
+        <ManagedCredentials summaries={summaries} labels={KIND_LABELS} onConnected={async () => { if (!await refresh()) throw new Error("Credential status unavailable"); }} />
         {GROUPS.map((group) => (
           <div className="group" key={group.eyebrow}>
             <p className="eyebrow">{group.eyebrow}</p>

@@ -264,7 +264,7 @@
   font: inherit;
 }
 
-/* The toolbar button that opens the panel, with its count badge. */
+/* A header button: Insights, the side panel's toggle, a terminal session's Skills & plugins. */
 .caps-toggle {
   display: inline-flex;
   align-items: center;
@@ -283,16 +283,4 @@
 .caps-toggle:hover,
 .caps-toggle:focus-visible {
   opacity: 1;
-}
-
-.caps-badge {
-  min-width: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--accent-bg);
-  color: var(--accent);
-  font-size: var(--text-2xs);
-  font-weight: 700;
-  line-height: 16px;
-  text-align: center;
 }

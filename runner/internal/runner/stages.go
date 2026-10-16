@@ -162,7 +162,7 @@ func missingEngineCredential(engine string, env func(string) string) (detail, hi
 				"Connect your own Claude credential in blerg settings," + operator
 		}
 	case "codex":
-		if env("CODEX_AUTH_JSON") == "" {
+		if env("CODEX_AUTH_JSON") == "" && env("BLERG_RUNNER_MANAGED_CREDENTIAL") != "1" {
 			return "No Codex credential reached the pod (CODEX_AUTH_JSON is empty)",
 				"Connect your own Codex login in blerg settings," + operator
 		}

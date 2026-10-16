@@ -202,16 +202,21 @@ func EndSessionStatus(ctx context.Context, conn *pgxpool.Pool, sessionID, status
 		   SET status            = $2,
 		       ended_at          = $3,
 		       status_changed_at = now(),
+		       background_tasks  = 0,
+		       paused_reason     = NULL,
 		       ended_by_kind     = CASE WHEN end_reason IS NULL THEN $5 ELSE ended_by_kind END,
 		       ended_by_account  = CASE WHEN end_reason IS NULL THEN $6 ELSE ended_by_account END,
 		       end_recorded_at   = CASE WHEN end_reason IS NULL THEN now() ELSE end_recorded_at END,
 		       end_reason        = coalesce(end_reason, $4)
-		 WHERE id = $1
-	`, sessionID, status, endedAt, reason, kind, account)
+		 WHERE id = $1 AND `+runtimeWriteGuard("$7")+`
+	`, sessionID, status, endedAt, reason, kind, account, runtimeAuthorityToken(ctx))
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
+		if runtimeAuthorityToken(ctx) != "" {
+			return ErrTokenInvalid
+		}
 		return fmt.Errorf("not found: %w", pgx.ErrNoRows)
 	}
 	return nil

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -162,6 +163,75 @@ func TestQuantilesUseLinearInterpolation(t *testing.T) {
 	}
 	one := quantilesOf([]float64{42})
 	near(t, "single p90", one.P90, 42)
+}
+
+func TestSpreadGivesTheWholeBox(t *testing.T) {
+	s := spreadOf([]float64{10, 1, 5, 2, 8, 3, 4, 9, 6, 7})
+	if s.Count != 10 {
+		t.Fatalf("count = %d", s.Count)
+	}
+	near(t, "min", s.Min, 1)
+	near(t, "p25", s.P25, 3.25)
+	near(t, "p50", s.P50, 5.5)
+	near(t, "p75", s.P75, 7.75)
+	near(t, "p90", s.P90, 9.1)
+	near(t, "max", s.Max, 10)
+
+	one := spreadOf([]float64{42})
+	for name, got := range map[string]float64{"min": one.Min, "p25": one.P25, "p50": one.P50, "p75": one.P75, "p90": one.P90, "max": one.Max} {
+		near(t, "single "+name, got, 42)
+	}
+	two := spreadOf([]float64{10, 4})
+	near(t, "pair min", two.Min, 4)
+	near(t, "pair p25", two.P25, 5.5)
+	near(t, "pair p50", two.P50, 7)
+	near(t, "pair p75", two.P75, 8.5)
+	near(t, "pair p90", two.P90, 9.4)
+	near(t, "pair max", two.Max, 10)
+	if z := spreadOf(nil); z != (spread{}) {
+		t.Errorf("empty = %+v", z)
+	}
+}
+
+func TestSlowCountsWhatTookMoreThanTwiceTheMedian(t *testing.T) {
+	v := []float64{10, 10, 12, 14, 40, 100} // median 13: 40 and 100 are over 26
+	if n := slowCount(v, spreadOf(v).P50); n != 2 {
+		t.Errorf("slow = %d, want 2", n)
+	}
+	if n := slowCount([]float64{26, 13, 13}, 13); n != 0 {
+		t.Errorf("exactly twice the median is not slow: got %d", n)
+	}
+	if n := slowCount([]float64{0, 0, 0, 5}, 0); n != 0 {
+		t.Errorf("a zero median has no slow: got %d", n)
+	}
+}
+
+// Each step of a start is summarised as a box: the spread and how many starts were slow at it.
+func TestStartupStepsCarryTheBoxAndTheSlowCount(t *testing.T) {
+	var attempts []startRecord
+	for i, secs := range []float64{10, 10, 12, 14, 40, 100} {
+		attempts = append(attempts, startRecord{SessionID: fmt.Sprint("s", i), Runtime: "cluster", Start: at(0), End: at(200), Ok: true,
+			Steps: map[string]float64{"image": secs}})
+	}
+	attempts = append(attempts, startRecord{SessionID: "lone", Runtime: "daemon", Start: at(0), End: at(9), Ok: true, Steps: map[string]float64{"engine": 9}})
+	out := summariseStartup(attempts, map[string]db.InsightSession{}, func(string) bool { return true })
+	if len(out.Steps) != 2 {
+		t.Fatalf("steps = %+v", out.Steps)
+	}
+	img := out.Steps[0]
+	if img.Runtime != "cluster" || img.Step != "image" || img.Count != 6 || img.Slow != 2 {
+		t.Fatalf("image step = %+v", img)
+	}
+	near(t, "image min", img.Min, 10)
+	near(t, "image p25", img.P25, 10.5)
+	near(t, "image p50", img.P50, 13)
+	near(t, "image p75", img.P75, 33.5)
+	near(t, "image p90", img.P90, 70)
+	near(t, "image max", img.Max, 100)
+	lone := out.Steps[1]
+	if lone.Count != 1 || lone.Slow != 0 || lone.Min != 9 || lone.P25 != 9 || lone.P75 != 9 || lone.Max != 9 {
+		t.Errorf("single-start step = %+v", lone)
+	}
 }
 
 func TestCostUsesPerMillionPrices(t *testing.T) {

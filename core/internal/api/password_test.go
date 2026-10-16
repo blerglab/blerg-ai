@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	cid "github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/core/internal/api"
@@ -339,5 +342,172 @@ func TestRefreshDivertsMustChangePasswordAccountToChangePassword(t *testing.T) {
 	pool.Exec(ctx, `UPDATE accounts SET must_change_password = false WHERE provider_subject='fresh'`)
 	if loc := refresh(boardURL); !strings.HasPrefix(loc, boardURL+"#access_token=") {
 		t.Fatalf("refresh after the flag cleared redirected to %q, want board", loc)
+	}
+}
+
+// authPost sends a same-origin JSON POST with a bearer token and returns the response with its
+// body read.
+func authPost(t *testing.T, srv *httptest.Server, path, tok, body string) (*http.Response, string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", srv.URL+path, strings.NewReader(body))
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp, string(b)
+}
+
+func accountIDOf(t *testing.T, pool *pgxpool.Pool, subject string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(), `SELECT id::text FROM accounts WHERE provider_subject = $1`, subject).Scan(&id); err != nil {
+		t.Fatalf("account %q: %v", subject, err)
+	}
+	return id
+}
+
+// TestChangePasswordChoosesUsername: the first password change can carry the username the
+// person picked. It is applied with the password, in one transaction; a taken name is a 409
+// with core's own words, an invalid one a 400 marked X-Blerg-Error: username (so the page can
+// tell it from a weak password), and neither changes the password.
+func TestChangePasswordChoosesUsername(t *testing.T) {
+	deps, pool := newTestDeps(t, nil, nil)
+	ctx := context.Background()
+	insertLocalAccount(t, pool, "Rand0m_Boot", "old-password-123")
+	insertLocalAccount(t, pool, "taken", "whatever-password")
+	accountID := accountIDOf(t, pool, "Rand0m_Boot")
+	pool.Exec(ctx, `UPDATE accounts SET must_change_password = true WHERE id = $1`, accountID)
+	idSvc := deps.Identity.(*identity.Service)
+	srv := httptest.NewTLSServer(api.NewRouter(deps))
+	defer srv.Close()
+	tok, err := idSvc.MintHumanAccessToken(ctx, accountID, "blerg-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := decodeClaims(t, tok).Caps; len(c) != 1 || c[0] != "password.change" {
+		t.Fatalf("expected a password-change-only token, caps = %v", c)
+	}
+	body := func(subject string) string {
+		return `{"old_password":"old-password-123","new_password":"a-long-enough-new-password","provider_subject":` + jsonString(subject) + `}`
+	}
+
+	resp, text := authPost(t, srv, "/auth/password", tok, body("taken"))
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(text, `"error":"that username is taken"`) {
+		t.Fatalf("taken username = %d %q, want 409 {error: that username is taken}", resp.StatusCode, text)
+	}
+	resp, text = authPost(t, srv, "/auth/password", tok, body("Alice"))
+	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("X-Blerg-Error") != "username" ||
+		!strings.Contains(text, "use lowercase letters, digits, dots, dashes and underscores (3–64 characters)") {
+		t.Fatalf("uppercase username = %d X-Blerg-Error=%q %q", resp.StatusCode, resp.Header.Get("X-Blerg-Error"), text)
+	}
+	var must bool
+	pool.QueryRow(ctx, `SELECT must_change_password FROM accounts WHERE id = $1`, accountID).Scan(&must)
+	if !must {
+		t.Fatal("a refused username must not have changed the password")
+	}
+
+	resp, _ = authPost(t, srv, "/auth/password", tok, body("alice"))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("change with a new username = %d, want 200", resp.StatusCode)
+	}
+	if id := accountIDOf(t, pool, "alice"); id != accountID {
+		t.Fatalf("renamed account id = %q, want the same account %q", id, accountID)
+	}
+	loginResp, err := srv.Client().PostForm(srv.URL+"/auth/login",
+		url.Values{"provider_subject": {"alice"}, "password": {"a-long-enough-new-password"}})
+	if err != nil || loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login with the chosen username = %v %d", err, loginResp.StatusCode)
+	}
+}
+
+// TestChangePasswordUsernameNonLocal: a github account (here signed in on a local-provider core)
+// cannot pick a username — it comes from the identity provider.
+func TestChangePasswordUsernameNonLocal(t *testing.T) {
+	deps, pool := newTestDeps(t, nil, nil)
+	ctx := context.Background()
+	var accountID string
+	if err := pool.QueryRow(ctx, `INSERT INTO accounts (provider, provider_subject, role) VALUES ('github', '4242', 'member') RETURNING id::text`).Scan(&accountID); err != nil {
+		t.Fatal(err)
+	}
+	idSvc := deps.Identity.(*identity.Service)
+	srv := httptest.NewTLSServer(api.NewRouter(deps))
+	defer srv.Close()
+	tok, _ := idSvc.MintHumanAccessToken(ctx, accountID, "blerg-core")
+	resp, text := authPost(t, srv, "/auth/password", tok,
+		`{"old_password":"x","new_password":"a-long-enough-new-password","provider_subject":"octo"}`)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(text, "username comes from your sign-in provider") {
+		t.Fatalf("non-local rename = %d %q, want 400 username comes from your sign-in provider", resp.StatusCode, text)
+	}
+	resp, text = authPost(t, srv, "/auth/username", tok, `{"password":"x","provider_subject":"octo"}`)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(text, "username comes from your sign-in provider") {
+		t.Fatalf("non-local POST /auth/username = %d %q, want 400", resp.StatusCode, text)
+	}
+}
+
+// TestChangeUsername is POST /auth/username: a signed-in local account renames itself behind
+// its current password. Sessions survive (they name the account id); a wrong password is the
+// same 401 + X-Blerg-Error as /auth/password; a taken name is 409; and a password-change-only
+// token cannot reach it at all.
+func TestChangeUsername(t *testing.T) {
+	deps, pool := newTestDeps(t, nil, nil)
+	ctx := context.Background()
+	insertLocalAccount(t, pool, "bob", "bobs-password-123")
+	insertLocalAccount(t, pool, "carol", "carols-password-1")
+	accountID := accountIDOf(t, pool, "bob")
+	idSvc := deps.Identity.(*identity.Service)
+	srv := httptest.NewTLSServer(api.NewRouter(deps))
+	defer srv.Close()
+	refresh, err := idSvc.IssueRefreshToken(ctx, accountID, "ua", "ip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := idSvc.MintHumanAccessToken(ctx, accountID, "blerg-core")
+	rename := func(pw, subject string) (*http.Response, string) {
+		return authPost(t, srv, "/auth/username", tok, `{"password":`+jsonString(pw)+`,"provider_subject":`+jsonString(subject)+`}`)
+	}
+
+	if resp, _ := rename("wrong-password-1", "robert"); resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("X-Blerg-Error") != "invalid_credentials" {
+		t.Fatalf("wrong password = %d X-Blerg-Error=%q, want 401 invalid_credentials", resp.StatusCode, resp.Header.Get("X-Blerg-Error"))
+	}
+	if resp, text := rename("bobs-password-123", "carol"); resp.StatusCode != http.StatusConflict || !strings.Contains(text, "that username is taken") {
+		t.Fatalf("taken = %d %q, want 409", resp.StatusCode, text)
+	}
+	if resp, _ := rename("bobs-password-123", "x"); resp.StatusCode != http.StatusBadRequest || resp.Header.Get("X-Blerg-Error") != "username" {
+		t.Fatalf("too short = %d X-Blerg-Error=%q, want 400 username", resp.StatusCode, resp.Header.Get("X-Blerg-Error"))
+	}
+	resp, text := rename("bobs-password-123", "robert")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("rename = %d %q, want 200", resp.StatusCode, text)
+	}
+	var got struct {
+		ProviderSubject string `json:"provider_subject"`
+	}
+	if err := json.Unmarshal([]byte(text), &got); err != nil || got.ProviderSubject != "robert" {
+		t.Fatalf("rename body = %q (%v), want {provider_subject: robert}", text, err)
+	}
+	if _, _, err := idSvc.RefreshAccessToken(ctx, refresh, "blerg-core"); err != nil {
+		t.Fatalf("a rename must not end existing sessions: %v", err)
+	}
+	loginResp, err := srv.Client().PostForm(srv.URL+"/auth/login",
+		url.Values{"provider_subject": {"robert"}, "password": {"bobs-password-123"}})
+	if err != nil || loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login with the new username = %v %d", err, loginResp.StatusCode)
+	}
+
+	// A password-change-only token is refused before the handler runs.
+	pool.Exec(ctx, `UPDATE accounts SET must_change_password = true WHERE id = $1`, accountID)
+	mustTok, _ := idSvc.MintHumanAccessToken(ctx, accountID, "blerg-core")
+	if resp, _ := authPost(t, srv, "/auth/username", mustTok, `{"password":"bobs-password-123","provider_subject":"bobby"}`); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("password-change-only token = %d, want 403", resp.StatusCode)
+	}
+	if id := accountIDOf(t, pool, "robert"); id != accountID {
+		t.Fatal("the refused rename must not have changed anything")
 	}
 }

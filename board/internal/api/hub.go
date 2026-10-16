@@ -36,8 +36,9 @@ var upgrader = websocket.Upgrader{
 // of the client sitting on a stale socket until its next failed op. Vars
 // (not consts) so tests can shrink them; see SetKeepaliveIntervals.
 var (
-	pingPeriod = 30 * time.Second
-	pongWait   = 60 * time.Second
+	keepaliveMu sync.Mutex
+	pingPeriod  = 30 * time.Second
+	pongWait    = 60 * time.Second
 )
 
 const writeWait = 5 * time.Second
@@ -45,9 +46,19 @@ const writeWait = 5 * time.Second
 // SetKeepaliveIntervals overrides the ping/pong intervals for tests and
 // returns a func that restores the previous values.
 func SetKeepaliveIntervals(ping, pong time.Duration) (restore func()) {
+	keepaliveMu.Lock()
 	prevPing, prevPong := pingPeriod, pongWait
 	pingPeriod, pongWait = ping, pong
-	return func() { pingPeriod, pongWait = prevPing, prevPong }
+	keepaliveMu.Unlock()
+	return func() { keepaliveMu.Lock(); pingPeriod, pongWait = prevPing, prevPong; keepaliveMu.Unlock() }
+}
+
+// Each connection keeps one policy even if defaults change while its read
+// loop or ping goroutine is still draining during test cleanup.
+func keepaliveSnapshot() (ping, pong time.Duration) {
+	keepaliveMu.Lock()
+	defer keepaliveMu.Unlock()
+	return pingPeriod, pongWait
 }
 
 // wsConn wraps a websocket.Conn with a write mutex: gorilla requires all
@@ -118,13 +129,14 @@ func (a *API) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := newWSConn(conn)
-	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+	period, wait := keepaliveSnapshot()
+	_ = conn.SetReadDeadline(time.Now().Add(wait))
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(pongWait))
+		return conn.SetReadDeadline(time.Now().Add(wait))
 	})
 	a.Hub.add(boardID, c)
 	go a.Hub.reader(boardID, c)
-	go a.Hub.pinger(boardID, c)
+	go a.Hub.pinger(boardID, c, period)
 }
 
 func (h *Hub) add(boardID string, c *wsConn) {
@@ -160,8 +172,8 @@ func (h *Hub) reader(boardID string, c *wsConn) {
 // deadline in handleWS/reader lapse and the reader tears the conn down, so
 // this only needs to detect a failed *write* itself (e.g. a half-closed TCP
 // stream that errors immediately rather than timing out).
-func (h *Hub) pinger(boardID string, c *wsConn) {
-	ticker := time.NewTicker(pingPeriod)
+func (h *Hub) pinger(boardID string, c *wsConn, period time.Duration) {
+	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 	for {
 		select {

@@ -46,16 +46,16 @@ func isValidTransition(from, to string) bool {
 	return targets[to]
 }
 
-// sessionNotification returns the push title and body to show when a session
-// enters `status`, and ok=false for statuses that should stay silent. Only the
-// "stop, the human is needed" states notify: waiting (a turn paused for input)
-// and idle (a turn finished). label is the session's human name.
+// sessionNotification returns the title and body of the notice (toast and push, notices.go) for a
+// session entering `status`, and ok=false for statuses that stay silent. Only the "stop, the human
+// is needed" states notify: waiting (a turn paused for input) and idle (its work is done and it
+// waits for the next message). label is the session's human name.
 func sessionNotification(status, label string) (title, body string, ok bool) {
 	switch status {
 	case "waiting":
 		return "Session waiting", fmt.Sprintf("%s is waiting for your input.", label), true
 	case "idle":
-		return "Session idle", fmt.Sprintf("%s finished its turn.", label), true
+		return "Session idle", fmt.Sprintf("%s is waiting for you.", label), true
 	default:
 		return "", "", false
 	}
@@ -81,6 +81,17 @@ func sessionLabel(title, repo, id string) string {
 // It inserts a new session row, appends a state_change event, and broadcasts
 // to all browsers.
 func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, daemonID string, msg protocol.SessionStarted) {
+	// A session already live on another daemon is not this daemon's to be
+	// handed a token for, whatever its session_started claims (read before the
+	// upsert below moves the row).
+	healable := true
+	if pool != nil {
+		if prev, err := db.GetSession(ctx, pool, msg.SessionID); err == nil && prev != nil &&
+			prev.DaemonID != daemonID && isActiveStatus(prev.Status) {
+			log.Printf("session_started %s from daemon %s: the session is live on daemon %s — no token heal", msg.SessionID, daemonID, prev.DaemonID)
+			healable = false
+		}
+	}
 	if pool != nil {
 		// A session the server already recorded as private (notePrivateInsert, before its row was
 		// written) goes in private and owned, so a pre-create that failed cannot leave a public row
@@ -94,6 +105,9 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 		if err := db.InsertSessionAs(ctx, pool, msg.SessionID, daemonID, "starting",
 			msg.ProjectPath, msg.Repo, msg.Title, msg.Model, origin); err != nil {
 			log.Printf("InsertSession %s: %v", msg.SessionID, err)
+			if db.HasRuntimeAuthority(ctx) {
+				return
+			}
 		}
 		if err := db.AppendSessionEvent(ctx, pool, msg.SessionID, "state_change",
 			`{"status":"starting"}`, 0); err != nil {
@@ -107,6 +121,12 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	}
 
 	hub.SetSessionOwner(msg.SessionID, daemonID)
+	// The token minted at spawn may be gone by now (an aborted spawn deletes
+	// it, a reconcile that ran while the spawn was queued revokes it): the
+	// session is starting, so it gets a working one.
+	if healable {
+		healSessionTokens(ctx, hub, pool, hub.GetDaemon(daemonID), []string{msg.SessionID})
+	}
 	if msg.Cols > 0 {
 		hub.SetSessionPTYCols(msg.SessionID, msg.Cols)
 	}
@@ -186,13 +206,15 @@ func handleSessionNotFound(hub *Hub, msg protocol.SessionStateChanged) error {
 
 // HandleSessionStateChanged handles a session_state_changed message from a daemon.
 // It validates the transition, updates Postgres, broadcasts to browsers, and —
-// when the session enters waiting/idle and no one is actively engaged — sends an
-// OS push notification (engaged users get an in-app toast from the broadcast).
+// when the session enters waiting, or idle with nothing left running — sends the
+// notice (notices.go): a toast in every open browser, and an OS push when no one
+// is actively engaged.
 func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg protocol.SessionStateChanged) error {
 	// End attribution is the server's to state (filled from the row below);
 	// a daemon never gets to put words in it.
 	msg.EndReason, msg.EndedBy = "", nil
 	var shown sessionEnd
+	var notice func()
 	if pool != nil {
 		current, err := db.GetSession(ctx, pool, msg.SessionID)
 		if err != nil {
@@ -263,9 +285,11 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		// promised. A session that really is finished is finalised by the
 		// daemon's session_ended, or by the reconciler's sweep.
 		if terminalSessionStatus(msg.Status) && msg.Status != "error" {
+			failPendingSessionInputs(ctx, hub, pool, msg.SessionID)
 			revokeSessionTokens(ctx, pool, msg.SessionID, "daemon reported "+msg.Status)
 			hub.NotifyCompletion(msg.SessionID)
 		} else if finalStartFailure {
+			failPendingSessionInputs(ctx, hub, pool, msg.SessionID)
 			revokeSessionTokens(ctx, pool, msg.SessionID, "cluster start failed")
 			hub.NotifyCompletion(msg.SessionID)
 		}
@@ -309,19 +333,9 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		// message: whatever the daemon put in these fields is replaced.
 		shown = sessionEndFor(ctx, pool, msg.SessionID, msg.Status)
 
-		// Send an OS push only when the user is away. If anyone has interacted
-		// recently, they're engaged and the client shows an in-app toast instead.
-		// Never for a private session: a subscription belongs to no account, so
-		// the push could not be limited to the session's owner (privacy.go).
-		if !hub.ActiveWithin(activityTTL) && !readyIdle && !current.Private {
-			var title string
-			if current.Title != nil {
-				title = *current.Title
-			}
-			if pushTitle, pushBody, ok := sessionNotification(msg.Status, sessionLabel(title, current.Repo, current.ID)); ok {
-				SendPush(pool, pushTitle, pushBody, "/sessions/"+msg.SessionID) //nolint:contextcheck // push delivery is best-effort background work with no tie to this request
-			}
-		}
+		// The notice (notices.go), sent after the broadcast below so a browser toasting it
+		// already shows the session in its new state.
+		notice = func() { noticeOnTransition(ctx, hub, pool, current, msg.Status, readyIdle) }
 	}
 
 	broadcastWithEnd(hub, shown, func(endReason string, endedBy *protocol.EndedBy) any {
@@ -329,6 +343,9 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		m.EndReason, m.EndedBy = endReason, endedBy
 		return m
 	})
+	if notice != nil {
+		notice()
+	}
 
 	return nil
 }
@@ -355,6 +372,9 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 		now := time.Now()
 		if err := db.EndSessionStatus(ctx, pool, msg.SessionID, finalStatus, &now, systemEnd(endReason)); err != nil {
 			log.Printf("UpdateSessionStatus session_ended %s: %v", msg.SessionID, err)
+			if db.HasRuntimeAuthority(ctx) {
+				return
+			}
 		}
 		shown = sessionEndFor(ctx, pool, msg.SessionID, finalStatus)
 
@@ -398,8 +418,10 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 		}
 	}
 
+	failPendingSessionInputs(ctx, hub, pool, msg.SessionID)
 	hub.UnsubscribeSession(msg.SessionID)
 	hub.RemoveSessionOwner(msg.SessionID)
+	hub.CancelIdleNotice(msg.SessionID) // it is over: nothing is left to wait for
 
 	// Best-effort: revoke board tokens and clear ticket binding for assist sessions.
 	// Errors are logged but not fatal — the session is already ended.

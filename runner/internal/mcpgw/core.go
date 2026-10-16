@@ -51,6 +51,21 @@ func ProofFromGrant(accountID, kind, value string) Proof {
 	return p
 }
 
+// Pin policies (docs/design/mcp-tool-changes.md §3.5), as core sends them with a credential.
+const (
+	PinPolicyStrict     = "strict"
+	PinPolicyAutoAccept = "auto_accept"
+)
+
+// NormalizePinPolicy maps what core sent to a policy the gateway acts on. Anything but the exact
+// string "auto_accept" (an older core that sends nothing, an unknown value) is strict: fail closed.
+func NormalizePinPolicy(s string) string {
+	if s == PinPolicyAutoAccept {
+		return PinPolicyAutoAccept
+	}
+	return PinPolicyStrict
+}
+
 // Credential is what core hands the gateway for one connection: where to call and the
 // header carrying the secret. HeaderName and Value are empty for a connection with no auth.
 type Credential struct {
@@ -58,6 +73,7 @@ type Credential struct {
 	HeaderName string
 	Value      string
 	ExpiresAt  time.Time // zero: no expiry known
+	PinPolicy  string    // PinPolicyStrict or PinPolicyAutoAccept; never empty
 }
 
 // ErrConnectionGone means core does not know the connection for this proof: it was
@@ -92,6 +108,7 @@ type coreTokenResponse struct {
 	HeaderName string     `json:"header_name"`
 	Value      string     `json:"value"`
 	ExpiresAt  *time.Time `json:"expires_at"`
+	PinPolicy  string     `json:"pin_policy"`
 }
 
 // Token implements CoreClient.
@@ -133,7 +150,7 @@ func (c *HTTPCoreClient) Token(ctx context.Context, proof Proof, connectionID st
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out); err != nil {
 			return Credential{}, fmt.Errorf("decode core response: %w", err)
 		}
-		cred := Credential{URL: out.URL, HeaderName: out.HeaderName, Value: out.Value}
+		cred := Credential{URL: out.URL, HeaderName: out.HeaderName, Value: out.Value, PinPolicy: NormalizePinPolicy(out.PinPolicy)}
 		if out.ExpiresAt != nil {
 			cred.ExpiresAt = *out.ExpiresAt
 		}

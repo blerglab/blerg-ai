@@ -47,7 +47,9 @@ flowchart LR
   `blerg-secrets` Secret. [`docs/backup-and-restore.md`](backup-and-restore.md) lists all of it.
 
 The three services share one login: core issues it, and the board and runner verify it. The
-board and runner never see a password. Agents authenticate with tokens core mints, scoped by a
+board and runner never see a password. A page without a token goes to core's `/auth/refresh` for
+one at most once per page load (and three times in two minutes); when it can't get one, the runner
+says "Couldn't sign you in" with a Retry instead of showing an empty page. Agents authenticate with tokens core mints, scoped by a
 preset, and a session gets a token of its own, valid for that session only and revoked when it
 ends.
 
@@ -64,6 +66,41 @@ Every session runs in exactly one place, chosen on the launch sheet:
 How cluster sessions are built, scheduled and cleaned up: [`install/k8s/CLUSTER-RUNTIME.md`](../install/k8s/CLUSTER-RUNTIME.md).
 How the local sandbox is hardened and what it mounts: [`install/desktop/DAEMON.md`](../install/desktop/DAEMON.md).
 Changing the image sessions run in: [`sandbox-image.md`](sandbox-image.md).
+
+## Engine adapters and catalogs
+
+Daemon `EngineSpec` entries own native process setup, credentials, model discovery and driver
+selection. Shared launch and recovery paths reject unknown engine names before preparing a
+workspace or choosing a driver. Native protocol events are translated into the shared agent
+contract; usage counters use disjoint input, cache-read and cache-write buckets.
+
+Cluster native history uses a separate engine layout registry: only the conversation files,
+SQLite state where needed, and a bounded identity/receipt journal are mounted from an
+account/session/engine-bound PVC. Credentials and current grants are prepared fresh. Database
+bindings include the immutable Kubernetes claim UID; expected missing state fails recovery rather
+than becoming a new conversation. A distributed writer fence waits for old Jobs and pods before
+replacement. Paused native-backed sessions do not expire; true endings and permanent deletion
+start configurable storage retention, with deletion tombstones preserving cleanup tracking.
+Legacy sessions without native history use archive recovery, which does not restore native identity.
+
+Workstation model catalogs come from that daemon's engine probes. Cluster model discovery has a
+separate provider registry in `runner/internal/server/clustermodelproviders.go`: a provider owns
+native acquisition and safe error messages, while shared code handles account authorization,
+sanitization, persistence and asynchronous refresh. Cache identity includes account, engine and
+agent image. Startup loads persisted snapshots; requests return immediately with a snapshot or
+pending status while refresh runs in the background. Public catalogs can serve Cluster engines
+without a native provider; workstation catalogs cannot. The chat, launch and cron pickers use the
+same runtime target and bounded requests, retaining manual entry and retry during discovery.
+
+Adding an engine requires its model rules and daemon adapter, plus a Cluster provider when its
+catalog needs native account access. It does not require another model endpoint or picker branch.
+Opaque Cluster credential imports remain snapshots and require reimport when rejected. An
+opt-in managed connection uses a separately registered Core credential adapter and a dedicated
+browser device login. Core alone retains encrypted refresh authority, serializes rotation and
+fences replacements by generation. Pods obtain short-lived access through their current runtime
+token, which the agent's environment does not carry; the account and live authorizing principal come from the private server launch record.
+The workstation login remains independent. Catalog caching never authorizes inference or chooses
+another payer after a credential failure. See [credential lifecycle](design/engine-credential-lifecycle.md).
 
 ## Session kinds
 

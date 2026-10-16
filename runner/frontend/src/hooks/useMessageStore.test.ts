@@ -186,6 +186,16 @@ describe('message_created toast', () => {
     expect(toasts[0].title).toContain('unknown-xyz')
   })
 
+  it('lists a quiet message without a toast (an ask from a session nobody attends)', () => {
+    wsMock.emit({
+      type: 'message_created',
+      quiet: true,
+      message: makeMessage({ id: 'msg-quiet', session_id: 'sess-a', kind: 'ask', body: 'Which one?' }),
+    })
+    expect(useMessageStore.getState().messages.map(m => m.id)).toContain('msg-quiet')
+    expect(useToastStore.getState().toasts).toHaveLength(0)
+  })
+
   it('initial_state does NOT fire a toast', () => {
     wsMock.emit({
       type: 'initial_state',

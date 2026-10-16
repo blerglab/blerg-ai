@@ -1,0 +1,102 @@
+// The session page's side panel (SessionRail): the person's open/closed choice for it and its tab,
+// kept per browser, the chat settings its Live tab holds, and the words it uses for how long
+// something has waited or run.
+import { loadCompact, localStorageChatStorage, saveCompact } from '@blerglab/chat'
+
+export const RAIL_PREF_KEY = 'blerg-runner.sessionRail.open'
+
+/** The person's choice for the desktop panel (open or closed), or null when they never made one. */
+export function readRailPref(): boolean | null {
+  try {
+    const v = localStorage.getItem(RAIL_PREF_KEY)
+    return v === '1' ? true : v === '0' ? false : null
+  } catch {
+    return null
+  }
+}
+
+export function writeRailPref(open: boolean) {
+  try {
+    localStorage.setItem(RAIL_PREF_KEY, open ? '1' : '0')
+  } catch {
+    // Private mode or a full store: the choice lasts for this page only.
+  }
+}
+
+export const RAIL_TAB_KEY = 'blerg-runner.sessionRail.tab'
+
+/** The panel's tabs, in order: what is live, the work done, the session's files, what it loaded. */
+export const RAIL_TABS = ['live', 'history', 'files', 'capabilities'] as const
+
+export type RailTab = typeof RAIL_TABS[number]
+
+/** The panel's tab the person last chose (Live until they choose, or for a value it does not know). */
+export function readRailTab(): RailTab {
+  try {
+    const v = localStorage.getItem(RAIL_TAB_KEY)
+    // Capabilities was called Skills: a choice saved under the old name still opens it.
+    if (v === 'skills') return 'capabilities'
+    return (RAIL_TABS as readonly string[]).includes(v ?? '') ? v as RailTab : 'live'
+  } catch {
+    return 'live'
+  }
+}
+
+export function writeRailTab(tab: RailTab) {
+  try {
+    localStorage.setItem(RAIL_TAB_KEY, tab)
+  } catch {
+    // Private mode or a full store: the choice lasts for this page only.
+  }
+}
+
+/** "waiting 4 min", "waiting 1 h 5 min", "asked just now". */
+export function waitLabel(since: number | null, now: number): string {
+  if (since === null) return ''
+  const min = Math.floor(Math.max(0, now - since) / 60_000)
+  if (min < 1) return 'asked just now'
+  if (min < 60) return `waiting ${min} min`
+  const h = Math.floor(min / 60)
+  return `waiting ${h} h${min % 60 ? ` ${min % 60} min` : ''}`
+}
+
+/** "12 min", "3 h 4 min", "2 d 5 h". */
+export function lifetimeLabel(ms: number): string {
+  const min = Math.floor(Math.max(0, ms) / 60_000)
+  if (min < 1) return 'under a minute'
+  if (min < 60) return `${min} min`
+  const h = Math.floor(min / 60)
+  if (h < 48) return `${h} h${min % 60 ? ` ${min % 60} min` : ''}`
+  return `${Math.floor(h / 24)} d${h % 24 ? ` ${h % 24} h` : ''}`
+}
+
+// ─── The chat settings the panel's Live tab holds (its Settings section) ──────────────────────
+
+// Whether the model's thinking is shown: on unless the person turned it off (kept in this browser).
+export const THINKING_KEY = 'blerg-runner.chat.thinking'
+
+export function readThinking(): boolean {
+  try {
+    return localStorage.getItem(THINKING_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+export function writeThinking(on: boolean) {
+  try {
+    localStorage.setItem(THINKING_KEY, on ? '1' : '0')
+  } catch {
+    // Private mode or a full store: the choice lasts for this page only.
+  }
+}
+
+/** Compact tool calls: on unless the person turned them off, under the chat's own key (the choice
+ *  made before the setting moved to the panel stands). */
+export function readCompact(): boolean {
+  return loadCompact(localStorageChatStorage)
+}
+
+export function writeCompact(on: boolean) {
+  saveCompact(localStorageChatStorage, on)
+}

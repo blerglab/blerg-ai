@@ -46,6 +46,38 @@ func TestChooseAgentDriver(t *testing.T) {
 	}
 }
 
+// A new or removed engine must not silently run Claude, even when Claude's
+// credentials and binary are available. Preflight and recovery share this gate.
+func TestUnknownAgentEngineNeverFallsBackToClaude(t *testing.T) {
+	cases := []struct {
+		name string
+		in   agentDriverInputs
+	}{
+		{"sandbox", agentDriverInputs{Sandbox: true}},
+		{"provider", agentDriverInputs{ProviderSet: true}},
+		{"forced CLI", agentDriverInputs{ClaudeCodeForced: true}},
+		{"host CLI", agentDriverInputs{PreferClaudeCLI: true, ClaudeOnPath: true}},
+		{"API key", agentDriverInputs{HasAPIKey: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.in.Engine = "future-engine"
+			kind, refusal := chooseAgentDriver(tc.in)
+			if kind != driverNone || !strings.Contains(refusal, "unsupported engine") {
+				t.Fatalf("unknown engine picked driver %v: %q", kind, refusal)
+			}
+		})
+	}
+	h := NewAgentHost(&agentTestSender{}, AgentHostConfig{ClaudeCode: true})
+	if got := h.engineBinary(protocol.SpawnSession{Engine: "future-engine", Kind: "agent"}); got != "" {
+		t.Fatalf("preflight selected another engine's binary: %q", got)
+	}
+	refusal := h.adoptOne(AgentRecord{Engine: "future-engine", WorkDir: t.TempDir()})
+	if !strings.Contains(refusal, "unsupported engine") {
+		t.Fatalf("recovery must preserve the engine refusal: %q", refusal)
+	}
+}
+
 // The owner's bug: a desktop Claude agent session with no API key was
 // refused ("native agent sessions need ANTHROPIC_API_KEY") even with Claude
 // Code installed and logged in. It now runs the claude CLI, and the engine

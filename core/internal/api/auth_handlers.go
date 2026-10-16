@@ -438,6 +438,83 @@ func (d Deps) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// usernameErrorValue is changePasswordErrorHeader's value on a refused username, so the
+// change-password page can put the message by the username field rather than the password.
+const usernameErrorValue = "username"
+
+// writeUsernameError answers a refused username — invalid (400), a github/oidc account's (400),
+// or taken (409) — with core's own words as JSON {"error"}, which the page shows as is, and
+// reports whether err was one of them.
+func writeUsernameError(w http.ResponseWriter, err error) bool {
+	status := 0
+	switch {
+	case errors.Is(err, authprovider.ErrUsernameTaken):
+		status = http.StatusConflict
+	case errors.Is(err, authprovider.ErrInvalidUsername), errors.Is(err, authprovider.ErrUsernameFromProvider):
+		status = http.StatusBadRequest
+	default:
+		return false
+	}
+	w.Header().Set(changePasswordErrorHeader, usernameErrorValue)
+	writeJSONStatus(w, status, map[string]string{"error": err.Error()})
+	return true
+}
+
+// handleChangeUsername is POST /auth/username {"password", "provider_subject"}: a signed-in
+// local account renames itself (Settings → Account). Gated on "card.read" in router.go, so a
+// password-change-only token cannot reach it — the first-login rename goes through
+// /auth/password instead. The current password is required, so a borrowed or stolen access
+// token cannot rename the account, and it is rate-limited exactly like handleChangePassword
+// (same LoginLimiter, same Sub+IP keys) since it is the same bcrypt-backed guess. Sessions are
+// not touched: they and every token name the account id, which a rename keeps.
+func (d Deps) handleChangeUsername(w http.ResponseWriter, r *http.Request) {
+	if !d.requireSameOrigin(w, r) {
+		return
+	}
+	local, ok := d.AuthProvider.(*authprovider.Local)
+	if !ok {
+		http.Error(w, "local provider not active", http.StatusNotFound)
+		return
+	}
+	p, ok := principalFromCtx(r.Context())
+	if !ok {
+		http.Error(w, "missing principal", http.StatusUnauthorized)
+		return
+	}
+	ip := d.clientIP(r)
+	if ok, retryAfter := d.LoginLimiter.Allow(ip, p.Sub); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		http.Error(w, "too many attempts — try again later", http.StatusTooManyRequests)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var body struct {
+		Password        string `json:"password"`
+		ProviderSubject string `json:"provider_subject"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	subject, err := local.ChangeUsername(r.Context(), p.Sub, body.Password, body.ProviderSubject)
+	if writeUsernameError(w, err) {
+		return
+	}
+	switch {
+	case errors.Is(err, authprovider.ErrInvalidCredentials):
+		d.LoginLimiter.Fail(ip, p.Sub)
+		// Same marker as handleChangePassword: a wrong current password, not a stale token.
+		w.Header().Set(changePasswordErrorHeader, "invalid_credentials")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	case err != nil:
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	d.LoginLimiter.Reset(ip, p.Sub)
+	writeJSON(w, map[string]string{"provider_subject": subject})
+}
+
 // handleLogoutAll is POST /auth/logout-all, gated behind requireHumanPrincipal: unlike
 // handleLogout (which trusts only the refresh cookie and revokes just that one device),
 // handleLogoutAll authenticates via the caller's bearer access token and revokes every live
@@ -531,6 +608,10 @@ func (d Deps) returnToAllowed(r *http.Request, returnTo string) bool {
 // password rather than trying to keep the current request's session alive. A subsequent
 // successful login clears the "sub" revocation (startHumanSession's existing Unrevoke call).
 //
+// An optional "provider_subject" in the body is the username the person chose on that page:
+// it is validated and applied in the same transaction as the password (a refused one changes
+// nothing, see writeUsernameError), and the account id — so everything keyed on it — stays.
+//
 // Guarded by the SAME LoginLimiter instance as POST /auth/login (desktop-security controller
 // addendum to Task 7): a hijacked/stolen access token otherwise buys the holder unlimited
 // bcrypt-verified guesses at the real password with NO other rate limit anywhere on this path,
@@ -569,15 +650,23 @@ func (d Deps) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	// provider_subject is optional: the username the person chose on the first-login page. It is
+	// applied with the password in one transaction (ChangePasswordAndSubject); absent or equal
+	// to the current one, nothing is renamed.
 	var body struct {
-		OldPassword string `json:"old_password"`
-		NewPassword string `json:"new_password"`
+		OldPassword     string `json:"old_password"`
+		NewPassword     string `json:"new_password"`
+		ProviderSubject string `json:"provider_subject"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	switch err := local.ChangePassword(r.Context(), p.Sub, body.OldPassword, body.NewPassword); {
+	_, err := local.ChangePasswordAndSubject(r.Context(), p.Sub, body.OldPassword, body.NewPassword, body.ProviderSubject)
+	if writeUsernameError(w, err) {
+		return
+	}
+	switch {
 	case errors.Is(err, authprovider.ErrWeakPassword):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

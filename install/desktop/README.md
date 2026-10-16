@@ -9,7 +9,9 @@ container. A team sharing one Blerg belongs on the [Kubernetes install](../k8s/R
 - Linux, macOS, or Windows with WSL2. On WSL2, systemd must be enabled: put `[boot]` and
   `systemd=true` on two lines in `/etc/wsl.conf`, then run `wsl --shutdown` from Windows and
   reopen the distribution.
-- Docker with Compose v2 (Docker Desktop, or the docker engine on Linux), plus `git`, `curl` and
+- Docker with Compose v2 (Docker Desktop with WSL integration turned on for your distro, or the
+  docker engine on Linux with the `docker-compose-plugin` package from Docker's own apt repository;
+  `blerg-up.sh` prints the exact steps if `docker compose` is missing), plus `git`, `curl` and
   `openssl`. The daemon is built with your host Go 1.25 or newer if you have it, and inside a
   container if you don't. Unsandboxed terminal sessions use the host's `tmux`.
 - **Claude Code or Codex installed and logged in before your first session.** The installer does
@@ -43,12 +45,14 @@ their own). The one-time admin credentials are in core's first-boot log:
 docker compose logs blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
 ```
 
-That line shows both the username (`provider_subject=…`) and the password. It is printed exactly
-once, on the boot that creates the account; a restart or rebuild never prints it again. If the
-log has rotated away, mint a fresh one-time password instead: `./blerg-up.sh --reset-admin` (or
-`docker compose exec blerg-core /blerg-core users set-password --subject <username>`). Click
-**Sign in** on the landing page, log in, and you'll be sent to `/change-password`: pick a real one
-(12–72 characters), then sign in again with it.
+That line shows both the username (`username: …`, a random string) and the password. It is
+printed exactly once, on the boot that creates the account; a restart or rebuild never prints it
+again. If the log has rotated away, mint a fresh one-time password instead: `./blerg-up.sh
+--reset-admin` (or `docker compose exec blerg-core /blerg-core users set-password --subject
+<username>`). Click **Sign in** on the landing page and sign in with that username and password
+the first time. You'll be sent to `/change-password`, where you choose your own username and a
+real password (12–72 characters); then sign in again with them. You can change the username
+later under **Settings → Account**.
 
 Log in at exactly `http://localhost:8081`. The desktop stack turns the cookie `Secure` flag off for
 that origin so every browser (Safari included) works; `127.0.0.1` or a LAN IP will not.
@@ -106,6 +110,20 @@ onto the host with `runtime: daemon`, or `BLERG_BOARD_RUNNER_RUNTIME=daemon` on 
 start never *asks* to bypass permission prompts, but an Agent session runs non-interactively and
 its engine bypasses them regardless, on either runtime.
 
+**Usage meters.** The sidebar shows how much of your Claude and Codex limits the account on this
+machine has used. For Claude the daemon reads the same account usage endpoint the CLI's own usage
+view reads (`api.anthropic.com/api/oauth/usage`), with the CLI's sign-in from
+`~/.claude/.credentials.json`: it only reads that file, takes the access token (never the refresh
+token), never refreshes or rewrites it, and sends the token nowhere but Anthropic. Only the
+percentages and reset times reach Blerg. The endpoint and that file are the CLI's internals, not a
+documented API: they may change, and the meter then goes empty (the daemon logs it once; nothing
+else breaks). On macOS the CLI keeps its login in the Keychain, not in that file, so there is no
+Claude meter there (the daemon says so once in its log); a daemon started with
+`CLAUDE_CODE_OAUTH_TOKEN` may run sessions on a different account from the one the meter reads. To
+turn it off, add `BLERG_RUNNER_CLAUDE_USAGE=0` to
+`.env` and run `./daemon/install.sh install`; Claude then shows only a "capped" row when it refuses
+a call for its limit.
+
 **Stop everything:** `systemctl --user stop blerg-runner-daemon` (macOS:
 `launchctl bootout gui/$(id -u)/dev.blerg.runner-daemon`), then
 `tmux ls -F '#{session_name}' 2>/dev/null | grep '^blerg-' | while read -r s; do tmux kill-session -t "=$s"; done`
@@ -120,8 +138,16 @@ container and ends with the `docker rm`.
   reconnects on its own; `./daemon/install.sh uninstall` removes it.
 - **Start again:** `./blerg-up.sh` (rebuilds by default so a `git pull` takes effect; `--no-build`
   to skip, `--no-open` to keep the browser closed).
-- **Upgrade:** `git pull && ./blerg-up.sh`; database migrations run automatically.
-  `./daemon/install.sh install` rebuilds the daemon;
+- **Upgrade:** `git pull && ./blerg-up.sh`; database migrations run automatically. On a large
+  database the runner's first start after an upgrade can take a while: migrations 041, 042 and 049
+  build indexes on its event table, and the daemon's events wait until they are done.
+  `./daemon/install.sh install` rebuilds the daemon (if agent sessions have work running that the
+  restart would cut off, it lists them and asks first; `--yes`, on it or on `blerg-up.sh`, skips
+  the question). Do it on every upgrade: much of what a session shows comes from the daemon (the
+  working line's thinking and retries, resumed subagents, picking work up after a restart and
+  saying why it restarted, Codex agent sessions, resuming after a usage limit, the usage meters),
+  and a session left with a revoked messaging token is given a new one only when both the stack
+  and the daemon are updated;
   `docker build --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest ../../runner/sandbox`
   rebuilds the sandbox image (keep the `UID` argument, or files the sandbox writes into your repos
   may end up owned by the wrong user). The engines inside it are pinned, so a rebuild only changes
@@ -146,7 +172,9 @@ Managing the daemon, other platforms, engines and `--no-daemon`: [`DAEMON.md`](D
 
 ## Uninstall
 
-From `install/desktop`: first *Stop everything* (above), then `docker compose down -v --rmi local`
+From `install/desktop`, `./uninstall.sh` does the steps below for you (`--purge` also removes the
+daemon's state folder, this stack's `.env` and the sandbox image; `--yes` skips the question). By
+hand: first *Stop everything* (above), then `docker compose down -v --rmi local`
 (the containers, the database volume and the three `desktop-blerg-*` images),
 `./daemon/install.sh uninstall` (the service, and the `~/.local/bin/blerg-runner` and
 `~/.claude/skills/managing-tickets` links the daemon made), `docker rmi blerg-runner-sandbox:latest`

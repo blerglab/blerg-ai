@@ -4,30 +4,134 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
 
-// fakeCodex writes a stub `codex` executable emitting the real event shapes
-// captured against codex-cli 0.154.0 (`codex exec --json` /
-// `codex exec resume <id> --json`) — see codexdriver.go's doc comment.
+// fakeCodex implements the installed Codex app-server RPC shapes without
+// requiring a login or running a model.
 func fakeCodex(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	script := `#!/bin/bash
-cat <<'EOF'
-{"type":"thread.started","thread_id":"cx-thread-1"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Reading the card."}}
-{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"ls","aggregated_output":"README.md\n","exit_code":0,"status":"completed"}}
-{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Done."}}
-{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"cache_write_input_tokens":0,"output_tokens":20}}
-EOF
-# record how we were called so the test can assert "resume cx-thread-1"
-echo "$@" >> "$FAKE_CODEX_LOG"
+	script := `#!/usr/bin/env python3
+import json, os, sys, time
+if "--version" in sys.argv:
+ print(os.environ.get("FAKE_CODEX_VERSION","codex-cli 0.162.1"));sys.exit(0)
+if os.environ.get("FAKE_CODEX_ENV_DUMP"):
+ with open(os.environ["FAKE_CODEX_ENV_DUMP"],"w") as dump: json.dump(dict(os.environ),dump)
+with open(os.environ.get("FAKE_CODEX_LOG", os.devnull), "a") as log: log.write("codex " + " ".join(sys.argv[1:]) + "\n")
+mcp_reads=0
+turn_starts=0
+for line in sys.stdin:
+ r=json.loads(line); method=r.get("method", ""); ident=r.get("id")
+ with open(os.environ.get("FAKE_CODEX_LOG", os.devnull), "a") as log: log.write(method + " " + json.dumps(r.get("params",{})) + "\n")
+ def send(v): print(json.dumps(v), flush=True)
+ if ident is None: continue
+ if method=="" and ("result" in r or "error" in r):
+  if ident==2000:
+   send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}})
+  if ident==1000:
+   send({"method":"item/completed","params":{"threadId":"cx-thread-1","item":{"type":"dynamicToolCall","id":"dynamic1","tool":"read_file","status":"completed","success":r["result"].get("success"),"contentItems":r["result"].get("contentItems")}}})
+   send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}})
+  continue
+ result={}
+ if method=="mcpServerStatus/list": result={"data":[],"nextCursor":None}
+ if method=="mcpServerStatus/list" and os.environ.get("FAKE_CODEX_MCP_STATUS"): result={"data":[{"name":"fixture-server","runtimeStatus":os.environ["FAKE_CODEX_MCP_STATUS"],"tools":{}}],"nextCursor":None}
+ if method=="mcpServerStatus/list" and os.environ.get("FAKE_CODEX_MCP_TRANSITION"):
+  mcp_reads += 1
+  if mcp_reads > 1: time.sleep(0.1)
+  send({"id":ident,"result":{"data":[{"name":"fixture-server","runtimeStatus":"starting" if mcp_reads==1 else "connected","tools":{}}],"nextCursor":None}})
+  if mcp_reads==1:
+   for _ in range(100): send({"method":os.environ["FAKE_CODEX_MCP_TRANSITION"],"params":{"threadId":"cx-thread-1","name":"fixture-server","status":"ready","success":True}})
+  continue
+ if method=="mcpServerStatus/list" and os.environ.get("FAKE_CODEX_MCP_FAILURE"):
+  if os.environ["FAKE_CODEX_MCP_FAILURE"]=="partial" and not r.get("params",{}).get("cursor"):
+   send({"id":ident,"result":{"data":[{"name":"fixture-server","runtimeStatus":"ready","tools":{}}],"nextCursor":"second"}})
+  elif os.environ["FAKE_CODEX_MCP_FAILURE"]=="missing-data": send({"id":ident,"result":{}})
+  elif os.environ["FAKE_CODEX_MCP_FAILURE"]=="null-data": send({"id":ident,"result":{"data":None}})
+  else: send({"id":ident,"error":{"code":-32603,"message":"fixture failure"}})
+  continue
+ if method=="thread/read" and not os.environ.get("FAKE_CODEX_CHILD_READ"):
+  child_id=r.get("params",{}).get("threadId")
+  if (child_id=="owned-child" and os.environ.get("FAKE_CODEX_CHILD_QUESTION") in ("owned","stale")) or (child_id=="child-thread" and os.environ.get("FAKE_CODEX_CHILD_FOLLOWUP")):
+   result={"thread":{"id":child_id,"parentThreadId":"cx-thread-1"}}
+ if method=="thread/read" and os.environ.get("FAKE_CODEX_CHILD_READ"):
+  time.sleep(0.03)
+  result={"thread":json.loads(os.environ["FAKE_CODEX_CHILD_READ"]).get(r.get("params",{}).get("threadId"),{})}
+ if method=="thread/list" and os.environ.get("FAKE_CODEX_CHILD_CATALOG"): result=json.loads(os.environ["FAKE_CODEX_CHILD_CATALOG"])
+ if method=="model/list": result=json.loads(os.environ.get("FAKE_CODEX_MODELS",'{"data":[],"nextCursor":null}'))
+ if method=="config/read": result={"config":json.loads(os.environ.get("FAKE_CODEX_CONFIG","{}"))}
+ if method in ("thread/start", "thread/resume"): result={"thread":{"id":"cx-thread-1"},"model":"gpt-5-codex","reasoningEffort":"high"}
+ if method=="skills/list" and os.environ.get("FAKE_CODEX_SKILL"): result={"data":[{"skills":[{"name":"review","path":"/opt/skills/review/SKILL.md","description":"Review code","scope":"project","enabled":True}]}]}
+ if method=="turn/start":
+  turn_starts += 1
+  result={"turn":{"id":"turn-"+str(turn_starts) if os.environ.get("FAKE_CODEX_STEER_RACE") else "turn-1"}}
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_MISSING_TURN_ID"): result={}
+ if method=="turn/steer" and os.environ.get("FAKE_CODEX_STEER_RACE"):
+  completion={"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}}
+  mode=os.environ["FAKE_CODEX_STEER_RACE"]
+  if mode=="before": send(completion)
+  send({"id":ident,"error":{"code":-32600,"message":"no active turn to steer" if mode!="other-error" else "fixture validation rejected"}})
+  if mode=="after":
+   time.sleep(0.02)
+   send(completion)
+  continue
+ send({"id":ident,"result":result})
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_CHILD_FOLLOWUP"):
+  send({"method":"thread/started","params":{"thread":{"id":"child-thread","parentThreadId":"cx-thread-1","model":"fixture-child-model","preview":"First task"}}})
+  send({"method":"turn/started","params":{"threadId":"child-thread","turn":{"id":"child-turn-1","status":"inProgress"}}})
+  send({"method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn-1","status":"completed"}}})
+  send({"method":"turn/started","params":{"threadId":"child-thread","turn":{"id":"child-turn-2","status":"inProgress"}}})
+  send({"method":"item/completed","params":{"threadId":"child-thread","item":{"id":"child-message-2","type":"agentMessage","text":"Follow-up result"}}})
+  send({"method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn-2","status":"completed"}}})
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_AUTH_DIAGNOSTIC"):
+  sys.stderr.write("Third-party tool secret: sample-private-value\n")
+  sys.stderr.write("auth: Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again.\n")
+  sys.stderr.flush()
+  time.sleep(0.1)
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_RECOVERED_CHILD"):
+  send({"method":"turn/started","params":{"threadId":"historical-child","turn":{"id":"recovered-turn","status":"inProgress"}}})
+  send({"method":"item/completed","params":{"threadId":"historical-child","item":{"type":"agentMessage","id":"recovered-message","text":"Recovered child progress"}}})
+  send({"method":"turn/completed","params":{"threadId":"historical-child","turn":{"id":"recovered-turn","status":"completed"}}})
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_CHILD_QUESTION"):
+  mode=os.environ["FAKE_CODEX_CHILD_QUESTION"]
+  if mode=="native-source" or mode=="unproven-source":
+   send({"method":"item/completed","params":{"threadId":"cx-thread-1","item":{"type":"subAgentActivity","id":"native-start","kind":"started","agentThreadId":"owned-child","model":"fixture-child-model"}}})
+  else:
+   send({"method":"thread/started","params":{"thread":{"id":"owned-child","parentThreadId":"foreign-root" if mode in ("foreign","foreign-item") else "cx-thread-1","model":"fixture-child-model","preview":"Review"}}})
+  if mode=="foreign-item": send({"method":"item/completed","params":{"threadId":"cx-thread-1","item":{"type":"collabAgentToolCall","id":"foreign-claim","tool":"sendInput","agentsStates":{"owned-child":{"status":"running","message":"Foreign metadata"}}}}})
+  send({"method":"turn/started","params":{"threadId":"owned-child","turn":{"id":"child-turn","status":"inProgress"}}})
+  send({"id":2000,"method":"item/tool/requestUserInput","params":{"threadId":"owned-child","turnId":"stale-turn" if mode=="stale" else "child-turn","isBlocking":True,"questions":[{"id":"choice","question":"Child question","options":[{"label":"Blue","description":"Cool tone"}]}]}})
+  continue
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_QUESTION"):
+  send({"id":2000,"method":"item/tool/requestUserInput","params":{"threadId":"cx-thread-1","turnId":"turn-1","isBlocking":not bool(os.environ.get("FAKE_CODEX_NONBLOCKING_QUESTION")),"questions":[{"id":"color","header":"Color","question":"Choose a color","isSecret":bool(os.environ.get("FAKE_CODEX_SECRET")),"options":[{"label":"Blue","description":"Cool tone"},{"label":"Green","description":"Natural tone"}]}]}})
+  continue
+ if method=="turn/interrupt":
+  send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"interrupted"}}})
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_DYNAMIC"):
+  send({"method":"item/started","params":{"threadId":"cx-thread-1","item":{"type":"dynamicToolCall","id":"dynamic1","tool":"read_file","arguments":{"path":"sample.txt"},"status":"inProgress"}}})
+  send({"id":1000,"method":"item/tool/call","params":{"threadId":"cx-thread-1","turnId":"turn-1","tool":"read_file","arguments":{"path":"sample.txt"}}})
+  continue
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_EXIT_ONCE") and not os.path.exists(os.environ["FAKE_CODEX_EXIT_ONCE"]):
+  open(os.environ["FAKE_CODEX_EXIT_ONCE"], "w").close()
+  time.sleep(0.1)
+  sys.exit(0)
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_LIMIT"):
+  message="You've hit your usage limit. Try again at 2030-01-02T03:04:05Z."
+  send({"method":"error","params":{"threadId":"cx-thread-1","error":{"message":message},"willRetry":False}})
+  send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":message}}}})
+  continue
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_STREAM_FIRST"):
+  for _ in range(1000): send({"method":"item/agentMessage/delta","params":{"threadId":"cx-thread-1","delta":"progress"}})
+  continue
+ if method=="turn/start" and (os.environ.get("FAKE_CODEX_HOLD_FIRST") or (os.environ.get("FAKE_CODEX_STEER_RACE") and turn_starts==1)): continue
+ if method in ("turn/start", "turn/steer"):
+  for name,item in [("item/completed",{"id":"i0","type":"agentMessage","text":"Reading the card."}), ("item/started",{"id":"i1","type":"commandExecution","command":"ls","status":"inProgress"}), ("item/completed",{"id":"i1","type":"commandExecution","command":"ls","status":"completed","aggregatedOutput":"README.md\n","exitCode":127 if os.environ.get("FAKE_CODEX_COMMAND_FAIL") else 0}), ("item/completed",{"id":"i2","type":"agentMessage","text":"Done."})]: send({"method":name,"params":{"threadId":"cx-thread-1","item":item}})
+  send({"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","tokenUsage":{"last":{"inputTokens":100,"cachedInputTokens":10,"outputTokens":20}}}})
+  send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-"+str(turn_starts) if os.environ.get("FAKE_CODEX_STEER_RACE") else "turn-1","status":"completed"}}})
 `
 	path := filepath.Join(dir, "codex")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -84,8 +188,8 @@ func TestCodexDriverTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsStr(string(raw), "resume cx-thread-1") {
-		t.Errorf("second turn must resume the thread; calls:\n%s", raw)
+	if !containsStr(string(raw), "app-server --listen stdio://") {
+		t.Errorf("turns must share a persistent app-server; calls:\n%s", raw)
 	}
 }
 
@@ -95,18 +199,8 @@ func TestCodexDriverTurn(t *testing.T) {
 // failing shell command (see codexdriver_test.go's sibling fixture and the
 // real capture in codexdriver.go's doc comment).
 func TestCodexDriverFailedCommandMarksToolResultError(t *testing.T) {
-	dir := t.TempDir()
-	script := `#!/bin/bash
-cat <<'EOF'
-{"type":"thread.started","thread_id":"cx-thread-2"}
-{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"nope","aggregated_output":"","exit_code":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"nope","aggregated_output":"not found\n","exit_code":127,"status":"failed"}}
-{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":1}}
-EOF
-`
-	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dir := fakeCodex(t)
+	t.Setenv("FAKE_CODEX_COMMAND_FAIL", "1")
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 
 	em := &collectEmitter{}
@@ -143,5 +237,59 @@ EOF
 	}
 	if !found {
 		t.Fatal("no tool_result event emitted")
+	}
+}
+
+func TestCodexDriverReportsExpiredAuthWithoutForwardingStderr(t *testing.T) {
+	t.Setenv("PATH", fakeCodex(t)+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_AUTH_DIAGNOSTIC", "1")
+	em := &collectEmitter{}
+	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+	d.Enqueue("work", "chat")
+	deadline := time.Now().Add(5 * time.Second)
+	for !contains(em.kinds(), "turn_done") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	found := false
+	for _, ev := range em.snapshot() {
+		if ev.Kind != "error" {
+			continue
+		}
+		p, ok := ev.Payload.(agent.ErrorPayload)
+		if !ok {
+			continue
+		}
+		if p.Message == "Codex login expired and could not be refreshed. Reconnect your Codex credential in Settings, then retry." {
+			found = true
+		}
+		if strings.Contains(p.Message, "sample-private-value") {
+			t.Fatal("stderr secret reached error event")
+		}
+	}
+	if !found {
+		t.Fatal("expired Codex login was hidden from the session")
+	}
+}
+
+func TestCodexAuthDiagnosticDiscardsRawOutput(t *testing.T) {
+	var events []agent.ErrorPayload
+	w := &codexAuthDiagnostic{emit: func(_ string, p any) { events = append(events, p.(agent.ErrorPayload)) }}
+	for _, chunk := range []string{strings.Repeat("sample-private-value ", 1000), "auth: Failed to refresh token: Your access token ", "could not be refreshed. Please log out and sign in again.\n", "auth: Failed to refresh token: Your access token could not be refreshed."} {
+		n, err := w.Write([]byte(chunk))
+		if n != len(chunk) || err != nil {
+			t.Fatalf("Write = %d, %v; want %d, nil", n, err, len(chunk))
+		}
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d diagnostics; want exactly one", len(events))
+	}
+	if !events[0].Retryable {
+		t.Fatal("login repair must leave the session available to retry")
+	}
+	if strings.Contains(events[0].Message, "sample-private-value") || w.window != "" {
+		t.Fatal("raw stderr retained or forwarded")
 	}
 }

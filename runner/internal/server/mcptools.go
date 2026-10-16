@@ -140,6 +140,7 @@ func (a *API) HandleGetMCPConnectionTools(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadGateway, "could not list this connection's tools: the MCP server was unreachable or refused the request")
 		return
 	}
+	storeDefinitions(r.Context(), a.dbPool, tools)
 	if tools == nil {
 		tools = []mcpgw.ListedTool{}
 	}
@@ -173,8 +174,8 @@ func (a *API) HandlePatchMCPConnectionDefaults(w http.ResponseWriter, r *http.Re
 		return
 	}
 	for name, g := range body.DefaultTools {
-		if name == "" || (g.Mode != mcpgw.ModeAllow && g.Mode != mcpgw.ModePropose) || g.Hash == "" {
-			writeError(w, http.StatusBadRequest, "each tool needs a name, a mode of allow or propose and a hash")
+		if name == "" || (g.Mode != mcpgw.ModeAllow && g.Mode != mcpgw.ModePropose) || g.Hash == "" || g.Listed != nil {
+			writeError(w, http.StatusBadRequest, "each tool needs a name, a mode of allow or propose and a hash; listed is not a default_tools field")
 			return
 		}
 	}

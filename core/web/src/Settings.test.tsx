@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import Settings from "./Settings";
 import * as authClient from "./authClient";
 
@@ -474,6 +474,21 @@ describe("Settings", () => {
     vi.restoreAllMocks();
   });
 
+  it.each(["request", "body"])("bounds a hung credential metadata %s", async stage => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", vi.fn((url: string) => {
+        if (url === "/api/credentials") return stage === "request" ? new Promise(() => {})
+          : Promise.resolve({ ok: true, status: 200, json: () => new Promise(() => {}) });
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }));
+      render(<Settings />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(12_100); });
+      expect(screen.getByText("Could not reach the server. Please try again.")).toBeInTheDocument();
+      expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("explains these credentials are for cluster-runtime sessions, which run as you", async () => {
     render(<Settings />);
     await screen.findByText("Claude");
@@ -500,7 +515,7 @@ describe("Settings", () => {
     const statuses = screen.getAllByText("Not configured");
     expect(statuses).toHaveLength(5);
     expect(screen.getByText("Claude")).toBeInTheDocument();
-    expect(screen.getByText("Codex")).toBeInTheDocument();
+    expect(within(screen.getByRole("heading", { name: "Credentials" }).closest("section")!).getByText("Codex")).toBeInTheDocument();
     expect(screen.getByText("Hermes")).toBeInTheDocument();
     expect(screen.getByText("GitHub")).toBeInTheDocument();
     expect(screen.getByText("GitLab")).toBeInTheDocument();
@@ -527,7 +542,7 @@ describe("Settings", () => {
     await screen.findByText("Claude");
 
     expect(screen.getByText("Claude").closest("li")).toHaveTextContent("claude setup-token");
-    expect(screen.getByText("Codex").closest("li")).toHaveTextContent("~/.codex/auth.json");
+    expect(within(screen.getByRole("heading", { name: "Credentials" }).closest("section")!).getByText("Codex").closest("li")).toHaveTextContent("~/.codex/auth.json");
     expect(screen.getByText("Hermes").closest("li")).toHaveTextContent("~/.hermes/.env");
     expect(screen.getByText("GitHub").closest("li")).toHaveTextContent(
       "fine-grained personal access token",
@@ -585,9 +600,9 @@ describe("Settings", () => {
   it("offers Remove only for credentials that are configured", async () => {
     store.engines = ["codex"];
     render(<Settings />);
-    await screen.findByText("Codex");
+    await within(screen.getByRole("heading", { name: "Credentials" }).closest("section")!).findByText("Codex");
     expect(screen.getAllByText("Remove")).toHaveLength(1);
-    expect(screen.getByText("Codex").closest("li")).toHaveTextContent("Remove");
+    expect(within(screen.getByRole("heading", { name: "Credentials" }).closest("section")!).getByText("Codex").closest("li")).toHaveTextContent("Remove");
     expect(screen.getByText("Claude").closest("li")).not.toHaveTextContent("Remove");
   });
 
@@ -623,8 +638,8 @@ describe("Settings", () => {
   it("never re-displays a previously saved credential's value", async () => {
     store.engines = ["codex"];
     render(<Settings />);
-    await screen.findByText("Codex");
-    const codexItem = screen.getByText("Codex").closest("li")!;
+    await within(screen.getByRole("heading", { name: "Credentials" }).closest("section")!).findByText("Codex");
+    const codexItem = within(screen.getByRole("heading", { name: "Credentials" }).closest("section")!).getByText("Codex").closest("li")!;
     expect(codexItem).toHaveTextContent("Configured");
     // The paste-in field for an already-configured engine starts empty, not pre-filled.
     expect((screen.getByLabelText("Codex credential") as HTMLTextAreaElement).value).toBe("");
@@ -661,5 +676,134 @@ describe("Settings", () => {
     const headers = (init?.headers ?? {}) as Record<string, string>;
     expect(headers.Authorization).toBeUndefined();
     expect(JSON.stringify(headers)).not.toContain("Bearer null");
+  });
+});
+
+// ── account (username) ───────────────────────────────────────────────────────
+// buildAccountFetchMock serves GET /api/me for `me`, empty credential and token lists, and
+// POST /auth/username with `rename`, recording the POST.
+function buildAccountFetchMock(
+  me: { provider: string; provider_subject: string },
+  rename: { status: number; headers?: Headers; body?: unknown },
+  captured: { post?: Record<string, unknown> },
+) {
+  return vi.fn((url: string, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    if (url === "/api/me") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: () => Promise.resolve({ account_id: "acc-1", email: "", role: "admin", must_change_password: false, ...me }),
+      });
+    }
+    if (url === "/auth/username" && method === "POST") {
+      captured.post = JSON.parse(init!.body as string) as Record<string, unknown>;
+      return Promise.resolve({
+        ok: rename.status >= 200 && rename.status < 300,
+        status: rename.status,
+        headers: rename.headers ?? new Headers(),
+        json: () => Promise.resolve(rename.body ?? {}),
+      });
+    }
+    if (url === "/api/credentials" || url === "/api/tokens") {
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve([]) });
+    }
+    return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve({}) });
+  });
+}
+
+describe("Settings — account", () => {
+  let captured: { post?: Record<string, unknown> };
+
+  beforeEach(() => {
+    captured = {};
+    vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
+    vi.spyOn(authClient, "ensureFreshToken").mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("comes first, and shows a local account's username with a form to change it", async () => {
+    vi.stubGlobal("fetch", buildAccountFetchMock({ provider: "local", provider_subject: "alice" }, { status: 200 }, captured));
+    render(<Settings />);
+    const heading = await screen.findByRole("heading", { name: "Account" });
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings[0]).toBe("Account");
+    expect(headings.indexOf("Account")).toBeLessThan(headings.indexOf("Agent tokens"));
+    const section = heading.closest("section")!;
+    expect(await within(section).findByText("alice")).toBeInTheDocument();
+    expect(within(section).getByText("Username and password")).toBeInTheDocument();
+    expect(within(section).getByLabelText("New username")).toBeInTheDocument();
+    expect(within(section).getByLabelText("Current password")).toBeInTheDocument();
+  });
+
+  it("says a github account's username comes from GitHub, with no form", async () => {
+    vi.stubGlobal("fetch", buildAccountFetchMock({ provider: "github", provider_subject: "123456" }, { status: 200 }, captured));
+    render(<Settings />);
+    expect(await screen.findByText("Your username comes from GitHub.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("New username")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Change username" })).not.toBeInTheDocument();
+  });
+
+  it("posts the new username with the current password and says to use it next time", async () => {
+    vi.stubGlobal(
+      "fetch",
+      buildAccountFetchMock(
+        { provider: "local", provider_subject: "alice" },
+        { status: 200, body: { provider_subject: "alice.w" } },
+        captured,
+      ),
+    );
+    render(<Settings />);
+    fireEvent.change(await screen.findByLabelText("New username"), { target: { value: "alice.w" } });
+    fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "my-password-123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Change username" }));
+
+    expect(await screen.findByText("Username changed. Use it next time you sign in.")).toBeInTheDocument();
+    expect(captured.post).toEqual({ password: "my-password-123", provider_subject: "alice.w" });
+    expect(screen.getByText("alice.w")).toBeInTheDocument();
+    // The password is not kept around once used.
+    expect((screen.getByLabelText("Current password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("shows a taken username (409) in core's words", async () => {
+    vi.stubGlobal(
+      "fetch",
+      buildAccountFetchMock(
+        { provider: "local", provider_subject: "alice" },
+        { status: 409, headers: new Headers({ "X-Blerg-Error": "username" }), body: { error: "that username is taken" } },
+        captured,
+      ),
+    );
+    render(<Settings />);
+    fireEvent.change(await screen.findByLabelText("New username"), { target: { value: "bob" } });
+    fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "my-password-123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Change username" }));
+
+    expect(await screen.findByText("that username is taken")).toBeInTheDocument();
+    expect(screen.queryByText("Username changed. Use it next time you sign in.")).not.toBeInTheDocument();
+  });
+
+  it("says the password is wrong on a marked 401, without leaving the page", async () => {
+    const redirect = vi.spyOn(authClient, "redirectToRefresh").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      buildAccountFetchMock(
+        { provider: "local", provider_subject: "alice" },
+        { status: 401, headers: new Headers({ "X-Blerg-Error": "invalid_credentials" }) },
+        captured,
+      ),
+    );
+    render(<Settings />);
+    fireEvent.change(await screen.findByLabelText("New username"), { target: { value: "bob" } });
+    fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "wrong-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Change username" }));
+
+    expect(await screen.findByText("Current password is incorrect.")).toBeInTheDocument();
+    expect(redirect).not.toHaveBeenCalled();
   });
 });

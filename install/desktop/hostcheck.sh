@@ -110,3 +110,37 @@ carries on regardless - do this whenever you like:
 EOF2
   return 0
 }
+
+# confirm_reinstall_over_work BIN [ASSUME_YES]: before a reinstall restarts the
+# running daemon, ask the newly built daemon BIN which agent sessions the
+# restart would cut off (a turn running, background tasks, subagents) and, if
+# there are any, list them and ask whether to go on. Returns 0 to go on, 1 when
+# the person said no, 2 when there was no terminal to ask (ASSUME_YES=1 goes on
+# after listing them). A binary that cannot answer never blocks the install.
+confirm_reinstall_over_work() {
+  local bin="$1" yes="${2:-0}" out ans
+  out="$("$bin" status --open-work 2>/dev/null)" || return 0
+  [ -n "$out" ] || return 0
+  blerg_box "agent work is running" <<EOF2
+Reinstalling restarts the daemon, and that cuts this work off:
+
+$out
+
+The sessions come back after the restart: what was cut off is marked
+stopped, and the agent is told what it was and asked to check it before
+picking it up again.
+EOF2
+  if [ "$yes" = 1 ]; then
+    blerg_step "Reinstalling anyway (--yes)."
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    blerg_fail "Not reinstalled: there is no terminal to ask. Re-run with --yes to reinstall anyway."
+    return 2
+  fi
+  read -r -p "  Reinstall anyway? [y/N] " ans
+  case "$ans" in
+    y|Y|yes|YES) return 0 ;;
+  esac
+  return 1
+}

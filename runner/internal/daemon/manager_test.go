@@ -552,6 +552,8 @@ func TestSpawnModelProblem(t *testing.T) {
 		}
 	}
 	bad := []protocol.SpawnSession{
+		{Engine: "future-engine", Kind: "agent"},
+		{Engine: "future-engine", Kind: "tmux"},
 		{Model: "sonnet --x"},
 		{Model: "-p"},
 		{Effort: "ultra"},
@@ -566,6 +568,23 @@ func TestSpawnModelProblem(t *testing.T) {
 		if p := spawnModelProblem(m); p == "" {
 			t.Errorf("%+v accepted", m)
 		}
+	}
+}
+
+func TestUnknownTerminalEngineRecoveryRefusesBeforeStartingClaude(t *testing.T) {
+	// An empty PATH keeps this failing regression from launching a real engine.
+	t.Setenv("PATH", t.TempDir())
+	sender := newRecordingSender(4)
+	m := &Manager{client: sender}
+	m.recoverSession(SessionRecord{SessionID: "unknown-terminal", Engine: "future-engine", ProjectPath: t.TempDir()})
+	select {
+	case msg := <-sender.ch:
+		state, ok := msg.(protocol.SessionStateChanged)
+		if !ok || state.Status != "error" || state.Message == nil || !strings.Contains(*state.Message, "unsupported engine") {
+			t.Fatalf("unknown terminal engine must be refused: %+v", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unknown terminal engine was not refused")
 	}
 }
 

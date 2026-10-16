@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,11 +21,13 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/agent/skills"
 	"github.com/blerglab/blerg-ai/runner/internal/agent/tools"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
+	"github.com/blerglab/blerg-ai/runner/internal/pluginsinstall"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 // AgentHostConfig configures agent-kind session hosting inside the daemon.
 type AgentHostConfig struct {
+	CredentialSource EngineCredentialSource
 	// SpawnKilled, when set, reports whether a kill_session arrived for a spawn that is still being prepared.
 	// The Manager sets it; the cluster pod has no such window. It is checked after the plugin install, which
 	// can run for minutes after the Manager's own kill checks.
@@ -64,6 +67,21 @@ type AgentHostConfig struct {
 	// session survives a restart of the daemon process. "" — the cluster pod's, and a daemon
 	// with no state directory — keeps none.
 	RecordsDir string
+	// NativeHistory is the pod's session-scoped conversation-only volume.
+	NativeHistory *NativeHistoryConfig
+	// RestartCause is why the previous run of the daemon ended (restartcause.go): what a session
+	// it cut off is told about it. The zero value says the run crashed.
+	RestartCause RestartCause
+	// UsageLimits hears what moves the providers' usage limits (limits.go): a Codex or Claude
+	// Code turn ended, Claude refused a call for its limit. nil — the cluster pod's — reports none.
+	UsageLimits UsageLimitsSink
+}
+
+// UsageLimitsSink is what agent sessions tell the daemon's UsageLimitsTracker.
+type UsageLimitsSink interface {
+	CodexTurnEnded()
+	ClaudeTurnEnded()
+	ClaudeRateLimited(resetsAt time.Time)
 }
 
 // reposRoot is the repos root in effect now.
@@ -93,29 +111,38 @@ type AgentHost struct {
 	// daemon is connected.
 	adopting    map[string]*adoptingSession
 	adoptFailed []string
+	// openAsks are the sessions the server says have a `blerg-runner ask` open (NoteOpenAsks): an
+	// adopted interactive session among them waits for the person.
+	openAsks map[string]bool
 	// connected is closed the first time the daemon has a connection to its server.
 	connected     chan struct{}
 	connectedOnce sync.Once
 }
 
 type agentSession struct {
-	loop    sessionDriver
-	cancel  context.CancelFunc
+	loop   sessionDriver
+	cancel context.CancelFunc
+	// runDone closes only after the driver has finished subprocess and file cleanup.
+	runDone <-chan struct{}
 	emitter *wsEmitter
 	status  atomic.Value // last status string for heartbeats
 	skills  []skills.Skill
 	// sandboxed marks a session whose engine runs inside a container, so Kill
 	// tears the container down the way killTmuxSession does for a terminal one.
-	sandboxed bool
-	plugins   bool // holds a plugin snapshot in the workshop (released on Kill)
+	sandboxed  bool
+	plugins    bool // holds a Claude plugin snapshot in the workshop (released on Kill)
+	pluginHome bool // holds a native plugin home, released on Kill
 	// mcp is the session's MCP gateway config file (nil: no grant), removed
 	// when the session ends.
-	mcp *mcpConfigFile
+	mcp             *mcpConfigFile
+	codexRestricted *codexRestrictedRuntime
 	// engine is the session's engine id ("" = Claude): the rules every
 	// in-session model/effort change is checked against (changeModel).
 	engine string
 	// record is the session's recovery record (nil: not recoverable, see recordable).
-	record *recordKeeper
+	record     *recordKeeper
+	inputs     *inputJournal
+	inputFault atomic.Bool
 }
 
 // The two reasons a sandboxed agent-kind spawn is refused: the Claude
@@ -250,8 +277,13 @@ func newWSEmitter(sender Sender, sessionID string, onEvent func(agent.Event)) *w
 	return e
 }
 
-func (e *wsEmitter) Emit(ev agent.Event) {
-	if e.onEvent != nil {
+func (e *wsEmitter) Emit(ev agent.Event) { e.emit(ev, true) }
+
+// Replay resends a receipt without applying old turn/status bookkeeping again.
+func (e *wsEmitter) Replay(ev agent.Event) { e.emit(ev, false) }
+
+func (e *wsEmitter) emit(ev agent.Event, observe bool) {
+	if observe && e.onEvent != nil {
 		e.onEvent(ev)
 	}
 	payload, err := json.Marshal(ev.Payload)
@@ -259,12 +291,9 @@ func (e *wsEmitter) Emit(ev agent.Event) {
 		log.Printf("agent %s: marshal %s payload: %v", e.sessionID, ev.Kind, err)
 		return
 	}
-	transient := false
-	if ev.Kind == "assistant_text" {
-		if p, ok := ev.Payload.(agent.AssistantTextPayload); ok && !p.Done {
-			transient = true
-		}
-	}
+	// A NUL in tool output would make the server's jsonb insert fail forever (see protocol.StripNUL).
+	payload = protocol.StripNUL(payload)
+	transient := agent.IsTransient(ev)
 	msg := protocol.AgentEvent{
 		Type:          "agent_event",
 		SessionID:     e.sessionID,
@@ -283,7 +312,16 @@ func (e *wsEmitter) Emit(ev agent.Event) {
 		return
 	}
 	e.mu.Lock()
-	for len(e.pending) >= pendingCap && !e.closed {
+	duplicate := false
+	if !observe {
+		for _, pending := range e.pending {
+			if pending.clientEventID == ev.ClientEventID {
+				duplicate = true
+				break
+			}
+		}
+	}
+	for len(e.pending) >= pendingCap && !e.closed && !duplicate {
 		e.notFull.Wait() // spec: loop blocks at the bound (buffering)
 	}
 	if e.closed {
@@ -299,7 +337,18 @@ func (e *wsEmitter) Emit(ev agent.Event) {
 		e.mu.Unlock()
 		return
 	}
-	e.pending = append(e.pending, pendingEvent{ev.ClientEventID, raw})
+	buffered := false
+	if !observe {
+		for _, pending := range e.pending {
+			if pending.clientEventID == ev.ClientEventID {
+				buffered = true
+				break
+			}
+		}
+	}
+	if !buffered {
+		e.pending = append(e.pending, pendingEvent{ev.ClientEventID, raw})
+	}
 	e.mu.Unlock()
 	_ = e.sender.Send(msg) // send failure is fine: resend covers it
 }
@@ -358,16 +407,25 @@ type httpMessenger struct {
 	base      string
 	token     string
 	sessionID string
+	turnID    string // optional native-question turn, recorded atomically with its server ask
 	client    *http.Client
 	ctx       context.Context     // session lifetime; bounds answer polling
 	onAnswer  func(answer string) // called from the answer-poll goroutine
+	onPollEnd func()              // optional: lets native requests stop waiting when the ask expires
+
+	pollMu sync.Mutex
+	polls  map[string]context.CancelFunc // ask id → its answer poll, while it runs
 }
 
 func (m *httpMessenger) post(kind, body string) (string, error) {
 	payload, _ := json.Marshal(map[string]string{
-		"session_id": m.sessionID, "kind": kind, "body": body,
+		"session_id": m.sessionID, "kind": kind, "body": body, "turn_id": m.turnID,
 	})
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, m.base+"/api/messages", bytes.NewReader(payload))
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.base+"/api/messages", bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}
@@ -403,8 +461,54 @@ func (m *httpMessenger) SendAsk(body string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	go m.pollAnswer(ctx, id)
+	pctx, cancel := context.WithCancel(ctx)
+	m.pollMu.Lock()
+	if m.polls == nil {
+		m.polls = make(map[string]context.CancelFunc)
+	}
+	m.polls[id] = cancel
+	m.pollMu.Unlock()
+	go func() {
+		if m.onPollEnd != nil {
+			defer m.onPollEnd()
+		}
+		defer func() {
+			m.pollMu.Lock()
+			delete(m.polls, id)
+			m.pollMu.Unlock()
+			cancel()
+		}()
+		m.pollAnswer(pctx, id)
+	}()
 	return id, nil
+}
+
+// CloseAsk implements agent.AskCloser: the ask was answered in the chat, so its poll stops (it
+// must not deliver the answer a second time) and its message is marked answered (its card stops
+// asking). Best effort: the loop already has its answer.
+func (m *httpMessenger) CloseAsk(id, answer string) {
+	m.pollMu.Lock()
+	if cancel := m.polls[id]; cancel != nil {
+		cancel()
+		delete(m.polls, id)
+	}
+	m.pollMu.Unlock()
+	go func() {
+		payload, _ := json.Marshal(map[string]string{"answer": answer})
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+			m.base+"/api/messages/"+url.PathEscape(id)+"/reply", bytes.NewReader(payload))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+m.token)
+		resp, err := m.client.Do(req)
+		if err != nil {
+			log.Printf("agent session %s: closing ask %s: %v", m.sessionID, id, err)
+			return
+		}
+		_ = resp.Body.Close()
+	}()
 }
 
 // pollAnswer long-polls the answer endpoint (the CLI's protocol) and delivers
@@ -563,6 +667,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	}
 	cliEngine := kind == driverCLI
 	useClaudeCode := kind == driverClaudeCode
+	useCodex := cliEngine && msg.Engine == "codex"
 
 	// In the sandbox Claude Code runs inside the container, and the
 	// credential travels with it — see sandboxClaudeCredentialEnv.
@@ -576,12 +681,12 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		sandboxCred = cred
 	}
 
-	if msg.RestrictTools && !useClaudeCode {
+	if msg.RestrictTools && !useClaudeCode && !useCodex {
 		fail(restrictToolsNeedsClaudeRefusal)
 		return
 	}
 	if msg.MCPGateway != nil {
-		if !useClaudeCode {
+		if !useClaudeCode && !useCodex {
 			fail(mcpGatewayNeedsClaudeRefusal)
 			return
 		}
@@ -591,36 +696,102 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			return
 		}
 	}
+	var native *nativeHistoryKeeper
+	if h.cfg.NativeHistory != nil {
+		var err error
+		native, err = openNativeHistory(*h.cfg.NativeHistory, msg.SessionID, msg.Engine, workDir)
+		if err != nil {
+			fail(err.Error())
+			return
+		}
+	}
+	nativeOwned := false
+	defer func() {
+		if native != nil && !nativeOwned {
+			_ = native.root.Close()
+		}
+	}()
 
 	skillList, _ := skills.Discover(workDir, h.cfg.HomeDir)
 	agentTypes := agent.DiscoverAgentTypes(workDir, h.cfg.HomeDir)
 
-	provider := h.cfg.Provider
-	if provider == nil {
-		provider = anthropic.New(h.cfg.APIKey, "")
+	journalDir := ""
+	if h.cfg.RecordsDir != "" {
+		journalDir = filepath.Join(h.cfg.RecordsDir, "inputs")
 	}
-
-	sess := &agentSession{skills: skillList, engine: msg.Engine}
+	if h.cfg.NativeHistory != nil {
+		journalDir = filepath.Join(h.cfg.NativeHistory.Directory, "receipts")
+	}
+	inputs, err := newInputJournal(journalDir, msg.SessionID)
+	if err != nil {
+		fail("the session's message receipt journal could not be opened")
+		return
+	}
+	sess := &agentSession{skills: skillList, engine: msg.Engine, inputs: inputs}
 	// A new session is idle until its first turn starts (the driver says
 	// "running" then). Reporting "running" here made a session with no
 	// initial prompt look busy — spinner, working indicator — while it was
 	// really waiting for its first message.
 	sess.status.Store("idle")
 	emitter := newWSEmitter(h.sender, msg.SessionID, func(ev agent.Event) {
+		if native != nil && native.observe(ev) != nil {
+			if sess.inputFault.CompareAndSwap(false, true) {
+				if sess.cancel != nil {
+					sess.cancel()
+				}
+				go h.sendError(msg.SessionID, "Native conversation state could not be retained; the session stopped before accepting more work.")
+				go h.kill(msg.SessionID, 1)
+			}
+		}
+		if err := sess.inputs.settle(ev); err != nil {
+			log.Printf("agent session %s: message receipt could not be saved: %v", msg.SessionID, err)
+			if sess.inputFault.CompareAndSwap(false, true) {
+				if sess.cancel != nil {
+					sess.cancel()
+				}
+				// A full event buffer must not hold teardown hostage. The server also
+				// fails any remaining outbox entries when the session's end arrives.
+				go h.kill(msg.SessionID, 1)
+				go func() {
+					payload, _ := json.Marshal(agent.ErrorPayload{Message: "The session stopped because its message receipt could not be saved. Check what ran before retrying.", Retryable: false, ClientID: inputEventClientID(ev)})
+					_ = h.sender.Send(protocol.AgentEvent{Type: "agent_event", SessionID: msg.SessionID, ClientEventID: ccUUID(), Ts: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: payload})
+				}()
+			}
+		}
 		if ev.Kind == "status_changed" {
 			if p, ok := ev.Payload.(agent.StatusPayload); ok {
 				sess.status.Store(p.Status)
-				sess.record.setTurnActive(p.Status == "running")
+				sess.record.setStatus(p.Status)
 			}
 		}
 		if ev.Kind == "turn_done" && h.cfg.OnTurnDone != nil {
 			h.cfg.OnTurnDone(msg.SessionID)
 		}
+		if ev.Kind == "turn_done" && h.cfg.UsageLimits != nil {
+			switch {
+			case msg.Engine == "codex":
+				h.cfg.UsageLimits.CodexTurnEnded()
+			case useClaudeCode: // the native loop bills an API key, not the account's limits
+				h.cfg.UsageLimits.ClaudeTurnEnded()
+			}
+		}
 		// What the recovery record keeps up with (a nil record ignores it all).
 		switch p := ev.Payload.(type) {
+		case agent.UserMessagePayload:
+			if ev.Kind == "user_message" {
+				sess.record.setCurrentTurnID(p.TurnID)
+			}
 		case agent.TurnDonePayload:
 			if ev.Kind == "turn_done" {
 				sess.record.turnEnded(p.StopReason)
+			}
+		case agent.ToolCallPayload:
+			if ev.Kind == "tool_call" {
+				sess.record.toolCall(p.CallID, p.Tool, p.Input, p.ParentCallID, true)
+			}
+		case agent.ToolResultPayload:
+			if ev.Kind == "tool_result" {
+				sess.record.toolCall(p.CallID, "", nil, p.ParentCallID, false)
 			}
 		case agent.ModelChangedPayload:
 			if ev.Kind == "model_changed" {
@@ -687,6 +858,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// for a daemon with no workshop. A dropped non-empty list is said so in
 	// the start panel, never shown as installed.
 	var pluginDirs []string
+	var pluginHome string
+	var pluginConfig map[string]any
+	nativePluginPrepare := engineRegistry[msg.Engine].PreparePlugins
 	if len(msg.Plugins) > 0 {
 		stages := daemonStageReporter{sender: h.sender, sessionID: msg.SessionID}
 		if ad != nil {
@@ -696,8 +870,8 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		switch {
 		case msg.RestrictTools:
 			reason = "not loaded: a restricted session runs without plugins"
-		case !useClaudeCode || msg.Kind != "agent":
-			reason = "not loaded: only Claude Code agent sessions load plugins"
+		case (!useClaudeCode && nativePluginPrepare == nil) || msg.Kind != "agent":
+			reason = "not loaded: this engine has no native plugin installer"
 		case h.cfg.Plugins == nil:
 			reason = "not loaded: this daemon has no plugin workshop (no state directory)"
 		}
@@ -709,12 +883,21 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		} else {
 			stages.report(protocol.StartStage{ID: protocol.StagePlugins, Label: "Installing plugins",
 				State: protocol.StageStateActive, Detail: fmt.Sprintf("Installing %d plugin(s)", len(msg.Plugins))})
-			dirs, res := h.cfg.Plugins.prepare(ctx, msg.SessionID, msg.Plugins)
-			pluginDirs = dirs
+			var dirs []string
+			var res pluginsinstall.Result
+			if nativePluginPrepare != nil {
+				pluginHome, pluginConfig, res = nativePluginPrepare(ctx, h.cfg.Plugins, msg.SessionID, msg.Plugins)
+			} else {
+				dirs, res = h.cfg.Plugins.prepare(ctx, msg.SessionID, msg.Plugins)
+				pluginDirs = dirs
+			}
 			if h.cfg.SpawnKilled != nil && h.cfg.SpawnKilled(msg.SessionID) {
 				// Stopped while the plugins installed: the session must not start behind the user's back.
 				log.Printf("agent session %s: spawn abandoned — killed while its plugins were being prepared", msg.SessionID)
 				cancel()
+				if pluginHome != "" {
+					h.cfg.Plugins.releaseCodex(msg.SessionID)
+				}
 				if len(dirs) > 0 {
 					h.cfg.Plugins.release(msg.SessionID)
 				}
@@ -731,9 +914,40 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			stages.report(protocol.StartStage{ID: protocol.StagePlugins, Label: "Installing plugins", State: state, Detail: res.Detail()})
 		}
 	}
+	// Interactive grant homes are prepared before Docker mounts are assembled.
+	runtimeHome := pluginHome
+	standaloneGrantHome := ""
+	grantSource := engineHome(h.cfg.HomeDir, "CODEX_HOME", ".codex")
+	if useCodex && msg.MCPGateway != nil && !msg.RestrictTools {
+		runtimeWork := workDir
+		if msg.Sandbox {
+			runtimeWork = sandboxWorkdir
+		}
+		var err error
+		if runtimeHome == "" {
+			runtimeHome, err = prepareCodexInteractiveHome(ctx, grantSource, runtimeWork)
+			standaloneGrantHome = runtimeHome
+		} else {
+			err = sanitizeCodexInteractiveHome(ctx, runtimeHome, grantSource, runtimeWork)
+		}
+		if err != nil {
+			cancel()
+			if pluginHome != "" {
+				h.cfg.Plugins.releaseCodex(msg.SessionID)
+			}
+			fail("Codex interactive MCP isolation could not be prepared")
+			return
+		}
+	}
 	// releasePlugins drops the session's plugin snapshot when the spawn fails
 	// after preparing it; a started session's goes on Kill.
 	releasePlugins := func() {
+		if standaloneGrantHome != "" {
+			_ = os.RemoveAll(standaloneGrantHome)
+		}
+		if pluginHome != "" {
+			h.cfg.Plugins.releaseCodex(msg.SessionID)
+		}
 		if len(pluginDirs) > 0 {
 			h.cfg.Plugins.release(msg.SessionID)
 		}
@@ -742,7 +956,14 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	var prefix sandboxExec
 	if msg.Sandbox {
 		sbOpts := h.cfg.Sandbox
-		sbOpts.ClaudeOnly = msg.RestrictTools || msg.MCPGateway != nil
+		if runtimeHome != "" {
+			sbOpts.CodexHome = runtimeHome
+			sbOpts.CodexSourceHome = grantSource
+		}
+		sbOpts.ClaudeOnly = msg.RestrictTools || (!useCodex && msg.MCPGateway != nil)
+		if useCodex && sbOpts.ClaudeOnly {
+			sbOpts.RestrictedEngine = "codex"
+		}
 		if len(pluginDirs) > 0 {
 			sbOpts.PluginCache = h.cfg.Plugins.sessionDir(msg.SessionID)
 			pluginDirs = translatePluginDirs(pluginDirs, sbOpts.PluginCache)
@@ -774,7 +995,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	if len(pluginDirs) > 0 {
 		ccOpts = append(ccOpts, withPluginDirs(pluginDirs))
 	}
-	if msg.MCPGateway != nil {
+	if msg.MCPGateway != nil && !useCodex {
 		mcpFile = newMCPConfigFile(msg.MCPGateway, prefix)
 		if _, err := mcpFile.Ensure(); err != nil {
 			cancel()
@@ -788,70 +1009,110 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		ccOpts = append(ccOpts, withMCPConfigSource(mcpFile))
 		sess.mcp = mcpFile
 	}
+	if useCodex && (msg.RestrictTools || msg.MCPGateway != nil) {
+		var runtime *codexRestrictedRuntime
+		var err error
+		if msg.RestrictTools {
+			runtime, err = prepareCodexRestrictedRuntime(ctx, workDir, grantSource, prefix, msg.MCPGateway, h.cfg.CredentialSource != nil)
+		} else {
+			runtime, err = prepareCodexGrantedRuntime(ctx, runtimeHome, prefix, msg.MCPGateway)
+		}
+		if err != nil {
+			cancel()
+			if msg.Sandbox {
+				removeSandboxContainer(msg.SessionID)
+			}
+			releasePlugins()
+			fail(err.Error())
+			return
+		}
+		sess.codexRestricted = runtime
+	}
 
 	var loop *agent.Loop
-	messenger := &httpMessenger{
-		base: h.cfg.ServerHTTP, token: h.cfg.DaemonToken, sessionID: msg.SessionID,
-		client: &http.Client{Timeout: 60 * time.Second},
-		ctx:    ctx,
-		onAnswer: func(answer string) {
-			if loop != nil {
-				loop.Enqueue(answer, "ask_answer")
-			}
-		},
-	}
-
-	registryTools := []agent.Tool{
-		tools.ReadFile(workDir), tools.Glob(workDir), tools.Grep(workDir),
-		tools.WriteFile(workDir), tools.EditFile(workDir), tools.BashEnv(workDir, env),
-		agent.SkillTool(skillList),
-	}
-	dataPlaneCtx := ""
-	if h.cfg.ServerHTTP != "" {
-		pub := tools.PublishConfig{Base: h.cfg.ServerHTTP, Token: h.cfg.DaemonToken}
-		dp := tools.DataPlaneConfig{Base: h.cfg.ServerHTTP, Token: h.cfg.DaemonToken, Project: msg.Repo}
-		registryTools = append(registryTools,
-			tools.PushMockup(workDir, pub), tools.PushScreenshot(workDir, pub),
-			tools.MemoryWrite(dp), tools.MemoryDelete(dp),
-			tools.RulePropose(dp), tools.KnowledgeSearch(dp))
-		dataPlaneCtx = fetchDataPlaneContext(h.cfg.ServerHTTP, h.cfg.DaemonToken, msg.Repo)
-	}
-	registry := agent.NewRegistry(registryTools...)
-	cfg := agent.Config{
-		Provider:  provider,
-		Emitter:   emitter,
-		Registry:  registry,
-		System:    BuildSystemPrompt(workDir, h.cfg.HomeDir, skillList, agentTypes, msg.Interaction) + dataPlaneCtx,
-		Model:     model,
-		Effort:    msg.Effort,
-		Messenger: messenger,
-		BudgetUSD: h.cfg.BudgetUSD,
-		Pricing:   h.cfg.Pricing,
-	}
 	var driver sessionDriver
 	switch {
 	case cliEngine:
 		spec := engineRegistry[msg.Engine]
 		log.Printf("agent session %s: %s driver", msg.SessionID, spec.DisplayName)
 		driver = spec.NewAgentDriver(AgentDriverOpts{
-			Spec: spec, WorkDir: workDir, Model: model, Effort: msg.Effort,
+			CredentialSource: h.cfg.CredentialSource, Spec: spec, WorkDir: workDir, Model: model, Effort: msg.Effort,
 			SessionID: msg.SessionID, Emitter: emitter, Env: env,
 		})
+		if cx, ok := driver.(*codexDriver); ok {
+			cx.DeveloperInstructions = ccSystemPromptFor(msg.Interaction)
+			cx.AskUser = codexQuestionHandler(h.cfg.ServerHTTP, h.cfg.DaemonToken, msg.SessionID, emitter, func() string { cx.mu.Lock(); defer cx.mu.Unlock(); return cx.usageTurnID })
+			cx.CodexHome = pluginHome
+			if pluginConfig != nil {
+				cx.RuntimeConfig = pluginConfig
+			}
+			if sess.codexRestricted != nil {
+				cx.RestrictedRuntime = sess.codexRestricted
+				cx.CodexHome = sess.codexRestricted.Home
+			}
+		}
+		if cx, ok := driver.(*codexDriver); ok && h.recordable(msg) {
+			sess.record = h.keepRecord(msg, workDir, model, ad)
+			cx.onThreadID = func(id string) { sess.record.update(func(r *AgentRecord) bool { r.CodexThreadID = id; return true }) }
+			cx.onEngine = sess.record.setEngine
+			cx.onOpenWork = sess.record.setOpenWork
+			cx.onKnownChildren = sess.record.setKnownSubagents
+			if ad != nil {
+				cx.threadID = ad.resumeID
+				cx.seedKnownChildren(append(append([]OpenSubagent(nil), ad.rec.KnownSubagents...), ad.rec.OpenSubagents...))
+				cx.usageTurnID = ad.rec.CurrentTurnID
+				// What was cut off, then why the daemon restarted (as finishAdoption shows it).
+				note := cutOffNotice(ad.rec.OpenCalls, ad.rec.OpenTasks, ad.rec.OpenSubagents)
+				if note != "" && ad.resumeID != "" {
+					note += "\n\n" + h.restartCauseWords(ad.rec)
+				}
+				cx.adoptionNote = note
+			}
+		}
 	case useClaudeCode:
 		log.Printf("agent session %s: claude-code driver (the engine's own login)", msg.SessionID)
 		cc := newClaudeCodeDriver(workDir, model, msg.Effort, emitter, env, ccOpts...)
 		cc.skills, cc.home = skillList, h.cfg.HomeDir
+		if h.cfg.UsageLimits != nil {
+			cc.onRateLimit = h.cfg.UsageLimits.ClaudeRateLimited
+		}
 		driver = cc
 		if h.recordable(msg) {
 			sess.record = h.keepRecord(msg, workDir, model, ad)
 			cc.onSessionID = sess.record.setClaudeSessionID
 			cc.onEngine = sess.record.setEngine
+			cc.onOpenWork = sess.record.setOpenWork
 		}
 		if ad != nil {
-			cc.adopt(ad.resumeID, adoption{hadConversation: ad.rec.ClaudeSessionID != "", cutOff: ad.rec.TurnActive})
+			// What was cut off goes with the next message: the person's, or recovery's own continue
+			// (finishAdoption).
+			a := adoption{hadConversation: ad.rec.ClaudeSessionID != "", cutOff: ad.rec.TurnActive,
+				work:  cutOffNotice(ad.rec.OpenCalls, ad.rec.OpenTasks, ad.rec.OpenSubagents),
+				cause: h.restartCauseWords(ad.rec)}
+			cc.adopt(ad.resumeID, a)
+			cc.usageTurnID = ad.rec.CurrentTurnID
+			// The agent may resume what the restart cut off: its runs open as resumed subagents.
+			_, agents := cutOffSplit(ad.rec.OpenTasks, ad.rec.OpenSubagents)
+			cc.seedKnownAgents(agents)
 		}
 	default:
-		loop = agent.NewLoop(cfg)
+		// The native loop's provider, registry, data-plane context and system prompt (with the
+		// enabled plugins' SessionStart hook context) are built here, after the engine decision:
+		// a CLI engine never uses them, and preparing them runs plugin hook commands.
+		messenger := &httpMessenger{
+			base: h.cfg.ServerHTTP, token: h.cfg.DaemonToken, sessionID: msg.SessionID,
+			client: &http.Client{Timeout: 60 * time.Second},
+			ctx:    ctx,
+			onAnswer: func(answer string) {
+				if loop != nil {
+					loop.Enqueue(answer, "ask_answer")
+				}
+			},
+		}
+		loop = agent.NewLoop(h.nativeLoopConfig(msg, nativeLoopInputs{
+			workDir: workDir, env: env, model: model, skills: skillList, agentTypes: agentTypes,
+			emitter: emitter, messenger: messenger, confined: msg.Sandbox || msg.RestrictTools || prefix.enabled(),
+		}))
 		loop.AddTool(agent.AgentTool(loop, agentTypes, agent.DefaultSpawn))
 		loop.InstallMessagingTools()
 		driver = loop
@@ -874,10 +1135,32 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	if len(restore) > 0 {
 		driver.RestoreContext(restore)
 	}
+	if native != nil {
+		fault := func() {
+			if sess.inputFault.CompareAndSwap(false, true) {
+				cancel()
+				go h.sendError(msg.SessionID, "Native conversation identity could not be retained; the session stopped before accepting more work.")
+				go h.kill(msg.SessionID, 1)
+			}
+		}
+		if err := native.bind(driver, h.cfg.HomeDir, fault); err != nil {
+			cancel()
+			mcpFile.Remove()
+			if sess.codexRestricted != nil {
+				sess.codexRestricted.Close()
+			}
+			releasePlugins()
+			fail(err.Error())
+			return
+		}
+	}
 
+	runDone := make(chan struct{})
+	sess.runDone = runDone
 	sess.loop = driver
 	sess.cancel = cancel
 	sess.plugins = len(pluginDirs) > 0
+	sess.pluginHome = pluginHome != ""
 
 	h.mu.Lock()
 	h.sessions[msg.SessionID] = sess
@@ -916,6 +1199,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	case loop != nil:
 		caps.emit(emitter, nativeCapabilities(model, skillList, agentTypes, loop.ToolDefs(), workDir, h.cfg.HomeDir))
 	case cliEngine:
+		if _, runtimeCaps := driver.(*codexDriver); runtimeCaps {
+			break
+		}
 		if p, ok := engineCapabilities(engineRegistry[msg.Engine], model, CapabilityContext{
 			WorkDir: workDir, HomeDir: h.cfg.HomeDir, Sandboxed: prefix.enabled(),
 		}); ok {
@@ -923,16 +1209,28 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 	}
 	driver.Start()
-	go driver.Run(ctx)
+	nativeOwned = true
+	go func() {
+		defer close(runDone)
+		if native != nil {
+			defer func() { _ = native.root.Close() }()
+		}
+		driver.Run(ctx)
+	}()
 	if ad != nil {
 		h.finishAdoption(ad, sess, driver, msg)
 		return
 	}
 	if note != "" {
-		driver.Enqueue(note, "chat")
+		// The daemon's note, not the person's: source "system" keeps it off their name.
+		driver.EnqueueInput(agent.Input{Text: note, Source: "system"})
 	}
 	if strings.TrimSpace(msg.InitialPrompt) != "" {
-		h.UserMessage(msg.SessionID, msg.InitialPrompt, "chat")
+		source := msg.InitialPromptSource
+		if source == "" {
+			source = "chat"
+		}
+		h.UserInput(msg.SessionID, agent.Input{Text: msg.InitialPrompt, Source: source, ClientID: msg.InitialPromptClientID})
 	} else if note == "" {
 		// Nothing queued: the session is ready and waiting for its first
 		// message. Say so now — otherwise the row sits at "starting" until
@@ -955,20 +1253,31 @@ func (h *AgentHost) get(sessionID string) *agentSession {
 // intercepted, skill slash-commands resolve to skill content, plain text is
 // enqueued as-is.
 func (h *AgentHost) UserMessage(sessionID, text, source string) {
+	h.UserInput(sessionID, agent.Input{Text: text, Source: source})
+}
+
+// UserInput is UserMessage with the sender's client id (in.ClientID), echoed on the message's
+// user_message.
+func (h *AgentHost) UserInput(sessionID string, in agent.Input) {
 	sess := h.get(sessionID)
 	if sess == nil {
 		// Being brought back after a restart: the message waits for it.
-		if h.holdForAdoption(sessionID, text, source) {
+		if h.holdForAdoption(sessionID, in) {
 			return
 		}
 		// Not a session this daemon is hosting (it ended, or it was lost in a restart and could
 		// not be adopted). Say so in its transcript rather than swallowing the message.
-		h.reportUndelivered(sessionID)
+		h.reportUndelivered(sessionID, in.ClientID)
 		return
 	}
-	if source == "" {
-		source = "chat"
+	if sess.inputFault.Load() {
+		h.reportUndelivered(sessionID, in.ClientID)
+		return
 	}
+	if in.Source == "" {
+		in.Source = "chat"
+	}
+	text := in.Text
 	trimmed := strings.TrimSpace(text)
 	if strings.HasPrefix(trimmed, "/model ") {
 		sess.changeModel(strings.TrimSpace(strings.TrimPrefix(trimmed, "/model ")), "", "command")
@@ -978,17 +1287,43 @@ func (h *AgentHost) UserMessage(sessionID, text, source string) {
 		sess.changeModel("", strings.TrimSpace(strings.TrimPrefix(trimmed, "/effort ")), "command")
 		return
 	}
-	if resolved, ok, err := skills.ResolveSlash(sess.skills, trimmed); err == nil && ok {
-		sess.loop.Enqueue(resolved, source)
+	send, receipt, err := sess.inputs.accept(in)
+	if err != nil {
+		sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: "Message not delivered: it could not be safely queued.", Retryable: true, ClientID: in.ClientID}})
 		return
 	}
-	sess.loop.Enqueue(text, source)
+	if receipt != nil {
+		sess.emitter.Replay(*receipt)
+		return
+	}
+	if !send {
+		return
+	}
+	if resolved, ok, err := skills.ResolveSlash(sess.skills, trimmed); sess.engine != "codex" && err == nil && ok {
+		// The engine gets the skill's instructions; the transcript keeps what the person typed.
+		in.Text, in.Shown = resolved, text
+		sess.loop.EnqueueInput(in)
+		return
+	}
+	sess.loop.EnqueueInput(in)
 }
 
 // SetModel applies a model/effort change from the UI.
 func (h *AgentHost) SetModel(sessionID, model, effort string) {
 	if sess := h.get(sessionID); sess != nil {
 		sess.changeModel(model, effort, "ui")
+	}
+}
+
+// RefreshTools asks the session's engine to list its MCP tools again (a grant was re-pinned or
+// extended). Engines that cannot are left alone.
+func (h *AgentHost) RefreshTools(sessionID string) {
+	sess := h.get(sessionID)
+	if sess == nil {
+		return
+	}
+	if r, ok := sess.loop.(toolRefresher); ok {
+		r.refreshTools()
 	}
 }
 
@@ -1028,8 +1363,13 @@ func (h *AgentHost) Interrupt(sessionID string) {
 	}
 }
 
+// agentDriverStopTimeout bounds teardown when a driver fails to honor cancellation.
+var agentDriverStopTimeout = 5 * time.Second
+
 // Kill stops the session entirely.
-func (h *AgentHost) Kill(sessionID string) {
+func (h *AgentHost) Kill(sessionID string) { h.kill(sessionID, 0) }
+
+func (h *AgentHost) kill(sessionID string, exitCode int) {
 	h.mu.Lock()
 	sess := h.sessions[sessionID]
 	delete(h.sessions, sessionID)
@@ -1040,22 +1380,45 @@ func (h *AgentHost) Kill(sessionID string) {
 	sess.emitter.close() // release any Emit blocked on a full buffer
 	sess.loop.Interrupt()
 	sess.cancel()
+	// Drivers finish subprocess teardown and final filesystem writes after their
+	// context is canceled. Keep their container, plugin home and records intact
+	// until then; otherwise cleanup can race deletion or recreate killed state.
+	if sess.runDone != nil {
+		timer := time.NewTimer(agentDriverStopTimeout)
+		select {
+		case <-sess.runDone:
+		case <-timer.C:
+			log.Printf("agent session %s: driver did not stop before the cleanup deadline", sessionID)
+		}
+		timer.Stop()
+	}
 	sess.mcp.Remove() // before the container goes, so the file is deleted in it too
+	if sess.codexRestricted != nil {
+		sess.codexRestricted.Close()
+	}
 	if sess.sandboxed {
 		// Same teardown a terminal sandbox gets on kill (killTmuxSession): the
 		// container outlives nothing.
 		removeSandboxContainer(sessionID)
 	}
+	if sess.pluginHome {
+		h.cfg.Plugins.releaseCodex(sessionID)
+	}
 	if sess.plugins {
 		h.cfg.Plugins.release(sessionID) // after the container: the snapshot was mounted in it
 	}
 	sess.record.delete() // killed for good: nothing to host again after a restart
-	_ = h.sender.Send(protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: 0})
+	sess.inputs.close()
+	removeSessionTokenFile(DaemonStateDir(), sessionID)
+	_ = h.sender.Send(protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: exitCode})
 }
 
 // HandleAck removes a server-persisted event from the pending buffer.
 func (h *AgentHost) HandleAck(sessionID, clientEventID string) {
 	if sess := h.get(sessionID); sess != nil {
+		if err := sess.inputs.ack(clientEventID); err != nil {
+			log.Printf("agent session %s: message receipt acknowledgment could not be saved: %v", sessionID, err)
+		}
 		sess.emitter.ack(clientEventID)
 	}
 }
@@ -1142,6 +1505,55 @@ func DefaultPricing() map[string]agent.Price {
 		"claude-sonnet-5":   price(3, 15),
 		"claude-sonnet-4-6": price(3, 15),
 		"claude-haiku-4-5":  price(1, 5),
+	}
+}
+
+// nativeLoopInputs is what the native loop's configuration is built from.
+type nativeLoopInputs struct {
+	workDir    string
+	env        []string
+	model      string
+	skills     []skills.Skill
+	agentTypes []agent.AgentTypeDef
+	emitter    agent.Emitter
+	messenger  agent.Messenger
+	// confined: a restricted or sandboxed session. Its preparation runs no plugin hook command
+	// on the host (today a confined session never reaches the native loop: this is the backstop).
+	confined bool
+}
+
+// nativeLoopConfig builds the native API loop's configuration: its provider, tool registry,
+// data-plane context and system prompt. Only the native driver calls it.
+func (h *AgentHost) nativeLoopConfig(msg protocol.SpawnSession, in nativeLoopInputs) agent.Config {
+	provider := h.cfg.Provider
+	if provider == nil {
+		provider = anthropic.New(h.cfg.APIKey, "")
+	}
+	registryTools := []agent.Tool{
+		tools.ReadFile(in.workDir), tools.Glob(in.workDir), tools.Grep(in.workDir),
+		tools.WriteFile(in.workDir), tools.EditFile(in.workDir), tools.BashEnv(in.workDir, in.env),
+		agent.SkillTool(in.skills),
+	}
+	dataPlaneCtx := ""
+	if h.cfg.ServerHTTP != "" {
+		pub := tools.PublishConfig{Base: h.cfg.ServerHTTP, Token: h.cfg.DaemonToken}
+		dp := tools.DataPlaneConfig{Base: h.cfg.ServerHTTP, Token: h.cfg.DaemonToken, Project: msg.Repo}
+		registryTools = append(registryTools,
+			tools.PushMockup(in.workDir, pub), tools.PushScreenshot(in.workDir, pub),
+			tools.MemoryWrite(dp), tools.MemoryDelete(dp),
+			tools.RulePropose(dp), tools.KnowledgeSearch(dp))
+		dataPlaneCtx = fetchDataPlaneContext(h.cfg.ServerHTTP, h.cfg.DaemonToken, msg.Repo)
+	}
+	return agent.Config{
+		Provider:  provider,
+		Emitter:   in.emitter,
+		Registry:  agent.NewRegistry(registryTools...),
+		System:    BuildSystemPrompt(in.workDir, h.cfg.HomeDir, in.skills, in.agentTypes, msg.Interaction, !in.confined) + dataPlaneCtx,
+		Model:     in.model,
+		Effort:    msg.Effort,
+		Messenger: in.messenger,
+		BudgetUSD: h.cfg.BudgetUSD,
+		Pricing:   h.cfg.Pricing,
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -65,6 +66,20 @@ func env(key, fallback string) string {
 
 // version is stamped by the build (git describe / VERSION); "dev" otherwise.
 var version = "dev"
+
+// release and commit are stamped by the build too: the repository's VERSION file and the short
+// git commit the image was made from. Empty when unstamped.
+var release, commit string
+
+// versionHandler serves GET /api/version: the build version plus the release and commit the web
+// footer shows. Public and static, so it holds nothing but build identifiers.
+func versionHandler(version, release, commit string) http.HandlerFunc {
+	body, _ := json.Marshal(map[string]string{"version": version, "release": release, "commit": commit})
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}
+}
 
 func main() {
 	logsafe.Install()
@@ -190,10 +205,7 @@ func main() {
 	// Discovery first: GET /agents and GET /openapi.json, both public.
 	api.RegisterBoardContractRoutes(mux, apiSrv)
 	apiSrv.Routes(mux)
-	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"version":"` + version + `"}`))
-	})
+	mux.HandleFunc("GET /api/version", versionHandler(version, release, commit))
 	mux.Handle("/mcp", mcp.New(apiSrv))
 
 	// SPA: serve web/dist with an index.html fallback for client routes.

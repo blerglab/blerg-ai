@@ -81,7 +81,9 @@
         "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
         "parameters": [
           { "name": "engine", "in": "path", "required": true, "description": "Engine id, as POST /api/runner/start takes it (`claude` for the default engine).", "schema": { "type": "string" } },
-          { "name": "daemon_id", "in": "query", "required": false, "description": "The daemon the session will run on, for engines whose list a daemon reports (`codex`, `hermes`): that daemon's list, or `source: \"none\"` when it reported none — never another daemon's. Ignored by `claude`.", "schema": { "type": "string" } }
+          { "name": "daemon_id", "in": "query", "required": false, "description": "The daemon the session will run on, for engines whose list a daemon reports (`codex`, `hermes`): that daemon's list, or `source: \"none\"` when it reported none — never another daemon's. Ignored by `claude`.", "schema": { "type": "string" } },
+          { "name": "runtime", "in": "query", "required": false, "description": "Use cluster for Codex to probe the configured agent image with the signed-in account’s own credential (source live). Requires a browser session token; shared runner keys cannot select an account. Returns immediately with the account/image-scoped cached snapshot. Successful catalogs persist across server restarts. Missing or older-than-15-minute catalogs refresh in the background; refreshing indicates that a new snapshot should be polled. A failed refresh preserves the last successful list and sets error. No catalog returns an empty models list while refreshing.", "schema": { "type": "string", "enum": ["cluster"] } },
+          { "name": "refresh", "in": "query", "required": false, "description": "With runtime=cluster, use 1 to retry a failed catalog refresh. The request still returns immediately; concurrent refreshes coalesce.", "schema": { "type": "string", "enum": ["1"] } }
         ],
         "responses": {
           "200": {
@@ -166,6 +168,7 @@
         "operationId": "send_message",
         "tags": ["sessions"],
         "summary": "Send a conversational turn to the session; resumes a disconnected one.",
+        "description": "Sent with source `human`, `chat` or `runner` (the default) while a `blerg-runner ask` of the session is open, the text answers that ask instead (the agent is blocked inside it), is recorded as the ask's answer and the reply carries `answered_ask: true`. Source `blerg-board` never answers an ask.",
         "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
         "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
         "requestBody": {
@@ -392,7 +395,8 @@
         "responses": {
           "200": { "description": "The bytes.", "content": { "*/*": { "schema": { "type": "string", "format": "binary" } } } },
           "401": { "$ref": "#/components/responses/Unauthorized" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "410": { "description": "The file is listed but its bytes are no longer stored (`missing: true` in the list); `{\"error\":\"file no longer available\"}`.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -407,7 +411,8 @@
         "responses": {
           "200": { "description": "The bytes.", "content": { "*/*": { "schema": { "type": "string", "format": "binary" } } } },
           "401": { "$ref": "#/components/responses/Unauthorized" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "410": { "description": "The file is listed but its bytes are no longer stored (`missing: true` in the list); `{\"error\":\"file no longer available\"}`.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -569,6 +574,8 @@
         "required": ["models", "source"],
         "properties": {
           "models": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } },
+          "refreshing": { "type": "boolean", "description": "A background Cluster catalog refresh is in progress. Existing models remain usable." },
+          "error": { "type": "string", "description": "A safe message for a failed background refresh; the last successful catalog remains available." },
           "source": { "type": "string", "enum": ["live", "builtin", "daemon", "none"], "description": "`live`: the engine's own list, last fetched successfully. `builtin`: the list compiled into this build. `daemon`: probed on a connected workstation daemon from the engine's own CLI or endpoint (Codex, Hermes). `none`: no source for this engine, or no daemon reported a list for it; `models` is empty." },
           "fetched_at": { "type": ["string", "null"], "format": "date-time", "description": "When the live or daemon list was fetched (for a union of several daemons' lists, the oldest of them); null otherwise." },
           "daemon_id": { "type": "string", "description": "For `source: \"daemon\"`: the daemon whose list this is. Absent for a union of several daemons' lists, and for every other source." },
@@ -720,7 +727,8 @@
           "origin": { "type": "string", "enum": ["agent", "user"], "description": "`agent`: published by the session. `user`: attached by a person." },
           "version": { "type": "integer", "description": "1 for the first file of this name and origin, then 2, 3, …" },
           "latest_version": { "type": "integer", "description": "The highest version of this name and origin." },
-          "created_at": { "type": "string", "format": "date-time" }
+          "created_at": { "type": "string", "format": "date-time" },
+          "missing": { "type": "boolean", "description": "Present and true when the file is listed but its bytes are no longer stored: it can be deleted, not read (its raw and download routes answer 410)." }
         }
       },
       "StoredArtifact": {
@@ -800,8 +808,8 @@
           "repo": { "type": "string" },
           "git_url": { "type": "string" },
           "branch": { "type": "string", "description": "`wip/<session_id>` on the repository's remote." },
-          "last_assistant_message": { "type": "string", "description": "Text of the most recent assistant event." },
-          "error_reason": { "type": "string" },
+          "last_assistant_message": { "type": "string", "description": "The last text the agent wrote in its last turn (the one in progress, while one is). Empty when that turn wrote none or failed." },
+          "error_reason": { "type": "string", "description": "Why the session failed; else, when its last turn failed, why that turn did." },
           "end_reason": { "$ref": "#/components/schemas/EndReason" },
           "ended_by": { "$ref": "#/components/schemas/EndedBy" },
           "auto_stop": { "type": "boolean", "description": "Whether this session was started one-shot: the runner ended it when its first turn was done." },

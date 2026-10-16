@@ -135,93 +135,170 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 		hello.Name = strings.ToLower(hello.Name)
 
 		// ── Step 2: validate token ─────────────────────────────────────────────
+		var runtimeToken db.BoardTokenRow
 		if !tokenEqual(hello.Token, daemonToken) {
+			runtimeToken, err = db.ValidateRuntimeToken(r.Context(), dbPool, hello.Token)
+		}
+		if !tokenEqual(hello.Token, daemonToken) && err != nil {
 			_ = wsConn.WriteMessage(websocket.CloseMessage,
 				websocket.FormatCloseMessage(4401, "unauthorized"))
 			_ = wsConn.Close()
 			return
 		}
 
-		// ── Step 3: assign a stable daemon ID ────────────────────────────────
-		// Look up by name so reconnecting daemons reuse the same UUID, keeping
-		// existing session rows associated with this daemon.
-		// The connection outlives the upgrade request, so its work keeps the
-		// request's values but not its cancellation.
+		if runtimeToken.ID != "" {
+			// The bearer, never self-reported hello metadata, chooses identity.
+			hello.Name = "runner-" + runtimeToken.SessionID
+			hello.Mode = "runner"
+			hello.ReposRoot = "/repos"
+		}
+
+		attach := func(ctx context.Context) error {
+			// ── Step 3: assign a stable daemon ID ────────────────────────────────
+			// Look up by name so reconnecting daemons reuse the same UUID, keeping
+			// existing session rows associated with this daemon.
+			// The connection outlives the upgrade request, so its work keeps the
+			// request's values but not its cancellation.
+
+			daemonID := ""
+			if runtimeToken.ID != "" {
+				daemonID, err = db.RuntimeDaemonID(ctx, dbPool, runtimeToken.SessionID, runtimeToken.ID)
+				if err != nil {
+					_ = wsConn.Close()
+					return err
+				}
+			} else if dbPool != nil {
+				existing, err := db.GetDaemonByName(ctx, dbPool, hello.Name)
+				if err != nil {
+					log.Printf("lookup daemon by name %q: %v", hello.Name, err)
+				} else if existing != nil {
+					daemonID = existing.ID
+				}
+			}
+			if daemonID == "" {
+				daemonID = newUUID()
+			}
+
+			// ── Step 4: upsert daemon in Postgres ─────────────────────────────────
+			if dbPool != nil {
+				if err := db.UpsertDaemon(ctx, dbPool, daemonID, hello.Name, hello.Mode, hello.ReposRoot); err != nil {
+					log.Printf("upsert daemon %s: %v", daemonID, err)
+				}
+			}
+
+			// ── Step 5: reconcile active_sessions ───────────────────────────────────────
+			// Mark sessions active in the DB but absent from the daemon's list as stopped.
+			var stoppedWhileAway []string
+			if dbPool != nil {
+				stoppedWhileAway = reconcileSessionsQueued(ctx, h, dbPool, daemonID,
+					boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions),
+					boundSessionIDs(hello.Mode, hello.Name, hello.QueuedSessions), nil)
+			}
+
+			// ── Step 6: build DaemonConn and register ─────────────────────────────
+			checkedOut := hello.CheckedOutRepos
+			if checkedOut == nil {
+				checkedOut = []string{}
+			}
+			dc := &DaemonConn{
+				BoundSessionID: runtimeToken.SessionID,
+				RuntimeTokenID: runtimeToken.ID,
+				ID:             daemonID,
+				Name:           hello.Name,
+				Mode:           hello.Mode,
+				ReposRoot:      hello.ReposRoot,
+				Version:        hello.Version,
+				send:           make(chan []byte, 256),
+			}
+			dc.SetCheckedOutRepos(checkedOut)
+			dc.SetRepoOrigins(hello.RepoOrigins, hello.RepoRemotes)
+			dc.SetGitProviders(hello.GitProviders)
+			dc.SetCloneFrom(hello.CloneFrom)
+			dc.SetMCPGateway(hello.MCPGateway)
+			dc.SetSessionTokenFile(hello.SessionTokenFile)
+			dc.SetInputReceipts(hello.InputReceipts)
+			dc.SetRestrictTools(hello.RestrictTools)
+			dc.SetCodexRestricted(hello.CodexRestricted)
+			dc.SetPlugins(hello.Plugins)
+			dc.SetPluginEngines(hello.PluginEngines)
+			dc.SetAllowHostCredentialClone(hello.AllowHostCredentialClone)
+			dc.SetSandboxAvailable(hello.SandboxAvailable)
+			dc.SetHostClaude(hello.ClaudeCLIAvailable, hello.AnthropicKeySet, hello.SandboxClaudeCredential)
+			dc.SetAvailableEngines(hello.AvailableEngines)
+			dc.SetEngineModels(hello.EngineModels)
+			h.Register(dc)
+			// Sessions the daemon still has but that were stopped while it was away: tell it so.
+			killStoppedSessions(dc, stoppedWhileAway)
+			// A session it still runs with a dead token gets a fresh one.
+			healSessionTokens(ctx, h, dbPool, dc, boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions))
+			// Which of them have a question open: a session it hosts again after a restart waits for
+			// its answer instead of continuing by itself (sessionpaused.go).
+			sendOpenAsks(ctx, dbPool, dc, boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions))
+			// Messages typed for its sessions while it was away (daemongrace.go).
+			h.deliverHeld(dc)
+			replayPendingSessionInputs(ctx, h, dbPool, dc, boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions))
+
+			// Store wsConn on the stack so goroutines below close over it.
+			conn := wsConn
+			conn.SetReadLimit(daemonMessageReadLimit)
+
+			// ── Step 7: start read / write goroutines ─────────────────────────────
+			go daemonWritePump(context.WithoutCancel(ctx), dc, conn, dbPool)
+			go daemonReadPump(h, dc, conn, dbPool) //nolint:gosec,contextcheck // the read pump outlives the upgrade request (hijacked websocket); it ends when the connection closes; contextcheck: a websocket read pump has no request context to inherit; the disconnect cleanup deliberately uses its own
+			return nil
+		}
 		ctx := context.WithoutCancel(r.Context())
-		daemonID := ""
-		if dbPool != nil {
-			existing, err := db.GetDaemonByName(ctx, dbPool, hello.Name)
-			if err != nil {
-				log.Printf("lookup daemon by name %q: %v", hello.Name, err)
-			} else if existing != nil {
-				daemonID = existing.ID
-			}
+		if runtimeToken.ID != "" {
+			err = db.WithRuntimeLaunchFence(ctx, dbPool, runtimeToken.SessionID, func(fenced context.Context) error {
+				if e := db.ValidateRuntimeBinding(fenced, dbPool, runtimeToken.SessionID, runtimeToken.ID, false); e != nil {
+					return e
+				}
+				return attach(db.WithRuntimeAuthority(fenced, runtimeToken.ID))
+			})
+		} else {
+			err = attach(ctx)
 		}
-		if daemonID == "" {
-			daemonID = newUUID()
+		if err != nil {
+			_ = wsConn.Close()
 		}
-
-		// ── Step 4: upsert daemon in Postgres ─────────────────────────────────
-		if dbPool != nil {
-			if err := db.UpsertDaemon(ctx, dbPool, daemonID, hello.Name, hello.Mode, hello.ReposRoot); err != nil {
-				log.Printf("upsert daemon %s: %v", daemonID, err)
-			}
-		}
-
-		// ── Step 5: reconcile active_sessions ───────────────────────────────────────
-		// Mark sessions active in the DB but absent from the daemon's list as stopped.
-		var stoppedWhileAway []string
-		if dbPool != nil {
-			stoppedWhileAway = reconcileSessions(ctx, h, dbPool, daemonID, boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions), nil)
-		}
-
-		// ── Step 6: build DaemonConn and register ─────────────────────────────
-		checkedOut := hello.CheckedOutRepos
-		if checkedOut == nil {
-			checkedOut = []string{}
-		}
-		dc := &DaemonConn{
-			ID:        daemonID,
-			Name:      hello.Name,
-			Mode:      hello.Mode,
-			ReposRoot: hello.ReposRoot,
-			Version:   hello.Version,
-			send:      make(chan []byte, 256),
-		}
-		dc.SetCheckedOutRepos(checkedOut)
-		dc.SetRepoOrigins(hello.RepoOrigins, hello.RepoRemotes)
-		dc.SetGitProviders(hello.GitProviders)
-		dc.SetCloneFrom(hello.CloneFrom)
-		dc.SetMCPGateway(hello.MCPGateway)
-		dc.SetRestrictTools(hello.RestrictTools)
-		dc.SetPlugins(hello.Plugins)
-		dc.SetAllowHostCredentialClone(hello.AllowHostCredentialClone)
-		dc.SetSandboxAvailable(hello.SandboxAvailable)
-		dc.SetHostClaude(hello.ClaudeCLIAvailable, hello.AnthropicKeySet, hello.SandboxClaudeCredential)
-		dc.SetAvailableEngines(hello.AvailableEngines)
-		dc.SetEngineModels(hello.EngineModels)
-		h.Register(dc)
-		// Sessions the daemon still has but that were stopped while it was away: tell it so.
-		killStoppedSessions(dc, stoppedWhileAway)
-		// Messages typed for its sessions while it was away (daemongrace.go).
-		h.deliverHeld(dc)
-
-		// Store wsConn on the stack so goroutines below close over it.
-		conn := wsConn
-		conn.SetReadLimit(daemonMessageReadLimit)
-
-		// ── Step 7: start read / write goroutines ─────────────────────────────
-		go daemonWritePump(dc, conn)
-		go daemonReadPump(h, dc, conn, dbPool) //nolint:gosec,contextcheck // the read pump outlives the upgrade request (hijacked websocket); it ends when the connection closes; contextcheck: a websocket read pump has no request context to inherit; the disconnect cleanup deliberately uses its own
 	}
 }
 
 // daemonWritePump drains dc.send and writes outbound messages to the daemon.
-func daemonWritePump(dc *DaemonConn, conn *websocket.Conn) {
+func daemonWritePump(parent context.Context, dc *DaemonConn, conn *websocket.Conn, dbPool *pgxpool.Pool) {
 	defer func() { _ = conn.Close() }()
 	for msg := range dc.send {
-		if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			log.Printf("daemon write pump %s: %v", dc.ID, err)
+		if dc.RuntimeTokenID != "" {
+			var target envelope
+			if json.Unmarshal(msg, &target) != nil || target.SessionID != dc.BoundSessionID {
+				continue
+			}
+		}
+		write := func(ctx context.Context) error {
+			if dc.RuntimeTokenID != "" {
+				if err := db.ValidateRuntimeBinding(ctx, dbPool, dc.BoundSessionID, dc.RuntimeTokenID, false); err != nil {
+					return err
+				}
+			}
+			// A silent or stalled pod cannot hold launch rotation behind a socket
+			// write forever. The authorization check and actual delivery share one
+			// epoch fence, so no newer launch can overtake an accepted delivery.
+			deadline := time.Now().Add(5 * time.Second)
+			if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
+				deadline = end
+			}
+			if err := conn.SetWriteDeadline(deadline); err != nil {
+				return err
+			}
+			return conn.WriteMessage(websocket.TextMessage, msg)
+		}
+		var err error
+		if dc.RuntimeTokenID != "" {
+			err = db.WithRuntimeLaunchFenceRetry(parent, dbPool, dc.BoundSessionID, write)
+		} else {
+			err = write(parent)
+		}
+		if err != nil {
 			return
 		}
 	}
@@ -257,121 +334,188 @@ func daemonReadPump(h *Hub, dc *DaemonConn, conn *websocket.Conn, dbPool *pgxpoo
 		if err := json.Unmarshal(raw, &env); err != nil {
 			continue
 		}
-		// A runner pod speaks for its own session only.
-		if bound := runnerBoundSession(dc.Mode, dc.Name); bound != "" && env.Type != "daemon_heartbeat" &&
-			!strings.EqualFold(env.SessionID, bound) {
-			log.Printf("runner %s: dropping %s for foreign session %q", dc.Name, env.Type, env.SessionID)
-			continue
-		}
-
-		switch env.Type {
-		case "daemon_heartbeat":
-			var hb protocol.DaemonHeartbeat
-			hbOK := json.Unmarshal(raw, &hb) == nil
-			if hbOK {
-				dc.SetSandboxAvailable(hb.SandboxAvailable)
-				dc.SetHostClaude(hb.ClaudeCLIAvailable, hb.AnthropicKeySet, hb.SandboxClaudeCredential)
-				dc.SetCheckedOutRepos(hb.CheckedOutRepos)
-				dc.SetRepoOrigins(hb.RepoOrigins, hb.RepoRemotes)
-				dc.SetAvailableEngines(hb.AvailableEngines)
-				// Absent = unchanged: the daemon only resends its model
-				// lists when one changed.
-				if hb.EngineModels != nil {
-					dc.SetEngineModels(hb.EngineModels)
+		if dc.RuntimeTokenID != "" {
+			err := db.WithRuntimeLaunchFenceRetry(ctx, dbPool, dc.BoundSessionID, func(fenced context.Context) error {
+				if !handleDaemonFrame(fenced, h, dc, dbPool, raw, env) {
+					return db.ErrTokenInvalid
 				}
-				// Absent (an older daemon) = unchanged.
-				if hb.ReposRoot != "" {
-					applyReposRoot(ctx, dbPool, dc, hb.ReposRoot)
-				}
+				return nil
+			})
+			if err != nil {
+				return
 			}
-			if dbPool != nil {
-				if err := db.SetDaemonStatus(ctx, dbPool, dc.ID, "connected"); err != nil {
-					log.Printf("heartbeat update %s: %v", dc.ID, err)
-				}
-				if hbOK {
-					killStoppedSessions(dc, reconcileSessions(ctx, h, dbPool, dc.ID, boundSessionIDs(dc.Mode, dc.Name, hb.ActiveSessions), hb.SessionStates))
-				}
-			}
-
-		case "repos_root_result":
-			var msg protocol.ReposRootResult
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("daemon %s malformed repos_root_result: %v", dc.ID, err)
-				continue
-			}
-			handleReposRootResult(ctx, h, dbPool, dc, msg)
-
-		case "session_started":
-			var msg protocol.SessionStarted
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("daemon %s malformed session_started: %v", dc.ID, err)
-				continue
-			}
-			HandleSessionStarted(ctx, h, dbPool, dc.ID, msg)
-
-		case "session_state_changed":
-			var msg protocol.SessionStateChanged
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("daemon %s malformed session_state_changed: %v", dc.ID, err)
-				continue
-			}
-			if err := HandleSessionStateChanged(ctx, h, dbPool, msg); err != nil {
-				log.Printf("daemon %s session_state_changed %s: %v", dc.ID, msg.SessionID, err)
-			}
-
-		case "session_ended":
-			var msg protocol.SessionEnded
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("daemon %s malformed session_ended: %v", dc.ID, err)
-				continue
-			}
-			HandleSessionEnded(ctx, h, dbPool, msg)
-
-		case "session_meta_changed":
-			var msg protocol.SessionMetaChanged
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("daemon %s malformed session_meta_changed: %v", dc.ID, err)
-				continue
-			}
-			HandleSessionMetaChanged(ctx, h, dbPool, msg)
-
-		case "session_output":
-			var msg protocol.SessionOutput
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("daemon %s malformed session_output: %v", dc.ID, err)
-				continue
-			}
-			HandleSessionOutput(ctx, h, dbPool, msg)
-
-		case "agent_event":
-			var msg protocol.AgentEvent
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("daemon %s malformed agent_event: %v", dc.ID, err)
-				continue
-			}
-			if msg.Transient {
-				// Streaming deltas: fan out only — no DB, no ack.
-				h.FanOutSessionOutput(msg.SessionID, raw)
-				continue
-			}
-			HandleAgentEvent(ctx, h, dbPool, dc, msg)
-
-		case "session_scrollback":
-			var msg protocol.SessionScrollback
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("daemon %s malformed session_scrollback: %v", dc.ID, err)
-				continue
-			}
-			// Snapshot, not part of the stream — fan out to subscribers only, no
-			// DB recording. (FanOutSessionOutput is a generic subscriber fan-out.)
-			if data, err := json.Marshal(msg); err == nil {
-				h.FanOutSessionOutput(msg.SessionID, data)
-			}
-
-		default:
-			log.Printf("daemon %s unknown message type: %s", dc.ID, env.Type)
+		} else if !handleDaemonFrame(ctx, h, dc, dbPool, raw, env) {
+			return
 		}
 	}
+}
+
+func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool, raw []byte, env envelope) bool {
+	if dc.RuntimeTokenID != "" {
+		ctx = db.WithRuntimeAuthority(ctx, dc.RuntimeTokenID)
+	}
+	if dc.RuntimeTokenID != "" {
+		if err := db.ValidateRuntimeBinding(ctx, dbPool, dc.BoundSessionID, dc.RuntimeTokenID, env.Type == "daemon_heartbeat"); err != nil {
+			return false
+		}
+		// Global daemon control responses are never a pod capability.
+		switch env.Type {
+		case "daemon_heartbeat", "session_started", "session_state_changed", "session_ended", "session_paused", "session_meta_changed", "session_output", "agent_event", "session_scrollback":
+		default:
+			return true
+		}
+	}
+	// A runner pod speaks for its own session only.
+	if bound := runnerBoundSession(dc.Mode, dc.Name); bound != "" && env.Type != "daemon_heartbeat" &&
+		!strings.EqualFold(env.SessionID, bound) {
+		log.Printf("runner %s: dropping %s for foreign session %q", dc.Name, env.Type, env.SessionID)
+		return true
+	}
+
+	switch env.Type {
+	case "daemon_heartbeat":
+		var hb protocol.DaemonHeartbeat
+		hbOK := json.Unmarshal(raw, &hb) == nil
+		if hbOK {
+			dc.SetSandboxAvailable(hb.SandboxAvailable)
+			dc.SetHostClaude(hb.ClaudeCLIAvailable, hb.AnthropicKeySet, hb.SandboxClaudeCredential)
+			dc.SetCheckedOutRepos(hb.CheckedOutRepos)
+			dc.SetRepoOrigins(hb.RepoOrigins, hb.RepoRemotes)
+			dc.SetAvailableEngines(hb.AvailableEngines)
+			// Absent = unchanged: the daemon only resends its model
+			// lists when one changed.
+			if hb.EngineModels != nil {
+				dc.SetEngineModels(hb.EngineModels)
+			}
+			// Absent (an older daemon) = unchanged.
+			if hb.ReposRoot != "" && dc.RuntimeTokenID == "" {
+				applyReposRoot(ctx, dbPool, dc, hb.ReposRoot)
+			}
+		}
+		if dbPool != nil {
+			if err := db.SetDaemonStatus(ctx, dbPool, dc.ID, "connected"); err != nil {
+				log.Printf("heartbeat update %s: %v", dc.ID, err)
+			}
+			if hbOK {
+				reported := boundSessionIDs(dc.Mode, dc.Name, hb.ActiveSessions)
+				queued := boundSessionIDs(dc.Mode, dc.Name, hb.QueuedSessions)
+				killStoppedSessions(dc, reconcileSessionsQueued(ctx, h, dbPool, dc.ID, reported, queued, hb.SessionStates))
+				healSessionTokens(ctx, h, dbPool, dc, reported)
+				replayPendingSessionInputs(ctx, h, dbPool, dc, reported)
+			}
+		}
+
+	case "repos_root_result":
+		var msg protocol.ReposRootResult
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed repos_root_result: %v", dc.ID, err)
+			return true
+		}
+		handleReposRootResult(ctx, h, dbPool, dc, msg)
+
+	case "session_token_result":
+		var msg protocol.SessionTokenResult
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed session_token_result: %v", dc.ID, err)
+			return true
+		}
+		handleSessionTokenResult(ctx, h, dbPool, msg)
+
+	case "session_started":
+		var msg protocol.SessionStarted
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed session_started: %v", dc.ID, err)
+			return true
+		}
+		if dc.RuntimeTokenID != "" {
+			var scopeErr error
+			msg.Repo, msg.ProjectPath, scopeErr = db.RuntimeScope(ctx, dbPool, dc.BoundSessionID, dc.RuntimeTokenID)
+			if scopeErr != nil {
+				return false
+			}
+		}
+		HandleSessionStarted(ctx, h, dbPool, dc.ID, msg)
+
+	case "session_state_changed":
+		var msg protocol.SessionStateChanged
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed session_state_changed: %v", dc.ID, err)
+			return true
+		}
+		if err := HandleSessionStateChanged(ctx, h, dbPool, msg); err != nil {
+			log.Printf("daemon %s session_state_changed %s: %v", dc.ID, msg.SessionID, err)
+		}
+
+	case "session_ended":
+		var msg protocol.SessionEnded
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed session_ended: %v", dc.ID, err)
+			return true
+		}
+		HandleSessionEnded(ctx, h, dbPool, msg)
+
+	case "session_paused":
+		var msg protocol.SessionPaused
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed session_paused: %v", dc.ID, err)
+			return true
+		}
+		handleSessionPaused(ctx, h, dbPool, dc, msg)
+
+	case "session_meta_changed":
+		var msg protocol.SessionMetaChanged
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed session_meta_changed: %v", dc.ID, err)
+			return true
+		}
+		HandleSessionMetaChanged(ctx, h, dbPool, msg)
+
+	case "session_output":
+		var msg protocol.SessionOutput
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed session_output: %v", dc.ID, err)
+			return true
+		}
+		HandleSessionOutput(ctx, h, dbPool, msg)
+
+	case "agent_event":
+		var msg protocol.AgentEvent
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed agent_event: %v", dc.ID, err)
+			return true
+		}
+		if msg.Transient {
+			// Streaming deltas: fan out only — no DB, no ack.
+			h.FanOutSessionOutput(msg.SessionID, raw)
+			return true
+		}
+		HandleAgentEvent(ctx, h, dbPool, dc, msg)
+
+	case "usage_limits":
+		var msg protocol.UsageLimits
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed usage_limits: %v", dc.ID, err)
+			return true
+		}
+		handleUsageLimits(h, dc, msg)
+
+	case "session_scrollback":
+		var msg protocol.SessionScrollback
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			log.Printf("daemon %s malformed session_scrollback: %v", dc.ID, err)
+			return true
+		}
+		// Snapshot, not part of the stream — fan out to subscribers only, no
+		// DB recording. (FanOutSessionOutput is a generic subscriber fan-out.)
+		if data, err := json.Marshal(msg); err == nil {
+			h.FanOutSessionOutput(msg.SessionID, data)
+		}
+
+	default:
+		log.Printf("daemon %s unknown message type: %s", dc.ID, env.Type)
+	}
+	return true
+
 }
 
 // isActiveStatus reports whether a session status represents a live session.
@@ -461,6 +605,9 @@ func setSessionStatusEnd(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, sess
 		log.Printf("setSessionStatus %s → %s: %v", sessionID, status, err)
 		return
 	}
+	if status != "idle" {
+		h.CancelIdleNotice(sessionID) // stopped, lost or revived busy: no idle notice is owed (notices.go)
+	}
 	// A revive into a live status drops the end attribution inside
 	// UpdateSessionStatus's own statement (migration 018) — not here, where a
 	// session_ended landing between two writes would lose its reason.
@@ -520,6 +667,7 @@ func setSessionStatusEnd(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, sess
 	// longer reports is "stopped" for good — so a final terminal write owes
 	// the broker a webhook too.
 	if final && terminalSessionStatus(status) {
+		failPendingSessionInputs(ctx, h, dbPool, sessionID)
 		h.NotifyCompletion(sessionID)
 	}
 	broadcastWithEnd(h, shown, func(endReason string, endedBy *protocol.EndedBy) any {
@@ -532,6 +680,7 @@ func setSessionStatusEnd(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, sess
 			EndReason: endReason,
 			EndedBy:   endedBy,
 		}
+
 	})
 }
 
@@ -550,9 +699,24 @@ func setSessionStatusEnd(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, sess
 // could tell the daemon then. The ids are returned for the caller to send kill_session for
 // (killStoppedSessions), since during a hello the connection is not registered yet.
 func reconcileSessions(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, daemonID string, activeSessions []string, states map[string]string) (stopped []string) {
+	return reconcileSessionsQueued(ctx, h, dbPool, daemonID, activeSessions, nil, states)
+}
+
+// reconcileSessionsQueued is reconcileSessions that also knows the daemon's
+// queued spawns (DaemonHello.QueuedSessions): a session waiting in the
+// daemon's queue is alive however long it waits, so it is left exactly as it
+// is — not stopped, its credentials kept, no completion fired. Its ownership
+// is asserted so a kill reaches it. (unreportedGrace remains the backstop for
+// a daemon too old to report its queue.)
+func reconcileSessionsQueued(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, daemonID string, activeSessions, queuedSessions []string, states map[string]string) (stopped []string) {
 	active := make(map[string]struct{}, len(activeSessions))
 	for _, id := range activeSessions {
 		active[id] = struct{}{}
+		h.SetSessionOwner(id, daemonID)
+	}
+	queued := make(map[string]struct{}, len(queuedSessions))
+	for _, id := range queuedSessions {
+		queued[id] = struct{}{}
 		h.SetSessionOwner(id, daemonID)
 	}
 
@@ -578,6 +742,16 @@ func reconcileSessions(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, daemon
 				log.Printf("reconcile %s: expire pending end: %v", s.ID, err)
 			}
 		}
+		// A session made moments ago that the daemon does not list yet is most
+		// likely still in its spawn queue (a clone, plugins): the daemon lists
+		// a session only once it runs. Reading it as lost would stop it and
+		// revoke the token it is about to start with.
+		if _, waiting := queued[s.ID]; waiting && !reported {
+			continue
+		}
+		if !reported && isActiveStatus(s.Status) && now.Sub(s.StartedAt) < unreportedGrace {
+			continue
+		}
 		desired, change := reconcileDesiredStatus(s.Status, reported, states[s.ID])
 		if !change {
 			continue
@@ -595,6 +769,15 @@ func reconcileSessions(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, daemon
 	}
 	return stopped
 }
+
+// unreportedGrace is how long after a session's row was made reconcile waits
+// before treating a daemon that does not list it as having lost it. A current
+// daemon lists its queued spawns (QueuedSessions), so this is the backstop for
+// an older one, whose spawn sits unlisted in its queue (clone, plugins): a
+// start slower than this is stopped, then revived by its own session_started,
+// which gives it a fresh messaging token (healSessionTokens) — but not its MCP
+// grants, which the stop deleted.
+const unreportedGrace = 2 * time.Minute
 
 // stoppedForGood reports whether an end reason is a decision to stop the session, as opposed to
 // the server losing sight of it (daemon_lost, daemon_unreported) or its process ending: only the
@@ -646,7 +829,7 @@ func handleDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 	}
 	// A desktop daemon gets a grace period before its sessions are marked lost
 	// (daemongrace.go): most disconnects are a restart that is back in seconds.
-	if dc.Mode != "runner" && daemonLostGrace > 0 {
+	if isHostDaemon(dc) && daemonLostGrace > 0 {
 		gen := h.away.begin(dc.ID)
 		time.AfterFunc(daemonLostGrace, func() {
 			if h.GetDaemon(dc.ID) != nil {
@@ -668,14 +851,14 @@ func handleDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 func finishDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 	ctx := context.Background()
 	affectedSessionIDs := markDaemonSessionsLost(ctx, h, dc, dbPool)
-	if dc.Mode != "runner" && h.GetDaemon(dc.ID) != nil {
+	if isHostDaemon(dc) && h.GetDaemon(dc.ID) != nil {
 		return // overtaken by the daemon's reconnect: it is not disconnected
 	}
 
 	// A cluster session pod (mode "runner") is never shown to browsers as a
 	// daemon, so its drop is not announced; its sessions' own status changes
 	// (set above) already reach them.
-	if dc.Mode == "runner" {
+	if !isHostDaemon(dc) {
 		return
 	}
 	// Broadcast daemon_disconnected regardless of DB availability.
@@ -690,12 +873,27 @@ func finishDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 // connection has been unregistered: the daemon is marked disconnected and each of its live
 // sessions lost (or, for a cluster pod, disconnected). It returns the sessions it marked.
 func markDaemonSessionsLost(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) []string {
+	if dc.RuntimeTokenID != "" {
+		affected := []string{}
+		_ = db.WithRuntimeLaunchFence(ctx, dbPool, dc.BoundSessionID, func(fenced context.Context) error {
+			if err := db.ValidateRuntimeBinding(fenced, dbPool, dc.BoundSessionID, dc.RuntimeTokenID, false); err != nil {
+				// A replaced pod owns only its obsolete daemon row, never the new launch.
+				return db.SetDaemonStatus(fenced, dbPool, dc.ID, "disconnected")
+			}
+			affected = markDaemonSessionsLostCurrent(db.WithRuntimeAuthority(fenced, dc.RuntimeTokenID), h, dc, dbPool)
+			return nil
+		})
+		return affected
+	}
+	return markDaemonSessionsLostCurrent(ctx, h, dc, dbPool)
+}
+func markDaemonSessionsLostCurrent(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) []string {
 	affectedSessionIDs := []string{}
 
 	if dbPool != nil {
 		// The daemon may be back already (a restart takes about a second): then this cleanup
 		// has been overtaken, and neither the daemon nor its sessions are marked.
-		if dc.Mode != "runner" && h.GetDaemon(dc.ID) != nil {
+		if isHostDaemon(dc) && h.GetDaemon(dc.ID) != nil {
 			return affectedSessionIDs
 		}
 		// Mark daemon as disconnected.
@@ -719,11 +917,11 @@ func markDaemonSessionsLost(ctx context.Context, h *Hub, dc *DaemonConn, dbPool 
 				// connection (a restart takes about a second): its hello has then reconciled
 				// these rows, and marking them lost now would undo that until its next
 				// heartbeat — during which the sessions take no status and no message.
-				if dc.Mode != "runner" && h.GetDaemon(dc.ID) != nil {
+				if isHostDaemon(dc) && h.GetDaemon(dc.ID) != nil {
 					log.Printf("daemon %s reconnected during its disconnect cleanup — remaining sessions left as they are", dc.ID)
 					break
 				}
-				if dc.Mode == "runner" {
+				if !isHostDaemon(dc) {
 					// Pod death is not session death: the session resumes when
 					// a new Job re-connects (or is re-created on demand).
 					setSessionStatus(ctx, h, dbPool, s.ID, "disconnected", nil, nil, false)

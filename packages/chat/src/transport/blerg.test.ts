@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, afterEach, type Mock } from 'vitest'
-import { createBlergTransport, type BlergSocket, type ChatBrowserMessage } from './blerg'
+import { act, renderHook } from '@testing-library/react'
+import { createBlergTransport, GAP_WAIT_MS, MAX_FORWARD_PAGES, type BlergSocket, type ChatBrowserMessage } from './blerg'
 import type { SubscribeHandlers } from './types'
+import { ArtifactGoneError, isArtifactGone } from './files'
 import type { AgentEvent } from '../types'
+import { useSession } from '../hooks/useSession'
+import { useTranscriptStore } from '../hooks/useTranscriptStore'
 
 // ─── a socket the tests drive ────────────────────────────────────────────────
 
@@ -47,7 +51,8 @@ function fakeSocket(opts: { open?: boolean } = {}) {
   return socket
 }
 
-type MockHandlers = { [K in keyof SubscribeHandlers]: Mock<SubscribeHandlers[K]> }
+// The members every subscriber gives (onEvents, onReset and onAskClosed are optional).
+type MockHandlers = { [K in keyof Omit<SubscribeHandlers, 'onEvents' | 'onReset' | 'onAskClosed'>]: Mock<SubscribeHandlers[K]> }
 function handlers(): MockHandlers {
   return {
     onEvent: vi.fn<SubscribeHandlers['onEvent']>(),
@@ -72,6 +77,7 @@ function make(socket = fakeSocket(), extra: Partial<Parameters<typeof createBler
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -126,6 +132,37 @@ describe('createBlergTransport subscribe', () => {
     expect(socket.sent).toHaveLength(1)
   })
 
+  it('accepts sparse lifecycle context without a false gap or clearing live streaming', async () => {
+    vi.useFakeTimers()
+    useTranscriptStore.setState({ sessions: {} })
+    const { t, socket } = make()
+    const hook = renderHook(() => useSession(t, 's1', { meta: { status: 'running', started_at: '2026-10-06T00:00:00Z' } }))
+    act(() => {
+      socket.emit(ev(20, { kind: 'subagent_started', payload: { child_id: 'old-child', summary: 'Earlier review' } }))
+      socket.emit(ev(40, { kind: 'subagent_done', payload: { child_id: 'old-child', summary: 'Review finished' } }))
+      for (let seq = 801; seq <= 1000; seq++) socket.emit(ev(seq, { kind: 'user_message', payload: { text: `m${seq}`, source: 'chat' } }))
+      socket.emit({ type: 'agent_events_replay_done', session_id: 's1', older: true, first_seq: 801, last_seq: 1000, has_more: false, has_older: true })
+      socket.emit(ev(0, { seq: undefined, client_event_id: 'typing', transient: true, payload: { text: 'Still writing', done: false } }))
+    })
+    expect(useTranscriptStore.getState().sessions.s1.firstSeq).toBe(801)
+    expect(socket.sent).toContainEqual({ type: 'subscribe_agent_events', session_id: 's1', before_seq: 801, limit: 200 })
+    act(() => {
+      // A second old lifecycle fact arrives with an older page, while the main agent types.
+      socket.emit(ev(50, { kind: 'subagent_done', payload: { child_id: 'another-old-child', summary: 'Also finished' } }))
+      for (let seq = 601; seq <= 800; seq++) socket.emit(ev(seq, { kind: 'user_message', payload: { text: `m${seq}`, source: 'chat' } }))
+      socket.emit({ type: 'agent_events_replay_done', session_id: 's1', older: true, first_seq: 601, last_seq: 800, has_more: false, has_older: true })
+    })
+    await act(async () => { await vi.advanceTimersByTimeAsync(GAP_WAIT_MS + 1) })
+    expect(socket.sent.filter(m => (m as { after_seq?: number }).after_seq != null)).toEqual([
+      { type: 'subscribe_agent_events', session_id: 's1', after_seq: 0, tail: 200 },
+    ])
+    expect(useTranscriptStore.getState().sessions.s1.streaming).toBe('Still writing')
+    expect(useTranscriptStore.getState().sessions.s1.firstSeq).toBe(601)
+    hook.unmount()
+    useTranscriptStore.setState({ sessions: {} })
+    vi.useRealTimers()
+  })
+
   it('hands persisted events to onEvent and typing deltas to onStreaming, for this session only', () => {
     const { t, socket } = make()
     const h = handlers()
@@ -155,6 +192,7 @@ describe('createBlergTransport subscribe', () => {
     t.subscribe('s1', { tail: true }, h)
     socket.emit(ev(5))
     socket.emit({ type: 'agent_events_replay_done', session_id: 's1', last_seq: 7, has_more: false, older: true })
+    socket.emit(ev(8))
     socket.emit(ev(9))
     socket.drop()
     expect(h.onConnection).toHaveBeenLastCalledWith(false)
@@ -188,6 +226,374 @@ describe('createBlergTransport subscribe', () => {
     for (const type of ['agent_event', 'agent_events_replay_done', 'session_state_changed', 'initial_state']) {
       expect(socket.handlerCount(type)).toBe(0)
     }
+  })
+})
+
+// ─── replay pages in one batch, and the bound on a forward replay ─────────────
+
+/** Handlers with the two optional members a batching subscriber (useSession) gives. */
+function batchHandlers() {
+  return {
+    ...handlers(),
+    onEvents: vi.fn<NonNullable<SubscribeHandlers['onEvents']>>(),
+    onReset: vi.fn<NonNullable<SubscribeHandlers['onReset']>>(),
+  }
+}
+
+const done = (lastSeq: number, hasMore: boolean, extra: object = {}) =>
+  ({ type: 'agent_events_replay_done', session_id: 's1', last_seq: lastSeq, has_more: hasMore, ...extra })
+
+/** Plays one full forward page of the server's 200 events after `after`, ending in has_more. */
+function fullPage(socket: ReturnType<typeof fakeSocket>, after: number, hasMore = true) {
+  for (let s = after + 1; s <= after + 200; s++) socket.emit(ev(s))
+  socket.emit(done(after + 200, hasMore))
+}
+
+describe('createBlergTransport replay batches', () => {
+  it('hands a replay page to onEvents in one call, before its onReplayDone', () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    socket.emit(ev(11))
+    socket.emit(ev(12))
+    socket.emit(ev(13))
+    expect(h.onEvents).not.toHaveBeenCalled()
+    socket.emit(done(13, false))
+    expect(h.onEvents).toHaveBeenCalledTimes(1)
+    expect(h.onEvents).toHaveBeenCalledWith([ev(11), ev(12), ev(13)])
+    expect(h.onEvent).not.toHaveBeenCalled()
+    expect(h.onEvents.mock.invocationCallOrder[0]).toBeLessThan(h.onReplayDone.mock.invocationCallOrder[0])
+  })
+
+  it('hands live events after the replay to onEvent one by one, in order', () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    socket.emit(ev(11))
+    socket.emit(done(11, false))
+    socket.emit(ev(12))
+    socket.emit(ev(13))
+    expect(h.onEvents).toHaveBeenCalledTimes(1)
+    expect(h.onEvent.mock.calls).toEqual([[ev(12)], [ev(13)]])
+  })
+
+  it('a tail page and every following forward page are batched too; a live event amid a page rides with it', () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { tail: true }, h)
+    socket.emit(ev(5))
+    socket.emit(ev(6))
+    socket.emit(done(6, false, { older: true, has_older: false, first_seq: 5 }))
+    expect(h.onEvents.mock.calls).toEqual([[[ev(5), ev(6)]]])
+    const h2 = batchHandlers()
+    t.subscribe('s1', { afterSeq: 0 }, h2)
+    socket.emit(ev(1))
+    socket.emit(done(200, true))
+    socket.emit(ev(201))
+    socket.emit(ev(900, { client_event_id: 'live900' })) // live, while the next page is on its way
+    socket.emit(ev(202))
+    socket.emit(done(202, false))
+    expect(h2.onEvents.mock.calls).toEqual([[[ev(1)]], [[ev(201), ev(900, { client_event_id: 'live900' }), ev(202)]]])
+    expect(h2.onEvent).not.toHaveBeenCalled()
+  })
+
+  it('a drop in the middle of a page hands over what arrived, and the reopen asks for the page again', () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    socket.emit(ev(11))
+    socket.emit(ev(12))
+    socket.drop()
+    expect(h.onEvents).toHaveBeenCalledWith([ev(11), ev(12)])
+    socket.reopen()
+    // From where the replay started: 11 and 12 come again (the transcript drops them as repeats),
+    // since a live event among them would have been no sign the replay got that far.
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 10 })
+    socket.emit(ev(11))
+    socket.emit(ev(12))
+    socket.emit(ev(13))
+    socket.emit(done(13, false))
+    expect(h.onEvents).toHaveBeenLastCalledWith([ev(11), ev(12), ev(13)])
+  })
+
+  it('pages a short gap forward and keeps what is held', () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    fullPage(socket, 10)
+    for (let s = 211; s <= 250; s++) socket.emit(ev(s))
+    socket.emit(done(250, false))
+    expect(h.onReset).not.toHaveBeenCalled()
+    expect(h.onEvents).toHaveBeenCalledTimes(2)
+    expect(socket.sent).toEqual([
+      { type: 'subscribe_agent_events', session_id: 's1', after_seq: 10 },
+      { type: 'subscribe_agent_events', session_id: 's1', after_seq: 210 },
+    ])
+  })
+
+  it(`gives up on a forward replay still not done after ${MAX_FORWARD_PAGES} full pages and loads from the end instead`, () => {
+    expect(MAX_FORWARD_PAGES).toBe(5)
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    // The server holds six full pages and more past seq 10.
+    for (let p = 0; p < MAX_FORWARD_PAGES; p++) fullPage(socket, 10 + p * 200)
+    expect(h.onReset).toHaveBeenCalledTimes(1)
+    const forward = socket.sent.filter(m => (m as { tail?: number; before_seq?: number }).tail == null)
+    expect(forward).toHaveLength(MAX_FORWARD_PAGES) // the sixth page is never asked for
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 0, tail: 200 })
+    // The page that ran over is dropped with the rest; the reset came after the pages before it.
+    expect(h.onEvents).toHaveBeenCalledTimes(MAX_FORWARD_PAGES - 1)
+    expect(h.onReplayDone).toHaveBeenCalledTimes(MAX_FORWARD_PAGES - 1)
+    expect(h.onEvents.mock.invocationCallOrder.at(-1)!).toBeLessThan(h.onReset.mock.invocationCallOrder[0])
+
+    // The newest page comes back as a batch and an older replay_done, as on a first visit.
+    socket.emit(ev(5000))
+    socket.emit(ev(5001))
+    socket.emit(done(5001, false, { older: true, has_older: true, first_seq: 5000 }))
+    expect(h.onEvents).toHaveBeenLastCalledWith([ev(5000), ev(5001)])
+    expect(h.onReplayDone).toHaveBeenLastCalledWith(expect.objectContaining({ older: true, hasOlder: true, firstSeq: 5000 }))
+    socket.emit(ev(5002))
+    expect(h.onEvent).toHaveBeenCalledWith(ev(5002))
+  })
+
+  it('a drop before the newest page arrives asks for the tail again, not forward from a live seq', () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    for (let p = 0; p < MAX_FORWARD_PAGES; p++) fullPage(socket, 10 + p * 200)
+    socket.emit(ev(7000)) // live, before the tail answered
+    socket.drop()
+    socket.reopen()
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 0, tail: 200 })
+  })
+
+  it('a loadOlder cut off by a drop is finished, so the tail asked for after a reset still lands', async () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    const older = t.loadOlder('s1', 5, 200)
+    for (let p = 0; p < MAX_FORWARD_PAGES; p++) fullPage(socket, 10 + p * 200)
+    expect(h.onReset).toHaveBeenCalledTimes(1)
+    socket.emit(ev(5000)) // the tail is coming in
+    socket.drop()
+    await expect(older).rejects.toThrow(/not connected/i)
+    const batchesBefore = h.onEvents.mock.calls.length
+    socket.reopen()
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 0, tail: 200 })
+    socket.emit(ev(5000))
+    socket.emit(ev(5001))
+    socket.emit(done(5001, false, { older: true, has_older: true, first_seq: 5000 }))
+    expect(h.onEvents.mock.calls.length - batchesBefore).toBe(1)
+    expect(h.onEvents).toHaveBeenLastCalledWith([ev(5000), ev(5001)])
+    expect(h.onReplayDone).toHaveBeenLastCalledWith(expect.objectContaining({ older: true, hasOlder: true, firstSeq: 5000 }))
+    socket.emit(ev(5002))
+    expect(h.onEvent).toHaveBeenCalledWith(ev(5002))
+  })
+
+  it('a drop in the middle of a forward replay resumes from the last page it finished, not from a live event that came in', () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    fullPage(socket, 10) // 11..210, has_more
+    socket.emit(ev(900, { client_event_id: 'live900' })) // live, while page 2 comes in
+    for (let s = 211; s <= 300; s++) socket.emit(ev(s))
+    socket.drop()
+    socket.reopen()
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 210 })
+    // Once the replay is through, a reconnect resumes from the newest seq seen again.
+    for (let s = 211; s <= 320; s++) socket.emit(ev(s))
+    socket.emit(done(320, false))
+    for (let s = 321; s < 900; s++) socket.emit(ev(s))
+    socket.drop()
+    socket.reopen()
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 900 })
+  })
+
+  it('typing deltas that arrive while a page is held wait in it, behind the events before them', () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    const closing = ev(11, { kind: 'turn_done', payload: {} })
+    const delta = ev(0, { seq: undefined, client_event_id: 'd1', transient: true, payload: { text: 'Hel', done: false } })
+    socket.emit(closing)
+    socket.emit(delta)
+    expect(h.onStreaming).not.toHaveBeenCalled()
+    socket.emit(done(11, false))
+    expect(h.onEvents).toHaveBeenCalledWith([closing, delta])
+    socket.emit({ ...delta, client_event_id: 'd2', payload: { text: 'lo', done: false } })
+    expect(h.onStreaming).toHaveBeenCalledWith('lo')
+  })
+
+  it('a subscriber that cannot reset (no onReset) is replayed forward however far it is, one event at a time without onEvents', () => {
+    const { t, socket } = make()
+    const h = handlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    for (let p = 0; p < MAX_FORWARD_PAGES + 1; p++) fullPage(socket, 10 + p * 200)
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 10 + (MAX_FORWARD_PAGES + 1) * 200 })
+    expect(h.onEvent).toHaveBeenCalledTimes((MAX_FORWARD_PAGES + 1) * 200)
+  })
+})
+
+describe('useSession over the blerg transport', () => {
+  afterEach(() => {
+    useTranscriptStore.setState({ sessions: {} })
+  })
+
+  /** A session visited before: ten events held, the start reached. */
+  function cached() {
+    const s = useTranscriptStore.getState()
+    s.ingestMany('s1', Array.from({ length: 10 }, (_, i) => ev(i + 1)))
+    s.ingestReplayDone('s1', { lastSeq: 10, hasMore: false, older: true, hasOlder: false, firstSeq: 1, serverTime: new Date(Date.now() - 5000).toISOString() })
+  }
+
+  /** Counts the updates that changed the session's events. */
+  function countEventUpdates() {
+    const n = { count: 0 }
+    const off = useTranscriptStore.subscribe((now, before) => {
+      if (now.sessions.s1?.events !== before.sessions.s1?.events) n.count++
+    })
+    return { n, off }
+  }
+
+  const held = () => useTranscriptStore.getState().sessions.s1?.events.map(e => e.seq) ?? []
+
+  it('a revisit commits a replay page in one store update and live events after it singly', () => {
+    cached()
+    const { t, socket } = make()
+    renderHook(() => useSession(t, 's1', { meta: { status: 'idle', started_at: '2026-10-13T00:00:00Z' } }))
+    expect(socket.sent).toEqual([{ type: 'subscribe_agent_events', session_id: 's1', after_seq: 10 }])
+    const { n, off } = countEventUpdates()
+    act(() => {
+      socket.emit(ev(11))
+      socket.emit(ev(12))
+      socket.emit(ev(13))
+      socket.emit(done(13, false))
+    })
+    expect(n.count).toBe(1)
+    act(() => {
+      socket.emit(ev(14))
+      socket.emit(ev(13)) // a replay/live overlap
+      socket.emit(ev(15))
+    })
+    off()
+    expect(n.count).toBe(3)
+    expect(held()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+  })
+
+  it(`a revisit more than ${MAX_FORWARD_PAGES} pages behind drops what is held and loads from the end, keeping the clock offset`, () => {
+    cached()
+    const offset = useTranscriptStore.getState().sessions.s1.clockOffset
+    const { t, socket } = make()
+    renderHook(() => useSession(t, 's1', { meta: { status: 'idle', started_at: '2026-10-13T00:00:00Z' } }))
+    act(() => { for (let p = 0; p < MAX_FORWARD_PAGES; p++) fullPage(socket, 10 + p * 200) })
+    expect(held()).toEqual([])
+    expect(useTranscriptStore.getState().sessions.s1).toMatchObject({ lastSeq: 0, firstSeq: 0, hasOlder: false, clockOffset: offset })
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 0, tail: 200 })
+
+    act(() => {
+      for (let s = 1801; s <= 2000; s++) socket.emit(ev(s))
+      socket.emit(done(2000, false, { older: true, has_older: true, first_seq: 1801 }))
+    })
+    expect(held()).toHaveLength(200)
+    expect(held()[0]).toBe(1801)
+    // The older part follows a page at a time, from before the newest page.
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', before_seq: 1801, limit: 200 })
+  })
+
+  it('a typing delta after a closing event in a held page survives the page', () => {
+    cached()
+    const { t, socket } = make()
+    renderHook(() => useSession(t, 's1', { meta: { status: 'idle', started_at: '2026-10-13T00:00:00Z' } }))
+    act(() => {
+      socket.emit(ev(11, { kind: 'turn_done', payload: {} }))
+      socket.emit(ev(0, { seq: undefined, client_event_id: 'd1', transient: true, payload: { text: 'Hel', done: false } }))
+      socket.emit(done(11, false))
+    })
+    expect(useTranscriptStore.getState().sessions.s1.streaming).toBe('Hel')
+  })
+
+  it('leaving with a page in flight and coming back asks for that page again', () => {
+    cached()
+    const { t, socket } = make()
+    const opts = { meta: { status: 'idle' as const, started_at: '2026-10-13T00:00:00Z' } }
+    const first = renderHook(() => useSession(t, 's1', opts))
+    act(() => {
+      fullPage(socket, 10) // 11..210
+      for (let s = 211; s <= 300; s++) socket.emit(ev(s)) // page 2 cut short by leaving
+    })
+    first.unmount()
+    renderHook(() => useSession(t, 's1', opts))
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 210 })
+    act(() => {
+      for (let s = 211; s <= 320; s++) socket.emit(ev(s))
+      socket.emit(done(320, false))
+    })
+    expect(held()).toEqual(Array.from({ length: 320 }, (_, i) => i + 1))
+  })
+
+  it('leaving mid-replay after a live event came in resumes from the replay, not the live event, and the gap arrives', () => {
+    cached()
+    const { t, socket } = make()
+    const opts = { meta: { status: 'idle' as const, started_at: '2026-10-13T00:00:00Z' } }
+    const first = renderHook(() => useSession(t, 's1', opts))
+    act(() => {
+      fullPage(socket, 10) // 11..210
+      for (let s = 211; s <= 300; s++) socket.emit(ev(s))
+      socket.emit(ev(900, { client_event_id: 'live900' })) // live, rides with page 2
+      for (let s = 301; s <= 410; s++) socket.emit(ev(s))
+      socket.emit(done(410, true))
+    })
+    expect(useTranscriptStore.getState().sessions.s1.lastSeq).toBe(900)
+    first.unmount()
+    renderHook(() => useSession(t, 's1', opts))
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 410 })
+    act(() => {
+      fullPage(socket, 410) // 411..610
+      fullPage(socket, 610) // 611..810
+      for (let s = 811; s <= 899; s++) socket.emit(ev(s))
+      socket.emit(done(899, false))
+    })
+    expect(held()).toEqual([...Array.from({ length: 899 }, (_, i) => i + 1), 900])
+    expect(useTranscriptStore.getState().sessions.s1).toMatchObject({ hasMore: false, lastSeq: 900 })
+  })
+
+  it('the tail\'s own replay_done does not answer the older page asked for during it: the page lands whole, shown as loading until then, and nothing more is asked for', async () => {
+    // A socket that dispatches to a Set (the runner's ws.ts, this fake) also calls a handler added
+    // while it dispatches: the older page's, added by the hook as the tail's replay_done is handled.
+    const { t, socket } = make()
+    const { result } = renderHook(() => useSession(t, 's1', { meta: { status: 'running', started_at: '2026-10-13T00:00:00Z' } }))
+    const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => ev(from + i))
+    await act(async () => {
+      for (const e of range(401, 600)) socket.emit(e)
+      socket.emit({ type: 'agent_events_replay_done', session_id: 's1', last_seq: 600, has_more: false, older: true, has_older: true, first_seq: 401 })
+    })
+    const backward = () => socket.sent.filter(m => (m as { before_seq?: number }).before_seq != null)
+    expect(backward()).toEqual([{ type: 'subscribe_agent_events', session_id: 's1', before_seq: 401, limit: 200 }])
+    expect(result.current.loadingOlder).toBe(true)
+    const { n, off } = countEventUpdates()
+    await act(async () => {
+      for (const e of range(201, 400)) socket.emit(e)
+      socket.emit({ type: 'agent_events_replay_done', session_id: 's1', last_seq: 0, has_more: false, older: true, has_older: true, first_seq: 201 })
+    })
+    off()
+    expect(n.count).toBe(1)
+    expect(result.current.loadingOlder).toBe(false)
+    expect(held()).toEqual(range(201, 600).map(e => e.seq))
+    expect(backward()).toHaveLength(1)
+  })
+
+  it('a revisit two pages behind keeps what is held and adds the gap', () => {
+    cached()
+    const { t, socket } = make()
+    renderHook(() => useSession(t, 's1', { meta: { status: 'idle', started_at: '2026-10-13T00:00:00Z' } }))
+    act(() => {
+      fullPage(socket, 10)
+      fullPage(socket, 210, false)
+    })
+    expect(held()).toHaveLength(410)
+    expect(held()[0]).toBe(1)
+    expect(socket.sent.some(m => (m as { tail?: number }).tail != null)).toBe(false)
   })
 })
 
@@ -230,6 +636,32 @@ describe('createBlergTransport messages', () => {
     socket.drop()
     await expect(t.send('s1', 'again')).resolves.toEqual({ queued: false })
     expect(socket.sent).toHaveLength(1)
+  })
+
+  it('send carries the client id the daemon echoes', async () => {
+    const { t, socket } = make()
+    await t.send('s1', 'hello', { clientId: 'q-1' })
+    expect(socket.sent).toEqual([{ type: 'agent_user_message', session_id: 's1', text: 'hello', client_id: 'q-1' }])
+  })
+
+  it('an answer names its ask, and the transport says it can', async () => {
+    const { t, socket } = make()
+    expect(t.answersAsks).toBe(true)
+    await t.send('s1', 'yes', { clientId: 'q-2', answerTo: 'm1' })
+    expect(socket.sent).toEqual([{ type: 'agent_user_message', session_id: 's1', text: 'yes', client_id: 'q-2', answer_message_id: 'm1' }])
+  })
+
+  it('reports the asks of its session the server closed: live, and those closed while away', () => {
+    const { t, socket } = make()
+    const onAskClosed = vi.fn()
+    t.subscribe('s1', {}, { ...handlers(), onAskClosed })
+    socket.emit({ type: 'message_answered', message: { id: 'm1', session_id: 's1', kind: 'ask', status: 'answered', answer: 'yes' } })
+    socket.emit({ type: 'message_answered', message: { id: 'm9', session_id: 's2', kind: 'ask', status: 'answered', answer: 'no' } })
+    socket.emit({ type: 'initial_state', daemons: [], sessions: [], messages: [
+      { id: 'm2', session_id: 's1', kind: 'ask', status: 'answered' },
+      { id: 'm3', session_id: 's1', kind: 'ask', status: 'open' },
+    ] })
+    expect(onAskClosed.mock.calls).toEqual([['m1', 'yes'], ['m2', '']])
   })
 
   it('setModel sends set_session_model with only the fields given', async () => {
@@ -295,6 +727,20 @@ describe('createBlergTransport files', () => {
     expect(fetch.mock.calls[1]).toEqual(['/api/sessions/s1/artifacts/a1', expect.objectContaining({ method: 'DELETE' })])
   })
 
+  it('a 410 (listed, bytes gone) is a distinct error on raw and download', async () => {
+    const { t, fetch } = make()
+    const gone = () => new Response('{"error":"file no longer available"}', { status: 410 })
+    fetch.mockResolvedValueOnce(gone())
+    const raw = await t.files!.raw('s1', 'a1').catch((e: unknown) => e)
+    expect(isArtifactGone(raw)).toBe(true)
+    expect(raw).toBeInstanceOf(ArtifactGoneError)
+    expect((raw as Error).message).toBe('This file is no longer available.')
+    fetch.mockResolvedValueOnce(gone())
+    expect(isArtifactGone(await t.files!.download('s1', 'a1').catch((e: unknown) => e))).toBe(true)
+    fetch.mockResolvedValueOnce(new Response('', { status: 500 }))
+    expect(isArtifactGone(await t.files!.raw('s1', 'a1').catch((e: unknown) => e))).toBe(false)
+  })
+
   it('a 401 signs the person out and throws', async () => {
     const onUnauthorized = vi.fn()
     const { t, fetch } = make(fakeSocket(), { onUnauthorized })
@@ -337,5 +783,170 @@ describe('createBlergTransport files', () => {
     expect(xhr.sent).toBe(file)
     expect(progress).toHaveBeenCalledWith(2, 3)
     vi.unstubAllGlobals()
+  })
+})
+
+// ─── holes in the live seqs ──────────────────────────────────────────────────
+
+describe('createBlergTransport gaps', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  /** Subscribed from seq 10 with the forward replay over: live from here. */
+  function live() {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    const off = t.subscribe('s1', { afterSeq: 10 }, h)
+    socket.emit(done(10, false))
+    socket.sent.length = 0
+    return { t, socket, h, off }
+  }
+
+  it('the server\'s gap notice replays forward from below the first event it dropped', () => {
+    const { socket, h } = live()
+    socket.emit(ev(11))
+    socket.emit(ev(14)) // 12 and 13 were dropped for this browser
+    socket.emit({ type: 'agent_events_gap', session_id: 's1', from_seq: 12 })
+    expect(socket.sent).toEqual([{ type: 'subscribe_agent_events', session_id: 's1', after_seq: 11 }])
+    // The replay brings what was missed (and 14 again, which the transcript dedupes), in one batch.
+    socket.emit(ev(12))
+    socket.emit(ev(13))
+    socket.emit(ev(14))
+    socket.emit(done(14, false))
+    expect(h.onEvents).toHaveBeenLastCalledWith([ev(12), ev(13), ev(14)])
+    expect(h.onReplayDone).toHaveBeenLastCalledWith(expect.objectContaining({ lastSeq: 14, hasMore: false }))
+  })
+
+  it('ignores a gap notice for another session', () => {
+    const { socket } = live()
+    socket.emit({ type: 'agent_events_gap', session_id: 's2', from_seq: 3 })
+    expect(socket.sent).toEqual([])
+  })
+
+  it('a hole in the live seqs that stays open is fetched after GAP_WAIT_MS', () => {
+    vi.useFakeTimers()
+    const { socket } = live()
+    socket.emit(ev(11))
+    socket.emit(ev(13))
+    vi.advanceTimersByTime(GAP_WAIT_MS - 1)
+    expect(socket.sent).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(socket.sent).toEqual([{ type: 'subscribe_agent_events', session_id: 's1', after_seq: 11 }])
+  })
+
+  it('an event that only came out of order closes its hole and nothing is fetched', () => {
+    vi.useFakeTimers()
+    const { socket, h } = live()
+    socket.emit(ev(12))
+    socket.emit(ev(11))
+    vi.advanceTimersByTime(GAP_WAIT_MS * 3)
+    expect(socket.sent).toEqual([])
+    expect(h.onEvent.mock.calls).toEqual([[ev(12)], [ev(11)]])
+  })
+
+  it('a seq the server never stored is fetched once, not again and again', () => {
+    vi.useFakeTimers()
+    const { socket } = live()
+    socket.emit(ev(11))
+    socket.emit(ev(13))
+    vi.advanceTimersByTime(GAP_WAIT_MS)
+    expect(socket.sent).toHaveLength(1)
+    socket.emit(ev(13))
+    socket.emit(done(13, false))
+    socket.emit(ev(14))
+    vi.advanceTimersByTime(GAP_WAIT_MS * 5)
+    expect(socket.sent).toHaveLength(1)
+  })
+
+  it('a gap notice during a replay waits for it to end', () => {
+    const { t, socket } = make()
+    const h = batchHandlers()
+    t.subscribe('s1', { afterSeq: 10 }, h)
+    socket.emit(ev(11))
+    socket.emit({ type: 'agent_events_gap', session_id: 's1', from_seq: 30 })
+    expect(socket.sent).toHaveLength(1) // only the subscribe
+    socket.emit(done(11, false))
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 11 })
+  })
+
+  it('a reconnect with a hole open resumes from below it', () => {
+    const { socket } = live()
+    socket.emit(ev(11))
+    socket.emit(ev(13))
+    socket.drop()
+    socket.reopen()
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 11 })
+  })
+
+  it('a gap while an older page is in flight: each answer goes where it belongs', async () => {
+    const { t, socket, h } = live()
+    const older = t.loadOlder('s1', 5, 3)
+    socket.emit(ev(11))
+    socket.emit(ev(13))
+    socket.emit({ type: 'agent_events_gap', session_id: 's1', from_seq: 12 })
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 11 })
+    // The older page and the refill arrive interleaved.
+    socket.emit(ev(2))
+    socket.emit(ev(12))
+    socket.emit(ev(3))
+    socket.emit(ev(13))
+    socket.emit(done(13, false))
+    socket.emit({ type: 'agent_events_replay_done', session_id: 's1', last_seq: 4, has_more: false, older: true, has_older: true, first_seq: 2 })
+    const page = await older
+    expect(page.events.map(e => e.seq)).toEqual([2, 3])
+    expect(h.onEvents).toHaveBeenLastCalledWith([ev(12), ev(13)])
+    expect(h.onReplayDone).toHaveBeenLastCalledWith(expect.objectContaining({ lastSeq: 13, hasMore: false }))
+  })
+
+  it('a drop while a refill is in flight resumes the refill on reconnect', () => {
+    const { socket, h } = live()
+    socket.emit(ev(11))
+    socket.emit(ev(14))
+    socket.emit({ type: 'agent_events_gap', session_id: 's1', from_seq: 12 })
+    socket.emit(ev(12)) // the refill had begun
+    socket.drop()
+    socket.reopen()
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 11 })
+    for (const s of [12, 13, 14]) socket.emit(ev(s))
+    socket.emit(done(14, false))
+    expect(h.onEvents).toHaveBeenLastCalledWith([ev(12), ev(13), ev(14)])
+    // Whole again: a later reconnect resumes from the end.
+    socket.drop()
+    socket.reopen()
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', after_seq: 14 })
+  })
+
+  it('unsubscribing cancels a pending gap fetch', () => {
+    vi.useFakeTimers()
+    const { socket, off } = live()
+    socket.emit(ev(11))
+    socket.emit(ev(13))
+    off()
+    vi.advanceTimersByTime(GAP_WAIT_MS * 2)
+    expect(socket.sent).toEqual([{ type: 'unsubscribe_session', session_id: 's1' }])
+  })
+
+  it('through useSession the missed events land in the transcript in seq order, without duplicates', async () => {
+    const socket = fakeSocket()
+    const { t } = make(socket)
+    const sid = 'gap-session'
+    useTranscriptStore.getState().clear(sid)
+    const e = (seq: number) => ev(seq, { session_id: sid })
+    const { result } = renderHook(() => useSession(t, sid))
+    await act(async () => {
+      socket.emit(e(1))
+      socket.emit({ type: 'agent_events_replay_done', session_id: sid, last_seq: 1, has_more: false, older: true })
+    })
+    await act(async () => {
+      socket.emit(e(2))
+      socket.emit(e(4))
+      socket.emit({ type: 'agent_events_gap', session_id: sid, from_seq: 3 })
+    })
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: sid, after_seq: 2 })
+    await act(async () => {
+      socket.emit(e(3))
+      socket.emit(e(4))
+      socket.emit({ type: 'agent_events_replay_done', session_id: sid, last_seq: 4, has_more: false })
+    })
+    expect(result.current.events.map(x => x.seq)).toEqual([1, 2, 3, 4])
   })
 })

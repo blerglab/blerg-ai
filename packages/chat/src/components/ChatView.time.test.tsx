@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, onTestFinished } from 'vitest'
 import { act, render, screen, within } from '@testing-library/react'
 import ChatView from './ChatView'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
@@ -255,6 +255,9 @@ describe('ChatView timestamps', () => {
   })
 
   it('stays fast with timestamps on a 2,000-event transcript', () => {
+    // A held transcript this long is drawn on the frame after the skeleton: run frames at once.
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { cb(0); return 1 })
+    onTestFinished(() => { vi.unstubAllGlobals() })
     const events: AgentEvent[] = []
     for (let g = 0; g < 50; g++) {
       events.push(ev('assistant_text', { text: `step ${g}`, done: true }, NOW - (50 - g) * 3 * 3600_000))

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ChatView from './ChatView'
 import { buildTimeline, isVisibleEvent } from '../model/toolGroups'
+import { useChatReportStore } from '../hooks/useLiveState'
 import { createFakeTransport, type FakeTransport } from '../test/fakeTransport'
 import { COMPACT, SESSION, file, meta, resetChatState, seed } from '../test/chat'
 import type { ArtifactInfo } from '../transport/types'
@@ -379,5 +380,11 @@ describe('the Files panel and the attach control', () => {
     fireEvent.click(within(panel).getByRole('button', { name: 'Attach files' }))
     expect(click).toHaveBeenCalled()
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('reports the Files list to a view beside it, as filesKey', async () => {
+    seed(artifactEvent(report, 1))
+    mount({ listed: [report, memo] })
+    await waitFor(() => expect(useChatReportStore.getState().reports[SESSION]?.filesKey).toBe('a1,a2'))
   })
 })

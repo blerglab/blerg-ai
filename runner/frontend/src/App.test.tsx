@@ -158,7 +158,7 @@ describe('notifications are opt-in', () => {
     })
     render(<MemoryRouter><NotificationsButton /></MemoryRouter>)
     expect(requestPermission).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByText('Enable notifications'))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable notifications' }))
     await waitFor(() => expect(requestPermission).toHaveBeenCalledTimes(1))
     vi.unstubAllGlobals()
   })
@@ -172,7 +172,7 @@ describe('notifications are opt-in', () => {
     const requestPermission = vi.fn().mockResolvedValue('granted')
     vi.stubGlobal('Notification', { requestPermission, permission: 'default' })
     render(<MemoryRouter><NotificationsButton /></MemoryRouter>)
-    fireEvent.click(screen.getByText('Enable notifications'))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable notifications' }))
     // Give any (incorrect) async call a microtask turn to happen before asserting it didn't.
     await Promise.resolve()
     await Promise.resolve()

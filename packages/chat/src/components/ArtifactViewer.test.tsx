@@ -101,6 +101,23 @@ describe('ArtifactViewer: text', () => {
   })
 })
 
+describe('ArtifactViewer: a file whose bytes are gone', () => {
+  it('shows the server’s 410 as “no longer available”, not a load error, and offers no download', async () => {
+    serve('{"error":"file no longer available"}', 410)
+    show(art({}))
+    expect(await screen.findByTestId('artifact-gone')).toHaveTextContent('This file is no longer available.')
+    expect(screen.queryByTestId('artifact-error')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Download' })).toBeNull()
+  })
+
+  it('does not fetch a file the list already marked missing', () => {
+    show(art({ missing: true }))
+    expect(screen.getByTestId('artifact-gone')).toHaveTextContent('no longer available')
+    expect(files.rawCalls).toHaveLength(0)
+    expect(screen.queryByRole('button', { name: 'Download' })).toBeNull()
+  })
+})
+
 describe('ArtifactViewer: markdown', () => {
   it('renders markdown and does not let a script tag through', async () => {
     serve('# Title\n\nsome **bold** text\n\n<script>window.__pwned = 1</script>\n\n<img src=x onerror="window.__pwned=2">')

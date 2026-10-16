@@ -47,16 +47,23 @@ var errPluginsUnavailable = errors.New("plugins skipped: your plugin list couldn
 // token's id, or the launching browser session's id, and core checks that specific one belongs
 // to the account. Not configured (no core URL or key) is (nil, nil): there is simply nothing to
 // fetch. A call with no proof fails closed without contacting core.
-func fetchCorePlugins(ctx context.Context, client *http.Client, coreURL, internalKey, accountID string, proof coreProof) ([]pluginspec.Entry, error) {
+func fetchCorePlugins(ctx context.Context, client *http.Client, coreURL, internalKey, accountID string, proof coreProof, engines ...string) ([]pluginspec.Entry, error) {
 	if coreURL == "" || internalKey == "" || accountID == "" {
 		return nil, nil
 	}
 	if !proof.valid() {
 		return nil, errNoLivenessProof
 	}
+	engine := pluginspec.EngineClaude
+	if len(engines) > 0 && engines[0] != "" {
+		engine = engines[0]
+	}
+	if !pluginspec.SupportsEngine(engine) {
+		return nil, errors.New("no native plugin installer for this engine")
+	}
 	client = coreHTTPClient(client) // never follows a redirect: the request carries the internal key
 	raw, err := json.Marshal(internalPluginsRequest{
-		AccountID: accountID, Engine: pluginspec.EngineClaude, TokenID: proof.TokenID, SessionID: proof.SessionID,
+		AccountID: accountID, Engine: engine, TokenID: proof.TokenID, SessionID: proof.SessionID,
 	})
 	if err != nil {
 		return nil, err
@@ -112,10 +119,14 @@ func pluginsRestricted(spec SessionJobSpec) bool {
 // pluginsNoteRestricted is the start panel's reason when a restricted session has no plugins stage.
 const pluginsNoteRestricted = "not loaded: a restricted session runs without plugins"
 
-// pluginsWanted: only unrestricted Claude sessions with a known spawning account get always-on
-// plugins.
+// pluginsWanted limits always-on plugins to unrestricted sessions with a known
+// spawning account and a registered native installer for their engine.
 func pluginsWanted(spec SessionJobSpec) bool {
-	return !pluginsRestricted(spec) && spec.SpawningAccountID != "" && (spec.Engine == "" || spec.Engine == pluginspec.EngineClaude)
+	engine := spec.Engine
+	if engine == "" {
+		engine = pluginspec.EngineClaude
+	}
+	return !pluginsRestricted(spec) && spec.SpawningAccountID != "" && pluginspec.SupportsEngine(engine)
 }
 
 // ResolvePlugins fills spec.Plugins (and PluginsNote when the list could not be used) exactly
@@ -139,7 +150,7 @@ func (j *JobManager) ResolvePlugins(ctx context.Context, spec *SessionJobSpec) {
 		log.Printf("cluster session %s: always-on plugins skipped: %v", spec.SessionID, errNoLivenessProof)
 		return
 	}
-	list, err := fetchCorePlugins(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, spec.SpawningAccountID, spec.proof())
+	list, err := fetchCorePlugins(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, spec.SpawningAccountID, spec.proof(), spec.Engine)
 	if err != nil {
 		log.Printf("cluster session %s: always-on plugins unavailable, starting without them: %v", spec.SessionID, err)
 		spec.PluginsNote = errPluginsUnavailable.Error()
@@ -182,11 +193,14 @@ func resolvePluginList(list []pluginspec.Entry, allow pluginspec.Allowlist, who 
 // loaded gives a note for the start panel and a session without plugins. The daemon re-checks
 // every entry.
 func (a *API) daemonPlugins(ctx context.Context, d *DaemonConn, accountID string, proof coreProof, kind, engine string, restricted bool) ([]pluginspec.Entry, string) {
-	if restricted && kind == "agent" && accountID != "" && (engine == "" || engine == pluginspec.EngineClaude) {
+	if engine == "" {
+		engine = pluginspec.EngineClaude
+	}
+	if restricted && kind == "agent" && accountID != "" && pluginspec.SupportsEngine(engine) {
 		return nil, pluginsNoteRestricted
 	}
-	if d == nil || !d.CanPlugins() || kind != "agent" || restricted || accountID == "" ||
-		(engine != "" && engine != pluginspec.EngineClaude) || a.coreURL == "" || a.coreInternalKey == "" {
+	if d == nil || !d.CanPluginsFor(engine) || kind != "agent" || restricted || accountID == "" ||
+		!pluginspec.SupportsEngine(engine) || a.coreURL == "" || a.coreInternalKey == "" {
 		return nil, ""
 	}
 	if !proof.valid() {
@@ -195,7 +209,7 @@ func (a *API) daemonPlugins(ctx context.Context, d *DaemonConn, accountID string
 	fetch := a.fetchPlugins
 	if fetch == nil {
 		fetch = func(ctx context.Context, accountID string, proof coreProof) ([]pluginspec.Entry, error) {
-			return fetchCorePlugins(ctx, nil, a.coreURL, a.coreInternalKey, accountID, proof)
+			return fetchCorePlugins(ctx, nil, a.coreURL, a.coreInternalKey, accountID, proof, engine)
 		}
 	}
 	list, err := fetch(ctx, accountID, proof)

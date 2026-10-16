@@ -1,0 +1,105 @@
+/* Usage-limit meters under "Where sessions run" (UsageMeters.tsx): one quiet row per provider. */
+.usage-meters {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 2px;
+}
+
+.usage-meters__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.68rem;
+  line-height: 16px;
+}
+
+.usage-meters__provider {
+  flex: 0 0 auto;
+  min-width: 42px;
+  max-width: 96px;
+  color: var(--fog);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-meters__windows {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.usage-meter {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fog-dim);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+
+.usage-meter__label {
+  flex: 0 0 auto;
+}
+
+.usage-meter__track {
+  flex: 1;
+  min-width: 12px;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--stone) 70%, var(--basalt));
+  overflow: hidden;
+}
+
+.usage-meter__fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--fog-dim);
+}
+
+.usage-meter__pct {
+  flex: 0 0 auto;
+  text-align: right;
+}
+
+.usage-meter--warning .usage-meter__fill { background: var(--amber); }
+.usage-meter--warning .usage-meter__pct { color: var(--amber); }
+.usage-meter--danger .usage-meter__fill { background: var(--danger); }
+.usage-meter--danger .usage-meter__pct { color: var(--danger); }
+
+.usage-meter--capped {
+  color: var(--danger);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.usage-meter__dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+/* The reset time as text: on a screen with no hover (a phone), where a title never shows. */
+.usage-meter__reset {
+  display: none;
+  flex: 0 0 auto;
+  color: var(--fog-dim);
+  font-size: 0.62rem;
+  white-space: nowrap;
+}
+
+@media (hover: none), (max-width: 600px) {
+  .usage-meter__reset { display: inline; }
+}

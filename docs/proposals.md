@@ -42,9 +42,22 @@ they do not match the summary, reject.
   cannot flood the queue.
 - Proposals are private: only the account that started the session sees them.
 
+## Tool changes
+
+The same page lists **tool changes**: an MCP server changed a tool a session had pinned, or
+offers a new one. The tool is off in that session until you decide. You see the tool's name, the
+connection, the session, and the **exact old and new definition** (description and input
+schema) as a diff; characters that would be invisible are shown as `⟨U+…⟩` and the card says so.
+Accept re-pins the session in place (a changed tool keeps its mode; you may tighten it to
+propose; a new tool defaults to propose). Keep off leaves it off, and later changes to that tool
+in that session are listed without a badge. Changes expire after 7 days. See
+[`mcp-connections.md`](mcp-connections.md#tools-are-off-by-default) for the per-connection
+setting that accepts them automatically.
+
 ## Where to manage them
 
-The runner UI has a **Proposals** page, with a count badge in the sidebar. It lists pending
+The runner UI has a **Proposals** page, with a count badge in the sidebar that counts proposals
+and tool changes waiting for you. It lists pending
 proposals first; open one to see its arguments and approve or reject it. A link an agent leaves in a
 card opens that proposal directly.
 

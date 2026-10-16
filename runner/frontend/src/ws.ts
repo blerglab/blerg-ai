@@ -3,9 +3,9 @@ import {
   consumeAccessTokenFromFragment,
   ensureFreshToken,
   getAccessToken,
-  redirectToRefresh,
 } from './authClient'
-import { refreshAlreadyAttempted, markRefreshAttempted, clearRefreshAttempted } from './refreshGuard'
+import { refreshAlreadyAttempted, clearRefreshAttempted } from './refreshGuard'
+import { bounceToRefresh, clearSignInStuck, markSignInStuck } from './signIn'
 import { tokenExpired } from './claims'
 
 let socket: WebSocket | null = null
@@ -47,11 +47,9 @@ function connect(): void {
   if (!token) {
     // No token in memory (fresh load, or the session expired): the socket
     // would just be refused. Go get one, the same way apiFetch does on a 401 —
-    // once per page load, so a failure to obtain one can't loop.
-    if (!refreshAlreadyAttempted()) {
-      markRefreshAttempted()
-      redirectToRefresh(location.href)
-    }
+    // once per page load, so a failure to obtain one can't loop. When the bounce
+    // was already spent, bounceToRefresh says so on screen instead.
+    bounceToRefresh()
     return
   }
 
@@ -65,6 +63,7 @@ function connect(): void {
   ws.onopen = () => {
     opened = true
     clearRefreshAttempted()
+    clearSignInStuck()
     backoff = 2000
     // Let consumers re-establish per-session state (subscriptions, resize)
     // on every fresh connection, not just the first.
@@ -120,11 +119,11 @@ function connect(): void {
             connect()
             return
           }
-          markRefreshAttempted()
-          redirectToRefresh(location.href)
+          bounceToRefresh()
         })
         return
       }
+      if (!tok || tokenExpired(tok)) markSignInStuck()
     }
     scheduleReconnect()
   }

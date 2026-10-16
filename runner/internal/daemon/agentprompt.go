@@ -52,8 +52,10 @@ inside the turn.
 // harness instructions → the interaction mode's paragraph → user CLAUDE.md →
 // project CLAUDE.md → SessionStart hook context → skills list → agent types
 // list. interaction is the session's mode ("interactive" or "unattended";
-// "" = interactive), the same paragraph a Claude Code session gets.
-func BuildSystemPrompt(workDir, homeDir string, skillList []skills.Skill, agentTypes []agent.AgentTypeDef, interaction string) string {
+// "" = interactive), the same paragraph a Claude Code session gets. runHooks
+// says whether the enabled plugins' SessionStart hook commands may run (on the
+// host) for their context: false for a confined session, which gets none.
+func BuildSystemPrompt(workDir, homeDir string, skillList []skills.Skill, agentTypes []agent.AgentTypeDef, interaction string, runHooks bool) string {
 	var b strings.Builder
 	b.WriteString(harnessInstructions)
 	b.WriteString("\n\n## Who is reading\n\n")
@@ -70,9 +72,11 @@ func BuildSystemPrompt(workDir, homeDir string, skillList []skills.Skill, agentT
 	appendFile("User instructions (~/.claude/CLAUDE.md)", filepath.Join(homeDir, ".claude", "CLAUDE.md"))
 	appendFile("Project instructions (CLAUDE.md)", filepath.Join(workDir, "CLAUDE.md"))
 
-	if hookCtx := skills.SessionStartContext(workDir, homeDir); strings.TrimSpace(hookCtx) != "" {
-		b.WriteString("\n\n## Session context\n\n")
-		b.WriteString(hookCtx)
+	if runHooks {
+		if hookCtx := skills.SessionStartContext(workDir, homeDir); strings.TrimSpace(hookCtx) != "" {
+			b.WriteString("\n\n## Session context\n\n")
+			b.WriteString(hookCtx)
+		}
 	}
 	if len(skillList) > 0 {
 		b.WriteString("\n\n## Available skills (load with the skill tool)\n\n")

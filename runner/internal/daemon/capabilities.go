@@ -416,6 +416,8 @@ func scanSkillDir(root string, source func(rel string) string) []protocol.Capabi
 
 // engineHome is an engine's config dir: $<envVar> when set to an absolute
 // path, else ~/<dotDir>.
+//
+//nolint:unparam // Keep engine-specific overrides explicit as new engines adopt this shared config-home resolver.
 func engineHome(home, envVar, dotDir string) string {
 	if v := os.Getenv(envVar); v != "" && filepath.IsAbs(v) {
 		return v

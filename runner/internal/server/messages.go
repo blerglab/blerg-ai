@@ -71,6 +71,7 @@ const defaultMessageLimit = 100
 var validMessageKinds = map[string]bool{"update": true, "ask": true, "note": true}
 
 type postMessageRequest struct {
+	TurnID    string `json:"turn_id,omitempty"`
 	SessionID string `json:"session_id"`
 	Kind      string `json:"kind"`
 	Body      string `json:"body"`
@@ -115,7 +116,12 @@ func (a *API) HandlePostMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := db.CreateMessage(ctx, a.dbPool, req.SessionID, req.Kind, req.Body)
+	var id string
+	if boardSessionID == "" && req.Kind == "ask" && sess.Kind == "agent" && sess.Engine != nil && *sess.Engine == "codex" {
+		id, err = a.createCodexQuestion(ctx, req)
+	} else {
+		id, err = db.CreateMessage(ctx, a.dbPool, req.SessionID, req.Kind, req.Body)
+	}
 	if err != nil {
 		log.Printf("api post message CreateMessage: %v", err)
 		writeError(w, http.StatusInternalServerError, "create failed")
@@ -128,19 +134,35 @@ func (a *API) HandlePostMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info := messageRowToInfo(*row)
-	a.hub.BroadcastJSON(protocol.MessageCreated{Type: "message_created", Message: info})
+	// An ask from a session nobody attends is listed, not toasted (notices.go).
+	quiet := row.Kind == "ask" && headlessSession(sess)
+	a.hub.BroadcastJSON(protocol.MessageCreated{Type: "message_created", Message: info, Quiet: quiet})
+	if row.Kind == "ask" {
+		// A question is its own notice: a deferred idle notice would only repeat it.
+		a.hub.CancelIdleNotice(sess.ID)
+	}
+	if boardSessionID != "" {
+		// `blerg-runner` (the session's own token): shown in an agent session's chat
+		// (messageevents.go). The native loop posts with the daemon token and records its own.
+		a.recordMessageEvent(ctx, *sess, *row)
+	}
 	a.pushForMessage(*sess, *row) //nolint:contextcheck // push delivery is best-effort background work with no tie to this request
 
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
 // pushForMessage sends a web push for a new message. ask/note always push (they need
-// the user); update pushes only when the user is away (matching the session-state
-// push policy), so progress chatter doesn't buzz while they're watching.
+// the user) — but an ask from a headless session pushes nothing; update pushes only
+// when the user is away (matching the session-state push policy), so progress
+// chatter doesn't buzz while they're watching.
 func (a *API) pushForMessage(sess db.SessionRow, msg db.MessageRow) {
 	// Push subscriptions belong to no account, so a notification cannot be
 	// aimed at a private session's owner alone: none is sent (privacy.go).
 	if sess.Private {
+		return
+	}
+	// Nobody attends a headless session: its question calls no one (notices.go).
+	if msg.Kind == "ask" && headlessSession(&sess) {
 		return
 	}
 	if msg.Kind == "update" && a.hub.ActiveWithin(activityTTL) {
@@ -337,6 +359,8 @@ func (a *API) HandlePostMessageReply(w http.ResponseWriter, r *http.Request) {
 	if row.Kind == "note" {
 		a.routeNoteReply(*row, req.Answer)
 	}
+	// An ask in an agent session's transcript: its answer is recorded there too (messageevents.go).
+	recordAskAnswer(ctx, a.hub, a.dbPool, *row, req.Answer, "")
 
 	a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)})
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})

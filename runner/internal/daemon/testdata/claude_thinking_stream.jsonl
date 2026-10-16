@@ -1,0 +1,29 @@
+{"type":"system","subtype":"init","session_id":"cc-think-1"}
+{"type":"system","subtype":"status","status":"requesting","session_id":"cc-think-1","uuid":"u-1"}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-2","ttft_ms":1803,"thinking_display":"updates","event":{"type":"message_start","message":{"model":"claude-opus-5","id":"msg_t1","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-3","thinking_display":"updates","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-4","thinking_display":"updates","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-5","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-t1"}}}
+{"type":"assistant","parent_tool_use_id":null,"message":{"model":"claude-opus-5","id":"msg_t1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"Survey the repo first.","signature":"sig-t1"}]},"session_id":"cc-think-1"}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-6","event":{"type":"content_block_stop","index":0}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-7","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_agent1","name":"Agent","input":{}}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-8","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"description\":\"Survey\",\"prompt\":\"List the top-level directories.\"}"}}}
+{"type":"assistant","parent_tool_use_id":null,"message":{"model":"claude-opus-5","id":"msg_t1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_agent1","name":"Agent","input":{"description":"Survey","prompt":"List the top-level directories."}}]},"session_id":"cc-think-1"}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-9","event":{"type":"content_block_stop","index":1}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-10","event":{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":40}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-11","event":{"type":"message_stop"}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":"toolu_agent1","uuid":"u-12","event":{"type":"message_start","message":{"model":"claude-haiku-5","id":"msg_s1","type":"message","role":"assistant","content":[]}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":"toolu_agent1","uuid":"u-13","event":{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque"}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":"toolu_agent1","uuid":"u-14","event":{"type":"content_block_stop","index":0}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":"toolu_agent1","uuid":"u-15","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":"toolu_agent1","uuid":"u-16","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"docs, runner"}}}
+{"type":"assistant","parent_tool_use_id":"toolu_agent1","message":{"id":"msg_s1","model":"claude-haiku-5","content":[{"type":"text","text":"docs, runner"}]},"session_id":"cc-think-1"}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":"toolu_agent1","uuid":"u-17","event":{"type":"content_block_stop","index":1}}
+{"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent1","content":"docs, runner","is_error":false}]}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-18","event":{"type":"message_start","message":{"model":"claude-opus-5","id":"msg_t2","type":"message","role":"assistant","content":[]}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-19","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-20","event":{"type":"message_start","message":{"model":"claude-opus-5","id":"msg_t3","type":"message","role":"assistant","content":[]}}}
+{"type":"stream_event","session_id":"cc-think-1","parent_tool_use_id":null,"uuid":"u-21","event":{"type":"content_block_stop","index":0}}
+{"type":"assistant","parent_tool_use_id":null,"message":{"model":"claude-opus-5","id":"msg_t3","type":"message","role":"assistant","content":[{"type":"text","text":"Two directories."}]},"session_id":"cc-think-1"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"},"session_id":"cc-think-1"}
+{"type":"result","subtype":"success","is_error":false,"result":"Two directories.","session_id":"cc-think-1","usage":{"input_tokens":2,"output_tokens":60}}

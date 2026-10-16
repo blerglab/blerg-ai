@@ -24,10 +24,14 @@ describe('useSessionStore', () => {
       daemons: [makeDaemon()],
       sessions: [makeSession()],
       server_version: '2.1.0',
+      server_release: '0.2.0',
+      server_commit: '510d0c0',
     })
     expect(get().daemons).toHaveLength(1)
     expect(get().sessions).toHaveLength(1)
     expect(get().serverVersion).toBe('2.1.0')
+    expect(get().serverRelease).toBe('0.2.0')
+    expect(get().serverCommit).toBe('510d0c0')
   })
 
   it('updates a session status on session_state_changed', () => {
@@ -36,31 +40,26 @@ describe('useSessionStore', () => {
     expect(get().sessions[0].status).toBe('waiting')
   })
 
-  it('always shows a toast on a waiting/idle transition (regardless of activity)', () => {
+  it('shows the server notice as a toast, as given (regardless of activity)', () => {
     wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'running' })] })
-    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'idle', unread: false })
+    wsMock.emit({
+      type: 'session_notice', session_id: 'sess-a', status: 'idle',
+      title: 'Session idle', body: 'Build the widget is waiting for you.', url: '/sessions/sess-a',
+    })
     const toasts = useToastStore.getState().toasts
     expect(toasts).toHaveLength(1)
     expect(toasts[0].title).toBe('Session idle')
+    expect(toasts[0].body).toBe('Build the widget is waiting for you.')
     expect(toasts[0].url).toBe('/sessions/sess-a')
   })
 
-  it('does not toast for a non-notifying transition (e.g. running)', () => {
-    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'waiting' })] })
-    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'running', unread: false })
-    expect(useToastStore.getState().toasts).toHaveLength(0)
-  })
-
-  it('does not toast when the status did not actually change', () => {
-    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'idle' })] })
-    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'idle', unread: false })
-    expect(useToastStore.getState().toasts).toHaveLength(0)
-  })
-
-  it('does not toast "finished its turn" when a starting session becomes ready and idle', () => {
-    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'starting' })] })
-    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'idle', unread: false })
-    expect(get().sessions[0].status).toBe('idle')
+  it('does not toast a state change by itself: the server says when the person is needed', () => {
+    // A turn can end while background work runs; the server sends session_notice once it is done.
+    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'running' })] })
+    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'idle', unread: true })
+    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'running', unread: true })
+    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'waiting', unread: true })
+    expect(get().sessions[0].status).toBe('waiting')
     expect(useToastStore.getState().toasts).toHaveLength(0)
   })
 
@@ -85,6 +84,36 @@ describe('useSessionStore', () => {
     wsMock.emit({ type: 'session_ended', session_id: 'sess-a', exit_code: 0, end_reason: 'process_exited' })
     expect(get().sessions[0].status).toBe('stopped')
     expect(get().sessions[0].end_reason).toBe('process_exited')
+  })
+
+  it('follows a session\'s background-task count, and an end clears it', () => {
+    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'idle', background_tasks: 1 }), makeSession({ id: 'sess-b' })] })
+    wsMock.emit({ type: 'session_background_changed', session_id: 'sess-a', background_tasks: 2 })
+    expect(get().sessions.map(s => s.background_tasks)).toEqual([2, undefined])
+    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'running', unread: false })
+    expect(get().sessions[0].background_tasks).toBe(2)
+    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'error', unread: false })
+    expect(get().sessions[0].background_tasks).toBe(0)
+    wsMock.emit({ type: 'session_background_changed', session_id: 'sess-a', background_tasks: 1 })
+    wsMock.emit({ type: 'session_ended', session_id: 'sess-a', exit_code: 0 })
+    expect(get().sessions[0].background_tasks).toBe(0)
+  })
+
+  it('follows a session paused by a restart until it runs again', () => {
+    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'idle' }), makeSession({ id: 'sess-b' })] })
+    wsMock.emit({ type: 'session_paused_changed', session_id: 'sess-a', paused_reason: 'restart' })
+    expect(get().sessions.map(s => s.paused_reason)).toEqual(['restart', undefined])
+    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'waiting', unread: false })
+    expect(get().sessions[0].paused_reason).toBe('restart')
+    wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'running', unread: false })
+    expect(get().sessions[0].paused_reason).toBeUndefined()
+    wsMock.emit({ type: 'session_paused_changed', session_id: 'sess-a', paused_reason: 'restart' })
+    // A message accepted for it (from any tab) ends the pause everywhere.
+    wsMock.emit({ type: 'session_paused_changed', session_id: 'sess-a', paused_reason: '' })
+    expect(get().sessions[0].paused_reason).toBeUndefined()
+    wsMock.emit({ type: 'session_paused_changed', session_id: 'sess-a', paused_reason: 'restart' })
+    get().clearPaused('sess-a')
+    expect(get().sessions[0].paused_reason).toBeUndefined()
   })
 
   it('upserts a session announced twice (server at create, pod at start) without duplicating it', () => {
@@ -122,6 +151,21 @@ describe('useSessionStore', () => {
     wsMock.emit({ type: 'daemon_disconnected', daemon_id: 'd1', affected_session_ids: ['sess-a'] })
     expect(get().sessions[0].status).toBe('error')
     expect(get().daemons).toHaveLength(0)
+  })
+
+  it('takes a daemon\'s usage limits from initial_state and replaces them on daemon_limits_changed', () => {
+    const codex = { provider: 'codex', windows: [{ id: '5h', used_percent: 42, resets_at: '2026-10-16T14:00:00Z' }], fetched_at: '2026-10-16T12:00:00Z' }
+    wsMock.emit({ type: 'initial_state', daemons: [makeDaemon({ usage_limits: [codex] }), makeDaemon({ id: 'd2' })], sessions: [] })
+    expect(get().daemons[0].usage_limits).toEqual([codex])
+    const claude = { provider: 'claude', windows: [{ id: 'capped', used_percent: 100, resets_at: '2026-10-16T15:00:00Z' }], fetched_at: '2026-10-16T12:05:00Z' }
+    wsMock.emit({ type: 'daemon_limits_changed', daemon_id: 'd1', usage_limits: [claude, codex] })
+    expect(get().daemons[0].usage_limits).toEqual([claude, codex])
+    expect(get().daemons[1].usage_limits).toBeUndefined()
+    wsMock.emit({ type: 'daemon_limits_changed', daemon_id: 'd1', usage_limits: [] })
+    expect(get().daemons[0].usage_limits).toEqual([])
+    // A daemon the page does not list is not invented.
+    wsMock.emit({ type: 'daemon_limits_changed', daemon_id: 'gone', usage_limits: [codex] })
+    expect(get().daemons).toHaveLength(2)
   })
 
   it('updateSessionStatus action mutates the matching session', () => {

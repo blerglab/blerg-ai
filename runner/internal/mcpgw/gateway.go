@@ -60,6 +60,12 @@ type ProposalRequest struct {
 	Arguments      json.RawMessage
 }
 
+// Refresher asks the daemon running a session to have its agent list its MCP tools again
+// (Hub.RefreshSessionTools). Installed by the server after the hub exists; nil means no refresh.
+type Refresher interface {
+	RefreshSessionTools(sessionID string) bool
+}
+
 // Config configures a Gateway. DB and Core are required; zero values elsewhere take the defaults.
 type Config struct {
 	DB   *pgxpool.Pool
@@ -68,6 +74,8 @@ type Config struct {
 	// BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS and BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS).
 	Policy netguard.Policy
 	Sink   ProposalSink
+	// Refresher asks the daemon to have a session's agent list tools again after a re-pin or grant.
+	Refresher Refresher
 	// Board and BoardMCPURL enable the built-in `board` connection (board.go): core's token
 	// exchange and the board's MCP endpoint. Either unset leaves the built-in unavailable.
 	Board       BoardExchanger
@@ -82,6 +90,8 @@ type Config struct {
 
 	FailedAuthLimit  int // failed authentications per (address, token) per window before that pair is blocked; an address as a whole gets ten times as many
 	FailedAuthWindow time.Duration
+
+	ChangeLimits db.ToolChangeLimits // caps on pending tool changes; zero: the defaults
 
 	Now func() time.Time // tests
 }
@@ -99,6 +109,9 @@ type Gateway struct {
 
 	sinkMu sync.RWMutex
 	sink   ProposalSink
+
+	refresherMu sync.RWMutex
+	refresher   Refresher
 
 	statesMu sync.Mutex
 	states   map[string]*grantState
@@ -133,7 +146,13 @@ func New(cfg Config) *Gateway {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	g := &Gateway{cfg: cfg, sink: cfg.Sink, states: map[string]*grantState{}}
+	if cfg.ChangeLimits.Session <= 0 {
+		cfg.ChangeLimits.Session = db.DefaultMaxPendingChangesPerSession
+	}
+	if cfg.ChangeLimits.Account <= 0 {
+		cfg.ChangeLimits.Account = db.DefaultMaxPendingChangesPerAccount
+	}
+	g := &Gateway{cfg: cfg, sink: cfg.Sink, refresher: cfg.Refresher, states: map[string]*grantState{}}
 	g.limiter = newFailLimiter(cfg.FailedAuthLimit, cfg.FailedAuthWindow, cfg.Now)
 	g.ipLimiter = newFailLimiter(cfg.FailedAuthLimit*10, cfg.FailedAuthWindow, cfg.Now)
 	// The overall client timeout is a backstop; the per-call context is what normally ends a call.
@@ -453,6 +472,19 @@ func (g *Gateway) handleInitialize(w http.ResponseWriter, req rpcMessage) {
 
 // ---- tools/list and tools/call --------------------------------------------------------
 
+// SetRefresher installs the daemon refresh (nil removes it).
+func (g *Gateway) SetRefresher(r Refresher) {
+	g.refresherMu.Lock()
+	g.refresher = r
+	g.refresherMu.Unlock()
+}
+
+func (g *Gateway) refresherFn() Refresher {
+	g.refresherMu.RLock()
+	defer g.refresherMu.RUnlock()
+	return g.refresher
+}
+
 // outcome is what one gateway call produced, for the reply and the call log.
 type outcome struct {
 	result  json.RawMessage
@@ -466,6 +498,24 @@ type outcome struct {
 // session pinned: the tool is off until a person selects it again, in a new session.
 func toolChangedMessage(tool string) string {
 	return "tool " + tool + " changed on the server since this session selected it, so it is off here; ask the person to start a new session and select it again"
+}
+
+// toolUnavailableMessage is the refusal while a changed definition waits for the person (strict):
+// neutral on purpose, so the agent does not lobby for the change.
+func toolUnavailableMessage(tool string) string {
+	return "tool " + tool + " is unavailable in this session because its definition changed; continue without it and do not ask the person to enable it"
+}
+
+// toolRelistMessage is the refusal of a call to a changed tool under auto_accept: the re-pin
+// happens on tools/list, so the agent must list first and call with the new definition.
+func toolRelistMessage(tool string) string {
+	return "tool " + tool + "'s definition changed; list tools again before calling it"
+}
+
+// toolReenabledMessage is the refusal of a call to an entry re-pinned or granted since the agent
+// last listed (listed:false): it is calling with a definition it has not seen.
+func toolReenabledMessage(tool string) string {
+	return "tool " + tool + " was re-enabled with a new definition; list tools again before calling it"
 }
 
 func refuse(mode, tool, out string, code int, msg string) outcome {
@@ -634,25 +684,23 @@ type listedTool struct {
 
 func (g *Gateway) handleToolsList(w http.ResponseWriter, r *http.Request, gr *db.MCPGrant, req rpcMessage) {
 	g.guarded(w, r, gr, req, "list", "", func(ctx context.Context, st *grantState) outcome {
-		tools, rerr, err := st.listUpstream(ctx, gr, maxPages, true)
+		tools, complete, rerr, err := st.listUpstream(ctx, gr, maxPages, true)
 		if err != nil {
 			return upstreamFailure(ctx, "list", "", err)
 		}
 		if rerr != nil {
 			return upstreamRPCError("list", "", rerr)
 		}
+		serve, listed := g.reconcileListing(ctx, gr, st, tools, complete)
 		out := []listedTool{}
-		for _, t := range tools {
-			entry, listed := gr.Tools[t.Name]
-			if g.effectiveMode(entry, listed) == "off" || !toolPinOK(gr, entry, t.Name, t.Hash) {
-				continue
-			}
+		for _, t := range serve {
 			schema := t.InputSchema
 			if len(bytes.TrimSpace(schema)) == 0 || string(bytes.TrimSpace(schema)) == "null" {
 				schema = json.RawMessage(`{"type":"object"}`)
 			}
 			out = append(out, listedTool{Name: t.Name, Description: capRunes(t.Description, g.cfg.DescriptionCap), InputSchema: schema})
 		}
+		g.markListed(ctx, gr, listed)
 		res, _ := json.Marshal(map[string]any{"tools": out})
 		return outcome{result: res, mode: "list", outcome: "ok"}
 	})
@@ -682,9 +730,14 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 			return unknown
 		}
 		if gr.Builtin == "" {
+			if !entry.IsListed() {
+				// Re-pinned or granted since the agent last listed: it would call with a
+				// definition it has not seen.
+				return refuse(mode, p.Name, "changed", codeInvalidParams, toolReenabledMessage(p.Name))
+			}
 			// The pinned hash must still match the upstream's definition, or the tool is off. A
 			// built-in's tools are the board's own and are not pinned.
-			hash, ok, rerr, err := st.currentHash(ctx, gr, p.Name, entry.Hash)
+			live, hash, ok, rerr, err := st.currentTool(ctx, gr, p.Name, entry.Hash)
 			if err != nil {
 				return upstreamFailure(ctx, mode, p.Name, err)
 			}
@@ -695,10 +748,29 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 				return unknown
 			}
 			if hash != entry.Hash {
-				// The server changed this tool since the session selected it. Say so: "unknown
-				// tool" sends an agent into retries, while the fix is on the person's side.
-				return refuse(mode, p.Name, "refused", codeInvalidParams, toolChangedMessage(p.Name))
+				// The server changed this tool since the session selected it. A call never
+				// re-pins (§4.1): under auto_accept the next tools/list does, so the agent is
+				// asked to list, unless the list would refuse too (throttled, or unreviewable);
+				// under strict the change is recorded for the person.
+				autoOK := st.policyFor(ctx, gr) == PinPolicyAutoAccept && !st.throttled(p.Name, g.now()) &&
+					!g.hashBlocked(ctx, gr, upstreamTool{Name: p.Name, Hash: hash}) &&
+					g.reviewableChange(st, live, hash)
+				if autoOK {
+					g.requestRefresh(gr, st)
+					return refuse(mode, p.Name, "changed", codeInvalidParams, toolRelistMessage(p.Name))
+				}
+				// With no fresh listing (the cached hash answered inside the refresh gap) there is
+				// no definition to store; the list that records the change stores it, and
+				// RecordToolChange is idempotent.
+				out := g.recordAndStore(ctx, gr, st, db.ToolChangeChanged, p.Name, entry.Hash, hash, entry.Mode, live)
+				if out.Blocked {
+					// Declined or expired in this session: the only remedy left is a new session.
+					return refuse(mode, p.Name, "changed", codeInvalidParams, toolChangedMessage(p.Name))
+				}
+				return refuse(mode, p.Name, "changed", codeInvalidParams, toolUnavailableMessage(p.Name))
 			}
+			g.seedDrifting(ctx, gr, st)
+			g.settled(ctx, gr, st, p.Name) // restored: an open row is superseded even if the agent only calls
 		}
 		if mode == ModePropose {
 			text, err := g.proposalSink().Propose(ctx, ProposalRequest{

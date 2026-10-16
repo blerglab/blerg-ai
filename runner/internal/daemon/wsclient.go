@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -75,9 +76,11 @@ type WSClient struct {
 	handlers      map[string]func([]byte)
 	onConnect     func()
 	sessionStates func() map[string]string
-	engineModels  EngineModelSource
-	reposRootFn   func() string
-	hbKick        chan struct{} // RequestHeartbeat: send one now
+	// queuedSessions lists the spawns received but not started (Manager.QueuedSpawnIDs).
+	queuedSessions func() []string
+	engineModels   EngineModelSource
+	reposRootFn    func() string
+	hbKick         chan struct{} // RequestHeartbeat: send one now
 
 	// sleep is the injectable backoff wait, so tests can observe/short-circuit
 	// it without real time passing. Returns false if ctx was done.
@@ -88,6 +91,12 @@ type WSClient struct {
 // successful connection and hello. Used to reattach persistent sessions.
 func (c *WSClient) SetOnConnect(fn func()) {
 	c.onConnect = fn
+}
+
+// SetQueuedSessions registers a provider for the spawns received but not
+// started yet, reported in the hello and every heartbeat (QueuedSessions).
+func (c *WSClient) SetQueuedSessions(fn func() []string) {
+	c.queuedSessions = fn
 }
 
 // SetSessionStates registers a provider for per-session detector states,
@@ -220,6 +229,14 @@ func (c *WSClient) Run(ctx context.Context, activeSessions func() []string) {
 	}
 }
 
+// queued is the queued-spawn report, nil without a provider.
+func (c *WSClient) queued() []string {
+	if c.queuedSessions == nil {
+		return nil
+	}
+	return c.queuedSessions()
+}
+
 // connect dials the server, sends hello, starts the heartbeat goroutine, then
 // reads until the connection closes or ctx is cancelled. It returns whether
 // the dial + hello succeeded (connected) and the error from the read loop
@@ -230,11 +247,8 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 		return false, err
 	}
 
-	c.mu.Lock()
-	c.conn = conn
-	c.mu.Unlock()
-
-	// Send daemon_hello.
+	// Send daemon_hello. The connection is not c.conn until the hello is written: the server
+	// reads the first frame as the hello, so Send (any other sender) fails "not connected" until then.
 	sessions := activeSessions()
 	if sessions == nil {
 		sessions = []string{}
@@ -262,9 +276,14 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	hello.GitProviders = gitprovider.Default.CredentialKinds()
 	hello.CloneFrom = true // SpawnSession.CloneFrom (EnsureClonedTarget)
 	hello.AllowHostCredentialClone = c.config.AllowHostCredentialClone
-	hello.MCPGateway = true             // SpawnSession.MCPGateway (mcpgateway.go)
-	hello.RestrictTools = true          // SpawnSession.RestrictTools (claudecode.go ccHardeningFlags)
+	hello.MCPGateway = true                         // SpawnSession.MCPGateway (mcpgateway.go)
+	hello.CodexRestricted = runtime.GOOS == "linux" // Spawn rechecks the actual CLI version before exposing only rooted dynamic tools.
+	hello.RestrictTools = true                      // SpawnSession.RestrictTools (claudecode.go ccHardeningFlags)
+	hello.PluginEngines = pluginEnginesCapability()
 	hello.Plugins = pluginsCapability() // SpawnSession.Plugins (pluginworkshop.go)
+	hello.InputReceipts = true
+	hello.SessionTokenFile = true // SessionToken → SessionTokenResult (sessiontoken.go)
+	hello.QueuedSessions = c.queued()
 	// sentModelsGen is the generation of the model lists this connection
 	// has reported; only the heartbeat goroutine touches it after the hello.
 	var sentModelsGen uint64
@@ -276,16 +295,18 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	raw, err := json.Marshal(hello)
 	if err != nil {
 		_ = conn.Close()
-		c.mu.Lock()
-		c.conn = nil
-		c.mu.Unlock()
 		return false, err
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
-		_ = conn.Close()
+	c.writeMu.Lock()
+	err = conn.WriteMessage(websocket.TextMessage, raw)
+	if err == nil {
 		c.mu.Lock()
-		c.conn = nil
+		c.conn = conn
 		c.mu.Unlock()
+	}
+	c.writeMu.Unlock()
+	if err != nil {
+		_ = conn.Close()
 		return false, err
 	}
 
@@ -297,6 +318,9 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	if c.onConnect != nil {
 		go c.onConnect()
 	}
+	// A heartbeat at once, not at the first tick: the server learns its sessions' real states
+	// (an adopted session's "idle") within a second of the hello.
+	c.RequestHeartbeat()
 
 	// hbStop signals the heartbeat goroutine to exit.
 	// hbDone is closed by the heartbeat goroutine when it has exited.
@@ -331,6 +355,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 				Type:               "daemon_heartbeat",
 				ActiveSessions:     sessions,
 				SessionStates:      states,
+				QueuedSessions:     c.queued(),
 				SandboxAvailable:   sandboxImageAvailable(),
 				CheckedOutRepos:    repos,
 				AvailableEngines:   availableEngines(),

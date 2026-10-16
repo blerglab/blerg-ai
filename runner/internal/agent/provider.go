@@ -44,7 +44,7 @@ type Usage struct {
 
 // StreamEvent is one element of a provider stream.
 type StreamEvent struct {
-	Kind       string // "text_delta" | "block" | "done" | "error"
+	Kind       string // "text_delta" | "thinking_start" | "block" | "done" | "error"
 	TextDelta  string // text_delta
 	Block      *Block // block: a completed content block
 	StopReason string // done: "end_turn" | "tool_use" | "max_tokens"

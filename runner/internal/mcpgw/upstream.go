@@ -78,6 +78,23 @@ type grantState struct {
 	inflight atomic.Int32
 	lastUsed atomic.Int64 // unix nanoseconds
 
+	// Drift bookkeeping (drift.go). recorded: kind|tool|hash this process recorded, with the
+	// outcome and when (a non-blocked entry is forgotten after a minute, so a decline, an expiry
+	// or a freed cap is seen again); drifting: tools with an open changed/removed row (seeded from
+	// the database once per state, then maintained), so the pin matching again supersedes it;
+	// unsafeByHash: ClassifyDefinition results; repins: re-pin times for the auto_accept throttle;
+	// throttleNoted: when the throttled event was last written per tool; lastRefresh: when the
+	// daemon was last asked to re-list.
+	driftMu       sync.Mutex
+	recorded      map[string]recordedDrift
+	drifting      map[string]bool
+	driftSeeded   bool
+	unsafeByHash  map[string]string
+	stored        map[string]bool // hashes whose definition this process has stored (unsafeByHash alone does not imply it)
+	repins        map[string][]time.Time
+	throttleNoted map[string]time.Time
+	lastRefresh   time.Time
+
 	// A built-in grant (board.go). builtin selects the trusted upstream client and the exchange
 	// credential; the rest is what revoking needs once the grant is gone. closed is guarded by credMu.
 	builtin   bool
@@ -411,7 +428,7 @@ type upstreamTool struct {
 //
 // pages bounds the pages followed. With charge set, every page after the first spends one call
 // of the grant's budget (errBudgetExhausted when none is left), so paging is never free.
-func (st *grantState) listUpstream(ctx context.Context, gr *db.MCPGrant, pages int, charge bool) ([]upstreamTool, *rpcError, error) {
+func (st *grantState) listUpstream(ctx context.Context, gr *db.MCPGrant, pages int, charge bool) ([]upstreamTool, bool, *rpcError, error) {
 	var tools []upstreamTool
 	seen := map[string]bool{}
 	cursor := ""
@@ -420,10 +437,10 @@ func (st *grantState) listUpstream(ctx context.Context, gr *db.MCPGrant, pages i
 		if charge && i > 0 {
 			ok, err := db.ConsumeMCPCall(ctx, st.g.cfg.DB, gr.SessionID, gr.ConnectionID)
 			if err != nil {
-				return nil, nil, err
+				return nil, false, nil, err
 			}
 			if !ok {
-				return nil, nil, errBudgetExhausted
+				return nil, false, nil, errBudgetExhausted
 			}
 		}
 		params := map[string]any{}
@@ -432,24 +449,31 @@ func (st *grantState) listUpstream(ctx context.Context, gr *db.MCPGrant, pages i
 		}
 		res, rerr, err := st.request(ctx, gr, "tools/list", params)
 		if err != nil || rerr != nil {
-			return nil, rerr, err
+			return nil, false, rerr, err
 		}
 		var page struct {
 			Tools      []upstreamTool `json:"tools"`
 			NextCursor string         `json:"nextCursor"`
 		}
 		if err := json.Unmarshal(res, &page); err != nil {
-			return nil, nil, errors.New("the upstream server sent an unreadable tool list")
+			return nil, false, nil, errors.New("the upstream server sent an unreadable tool list")
 		}
+		taken := 0
 		for _, t := range page.Tools {
 			if len(tools) >= maxTools {
 				break
 			}
 			t.Hash = ToolHash(t.Name, t.Description, t.InputSchema)
 			tools = append(tools, t)
+			taken++
+		}
+		// Complete only when the upstream said there is nothing more AND every tool of this last
+		// page was kept: a page cut at maxTools, or a cursor loop, leaves tools unseen.
+		if page.NextCursor == "" && taken == len(page.Tools) {
+			complete = true
+			break
 		}
 		if page.NextCursor == "" || seen[page.NextCursor] {
-			complete = true
 			break
 		}
 		if len(tools) >= maxTools {
@@ -478,18 +502,20 @@ func (st *grantState) listUpstream(ctx context.Context, gr *db.MCPGrant, pages i
 	}
 	st.hashes, st.hashesAt = hashes, st.g.now()
 	st.hashMu.Unlock()
-	return tools, nil, nil
+	return tools, complete, nil, nil
 }
 
-// currentHash returns the upstream's present hash for a tool, from the last listing when it
+// currentTool returns the upstream's present hash for a tool, from the last listing when it
 // is younger than HashCacheTTL and from a fresh listing otherwise. ok is false when the
-// upstream does not list the tool.
+// upstream does not list the tool (or lists it twice). live is the tool as this call listed
+// it, nil when the cached hash answered (then hash == want, or the mismatch is inside
+// hashRefreshGap and was recorded by the fetch that opened the gap).
 //
 // want is the hash the grant pinned. A cached listing that agrees with it is enough; one that
 // disagrees is re-fetched (at most once per hashRefreshGap) before the tool is refused, so a tool
 // restored inside the cache window is not refused on stale data. The refetch is capped at
 // hashRefreshMaxPages and its extra pages are charged to the budget.
-func (st *grantState) currentHash(ctx context.Context, gr *db.MCPGrant, name, want string) (hash string, ok bool, rerr *rpcError, err error) {
+func (st *grantState) currentTool(ctx context.Context, gr *db.MCPGrant, name, want string) (live *upstreamTool, hash string, ok bool, rerr *rpcError, err error) {
 	now := st.g.now()
 	st.hashMu.Lock()
 	age := now.Sub(st.hashesAt)
@@ -497,13 +523,22 @@ func (st *grantState) currentHash(ctx context.Context, gr *db.MCPGrant, name, wa
 	h, has := st.hashes[name]
 	st.hashMu.Unlock()
 	if fresh && (h == want || age < hashRefreshGap) {
-		return h, has && h != "", nil, nil
+		return nil, h, has && h != "", nil, nil
 	}
-	if _, rerr, err = st.listUpstream(ctx, gr, hashRefreshMaxPages, true); err != nil || rerr != nil {
-		return "", false, rerr, err
+	tools, _, rerr, err := st.listUpstream(ctx, gr, hashRefreshMaxPages, true)
+	if err != nil || rerr != nil {
+		return nil, "", false, rerr, err
 	}
 	st.hashMu.Lock()
 	h, has = st.hashes[name]
 	st.hashMu.Unlock()
-	return h, has && h != "", nil, nil
+	if has && h != "" {
+		for i := range tools {
+			if tools[i].Name == name {
+				live = &tools[i]
+				break
+			}
+		}
+	}
+	return live, h, has && h != "", nil, nil
 }

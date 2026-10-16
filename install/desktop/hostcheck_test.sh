@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Tests for hostcheck.sh (engine preflight, WSL detection) and the argument handling of
-# blerg-up.sh / daemon/install.sh. Needs no docker: everything runs against a scratch HOME/PATH.
+# Tests for hostcheck.sh (engine preflight, WSL detection), the argument handling of blerg-up.sh /
+# daemon/install.sh and the planned-restart marker install.sh leaves the daemon.
+# Needs no docker: everything runs against a scratch HOME/PATH.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 HERE="$PWD"
@@ -79,7 +80,7 @@ grep -q 'no coding engine is ready' <<<"$out" && t "darwin: must not say missing
 # --- argument handling
 out="$(./blerg-up.sh --help 2>&1)"; rc=$?
 [ "$rc" = 0 ] || t "blerg-up --help exit $rc"
-for f in --no-build --no-daemon --no-open --regen-secrets --reset-admin --help; do grep -q -- "$f" <<<"$out" || t "blerg-up usage lacks $f"; done
+for f in --no-build --no-daemon --no-open --yes --regen-secrets --reset-admin --help; do grep -q -- "$f" <<<"$out" || t "blerg-up usage lacks $f"; done
 out="$(./blerg-up.sh --bogus 2>&1)"; rc=$?
 [ "$rc" != 0 ] || t "blerg-up unknown flag exited 0"
 grep -q 'unknown option: --bogus' <<<"$out" && grep -q 'Usage:' <<<"$out" || t "blerg-up unknown flag: no message/usage"
@@ -94,6 +95,60 @@ out="$(./daemon/install.sh 2>&1)"; rc=$?
 mkbin "$tmp/bin-nocurl"
 out="$(PATH="$tmp/bin-nocurl" ./blerg-up.sh --no-daemon 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "curl isn't installed" <<<"$out" || t "missing curl not reported (rc=$rc)"
+
+# --- the question before reinstalling over running agent work
+mkdir -p "$tmp/rw"
+printf '#!/bin/sh\n[ "$1 $2" = "status --open-work" ] || exit 9\nprintf "session s1 (proj): a turn is running, 1 subagent\\n  - subagent Explore: Find the callers\\n"\n' > "$tmp/rw/busy"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/rw/idle"
+printf '#!/bin/sh\nexit 2\n' > "$tmp/rw/old"
+chmod +x "$tmp/rw/busy" "$tmp/rw/idle" "$tmp/rw/old"
+out="$(confirm_reinstall_over_work "$tmp/rw/idle" </dev/null 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] || t "nothing running: expected silence and go (rc=$rc, $out)"
+out="$(confirm_reinstall_over_work "$tmp/rw/old" </dev/null 2>&1)"; rc=$?
+[ "$rc" = 0 ] || t "a binary that cannot answer must not block (rc=$rc)"
+out="$(confirm_reinstall_over_work "$tmp/rw/busy" </dev/null 2>&1)"; rc=$?
+[ "$rc" = 2 ] || t "work running, no terminal: expected rc 2, got $rc"
+grep -q 'session s1 (proj): a turn is running' <<<"$out" && grep -q 'subagent Explore: Find the callers' <<<"$out" || t "work not listed: $out"
+grep -q -- '--yes' <<<"$out" || t "no terminal: does not say --yes"
+out="$(confirm_reinstall_over_work "$tmp/rw/busy" 1 </dev/null 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'session s1' <<<"$out" && grep -q 'anyway (--yes)' <<<"$out" || t "--yes: expected the list and go (rc=$rc)"
+out="$(./daemon/install.sh install --bogus 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'unknown option: --bogus' <<<"$out" || t "install.sh unknown option"
+grep -q -- '--yes' <<<"$(./daemon/install.sh --help 2>&1)" || t "install.sh usage lacks --yes"
+grep -q '^EXIT_WORK_RUNNING=5$' daemon/install.sh && grep -q '^    5) # install.sh.s EXIT_WORK_RUNNING' blerg-up.sh \
+  || t "blerg-up.sh and install.sh disagree on the work-running exit code"
+
+# --- a reinstall over a running daemon tells the next daemon the restart is planned: install.sh
+# writes restart-planned (with its reason) into the daemon's state directory before it restarts the
+# service (runner/internal/daemon/restartcause.go reads it). Runs install.sh from a scratch copy of
+# the tree against stub go/systemctl, so nothing real is built, installed or restarted.
+inst="$tmp/inst"
+mkdir -p "$inst/repo/install/desktop/daemon" "$inst/repo/runner" "$inst/repo/bin" "$inst/home" "$inst/repos"
+cp brand.sh hostcheck.sh "$inst/repo/install/desktop/"
+cp daemon/install.sh daemon/*.tmpl "$inst/repo/install/desktop/daemon/"
+printf 'BLERG_RUNNER_DAEMON_TOKEN=tok\nBLERG_RUNNER_REPOS_ROOT=%s\nBLERG_SKIP_CLAUDE_TOKEN_PROMPT=1\n' "$inst/repos" > "$inst/repo/install/desktop/.env"
+mkbin "$inst/bin" loginctl
+for x in mv chmod rm cmp; do p="$(command -v "$x")" && ln -sf "$p" "$inst/bin/$x"; done
+rm -f "$inst/bin/uname"
+printf '#!/bin/sh\n[ "$1" = -m ] && echo x86_64 || echo Linux\n' > "$inst/bin/uname"
+# go: "build -o OUT" writes a daemon whose content is $FAKE_BUILD and that reports no open work.
+printf '#!/bin/sh\n[ "$1" = version ] && { echo "go version go1.26.0 linux/amd64"; exit 0; }\nprintf "#!/bin/sh\\n# %%s\\nexit 0\\n" "$FAKE_BUILD" > "$3"; chmod +x "$3"\n' > "$inst/bin/go"
+# systemctl: is-active answers $FAKE_RUNNING; restart logs what the marker held at that moment.
+printf '#!/bin/sh\ncase "$*" in\n  *is-active*) [ "$FAKE_RUNNING" = 1 ] ;;\n  *restart*) echo "restart marker=$(cat "$BLERG_RUNNER_DAEMON_STATE_DIR/restart-planned" 2>/dev/null)" >> "$FAKE_LOG" ;;\nesac\n' > "$inst/bin/systemctl"
+chmod +x "$inst/bin/uname" "$inst/bin/go" "$inst/bin/systemctl"
+run_install() { # RUNNING BUILD ; runs install.sh install, prints the systemctl log
+  rm -rf "$inst/state" "$inst/systemctl.log"
+  ( export PATH="$inst/bin" HOME="$inst/home" BLERG_RUNNER_DAEMON_STATE_DIR="$inst/state" FAKE_LOG="$inst/systemctl.log" \
+      FAKE_RUNNING="$1" FAKE_BUILD="$2" BLERG_PROC_VERSION="$tmp/pv-plain" XDG_RUNTIME_DIR="$inst/run"
+    unset WSL_DISTRO_NAME CLAUDE_CODE_OAUTH_TOKEN BLERG_RUNNER_SERVER_URL
+    "$inst/repo/install/desktop/daemon/install.sh" install </dev/null >"$inst/out" 2>&1 ) || { echo "install.sh failed:"; cat "$inst/out"; }
+  cat "$inst/systemctl.log" 2>/dev/null
+}
+[ "$(run_install 1 build-a)" = "restart marker=update" ] || t "over a running daemon, a new build: no 'update' marker before the restart ($(cat "$inst/systemctl.log" 2>/dev/null))"
+[ "$(cat "$inst/state/restart-planned" 2>/dev/null)" = update ] || t "the update marker was not left for the daemon"
+[ "$(run_install 1 build-a)" = "restart marker=reinstall" ] || t "over a running daemon, the same build: no 'reinstall' marker before the restart"
+[ "$(run_install 0 build-b)" = "restart marker=" ] || t "no daemon running, yet a planned-restart marker"
+[ ! -e "$inst/state/restart-planned" ] || t "no daemon running, yet a marker was left"
 
 # --- the marker for an explicit "no" on the Claude token question
 grep -q 'BLERG_SKIP_CLAUDE_TOKEN_PROMPT' daemon/install.sh || t "skip marker missing from install.sh"

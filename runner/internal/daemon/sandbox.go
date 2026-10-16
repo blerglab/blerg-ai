@@ -118,6 +118,11 @@ func sandboxEnvArgs(env []string) []string {
 		if strings.HasPrefix(kv, "BLERG_RUNNER_DAEMON_TOKEN=") {
 			continue
 		}
+		// A host path: the CLI inside finds its token file under its own HOME
+		// (sessiontoken.go), not under the daemon's state directory.
+		if strings.HasPrefix(kv, DaemonStateDirEnv+"=") {
+			continue
+		}
 		if strings.HasPrefix(kv, "BLERG_RUNNER_") || strings.HasPrefix(kv, "BLERG_BOARD_") {
 			args = append(args, "-e", kv)
 		}
@@ -141,10 +146,16 @@ type SandboxOptions struct {
 	// ClaudeOnly is set per session (never from configuration) for a restricted session: only the
 	// claude login is mounted, not codex's or hermes's.
 	ClaudeOnly bool
+	// RestrictedEngine selects only that registered engine's login mounts.
+	RestrictedEngine string
 	// PluginCache is set per session when it loads always-on plugins: the
 	// session's plugin snapshot (pluginworkshop.go), bind-mounted read-only at
 	// sandboxPluginPath. "" = no mount.
 	PluginCache string
+	// CodexHome is a private per-session CODEX_HOME; exact-path mounts preserve native paths.
+	CodexHome string
+	// CodexSourceHome supplies fixed user login/config links for unrestricted sessions only.
+	CodexSourceHome string
 }
 
 // sandboxPluginPath is where a sandboxed session sees its plugin snapshot;
@@ -315,15 +326,31 @@ func pluginCacheMountArg(hostPath string) string {
 	return "type=bind," + src + ",dst=" + sandboxPluginPath + ",readonly"
 }
 
+// codexHomeMountArg mounts native state at its original absolute path, so private home
+// symlinks and saved rollout paths mean the same thing on the host and in the container.
+func codexHomeMountArg(path string) string {
+	field := func(key string) string {
+		value := key + "=" + path
+		if strings.ContainsAny(path, `,"`) {
+			return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+		}
+		return value
+	}
+	return "type=bind," + field("src") + "," + field("dst")
+}
+
 // sandboxRunExtras are the per-start additions to `docker run` that depend on
 // the host's state at spawn time rather than on the session.
 type sandboxRunExtras struct {
 	network string // --network <name>; "" = default bridge
 	cliPath string // host path of the messaging CLI to mount; "" = none
 	// claudeOnly mounts only the claude login (a restricted session runs no other engine).
-	claudeOnly bool
+	claudeOnly       bool
+	restrictedEngine string
 	// pluginCache is the daemon's plugin cache to mount read-only; "" = none.
-	pluginCache string
+	pluginCache     string
+	codexHome       string
+	codexSourceHome string
 }
 
 // sandboxRunArgs is the `docker run` argument list for a session sandbox:
@@ -370,15 +397,31 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 	if extras.pluginCache != "" {
 		args = append(args, "--mount", pluginCacheMountArg(extras.pluginCache))
 	}
+	if extras.codexHome != "" && filepath.IsAbs(extras.codexHome) {
+		args = append(args, "--mount", codexHomeMountArg(extras.codexHome))
+	}
+	if extras.codexSourceHome != "" && filepath.IsAbs(extras.codexSourceHome) && extras.restrictedEngine == "" {
+		args = append(args, "--mount", codexHomeMountArg(extras.codexSourceHome))
+	}
+
 	if home != "" {
 		// /home/agent matches the sandbox image's ENV HOME (see
 		// runner/sandbox/Dockerfile) — not the host's own $HOME. These are
 		// read-write on purpose (the engine needs its login) — which is why the
 		// launch sheet and DAEMON.md say the sandbox does NOT protect them.
-		logins := []string{".claude", ".claude.json", ".codex", ".hermes/config.yaml", ".hermes/.env"}
+		logins := append([]string(nil), claudeEngineSpec.SandboxLoginPaths...)
+		for _, id := range engineOrder {
+			logins = append(logins, engineRegistry[id].SandboxLoginPaths...)
+		}
 		if extras.claudeOnly {
 			// A restricted session runs claude only: no other engine's login goes in.
-			logins = logins[:2]
+			logins = append([]string(nil), claudeEngineSpec.SandboxLoginPaths...)
+		}
+		if extras.restrictedEngine != "" {
+			logins = engineRegistry[extras.restrictedEngine].SandboxLoginPaths
+			if extras.restrictedEngine == "claude" {
+				logins = claudeEngineSpec.SandboxLoginPaths
+			}
 		}
 		for _, p := range logins {
 			if _, err := os.Stat(filepath.Join(home, p)); err == nil {
@@ -470,7 +513,7 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	// to a session that is being recreated right now either way.
 	forceRemoveContainer(container)
 	home, _ := os.UserHomeDir()
-	extras := sandboxRunExtras{cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly, pluginCache: opts.PluginCache}
+	extras := sandboxRunExtras{cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly, restrictedEngine: opts.RestrictedEngine, pluginCache: opts.PluginCache, codexHome: opts.CodexHome, codexSourceHome: opts.CodexSourceHome}
 	if opts.Network != "" {
 		exists, err := sandboxNetworkState(opts.Network)
 		if err != nil {
@@ -496,6 +539,8 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 		unregisterSandbox(sessionID)
 		return "", err
 	}
+	// Before anything runs in it: a session given a fresh token earlier keeps it.
+	copyTokenIntoSandbox(container, sessionID)
 	return container, nil
 }
 

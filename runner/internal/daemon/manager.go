@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/scratch"
@@ -61,6 +62,13 @@ type ManagerConfig struct {
 	// restart of the daemon process (AgentRecordsDir(DaemonStateDir()) on a real daemon). ""
 	// keeps none.
 	AgentRecordsDir string
+	// RestartCause is why the previous run of the daemon ended (ReadRestartCause): what the agent
+	// of a session it cut off is told about it.
+	RestartCause RestartCause
+
+	// UsageLimits hears what moves the providers' usage limits (a Codex turn ended, Claude
+	// refused a call for its limit): the daemon's UsageLimitsTracker. nil reports none.
+	UsageLimits UsageLimitsSink
 }
 
 // withReposRootSetting fills in ReposRootSetting from ReposRoot when the
@@ -268,6 +276,10 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 		Plugins: NewPluginWorkshop(DaemonStateDir()),
 		// Recovery records of agent sessions (agentrecord.go); "" keeps none.
 		RecordsDir: cfg.AgentRecordsDir,
+		// Why the previous run ended, for the sessions it cut off (restartcause.go).
+		RestartCause: cfg.RestartCause,
+		// Usage limits per provider (limits.go).
+		UsageLimits: cfg.UsageLimits,
 	})
 	if apiKey != "" {
 		log.Printf("manager: agent sessions enabled (Claude: the claude CLI when installed, else the native loop, budget $%.0f/session)", budget)
@@ -278,12 +290,15 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	client.OnMessage("spawn_session", m.enqueueSpawn)
 	client.OnMessage("send_input", m.handleSendInput)
 	client.OnMessage("kill_session", m.handleKillSession)
+	client.OnMessage("open_asks", m.handleOpenAsks)
+	client.OnMessage("session_token", m.handleSessionToken)
 	client.OnMessage("resize_session", m.handleResizeSession)
 	client.OnMessage("request_scrollback", m.handleRequestScrollback)
 	client.OnMessage("inject_note_reply", m.handleInjectNoteReply)
 	client.OnMessage("agent_event_ack", m.handleAgentEventAck)
 	client.OnMessage("agent_user_message", m.handleAgentUserMessage)
 	client.OnMessage("set_session_model", m.handleSetSessionModel)
+	client.OnMessage("refresh_session_tools", m.handleRefreshSessionTools)
 	client.OnMessage("interrupt_session", m.handleInterruptSession)
 	client.OnMessage("set_repos_root", m.handleSetReposRoot)
 	client.SetReposRoot(cfg.ReposRootSetting.Get)
@@ -291,6 +306,16 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 }
 
 // ─── Agent session routing ───────────────────────────────────────────────────
+
+// handleOpenAsks takes the server's list of sessions with a `blerg-runner ask` open: an adopted
+// interactive session among them is not continued by itself (agentadopt.go).
+func (m *Manager) handleOpenAsks(raw []byte) {
+	var msg protocol.OpenAsks
+	if err := json.Unmarshal(raw, &msg); err != nil || m.agents == nil {
+		return
+	}
+	m.agents.NoteOpenAsks(msg.SessionIDs)
+}
 
 func (m *Manager) handleAgentEventAck(raw []byte) {
 	var msg protocol.AgentEventAck
@@ -317,7 +342,10 @@ func (m *Manager) handleAgentUserMessage(raw []byte) {
 			return
 		}
 	}
-	m.agents.UserMessage(msg.SessionID, msg.Text, msg.Source)
+	if msg.Source == "limit_resume" && msg.ExpectedTurnID == "" {
+		return
+	}
+	m.agents.UserInput(msg.SessionID, agent.Input{Text: msg.Text, Source: msg.Source, ClientID: msg.ClientID, ExpectedTurnID: msg.ExpectedTurnID})
 }
 
 func (m *Manager) handleSetSessionModel(raw []byte) {
@@ -326,6 +354,14 @@ func (m *Manager) handleSetSessionModel(raw []byte) {
 		return
 	}
 	m.agents.SetModel(msg.SessionID, msg.Model, msg.Effort)
+}
+
+func (m *Manager) handleRefreshSessionTools(raw []byte) {
+	var msg protocol.RefreshSessionTools
+	if err := json.Unmarshal(raw, &msg); err != nil || m.agents == nil {
+		return
+	}
+	m.agents.RefreshTools(msg.SessionID)
 }
 
 func (m *Manager) handleInterruptSession(raw []byte) {
@@ -425,10 +461,13 @@ func claudeCommand(id, model, effort string, skipPerms, resume, sandboxed bool) 
 	return cmd
 }
 
-// spawnModelProblem reports why a spawn's model/effort must be refused, or ""
-// when both are usable — the daemon's own check against the engine's rules
-// (internal/models), not trusting the server's.
+// spawnModelProblem reports why a spawn's engine/model/effort must be refused,
+// or "" when all are usable — the daemon checks its own engine registry and
+// model rules (internal/models), not trusting the server's.
 func spawnModelProblem(msg protocol.SpawnSession) string {
+	if problem := engineProblem(msg.Engine); problem != "" {
+		return problem
+	}
 	if !models.ValidModelFor(msg.Engine, msg.Model) {
 		return fmt.Sprintf("refusing spawn: invalid model %q", msg.Model)
 	}
@@ -1030,6 +1069,25 @@ func (m *Manager) enqueueSpawn(raw []byte) {
 	}
 }
 
+// QueuedSpawnIDs returns the spawns this daemon has received but not started
+// yet — waiting in the queue or preparing their workspace (clone, plugins) —
+// and that no kill_session has cancelled. ActiveSessionIDs does not list them
+// (they are not sessions yet), so the hello and heartbeat report them apart
+// (DaemonHello.QueuedSessions): without it the server read a slow start as a
+// session the daemon had lost, stopped it and revoked its credentials.
+func (m *Manager) QueuedSpawnIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.pendingSpawns))
+	for id, killed := range m.pendingSpawns {
+		if !killed {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // spawnKilled reports whether a kill_session arrived while this spawn was
 // queued or preparing its workspace.
 func (m *Manager) spawnKilled(sessionID string) bool {
@@ -1188,11 +1246,29 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 
 	command := m.config.Command
 	if len(command) == 0 {
+		var codexHome, codexSource string
+		if msg.Engine == "codex" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				m.sendError(msg.SessionID, "Codex login home is unavailable")
+				return
+			}
+			codexSource = engineHome(home, "CODEX_HOME", ".codex")
+			codexHome, err = prepareCodexTerminalHome(DaemonStateDir(), msg.SessionID, codexSource)
+			if err != nil {
+				m.sendError(msg.SessionID, err.Error())
+				return
+			}
+		}
 		var inner []string
 		if spec, ok := engineRegistry[msg.Engine]; ok {
 			inner = buildTerminalCommand(spec, msg.Model, msg.Effort, msg.DangerouslySkipPermissions, msg.Sandbox)
 		} else {
 			inner = claudeCommand(msg.SessionID, msg.Model, msg.Effort, msg.DangerouslySkipPermissions, false, msg.Sandbox)
+		}
+		if codexHome != "" {
+			inner = append(inner, "--no-daemon")
+			inner = append([]string{"env", "CODEX_HOME=" + codexHome}, inner...)
 		}
 		// Run the engine inside a persistent, detached tmux session so the process
 		// survives a daemon restart; we then attach to it under the PTY. The
@@ -1202,7 +1278,9 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 		// registry-transparent so it needs no branching here beyond create.
 		var createErr error
 		if msg.Sandbox {
-			createErr = createDockerSandbox(msg.SessionID, projectPath, inner, env, m.config.sandboxOptions())
+			opts := m.config.sandboxOptions()
+			opts.CodexHome, opts.CodexSourceHome = codexHome, codexSource
+			createErr = createDockerSandbox(msg.SessionID, projectPath, inner, env, opts)
 		} else {
 			createErr = createTmuxSession(msg.SessionID, projectPath, inner, env)
 		}
@@ -1225,6 +1303,8 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 			DangerouslySkipPermissions: msg.DangerouslySkipPermissions,
 			Sandbox:                    msg.Sandbox,
 			Engine:                     msg.Engine,
+			CodexHome:                  codexHome,
+			CodexSourceHome:            codexSource,
 			Title:                      msg.Title,
 			InitialPrompt:              msg.InitialPrompt,
 			Assist:                     msg.Assist,
@@ -1326,6 +1406,7 @@ func (m *Manager) streamSession(id string, sess *Session) {
 		// Remove the recovery record now that the session has ended naturally.
 		// Best-effort: safe to call when no record exists (e.g. test path).
 		m.deleteRecord(id)
+		removeSessionTokenFile(DaemonStateDir(), id)
 		_ = m.client.Send(protocol.SessionEnded{
 			Type:      "session_ended",
 			SessionID: id,
@@ -1539,10 +1620,24 @@ func (m *Manager) reattachSession(id string) {
 // resume the interactive tmux case — it spawns fresh and injects the stored
 // initial prompt instead.
 func (m *Manager) recoverSession(rec SessionRecord) {
+	if problem := engineProblem(rec.Engine); problem != "" {
+		m.sendError(rec.SessionID, problem)
+		return
+	}
 	var inner []string
 	resume := false
 	if spec, ok := engineRegistry[rec.Engine]; ok {
 		inner = buildTerminalCommand(spec, rec.Model, rec.Effort, rec.DangerouslySkipPermissions, rec.Sandbox)
+		if rec.Engine == "codex" {
+			thread := codexTerminalThread(rec.CodexHome)
+			if rec.CodexHome == "" || thread == "" {
+				m.sendError(rec.SessionID, "The Codex terminal's saved conversation could not be identified. Its original prompt was not replayed.")
+				return
+			}
+			inner = append(inner, "--no-daemon", "resume", thread)
+			inner = append([]string{"env", "CODEX_HOME=" + rec.CodexHome}, inner...)
+			resume = true
+		}
 	} else {
 		resume = transcriptExists(rec.SessionID)
 		inner = claudeCommand(rec.SessionID, rec.Model, rec.Effort, rec.DangerouslySkipPermissions, resume, rec.Sandbox)
@@ -1555,7 +1650,9 @@ func (m *Manager) recoverSession(rec SessionRecord) {
 
 	var createErr error
 	if rec.Sandbox {
-		createErr = createDockerSandbox(rec.SessionID, rec.ProjectPath, inner, env, m.config.sandboxOptions())
+		opts := m.config.sandboxOptions()
+		opts.CodexHome, opts.CodexSourceHome = rec.CodexHome, rec.CodexSourceHome
+		createErr = createDockerSandbox(rec.SessionID, rec.ProjectPath, inner, env, opts)
 	} else {
 		createErr = createTmuxSession(rec.SessionID, rec.ProjectPath, inner, env)
 	}

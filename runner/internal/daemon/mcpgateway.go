@@ -194,7 +194,7 @@ func (f *mcpConfigFile) exists() bool {
 	if f.prefix.enabled() {
 		return dockerRun("exec", f.prefix.container(), "test", "-f", f.path) == nil
 	}
-	st, err := os.Stat(f.path)
+	st, err := os.Stat(f.path) //nolint:gosec // G703: f.path is the fixed mcp.json inside this object’s private MkdirTemp directory.
 	return err == nil && st.Mode().IsRegular()
 }
 
@@ -205,7 +205,7 @@ func (f *mcpConfigFile) removeLocked() {
 	if f.prefix.enabled() {
 		_ = dockerRun("exec", f.prefix.container(), "rm", "-rf", f.dir)
 	} else {
-		_ = os.RemoveAll(f.dir)
+		_ = os.RemoveAll(f.dir) //nolint:gosec // G703: f.dir is created only by this object’s MkdirTemp, never supplied by a tool or request.
 	}
 	f.dir, f.path = "", ""
 }
@@ -216,7 +216,7 @@ func (f *mcpConfigFile) writeOnHost(body []byte) error {
 		return fmt.Errorf("could not create the MCP config directory: %w", err)
 	}
 	path := filepath.Join(dir, "mcp.json")
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	if err := os.WriteFile(path, body, 0o600); err != nil { //nolint:gosec // G703: fixed mcp.json in the fresh, private MkdirTemp directory above.
 		_ = os.RemoveAll(dir)
 		return fmt.Errorf("could not write the MCP config: %w", err)
 	}

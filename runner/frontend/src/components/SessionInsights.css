@@ -1,0 +1,231 @@
+/* Session insights dialog: the Skills & plugins dialog shell (CapabilitiesPanel.css) holding a row of
+   headline tiles and one card per subject. Ink, surfaces and type come from the app's tokens (index.css);
+   the only colours added here are the chart series below.
+
+   Series colours: the dataviz reference palette's first three categorical slots, in its fixed order
+   (blue, orange, aqua), stepped per mode. Validated with validate_palette.js against the card surface
+   (--scree-2) and the dialog surface (--scree), both modes: every check passes; in light mode aqua sits
+   at 2.8:1 on white, so every value it marks is also printed in the legend beside it (the relief rule).
+   Text never wears a series colour; a percent set inside a segment uses --si-on-series, which clears
+   4.5:1 on all six fills. Single-series bar lists (tools, models) use the neutral --si-bar so a
+   series hue always means the same thing inside one card. */
+.session-insights-dialog {
+  width: min(840px, 100%);
+  --si-series-1: #3987e5;
+  --si-series-2: #d95926;
+  --si-series-3: #199e70;
+  --si-on-series: #000;
+  --si-bar: var(--fog-dim);
+  --si-rule: color-mix(in srgb, var(--stone) 60%, transparent);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .session-insights-dialog {
+    --si-series-1: #2a78d6;
+    --si-series-2: #eb6834;
+    --si-series-3: #1baf7a;
+  }
+}
+:root[data-theme="light"] .session-insights-dialog {
+  --si-series-1: #2a78d6;
+  --si-series-2: #eb6834;
+  --si-series-3: #1baf7a;
+}
+
+/* ── header strip ─────────────────────────────────────────────────────────── */
+.si-title { display: flex; gap: 0.3em; min-width: 0; white-space: nowrap; }
+.si-title-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.si-title-suffix { flex-shrink: 0; color: var(--fog-dim); font-weight: 500; }
+
+.si-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 0 16px 12px;
+  border-bottom: 1px solid var(--scree-2);
+}
+.si-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.si-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 1px 8px;
+  border: 1px solid var(--stone);
+  border-radius: 999px;
+  color: var(--fog);
+  font-size: var(--text-xs);
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.si-chip b { color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
+.si-state-live { color: var(--lichen); border-color: color-mix(in srgb, var(--lichen) 45%, transparent); }
+.si-state-background { color: color-mix(in srgb, var(--lichen) 55%, var(--fog-dim)); border-color: color-mix(in srgb, var(--lichen) 25%, transparent); }
+.si-state-idle,
+.si-state-ended { color: var(--fog-dim); }
+.si-updated { margin-left: auto; color: var(--fog-dim); font-size: var(--text-xs); white-space: nowrap; }
+
+/* ── body ─────────────────────────────────────────────────────────────────── */
+.si-body { display: flex; flex-direction: column; gap: 12px; padding: 12px 8px 0; }
+.si-mono { font-family: var(--mono); }
+.si-sr {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+.si-empty { margin: 0; color: var(--fog-dim); font-size: var(--text-sm); }
+.si-foot { margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--si-rule); color: var(--fog-dim); font-size: var(--text-xs); }
+.si-foot.si-foot-solo { margin-top: 0; padding-top: 0; border-top: 0; color: var(--fog); font-size: var(--text-sm); }
+
+/* tiles: one figure each */
+.si-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.si-tile,
+.si-card,
+.si-ghost { background: var(--scree-2); border: 1px solid var(--stone); border-radius: 10px; min-width: 0; }
+.si-tile { padding: 12px 16px; }
+.si-tile-label { color: var(--fog-dim); font-size: var(--text-xs); }
+.si-tile-value {
+  margin-top: 4px;
+  color: var(--chalk);
+  font-family: var(--body);
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.si-unit { color: var(--fog); font-size: var(--text-base); font-weight: 500; letter-spacing: 0; }
+.si-tile-sub {
+  margin-top: 6px;
+  color: var(--fog-dim);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* a subtitle in parts (the tokens tile) wraps rather than clipping: each part is kept whole on its
+   line where it fits, and a part longer than the tile wraps inside itself */
+.si-tile-sub-parts { white-space: normal; overflow: visible; text-overflow: clip; }
+.si-tile-sub-parts > span { display: inline-block; max-width: 100%; }
+
+/* cards */
+.si-card { padding: 16px; }
+.si-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.si-card-title { margin: 0; color: var(--fog); font-size: var(--text-sm); font-weight: 600; }
+.si-card-aside { color: var(--fog-dim); font-size: var(--text-xs); font-variant-numeric: tabular-nums; text-align: right; }
+.si-subhead { margin: 0 0 8px; color: var(--fog-dim); font-size: var(--text-xs); }
+.si-block { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--si-rule); }
+
+/* stacked bar: a 2px surface gap between segments, 4px rounded outer ends */
+.si-stack { display: flex; gap: 2px; height: 20px; }
+.si-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 1 auto;
+  min-width: 2px;
+  color: var(--si-on-series);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.si-seg:first-child { border-top-left-radius: 4px; border-bottom-left-radius: 4px; }
+.si-seg:last-child { border-top-right-radius: 4px; border-bottom-right-radius: 4px; }
+.si-s-1 { background: var(--si-series-1); }
+.si-s-2 { background: var(--si-series-2); }
+.si-s-3 { background: var(--si-series-3); }
+
+.si-legend { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 24px; font-size: var(--text-sm); }
+.si-legend li { display: flex; align-items: center; gap: 8px; }
+.si-sw { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+.si-legend-label { color: var(--fog); }
+.si-legend-value { color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
+.si-legend-extra { color: var(--fog-dim); font-size: var(--text-xs); }
+
+/* bar list: name, a bar scaled to the largest row, the number */
+.si-bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: var(--text-sm); }
+.si-bar-row { display: grid; grid-template-columns: minmax(0, 13rem) minmax(0, 1fr) 4.5rem; gap: 12px; align-items: center; min-height: 24px; }
+.si-bars-narrow .si-bar-row { grid-template-columns: minmax(0, 7.5rem) minmax(0, 1fr) 3rem; }
+.si-bar-name { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-width: 0; color: var(--chalk); }
+.si-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.si-name.si-mono { font-size: var(--text-xs); }
+.si-tag {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border: 1px solid var(--stone);
+  border-radius: 4px;
+  color: var(--fog-dim);
+  font-size: var(--text-2xs);
+  line-height: 16px;
+}
+.si-bar-track { display: block; height: 10px; }
+.si-bar { display: block; height: 100%; min-width: 2px; background: var(--si-bar); border-radius: 0 4px 4px 0; }
+.si-bar-value { color: var(--chalk); text-align: right; font-variant-numeric: tabular-nums; }
+.si-bars-other { color: var(--fog-dim); font-size: var(--text-xs); padding-top: 4px; }
+
+/* token figures under the bars */
+.si-figs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--si-rule); }
+.si-figs div { min-width: 0; }
+.si-figs dt { color: var(--fog-dim); font-size: var(--text-xs); }
+.si-figs dd { margin: 4px 0 0; color: var(--chalk); font-size: var(--text-base); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* work: top tools beside MCP calls and proposals */
+.si-work-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px 24px; }
+.si-work-side { display: flex; flex-direction: column; gap: 16px; padding-left: 24px; border-left: 1px solid var(--si-rule); }
+.si-stat-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.si-stat-head .si-subhead { margin: 0; }
+.si-stat-n { color: var(--chalk); font-size: var(--text-lg); font-weight: 600; }
+.si-stat .si-chips { margin-top: 8px; }
+
+/* subagents: two small tables */
+.si-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; align-items: start; }
+.si-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+.si-table th { padding: 0 0 6px; border-bottom: 1px solid var(--stone); color: var(--fog-dim); font-size: var(--text-xs); font-weight: 500; text-align: left; }
+.si-table td { padding: 6px 0; border-bottom: 1px solid var(--si-rule); color: var(--chalk); overflow-wrap: anywhere; }
+.si-table td.si-mono { font-size: var(--text-xs); }
+.si-table tr:last-child td { border-bottom: 0; }
+.si-table .n { width: 4rem; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* loading and error */
+.si-skeleton { display: flex; flex-direction: column; gap: 12px; }
+.si-ghost { opacity: 0.55; animation: si-pulse 1.6s ease-in-out infinite; }
+.si-ghost-tile { height: 92px; }
+.si-ghost-card { height: 128px; }
+@keyframes si-pulse { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .si-ghost { animation: none; } }
+.si-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.si-error-msg { display: flex; align-items: center; gap: 8px; color: var(--danger); font-size: var(--text-sm); }
+.si-error-msg > span[aria-hidden] {
+  display: inline-grid; place-items: center; width: 18px; height: 18px; flex-shrink: 0;
+  border: 1px solid currentColor; border-radius: 999px; font-size: var(--text-2xs); font-weight: 700;
+}
+.si-btn {
+  padding: 4px 12px;
+  background: none;
+  border: 1px solid var(--stone);
+  border-radius: 6px;
+  color: var(--chalk);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.si-btn:hover,
+.si-btn:focus-visible { border-color: var(--accent-border); }
+
+@media (max-width: 640px) {
+  .si-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .si-figs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .si-work-grid,
+  .si-two { grid-template-columns: 1fr; }
+  .si-work-side { padding-left: 0; padding-top: 16px; border-left: 0; border-top: 1px solid var(--si-rule); }
+  .si-bar-row,
+  .si-bars-narrow .si-bar-row { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 3.5rem; }
+  .si-tile { padding: 12px; }
+  /* on a phone each part of a parted subtitle starts its own line */
+  .si-tile-sub-parts > span { display: block; }
+  .si-tile-sub-parts .si-sep { display: none; }
+  /* a long model or tool name wraps instead of being cut short; a "no price" tag drops beneath it */
+  .si-name { white-space: normal; overflow-wrap: anywhere; }
+}

@@ -17,14 +17,35 @@ import { apiFetch } from '../apiFetch'
 import type { McpConnectionInfo, McpSelectionEntry, McpToolInfo, McpToolMode } from '../types'
 import {
   MCP_ALLOW_WARNING, MCP_PRESET_LABEL, MCP_PROPOSE_LABEL, buildSelection, isReadOnlyTool, presetModes, presetOf,
-  type McpModes, type McpPreset, type McpSeenHashes, type McpToolsState,
+  type McpModes, type McpPreset, type McpPresetClaims, type McpSeenHashes, type McpToolsState,
 } from '../lib/mcpSelection'
+import { escapeHidden, isPlainName } from '../lib/toolChanges'
+
+// Where the connection list comes from: the last list, if one is kept, shown
+// at once, and a fresh one. Tool listings are never part of it.
+export interface McpConnectionsSource {
+  cached: () => McpConnectionInfo[] | undefined
+  load: () => Promise<McpConnectionInfo[]>
+}
 
 interface Props {
   value: McpSelectionEntry[]
   onChange: (next: McpSelectionEntry[]) => void
   // No presets: every tool's mode must be picked by hand (the crons form).
   requireExplicit?: boolean
+  // A stable source (the launch sheet's cache); without one the list is asked
+  // for on every mount.
+  connections?: McpConnectionsSource
+}
+
+const liveConnections: McpConnectionsSource = {
+  cached: () => undefined,
+  load: async () => {
+    const res = await apiFetch('/api/mcp/connections')
+    if (!res.ok) throw new Error(await errorText(res))
+    const body = await res.json() as { connections?: McpConnectionInfo[] }
+    return body.connections ?? []
+  },
 }
 
 async function errorText(res: Response): Promise<string> {
@@ -52,8 +73,14 @@ const primary: React.CSSProperties = {
   ...button, background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))', border: '1px solid var(--blaze)', color: 'var(--amber)', fontWeight: 700,
 }
 
-export default function McpPicker({ value, onChange, requireExplicit = false }: Props) {
-  const [conns, setConns] = useState<McpConnectionInfo[] | null>(null)
+// The first 200 code points (not UTF-16 units, so a surrogate pair is never split), with an ellipsis when cut.
+function descriptionCut(d: string): string {
+  const chars = Array.from(d)
+  return chars.length > 200 ? chars.slice(0, 200).join('') + '…' : d
+}
+
+export default function McpPicker({ value, onChange, requireExplicit = false, connections = liveConnections }: Props) {
+  const [conns, setConns] = useState<McpConnectionInfo[] | null>(() => connections.cached() ?? null)
   const [connError, setConnError] = useState<string | null>(null)
   // What came in as value: the hashes it named, its connections checked, its modes set.
   const [seen] = useState<McpSeenHashes>(() => {
@@ -68,21 +95,23 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
     return m
   })
   const [tools, setTools] = useState<Record<string, McpToolsState>>({})
+  // The preset last clicked per connection, until a per-tool edit follows.
+  const [claims, setClaims] = useState<McpPresetClaims>({})
   // Connections whose per-tool list is open (Customize).
   const [custom, setCustom] = useState<Set<string>>(() => new Set())
 
   // The async tool load outlives the render that started it: it reads the latest state and the
   // latest onChange from here (written in an effect, never during render).
-  const latest = useRef({ checked, modes, tools, onChange })
-  useEffect(() => { latest.current = { checked, modes, tools, onChange } })
+  const latest = useRef({ checked, modes, tools, claims, onChange })
+  useEffect(() => { latest.current = { checked, modes, tools, claims, onChange } })
   const alive = useRef(true)
   useEffect(() => {
     alive.current = true
     return () => { alive.current = false }
   }, [])
 
-  const emit = useCallback((c: Set<string>, m: McpModes, t: Record<string, McpToolsState>) => {
-    latest.current.onChange(buildSelection(c, m, t, seen))
+  const emit = useCallback((c: Set<string>, m: McpModes, t: Record<string, McpToolsState>, cl: McpPresetClaims) => {
+    latest.current.onChange(buildSelection(c, m, t, seen, cl))
   }, [seen])
 
   const loadTools = useCallback((id: string) => {
@@ -107,7 +136,7 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
         const nextTools: Record<string, McpToolsState> = { ...nowTools, [id]: { status: 'ready', tools: list } }
         setModes(nextModes)
         setTools(t => ({ ...t, [id]: { status: 'ready', tools: list } }))
-        if (Object.keys(nowModes[id] ?? {}).length > 0) emit(nowChecked, nextModes, nextTools)
+        if (Object.keys(nowModes[id] ?? {}).length > 0) emit(nowChecked, nextModes, nextTools, latest.current.claims)
       })
       .catch((e: unknown) => {
         if (!alive.current) return
@@ -115,21 +144,28 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
       })
   }, [seen, emit])
 
+  // Asked again on every mount, even with a cached list showing. Tools are
+  // only ever loaded from this live answer (or a later click), never from the
+  // cached list.
   useEffect(() => {
     let cancelled = false
-    apiFetch('/api/mcp/connections')
-      .then(async res => {
-        if (!res.ok) throw new Error(await errorText(res))
-        const body = await res.json() as { connections?: McpConnectionInfo[] }
+    const hadCached = connections.cached() !== undefined
+    connections.load()
+      .then(list => {
         if (cancelled) return
-        const list = body.connections ?? []
         setConns(list)
-        // A value that came in with connections already chosen (an edit) shows their tools.
-        for (const c of list) if (c.status === 'ok' && latest.current.checked.has(c.id)) loadTools(c.id)
+        // A value that came in with connections already chosen (an edit) shows their tools —
+        // unless they are already loading or loaded (checked from the cached list meanwhile).
+        for (const c of list) {
+          if (c.status === 'ok' && latest.current.checked.has(c.id) && !latest.current.tools[c.id]) loadTools(c.id)
+        }
       })
-      .catch((e: unknown) => { if (!cancelled) setConnError(e instanceof Error ? e.message : String(e)) })
+      .catch((e: unknown) => {
+        // A failed refresh under a cached list keeps the list; with none, say so.
+        if (!cancelled && !hadCached) setConnError(e instanceof Error ? e.message : String(e))
+      })
     return () => { cancelled = true }
-  }, [loadTools])
+  }, [loadTools, connections])
 
   function toggle(id: string, on: boolean) {
     const next = new Set(checked)
@@ -137,21 +173,25 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
     else next.delete(id)
     setChecked(next)
     if (on && tools[id]?.status !== 'ready' && tools[id]?.status !== 'loading') loadTools(id)
-    emit(next, modes, tools)
+    emit(next, modes, tools, claims)
   }
 
   function setMode(id: string, name: string, mode: McpToolMode) {
     const nextModes = { ...modes, [id]: { ...modes[id], [name]: mode } }
+    const nextClaims = { ...claims, [id]: undefined }
     setModes(nextModes)
-    emit(checked, nextModes, tools)
+    setClaims(nextClaims)
+    emit(checked, nextModes, tools, nextClaims)
   }
 
   function applyPreset(id: string, preset: McpPreset) {
     const st = tools[id]
     if (st?.status !== 'ready') return
     const nextModes = { ...modes, [id]: presetModes(preset, st.tools) }
+    const nextClaims = { ...claims, [id]: requireExplicit || preset === 'none' ? undefined : preset }
     setModes(nextModes)
-    emit(checked, nextModes, tools)
+    setClaims(nextClaims)
+    emit(checked, nextModes, tools, nextClaims)
   }
 
   if (connError) return <div data-testid="mcp-error" style={{ ...muted, color: 'var(--danger)' }}>Could not load MCP connections: {connError}</div>
@@ -166,9 +206,11 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
     next.delete(id)
     const nextModes = { ...modes }
     delete nextModes[id]
+    const nextClaims = { ...claims, [id]: undefined }
     setChecked(next)
     setModes(nextModes)
-    emit(next, nextModes, tools)
+    setClaims(nextClaims)
+    emit(next, nextModes, tools, nextClaims)
   }
 
   return (
@@ -251,16 +293,18 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
                 )}
                 {showList && <div style={{ maxHeight: 260, overflowY: 'auto', marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {st.tools.map(t => {
-                    const mode = modeOf(t.name)
+                    const mode = t.unsafe ? 'off' : modeOf(t.name)
                     const ro = isReadOnlyTool(t)
                     return (
                       <div key={t.name} data-testid={`mcp-tool-${c.name}-${t.name}`}>
                         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                          <span style={{ color: 'var(--chalk)', fontFamily: 'monospace', fontSize: 13 }}>{t.name}</span>
+                          <span style={{ color: 'var(--chalk)', fontFamily: 'monospace', fontSize: 13 }}>{escapeHidden(t.name).text}</span>
+                          {!isPlainName(t.name) && <span style={{ ...muted, color: 'var(--danger)', fontSize: 11 }}>name has unusual characters</span>}
                           {ro && <span style={{ ...muted, border: '1px solid var(--stone)', borderRadius: 4, padding: '0 4px', fontSize: 11 }}>read-only (claimed by the server)</span>}
                           <select
                             aria-label={`${c.name} ${t.name} mode`}
                             value={mode}
+                            disabled={!!t.unsafe}
                             onChange={e => setMode(c.id, t.name, e.target.value as McpToolMode)}
                             style={{ marginLeft: 'auto' }}
                           >
@@ -269,7 +313,13 @@ export default function McpPicker({ value, onChange, requireExplicit = false }: 
                             <option value="allow">allow</option>
                           </select>
                         </div>
-                        {t.description && <div style={{ ...muted, fontSize: 12 }}>{t.description.length > 200 ? t.description.slice(0, 200) + '…' : t.description}</div>}
+                        {t.description && (
+                          <div style={{ ...muted, fontSize: 12 }}>
+                            {escapeHidden(descriptionCut(t.description)).text}
+                            {escapeHidden(t.description).hidden && <span style={{ ...muted, color: 'var(--danger)', fontSize: 11 }}> contains hidden characters</span>}
+                          </div>
+                        )}
+                        {t.unsafe && <div style={{ ...muted, color: 'var(--danger)', fontSize: 12 }}>cannot be reviewed (hidden characters or too large); off</div>}
                         {mode === 'allow' && !ro && (requireExplicit || preset !== 'allow_all') && (
                           <div role="alert" data-testid={`mcp-warn-${c.name}-${t.name}`} style={{ color: 'var(--danger)', fontSize: 12 }}>
                             Warning: {MCP_ALLOW_WARNING}.

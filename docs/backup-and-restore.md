@@ -167,7 +167,7 @@ in `install/k8s/postgres-statefulset.yaml`.
 | `blerg-secrets`: `BLERG_CORE_LOCAL_KEY`, `POSTGRES_PASSWORD`, the service keys, the daemon token | Secret in namespace `blerg` | **Yes.** Losing `POSTGRES_PASSWORD` locks the components out of the database |
 | `blerg-runner-agent`: the daemon token and any engine credential you pinned in `.env` | Secret in namespace `blerg-runner-sessions` | Only if you pinned credentials or manage it yourself (`AGENT_SECRET_EXTERNAL`). Otherwise the next `deploy.sh` recreates it |
 | `install/k8s/.env`: `REGISTRY`, `TAG`, `DOMAIN` and any `SECRET_*` pins | your checkout, not the cluster | Yes, it is small |
-| Runner data (agent-config bundles, mockups, files agents published and files you uploaded) | `emptyDir` in the runner pod | Lost when the runner pod restarts, by design: the Files panel keeps listing them afterwards, but they cannot be downloaded. Give the runner a volume if you want them kept |
+| Runner data (agent-config bundles, mockups, files agents published and files you uploaded) | PVC `blerg-runner-data` in `blerg` (10Gi), at `/data` in the runner | Yes, to keep those files: a volume snapshot (see below). Without it the Files panel still lists them, marked "no longer available", but they cannot be opened or downloaded |
 | Session Jobs, their per-session Secrets, the images | cluster and registry | No |
 
 ### Back up
@@ -195,6 +195,10 @@ ls -l "$dir"
 
 **Checkpoint:** every file is non-empty and `-rw-------`. `blerg-secrets.json` holds every
 secret of the install in base64, so store it like a password vault.
+
+The runner's files (PVC `blerg-runner-data`) are not in that directory: the runner image has no
+shell or `tar` to copy them out with. Take a volume snapshot if your StorageClass supports one,
+or copy `/data` from a helper pod that mounts the claim while the runner is scaled to 0.
 
 ### Restore
 

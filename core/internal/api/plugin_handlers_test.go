@@ -200,7 +200,7 @@ func TestPluginsAllowlistWildcardAndUnknownEngine(t *testing.T) {
 	if code, _ := pluginReq(t, srv, http.MethodPut, human, putBody{[]pluginspec.Entry{{Marketplace: "file:///x", Plugin: "x"}}}); code != 422 {
 		t.Fatalf("* must still reject invalid sources, got %d", code)
 	}
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/plugins/codex", nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/plugins/unknown-engine", nil)
 	req.Header.Set("Authorization", "Bearer "+human)
 	resp, _ := srv.Client().Do(req)
 	_ = resp.Body.Close()

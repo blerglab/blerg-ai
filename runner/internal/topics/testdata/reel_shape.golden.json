@@ -1,0 +1,135 @@
+{
+  "topics": [
+    {
+      "id": "tp_5f1c2a9e",
+      "source": "marker",
+      "title": "Build the History tab",
+      "status": "done",
+      "outcome": "Shipped on main",
+      "start_seq": 2,
+      "end_seq": 7,
+      "started_at": "2026-10-15T10:02:00Z",
+      "ended_at": "2026-10-15T10:07:00Z",
+      "counts": {
+        "documents": 1,
+        "agents": 1,
+        "commits": 2
+      },
+      "items": [
+        {
+          "type": "request",
+          "seq": 2,
+          "event_id": "e2",
+          "ts": "2026-10-15T10:02:00Z",
+          "text": "Build the History tab per the spec"
+        },
+        {
+          "type": "document",
+          "seq": 4,
+          "event_id": "e4",
+          "ts": "2026-10-15T10:04:00Z",
+          "name": "plan.md",
+          "view": "markdown",
+          "mock": false,
+          "content_type": "text/markdown",
+          "size": 120,
+          "latest_version": 1,
+          "versions_total": 1,
+          "versions": [
+            {
+              "version": 1,
+              "artifact_id": "art1",
+              "created_at": "2026-10-15T10:04:00Z",
+              "in_topic": true,
+              "deleted": false
+            }
+          ]
+        },
+        {
+          "type": "agent",
+          "seq": 5,
+          "event_id": "e5",
+          "ts": "2026-10-15T10:05:00Z",
+          "call_id": "toolu_1",
+          "title": "Implement task 3",
+          "agent_type": "general-purpose",
+          "model": "claude-sonnet-5",
+          "usage": {
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "tool_uses": 37,
+          "duration_ms": 412000,
+          "status": "done"
+        },
+        {
+          "type": "done",
+          "seq": 7,
+          "event_id": "e7",
+          "ts": "2026-10-15T10:07:00Z",
+          "outcome": "Shipped on main",
+          "commits": [
+            {
+              "sha": "1a2b3c4",
+              "url": "https://github.com/example-org/example-repo/commit/1a2b3c4"
+            },
+            {
+              "sha": "9f8e7d6",
+              "url": "https://github.com/example-org/example-repo/commit/9f8e7d6"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "unmarked": {
+    "agents": 1,
+    "documents": [
+      {
+        "type": "document",
+        "seq": 12,
+        "event_id": "e12",
+        "ts": "2026-10-15T10:12:00Z",
+        "name": "notes.md",
+        "view": "markdown",
+        "mock": false,
+        "content_type": "text/markdown",
+        "size": 120,
+        "latest_version": 1,
+        "versions_total": 1,
+        "versions": [
+          {
+            "version": 1,
+            "artifact_id": "art2",
+            "created_at": "2026-10-15T10:12:00Z",
+            "in_topic": true,
+            "deleted": false
+          }
+        ]
+      }
+    ],
+    "subagents": [
+      {
+        "type": "agent",
+        "seq": 13,
+        "event_id": "e13",
+        "ts": "2026-10-15T10:13:00Z",
+        "call_id": "toolu_2",
+        "title": "Check the badge",
+        "agent_type": "general-purpose",
+        "model": "sonnet",
+        "usage": null,
+        "tool_uses": 0,
+        "duration_ms": 0,
+        "status": "running"
+      }
+    ],
+    "first_seq": 12,
+    "last_seq": 13,
+    "started_at": "2026-10-15T10:12:00Z",
+    "ended_at": "2026-10-15T10:13:00Z"
+  },
+  "tokens_hidden": false
+}

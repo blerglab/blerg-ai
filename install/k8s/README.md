@@ -21,7 +21,7 @@ keep secrets out of its transcript.
 
 - [ ] `kubectl` pointed at the target cluster (`kubectl get nodes` lists a `Ready` node).
 - [ ] `docker`, `envsubst` (from gettext) and `openssl` on the machine you deploy from.
-- [ ] A **default StorageClass** (`kubectl get storageclass` shows `(default)`) — Postgres asks for a `5Gi` PVC without naming a class.
+- [ ] A **default StorageClass** (`kubectl get storageclass` shows `(default)`) — Postgres asks for a `5Gi` PVC and the runner for a `10Gi` one (its files) without naming a class. Without a default, set `RUNNER_DATA_STORAGE_CLASS` for the runner's ([Runner data volume](#runner-data-volume)).
 - [ ] An **image registry your cluster's nodes can pull from** (not just your workstation). MicroK8s: `microk8s enable registry` gives `localhost:32000`, the default.
 - [ ] **ingress-nginx** with the ingress class `nginx` (`kubectl get ingressclass`). Another controller needs edits — see [Ingress controller](#ingress-controller-check-6-expanded).
 - [ ] **DNS** for three names pointing at the ingress controller: `<DOMAIN>`, `board.<DOMAIN>` and `runner.<DOMAIN>`.
@@ -79,10 +79,10 @@ kubectl -n blerg logs deploy/blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
 ```
 
 The line reads
-`BLERG_BOOTSTRAP_ADMIN_PASSWORD=<password> (login as provider_subject=<username>; you must change this on first login)`.
+`BLERG_BOOTSTRAP_ADMIN_PASSWORD=<password> (username: <username>; you must change the password on first login and can pick your own username then)`.
 Open `https://<DOMAIN>/`, click **Sign in**, log in with that username and
-password, and you are sent to `/change-password`: pick a real password
-(12–72 characters), then sign in again with it. Details and recovery:
+password, and you are sent to `/change-password`: choose your own username and
+a real password (12–72 characters), then sign in again with them. Details and recovery:
 [First login](#first-login).
 
 ### 5. Add credentials and run a session
@@ -114,6 +114,8 @@ from the environment). `.env.example` lists every one.
 | `CLUSTER_RUNTIME` | `on` | Per-session agent Jobs. `off` (or `false`/`0`/`no`) skips the agent image, the `blerg-runner-sessions` namespace, its RBAC and the agent Secret, and renders the agent image empty (the runner's off switch). |
 | `AGENT_SECRET_EXTERNAL` | unset | `1` (or `true`/`yes`): you manage `blerg-runner-sessions/blerg-runner-agent` yourself; `deploy.sh` never touches it. |
 | `BLERG_ASSUME_YES` | unset | `1` (or `true`/`yes`), or the `--yes`/`-y` flag: do not ask "Deploy to this cluster?" before building and applying. Without a terminal on stdin (an agent, CI, ssh without a tty) the run is refused unless one of these is given, so a non-interactive deploy is always a deliberate one. |
+| `RUNNER_DATA_SIZE` | `10Gi` | Size of the runner's data claim `blerg-runner-data` (published and attached files, agent-config bundles, mockups). Applies only when `deploy.sh` creates the claim — see [Runner data volume](#runner-data-volume). |
+| `RUNNER_DATA_STORAGE_CLASS` | unset (the cluster's default StorageClass) | StorageClass for that claim, e.g. when the cluster has no default or you want another. Also applies only at creation. |
 | `WEBHOOK_ALLOW_PRIVATE` | unset (`false`) | `1` (or `true`/`yes`) renders `BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE: "true"`, allowing completion webhooks to private, loopback and link-local addresses. |
 
 ### Secret pins (`SECRET_*`)
@@ -257,22 +259,27 @@ $EDITOR .env          # set REGISTRY to your own registry, and DOMAIN if you wan
    (the namespace + its RBAC) directly rather than through the kustomization.
    `CLUSTER_RUNTIME=off` skips all of it. No human-supplied secret is needed
    either way — see [`CLUSTER-RUNTIME.md`](CLUSTER-RUNTIME.md).
-5. Renders only the files `kustomization.yaml` lists — substituting
+5. Creates the runner's data claim `blerg-runner-data` (`runner-data-pvc.yaml`,
+   `RUNNER_DATA_SIZE`, optional `RUNNER_DATA_STORAGE_CLASS`) if it does not
+   exist yet — before the Deployment that mounts it. An existing claim is left
+   exactly as it is, and `deploy.sh` never deletes it; it is not in the
+   kustomization. See [Runner data volume](#runner-data-volume).
+6. Renders only the files `kustomization.yaml` lists — substituting
    `${REGISTRY}` / `${TAG}` / `${DOMAIN}` / `${SCHEME}` / `${AGENT_IMAGE}` /
    `${WEBHOOK_ALLOW_PRIVATE}` in a temp copy with `envsubst` — then
    `kubectl apply -k <rendered temp dir>`. `AGENT_IMAGE` is
    `${REGISTRY}/blerg-runner-agent:${TAG}`, or empty with `CLUSTER_RUNTIME=off`.
-6. Restarts the runner (`kubectl -n blerg rollout restart
+7. Restarts the runner (`kubectl -n blerg rollout restart
    deploy/blerg-runner`) unconditionally, then waits for `kubectl -n blerg
    rollout status` on all three Deployments (timeout 180 s). The restart
    matters on re-runs: the runner reads its ConfigMap only at process start,
    and a re-run with an unchanged `TAG` leaves the pod spec byte-identical, so
    `apply -k` would update `blerg-config` without anything picking the new
    values up.
-7. With `CLUSTER_ISSUER` set, annotates `ingress/blerg` with
+8. With `CLUSTER_ISSUER` set, annotates `ingress/blerg` with
    `cert-manager.io/cluster-issuer` and sets its `spec.tls` to the three hosts
    and Secret `blerg-tls`; without it, removes both (see [TLS](#tls)).
-8. Prints the cluster-runtime state and the first-login commands.
+9. Prints the cluster-runtime state and the first-login commands.
 
 `core-deployment.yaml` sets `BLERG_CORE_BEHIND_PROXY=true` because core is
 only ever reached through the ingress here, and ingress-nginx *overwrites*
@@ -302,6 +309,51 @@ tag other than `latest`, the default `imagePullPolicy` (`IfNotPresent`) also
 means a node that already has that tag never re-pulls it, so even the
 restarted runner keeps the old image.
 
+### Runner data volume
+
+The runner keeps the bytes of every file a session published (`blerg-runner
+publish`) or a person attached, uploaded agent-config bundles and mockups under
+`/data` (`BLERG_RUNNER_DATA_DIR`); its database only indexes them. `/data` is the
+PersistentVolumeClaim `blerg-runner-data` (`ReadWriteOnce`, `10Gi` by default),
+so those files survive restarts and deploys.
+
+- **Size and class.** Set `RUNNER_DATA_SIZE` (a quantity such as `20Gi`) and,
+  when the cluster has no default StorageClass or you want another,
+  `RUNNER_DATA_STORAGE_CLASS=<name>` (`kubectl get storageclass` lists them) in
+  `.env` **before the first deploy that creates the claim**. On an existing
+  claim both are ignored: a bound claim's class cannot change, and it can only
+  grow if its StorageClass has `allowVolumeExpansion: true` — then
+  `kubectl -n blerg patch pvc blerg-runner-data -p '{"spec":{"resources":{"requests":{"storage":"20Gi"}}}}'`.
+  A size request is not a hard quota on host-path provisioners.
+- **Recreate, not rolling.** A `ReadWriteOnce` volume is mounted by one node at
+  a time, so the runner Deployment uses the `Recreate` strategy: a rolling
+  update would start the new pod before stopping the old one, and on another
+  node it would wait forever for the volume. A deploy therefore stops the
+  runner for a few seconds; browsers and daemons reconnect by themselves.
+- **Ownership.** The pod sets `fsGroup: 65532` (the runner's user), so a
+  freshly provisioned, root-owned volume is writable — on volume types with
+  ownership management (most CSI and block volumes). In-tree hostPath volumes,
+  such as MicroK8s' `microk8s-hostpath`, ignore `fsGroup`. If the runner's log
+  shows `permission denied` under `/data`, fix the claim once from a helper pod
+  while the runner is stopped (look first: `ls -lan` shows the owner; chown
+  only if it is not `65532`):
+
+  ```sh
+  kubectl -n blerg scale deploy/blerg-runner --replicas=0
+  kubectl -n blerg wait --for=delete pod -l app=blerg-runner --timeout=120s
+  kubectl -n blerg run runner-data-fix --rm -i --restart=Never --image=busybox:1.36 --overrides='{"spec":{"volumes":[{"name":"d","persistentVolumeClaim":{"claimName":"blerg-runner-data"}}],"containers":[{"name":"runner-data-fix","image":"busybox:1.36","command":["ls","-lan","/data"],"volumeMounts":[{"name":"d","mountPath":"/data"}]}]}}'
+  # only if that shows another owner — the same command with:  "command":["chown","-R","65532:65532","/data"]
+  kubectl -n blerg scale deploy/blerg-runner --replicas=1
+  ```
+
+**Upgrading an existing install.** Before this change `/data` was an
+`emptyDir`, emptied on every runner restart. The first `deploy.sh` run after
+the upgrade creates the claim **empty** — there is nothing to migrate: the old
+pod's files are gone already (or go with it). Files published or attached
+before the upgrade stay listed in each session's Files tab, marked "no longer
+available", and cannot be opened or downloaded; delete them there if you like.
+Everything published from then on is kept.
+
 ### Rolling back an upgrade
 
 Before an upgrade, record what is running (`kubectl -n blerg get deploy -o
@@ -309,6 +361,9 @@ wide`, and `kubectl -n blerg get configmap blerg-config -o
 jsonpath='{.data.BLERG_RUNNER_AGENT_IMAGE}'`) and take a [backup](#back-up).
 Database migrations only run forward, so an older build may not start
 against a database a newer one has migrated; then the backup is the way back.
+Migrations 041, 042 and 049 each build an index on `agent_events` at the runner's
+first start, which holds writes to that table (daemon ingest waits) for as
+long as the build takes; a slow first start is not a hang.
 
 `kubectl rollout undo` does **not** roll back a `deploy.sh` upgrade: the
 runner is restarted after the apply, so its previous revision already runs
@@ -337,6 +392,7 @@ You can apply the pieces by hand too:
 ```sh
 kubectl create namespace blerg
 kubectl apply -f secret.example.yaml   # after editing it with real values — do not commit your copy
+RUNNER_DATA_SIZE=10Gi envsubst '${RUNNER_DATA_SIZE}' < runner-data-pvc.yaml | kubectl apply -f -   # once, before the runner; add storageClassName under spec if needed
 kubectl apply -k .                      # applies with the ${...} placeholders literal, unless you envsubst first
 kubectl apply -f cluster-runtime.yaml   # cluster runtime only; never through the kustomization
 ```
@@ -404,7 +460,8 @@ kubectl -n blerg logs deploy/blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
 ```
 
 The line carries both the password and the username
-(`provider_subject=<username>` — a random string, not `admin`).
+(`username: <username>` — a random string, not `admin`; you can choose your own
+on the first password change).
 
 `deploy.sh` prints this same command at the end of every run, but the line
 itself is only ever written **once** — on the first boot that creates the
@@ -417,7 +474,7 @@ and signs the account out everywhere):
 kubectl -n blerg exec deploy/blerg-core -- /blerg-core users set-password --subject <username>
 ```
 
-It prints one line, `provider_subject=<username> password=<one-time>`. If you
+It prints one line, `username=<username> password=<one-time>`. If you
 no longer know the admin username either, look it up:
 
 ```sh
@@ -535,9 +592,12 @@ Sessions execute in one of two places, and both can be live at once:
   throwaway Kubernetes Job per session in the `blerg-runner-sessions`
   namespace. `deploy.sh` sets this up on every run (`CLUSTER_RUNTIME=off` to
   skip it), and it needs no operator-supplied credential: each user adds their
-  own Claude/Codex/Hermes and GitHub credentials in Settings, and sessions run
-  as the user who launched them. Details, the secrets contract and
-  verification: [`CLUSTER-RUNTIME.md`](CLUSTER-RUNTIME.md).
+  own Claude/Codex/Hermes and GitHub credentials in Settings (for Codex, also
+  a managed connection: a device login under Settings → Managed connections),
+  and sessions run as the user who launched them. A new account-owned Claude or
+  Codex session keeps its native conversation on its own PVC, so a replacement
+  pod resumes it. Details, the secrets contract and verification:
+  [`CLUSTER-RUNTIME.md`](CLUSTER-RUNTIME.md).
 - **A workstation daemon — optional.** A human's own machine drives their
   `claude`/`codex`/`hermes` CLI in tmux — the only way to run a Terminal
   session, which a Job pod cannot host. Set-up below.
@@ -586,6 +646,12 @@ chmod 600 install/desktop/.env
 
 See [`install/desktop/DAEMON.md`](../desktop/DAEMON.md) for what the
 service needs (engine login, tmux) and how to check its logs.
+
+When you upgrade the cluster, update the daemon too: `git pull` the same
+commit on the workstation and run `(cd install/desktop && ./daemon/install.sh install)`
+again. Much
+of what a session shows comes from the daemon, and a session left with a
+revoked messaging token is given a new one only when both are updated.
 
 Fetch the daemon token with (it prints the secret — agents: don't run this):
 
@@ -642,7 +708,8 @@ The same procedure for both installs, with a restore drill checklist, is in
 |---|---|---|
 | Postgres data: accounts, boards, sessions, encrypted credentials | PVC `postgres-data-postgres-0` in `blerg` (`5Gi`) | Everything. |
 | `blerg-secrets`, above all `BLERG_CORE_LOCAL_KEY` | Secret in `blerg` | **Losing `BLERG_CORE_LOCAL_KEY` loses every stored credential** — there is no recovery; users must re-enter them. Losing `POSTGRES_PASSWORD` locks the components out of the database. |
-| Runner data (uploaded agent-config bundles, published mockups, files agents published with `blerg-runner publish`) | `emptyDir` at `/data` in the runner pod | Already lost on every runner restart (published files then answer "no longer available"); swap the volume for a PVC in `runner-deployment.yaml` if you need it kept. |
+| Runner data (uploaded agent-config bundles, published mockups, files agents published with `blerg-runner publish`, files people attached) | PVC `blerg-runner-data` in `blerg` (`10Gi`), at `/data` in the runner pod | Those files: they stay listed in the Files tab, marked "no longer available", but cannot be opened or downloaded. Back it up with a volume snapshot, or copy `/data` from a helper pod that mounts the claim while the runner is scaled to 0 (the runner image has no shell or `tar`). |
+| Retained native conversations (account-owned Claude and Codex Cluster sessions) | one PVC per session in `blerg-runner-sessions` (`1Gi` each, `BLERG_RUNNER_NATIVE_HISTORY_*` in `blerg-config`), reclaimed seven days after the session ends | That session's native conversation: replacing its pod then fails explicitly instead of resuming. See [`CLUSTER-RUNTIME.md`](CLUSTER-RUNTIME.md#retained-native-conversations). |
 | `blerg-runner-agent` | Secret in `blerg-runner-sessions` | Recreated by the next `deploy.sh` run (daemon token copied from `blerg-secrets`; optional keys only if pinned in `.env`). |
 
 Session Jobs, their per-session Secrets, and the images are disposable.
@@ -691,7 +758,7 @@ kubectl -n blerg scale deploy/blerg-core deploy/blerg-board deploy/blerg-runner 
 ```
 
 (`./deploy.sh` brings it back.) Remove it completely — **this deletes the
-Postgres PVC and `blerg-secrets`, including `BLERG_CORE_LOCAL_KEY`; back up
+Postgres PVC, the runner data PVC and `blerg-secrets`, including `BLERG_CORE_LOCAL_KEY`; back up
 first, and there is no undo**:
 
 ```sh
@@ -733,6 +800,8 @@ Secret and restart the three Deployments after each `deploy.sh` run.
 | `jwks fetch failed` / `register ... 401` in board's or runner's logs for about the first 15 seconds after a fresh deploy or a core rollout | `kubectl -n blerg logs deploy/blerg-core` | Expected, not a bug: core runs its database migrations on boot before it can serve `/.well-known/jwks` or accept registration, and board/runner race to reach it. Both retry and settle; if the errors persist past ~15–20 s, look for an actual migration failure in core's log. |
 | Pods stuck in `ImagePullBackOff` / `ErrImagePull` | `kubectl -n blerg describe pod <pod>` (Events) | Nodes cannot pull from `REGISTRY`: fix the registry address, or the nodes' containerd trust/insecure-registry config, or their pull credentials ([Image registry](#image-registry-check-5-expanded)). |
 | `postgres-0` `Pending`; core never becomes ready | `kubectl -n blerg get pvc` shows `Pending`; `kubectl get storageclass` has no `(default)` | Install or mark a default StorageClass. On Kubernetes ≥ 1.28 the class-less `Pending` claim picks up the new default by itself — wait a minute first. If it stays `Pending`, delete both the claim (it holds no data yet) and the pod so the StatefulSet recreates them: `kubectl -n blerg delete pvc/postgres-data-postgres-0 pod/postgres-0` (repeat the pod delete if the new pod caught the terminating claim). |
+| `blerg-runner-…` `Pending`; `deploy.sh` times out on the runner | `kubectl -n blerg get pvc blerg-runner-data` shows `Pending`; `kubectl -n blerg describe pvc blerg-runner-data` (Events) | No default StorageClass, or the named one does not exist. Set `RUNNER_DATA_STORAGE_CLASS`; while the claim is still `Pending` (it holds no data yet), stop the runner and delete it, waiting until it is gone: `kubectl -n blerg scale deploy/blerg-runner --replicas=0`, `kubectl -n blerg delete pvc blerg-runner-data --wait=false`, `kubectl -n blerg wait --for=delete pvc/blerg-runner-data --timeout=120s`. Then re-run `deploy.sh`, which recreates the claim and scales the runner back to 1 ([Runner data volume](#runner-data-volume)). |
+| The Files tab marks files "no longer available"; opening one answers `410` | Were they published before the runner data volume existed, or was the claim deleted? | Their bytes are gone; nothing brings them back. Delete them from the Files tab. New files are kept ([Runner data volume](#runner-data-volume)). |
 | Pods `CrashLoopBackOff` with `exec format error` | `kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.architecture}'` vs. `docker version --format '{{.Server.Arch}}'` | Images were built for the wrong CPU architecture. Build on a matching machine and deploy with a new `TAG`. |
 | `deploy.sh` times out at `rollout status` | `kubectl -n blerg get pods`, then `describe`/`logs` of the failing pod | Usually one of the rows above; the Postgres pod is not in that wait list, so check it too. |
 | Every host answers `404` from the ingress | `kubectl get ingressclass`; `kubectl -n blerg get ingress blerg` shows no `ADDRESS` | The controller is not ingress-nginx or uses another class: edit `ingressClassName` and the annotations in `ingress.yaml` ([Ingress controller](#ingress-controller-check-6-expanded)). |
@@ -759,9 +828,10 @@ Secret and restart the three Deployments after each `deploy.sh` run.
 | `postgres-statefulset.yaml` | Postgres 16 StatefulSet + headless Service + PVC |
 | `core-deployment.yaml` | `blerg-core` Deployment + Service (`:8080`) |
 | `board-deployment.yaml` | `blerg-board` Deployment + Service (`:8080`) |
-| `runner-deployment.yaml` | `blerg-runner` Deployment + Service (`:8080`) — server only, see "Connecting the workstation daemon" |
+| `runner-deployment.yaml` | `blerg-runner` Deployment (strategy `Recreate`) + Service (`:8080`) — server only, see "Connecting the workstation daemon" |
+| `runner-data-pvc.yaml` | the runner's data claim `blerg-runner-data`, mounted at `/data`; created once by `deploy.sh`, not in the kustomization ([Runner data volume](#runner-data-volume)) |
 | `ingress.yaml` | host-based routing under `${DOMAIN}` |
-| `kustomization.yaml` | ties the above together (everything except the Secret and `cluster-runtime.yaml`) |
+| `kustomization.yaml` | ties the above together (everything except the Secret, the runner data claim and `cluster-runtime.yaml`) |
 | `deploy.sh` | build, push, generate secrets, apply |
 | `deploy_test.sh` | renders the manifests the way `deploy.sh` does and checks the wiring; no cluster needed |
 | `.env.example` | every setting `deploy.sh` reads |

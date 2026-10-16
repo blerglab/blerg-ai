@@ -103,11 +103,14 @@ no more:
 interface Transport {
   // Replay then live. tail=true asks for the newest page first (how the runner opens a long
   // transcript); onReplayDone carries has_more/has_older/first_seq/last_seq/server_time.
+  // onEvents? takes a replayed page in one call; onReset? drops what is held (see below).
   subscribe(sessionId, opts: {afterSeq?: number; tail?: boolean},
-            handlers: {onEvent; onStreaming; onReplayDone; onStatus; onConnection}): () => void
+            handlers: {onEvent; onEvents?; onStreaming; onReplayDone; onStatus; onConnection;
+                       onReset?; onAskClosed?}): () => void
   loadOlder(sessionId, beforeSeq, limit): Promise<{events; hasOlder; firstSeq; serverTime}>
   session(sessionId): Promise<SessionMeta>   // status, engine, runtime, model, effort, started_at, ended_at
-  send(sessionId, text): Promise<{queued: boolean}>   // false: not connected, nothing was sent
+  send(sessionId, text, opts?: {clientId?; answerTo?}): Promise<{queued: boolean}>  // false: not connected
+  answersAsks?: boolean   // send passes answerTo on (an ask card's reply); absent: no reply box
   stop(sessionId): Promise<void>
   setModel?(sessionId, model, effort): Promise<void>  // optional: the composer's /model and /effort
   connected(): boolean
@@ -133,6 +136,61 @@ only, as the runner's message body does.
 is renewed silently) and may inject its shared socket (the runner's is a module singleton other
 panels use). It works from the runner's origin with a core-issued browser token, which is the
 only place such a token exists; an outside app never uses it.
+
+It hands the events of each replay page (a tail page or a forward page, from the request to its
+`agent_events_replay_done`, with any live event that arrives meanwhile) to `onEvents` in one
+call, so a page is one transcript update (`ingestMany`: deduped by `client_event_id`, sorted
+once) rather than one sort and one render per event; live events after it go to `onEvent` one by
+one and are appended without a re-sort. A forward replay is bounded: a session opened again a
+little behind keeps the transcript the store holds and catches up in a few pages, but one still
+`has_more` after `MAX_FORWARD_PAGES` (5) full pages, about 1000 events, would replay its whole gap
+before showing anything new, so the transport calls `onReset` (the hook drops the events held,
+keeping the clock offset) and asks for the newest page as a reload does, the older part paged in
+behind it through `loadOlder`. A subscriber without `onEvents` or `onReset` is served as before
+(@blerglab/chat 0.4.0).
+
+It also keeps the live transcript whole (@blerglab/chat 0.8.0). The server sends
+`agent_events_gap{session_id, from_seq}` when it had to drop live events for this browser, and
+the transport replays forward from below the first one at once; a hole in the live seqs that is
+still open after `GAP_WAIT_MS` (live delivery is not strictly in seq order) is fetched the same
+way, and a reconnect resumes from below any hole. The transcript dedupes what it already held.
+Each message goes with a client id (`opts.clientId`) the daemon echoes on its `user_message`, and
+on the error that reports it dropped (its queue full): the queued bubble is matched by that id,
+by text only for an event without one (an older daemon, the proxy transport, whose contract
+carries text only). `answerTo` makes the message the answer to that open ask, and
+`onAskClosed` reports an ask the server answered or closed (`message_answered`).
+
+**Drawing a long transcript** (@blerglab/chat 0.5.0). A session of thousands of events used to
+be drawn whole: opening one held from an earlier visit mounted every row in one render (seconds,
+with the router keeping the old page on screen meanwhile), and the hook paged the whole history
+in behind the tail, each page redrawing everything. Now:
+
+- `Transcript` still works out the timeline, day breaks, turn footers and turn times over every
+  event held (cheap), but draws only the newest `WINDOW` (300) rows. The window is pinned by the
+  event its first row starts with, so an older page lands out of sight and live events appended
+  at the bottom are always drawn; it goes back to the newest rows for another session, and,
+  while the reader follows the bottom, whenever more than twice `WINDOW` rows are drawn (a long
+  live visit stays bounded).
+- A zero-height sentinel above the first drawn row is watched by an `IntersectionObserver`
+  (800 px ahead of the view): in view, it reveals 300 more rows, or, with every held row drawn
+  and `hasOlder`, calls `onLoadOlder` once (not again while that page is in flight; after a page
+  that brought nothing, not again while the sentinel stays in view, so a failed fetch does not
+  loop, but once more when it leaves view and comes back). The view keeps the first previously
+  drawn row where it was on screen when rows go in above it; a reader at the bottom stays there.
+- `useSession` fetches one older page after the tail (so there is something to scroll into),
+  one after a reconnect and one on a later visit, and otherwise only when asked. `loadingOlder`
+  is true while a page is in flight; the "Loading earlier messages" line and the hidden
+  scrollbar thumb follow it, not `hasOlder`, which can stay true as long as nobody scrolls up.
+- `Transcript` is memoised and `ChatView` keeps its props stable (the ready card, the start
+  panel's attempt and session row, `useSession`'s `meta`); the working line ticks in its own
+  component, so neither a keystroke nor the turn clock redraws the timeline. `buildTimeline`
+  takes the previous timeline and hands an unchanged tool group its previous entries.
+- On a revisit to a session whose held transcript is longer than the window, `ChatView`'s first
+  render draws the skeleton, so the switch paints at once, and the transcript follows on the next
+  frame (a `requestAnimationFrame` sets a `painted` flag: an ordinary update, not a transition,
+  so store updates and the clock's tick cannot restart it). The runner's session list also
+  highlights the clicked row optimistically (`useOptimistic`, in the same transition as the
+  navigation).
 
 **`ProxyTransport`** talks to the app's own backend over the **proxy contract**, which mirrors
 the runner's v1 operations one to one (same bodies, same frames, A and B included):

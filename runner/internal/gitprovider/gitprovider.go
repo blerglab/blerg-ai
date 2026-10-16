@@ -52,6 +52,8 @@ type Provider interface {
 	// (public repositories, or a token injected later). The result with a
 	// token is a secret: never log it — see RedactURL.
 	CloneURL(owner, name, token string) string
+	// CommitURL is the web page of commit sha in owner/name.
+	CommitURL(owner, name, sha string) string
 	// ListMine lists the repositories token's owner can see on this service,
 	// most recently active first, capped at MaxListedRepos.
 	ListMine(ctx context.Context, token string) ([]Repo, error)
@@ -210,6 +212,16 @@ func (r *Registry) ParseFullName(providerID, full string) (Ref, bool) {
 	return Ref{Provider: p.ID(), Owner: owner, Name: name}, true
 }
 
+// CommitURL is the web page of commit sha in ref, when ref's provider is
+// registered and its owner and name meet that provider's naming rules.
+func (r *Registry) CommitURL(ref Ref, sha string) (string, bool) {
+	p, ok := r.ProviderForCredentialKind(ref.Provider)
+	if !ok || !p.ValidOwnerName(ref.Owner) || !p.ValidRepoName(ref.Name) {
+		return "", false
+	}
+	return p.CommitURL(ref.Owner, ref.Name, sha), true
+}
+
 // TokenUserForHost is the HTTPS username to pair with a token for a clone URL
 // on host: the registered provider's own, else GitHub's historical
 // "x-access-token" (what the runner always used before providers existed).
@@ -333,6 +345,12 @@ func remotePath(raw, host string) (string, bool) {
 		return "", false
 	}
 	return path, true
+}
+
+// webURL is https://host/<path>, each segment escaped.
+func webURL(host string, segs ...string) string {
+	u := url.URL{Scheme: "https", Host: host, Path: "/" + strings.Join(segs, "/")}
+	return u.String()
 }
 
 // httpsCloneURL is the shared shape of every provider's clone URL.

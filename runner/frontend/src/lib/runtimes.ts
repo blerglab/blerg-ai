@@ -10,6 +10,7 @@ export interface RunDaemon {
   status?: string
   sandbox_available?: boolean
   available_engines?: string[]
+  codex_restricted?: boolean
 }
 
 export type RunRuntime = 'cluster' | 'docker' | 'daemon'
@@ -35,6 +36,13 @@ export const RUNTIME_CARDS: { id: RunRuntime; title: string; body: string }[] = 
     body: 'Runs directly on the daemon host, as you, with full filesystem access.',
   },
 ]
+
+// Where a running session is, in a few words (the ready card, the side panel's Session facts).
+export const RUNTIME_LABELS: Record<string, string> = {
+  cluster: 'Cluster pod',
+  docker: 'Local sandbox',
+  daemon: 'This machine',
+}
 
 export const TERMINAL_NEEDS_DAEMON = 'Terminal sessions run on a daemon.'
 export const AGENT_NO_PROMPTS = 'Agent sessions run without permission prompts.'

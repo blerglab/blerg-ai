@@ -9,6 +9,7 @@ import * as wsMock from '../test/wsMock'
 import { makeDaemon, makeSession } from '../test/fixtures'
 import { arrowSeq, KEY_SEQ } from '../terminalKeys'
 import type { SessionInfo, MessageInfo } from '../types'
+import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 
 vi.mock('../ws', () => import('../test/wsMock'))
 
@@ -81,6 +82,79 @@ describe('SessionDetail', () => {
     expect(screen.getByTestId('caps-unavailable')).toHaveTextContent('Not available for terminal sessions')
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('opens this session\'s Insights from the header, and Escape closes it', async () => {
+    seedSession({ title: 'Fix the bug', status: 'running' })
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderDetail()
+    fireEvent.click(screen.getByTestId('session-insights-toggle'))
+    expect(screen.getByRole('dialog', { name: 'Fix the bug · Insights' })).toBeInTheDocument()
+    await waitFor(() => expect(fetchMock.mock.calls.some((c) => String((c as unknown[])[0]).includes('/api/sessions/sess-a/insights'))).toBe(true))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load insights')
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('on a phone the header\'s Insights button is an icon with a name, so it never squeezes the title out', () => {
+    const desktop = window.matchMedia
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: true, media: query, onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    }))
+    try {
+      seedSession({ title: 'Fix the bug', status: 'running' })
+      renderDetail()
+      const toggle = screen.getByTestId('session-insights-toggle')
+      expect(toggle).toHaveAccessibleName('Insights')
+      expect(toggle.textContent).toBe('')
+      expect(toggle.querySelector('svg')).not.toBeNull()
+      expect(toggle).toHaveAttribute('title', "This session's time, work, tokens and cost")
+    } finally {
+      window.matchMedia = desktop
+    }
+  })
+
+  // A background command the agent left running, as the session's transcript holds it.
+  function seedBackgroundTask(sessionId = 'sess-a') {
+    const at = new Date(Date.now() - 65_000).toISOString()
+    const ev = (seq: number, kind: string, payload: unknown): AgentEvent =>
+      ({ session_id: sessionId, client_event_id: `bg${seq}`, seq, ts: at, kind, payload } as AgentEvent)
+    useTranscriptStore.setState({ sessions: {} })
+    const store = useTranscriptStore.getState()
+    store.ingest(ev(1, 'tool_call', { tool: 'Bash', call_id: 'c1', input: { command: 'make deploy', run_in_background: true } }))
+    store.ingest(ev(2, 'background_task_started', { task_id: 'b1', call_id: 'c1', kind: 'bash', description: 'Wait for the deploy', started_at: at }))
+  }
+
+  it('lists what runs in the background in the side panel, not in a chip, a popover or the conversation', async () => {
+    seedSession({ kind: 'agent', title: 'Ship it', status: 'idle' })
+    seedBackgroundTask()
+    renderDetail()
+    expect(screen.queryByTestId('background-head-chip')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('background-strip')).not.toBeInTheDocument()
+    // This stub's server cannot answer the live state: the page reads the chat's loaded events.
+    await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('1'))
+    expect(screen.getByTestId('rail-task')).toHaveTextContent('Wait for the deploy')
+  })
+
+  it('on a phone the side panel toggle is an icon with a name and its count', async () => {
+    const desktop = window.matchMedia
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: true, media: query, onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    }))
+    try {
+      seedSession({ kind: 'agent', status: 'running' })
+      seedBackgroundTask()
+      renderDetail()
+      const toggle = screen.getByTestId('rail-toggle')
+      await waitFor(() => expect(toggle.textContent).toBe('1'))
+      expect(toggle.querySelector('svg')).not.toBeNull()
+      expect(toggle).toHaveAccessibleName('Session panel: 1 running')
+    } finally {
+      window.matchMedia = desktop
+    }
   })
 
   it('shows "Session not found" for an unknown id', () => {
@@ -423,10 +497,10 @@ describe('SessionDetail', () => {
     })
   })
 
-  it('shows the posture banner for each runtime', () => {
-    seedSession({ runtime: 'docker', skip_permissions: true })
+  it.each(['claude', 'codex', 'hermes'])('describes the Docker posture for %s using its own engine login', engine => {
+    seedSession({ runtime: 'docker', engine, skip_permissions: true })
     renderDetail()
-    expect(screen.getByTestId('posture-banner')).toHaveTextContent('Docker sandbox — repo mounted at /workspace; your ~/.claude is shared · permission prompts bypassed')
+    expect(screen.getByTestId('posture-banner')).toHaveTextContent('Docker sandbox — repo mounted at /workspace; using your engine login · permission prompts bypassed')
   })
   it('does not call a cluster agent session unsandboxed', () => {
     seedSession({ kind: 'agent', runtime: 'cluster' })
@@ -455,6 +529,33 @@ describe('SessionDetail', () => {
     seedSession({ kind: 'agent', ...over })
     renderDetail()
     expect(screen.queryByTestId('detail-unattended')).not.toBeInTheDocument()
+  })
+
+  it('has a Show thinking checkbox that is on by default, toggles and persists', () => {
+    localStorage.removeItem('blerg-runner.chat.thinking')
+    seedSession({ kind: 'agent', status: 'idle' })
+    renderDetail()
+    const box = screen.getByRole('checkbox', { name: 'Show thinking' })
+    expect(box).toBeChecked()
+    fireEvent.click(box)
+    expect(box).not.toBeChecked()
+    expect(localStorage.getItem('blerg-runner.chat.thinking')).toBe('0')
+    fireEvent.click(box)
+    expect(box).toBeChecked()
+    expect(localStorage.getItem('blerg-runner.chat.thinking')).toBe('1')
+  })
+
+  it('draws thinking only while Show thinking is on', () => {
+    localStorage.setItem('blerg-runner.chat.thinking', '0')
+    seedSession({ kind: 'agent', status: 'idle' })
+    useTranscriptStore.getState().ingest({
+      session_id: 'sess-a', client_event_id: 'th1', seq: 1, ts: '2026-06-23T10:00:00Z', kind: 'assistant_thinking', payload: { text: 'pondering' },
+    } as AgentEvent)
+    renderDetail()
+    expect(screen.queryByTestId('thinking')).not.toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Show thinking' })).not.toBeChecked()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Show thinking' }))
+    expect(screen.getByTestId('thinking')).toHaveTextContent('pondering')
   })
 
   it('does not carry the chat draft from one agent session to the next', () => {

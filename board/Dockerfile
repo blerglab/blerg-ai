@@ -8,12 +8,15 @@ FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d8
 WORKDIR /src
 COPY contracts/ /src/contracts/
 COPY board/ /src/board/
+COPY VERSION /src/VERSION
 WORKDIR /src/board
 RUN go mod download
 # The build context is a COPY, not a git checkout, so `git describe` can
 # never succeed here (M6) — pass the version in explicitly instead.
+# release is the repository's VERSION file; commit is the short git commit, passed in.
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o blerg-board-server ./cmd/blerg-board-server && \
+ARG COMMIT=
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION} -X main.release=$(tr -d '[:space:]' < /src/VERSION) -X main.commit=${COMMIT}" -o blerg-board-server ./cmd/blerg-board-server && \
     CGO_ENABLED=0 GOOS=linux go build -o blerg-board ./cmd/blerg-board
 
 # Stage 2: SPA

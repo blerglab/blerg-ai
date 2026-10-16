@@ -32,6 +32,26 @@ describe("Shell nav", () => {
     await screen.findByText("Boards");
     expect(screen.queryByText("Tokens")).toBeNull();
   });
+  it("shows the release version and commit beside the Board title", async () => {
+    responses["/api/me"] = { kind: "service", is_admin: false, is_human: true };
+    responses["/api/version"] = { version: "510d0c0", release: "0.2.0", commit: "510d0c0" };
+    render(<MemoryRouter><Shell><div /></Shell></MemoryRouter>);
+    const el = await screen.findByText(/v0\.2\.0/);
+    expect(el).toHaveTextContent("v0.2.0 · 510d0c0");
+    expect(el).toHaveAttribute("title", expect.stringContaining("release 0.2.0"));
+  });
+  it("shows no version when /api/version fails, rather than an ellipsis", async () => {
+    responses["/api/me"] = { kind: "service", is_admin: false, is_human: true };
+    const mock = vi.mocked(api);
+    const impl = mock.getMockImplementation()!;
+    mock.mockImplementation((path: string) => (path === "/api/version" ? Promise.reject(new Error("down")) : impl(path)));
+    render(<MemoryRouter><Shell><div /></Shell></MemoryRouter>);
+    await screen.findByText("Boards");
+    await waitFor(() => expect(mock).toHaveBeenCalledWith("/api/version"));
+    expect(screen.queryByText("…")).toBeNull();
+    expect(document.querySelector(".build-version")).toBeNull();
+    mock.mockImplementation(impl);
+  });
   it("shows the Tokens link to admins", async () => {
     responses["/api/me"] = { kind: "service", is_admin: true, is_human: true };
     render(<MemoryRouter><Shell><div /></Shell></MemoryRouter>);

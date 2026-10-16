@@ -1,0 +1,714 @@
+/* The session page's side panel: a column beside the chat on a wide screen, a drawer over it on a
+   narrow one. Painted from the app's panel tokens (the Skills & plugins and Insights dialogs'). */
+
+.session-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--scree);
+  color: var(--chalk);
+  font-size: var(--text-sm);
+}
+
+.session-rail[hidden] {
+  display: none;
+}
+
+/* Wide: a column the height of the page below the header; the chat beside it gives up the width. */
+.session-rail.panel {
+  width: 340px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--stone);
+}
+
+/* Narrow: a drawer from the right edge, over a dimmed page, the full height of the screen. */
+.rail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  justify-content: flex-end;
+  background: color-mix(in srgb, var(--basalt) 70%, transparent);
+}
+
+.session-rail.drawer {
+  width: min(360px, calc(100vw - 32px));
+  height: 100%;
+  border-left: 1px solid var(--stone);
+  box-shadow: var(--shadow);
+  animation: rail-in 0.18s ease-out;
+}
+
+@keyframes rail-in {
+  from { transform: translateX(24px); opacity: 0.6; }
+  to { transform: none; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-rail.drawer { animation: none; }
+}
+
+.rail-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 8px 16px;
+  border-bottom: 1px solid var(--stone);
+}
+
+.rail-heading {
+  flex: 1;
+  margin: 0;
+  font-family: var(--display);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.rail-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--fog);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 5px 7px;
+}
+
+.rail-close:hover,
+.rail-close:focus-visible {
+  border-color: var(--stone);
+  color: var(--chalk);
+}
+
+.rail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 0 16px;
+}
+
+.rail-section {
+  padding: 10px 16px 12px;
+}
+
+.rail-section + .rail-section {
+  border-top: 1px solid var(--scree-2);
+}
+
+.rail-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fog);
+}
+
+.rail-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--scree-2);
+  color: var(--fog-dim);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  letter-spacing: 0;
+}
+
+.rail-count.attention {
+  background: color-mix(in srgb, var(--amber) 22%, transparent);
+  color: var(--amber);
+}
+
+.rail-count.running {
+  background: color-mix(in srgb, var(--lichen) 18%, transparent);
+  color: var(--lichen);
+}
+
+.rail-empty {
+  margin: 0;
+  color: var(--fog-dim);
+  font-size: var(--text-xs);
+}
+
+.rail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rail-item {
+  padding: 8px 10px;
+  border: 1px solid var(--stone);
+  border-radius: 8px;
+  background: var(--basalt);
+  min-width: 0;
+}
+
+.rail-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rail-item-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--chalk);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.rail-item-kicker {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+.rail-wait {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--fog-dim);
+}
+
+.rail-item-line {
+  margin-top: 3px;
+  font-size: var(--text-xs);
+  color: var(--fog-dim);
+  overflow-wrap: anywhere;
+}
+
+.rail-item-line.doing {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fog);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail-item-line.bad {
+  color: var(--danger);
+}
+
+.rail-clock {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fog-dim);
+}
+
+.rail-glyph {
+  flex-shrink: 0;
+  display: inline-block;
+  width: 1em;
+  text-align: center;
+}
+
+.rail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.rail-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--stone);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--fog);
+  white-space: nowrap;
+}
+
+.rail-chip.status {
+  color: var(--lichen);
+  border-color: color-mix(in srgb, var(--lichen) 40%, var(--stone));
+}
+
+.rail-spin {
+  width: 8px;
+  height: 8px;
+  border: 2px solid color-mix(in srgb, var(--lichen) 30%, transparent);
+  border-top-color: var(--lichen);
+  border-radius: 50%;
+  animation: rail-rotate 0.8s linear infinite;
+}
+
+@keyframes rail-rotate {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-spin { animation: none; }
+}
+
+/* A subagent running in the background (the turn went on without it): dashed, as its card is in
+   the transcript. */
+.rail-sub.background {
+  border-style: dashed;
+}
+
+.rail-sub-icon {
+  color: var(--fog-dim);
+}
+
+.rail-task.failed {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--stone));
+}
+
+.rail-task.done {
+  opacity: 0.8;
+}
+
+.rail-task .bg-icon {
+  flex-shrink: 0;
+}
+
+.rail-task-state {
+  color: var(--lichen);
+}
+
+.rail-ask {
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--stone));
+}
+
+.rail-ask-text {
+  color: var(--chalk);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 9.5em;
+  overflow-y: auto;
+}
+
+.rail-reply {
+  margin-top: 8px;
+}
+
+.rail-reply .ask-reply-box {
+  font-size: var(--text-sm);
+  padding: 6px 8px;
+  background: var(--scree);
+}
+
+.rail-reply .ask-reply-send {
+  padding: 5px 12px;
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rail-reply .ask-reply-send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.rail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  margin-top: 6px;
+}
+
+.rail-link {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  text-decoration: none;
+}
+
+.rail-link:hover,
+.rail-link:focus-visible {
+  text-decoration: underline;
+}
+
+.rail-missing {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--fog-dim);
+}
+
+.rail-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.rail-facts div {
+  display: contents;
+}
+
+.rail-facts dt {
+  font-size: var(--text-xs);
+  color: var(--fog-dim);
+}
+
+.rail-facts dd {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--chalk);
+  overflow-wrap: anywhere;
+}
+
+.rail-session-links {
+  margin-top: 10px;
+}
+
+/* The header button that opens and closes the panel, with the count of what needs you or runs. */
+.rail-toggle {
+  position: relative;
+}
+
+.rail-toggle[aria-expanded="true"] {
+  opacity: 1;
+  border-color: var(--accent-border);
+}
+
+.rail-badge {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--scree-2);
+  color: var(--fog);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.rail-badge.attention {
+  background: var(--amber);
+  color: var(--basalt);
+}
+
+/* Said to a screen reader, not drawn: the live announcement, and words a row reads out (.rail-sr). */
+.rail-announce,
+.rail-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Live · History: the panel's two views. */
+.rail-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 12px 0;
+  border-bottom: 1px solid var(--scree-2);
+}
+
+.rail-tab {
+  padding: 4px 7px 6px;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fog-dim);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.rail-tab-count {
+  display: inline-block;
+  margin-left: 4px;
+}
+
+.rail-tab.on {
+  color: var(--chalk);
+  border-bottom-color: var(--accent);
+}
+
+.rail-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* History: topic cards and their timelines. */
+.reel-list,
+.reel-note {
+  padding: 10px 16px 12px;
+}
+
+.reel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reel-now {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--lichen);
+}
+
+.reel-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0 0 0 10px;
+  list-style: none;
+  border-left: 1px solid var(--stone);
+}
+
+.reel-row {
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.reel-who,
+.reel-time {
+  color: var(--fog-dim);
+}
+
+.reel-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.reel-chip {
+  padding: 0 7px;
+  border: 1px solid var(--stone);
+  border-radius: 999px;
+  color: var(--chalk);
+  font-size: 11px;
+  line-height: 18px;
+  text-decoration: none;
+}
+
+.reel-chip.in-topic {
+  background: var(--accent);
+  border-color: var(--accent);
+  /* A fixed dark ink, not --basalt (light in the light theme): AA on the accent in both themes
+     (6.7:1 on the dark theme's blaze, 4.7:1 on the light theme's). */
+  color: #0d1117;
+  font-weight: 600;
+}
+
+.reel-chip.deleted,
+.reel-chip.missing {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.reel-thumb {
+  width: 40px;
+  height: 28px;
+  object-fit: cover;
+  border: 1px solid var(--stone);
+  border-radius: 4px;
+}
+
+.rail-chip.reel-status-error {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--stone));
+}
+
+.rail-chip.reel-status-done,
+.rail-chip.reel-status-stopped {
+  color: var(--fog-dim);
+  border-color: var(--stone);
+}
+
+/* A card's disclosure: a caret before the title, turned when the timeline is open. */
+.reel-caret::before {
+  content: '▸';
+  display: inline-block;
+  width: 10px;
+  color: var(--fog-dim);
+  font-size: 10px;
+}
+
+.reel-head[aria-expanded='true'] .reel-caret::before {
+  content: '▾';
+}
+
+.reel-icon {
+  flex-shrink: 0;
+}
+
+/* A commit: its short sha in the code face; a button (no repository known) copies it. */
+.reel-chip.reel-commit {
+  font-family: var(--mono);
+  background: none;
+  cursor: pointer;
+}
+
+.reel-chip.reel-commit.copied {
+  border-color: var(--accent);
+}
+
+.reel-copied {
+  color: var(--fog-dim);
+  font-size: 11px;
+  line-height: 20px;
+}
+
+.reel-chip.older {
+  border-style: dashed;
+  color: var(--fog-dim);
+}
+
+/* The work no topic holds: one quiet line after the cards, opening onto its files and one line per
+   subagent. */
+.reel-rest {
+  padding: 0 16px 12px;
+  font-size: var(--text-xs);
+}
+
+.reel-note + .reel-rest {
+  margin-top: -4px;
+}
+
+.reel-rest > .reel-head {
+  color: var(--fog-dim);
+}
+
+.reel-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.reel-line-mark {
+  flex-shrink: 0;
+  color: var(--fog-dim);
+}
+
+.reel-line-mark.reel-status-error {
+  color: var(--danger);
+}
+
+.reel-line-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--chalk);
+}
+
+.reel-line-meta {
+  flex-shrink: 0;
+  color: var(--fog-dim);
+}
+
+/* Files: the chat's Files list, in the panel's width (rows wrap their actions under the name). */
+.rail-files {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 16px 12px;
+}
+
+.rail-files-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 4px 0 8px;
+  font-size: var(--text-xs);
+  color: var(--fog-dim);
+}
+
+.rail-files .artifact-row-main {
+  flex-basis: 100%;
+}
+
+.rail-files .artifact-empty {
+  padding-top: 16px;
+}
+
+/* Capabilities: the Skills & plugins content, its filter and groups in the panel's scroll. */
+.rail-capabilities {
+  display: flex;
+  flex-direction: column;
+  padding-top: 8px;
+}
+
+.rail-capabilities .caps-body {
+  overflow: visible;
+  padding: 0 8px 8px;
+}
+
+/* Settings for the session and its transcript. */
+.rail-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rail-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--chalk);
+  cursor: pointer;
+}
+
+.rail-check input {
+  margin: 0;
+  accent-color: var(--accent);
+}

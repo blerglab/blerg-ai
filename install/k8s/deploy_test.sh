@@ -175,12 +175,69 @@ grep -qF 'blerg-runner-mcp-gateway' "$here/CLUSTER-RUNTIME.md" || { echo "FAIL: 
 # Session pods must not reach core, and the board only through the commented-out opt-in rule.
 grep -vE '^\s*#' "$here/networkpolicy-sessions.example.yaml" | grep -qE 'app: blerg-(core|board)' && { echo "FAIL: networkpolicy-sessions.example.yaml lets session pods reach core or the board by default"; fail=1; }
 
+# The runner's data directory is a persistent claim, not an emptyDir: the database indexes the
+# files in it, so it must survive a restart. The claim is ReadWriteOnce, so the Deployment must
+# Recreate (a rolling update deadlocks on it); deploy.sh creates it before applying the Deployment,
+# never re-applies or deletes it, and it stays out of the kustomization.
+runner_doc="$(awk 'BEGIN{RS="\n---\n"} /kind: Deployment/ && /name: blerg-runner\n/ {print}' "$tmp/runner-deployment.yaml" | grep -vE '^\s*#')"
+[ -n "$runner_doc" ] || { echo "FAIL: could not isolate the runner Deployment"; fail=1; }
+grep -qE '^\s+type: Recreate\s*$' <<<"$runner_doc" || { echo "FAIL: the runner Deployment's strategy is not Recreate"; fail=1; }
+grep -qE 'emptyDir' <<<"$runner_doc" && { echo "FAIL: the runner Deployment still mounts an emptyDir"; fail=1; }
+grep -qE '^\s+claimName: blerg-runner-data\s*$' <<<"$runner_doc" || { echo "FAIL: the runner's data volume is not the blerg-runner-data claim"; fail=1; }
+grep -A1 -E '^\s+- name: data\s*$' <<<"$runner_doc" | grep -qE '^\s+mountPath: /data\s*$' \
+  || { echo "FAIL: the data volume is not mounted at /data"; fail=1; }
+grep -qE '^\s+fsGroup: 65532\s*$' <<<"$runner_doc" || { echo "FAIL: the runner pod has no fsGroup for its data volume"; fail=1; }
+grep -qF 'runner-data-pvc.yaml' "$here/kustomization.yaml" && { echo "FAIL: the data claim is in the kustomization (delete -k would take the files)"; fail=1; }
+claim="$(runner_data_claim_render "$here/runner-data-pvc.yaml" 10Gi | grep -vE '^\s*#')"
+grep -qE '^kind: PersistentVolumeClaim$' <<<"$claim" && grep -qE '^  name: blerg-runner-data$' <<<"$claim" && grep -qE '^  namespace: blerg$' <<<"$claim" \
+  || { echo "FAIL: runner-data-pvc.yaml is not the blerg-runner-data claim in namespace blerg"; fail=1; }
+grep -qF 'accessModes: ["ReadWriteOnce"]' <<<"$claim" || { echo "FAIL: the data claim is not ReadWriteOnce"; fail=1; }
+grep -qE '^      storage: 10Gi$' <<<"$claim" || { echo "FAIL: RUNNER_DATA_SIZE not rendered into the claim"; fail=1; }
+grep -q 'storageClassName' <<<"$claim" && { echo "FAIL: no storage class given, yet the claim names one"; fail=1; }
+grep -q '\${' <<<"$claim" && { echo "FAIL: unsubstituted placeholder in the data claim"; fail=1; }
+classed="$(runner_data_claim_render "$here/runner-data-pvc.yaml" 20Gi fast-ssd | grep -vE '^\s*#')"
+awk '/^spec:/{s=1;next} s&&/^  storageClassName: fast-ssd$/{ok=1} END{exit !ok}' <<<"$classed" \
+  || { echo "FAIL: RUNNER_DATA_STORAGE_CLASS not rendered under spec"; fail=1; }
+( runner_data_claim_render "$here/runner-data-pvc.yaml" '10Gi; rm' 2>/dev/null ) && { echo "FAIL: a bad RUNNER_DATA_SIZE was accepted"; fail=1; }
+( runner_data_claim_render "$here/runner-data-pvc.yaml" 10Gi 'Bad Class' 2>/dev/null ) && { echo "FAIL: a bad RUNNER_DATA_STORAGE_CLASS was accepted"; fail=1; }
+claim_line="$(grep -nF 'runner_data_claim_render "$script_dir/runner-data-pvc.yaml"' "$here/deploy.sh" | head -1 | cut -d: -f1)"
+apply_line="$(grep -nE '^kubectl apply -k "\$render_dir"' "$here/deploy.sh" | head -1 | cut -d: -f1)"
+{ [ -n "$claim_line" ] && [ -n "$apply_line" ] && [ "$claim_line" -lt "$apply_line" ]; } \
+  || { echo "FAIL: deploy.sh does not create the data claim before applying the Deployment"; fail=1; }
+grep -qF 'runner_data_claim_check "$RUNNER_DATA_SIZE" "$RUNNER_DATA_STORAGE_CLASS"' "$here/deploy.sh" \
+  || { echo "FAIL: deploy.sh does not check for an existing data claim before creating one"; fail=1; }
+# runner_data_claim_check against a stubbed kubectl: absent -> 2 (create), present -> 0 (left alone,
+# size and class printed, a mismatch warned about), being deleted or unreadable -> 1 (stop).
+claim_check() { # $1 = what the stub answers, $2 = its exit status, $3.. = the check's arguments
+  local answer="$1" status="$2"; shift 2
+  kubectl() { printf '%s' "$answer"; return "$status"; }
+  local rc=0
+  runner_data_claim_check "$@" >"$tmp/claim.out" 2>&1 || rc=$?
+  unset -f kubectl
+  return "$rc"
+}
+rc=0; claim_check 'Error from server (NotFound): persistentvolumeclaims "blerg-runner-data" not found' 1 10Gi || rc=$?
+[ "$rc" -eq 2 ] || { echo "FAIL: a missing claim is not reported as absent ($rc)"; fail=1; }
+rc=0; claim_check '10Gi|microk8s-hostpath|' 0 10Gi || rc=$?
+{ [ "$rc" -eq 0 ] && grep -qF '10Gi, storage class: microk8s-hostpath' "$tmp/claim.out" && ! grep -q warning "$tmp/claim.out"; } \
+  || { echo "FAIL: an existing matching claim is not left alone with its size and class printed"; fail=1; }
+rc=0; claim_check '10Gi|standard|' 0 20Gi fast-ssd || rc=$?
+{ [ "$rc" -eq 0 ] && [ "$(grep -c warning "$tmp/claim.out")" -eq 2 ]; } \
+  || { echo "FAIL: a size or class mismatch on an existing claim is not warned about"; fail=1; }
+rc=0; claim_check '10Gi|standard|2026-10-16T10:00:00Z' 0 10Gi || rc=$?
+{ [ "$rc" -eq 1 ] && grep -q 'being deleted' "$tmp/claim.out"; } || { echo "FAIL: a claim being deleted does not stop the deploy"; fail=1; }
+rc=0; claim_check 'error: You must be logged in to the server (Unauthorized)' 1 10Gi || rc=$?
+[ "$rc" -eq 1 ] || { echo "FAIL: an unreadable claim (not NotFound) does not stop the deploy ($rc)"; fail=1; }
+grep -vE '^\s*#' "$here/deploy.sh" | grep -qE 'delete (pvc|persistentvolumeclaim)|blerg-runner-data.*delete' && { echo "FAIL: deploy.sh deletes the data claim"; fail=1; }
+
 if [ -n "${BLERG_SKIP_KUBECTL:-}" ]; then
   echo "skip: BLERG_SKIP_KUBECTL set (dry-run not exercised)"
 elif command -v kubectl >/dev/null 2>&1; then
   kubectl apply -k "$tmp" --dry-run=client -o name >/dev/null || { echo "FAIL: kustomize dry-run"; fail=1; }
   kubectl apply -f "$here/cluster-runtime.yaml" --dry-run=client -o name >/dev/null \
     || { echo "FAIL: cluster-runtime.yaml dry-run"; fail=1; }
+  printf '%s\n' "$claim" | kubectl apply -f - --dry-run=client -o name >/dev/null \
+    || { echo "FAIL: runner-data-pvc.yaml dry-run"; fail=1; }
 else
   echo "skip: kubectl not on PATH (dry-run not exercised)"
 fi

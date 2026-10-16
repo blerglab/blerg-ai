@@ -41,7 +41,7 @@ func NewEmbedderFromEnv() Embedder {
 	if model == "" {
 		model = "voyage-3-lite"
 	}
-	return &voyageEmbedder{apiKey: key, model: model, client: &http.Client{Timeout: 30 * time.Second}}
+	return &voyageEmbedder{apiKey: key, model: model, client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
 func (v *voyageEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
@@ -58,16 +58,16 @@ func (v *voyageEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return nil, fmt.Errorf("voyage: %d: %s", resp.StatusCode, raw)
+		return nil, fmt.Errorf("embedding service returned status %d", resp.StatusCode)
 	}
 	var out struct {
 		Data []struct {
 			Embedding []float32 `json:"embedding"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20+1))
+	if err != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &out) != nil {
+		return nil, fmt.Errorf("embedding service returned an invalid response")
 	}
 	vecs := make([][]float32, len(out.Data))
 	for i, d := range out.Data {
@@ -104,16 +104,21 @@ type memoryWriteRequest struct {
 // HandlePostMemory upserts a memory (bearer: daemon token), embedding at
 // write time when an embedder is configured.
 func (a *API) HandlePostMemory(w http.ResponseWriter, r *http.Request) {
-	if !checkBearerToken(w, r, a.daemonToken) {
+	session, ok := a.authDataPlane(w, r)
+	if !ok {
 		return
 	}
 	if a.dbPool == nil {
 		writeError(w, http.StatusServiceUnavailable, "no database")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
 	var req memoryWriteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Project == "" || req.Name == "" {
 		writeError(w, http.StatusBadRequest, "project, name, content required")
+		return
+	}
+	if !dataPlaneProject(w, session, req.Project) {
 		return
 	}
 	if len(req.Content) > 64<<10 {
@@ -138,7 +143,8 @@ func (a *API) HandlePostMemory(w http.ResponseWriter, r *http.Request) {
 
 // HandleDeleteMemory removes a memory (bearer: daemon token).
 func (a *API) HandleDeleteMemory(w http.ResponseWriter, r *http.Request) {
-	if !checkBearerToken(w, r, a.daemonToken) {
+	session, ok := a.authDataPlane(w, r)
+	if !ok {
 		return
 	}
 	if a.dbPool == nil {
@@ -148,6 +154,9 @@ func (a *API) HandleDeleteMemory(w http.ResponseWriter, r *http.Request) {
 	project, name := r.URL.Query().Get("project"), r.URL.Query().Get("name")
 	if project == "" || name == "" {
 		writeError(w, http.StatusBadRequest, "project and name required")
+		return
+	}
+	if !dataPlaneProject(w, session, project) {
 		return
 	}
 	if err := db.DeleteAgentMemory(r.Context(), a.dbPool, project, name); err != nil {
@@ -165,14 +174,19 @@ type memoryIndexEntry struct {
 
 // HandleGetMemories returns a project's memory index (bearer: daemon token).
 func (a *API) HandleGetMemories(w http.ResponseWriter, r *http.Request) {
-	if !checkBearerToken(w, r, a.daemonToken) {
+	session, ok := a.authDataPlane(w, r)
+	if !ok {
 		return
 	}
 	if a.dbPool == nil {
 		writeJSON(w, http.StatusOK, []memoryIndexEntry{})
 		return
 	}
-	rows, err := db.ListAgentMemories(r.Context(), a.dbPool, r.URL.Query().Get("project"))
+	project := r.URL.Query().Get("project")
+	if !dataPlaneProject(w, session, project) {
+		return
+	}
+	rows, err := db.ListAgentMemories(r.Context(), a.dbPool, project)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list error")
 		return
@@ -208,16 +222,21 @@ type knowledgeHit struct {
 // cosine over stored embeddings when an embedder is configured, keyword
 // fallback otherwise (bearer: daemon token).
 func (a *API) HandleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
-	if !checkBearerToken(w, r, a.daemonToken) {
+	session, ok := a.authDataPlane(w, r)
+	if !ok {
 		return
 	}
 	if a.dbPool == nil {
 		writeJSON(w, http.StatusOK, []knowledgeHit{})
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
 	var req knowledgeSearchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Query == "" {
 		writeError(w, http.StatusBadRequest, "query required")
+		return
+	}
+	if !dataPlaneProject(w, session, req.Project) {
 		return
 	}
 	if req.K <= 0 || req.K > 20 {
@@ -271,16 +290,21 @@ func (a *API) HandleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 // the executor cannot verify free-text approval, so approval is a UI action
 // (bearer: daemon token).
 func (a *API) HandlePostRule(w http.ResponseWriter, r *http.Request) {
-	if !checkBearerToken(w, r, a.daemonToken) {
+	session, ok := a.authDataPlane(w, r)
+	if !ok {
 		return
 	}
 	if a.dbPool == nil {
 		writeError(w, http.StatusServiceUnavailable, "no database")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
 	var req struct{ Project, Content string }
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Project == "" || req.Content == "" {
 		writeError(w, http.StatusBadRequest, "project and content required")
+		return
+	}
+	if !dataPlaneProject(w, session, req.Project) {
 		return
 	}
 	id, err := db.InsertAgentRule(r.Context(), a.dbPool, req.Project, req.Content)
@@ -294,14 +318,23 @@ func (a *API) HandlePostRule(w http.ResponseWriter, r *http.Request) {
 // HandleGetRules lists a project's rules. Rules steer what agents do, so the
 // read is admin-only: the daemon token or a core token with board.admin.
 func (a *API) HandleGetRules(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.authDaemonOrCoreCap(w, r, "board.admin"); !ok {
-		return
+	var runtime *db.SessionRow
+	if !a.isDaemonToken(a.rawBearer(r)) {
+		if session, err := a.authenticateRuntimeToken(r); err == nil {
+			var ok bool
+			runtime, ok = a.authDataPlane(w, r)
+			if !ok || runtime.ID != session.ID || !dataPlaneProject(w, runtime, r.URL.Query().Get("project")) {
+				return
+			}
+		} else if _, ok := a.authDaemonOrCoreCap(w, r, "board.admin"); !ok {
+			return
+		}
 	}
 	if a.dbPool == nil {
 		writeJSON(w, http.StatusOK, []db.AgentRuleRow{})
 		return
 	}
-	rows, err := db.ListAgentRules(r.Context(), a.dbPool, r.URL.Query().Get("project"), false)
+	rows, err := db.ListAgentRules(r.Context(), a.dbPool, r.URL.Query().Get("project"), runtime != nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list error")
 		return

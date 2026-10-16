@@ -231,6 +231,12 @@ collect:
 			next = models.SanitizeReported(r.engine, r.models)
 		case errors.Is(r.err, errNoModelList):
 			next = []models.Model{}
+			// A definite "no list" used to be silent, which left a Codex
+			// that is installed but reports nothing impossible to tell from
+			// one that is not installed. Said once per change, not per probe.
+			if !had || len(prev.Models) > 0 {
+				log.Printf("models: %s reports no model list: %v", r.engine, r.err)
+			}
 		default:
 			log.Printf("models: %s model probe failed (keeping the last list): %v", r.engine, r.err)
 			if had {

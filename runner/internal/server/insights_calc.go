@@ -291,8 +291,22 @@ type quantiles struct {
 
 // quantilesOf summarises values with linear interpolation between ranks.
 func quantilesOf(v []float64) quantiles {
+	return spreadOf(v).quantiles
+}
+
+// spread is the whole box of a box-and-whisker chart: the quantiles plus the fastest value and the
+// middle half (p25 to p75).
+type spread struct {
+	quantiles
+	Min float64
+	P25 float64
+	P75 float64
+}
+
+// spreadOf summarises values with linear interpolation between ranks.
+func spreadOf(v []float64) spread {
 	if len(v) == 0 {
-		return quantiles{}
+		return spread{}
 	}
 	s := append([]float64(nil), v...)
 	sort.Float64s(s)
@@ -302,7 +316,24 @@ func quantilesOf(v []float64) quantiles {
 		hi := int(math.Ceil(pos))
 		return s[lo] + (s[hi]-s[lo])*(pos-float64(lo))
 	}
-	return quantiles{Count: len(s), P50: at(0.5), P90: at(0.9), Max: s[len(s)-1]}
+	return spread{
+		quantiles: quantiles{Count: len(s), P50: at(0.5), P90: at(0.9), Max: s[len(s)-1]},
+		Min:       s[0], P25: at(0.25), P75: at(0.75),
+	}
+}
+
+// slowCount is how many values took more than twice the median; none when the median is zero.
+func slowCount(v []float64, p50 float64) int {
+	if p50 <= 0 {
+		return 0
+	}
+	n := 0
+	for _, x := range v {
+		if x > 2*p50 {
+			n++
+		}
+	}
+	return n
 }
 
 // costUSD estimates what tokens cost at a model's per-million-token prices.

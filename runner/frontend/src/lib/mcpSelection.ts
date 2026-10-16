@@ -14,6 +14,10 @@ export type McpModes = Record<string, Record<string, McpToolMode>>
 // connection id -> tool name -> the hash a value came in with
 export type McpSeenHashes = Record<string, Record<string, string>>
 
+// connection id -> the preset button last clicked for it, while no per-tool edit followed. The
+// server re-derives the preset from the modes; this is only the claim it checks against.
+export type McpPresetClaims = Record<string, 'allow_all' | 'approval' | undefined>
+
 export const isReadOnlyTool = (t: McpToolInfo) => t.annotations?.readOnlyHint === true
 
 // Presets: one click for the whole connection. `approval` allows what the server marks
@@ -27,7 +31,7 @@ export const MCP_PRESET_LABEL: Record<McpPreset, string> = {
 export function presetModes(preset: McpPreset, tools: McpToolInfo[]): Record<string, McpToolMode> {
   const out: Record<string, McpToolMode> = {}
   for (const t of tools) {
-    out[t.name] = preset === 'none' ? 'off'
+    out[t.name] = preset === 'none' || t.unsafe ? 'off'
       : preset === 'allow_all' ? 'allow'
       : isReadOnlyTool(t) ? 'allow' : 'propose'
   }
@@ -51,6 +55,7 @@ export function presetOf(modes: Record<string, McpToolMode> | undefined, tools: 
 // an entry with an empty tool set would be refused.
 export function buildSelection(
   checked: Set<string>, modes: McpModes, tools: Record<string, McpToolsState>, seen: McpSeenHashes,
+  claims: McpPresetClaims = {},
 ): McpSelectionEntry[] {
   const out: McpSelectionEntry[] = []
   for (const id of checked) {
@@ -58,12 +63,16 @@ export function buildSelection(
     for (const [name, mode] of Object.entries(modes[id] ?? {})) {
       if (mode === 'off') continue
       const st = tools[id]
-      const live = st?.status === 'ready' ? st.tools.find(t => t.name === name)?.hash : undefined
-      const hash = live ?? seen[id]?.[name]
+      const info = st?.status === 'ready' ? st.tools.find(t => t.name === name) : undefined
+      if (info?.unsafe) continue
+      const hash = info?.hash ?? seen[id]?.[name]
       if (!hash) continue
       picked[name] = { mode, hash }
     }
-    if (Object.keys(picked).length > 0) out.push({ connection: id, tools: picked })
+    if (Object.keys(picked).length > 0) {
+      const claim = claims[id]
+      out.push(claim ? { connection: id, tools: picked, preset: claim } : { connection: id, tools: picked })
+    }
   }
   return out
 }

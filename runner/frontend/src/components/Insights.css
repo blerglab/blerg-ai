@@ -26,13 +26,55 @@
 .grid .muted, .insights .muted { color: var(--fog-dim); }
 .insights table { display: block; overflow-x: auto; }
 
-.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
-.steps li { display: grid; grid-template-columns: 130px 1fr 190px; gap: 10px; align-items: center; font-size: 0.85rem; }
-.step-bar { position: relative; height: 10px; background: color-mix(in srgb, var(--stone) 40%, transparent); border-radius: 5px; overflow: hidden; }
-.step-bar i { position: absolute; inset: 0 auto 0 0; background: color-mix(in srgb, var(--blaze) 35%, transparent); }
-.step-bar b { position: absolute; inset: 0 auto 0 0; background: var(--blaze); }
-.step-val small { color: var(--fog-dim); }
-@media (max-width: 640px) { .steps li { grid-template-columns: 1fr; gap: 2px; } }
+/* Start steps: a box-and-whisker per step on one shared time axis (StartSteps.tsx). Marks carry
+   the series colour (--blaze); every piece of text uses text tokens. */
+.sb-legend { display: flex; gap: 6px 16px; flex-wrap: wrap; align-items: center; margin: 0 0 10px; font-size: 0.78rem; color: var(--fog); }
+.sb-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sb-legend .sb-note { color: var(--fog-dim); }
+.sb-key { position: relative; display: inline-block; width: 18px; height: 10px; }
+.sb-key.box { background: color-mix(in srgb, var(--blaze) 35%, transparent); border-radius: 2px; }
+.sb-key.median { width: 2px; height: 12px; background: var(--blaze); border-radius: 1px; }
+.sb-key.p90 { width: 8px; height: 8px; box-sizing: border-box; border: 2px solid var(--blaze); border-radius: 50%; }
+.sb-key.whisker { height: 2px; background: var(--blaze); }
+.sb-rows { list-style: none; margin: 0; padding: 0; }
+.sb-rows > li { position: relative; cursor: pointer; display: grid; grid-template-columns: 130px minmax(0, 1fr) 260px; grid-template-areas: "name plot stats"; gap: 12px; align-items: center; min-height: 28px; padding: 0 4px; border-radius: 6px; font-size: 0.85rem; outline: none; }
+.sb-rows > li:not(.sb-axis):hover, .sb-rows > li.on { background: color-mix(in srgb, var(--chalk) 5%, transparent); }
+.sb-rows > li:has(.sb-name:focus-visible) { box-shadow: 0 0 0 2px var(--blaze); }
+.sb-rows > li.sb-axis { cursor: default; }
+/* the step name is the row's button: it takes keyboard focus and says whether the tooltip is open */
+.sb-name { grid-area: name; color: var(--chalk); min-width: 0; padding: 0; background: none; border: 0; font: inherit; text-align: left; cursor: pointer; outline: none; }
+.sb-stats { grid-area: stats; color: var(--fog-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.sb-plot { grid-area: plot; position: relative; display: block; height: 28px; }
+.sb-plot > i { position: absolute; top: 50%; display: block; }
+.sb-plot > .sb-grid { top: 0; bottom: 0; width: 1px; background: color-mix(in srgb, var(--stone) 55%, transparent); }
+.sb-whisker { height: 2px; margin-top: -1px; min-width: 1px; border-radius: 1px; background: var(--blaze); }
+.sb-cap { width: 1px; height: 9px; margin-top: -4px; background: var(--blaze); }
+.sb-box { height: 14px; margin-top: -7px; min-width: 2px; border-radius: 2px; background: color-mix(in srgb, var(--blaze) 35%, var(--basalt)); }
+.sb-median { width: 2px; height: 16px; margin: -8px 0 0 -1px; border-radius: 1px; background: var(--blaze); }
+/* the hollow 90th-percentile mark and the dots wear a 2px ring in the surface colour so they read where they cross the whisker */
+.sb-p90 { width: 8px; height: 8px; margin: -4px 0 0 -4px; box-sizing: border-box; border: 2px solid var(--blaze); border-radius: 50%; background: var(--basalt); box-shadow: 0 0 0 2px var(--basalt); }
+.sb-dot { width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: var(--blaze); box-shadow: 0 0 0 2px var(--basalt); }
+.sb-rows > li.sb-axis { min-height: 18px; }
+.sb-axis .sb-plot { height: 18px; border-top: 1px solid var(--stone); }
+.sb-tick { position: absolute; top: 3px; transform: translateX(-50%); font-size: 0.68rem; color: var(--fog-dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sb-tick:first-child { transform: none; }
+.sb-tick:last-child { transform: translateX(-100%); }
+.sb-axis .sb-stats { font-size: 0.7rem; }
+.sb-tip { position: absolute; z-index: 5; top: calc(100% + 4px); right: 4px; min-width: 210px; padding: 8px 10px; background: var(--scree-2); border: 1px solid var(--stone); border-radius: 8px; box-shadow: 0 6px 18px rgb(0 0 0 / 0.35); font-size: 0.78rem; color: var(--fog); pointer-events: none; max-width: calc(100vw - 16px); box-sizing: border-box; }
+.sb-tip.up { top: auto; bottom: calc(100% + 4px); }
+/* a pinned tooltip takes taps itself (closing it), so a tap on it never lands on the row underneath */
+.sb-rows > li.pinned .sb-tip { pointer-events: auto; }
+.sb-tip-title { color: var(--fog-dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+.sb-tip ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.sb-tip b { display: inline-block; min-width: 76px; color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .sb-rows > li { grid-template-columns: 1fr auto; grid-template-areas: "name stats" "plot plot"; gap: 0 8px; padding: 4px; }
+  .sb-tip { right: auto; left: 4px; }
+  /* the axis note goes under the ticks, across the full width, where it has room to wrap */
+  .sb-rows > li.sb-axis { grid-template-columns: minmax(0, 1fr); grid-template-areas: "plot" "stats"; gap: 2px 0; }
+  .sb-axis .sb-name { display: none; }
+  .sb-axis .sb-axis-note { text-align: right; }
+}
 
 .plain { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; font-size: 0.88rem; }
 .plain a { color: var(--amber); text-decoration: none; }
@@ -46,6 +88,38 @@
 .chart .axis { fill: var(--fog-dim); font-size: 10px; }
 .chart figcaption { font-size: 0.74rem; color: var(--fog-dim); margin-top: 4px; }
 
+/* the price editor scrolls sideways inside its section on a narrow screen; a soft shade on an edge says
+   there is more that way (each shade is covered while that edge is scrolled to its end) */
+.scroll-x {
+  overflow-x: auto;
+  --sx-bg: var(--basalt);
+  --sx-shade: color-mix(in srgb, var(--chalk) 22%, transparent);
+  background:
+    linear-gradient(to right, var(--sx-bg) 30%, transparent) left center / 40px 100% no-repeat local,
+    linear-gradient(to left, var(--sx-bg) 30%, transparent) right center / 40px 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, var(--sx-shade), transparent) left center / 14px 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, var(--sx-shade), transparent) right center / 14px 100% no-repeat scroll;
+}
+.insights .scroll-x > table { display: table; width: auto; overflow: visible; }
+
+/* the wide tables as one entry per row on a narrow screen (Insights.tsx renders them under NARROW_QUERY) */
+.stack { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.stack > li { padding: 10px 12px; background: var(--scree); border: 1px solid var(--stone); border-radius: 8px; }
+.stack-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; font-size: 0.85rem; }
+.stack-name { color: var(--chalk); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.stack-figs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; margin: 8px 0 0; }
+.stack-figs.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.stack-figs dt { color: var(--fog-dim); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.stack-figs dd { margin: 1px 0 0; color: var(--chalk); font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 640px) {
+  .insights { padding: 16px 14px 48px; }
+  .insights-controls { flex-basis: 100%; }
+  .card-value { font-size: 1.4rem; }
+}
+
 .prices input { width: 84px; background: var(--basalt); color: var(--chalk); border: 1px solid var(--stone); border-radius: 4px; padding: 3px 6px; text-align: right; font: inherit; font-size: 0.82rem; }
 .prices .actions { white-space: nowrap; text-align: right; }
+/* the model keeps a readable width in the scrolling editor instead of folding into a narrow column */
+.prices td:first-child { min-width: 9.5rem; overflow-wrap: anywhere; }
 .prices .actions button { margin-left: 6px; }

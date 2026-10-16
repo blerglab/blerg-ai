@@ -238,7 +238,8 @@ func NewRouter(deps Deps) http.Handler {
 	})
 	mux.Handle("GET /brand/", http.StripPrefix("/brand/", landing.AssetHandler()))
 
-	// GET /api/site is the one unauthenticated /api route: the build version and the
+	// GET /api/site is the one unauthenticated /api route: the build version (and the release
+	// version and git commit it was built from) and the
 	// browser-facing component URLs (BLERG_CORE_ORIGIN_AUDIENCES, inverted) the SPA's home
 	// tiles and footer render. Nothing here is secret — it is exactly what the old
 	// server-rendered landing page put in its HTML for anyone to read.
@@ -246,6 +247,8 @@ func NewRouter(deps Deps) http.Handler {
 		l := deps.componentLinks()
 		writeJSON(w, map[string]string{
 			"version":    landing.Version(),
+			"release":    landing.Release(),
+			"commit":     landing.Commit(),
 			"board_url":  l.BoardURL,
 			"runner_url": l.RunnerURL,
 		})
@@ -329,6 +332,9 @@ func NewRouter(deps Deps) http.Handler {
 	// do; GET /api/me and POST /auth/logout-all are also reachable (no capability gate
 	// either) but neither leaks or changes anything the flag needs to withhold.
 	mux.HandleFunc("POST /auth/password", requireHumanPrincipal(deps.handleChangePassword, deps, ""))
+	// "card.read", like /api/credentials: a password-change-only token must NOT reach this —
+	// on first login the username is chosen through /auth/password above.
+	mux.HandleFunc("POST /auth/username", requireHumanPrincipal(deps.handleChangeUsername, deps, "card.read"))
 
 	// requirePrincipal, not requireHumanPrincipal: /api/me is the introspection endpoint an
 	// external tool calls to confirm its agent token works and learn what it may do (spec §2),
@@ -385,6 +391,10 @@ func NewRouter(deps Deps) http.Handler {
 	// "card.read" gates all three: it's the capability every normal role (member, admin) has
 	// and a password-change-only token (R7/I-7) deliberately lacks, so this is what actually
 	// stops such a token from touching the credential vault, not just the SPA's own routing.
+	mux.HandleFunc("GET /api/credentials/managed/capabilities", requireHumanPrincipal(deps.handleManagedCapabilities, deps, "card.read"))
+	mux.HandleFunc("POST /api/credentials/{engine}/managed/login", requireHumanPrincipal(deps.handleManagedLoginStart, deps, "card.read"))
+	mux.HandleFunc("GET /api/credentials/{engine}/managed/login/{attempt}", requireHumanPrincipal(deps.handleManagedLoginPoll, deps, "card.read"))
+	mux.HandleFunc("DELETE /api/credentials/{engine}/managed/login/{attempt}", requireHumanPrincipal(deps.handleManagedLoginCancel, deps, "card.read"))
 	mux.HandleFunc("POST /api/credentials", requireHumanPrincipal(deps.handleStoreCredential, deps, "card.read"))
 	mux.HandleFunc("GET /api/credentials", requireHumanPrincipal(deps.handleListCredentials, deps, "card.read"))
 	mux.HandleFunc("DELETE /api/credentials/{engine}", requireHumanPrincipal(deps.handleDeleteCredential, deps, "card.read"))
@@ -400,6 +410,7 @@ func NewRouter(deps Deps) http.Handler {
 	// attempting to call it cross-origin is blocked by the browser itself even if it somehow
 	// obtained a valid internal key. See internal_handlers.go's header comment for the full
 	// rationale.
+	mux.HandleFunc("POST /internal/credentials/managed/access", deps.handleInternalManagedAccess)
 	mux.HandleFunc("POST /internal/credentials/fetch", deps.handleInternalFetchCredential)
 	// Same gates as fetch (internal key + live human session), names only, no plaintext.
 	mux.HandleFunc("POST /internal/credentials/list", deps.handleInternalListCredentials)

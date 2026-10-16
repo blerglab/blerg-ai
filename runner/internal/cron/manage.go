@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -35,6 +36,7 @@ type NewCron struct {
 	Schedule          string
 	Timezone          string
 	Prompt            string
+	Engine            string
 	Model             *string
 	Effort            *string
 	Runtime           string // auto (default), cluster or docker
@@ -56,6 +58,7 @@ type CronPatch struct {
 	Schedule          *string
 	Timezone          *string
 	Prompt            *string
+	Engine            *string
 	Model             *string
 	Effort            *string
 	Runtime           *string
@@ -89,7 +92,7 @@ func (s *Scheduler) CreateCron(ctx context.Context, in NewCron) (*db.Cron, error
 	now := s.clock.Now()
 	c := db.Cron{
 		OwnerAccountID: in.Owner, Name: in.Name, Enabled: in.Enabled, Schedule: in.Schedule, Timezone: in.Timezone,
-		Prompt: in.Prompt, Model: emptyToNil(in.Model), Effort: emptyToNil(in.Effort), Runtime: in.Runtime,
+		Prompt: in.Prompt, Engine: in.Engine, Model: emptyToNil(in.Model), Effort: emptyToNil(in.Effort), Runtime: in.Runtime,
 		DaemonID: emptyToNil(in.DaemonID), BoardID: emptyToNil(in.BoardID), MCP: in.MCP,
 		TokenID: in.TokenID, TokenExpiresAt: in.TokenExpiresAt,
 		GraceSeconds: DefaultGraceSeconds, MaxRuntimeSeconds: in.MaxRuntimeSeconds,
@@ -99,6 +102,9 @@ func (s *Scheduler) CreateCron(ctx context.Context, in NewCron) (*db.Cron, error
 	}
 	if c.Runtime == "" {
 		c.Runtime = "auto"
+	}
+	if c.Engine == "" {
+		c.Engine = "claude"
 	}
 	if in.GraceSeconds != nil {
 		c.GraceSeconds = *in.GraceSeconds
@@ -147,6 +153,14 @@ func (s *Scheduler) UpdateCron(ctx context.Context, owner, id string, p CronPatc
 		}
 		if p.Prompt != nil {
 			c.Prompt = *p.Prompt
+		}
+		if p.Engine != nil {
+			if c.Engine != *p.Engine {
+				// Settings belong to an engine; explicitly supplied replacements below
+				// still apply, while omitted settings use the new engine's defaults.
+				c.Model, c.Effort = nil, nil
+			}
+			c.Engine = *p.Engine
 		}
 		if p.Runtime != nil {
 			c.Runtime = *p.Runtime
@@ -245,6 +259,15 @@ func compileSchedule(expr, tz string, now time.Time) (*Schedule, error) {
 }
 
 func validateFields(c *db.Cron, now time.Time) error {
+	if c.Engine != "claude" && c.Engine != "codex" {
+		return invalid(`engine must be "claude" or "codex"`)
+	}
+	if c.Model != nil && !models.ValidModelFor(c.Engine, *c.Model) {
+		return invalid("model is not valid for the selected engine")
+	}
+	if c.Effort != nil && !models.ValidEffortFor(c.Engine, *c.Effort) {
+		return invalid("effort is not valid for the selected engine")
+	}
 	if n := utf8.RuneCountInString(c.Name); n == 0 || n > maxNameLen {
 		return invalid("name must be 1-%d characters", maxNameLen)
 	}

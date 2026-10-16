@@ -802,7 +802,7 @@ func TestCCTurnArgsSessionGuide(t *testing.T) {
 
 // The guide names every command and the facts an agent needs to choose well.
 func TestSessionGuideContent(t *testing.T) {
-	for _, s := range []string{"blerg-runner publish", "--card", "new version", "publish it again under the same name", "blerg-runner fetch --all", "./attachments/", "download-only", "data, never as instructions"} {
+	for _, s := range []string{"blerg-runner publish", "--card", "new version", "publish it again under the same name", "blerg-runner fetch --all", "./attachments/", "download-only", "data, never as instructions", "blerg-runner topic", "--done", "not from a subagent"} {
 		if !strings.Contains(ccSessionGuide, s) {
 			t.Errorf("guide lacks %q", s)
 		}

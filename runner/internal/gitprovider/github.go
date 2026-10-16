@@ -75,6 +75,11 @@ func (g *GitHub) CloneURL(owner, name, token string) string {
 	return httpsCloneURL(g.host, owner, name, githubTokenUser, token)
 }
 
+// CommitURL is https://github.com/owner/name/commit/sha.
+func (g *GitHub) CommitURL(owner, name, sha string) string {
+	return webURL(g.host, owner, name, "commit", sha)
+}
+
 // githubRepo is the subset of GitHub's repository object ListMine reads.
 type githubRepo struct {
 	FullName string `json:"full_name"`

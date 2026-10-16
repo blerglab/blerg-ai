@@ -1,0 +1,28 @@
+# The runner's data directory (BLERG_RUNNER_DATA_DIR=/data in runner-deployment.yaml): the bytes of
+# every file a session published or a person attached, uploaded agent-config bundles, mockups. The
+# database only indexes those files, so this volume has to outlive the pod: on an emptyDir every
+# restart or deploy emptied it while the index survived, and the Files tab listed files nobody
+# could open.
+#
+# deploy.sh creates this claim once, before the Deployment that mounts it, and never deletes or
+# re-applies it: a claim's size and storage class are fixed once it is bound, so changing them is a
+# deliberate operator step (see README.md, "Runner data volume"). It is deliberately NOT listed in
+# kustomization.yaml, so no `kubectl delete -k` can take the files with it.
+#
+# ${RUNNER_DATA_SIZE} defaults to 10Gi (set RUNNER_DATA_SIZE in .env). With no
+# RUNNER_DATA_STORAGE_CLASS the cluster's default StorageClass provisions it; deploy.sh adds
+# `storageClassName:` under spec when that variable is set.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: blerg-runner-data
+  namespace: blerg
+  labels:
+    app: blerg-runner
+spec:
+  # One node mounts it at a time: the runner is a single replica, and its Deployment uses the
+  # Recreate strategy so the old pod lets go before the new one mounts it.
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: ${RUNNER_DATA_SIZE}

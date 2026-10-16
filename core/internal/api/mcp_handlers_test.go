@@ -137,6 +137,7 @@ func TestMCPPublicRoutesAuthMatrix(t *testing.T) {
 		{"create", http.MethodPost, "/api/mcp/connections", map[string]string{"name": "x", "url": "https://m.example.com", "auth_kind": "none"}},
 		{"patch", http.MethodPatch, "/api/mcp/connections/" + id, map[string]string{"name": "renamed"}},
 		{"delete", http.MethodDelete, "/api/mcp/connections/" + id, nil},
+		{"events", http.MethodGet, "/api/mcp/connections/" + id + "/events", nil},
 	}
 	for _, rt := range routes {
 		t.Run(rt.name, func(t *testing.T) {

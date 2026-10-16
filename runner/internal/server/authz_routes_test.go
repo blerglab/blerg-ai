@@ -42,6 +42,7 @@ func newAuthzMux(api *API) *http.ServeMux {
 	mux.HandleFunc("GET /api/tickets/{id}/events", api.HandleGetTicketEvents)
 	mux.HandleFunc("GET /api/boards/{id}/archive", api.HandleGetBoardArchive)
 	mux.HandleFunc("POST /api/boards/{id}/assist", api.HandlePostAssist)
+	mux.HandleFunc("GET /api/sessions/{id}/insights", api.HandleGetSessionInsights)
 	return mux
 }
 
@@ -56,6 +57,7 @@ type authzFixture struct {
 type authzWorld struct {
 	a, b       authzFixture
 	noBoardMsg string // message on a session with no board
+	plainSess  string // that session (not private, so every person may see it)
 	rule       string
 	boardTokA  string // board token scoped to a.board with {board}
 }
@@ -109,6 +111,7 @@ func seedAuthzWorld(ctx context.Context, t *testing.T, api *API, tag string) aut
 		t.Fatalf("CreateMessage: %v", err)
 	}
 	w.noBoardMsg = msg
+	w.plainSess = plainSess
 
 	rule, err := db.InsertAgentRule(ctx, pool, "proj-"+tag, "be nice")
 	if err != nil {
@@ -178,6 +181,7 @@ var authzRoutes = []authzRoute{
 	{"POST /api/boards/x/assist", "POST", func(f authzFixture, _ authzWorld) string { return "/api/boards/" + f.board + "/assist" },
 		func(authzFixture) string { return `{}` }, "session.start", "board"},
 	{"GET /api/boards", "GET", func(authzFixture, authzWorld) string { return "/api/boards" }, nil, "session.start", "browser"},
+	{"GET /api/sessions/x/insights", "GET", func(_ authzFixture, w authzWorld) string { return "/api/sessions/" + w.plainSess + "/insights" }, nil, "session.start", "browser"},
 	{"POST /api/agent/rules", "POST", func(authzFixture, authzWorld) string { return "/api/agent/rules" },
 		func(authzFixture) string { return `{"project":"p","content":"c"}` }, "", "daemon"},
 	{"GET /api/agent/rules", "GET", func(authzFixture, authzWorld) string { return "/api/agent/rules" }, nil, "board.admin", "rules"},

@@ -22,6 +22,8 @@ export interface ChatContextValue {
   /** The newest review file for `name` of either origin, merged (person's base, agent's replies).
    *  null when none. */
   reviewFor: (name: string) => Promise<ReviewFile | null>
+  /** The session is over (stopped, ended or failed): a run with no end recorded is not running. */
+  sessionOver?: boolean
 }
 
 export const ChatContext = createContext<ChatContextValue | null>(null)

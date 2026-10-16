@@ -9,6 +9,11 @@ export type {
   AgentUserMessage,
   ArtifactPayload,
   AssistantTextPayload,
+  AssistantThinkingPayload,
+  ThinkingPayload,
+  BackgroundTaskDonePayload,
+  BackgroundTaskKind,
+  BackgroundTaskStartedPayload,
   CapabilitiesPayload,
   CapabilityGroup,
   CapabilityGroupId,
@@ -35,10 +40,13 @@ export type {
   SubagentPayload,
   SubscribeAgentEvents,
   ToolCallPayload,
+  TopicPayload,
+  TokenUsage,
   ToolResultPayload,
   TurnDonePayload,
   UnsubscribeSession,
   UserMessagePayload,
+  AgentEventsGap,
 } from './types'
 
 // ─── Model: events → groups → what to draw; no React in it ──────────────────────────────────
@@ -52,14 +60,30 @@ export {
   groupStats,
   isVisibleEvent,
   outputText,
+  parentCallOf,
   previewLine,
   safeJSON,
   summaryText,
 } from './model/toolGroups'
-export type { CallDescription, GroupStats, TimelineItem, ToolEntry } from './model/toolGroups'
-export { LONG_RUNNING_MS, STILL_RUNNING_MS, liveCalls, longRunningTitle, oldestLive, runningLabel, runningMs } from './model/liveCalls'
-export type { LiveCall } from './model/liveCalls'
+export type { CallDescription, GroupStats, SubagentEntry, TimelineItem, TimelineOptions, ToolEntry } from './model/toolGroups'
+export { LONG_RUNNING_MS, STILL_RUNNING_MS, callDetail, liveCalls, liveTurn, longRunningTitle, oldestLive, runningLabel, runningMs } from './model/liveCalls'
+export type { LiveCall, LiveTurn, WaitingOn } from './model/liveCalls'
+export { activityLabel, modelRetry, nextAnswering, nextThinking } from './model/workingActivity'
+export type { ModelRetry } from './model/workingActivity'
+export { DONE_LINGER_MS, backgroundTasks, clockLabel, runningTasks, shownTasks, staleTask, taskFailed, taskOk, truncateLabel } from './model/backgroundTasks'
+export { NO_END_RECORDED, STALE_RUNNING_MS } from './model/stale'
+export type { BackgroundTask } from './model/backgroundTasks'
 export { isHarnessText } from './model/harnessText'
+export { topicDividerText } from './model/topicMarker'
+export { firstPersonMessage, isShownUserMessage, userMessageShape } from './model/userMessages'
+export type { UserMessageShape } from './model/userMessages'
+export { droppedMessageId, isRetryNotice, isTurnError } from './model/notices'
+export { askStates } from './model/asks'
+export { liveSubagents, openAsks } from './model/liveState'
+export type { AskLive, LiveReport, SubagentLive } from './model/liveState'
+export { doingLine, staleSubagent, subagentModel, subagentStatus, subagentTitle, subagentTokens, tokenLabel } from './model/subagents'
+export type { SubagentStatus } from './model/subagents'
+export type { AskState, Asks } from './model/asks'
 export { MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_BYTES, attachmentNote, composeMessage, splitAttachmentNote } from './model/attachments'
 export type { UploadedFile } from './model/attachments'
 export {
@@ -109,7 +133,7 @@ export { latestStartAttempt, placeholderAttempt, startPanelVisible, withSessionO
 export type { AttemptStage, StartAttempt, StartSession } from './model/startStages'
 export { END_REASON, describeSessionEnd, isTerminalStatus } from './model/sessionEnd'
 export type { SessionEndLine, SessionEndSource } from './model/sessionEnd'
-export { localStorageChatStorage } from './model/storage'
+export { COMPACT_KEY, loadCompact, localStorageChatStorage, saveCompact } from './model/storage'
 export type { ChatStorage } from './model/storage'
 
 // ─── Components ─────────────────────────────────────────────────────────────────────────────
@@ -121,12 +145,14 @@ export { default as Transcript, HistorySkeleton, pairFooters, turnStartTimes, da
 export type { TranscriptProps } from './components/Transcript'
 export { default as Composer } from './components/Composer'
 export type { ComposerProps } from './components/Composer'
-export { renderEvent, turnDoneText, ToolCard, EventRow } from './components/cards/EventCards'
-export type { DescribeUserMessage, MessageFooter, RenderOptions, UserMessageLook } from './components/cards/EventCards'
+export { renderEvent, turnDoneText, compactionText, ToolCard, EventRow } from './components/cards/EventCards'
+export type { DescribeUserMessage, MessageFooter, RenderOptions, UserMessageContext, UserMessageLook } from './components/cards/EventCards'
 export { ToolGroup } from './components/ToolGroup'
 export { default as ArtifactCard, MediaPreview } from './components/ArtifactCard'
 export { default as ArtifactViewer } from './components/ArtifactViewer'
 export { default as FilesPanel } from './components/FilesPanel'
+export { default as FilesList } from './components/FilesList'
+export type { FilesListProps } from './components/FilesList'
 export { default as ReviewMode } from './components/review/ReviewMode'
 export type { ReviewModeProps } from './components/review/ReviewMode'
 export { default as PdfPages } from './components/review/PdfPages'
@@ -136,12 +162,16 @@ export type { MarkupModeProps } from './components/markup/MarkupMode'
 export { ComposerChips, MessageText } from './components/AttachmentChips'
 export { default as StartProgress } from './components/StartProgress'
 export { default as WorkingIndicator } from './components/WorkingIndicator'
+export { KIND_ICON, KIND_NAME, KindIcon, StatusGlyph, elapsedOf, stateClass, titleOf } from './components/BackgroundParts'
+export { default as AskReply } from './components/AskReply'
+export type { AskReplyProps } from './components/AskReply'
+export { FLASH_MS, scrollToCall, scrollToEvent } from './components/scrollToCall'
 export { TimeLabel, DayDivider } from './components/TimeLabel'
 export { ChatContext, useChat } from './components/context'
 export type { ChatContextValue } from './components/context'
 
 // ─── Hooks ──────────────────────────────────────────────────────────────────────────────────
-export { useSession, unmatchedQueued, OLDER_PAGE } from './hooks/useSession'
+export { useSession, unmatchedQueued, OLDER_PAGE, QUEUED_IDLE_MS, QUEUED_LINGER_MS } from './hooks/useSession'
 export type { SessionHandle, UseSessionOptions, QueuedMessage, PendingTurn } from './hooks/useSession'
 export { useTranscriptStore } from './hooks/useTranscriptStore'
 export type { SessionTranscript } from './hooks/useTranscriptStore'
@@ -153,6 +183,10 @@ export { useTicker, usePrefersReducedMotion } from './hooks/useTicker'
 export { useClockNow } from './hooks/useSharedClock'
 export { useSecondClock } from './hooks/useSecondClock'
 export { useBackdropClose } from './hooks/useBackdropClose'
+export { useBackgroundLiveStore, useBackgroundTasks } from './hooks/useBackgroundTasks'
+export type { BackgroundTaskCounts, BackgroundTasksHandle, UseBackgroundTasksOptions } from './hooks/useBackgroundTasks'
+export { useChatReportStore, useLiveState } from './hooks/useLiveState'
+export type { ChatFiles, ChatReport, LiveState } from './hooks/useLiveState'
 
 // ─── Transport ──────────────────────────────────────────────────────────────────────────────
 export * from './transport'

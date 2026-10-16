@@ -195,3 +195,29 @@ func TestQueuedMessageInjectedNextProviderCall(t *testing.T) {
 		t.Fatalf("queued message not injected: %+v", last)
 	}
 }
+
+// A thinking block is said as it opens and as it closes (transient thinking_started/_done), before
+// the answer's text.
+func TestThinkingBlockIsSaidAsItOpensAndCloses(t *testing.T) {
+	rec := &recorder{}
+	thinking := json.RawMessage(`{"type":"thinking","thinking":"hmm","signature":"s"}`)
+	startLoop(t, rec, NewRegistry(), append([]StreamEvent{
+		{Kind: "thinking_start"},
+		{Kind: "block", Block: &Block{Type: "thinking", Raw: thinking}},
+	}, textResponse("hello")...))
+	var got []string
+	for _, k := range rec.kinds() {
+		if k == KindThinkingStarted || k == KindThinkingDone || k == "assistant_text" {
+			got = append(got, k)
+		}
+	}
+	want := []string{KindThinkingStarted, KindThinkingDone, "assistant_text", "assistant_text"}
+	if len(got) != len(want) {
+		t.Fatalf("kinds = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("kinds = %v, want %v", got, want)
+		}
+	}
+}

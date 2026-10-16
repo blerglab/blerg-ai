@@ -29,15 +29,12 @@ import (
 // extra command first, then emits a minimal valid codex event stream.
 func fakeEngineDumpingEnv(t *testing.T, envFile, pre string) string {
 	t.Helper()
-	dir := t.TempDir()
-	script := "#!/bin/bash\nenv > " + envFile + "\n" + pre + `
-cat <<'EOF'
-{"type":"thread.started","thread_id":"cx-1"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"ok"}}
-{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":1}}
-EOF
-`
+	dir := fakeCodex(t)
+	engine := filepath.Join(dir, "codex-engine")
+	if err := os.Rename(filepath.Join(dir, "codex"), engine); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/bash\nenv > " + envFile + "\n" + pre + "\nexec " + engine + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

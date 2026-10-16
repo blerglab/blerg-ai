@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo "skip: docker compose unavailable"; exit 0; }
-out="$(BLERG_PORT_CORE=9001 BLERG_PORT_BOARD=9002 BLERG_PORT_RUNNER=9003 \
+out="$(env -u BLERG_COMMIT BLERG_PORT_CORE=9001 BLERG_PORT_BOARD=9002 BLERG_PORT_RUNNER=9003 \
        BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) \
        BLERG_BOARD_SECRET_KEY=board-secret-sentinel \
        docker compose --env-file /dev/null config)"
@@ -18,6 +18,12 @@ for want in 'http://localhost:9001,http://localhost:9002,http://localhost:9003' 
   grep -qF -- "$want" <<<"$out" || { echo "FAIL: $want"; fail=1; }
 done
 if grep -E 'localhost:808[123]' <<<"$out" | grep -qv '^#'; then echo "FAIL: a literal default port survived a port override"; fail=1; fi
+
+# The build args carry the git commit the apps show beside the release version: "dev" unless
+# blerg-up.sh (or the caller) sets BLERG_COMMIT.
+[ "$(grep -c 'COMMIT: dev' <<<"$out")" -eq 3 ] || { echo "FAIL: core, board and runner do not all default COMMIT to dev"; fail=1; }
+out_commit="$(BLERG_COMMIT=abc1234 BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) docker compose --env-file /dev/null config)"
+[ "$(grep -c 'COMMIT: abc1234' <<<"$out_commit")" -eq 3 ] || { echo "FAIL: BLERG_COMMIT is not passed to the core, board and runner builds"; fail=1; }
 
 # R2: ports are published on loopback unless BLERG_BIND_ADDR says otherwise.
 grep -qE 'host_ip: 127\.0\.0\.1' <<<"$out" || { echo "FAIL: ports not bound to 127.0.0.1 by default"; fail=1; }

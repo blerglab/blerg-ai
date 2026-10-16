@@ -78,7 +78,11 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 	// 3. Select daemon: default_daemon_id → any connected daemon → 503.
 	var daemon *DaemonConn
 	if board.DefaultDaemonID != nil {
-		daemon = a.hub.GetDaemon(*board.DefaultDaemonID)
+		if connected := a.hub.GetDaemon(*board.DefaultDaemonID); connected != nil && !isHostDaemon(connected) {
+			writeError(w, http.StatusServiceUnavailable, "the board's pinned daemon is not a host execution target")
+			return
+		}
+		daemon = a.hub.GetHostDaemon(*board.DefaultDaemonID)
 	}
 	if daemon == nil {
 		daemon = a.hub.AnyDaemon()

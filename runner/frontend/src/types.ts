@@ -63,6 +63,22 @@ export interface DaemonInfo {
   repos_root: string;
   status: string;
   last_seen_at: string;
+  /** The providers' usage limits on this machine, one entry per provider that reported (absent: none). */
+  usage_limits?: UsageLimits[];
+}
+
+/** One limit window: "5h" (five hours), "7d" (the week) or "capped" (refused until resets_at). */
+export interface UsageWindow {
+  id: string;
+  used_percent: number;
+  resets_at?: string;
+}
+
+/** A provider's usage limits as a daemon reported them: percentages and reset times only. */
+export interface UsageLimits {
+  provider: string; // "codex" | "claude"
+  windows: UsageWindow[];
+  fetched_at?: string;
 }
 
 export interface SessionInfo {
@@ -100,6 +116,13 @@ export interface SessionInfo {
   // watching: it decides, notes its assumptions, finishes and summarises). Absent from a runner
   // or daemon older than the field.
   interaction?: 'interactive' | 'unattended';
+  // How many background tasks (a background shell, a monitor, a background subagent) the session's
+  // agent has running; absent when none, and from a runner older than the field.
+  background_tasks?: number;
+  // Why the session is paused waiting for a message: "restart" — a daemon restart cut off what it
+  // was doing and it was not continued by itself (it was waiting for the person, or had been
+  // continued once already). Absent when it is not paused, and from a runner older than the field.
+  paused_reason?: 'restart' | string;
 }
 
 export interface StartedBy {
@@ -141,7 +164,11 @@ export interface ModelList {
 
 export type AgentEventKind =
   | 'user_message'
+  | 'input_accepted'
   | 'assistant_text'
+  | 'assistant_thinking'
+  | 'thinking_started'
+  | 'thinking_done'
   | 'tool_call'
   | 'tool_result'
   | 'provider_blocks'
@@ -152,13 +179,17 @@ export type AgentEventKind =
   | 'note'
   | 'model_changed'
   | 'subagent_started'
+  | 'subagent_update'
   | 'subagent_done'
+  | 'background_task_started'
+  | 'background_task_done'
   | 'turn_done'
   | 'error'
   | 'compaction'
   | 'start_stage'
   | 'capabilities'
-  | 'artifact';
+  | 'artifact'
+  | 'topic';
 
 export interface AgentEvent {
   type: 'agent_event';
@@ -172,9 +203,11 @@ export interface AgentEvent {
 }
 
 export interface UserMessagePayload { text: string; source: string }
-export interface AssistantTextPayload { text: string; done: boolean }
-export interface ToolCallPayload { tool: string; call_id: string; input: unknown }
-export interface ToolResultPayload { call_id: string; output: string; is_error: boolean; duration_ms: number }
+// parent_call_id: the event belongs to the subagent started by that call (absent: the main agent).
+export interface AssistantTextPayload { text: string; done: boolean; parent_call_id?: string }
+export interface AssistantThinkingPayload { text: string; parent_call_id?: string }
+export interface ToolCallPayload { tool: string; call_id: string; input: unknown; parent_call_id?: string }
+export interface ToolResultPayload { call_id: string; output: string; is_error: boolean; duration_ms: number; parent_call_id?: string }
 export interface StatusPayload { status: string; reason: string }
 export interface CheckInPayload { phase: string; summary: string }
 export interface MessagingPayload { body: string }
@@ -265,10 +298,14 @@ export interface McpToolInfo {
   // What the server claims about itself (readOnlyHint, destructiveHint, title...). Display only.
   annotations?: { readOnlyHint?: boolean; [k: string]: unknown }
   hash: string
+  // Set by the tools route for a definition that cannot be reviewed (hidden characters, a NUL, too large).
+  unsafe?: string
 }
 export interface McpSelectionEntry {
   connection: string
   tools: Record<string, { mode: 'allow' | 'propose'; hash: string }>
+  // The preset button last clicked; the server re-derives it from the modes and only checks the claim.
+  preset?: 'allow_all' | 'approval'
 }
 
 export interface AgentEventsReplayDone {
@@ -282,6 +319,32 @@ export interface AgentEventsReplayDone {
   has_older?: boolean;
   first_seq?: number;
   server_time?: string; // server clock at replay end — for skew-free elapsed times
+}
+
+// The server's "the person is needed" notice for a session: it waits for input, or it is idle with
+// nothing left running (runner/internal/server/notices.go). Shown as a toast, as given.
+export interface SessionNotice {
+  type: "session_notice";
+  session_id: string;
+  status: SessionStatus;
+  title: string;
+  body: string;
+  url: string;
+}
+
+// The number of background tasks a session's agent has running changed (one started or ended).
+export interface SessionBackgroundChanged {
+  type: "session_background_changed";
+  session_id: string;
+  background_tasks: number;
+}
+
+// A session's paused reason changed (SessionInfo.paused_reason): set when its daemon reports it
+// paused by a restart.
+export interface SessionPausedChanged {
+  type: "session_paused_changed";
+  session_id: string;
+  paused_reason: string;
 }
 
 export interface SessionMetaChanged {
@@ -308,11 +371,20 @@ export interface InitialState {
   sessions: SessionInfo[];
   messages?: MessageInfo[];
   server_version?: string;
+  /** The release version (the VERSION file) and short git commit the server was built from. */
+  server_release?: string;
+  server_commit?: string;
 }
 
 export interface DaemonConnected {
   type: "daemon_connected";
   daemon: DaemonInfo;
+}
+
+export interface DaemonLimitsChanged {
+  type: "daemon_limits_changed";
+  daemon_id: string;
+  usage_limits: UsageLimits[];
 }
 
 export interface DaemonDisconnected {
@@ -389,6 +461,7 @@ export interface SessionScrollback {
 export interface MessageCreated {
   type: "message_created";
   message: MessageInfo;
+  quiet?: boolean; // listed, not toasted: an ask from a session nobody attends
 }
 
 export interface MessageAnswered {
@@ -465,12 +538,16 @@ export type ServerMessage =
   | InitialState
   | DaemonConnected
   | DaemonDisconnected
+  | DaemonLimitsChanged
   | SessionStarted
   | SessionOutput
   | SessionStateChanged
   | SessionReadChanged
   | SessionStarChanged
   | SessionMetaChanged
+  | SessionBackgroundChanged
+  | SessionPausedChanged
+  | SessionNotice
   | SessionTitleChanged
   | SessionEnded
   | HistoryDone
@@ -533,6 +610,10 @@ export interface AgentUserMessage {
   session_id: string;
   text: string;
   source?: string;
+  /** The sender's id for the message (a queued bubble's), echoed on its user_message. */
+  client_id?: string;
+  /** This message answers that open ask (an ask card's reply). */
+  answer_message_id?: string;
 }
 
 export interface SetSessionModel {
@@ -700,3 +781,9 @@ export interface ProposalInfo {
   decided_by: string | null
   result: ProposalResult
 }
+
+export type ToolChangeKind = 'changed' | 'new' | 'removed'
+export type ToolChangeState = 'pending' | 'accepted' | 'declined' | 'superseded' | 'expired'
+export interface ToolDefinitionInfo { hash: string; name: string; description: string; input_schema: unknown; canonical: string; unsafe?: string }
+export interface ToolChangeInfo { id: string; state: ToolChangeState; kind: ToolChangeKind; connection_id: string; connection_name: string; tool: string; old_hash: string; new_hash: string; mode: 'allow' | 'propose'; muted: boolean; session_id: string; created_at: string; expires_at: string; decided_at: string | null; decided_by: string | null; old_definition?: ToolDefinitionInfo | null; new_definition?: ToolDefinitionInfo | null }
+export interface PinEventInfo { id: number; session_id: string; connection_id: string; connection_name: string; tool: string; action: string; old_hash: string; new_hash: string; mode: string; actor: string; created_at: string }

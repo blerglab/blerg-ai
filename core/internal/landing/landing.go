@@ -38,6 +38,29 @@ func Version() string {
 	return "dev"
 }
 
+// release and commit are stamped at build time (-X ...landing.release=$(cat VERSION),
+// -X ...landing.commit=<short sha>); see core/Dockerfile.
+var release, commit string
+
+// Release returns the release version this build was cut from: the repository's VERSION
+// file, such as "0.2.0". BLERG_RELEASE overrides the stamp. Empty when unknown, so the SPA
+// can fall back to Version().
+func Release() string {
+	if v := os.Getenv("BLERG_RELEASE"); v != "" {
+		return v
+	}
+	return release
+}
+
+// Commit returns the short git commit this build was made from ("dev" when the build was
+// not made from a git checkout). BLERG_COMMIT overrides the stamp. Empty when unknown.
+func Commit() string {
+	if v := os.Getenv("BLERG_COMMIT"); v != "" {
+		return v
+	}
+	return commit
+}
+
 // AssetHandler serves the embedded brand assets (tokens.css, logo.svg,
 // favicon.svg) under /brand/.
 func AssetHandler() http.Handler {

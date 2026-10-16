@@ -82,3 +82,60 @@ secret_add() {
       ;;
   esac
 }
+
+# --- The runner's data volume ---------------------------------------------------------------
+#
+# runner-data-pvc.yaml is rendered here rather than through the kustomization: the claim is
+# created once and then left alone (its size and class are fixed once it is bound), and an
+# optional storage class has to add a line, not fill one in.
+
+# runner_data_size_ok SIZE: a Kubernetes quantity such as 10Gi or 500Mi.
+runner_data_size_ok() {
+  [[ "${1:-}" =~ ^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$ ]]
+}
+
+# runner_data_class_ok CLASS: empty (the cluster's default StorageClass) or a StorageClass name.
+runner_data_class_ok() {
+  [ -z "${1:-}" ] || [[ "$1" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]]
+}
+
+# runner_data_claim_render MANIFEST SIZE [CLASS]: prints the claim with its size, and with
+# `storageClassName: CLASS` under spec when CLASS is set.
+runner_data_claim_render() {
+  local manifest="$1" size="$2" class="${3:-}"
+  runner_data_size_ok "$size" || { echo "RUNNER_DATA_SIZE is not a Kubernetes quantity (e.g. 10Gi): $size" >&2; return 1; }
+  runner_data_class_ok "$class" || { echo "RUNNER_DATA_STORAGE_CLASS is not a StorageClass name: $class" >&2; return 1; }
+  RUNNER_DATA_SIZE="$size" envsubst '${RUNNER_DATA_SIZE}' < "$manifest" |
+    awk -v class="$class" '{ print } class != "" && /^spec:[[:space:]]*$/ { print "  storageClassName: " class }'
+}
+
+# runner_data_claim_check WANT_SIZE [WANT_CLASS]: what deploy.sh does about an existing claim.
+#   0  the claim exists and can be used: its size and class are printed, with a warning when they
+#      differ from the settings (which only apply when the claim is created)
+#   2  there is no claim: create it
+#   1  stop: the claim is being deleted, or kubectl could not say whether it exists (never apply
+#      over a live claim on a guess)
+runner_data_claim_check() {
+  local want_size="$1" want_class="${2:-}" out size class deleting
+  if ! out="$(kubectl -n blerg get persistentvolumeclaim blerg-runner-data \
+      -o 'jsonpath={.spec.resources.requests.storage}{"|"}{.spec.storageClassName}{"|"}{.metadata.deletionTimestamp}' 2>&1)"; then
+    case "$out" in
+      *NotFound*|*"not found"*) return 2 ;;
+    esac
+    echo "cannot read persistentvolumeclaim/blerg-runner-data, so not touching it: $out" >&2
+    return 1
+  fi
+  IFS='|' read -r size class deleting <<<"$out"
+  if [ -n "$deleting" ]; then
+    echo "persistentvolumeclaim/blerg-runner-data is being deleted (since $deleting); wait until it is gone, then re-run deploy.sh" >&2
+    return 1
+  fi
+  echo "==> Runner data claim blerg-runner-data exists (${size:-unknown size}, storage class: ${class:-none}); leaving it as it is"
+  if [ "$size" != "$want_size" ]; then
+    echo "    warning: RUNNER_DATA_SIZE=$want_size differs from the claim's $size; it applies only when the claim is created (README.md, \"Runner data volume\")" >&2
+  fi
+  if [ -n "$want_class" ] && [ "$class" != "$want_class" ]; then
+    echo "    warning: RUNNER_DATA_STORAGE_CLASS=$want_class differs from the claim's ${class:-none}; a bound claim's class cannot change" >&2
+  fi
+  return 0
+}

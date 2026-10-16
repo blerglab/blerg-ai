@@ -153,6 +153,7 @@ func TestResumedCronSessionIsRestricted(t *testing.T) {
 	if _, err := cf.pool.Exec(ctx, `UPDATE sessions SET status = 'disconnected' WHERE id = $1`, sid); err != nil {
 		t.Fatal(err)
 	}
+	cf.k8s.finishSessionJob(sid)
 	resumeClusterSession(ctx, cf.hub, cf.pool, sid, "carry on", mcpAcct, "sid-2")
 	if len(cf.k8s.created) != 2 {
 		t.Fatalf("%d Jobs, want 2", len(cf.k8s.created))
@@ -172,6 +173,7 @@ func TestResumedGrantSessionKeepsItsRestriction(t *testing.T) {
 		if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET status = 'disconnected' WHERE id = $1`, sid); err != nil {
 			t.Fatal(err)
 		}
+		fx.k8s.finishSessionJob(sid)
 	}
 	// Launch sheet, cluster: watched.
 	rec := fx.do(fx.api.HandlePostSessions, fx.human(), map[string]any{"repo": "acme/widget", "runtime": "cluster", "kind": "agent", "mcp": fx.selection()})

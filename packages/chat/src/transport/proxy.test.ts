@@ -36,7 +36,8 @@ function router() {
   }
 }
 
-type MockHandlers = { [K in keyof SubscribeHandlers]: Mock<SubscribeHandlers[K]> }
+// The members every subscriber gives (onEvents, onReset and onAskClosed are optional).
+type MockHandlers = { [K in keyof Omit<SubscribeHandlers, 'onEvents' | 'onReset' | 'onAskClosed'>]: Mock<SubscribeHandlers[K]> }
 function handlers(): MockHandlers {
   return {
     onEvent: vi.fn<SubscribeHandlers['onEvent']>(),

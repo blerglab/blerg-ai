@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import Proposals from './Proposals'
+import Proposals, { ProposalsBadge } from './Proposals'
 import { usePendingProposals, isAwaitingYou } from '../lib/proposals'
 import type { ProposalInfo } from '../types'
 
@@ -26,13 +26,15 @@ let items: ProposalInfo[]
 let calls: { url: string; method: string; body?: unknown }[]
 let action: (url: string) => Promise<unknown> | null
 let pageSize = 50
+let changesPending = 0
 
 beforeEach(() => {
   items = []
   calls = []
   action = () => null
   pageSize = 50
-  usePendingProposals.setState({ count: 0 })
+  changesPending = 0
+  usePendingProposals.setState({ count: 0, changes: 0 })
   apiFetch.mockReset()
   apiFetch.mockImplementation((url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
@@ -41,16 +43,17 @@ beforeEach(() => {
     if (custom) return custom
     const u = new URL(url, 'http://x')
     const pendingCount = items.filter(i => i.state === 'pending').length
-    if (u.pathname === '/api/proposals/count') return res({ pending_count: pendingCount })
+    if (u.pathname === '/api/proposals/count') return res({ pending_count: pendingCount, tool_changes_pending: changesPending })
     if (u.pathname === '/api/proposals') {
       const scope = u.searchParams.get('scope') ?? 'open'
-      if (scope === 'open') return res({ proposals: items.filter(isAwaitingYou), decided_next: null, pending_count: pendingCount })
+      if (scope === 'open') return res({ proposals: items.filter(isAwaitingYou), decided_next: null, pending_count: pendingCount, tool_changes_pending: changesPending })
       const decided = items.filter(i => !isAwaitingYou(i))
       const from = Number(u.searchParams.get('before') ?? '0')
       const page = decided.slice(from, from + pageSize)
       const next = from + pageSize < decided.length ? String(from + pageSize) : null
       return res({ proposals: page, decided_next: next, pending_count: pendingCount })
     }
+    if (u.pathname === '/api/tool-changes') return res({ tool_changes: [], decided_next: null, pending_count: changesPending })
     const one = /^\/api\/proposals\/([^/]+)$/.exec(u.pathname)
     if (one && method === 'GET') {
       const found = items.find(i => i.id === decodeURIComponent(one[1]))
@@ -70,6 +73,25 @@ describe('Proposals list', () => {
     renderPage()
     expect(await screen.findByTestId('proposals-empty')).toBeTruthy()
     expect(screen.getByTestId('proposals-empty').textContent).toMatch(/queued for your approval/i)
+  })
+
+  // Review Focus 2: zero proposals, three tool changes; the page's own refresh must not clobber the sum.
+  it('the badge is proposals plus tool changes', async () => {
+    changesPending = 3
+    render(<MemoryRouter><Proposals /><ProposalsBadge /></MemoryRouter>)
+    await screen.findByTestId('proposals-empty')
+    await waitFor(() => expect(screen.getByTestId('proposals-count-badge').textContent).toBe('3'))
+    expect(screen.getByTestId('proposals-count-badge').getAttribute('aria-label')).toBe('3 items awaiting your review')
+  })
+
+  it('?session= shows that session\'s proposals only, with a way back to all of them', async () => {
+    items = [prop(), prop({ id: 'p3', session_id: 's2', tool: 'other_tool' })]
+    renderPage('/proposals?session=s1')
+    expect(await screen.findByTestId('proposal-p1')).toBeTruthy()
+    expect(screen.queryByTestId('proposal-p3')).toBeNull()
+    const note = screen.getByTestId('proposals-session-filter')
+    expect(note.textContent).toContain('Showing proposals for this session')
+    expect(within(note).getByRole('link', { name: 'Show all' }).getAttribute('href')).toBe('/proposals')
   })
 
   it('shows pending by default and decided under its tab', async () => {

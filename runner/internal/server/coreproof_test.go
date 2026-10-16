@@ -22,6 +22,13 @@ func recordingCore(t *testing.T) (*httptest.Server, func() []map[string]string) 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var m map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&m)
+		if r.URL.Path == "/internal/credentials/list" {
+			if (m["token_id"] != "") == (m["session_id"] != "") {
+				t.Error("principal verification lost exact proof")
+			}
+			_, _ = w.Write([]byte(`{"engines":[]}`))
+			return
+		}
 		got = append(got, m)
 		w.WriteHeader(http.StatusNotFound)
 	}))

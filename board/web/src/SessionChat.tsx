@@ -5,8 +5,8 @@
 import { useMemo } from "react";
 import { ChatView, createProxyTransport, type DescribeUserMessage, type Transport } from "@blerglab/chat";
 import "@blerglab/chat/blerg.css";
-import { ensureFreshToken, getAccessToken, redirectToRefresh } from "./authClient";
-import { markRefreshAttempted, refreshAlreadyAttempted } from "./refreshGuard";
+import { ensureFreshToken, getAccessToken } from "./authClient";
+import { bounceToRefresh } from "./signIn";
 
 /** The session as the board's own API lists it. */
 export interface RunnerSession {
@@ -48,22 +48,24 @@ function boardTransport(): Transport {
     },
     onUnauthorized: () => {
       void ensureFreshToken().then((ok) => {
-        if (ok || refreshAlreadyAttempted()) return;
-        markRefreshAttempted();
-        redirectToRefresh(location.href);
+        if (ok) return;
+        bounceToRefresh();
       });
     },
   });
   return shared;
 }
 
-// Who a user message is from. The prompt a session was started with is its brief, not
-// conversation; what a signed-in person typed (here or as an answer to a question) is theirs;
-// everything else the board sent on its own — a review's findings relayed to the worker, a
-// dispatcher's nudge — and it says so.
-const describeUserMessage: DescribeUserMessage = (_ev, p) => {
-  if (p.source === "chat") return { brief: true };
-  if (p.source === "human" || p.source === "ask_answer") return null;
+// Who a user message is from. The prompt the board started the session with (its first message,
+// recorded as "chat") is its brief, not conversation; any later "chat" message is a person's,
+// typed in the runner's own app. What a signed-in person typed here, an answer to the agent's
+// question and a reply to its note are theirs; everything else the board sent on its own — a
+// review's findings relayed to the worker, a dispatcher's nudge — and it says so. Text nobody
+// typed (the restart note, a command's output) never reaches this: the chat draws it as a
+// system card.
+export const describeUserMessage: DescribeUserMessage = (_ev, p, ctx) => {
+  if (p.source === "chat") return ctx.first ? { brief: true } : null;
+  if (p.source === "human" || p.source === "ask_answer" || p.source === "note_reply") return null;
   return { author: "blerg-board" };
 };
 

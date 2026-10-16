@@ -216,6 +216,7 @@ func TestAgentTokenResumeCarriesTheOwner(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE sessions SET status = 'disconnected' WHERE id = $1`, sessionID); err != nil {
 		t.Fatal(err)
 	}
+	fake.finishSessionJob(sessionID)
 	fake.mu.Lock()
 	fake.created = nil
 	fake.createdSecrets = nil

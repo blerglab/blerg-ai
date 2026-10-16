@@ -1,8 +1,11 @@
+import { useContext } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { OpenSessionContext } from '../lib/openSession'
 import type { SessionInfo, DaemonInfo } from '../types'
 import { send } from '../ws'
-import { repoLabel } from '../lib/noRepo'
+import { isNoRepo, repoLabel } from '../lib/noRepo'
 import { startedByLabel } from '../lib/startedBy'
+import { BACKGROUND_COLOR, PAUSED_WORDS, displayLabel, displayState, pausedByRestart } from '../lib/displayState'
 
 interface Props {
   session: SessionInfo
@@ -14,6 +17,8 @@ const STATUS_STYLES: Record<string, { bg: string; border: string; color: string;
   waiting:  { bg: 'color-mix(in srgb, var(--amber) 16%, var(--scree-2))', border: 'color-mix(in srgb, var(--amber) 40%, var(--stone))', color: 'var(--amber)', text: 'waiting' },
   running:  { bg: 'color-mix(in srgb, var(--lichen) 16%, var(--scree-2))', border: 'color-mix(in srgb, var(--lichen) 40%, var(--stone))', color: 'var(--lichen)', text: 'running' },
   idle:     { bg: 'var(--scree-2)', border: 'var(--stone)', color: 'var(--fog-dim)', text: 'idle' },
+  // idle to the engine, but its agent has background work running: quieter than running, not resting
+  background: { bg: 'var(--scree-2)', border: 'color-mix(in srgb, var(--lichen) 22%, var(--stone))', color: BACKGROUND_COLOR, text: 'working in background' },
   starting: { bg: 'color-mix(in srgb, var(--batch) 16%, var(--scree-2))', border: 'color-mix(in srgb, var(--batch) 40%, var(--stone))', color: 'var(--batch)', text: 'starting' },
   stopped:  { bg: 'var(--scree-2)', border: 'var(--stone)', color: 'var(--fog-dim)', text: 'stopped' },
   error:    { bg: 'color-mix(in srgb, var(--danger) 16%, var(--scree-2))', border: 'color-mix(in srgb, var(--danger) 40%, var(--stone))', color: 'var(--danger)', text: 'error' },
@@ -39,37 +44,89 @@ const RUNTIME_CHIP: Record<string, string> = {
 // absent field is unknown and gets no chip.
 function kindChipLabel(kind: string | undefined): string | null {
   if (kind === undefined) return null
-  if (kind === 'agent') return 'Agent'
+  // An agent session is the default kind: a chip on every card would say nothing.
+  if (kind === 'agent') return null
   if (kind === 'tmux' || kind === '') return 'Terminal'
   return null
 }
 
 const chipStyle: React.CSSProperties = {
   color: 'var(--fog-dim)',
-  fontSize: '0.68rem',
+  fontSize: '0.64rem',
   flexShrink: 0,
   background: 'var(--basalt)',
   border: '1px solid var(--scree)',
   borderRadius: 4,
-  padding: '1px 5px',
-  letterSpacing: '0.04em',
+  padding: '0 4px', lineHeight: '15px',
+  letterSpacing: '0.02em',
+}
+
+// The status glyph's slot: one fixed width whatever the state, so every card's name starts at the
+// same place (and the chips row under it lines up: STATUS_SLOT + the row's gap).
+const STATUS_SLOT = 22
+const ROW_GAP = 6
+
+// The ⏱ count, as the glyph and as the chip: past nine it reads "9+". The ⏱ is drawn a size
+// smaller than the count (it renders wide): "⏱2" fits the status slot, and "⏱9+" (rare) spills
+// 2 px each side of it, into the card's padding and the row's gap, the name staying where it is.
+function taskCount(n: number): string {
+  return n > 9 ? '9+' : String(n)
+}
+
+function TaskCount({ n }: { n: number }) {
+  return <><span style={{ fontSize: '0.85em' }}>⏱</span>{n > 0 ? taskCount(n) : ''}</>
+}
+
+// The background glyph and the ⏱ chip share one look: the chip's size and spacing, the quiet
+// background colour.
+const backgroundText: React.CSSProperties = {
+  color: BACKGROUND_COLOR,
+  fontSize: '0.64rem',
+  fontWeight: 600,
+  letterSpacing: '-0.02em',
+  fontVariantNumeric: 'tabular-nums',
+  whiteSpace: 'nowrap',
 }
 
 // StatusIndicator renders the per-state glyph that sits at the left of the card:
 //   running → animated spinner (it's doing work)
 //   waiting → a question mark (it needs an answer)
 //   idle    → a snoozing "Zz" (it's resting)
+//   background → ⏱ and the count of background tasks (its turn is over, its work is not)
 //   other   → the classic coloured dot
+// A glyph only: the words are in the title and the accessible name, so the small card stays light.
 // Keeps data-testid="status-dot" + title across all variants for accessibility/tests.
-function StatusIndicator({ status, color, text }: { status: string; color: string; text: string }) {
+function StatusIndicator(props: { status: string; color: string; text: string; count?: number }) {
+  return (
+    <span data-testid="status-slot" style={{ width: STATUS_SLOT, flexShrink: 0, display: 'inline-flex', justifyContent: 'center', alignItems: 'center' }}>
+      <StatusGlyph {...props} />
+    </span>
+  )
+}
+
+function StatusGlyph({ status, color, text, count = 0 }: { status: string; color: string; text: string; count?: number }) {
   const common = { 'data-testid': 'status-dot', title: text } as const
+
+  if (status === 'background') {
+    return (
+      <span
+        {...common}
+        role="img"
+        aria-label={text}
+        data-status="background"
+        style={{ ...backgroundText, color, lineHeight: 1, display: 'inline-block' }}
+      >
+        <TaskCount n={count} />
+      </span>
+    )
+  }
 
   if (status === 'running') {
     return (
       <span
         {...common}
         className="blerg-status-spinner"
-        style={{ borderTopColor: color }}
+        style={{ color, borderTopColor: color }}
       />
     )
   }
@@ -131,16 +188,40 @@ function StatusIndicator({ status, color, text }: { status: string; color: strin
   )
 }
 
+// Statuses in which a session can have something running in the background.
+const LIVE_STATUSES = new Set(['starting', 'running', 'idle', 'waiting'])
+
+function backgroundTitle(n: number): string {
+  return n === 1 ? '1 background task running' : `${n} background tasks running`
+}
+
 export default function SessionCard({ session, active }: Props) {
   const navigate = useNavigate()
+  const openSession = useContext(OpenSessionContext)
   const status = session.status
-  const statusStyle = STATUS_STYLES[status] ?? STATUS_STYLES.stopped
+  // What the card shows: an idle session with background work running reads as "background".
+  const shown = displayState(session)
+  // A session a daemon restart left paused needs the person as a waiting one does: the same "?",
+  // its own words in the tooltip.
+  const paused = pausedByRestart(session)
+  const glyph = paused ? 'waiting' : shown
+  const statusStyle = STATUS_STYLES[glyph] ?? STATUS_STYLES.stopped
   const isWaiting = status === 'waiting'
 
   // Flash and unread dot driven by server-persisted session.unread.
   const unread = !!session.unread
   const flashing = isWaiting && unread
-  const hasDetails = (status === 'error' && !!session.error_reason)
+  // Background tasks its agent left running (the server's count, so it is right for a session
+  // nobody has open).
+  const bgTasks = LIVE_STATUSES.has(status) ? session.background_tasks ?? 0 : 0
+  // In the background state the status glyph carries the count; the chip shows it otherwise.
+  const bgChip = shown !== 'background' && bgTasks > 0
+  // The session's org/repo in small text, so the list needs no repo headings. Not for a no-repo
+  // session, and not for an untitled one: its name already is the repo.
+  const repoLine = session.title && !isNoRepo(session.repo) ? session.repo : ''
+  // A session with background tasks keeps its second line when the count moves into the status slot,
+  // so the card does not change height as its turn ends.
+  const hasDetails = !!repoLine || bgTasks > 0 || (status === 'error' && !!session.error_reason)
     || !!(session.runtime && RUNTIME_CHIP[session.runtime]) || !!kindChipLabel(session.kind) || !!session.model || !!session.cron_id || !!session.started_by
 
   return (
@@ -148,7 +229,8 @@ export default function SessionCard({ session, active }: Props) {
       data-active={active ? 'true' : undefined}
       className={flashing ? 'blerg-runner-waiting-flash' : undefined}
       onClick={() => {
-        navigate(`/sessions/${session.id}`)
+        if (openSession) openSession(session.id)
+        else navigate(`/sessions/${session.id}`)
       }}
       style={{
         // backgroundColor (longhand) so the flash class's background-image survives.
@@ -163,7 +245,7 @@ export default function SessionCard({ session, active }: Props) {
         // Selection reads as a blaze (brand accent = "active") left bar + a
         // soft lift — distinct from amber, which means "waiting". The status
         // dot still shows what state the session is in.
-        borderLeft: active ? '3px solid var(--blaze)' : isWaiting ? `3px solid ${statusStyle.border}` : `1px solid ${statusStyle.border}`,
+        borderLeft: active ? '3px solid var(--blaze)' : isWaiting || paused ? `3px solid ${statusStyle.border}` : `1px solid ${statusStyle.border}`,
         borderTop: `1px solid ${statusStyle.border}`,
         borderRight: `1px solid ${statusStyle.border}`,
         borderBottom: `1px solid ${statusStyle.border}`,
@@ -172,9 +254,9 @@ export default function SessionCard({ session, active }: Props) {
     >
       {/* Row 1: status indicator + name (+ unread dot, star). The name gets
           the whole line so it stays readable in the narrow sidebar. */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-      {/* Status indicator — spinner / "?" / "Zz" / dot depending on state */}
-      <StatusIndicator status={status} color={statusStyle.color} text={statusStyle.text} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: ROW_GAP, minWidth: 0 }}>
+      {/* Status indicator — spinner / "?" / "Zz" / "⏱ n" / dot depending on state */}
+      <StatusIndicator status={glyph} color={statusStyle.color} text={paused ? PAUSED_WORDS : displayLabel(shown, bgTasks)} count={bgTasks} />
 
       {/* Session name */}
       <span style={{
@@ -229,9 +311,41 @@ export default function SessionCard({ session, active }: Props) {
       </button>
       </div>
 
-      {/* Row 2: failure reason and the small chips (where/how it runs, model).
-          Text is deliberately small so the card grows by one compact line. */}
-      {hasDetails && <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, minWidth: 0, paddingLeft: 16 }}>
+      {/* Row 2, the last: the org/repo, failure reason and the small chips (where/how it runs,
+          model) on ONE line that never wraps, so a card is two lines at most; the repo and a
+          failure reason give way (ellipsis), the chips keep their size. */}
+      {hasDetails && <div style={{ display: 'flex', flexWrap: 'nowrap', overflow: 'hidden', alignItems: 'center', gap: 4, minWidth: 0, minHeight: 15, paddingLeft: STATUS_SLOT + ROW_GAP }}>
+      {repoLine && (
+        <span
+          data-testid="session-repo"
+          title={repoLine}
+          style={{
+            color: 'var(--fog-dim)',
+            fontSize: '0.7rem',
+            // The one thing that gives way (the full name is in the title): the chips keep their size.
+            flex: '0 1 auto',
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            marginRight: 2,
+          }}
+        >
+          {repoLine}
+        </span>
+      )}
+      {/* Background tasks running — a long watch is otherwise invisible from the list */}
+      {bgChip && (
+        <span
+          data-testid="background-chip"
+          title={backgroundTitle(bgTasks)}
+          aria-label={backgroundTitle(bgTasks)}
+          style={{ ...chipStyle, ...backgroundText, borderColor: `color-mix(in srgb, ${BACKGROUND_COLOR} 40%, var(--scree))` }}
+        >
+          <TaskCount n={bgTasks} />
+        </span>
+      )}
+
       {/* Spawn/run failure reason — second line, only on failed sessions */}
       {status === 'error' && session.error_reason && (
         <span
@@ -279,13 +393,13 @@ export default function SessionCard({ session, active }: Props) {
           data-testid="model-chip"
           style={{
             color: 'var(--fog-dim)',
-            fontSize: '0.66rem',
+            fontSize: '0.62rem',
             fontFamily: 'monospace',
             flexShrink: 0,
             background: 'var(--basalt)',
             border: '1px solid var(--scree)',
             borderRadius: 4,
-            padding: '1px 5px',
+            padding: '0 4px', lineHeight: '15px',
           }}
         >
           {shortModel(session.model)}

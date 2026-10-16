@@ -9,14 +9,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -96,10 +94,40 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
+// probeStderrTail is how much of a failed probe's stderr is kept for the log.
+const probeStderrTail = 512
+
+// tailBuffer keeps the last max bytes written to it; Write never fails.
+type tailBuffer struct {
+	b   []byte
+	max int
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.b = append(t.b, p...)
+	if len(t.b) > t.max {
+		t.b = t.b[len(t.b)-t.max:]
+	}
+	return len(p), nil
+}
+
+// text is the kept tail on one line, control characters flattened (it came
+// from a CLI and goes into a log).
+func (t *tailBuffer) text() string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, string(t.b))), " ")
+}
+
 // runProbeCommand runs bin with args and returns its stdout: no stdin
-// (os/exec's /dev/null), stderr discarded, minimal env, working directory
+// (os/exec's /dev/null), stderr only its tail (for errors), minimal env, working directory
 // the user's home, its own process group killed at timeout or when stdout
-// passes maxOut.
+// passes maxOut. When the command itself fails, the last probeStderrTail bytes
+// of its stderr ride in the error: that is the only clue to why a CLI that
+// is installed reports no list.
 func runProbeCommand(ctx context.Context, timeout time.Duration, maxOut int, bin string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -118,6 +146,8 @@ func runProbeCommand(ctx context.Context, timeout time.Duration, maxOut int, bin
 	cmd.WaitDelay = 2 * time.Second
 	out := &cappedBuffer{max: maxOut, onOverflow: cancel}
 	cmd.Stdout = out
+	errTail := &tailBuffer{max: probeStderrTail}
+	cmd.Stderr = errTail
 	err := cmd.Run()
 	if out.overflow {
 		return nil, fmt.Errorf("%s: %w (%d bytes)", filepath.Base(bin), errProbeOutputTooLarge, maxOut)
@@ -126,87 +156,17 @@ func runProbeCommand(ctx context.Context, timeout time.Duration, maxOut int, bin
 		return nil, fmt.Errorf("%s: %w", filepath.Base(bin), ctx.Err())
 	}
 	if err != nil {
+		if t := errTail.text(); t != "" {
+			return nil, fmt.Errorf("%s: %w: %s", filepath.Base(bin), err, t)
+		}
 		return nil, fmt.Errorf("%s: %w", filepath.Base(bin), err)
 	}
 	return out.buf.Bytes(), nil
 }
 
-// codexLevel is one supported_reasoning_levels element, which Codex has
-// spelled both as {"effort": "high", "description": …} and as a bare "high".
-// Any other shape reads as "" (dropped later).
-type codexLevel string
-
-func (l *codexLevel) UnmarshalJSON(b []byte) error {
-	var s string
-	if json.Unmarshal(b, &s) == nil {
-		*l = codexLevel(s)
-		return nil
-	}
-	var o struct {
-		Effort string `json:"effort"`
-	}
-	if json.Unmarshal(b, &o) == nil {
-		*l = codexLevel(o.Effort)
-	}
-	return nil
-}
-
-type rawCodexModel struct {
-	Slug                     string       `json:"slug"`
-	DisplayName              string       `json:"display_name"`
-	Description              string       `json:"description"`
-	DefaultReasoningLevel    string       `json:"default_reasoning_level"`
-	SupportedReasoningLevels []codexLevel `json:"supported_reasoning_levels"`
-	Visibility               string       `json:"visibility"`
-	Priority                 *float64     `json:"priority"`
-}
-
-// parseCodexModels reads `codex debug models` output: the models Codex's own
-// picker lists (visibility "list"; hidden ones are internal or retired), in
-// its priority order (lowest first; entries without one last, in document
-// order). An entry that does not decode is skipped; a document that does not
-// decode at all is an error.
+// parseCodexModels shares the CLI catalog decoder with cluster probes.
 func parseCodexModels(data []byte) ([]models.Model, error) {
-	var doc struct {
-		Models []json.RawMessage `json:"models"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("codex models: %w", err)
-	}
-	if doc.Models == nil {
-		return nil, errors.New("codex models: no models array")
-	}
-	type ranked struct {
-		m        rawCodexModel
-		priority float64
-	}
-	var listed []ranked
-	for _, raw := range doc.Models {
-		var m rawCodexModel
-		if json.Unmarshal(raw, &m) != nil || m.Visibility != "list" {
-			continue
-		}
-		p := math.Inf(1)
-		if m.Priority != nil {
-			p = *m.Priority
-		}
-		listed = append(listed, ranked{m, p})
-	}
-	sort.SliceStable(listed, func(i, j int) bool { return listed[i].priority < listed[j].priority })
-	out := make([]models.Model, 0, len(listed))
-	for _, r := range listed {
-		efforts := make([]string, 0, len(r.m.SupportedReasoningLevels))
-		for _, l := range r.m.SupportedReasoningLevels {
-			efforts = append(efforts, string(l))
-		}
-		out = append(out, models.Model{
-			ID: r.m.Slug, Name: r.m.DisplayName, Description: r.m.Description,
-			// Codex's own picker shows every listed model at once.
-			Section: "main", Efforts: efforts, DefaultEffort: r.m.DefaultReasoningLevel,
-			EffortKind: "reasoning",
-		})
-	}
-	return models.SanitizeReported("codex", out), nil
+	return models.ParseCodexModels(data)
 }
 
 // ─── Hermes: the configured endpoint's /models ───────────────────────────────

@@ -9,8 +9,11 @@ for a signed-in person only: an agent token cannot create, read or change one.
 
 ## How a cron works
 
-A cron has a name, a schedule, a time zone, a prompt (up to 16 KiB), an optional model and effort,
+A cron has a name, a schedule, a time zone, a prompt (up to 16 KiB), a Claude or Codex engine, an optional model and effort,
 a runtime, an optional daemon pin and the connections and tools it may use.
+
+Changing the engine resets its saved model and effort to the new engine's defaults unless you
+choose replacements. Existing crons keep Claude as their engine.
 
 1. The runner's scheduler wakes every 30 seconds and finds crons that are due.
 2. For each, it records the run, then starts an ordinary agent session with your prompt.
@@ -96,6 +99,10 @@ interactive session (a session you launch yourself keeps its tools even with con
 [mcp-connections.md](mcp-connections.md#how-a-session-sees-a-connection-the-gateway)):
 
 - **Where it runs.** A cluster pod or the Docker sandbox. Never the bare host.
+- **Codex support.** A Docker daemon must explicitly report `codex_restricted`; older daemons
+  are held as unavailable until upgraded. The isolated runtime verifies the pinned Codex CLI
+  before starting and loads only the runner's file tools and selected MCP tools, with no user
+  settings, plugins, hooks or native tools. Cluster runs need the updated agent image too.
 - **Tools.** Only file tools (read, write, edit, search) plus the MCP tools you allowed for that
   cron. No shell, web access, sub-agents or other built-ins. The runner sets this list; a session
   cannot change it.
@@ -145,7 +152,7 @@ credentials for this cron's runs.
 ## On a desktop
 
 Read this before scheduling a sandbox cron on a desktop install. The sandbox does not use your
-account's stored credential: it mounts the **host developer's own Claude login**, so a cron there
+account's stored credential: it mounts the **host developer's own engine login**, so a cron there
 runs on that login and its usage. A sandbox cron can also run on **any connected daemon**, and every
 account on the install shares the connected daemons. The supported desktop shape is one person per
 install; you can pin a cron to a daemon. On Kubernetes a cron uses the credential of the person who

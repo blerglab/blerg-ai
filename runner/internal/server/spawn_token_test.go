@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +29,8 @@ const spawnTokenDaemonTok = "daemon-master-token-1234567890"
 
 func spawnTokenFixture(t *testing.T) (*API, *Hub, *DaemonConn, *pgxpool.Pool) {
 	t.Helper()
-	pool := connectSrvTestDB(t)
+	pool := connectSrvTestSchemaPool(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
 	if err := db.RunMigrations(ctx, pool); err != nil {
 		t.Fatalf("RunMigrations: %v", err)
 	}
@@ -40,9 +40,32 @@ func spawnTokenFixture(t *testing.T) (*API, *Hub, *DaemonConn, *pgxpool.Pool) {
 	}
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
+	dc.SetSessionTokenFile(true) // a current daemon: it can take a re-issued token
 	hub.Register(dc)
 	api := NewAPI(hub, pool, spawnTokenDaemonTok, nil, "")
 	return api, hub, dc, pool
+}
+
+// connectSrvTestSchemaPool is connectSrvTestDB + setupSrvTestSchema with the
+// schema pinned on EVERY connection of the pool (search_path as a connection
+// parameter), not only on the one that ran SET: a test whose work spans
+// goroutines (a daemon websocket's read pump) uses several connections, and
+// one of them landing in another schema made such tests flaky.
+func connectSrvTestSchemaPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	setup := connectSrvTestDB(t)
+	setupSrvTestSchema(t, setup)
+	cfg, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = "test_blerg_runner_srv"
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 // spawnViaREST POSTs /api/sessions with a session.start token and returns the
@@ -189,8 +212,12 @@ func TestReconcileUnreportedSessionRevokesToken(t *testing.T) {
 			t.Fatalf("setSessionStatus(%s) revoked the token: %v", status, err)
 		}
 	}
-	// Put it back to active so reconcile has something to stop.
+	// Put it back to active so reconcile has something to stop, and older
+	// than the grace a just-made session gets (unreportedGrace).
 	if err := db.UpdateSessionStatus(ctx, pool, sessionID, "running", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET started_at = now() - interval '10 minutes' WHERE id = $1`, sessionID); err != nil {
 		t.Fatal(err)
 	}
 

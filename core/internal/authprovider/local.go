@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/blerglab/blerg-ai/core/internal/db"
@@ -96,7 +98,7 @@ func (l *Local) EnsureBootstrapAdmin(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("BLERG_BOOTSTRAP_ADMIN_PASSWORD=%s (login as provider_subject=%s; you must change this on first login)", password, subject)
+	log.Printf("BLERG_BOOTSTRAP_ADMIN_PASSWORD=%s (username: %s; you must change the password on first login and can pick your own username then)", password, subject)
 	return nil
 }
 
@@ -158,25 +160,211 @@ func (l *Local) Callback(ctx context.Context, r *http.Request) (Account, error) 
 // internal 500 here) — a multi-byte-heavy 72-character password can already exceed 72 bytes, so
 // bytes (not runes/characters) is the correct unit to bound.
 func (l *Local) ChangePassword(ctx context.Context, accountID, oldPassword, newPassword string) error {
+	_, err := l.ChangePasswordAndSubject(ctx, accountID, oldPassword, newPassword, "")
+	return err
+}
+
+// ChangePasswordAndSubject is ChangePassword plus an optional rename: when newSubject is
+// non-empty and differs from the account's current provider_subject, the account is renamed in
+// the SAME transaction as the password change, so a taken or invalid username leaves the
+// password untouched too. It returns the account's provider_subject after the change. A new name
+// is validated after the row is read (echoing the current name is a no-op even if it predates
+// the rules) and before any bcrypt work; a rename asked of a non-local account is
+// ErrUsernameFromProvider (checked before the password, since such an account has no password
+// here to check). The password is checked, and the new hash computed, before the row lock is
+// taken (see lockUnchanged).
+func (l *Local) ChangePasswordAndSubject(ctx context.Context, accountID, oldPassword, newPassword, newSubject string) (string, error) {
 	if len(newPassword) < 12 || len(newPassword) > 72 {
-		return ErrWeakPassword
+		return "", ErrWeakPassword
 	}
-	var hash *string
-	err := l.st.Pool().QueryRow(ctx,
-		`SELECT password_hash FROM accounts WHERE id = $1 AND provider = 'local'`, accountID).Scan(&hash)
-	if err != nil || hash == nil {
+	acc, err := l.readAccount(ctx, accountID)
+	if err != nil {
 		_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(oldPassword))
-		return ErrInvalidCredentials
+		return "", ErrInvalidCredentials
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(*hash), []byte(oldPassword)); err != nil {
-		return ErrInvalidCredentials
+	// Echoing the current name (even a legacy one the rules would refuse) is a no-op, so the
+	// rules apply only to a name that is actually new.
+	rename := newSubject != "" && newSubject != acc.subject
+	if rename {
+		if err := ValidateUsername(newSubject); err != nil {
+			return "", err
+		}
+		if acc.provider != "local" {
+			return "", ErrUsernameFromProvider
+		}
+	}
+	if err := acc.checkPassword(oldPassword); err != nil {
+		return "", err
 	}
 	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
+		return "", err
+	}
+	tx, err := l.st.Pool().Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockUnchanged(ctx, tx, accountID, acc); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE accounts SET password_hash = $2, must_change_password = false WHERE id = $1`, accountID, string(newHash)); err != nil {
+		return "", err
+	}
+	subject := acc.subject
+	if rename {
+		if err := renameLocal(ctx, tx, accountID, newSubject); err != nil {
+			return "", err
+		}
+		subject = newSubject
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return subject, nil
+}
+
+// ErrInvalidUsername is ValidateUsername's refusal. Its text is shown to the person as is.
+var ErrInvalidUsername = errors.New("use lowercase letters, digits, dots, dashes and underscores (3–64 characters)")
+
+// ErrUsernameTaken is a rename onto a provider_subject another local account already has
+// (accounts' UNIQUE (provider, provider_subject) is the check). Its text is shown as is.
+var ErrUsernameTaken = errors.New("that username is taken")
+
+// ErrUsernameFromProvider is a rename asked of a github/oidc account, whose provider_subject is
+// the identity provider's own id for the person and is not ours to change. Shown as is.
+var ErrUsernameFromProvider = errors.New("username comes from your sign-in provider")
+
+// ValidateUsername is the rule for a username a person chooses: 3 to 64 characters of
+// lowercase letters, digits, '.', '_' and '-', starting with a letter or digit. Uppercase is
+// refused rather than folded, so what is stored is exactly what was typed. It applies to a new
+// name only — a self-chosen one, or one an operator passes to `users create` — not to a name
+// already stored (the random bootstrap one, or one created before the rule existed).
+func ValidateUsername(s string) error {
+	if len(s) < 3 || len(s) > 64 {
+		return ErrInvalidUsername
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case (c == '.' || c == '_' || c == '-') && i > 0:
+		default:
+			return ErrInvalidUsername
+		}
+	}
+	return nil
+}
+
+// ChangeUsername renames a local account behind its current password (POST /auth/username).
+// The new name must pass ValidateUsername (ErrInvalidUsername) and not belong to another local
+// account (ErrUsernameTaken); a github/oidc account is ErrUsernameFromProvider; a wrong password
+// or an unknown accountID is ErrInvalidCredentials, with the same dummy-hash timing as
+// ChangePassword. Echoing the current name is a no-op (even a legacy name the rules would
+// refuse). Sessions and tokens are unaffected — they name the account id, not the username.
+// Returns the account's provider_subject afterwards. As in ChangePasswordAndSubject, the
+// password is checked before the row lock is taken.
+func (l *Local) ChangeUsername(ctx context.Context, accountID, password, newSubject string) (string, error) {
+	acc, err := l.readAccount(ctx, accountID)
+	if err != nil {
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password))
+		return "", ErrInvalidCredentials
+	}
+	// The rules and the provider check apply only to a name that is actually new.
+	rename := newSubject != acc.subject
+	if rename {
+		if err := ValidateUsername(newSubject); err != nil {
+			return "", err
+		}
+		if acc.provider != "local" {
+			return "", ErrUsernameFromProvider
+		}
+	}
+	if err := acc.checkPassword(password); err != nil {
+		return "", err
+	}
+	if !rename {
+		return newSubject, nil
+	}
+	tx, err := l.st.Pool().Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockUnchanged(ctx, tx, accountID, acc); err != nil {
+		return "", err
+	}
+	if err := renameLocal(ctx, tx, accountID, newSubject); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return newSubject, nil
+}
+
+// accountRow is the row a password or username change works on.
+type accountRow struct {
+	provider, subject string
+	hash              *string
+}
+
+// readAccount reads the row with a plain SELECT, outside any transaction, so the bcrypt check
+// that follows holds neither a row lock nor a pooled connection.
+func (l *Local) readAccount(ctx context.Context, accountID string) (accountRow, error) {
+	var a accountRow
+	err := l.st.Pool().QueryRow(ctx,
+		`SELECT provider, provider_subject, password_hash FROM accounts WHERE id = $1`, accountID).
+		Scan(&a.provider, &a.subject, &a.hash)
+	return a, err
+}
+
+// lockUnchanged takes the row lock (FOR UPDATE) inside tx and checks the row is still the one
+// the password was checked against. If the hash, name or provider changed in between (a
+// concurrent password change, reset or rename), or the row is gone, it is ErrInvalidCredentials:
+// the password that was checked may no longer be the account's. Any other error is returned.
+func lockUnchanged(ctx context.Context, tx pgx.Tx, accountID string, checked accountRow) error {
+	var now accountRow
+	if err := tx.QueryRow(ctx,
+		`SELECT provider, provider_subject, password_hash FROM accounts WHERE id = $1 FOR UPDATE`, accountID).
+		Scan(&now.provider, &now.subject, &now.hash); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrInvalidCredentials
+		}
 		return err
 	}
-	_, err = l.st.Pool().Exec(ctx,
-		`UPDATE accounts SET password_hash = $2, must_change_password = false WHERE id = $1`, accountID, string(newHash))
+	if now.provider != checked.provider || now.subject != checked.subject ||
+		(now.hash == nil) != (checked.hash == nil) ||
+		(now.hash != nil && *now.hash != *checked.hash) {
+		return ErrInvalidCredentials
+	}
+	return nil
+}
+
+// checkPassword compares password with the account's bcrypt hash. An account with no local
+// hash (github/oidc) pays the dummy-hash cost and fails, like a wrong password.
+func (a accountRow) checkPassword(password string) error {
+	if a.provider != "local" || a.hash == nil {
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password))
+		return ErrInvalidCredentials
+	}
+	if bcrypt.CompareHashAndPassword([]byte(*a.hash), []byte(password)) != nil {
+		return ErrInvalidCredentials
+	}
+	return nil
+}
+
+// renameLocal is the rename statement itself, run inside the caller's transaction. The
+// UNIQUE (provider, provider_subject) constraint is the uniqueness check: its violation is
+// ErrUsernameTaken, so two people racing for one name cannot both get it.
+func renameLocal(ctx context.Context, tx pgx.Tx, accountID, newSubject string) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE accounts SET provider_subject = $2 WHERE id = $1 AND provider = 'local'`, accountID, newSubject)
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) && pe.Code == "23505" {
+		return ErrUsernameTaken
+	}
 	return err
 }
 
@@ -194,7 +382,10 @@ func oneTimePassword() (string, error) {
 // must_change_password=true, returning that password (the ONLY time it is ever available in
 // plaintext — it is never stored anywhere but this return value, and the CLI caller prints it
 // once to stdout and discards it). role must be "admin" or "member"; any other value is
-// rejected without touching the database. A duplicate provider_subject is reported as
+// rejected without touching the database, and so is a subject that fails ValidateUsername
+// (ErrInvalidUsername), so operator-created names follow the same rules as self-chosen ones
+// (EnsureBootstrapAdmin's random subject does not go through here; it is replaced at first
+// login). A duplicate provider_subject is reported as
 // ErrSubjectExists via the ON CONFLICT DO NOTHING + RowsAffected check below, relying on the
 // UNIQUE (provider, provider_subject) constraint from migration 005_identity_accounts.sql
 // (verified present) rather than a separate existence check, so the create is a single atomic
@@ -203,8 +394,8 @@ func (l *Local) CreateLocalAccount(ctx context.Context, subject, role string) (s
 	if role != "admin" && role != "member" {
 		return "", fmt.Errorf("role must be admin or member, got %q", role)
 	}
-	if subject == "" {
-		return "", errors.New("subject is required")
+	if err := ValidateUsername(subject); err != nil {
+		return "", err
 	}
 	pw, err := oneTimePassword()
 	if err != nil {

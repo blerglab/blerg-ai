@@ -34,13 +34,18 @@ metadata:
 # only) so the start progress a browser shows can say what the pod is waiting
 # on — Unschedulable, ImagePullBackOff, a missing Secret — instead of a bare
 # "Starting…". Without the pods rule sessions still start; the progress panel
-# just cannot see past "Job created".
+# just cannot see past "Job created". Model catalog probes also need pods/log
+# get access to read their bounded, credential-free model JSON output.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: blerg-runner-agent-launcher
   namespace: blerg-runner-sessions
 rules:
+  # Only the runner launcher manages conversation PVCs. Workers mount no SA token.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "delete"]
@@ -48,7 +53,7 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "create", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["pods"]
+    resources: ["pods", "pods/log"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

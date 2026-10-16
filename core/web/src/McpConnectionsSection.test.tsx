@@ -12,6 +12,7 @@ type Conn = {
   has_secret: boolean;
   status: string;
   oauth_issuer?: string;
+  pin_policy?: string;
   last_verified_at: string | null;
 };
 
@@ -43,6 +44,7 @@ function fakeCore(initial: Conn[] = [], max = 20) {
     calls: [] as { url: string; method: string; body: Record<string, string> | null }[],
     reject: null as { status: number; text: string } | null,
     authURL: "https://auth.example.com/authorize?state=abc",
+    events: [] as { id: number; action: string; from_value: string; to_value: string; created_at: string }[],
   };
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
@@ -66,9 +68,20 @@ function fakeCore(initial: Conn[] = [], max = 20) {
       state.conns = [...state.conns, c];
       return reply(201, c);
     }
+    if (url.endsWith("/events") && method === "GET") return reply(200, { events: state.events });
     const id = url.split("/").pop()!;
     if (method === "PATCH") {
-      state.conns = state.conns.map((c) => (c.id === id ? { ...c, name: body!.name ?? c.name } : c));
+      if (body?.pin_policy) {
+        const old = state.conns.find((c) => c.id === id)?.pin_policy ?? "strict";
+        state.events.push({
+          id: state.events.length + 1,
+          action: "pin_policy",
+          from_value: old,
+          to_value: body.pin_policy,
+          created_at: "2026-10-13T10:00:00Z",
+        });
+      }
+      state.conns = state.conns.map((c) => (c.id === id ? { ...c, ...body } : c));
       return reply(200, state.conns.find((c) => c.id === id));
     }
     if (method === "DELETE") {
@@ -542,5 +555,19 @@ describe("MCP connections", () => {
       await screen.findByText(/No MCP connections yet/);
       expect(screen.queryByTestId("mcp-oauth-banner")).not.toBeInTheDocument();
     });
+  });
+
+  // Review Focus 4
+  it("shows Ask me when the server sends no pin_policy and saves a flip", async () => {
+    setup([conn({ id: "c1" })]);
+    render(<McpConnectionsSection site={{ version: "x", board_url: "", runner_url: "https://runner.test" }} />);
+    const select = (await screen.findByLabelText(/definition changes for docs/i)) as HTMLSelectElement;
+    expect(select.value).toBe("strict");
+    fireEvent.change(select, { target: { value: "auto_accept" } });
+    await waitFor(() => expect(core.state.calls.some((c) => c.method === "PATCH" && c.body?.pin_policy === "auto_accept")).toBe(true));
+    expect(screen.getByText(/trusts this server to change what an agent may do/i)).toBeTruthy();
+    expect(await screen.findByText(/Ask me → Accept automatically/)).toBeTruthy();
+    const link = screen.getByRole("link", { name: /tool change history/i });
+    expect(link.getAttribute("href")).toBe("https://runner.test/proposals?connection=c1");
   });
 });

@@ -14,13 +14,29 @@ import (
 // ErrMCPGrantNotFound is returned when no grant matches a token hash.
 var ErrMCPGrantNotFound = errors.New("mcp grant not found")
 
+// Grant presets (migration 039): which launch-sheet preset produced the selection. auto_accept
+// uses it for a tool the launch never saw: allow_all grants allow, approval grants propose, custom
+// grants nothing.
+const (
+	PresetAllowAll = "allow_all"
+	PresetApproval = "approval"
+	PresetCustom   = "custom"
+)
+
 // MCPGrantTool is one tool entry of a grant: its mode ("allow" or "propose"; any
-// other value, and any tool not listed, means off) and the hash of its
-// description and input schema the person confirmed.
+// other value, and any tool not listed, means off), the hash of its description and
+// input schema the person confirmed, and whether the agent has listed the entry at that
+// hash. Listed is nil (absent on the wire) for an entry the agent has seen; false after a
+// re-pin or an auto-grant until the first tools/list serves it. It is never set on a
+// connection's default_tools.
 type MCPGrantTool struct {
-	Mode string `json:"mode"`
-	Hash string `json:"hash"`
+	Mode   string `json:"mode"`
+	Hash   string `json:"hash"`
+	Listed *bool  `json:"listed,omitempty"`
 }
+
+// IsListed reports whether the agent has listed this entry at its current hash.
+func (t MCPGrantTool) IsListed() bool { return t.Listed == nil || *t.Listed }
 
 // MCPGrant is a row of session_mcp_grants. The proof is what the gateway presents to
 // core when it fetches the connection's credential.
@@ -42,16 +58,22 @@ type MCPGrant struct {
 	// carries what the built-in needs (for "board", the target board id).
 	Builtin    string
 	BuiltinRef string
+	// Preset is the launch-sheet preset that produced the selection (PresetCustom when none).
+	Preset string
+	// KnownTools is every tool name the launch listing contained; nil when unknown (a grant from
+	// before migration 039, or an incomplete launch listing): such a grant never records a new tool.
+	KnownTools []string
 }
 
 const mcpGrantColumns = `session_id::text, connection_id::text, name, account_id, tools, url_snapshot,
-	proof_kind, proof_value, token_hash, call_budget, calls_used, created_at, builtin, builtin_ref`
+	proof_kind, proof_value, token_hash, call_budget, calls_used, created_at, builtin, builtin_ref, preset, known_tools`
 
 func scanMCPGrant(row pgx.Row) (*MCPGrant, error) {
 	var g MCPGrant
-	var tools []byte
+	var tools, known []byte
 	if err := row.Scan(&g.SessionID, &g.ConnectionID, &g.Name, &g.AccountID, &tools, &g.URLSnapshot,
-		&g.ProofKind, &g.ProofValue, &g.TokenHash, &g.CallBudget, &g.CallsUsed, &g.CreatedAt, &g.Builtin, &g.BuiltinRef); err != nil {
+		&g.ProofKind, &g.ProofValue, &g.TokenHash, &g.CallBudget, &g.CallsUsed, &g.CreatedAt, &g.Builtin, &g.BuiltinRef,
+		&g.Preset, &known); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(tools, &g.Tools); err != nil {
@@ -59,6 +81,11 @@ func scanMCPGrant(row pgx.Row) (*MCPGrant, error) {
 	}
 	if g.Tools == nil {
 		g.Tools = map[string]MCPGrantTool{}
+	}
+	if len(known) > 0 && string(known) != "null" {
+		if err := json.Unmarshal(known, &g.KnownTools); err != nil {
+			return nil, fmt.Errorf("decode grant known_tools: %w", err)
+		}
 	}
 	return &g, nil
 }
@@ -80,6 +107,16 @@ func ReplaceMCPGrants(ctx context.Context, pool *pgxpool.Pool, sessionID string,
 	return storeMCPGrants(ctx, pool, sessionID, grants)
 }
 
+// carriedGrant is what a replace (a resume) keeps from the row it deletes: the call budget spent,
+// and the tools, preset and known tools AS THE ROW HAS THEM. An accept or an auto-accept that
+// landed between the caller's read and this replace must not be undone by the caller's stale copy.
+type carriedGrant struct {
+	used   int
+	tools  []byte
+	preset string
+	known  []byte
+}
+
 // storeMCPGrants inserts grants in one transaction, first deleting replaceSession's
 // grants when that is set.
 func storeMCPGrants(ctx context.Context, pool *pgxpool.Pool, replaceSession string, grants []MCPGrant) error {
@@ -88,23 +125,21 @@ func storeMCPGrants(ctx context.Context, pool *pgxpool.Pool, replaceSession stri
 		return fmt.Errorf("InsertMCPGrants begin: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit; on an error path the original error is returned
-	// A replace (a resume) issues new tokens but must not reset the call budget:
-	// what each connection already spent carries over.
-	used := map[string]int{}
+	carried := map[string]carriedGrant{}
 	if replaceSession != "" {
 		rows, err := tx.Query(ctx, `DELETE FROM session_mcp_grants WHERE session_id = $1
-			RETURNING connection_id::text, calls_used`, replaceSession)
+			RETURNING connection_id::text, calls_used, tools, preset, known_tools`, replaceSession)
 		if err != nil {
 			return fmt.Errorf("ReplaceMCPGrants delete: %w", err)
 		}
 		for rows.Next() {
 			var cid string
-			var n int
-			if err := rows.Scan(&cid, &n); err != nil {
+			var c carriedGrant
+			if err := rows.Scan(&cid, &c.used, &c.tools, &c.preset, &c.known); err != nil {
 				rows.Close()
 				return fmt.Errorf("ReplaceMCPGrants delete scan: %w", err)
 			}
-			used[cid] = n
+			carried[cid] = c
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -119,13 +154,33 @@ func storeMCPGrants(ctx context.Context, pool *pgxpool.Pool, replaceSession stri
 		if string(tools) == "null" {
 			tools = []byte("{}")
 		}
+		preset := g.Preset
+		if preset == "" {
+			preset = PresetCustom
+		}
+		var known []byte
+		if g.KnownTools != nil {
+			if known, err = json.Marshal(g.KnownTools); err != nil {
+				return fmt.Errorf("InsertMCPGrants encode known_tools: %w", err)
+			}
+		}
+		used := 0
+		if c, ok := carried[g.ConnectionID]; ok {
+			// A replace keeps what the row had: the spent budget and the pins as they are now. A
+			// built-in's tools are not the row's to keep (buildGrants sets them from BoardTools, so
+			// a later release's board tool reaches a resumed session).
+			used = c.used
+			if g.Builtin == "" {
+				tools, preset, known = c.tools, c.preset, c.known
+			}
+		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO session_mcp_grants
 			  (session_id, connection_id, name, account_id, tools, url_snapshot,
-			   proof_kind, proof_value, token_hash, call_budget, calls_used, builtin, builtin_ref)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			   proof_kind, proof_value, token_hash, call_budget, calls_used, builtin, builtin_ref, preset, known_tools)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 			g.SessionID, g.ConnectionID, g.Name, g.AccountID, tools, g.URLSnapshot,
-			g.ProofKind, g.ProofValue, g.TokenHash, g.CallBudget, used[g.ConnectionID], g.Builtin, g.BuiltinRef); err != nil {
+			g.ProofKind, g.ProofValue, g.TokenHash, g.CallBudget, used, g.Builtin, g.BuiltinRef, preset, known); err != nil {
 			return fmt.Errorf("InsertMCPGrants insert: %w", err)
 		}
 	}

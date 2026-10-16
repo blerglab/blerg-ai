@@ -63,6 +63,10 @@ CLUSTER_RUNTIME="${CLUSTER_RUNTIME:-on}"
 # completely alone. See cluster-agent-secret.example.yaml.
 AGENT_SECRET_EXTERNAL="${AGENT_SECRET_EXTERNAL:-}"
 AGENT_NAMESPACE=blerg-runner-sessions
+# The runner's data volume (runner-data-pvc.yaml): its size, and a StorageClass when the cluster
+# has no default one (or you want another). Both apply only when deploy.sh first creates the claim.
+RUNNER_DATA_SIZE="${RUNNER_DATA_SIZE:-10Gi}"
+RUNNER_DATA_STORAGE_CLASS="${RUNNER_DATA_STORAGE_CLASS:-}"
 
 # Normalise both switches to a single canonical value each, so an operator
 # writing off/false/0/no (or 1/true/yes) gets what they obviously meant. The
@@ -98,6 +102,8 @@ command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 1; }
 # check both up front, before any image is built or pushed, instead of failing half-way.
 command -v envsubst >/dev/null || { echo "envsubst is required (package: gettext / gettext-base)" >&2; exit 1; }
 command -v openssl >/dev/null || { echo "openssl is required (generates BLERG_CORE_LOCAL_KEY on a first deploy)" >&2; exit 1; }
+runner_data_size_ok "$RUNNER_DATA_SIZE" || { echo "RUNNER_DATA_SIZE is not a Kubernetes quantity (e.g. 10Gi): $RUNNER_DATA_SIZE" >&2; exit 1; }
+runner_data_class_ok "$RUNNER_DATA_STORAGE_CLASS" || { echo "RUNNER_DATA_STORAGE_CLASS is not a StorageClass name: $RUNNER_DATA_STORAGE_CLASS" >&2; exit 1; }
 
 # Say which cluster this will change, and make the operator agree, before anything is
 # built, pushed or applied.
@@ -128,10 +134,14 @@ fi
 rand() { openssl rand -hex 24 2>/dev/null || head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 48; }
 rand_b64() { openssl rand -base64 32; }
 
-echo "==> Building images (registry=${REGISTRY}, tag=${TAG})"
-docker build -f "$repo_root/core/Dockerfile" --build-arg VERSION="$TAG" -t "${REGISTRY}/blerg-core:${TAG}" "$repo_root"
-docker build -f "$repo_root/board/Dockerfile" --build-arg VERSION="$TAG" -t "${REGISTRY}/blerg-board:${TAG}" "$repo_root"
-docker build -f "$repo_root/runner/Dockerfile.server" --build-arg VERSION="$TAG" -t "${REGISTRY}/blerg-runner:${TAG}" "$repo_root"
+# The images report two numbers: the release (the VERSION file, read by the Dockerfiles) and
+# the git commit they were built from. The build context is a copy, so the commit is passed in.
+COMMIT="${BLERG_COMMIT:-$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo dev)}"
+
+echo "==> Building images (registry=${REGISTRY}, tag=${TAG}, commit=${COMMIT})"
+docker build -f "$repo_root/core/Dockerfile" --build-arg VERSION="$TAG" --build-arg COMMIT="$COMMIT" -t "${REGISTRY}/blerg-core:${TAG}" "$repo_root"
+docker build -f "$repo_root/board/Dockerfile" --build-arg VERSION="$TAG" --build-arg COMMIT="$COMMIT" -t "${REGISTRY}/blerg-board:${TAG}" "$repo_root"
+docker build -f "$repo_root/runner/Dockerfile.server" --build-arg VERSION="$TAG" --build-arg COMMIT="$COMMIT" -t "${REGISTRY}/blerg-runner:${TAG}" "$repo_root"
 if [ -n "$AGENT_IMAGE" ]; then
   # No --build-arg VERSION here: Dockerfile.devcontainer declares no ARG
   # VERSION, and passing an unused build arg only earns a docker warning.
@@ -301,6 +311,19 @@ if [ "$cluster_runtime" = off ]; then
 else
   echo "==> Applying cluster-runtime namespace/RBAC"
   kubectl apply -f "$script_dir/cluster-runtime.yaml"
+fi
+
+# The runner's data volume goes in before the Deployment that mounts it, and only once: an existing
+# claim is never re-applied (its size and class are fixed once bound) and never deleted — it holds
+# every file the sessions published. See README.md, "Runner data volume".
+claim_state=0
+runner_data_claim_check "$RUNNER_DATA_SIZE" "$RUNNER_DATA_STORAGE_CLASS" || claim_state=$?
+if [ "$claim_state" -eq 1 ]; then
+  exit 1
+elif [ "$claim_state" -eq 2 ]; then
+  echo "==> Creating the runner data claim blerg-runner-data (${RUNNER_DATA_SIZE}, storage class: ${RUNNER_DATA_STORAGE_CLASS:-cluster default})"
+  runner_data_claim_render "$script_dir/runner-data-pvc.yaml" "$RUNNER_DATA_SIZE" "$RUNNER_DATA_STORAGE_CLASS" > "$work_dir/runner-data-pvc.yaml"
+  kubectl apply -f "$work_dir/runner-data-pvc.yaml"
 fi
 
 kubectl apply -k "$render_dir"

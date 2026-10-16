@@ -59,6 +59,11 @@ func newEndFixture(t *testing.T, status string, sendBuf int) *endFixture {
 		"/repos/org/proj", "org/proj", "T", ""); err != nil {
 		t.Fatal(err)
 	}
+	// An established session, older than the grace reconcile gives a
+	// just-made one (unreportedGrace).
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET started_at = now() - interval '10 minutes' WHERE id = $1`, sessionID); err != nil {
+		t.Fatal(err)
+	}
 	dc := &DaemonConn{ID: endTestDaemonID, Name: "desktop", send: make(chan []byte, sendBuf)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/sessions/{id}", api.HandleDeleteSession)

@@ -127,6 +127,10 @@ func (d Deps) handleInternalFetchCredential(w http.ResponseWriter, r *http.Reque
 
 	plaintext, err := d.Credentials.Fetch(r.Context(), body.AccountID, body.Engine)
 	if err != nil {
+		if errors.Is(err, credentials.ErrNotManaged) {
+			managedCredentialError(w, err)
+			return
+		}
 		if errors.Is(err, credentials.ErrNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return

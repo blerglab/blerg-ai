@@ -7,7 +7,7 @@
 # install.sh and DAEMON.md). The daemon can't be containerized: it drives
 # your own `claude` CLI and tmux directly, so it always runs on the host.
 #
-# Usage: ./blerg-up.sh [--no-build] [--no-daemon] [--no-open]
+# Usage: ./blerg-up.sh [--no-build] [--no-daemon] [--no-open] [--yes]
 #                      [--regen-secrets] [--reset-admin] [--help]
 #   --no-build   skip rebuilding images (fast path; --build is kept as a
 #                harmless no-op synonym for old habits — rebuilding is now
@@ -16,6 +16,8 @@
 #                exactly how a real code fix silently failed to take effect)
 #   --no-daemon  skip installing the runner daemon service (manual instructions instead)
 #   --no-open    don't open a browser to blerg-core when everything's up
+#   --yes, -y    reinstall the daemon even when agent sessions have work running
+#                that the restart would cut off (passed to daemon/install.sh)
 #   --regen-secrets  regenerate any of the secrets in .env that are missing, a
 #                placeholder, or too short — everything else in .env is left alone
 #   --reset-admin    reset the (oldest) local admin account's password and print a new
@@ -46,6 +48,7 @@ INSTALL_DAEMON=1
 OPEN_BROWSER=1
 REGEN_SECRETS=0
 RESET_ADMIN=0
+YES_FLAG=""
 usage() {
   cat <<EOF
 Usage: ./blerg-up.sh [options]
@@ -58,6 +61,9 @@ Options:
                    no-op, rebuilding is the default)
   --no-daemon      skip installing the runner daemon service
   --no-open        don't open a browser when everything is up
+  --yes, -y        reinstall the daemon even when agent sessions have work
+                   running that the restart would cut off (without it, you
+                   are asked; with no terminal to ask, it is not reinstalled)
   --regen-secrets  regenerate secrets in .env that are missing, placeholders or
                    too short (everything else in .env is kept)
   --reset-admin    reset the oldest local admin's password and print a new
@@ -75,6 +81,7 @@ for arg in "$@"; do
     --no-open) OPEN_BROWSER=0 ;;
     --regen-secrets) REGEN_SECRETS=1 ;;
     --reset-admin) RESET_ADMIN=1 ;;
+    --yes|-y) YES_FLAG="--yes" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "blerg-up.sh: unknown option: $arg" >&2; echo >&2; usage >&2; exit 2 ;;
   esac
@@ -146,8 +153,27 @@ fi
 if ! docker compose version >/dev/null 2>&1; then
   fail_block <<'EOF'
 Docker is installed, but the 'docker compose' plugin isn't available.
-blerg needs Compose v2 (bundled with Docker Desktop; on Linux, install
-the docker-compose-plugin package), then re-run ./blerg-up.sh.
+blerg needs Compose v2. How to get it depends on how Docker was installed:
+
+  Docker Desktop (Windows/WSL2, macOS): Compose v2 is bundled. On WSL2,
+    open Docker Desktop > Settings > Resources > WSL integration, turn on
+    your distro, then close and reopen the WSL terminal.
+
+  Docker Engine on Debian/Ubuntu (e.g. 'apt install docker.io'): that
+    package has no compose plugin, and the distro's 'docker-compose'
+    package is the old v1. Add Docker's own apt repository and install
+    the plugin:
+      sudo apt-get update && sudo apt-get install -y ca-certificates curl
+      sudo install -m 0755 -d /etc/apt/keyrings
+      sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      sudo chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+      sudo apt-get update && sudo apt-get install -y docker-compose-plugin
+    (Debian: replace 'ubuntu' with 'debian' in both URLs.)
+
+  Other Linux: https://docs.docker.com/compose/install/linux/
+
+Then re-run ./blerg-up.sh.
 EOF
 fi
 
@@ -343,6 +369,14 @@ BLERG_CORE_ALLOWED_RETURN_ORIGINS=http://localhost:${PORT_CORE},http://localhost
 BLERG_CORE_ORIGIN_AUDIENCES=http://localhost:${PORT_CORE}=blerg-core,http://localhost:${PORT_BOARD}=blerg-board,http://localhost:${PORT_RUNNER}=blerg-runner
 ENVEOF
 
+# The images show "v<release> · <commit>" in the apps: the release comes from the VERSION file at
+# the repo root (the Dockerfiles read it), the commit from this checkout, or "dev" when this is
+# not a git checkout. Exported for docker-compose.yml, never written to .env, so it cannot go stale.
+if [ -z "${BLERG_COMMIT:-}" ]; then
+  BLERG_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
+  export BLERG_COMMIT="${BLERG_COMMIT:-dev}"
+fi
+
 blerg_step "Starting desktop stack (postgres, blerg-core, blerg-board, blerg-runner)..."
 RUN_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 docker compose -f "$COMPOSE_FILE" up -d $BUILD_FLAG
@@ -381,11 +415,17 @@ fi
 DAEMON_UP=0
 if [ "$INSTALL_DAEMON" -eq 1 ]; then
   blerg_step "Installing the runner daemon as a host service..."
-  if ./daemon/install.sh install; then
-    DAEMON_UP=1
-  else
-    blerg_fail "Daemon service install didn't work — falling back to manual steps (see above for why)."
-  fi
+  daemon_rc=0
+  # $YES_FLAG is "" or "--yes": unquoted on purpose, so "" passes nothing.
+  # shellcheck disable=SC2086
+  ./daemon/install.sh install $YES_FLAG || daemon_rc=$?
+  case "$daemon_rc" in
+    0) DAEMON_UP=1 ;;
+    5) # install.sh's EXIT_WORK_RUNNING: the old daemon is still up, as it was
+      DAEMON_UP=1
+      blerg_fail "The daemon was not reinstalled: agent work is running; re-run with --yes to reinstall anyway." ;;
+    *) blerg_fail "Daemon service install didn't work — falling back to manual steps (see above for why)." ;;
+  esac
 fi
 
 open_browser() {
@@ -423,8 +463,9 @@ if docker compose logs --since "$RUN_START" blerg-core 2>/dev/null | grep -q BLE
 
      docker compose logs blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
 
-   (username = the provider_subject in that line; it is printed once, on the
-   boot that created the account - if it's gone, run: $0 --reset-admin)
+   (the username is in that line too, and you choose your own when you first
+   change the password; it is printed once, on the boot that created the
+   account - if it's gone, run: $0 --reset-admin)
 HINT
 )"
 else

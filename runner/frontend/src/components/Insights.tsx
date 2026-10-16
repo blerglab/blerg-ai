@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
+import { useMediaQuery } from '../hooks/useMediaQuery'
 import {
   RANGES, formatDuration, formatPercent, formatTokens, formatUSD, outcomeLabel, shortDay, stepLabel,
   type InsightsResponse, type ModelPrice, type RangeLabel,
 } from '../lib/insights'
+import StartSteps from './StartSteps'
 import './Insights.css'
 
 type Scope = 'all' | 'mine'
+
+// At this width and under, the wide tables become one stacked entry per row (Insights.css uses the same width).
+export const NARROW_QUERY = '(max-width: 640px)'
 
 export default function Insights() {
   const [range, setRange] = useState<RangeLabel>('7d')
@@ -89,6 +94,7 @@ export default function Insights() {
 }
 
 function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: ModelPrice[]; onPriceChange: () => void }) {
+  const narrow = useMediaQuery(NARROW_QUERY)
   const empty = d.sessions.started === 0 && d.tokens.totals.turns === 0
   // the headline startup figure: the runtime that started the most sessions
   const headline = useMemo(() => {
@@ -97,7 +103,6 @@ function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: Mod
   }, [d])
   const stepRuntime = headline?.runtime
   const steps = d.startup.steps.filter((s) => s.runtime === stepRuntime)
-  const maxStep = Math.max(1, ...steps.map((s) => s.p90))
 
   return (
     <>
@@ -117,6 +122,23 @@ function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: Mod
         <h2>Pod startup</h2>
         {d.startup.groups.length === 0 ? <p className="insights-note">No starts recorded in this range.</p> : (
           <>
+            {narrow ? (
+              <ul className="stack" data-testid="startup-stack">
+                {d.startup.groups.map((g) => (
+                  <li key={g.runtime + g.kind}>
+                    <div className="stack-head">
+                      <span className="stack-name">{g.runtime} · {g.kind}</span>
+                      <span className="muted">{g.attempts} {g.attempts === 1 ? 'attempt' : 'attempts'}, {g.failed} failed</span>
+                    </div>
+                    <dl className="stack-figs three">
+                      <Fig k="Median" v={g.seconds.count ? formatDuration(g.seconds.p50) : '—'} />
+                      <Fig k="90th" v={g.seconds.count ? formatDuration(g.seconds.p90) : '—'} />
+                      <Fig k="Slowest" v={g.seconds.count ? formatDuration(g.seconds.max) : '—'} />
+                    </dl>
+                  </li>
+                ))}
+              </ul>
+            ) : (
             <table className="grid">
               <thead><tr><th>Runtime</th><th>Kind</th><th className="n">Attempts</th><th className="n">Failed</th><th className="n">Median</th><th className="n">90th</th><th className="n">Slowest</th></tr></thead>
               <tbody>
@@ -130,20 +152,8 @@ function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: Mod
                 ))}
               </tbody>
             </table>
-            {steps.length > 0 && (
-              <>
-                <h3>Where the time goes ({stepRuntime})</h3>
-                <ul className="steps" data-testid="start-steps">
-                  {steps.map((s) => (
-                    <li key={s.step}>
-                      <span className="step-name">{stepLabel(s.step)}</span>
-                      <span className="step-bar" aria-hidden="true"><i style={{ width: `${Math.max(2, (s.p90 / maxStep) * 100)}%` }} /><b style={{ width: `${Math.max(1, (s.p50 / maxStep) * 100)}%` }} /></span>
-                      <span className="step-val">{formatDuration(s.p50)}<small> median · {formatDuration(s.p90)} 90th</small></span>
-                    </li>
-                  ))}
-                </ul>
-              </>
             )}
+            {steps.length > 0 && stepRuntime && <StartSteps runtime={stepRuntime} steps={steps} />}
             {d.startup.failures.length > 0 && (
               <p className="insights-note">Failed starts by stage: {d.startup.failures.map((f) => `${stepLabel(f.key)} ${f.count}`).join(' · ')}</p>
             )}
@@ -168,6 +178,23 @@ function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: Mod
         <h2>Tokens and cost</h2>
         {d.tokens.by_model.length === 0 ? <p className="insights-note">No turns completed in this range.</p> : (
           <>
+            {narrow ? (
+              <ul className="stack" data-testid="tokens-stack">
+                {d.tokens.by_model.map((m) => (
+                  <li key={m.model}>
+                    <div className="stack-head"><span className="stack-name">{m.model}</span></div>
+                    <dl className="stack-figs">
+                      <Fig k="Turns" v={String(m.turns)} />
+                      <Fig k="Input" v={formatTokens(m.input)} />
+                      <Fig k="Output" v={formatTokens(m.output)} />
+                      <Fig k="Cache read" v={formatTokens(m.cache_read)} />
+                      <Fig k="Cache write" v={formatTokens(m.cache_write)} />
+                      <Fig k="Est. cost" v={m.priced ? formatUSD(m.cost_usd) : <span className="muted" title="No price set for this model">no price</span>} />
+                    </dl>
+                  </li>
+                ))}
+              </ul>
+            ) : (
             <table className="grid">
               <thead><tr><th>Model</th><th className="n">Turns</th><th className="n">Input</th><th className="n">Output</th><th className="n">Cache read</th><th className="n">Cache write</th><th className="n">Est. cost</th></tr></thead>
               <tbody>
@@ -180,7 +207,8 @@ function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: Mod
                 ))}
               </tbody>
             </table>
-            <DailyChart days={d.tokens.daily} />
+            )}
+            <DailyChart days={d.tokens.daily} narrow={narrow} />
             {d.tokens.top_sessions.length > 0 && (
               <>
                 <h3>Biggest sessions</h3>
@@ -254,23 +282,31 @@ function Card({ id, label, value, hint }: { id: string; label: string; value: st
   )
 }
 
+// Fig is one figure of a stacked entry: its name over its value.
+function Fig({ k, v }: { k: string; v: React.ReactNode }) {
+  return <div><dt>{k}</dt><dd>{v}</dd></div>
+}
+
 // DailyChart draws output + input tokens per day as bars (cache reads are far larger and would flatten them; they are in the table).
-function DailyChart({ days }: { days: InsightsResponse['tokens']['daily'] }) {
+// On a phone the drawing is narrower, so its day labels stay readable once it is scaled to the screen.
+function DailyChart({ days, narrow }: { days: InsightsResponse['tokens']['daily']; narrow: boolean }) {
   if (days.length === 0) return null
-  const W = 640, H = 140, pad = 24
+  const W = narrow ? 340 : 640, H = 140, pad = narrow ? 12 : 24
+  const every = Math.ceil(days.length / (narrow ? 5 : 8))
   const vals = days.map((x) => x.output + x.input + x.cache_write)
   const max = Math.max(1, ...vals)
-  const bw = Math.max(6, (W - pad * 2) / days.length - 6)
+  const bw = Math.max(narrow ? 3 : 6, (W - pad * 2) / days.length - (narrow ? 3 : 6))
   return (
     <figure className="chart" data-testid="daily-chart">
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Tokens per day, ${days.length} days`} preserveAspectRatio="xMidYMid meet">
         {days.map((day, i) => {
           const h = Math.max(2, (vals[i] / max) * (H - pad * 2))
-          const x = pad + i * ((W - pad * 2) / days.length) + 3
+          const slot = (W - pad * 2) / days.length
+          const x = pad + i * slot + (slot - bw) / 2
           return (
             <g key={day.day}>
               <rect x={x} y={H - pad - h} width={bw} height={h} rx={2} className="bar"><title>{`${shortDay(day.day)}: ${formatTokens(vals[i])} tokens (${formatTokens(day.output)} output)`}</title></rect>
-              {(days.length <= 10 || i % Math.ceil(days.length / 8) === 0) && <text x={x + bw / 2} y={H - 6} textAnchor="middle" className="axis">{shortDay(day.day)}</text>}
+              {((!narrow && days.length <= 10) || i % every === 0) && <text x={x + bw / 2} y={H - 6} textAnchor="middle" className="axis">{shortDay(day.day)}</text>}
             </g>
           )
         })}
@@ -344,6 +380,7 @@ function PriceEditor({ stored, unpriced, onChange }: { stored: ModelPrice[]; unp
       <p className="insights-note">Dollars per million tokens, per model. Only an administrator sets these; the estimates everywhere use them. Models with no price show no cost.</p>
       {error && <div role="alert" className="insights-error">{error}</div>}
       {models.length === 0 ? <p className="insights-note">Every model in this range has a price.</p> : (
+        <div className="scroll-x" data-testid="prices-scroll">
         <table className="grid prices">
           <thead><tr><th>Model</th><th className="n">Input</th><th className="n">Output</th><th className="n">Cache read</th><th className="n">Cache write</th><th /></tr></thead>
           <tbody>
@@ -372,6 +409,7 @@ function PriceEditor({ stored, unpriced, onChange }: { stored: ModelPrice[]; unp
             })}
           </tbody>
         </table>
+        </div>
       )}
     </section>
   )

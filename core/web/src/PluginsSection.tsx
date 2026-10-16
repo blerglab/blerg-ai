@@ -30,6 +30,12 @@ const OFFICIAL_MARKETPLACE = "anthropics/claude-plugins-official";
 
 export const PLUGIN_ENGINES: readonly PluginEngine[] = [
   {
+    engine: "codex",
+    label: "Codex",
+    defaultMarketplace: OFFICIAL_MARKETPLACE,
+    suggestions: [],
+  },
+  {
     engine: "claude",
     label: "Claude Code",
     defaultMarketplace: OFFICIAL_MARKETPLACE,
@@ -252,20 +258,20 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
   );
 }
 
-export default function PluginsSection() {
+export default function PluginsSection({ engines = PLUGIN_ENGINES }: { engines?: readonly PluginEngine[] } = {}) {
   return (
     <section className="section">
       <p className="eyebrow">Sessions</p>
       <h2 className="section-title">Always-on plugins</h2>
       <p className="section-help">
-        These plugins are loaded into every Claude agent session started as you — on the
+        These plugins are loaded into your Claude and Codex agent sessions — on the
         cluster and on your own workstation daemon (Local sandbox or This machine) — including
-        sessions your boards start with your automation token. They do not change Claude Code
+        sessions your boards start with your automation token. They do not change your engine settings
         on your own machine: a daemon keeps them in its own folder and loads them for the
         session only. Plugins run code in your sessions, so only add ones you trust.
       </p>
       <ul className="card-list">
-        {PLUGIN_ENGINES.map((e) => (
+        {engines.map((e) => (
           <PluginEngineCard key={e.engine} {...e} />
         ))}
       </ul>

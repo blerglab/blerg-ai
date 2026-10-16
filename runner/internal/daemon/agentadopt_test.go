@@ -20,6 +20,12 @@ import (
 // (claudecode_test.go: it reports session id "cc-sess-1" and logs its argv).
 func recoveryHost(t *testing.T) (host func() (*AgentHost, *agentTestSender), recDir, workDir, claudeLog string) {
 	t.Helper()
+	return recoveryHostAfter(t, RestartCause{})
+}
+
+// recoveryHostAfter is recoveryHost for a daemon that knows why its previous run ended.
+func recoveryHostAfter(t *testing.T, cause RestartCause) (host func() (*AgentHost, *agentTestSender), recDir, workDir, claudeLog string) {
+	t.Helper()
 	engineDir := fakeClaude(t)
 	t.Setenv("PATH", engineDir+":"+os.Getenv("PATH"))
 	claudeLog = filepath.Join(engineDir, "calls.log")
@@ -36,7 +42,8 @@ func recoveryHost(t *testing.T) (host func() (*AgentHost, *agentTestSender), rec
 	t.Cleanup(func() { adoptContinueDelay = oldDelay })
 	host = func() (*AgentHost, *agentTestSender) {
 		sender := &agentTestSender{}
-		h := NewAgentHost(sender, AgentHostConfig{ReposRoot: reposRoot, HomeDir: home, ClaudeCode: true, RecordsDir: recDir})
+		h := NewAgentHost(sender, AgentHostConfig{ReposRoot: reposRoot, HomeDir: home, ClaudeCode: true, RecordsDir: recDir,
+			RestartCause: cause})
 		// Nothing may still be writing a record when the test's directories are removed.
 		t.Cleanup(func() {
 			h.Freeze()
@@ -333,13 +340,14 @@ func TestLockAgentRecordsIsExclusive(t *testing.T) {
 }
 
 // The heart of it: a recorded session is hosted again without a start, resumes its Claude
-// conversation, and tells the model what happened on the engine's line only.
-func TestAdoptResumesAnInteractiveSessionAndWaits(t *testing.T) {
+// conversation, and tells the model what happened on the engine's line only. It was waiting for the
+// person, so it waits for them.
+func TestAdoptResumesAnInteractiveSessionWaitingForThePersonAndWaits(t *testing.T) {
 	newHost, recDir, workDir, claudeLog := recoveryHost(t)
 	stubTranscripts(t, "conv-1")
 	if err := writeAgentRecord(recDir, AgentRecord{
 		SessionID: "s1", Repo: "proj", WorkDir: workDir, Interaction: protocol.InteractionInteractive,
-		Model: "claude-opus-5", ClaudeSessionID: "conv-1", TurnActive: true, EnginePID: 0,
+		Model: "claude-opus-5", ClaudeSessionID: "conv-1", TurnActive: true, EnginePID: 0, Waiting: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +363,8 @@ func TestAdoptResumesAnInteractiveSessionAndWaits(t *testing.T) {
 		!strings.Contains(notices[0], "cut off") {
 		t.Fatalf("the person is told once what happened: %v", notices)
 	}
-	// Interactive: nothing runs until the person says something.
+	// Interactive and waiting for the person: nothing runs until they say something.
+	host.NoteConnected()
 	time.Sleep(150 * time.Millisecond)
 	if _, err := os.Stat(claudeLog); err == nil {
 		t.Fatal("an interactive session ran a turn by itself after the restart")
@@ -367,7 +376,7 @@ func TestAdoptResumesAnInteractiveSessionAndWaits(t *testing.T) {
 	host.UserMessage("s1", "where were we?", "chat")
 	sender.waitForKind(t, "turn_done")
 	argv, _ := os.ReadFile(claudeLog)
-	for _, want := range []string{"--resume conv-1", "restarted while you were working", "do not run it again", "where were we?", "claude-opus-5", "This session is interactive"} {
+	for _, want := range []string{"--resume conv-1", "restarted while you were working", restartWordsUnplanned, "where were we?", "claude-opus-5", "This session is interactive"} {
 		if !strings.Contains(string(argv), want) {
 			t.Errorf("the engine was not given %q: %s", want, argv)
 		}
@@ -438,7 +447,7 @@ func TestAdoptContinuesAnUnattendedCutOffTurnOnce(t *testing.T) {
 	host.NoteConnected()
 	sender.waitForKind(t, "turn_done")
 	argv, _ := os.ReadFile(claudeLog)
-	if !strings.Contains(string(argv), adoptContinuePrompt) || !strings.Contains(string(argv), "do not run it again") ||
+	if !strings.Contains(string(argv), adoptContinuePrompt) || !strings.Contains(string(argv), restartWordsUnplanned) ||
 		!strings.Contains(string(argv), "--resume conv-1") {
 		t.Fatalf("the cut-off turn was not continued with the note: %s", argv)
 	}

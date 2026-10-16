@@ -149,7 +149,7 @@ function HtmlPreview({ sessionId, files, artifact, onOpen }: {
   )
 }
 
-export default function ArtifactCard({ payload, ts }: { payload: ArtifactPayload; ts?: string }) {
+export default function ArtifactCard({ payload, ts, eventId }: { payload: ArtifactPayload; ts?: string; eventId?: string }) {
   const chat = useChat()
   const files = chat?.files ?? null
   const [error, setError] = useState<string | null>(null)
@@ -172,7 +172,7 @@ export default function ArtifactCard({ payload, ts }: { payload: ArtifactPayload
   }
 
   return (
-    <div className="agent-card artifact-card" data-testid="artifact-card">
+    <div className="agent-card artifact-card" data-testid="artifact-card" data-event-id={eventId}>
       {chat && files && <MediaPreview sessionId={chat.sessionId} files={files} artifact={payload} onOpen={autoplay => chat.view(payload, { autoplay })} />}
       <div className="artifact-card-row">
         <span className="artifact-card-icon" aria-hidden="true">📎</span>

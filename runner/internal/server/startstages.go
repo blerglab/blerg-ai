@@ -320,7 +320,7 @@ func persistStartStages(ctx context.Context, h *Hub, pool *pgxpool.Pool, session
 		ev.Seq = seq
 	}
 	if msg, err := json.Marshal(ev); err == nil {
-		h.FanOutSessionOutput(sessionID, msg)
+		h.FanOutAgentEvent(sessionID, ev.Seq, msg)
 	}
 }
 

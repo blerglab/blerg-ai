@@ -19,6 +19,13 @@ function fakeCore(initial: Entry[] = []) {
     max: 20,
   });
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+    if (url === "/api/plugins/codex" && (init?.method ?? "GET") === "GET") {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ...body(), engine: "codex", plugins: [] }) });
+    }
+    if (url === "/api/plugins/codex" && init?.method === "PUT") {
+      const next = (JSON.parse(init.body as string) as { plugins: Entry[] }).plugins;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ...body(), engine: "codex", plugins: next }) });
+    }
     if (url === "/api/plugins/claude" && (init?.method ?? "GET") === "GET") {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body()) });
     }
@@ -55,12 +62,12 @@ describe("Always-on plugins", () => {
 
   it("explains what it does, and warns that plugins run code", async () => {
     setup();
-    render(<PluginsSection />);
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     await screen.findByText("No always-on plugins yet.");
     const help = document.querySelector(".section-help")!.textContent ?? "";
-    expect(help).toMatch(/every Claude agent session started as you/);
+    expect(help).toMatch(/your Claude and Codex agent sessions/);
     expect(help).toMatch(/automation token/);
-    expect(help).toMatch(/do not change Claude Code on your own machine/);
+    expect(help).toMatch(/do not change your engine settings on your own machine/);
     expect(help).toMatch(/run code in your sessions, so only add ones you trust/);
   });
 
@@ -69,7 +76,7 @@ describe("Always-on plugins", () => {
       { marketplace: OFFICIAL, plugin: "superpowers" },
       { marketplace: OFFICIAL, plugin: "frontend-design" },
     ]);
-    render(<PluginsSection />);
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     const rows = await screen.findAllByRole("row");
     expect(rows[1]).toHaveTextContent("superpowers");
     expect(rows[2]).toHaveTextContent("frontend-design");
@@ -81,7 +88,7 @@ describe("Always-on plugins", () => {
 
   it("offers one-click suggestions from a data table, and disables one already added", async () => {
     setup();
-    render(<PluginsSection />);
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     await screen.findByText("No always-on plugins yet.");
     // One button per suggestion in the table — nothing hardcoded beyond it.
     for (const s of PLUGIN_ENGINES[0].suggestions) {
@@ -100,7 +107,7 @@ describe("Always-on plugins", () => {
 
   it("adds a plugin from the form and clears the name", async () => {
     setup();
-    render(<PluginsSection />);
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     await screen.findByText("No always-on plugins yet.");
     const add = screen.getByRole("button", { name: "Add plugin" });
     expect(add).toBeDisabled();
@@ -113,7 +120,7 @@ describe("Always-on plugins", () => {
 
   it("shows the server's validation reason, including marketplace not allowed", async () => {
     setup();
-    render(<PluginsSection />);
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     await screen.findByText("No always-on plugins yet.");
     core.state.reject = "marketplace not allowed by this install: evil/plugins";
     fireEvent.change(screen.getByLabelText(/Marketplace/), { target: { value: "evil/plugins" } });
@@ -127,7 +134,7 @@ describe("Always-on plugins", () => {
 
   it("does not render a non-422 body as the reason", async () => {
     setup();
-    render(<PluginsSection />);
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     await screen.findByText("No always-on plugins yet.");
     core.fetchMock.mockImplementationOnce(() => Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve("<b>stack trace</b>") }));
     fireEvent.click(screen.getByRole("button", { name: "Add superpowers" }));
@@ -138,10 +145,19 @@ describe("Always-on plugins", () => {
 
   it("says which marketplaces this install accepts", async () => {
     setup();
-    render(<PluginsSection />);
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     const note = await screen.findByText(/This install accepts these marketplaces/);
     expect(note).toHaveTextContent(OFFICIAL);
     expect(note).toHaveTextContent("Up to 20 plugins");
+  });
+
+  it("provides a separate Codex list with the same operator allow-list", async () => {
+    setup();
+    render(<PluginsSection />);
+    const card = screen.getByText("Codex").closest("li")!;
+    expect(await within(card).findByText("No always-on plugins yet.")).toBeInTheDocument();
+    expect(within(card).getByText(/This install accepts these marketplaces/)).toHaveTextContent(OFFICIAL);
+    expect(core.fetchMock).toHaveBeenCalledWith("/api/plugins/codex", expect.anything());
   });
 
   it("is part of the Settings page", async () => {

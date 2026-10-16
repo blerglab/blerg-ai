@@ -47,6 +47,9 @@ func validateSecrets() error {
 
 var version = "dev"
 
+// release (the VERSION file) and commit (short git sha) are stamped by the build; empty when not.
+var release, commit string
+
 // spaHandler serves static files from dir, falling back to index.html for any
 // path that doesn't correspond to a real file — standard SPA routing support.
 // index.html is served with Cache-Control: no-cache so browsers always
@@ -176,6 +179,7 @@ func main() {
 
 	hub := server.NewHub()
 	hub.SetServerVersion(version)
+	hub.SetServerBuild(release, commit)
 	// The same version the hub reports also goes in the agent manifest served at
 	// GET /agents and sent to core on registration.
 	server.SetComponentVersion(version)
@@ -204,12 +208,19 @@ func main() {
 	api := server.NewAPI(hub, dbPool, cfg.DaemonToken, repoLister, cfg.VapidPublicKey)
 	if jm := hub.JobManager(); jm != nil {
 		jm.Overrides = api.SettingsOverrides()
+		// The advisory-lock pools (pod frames, limit resume) are sized from the
+		// session cap in force when they are first used.
+		db.SetLockPoolSessions(jm.EffectiveMaxSessions)
 	}
 	// Close out cluster sessions whose Job ended without the pod reporting back
 	// (deadline, OOM kill, image pull failure, node loss) so they reach a
 	// terminal status and fire their completion webhook. Inert without a
 	// cluster runtime or a database; stops with ctx.
 	go api.StartClusterJobReconciler(ctx, 0)
+	go api.RunLimitResumes(ctx)
+	// Held idle notices (a turn ended while background work ran) are looked at again every minute:
+	// work that never reports its end, or goes stale, does not hold one forever. Stops with ctx.
+	go server.RunIdleNoticeChecks(ctx, hub, dbPool, 0)
 	// Own listener; off unless BLERG_RUNNER_MCP_GW_ADDR is set. Session starts reach it (and the
 	// address sessions dial, BLERG_RUNNER_MCP_GW_URL) through SetMCPGateway.
 	api.SetMCPGateway(server.StartMCPGateway(ctx, dbPool, cfg.CoreURL, cfg.CoreInternalKey), server.MCPGatewayURLFromEnv(), cfg.CoreURL, cfg.CoreInternalKey)
@@ -249,15 +260,21 @@ func main() {
 	mux.HandleFunc("POST /api/sessions", api.HandlePostSessions)
 	mux.HandleFunc("DELETE /api/sessions/{id}", api.HandleDeleteSession)
 	mux.HandleFunc("POST /api/sessions/{id}/pause", api.HandlePauseSession)
+	mux.HandleFunc("GET /api/sessions/{id}/limit-resume", api.HandleLimitResume)
+	mux.HandleFunc("PUT /api/sessions/{id}/limit-resume", api.HandleLimitResume)
 	mux.HandleFunc("PATCH /api/sessions/{id}", api.HandlePatchSession)
 	mux.HandleFunc("GET /api/repos", api.HandleGetRepos)
 	mux.HandleFunc("GET /api/push/vapid-public-key", api.HandleGetVapidPublicKey)
 	mux.HandleFunc("POST /api/push/subscribe", api.HandlePostPushSubscribe)
 	mux.HandleFunc("GET /api/sessions/{id}/agent-events", api.HandleGetAgentEvents)
 	mux.HandleFunc("GET /api/sessions/{id}/capabilities", api.HandleGetCapabilities)
+	mux.HandleFunc("GET /api/sessions/{id}/insights", api.HandleGetSessionInsights)
+	api.RegisterTopicRoutes(mux)
+	api.RegisterLiveRoutes(mux)
 	api.RegisterMCPRoutes(mux)
 	api.RegisterCronRoutes(mux, cfg.CoreURL, cfg.CoreInternalKey)
 	api.RegisterProposalRoutes(mux)
+	api.RegisterToolChangeRoutes(mux)
 	// Runner contract (blerg-board) — enabled only when BLERG_RUNNER_KEY is set.
 	api.SetRunnerKey(os.Getenv("BLERG_RUNNER_KEY"))
 	// Additive: also accept blerg-core-issued tokens (aud "blerg-runner") once
@@ -279,6 +296,8 @@ func main() {
 	claudeCatalog := models.NewCatalog(catalogURL)
 	go claudeCatalog.Run(ctx, models.DefaultRefreshInterval)
 	api.SetModelSources(server.NewModelSources(claudeCatalog, hub))
+	// Restore account-scoped cluster catalogs without holding up startup or the UI.
+	go api.WarmClusterModelCache(ctx)
 	// The runner contract plus its public documentation (GET /agents,
 	// GET /openapi.json). One registration function, shared with the test that
 	// checks openapi.json describes exactly what is wired.
@@ -301,6 +320,7 @@ func main() {
 	mux.HandleFunc("GET /s/", api.HandleServeScreenshot)
 	mux.HandleFunc("POST /api/agent-config", api.HandlePostAgentConfig)
 	mux.HandleFunc("GET /api/agent-config", api.HandleGetAgentConfig)
+	mux.HandleFunc("POST /api/session/credentials/access", api.HandleManagedCredentialAccess)
 	mux.HandleFunc("POST /api/messages", api.HandlePostMessages)
 	mux.HandleFunc("GET /api/messages", api.HandleGetMessages)
 	mux.HandleFunc("GET /api/messages/{id}/answer", api.HandleGetMessageAnswer)

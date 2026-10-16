@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -15,6 +17,12 @@ import (
 var version = "dev"
 
 func main() {
+	// A subcommand (the installer's question before a reinstall) runs and exits before anything
+	// a running daemon does: no provisioning, no records lock, no connection.
+	if len(os.Args) > 1 {
+		os.Exit(runCommand(os.Args[1:], os.Stdout, os.Stderr))
+	}
+
 	// Systemd user services start with a minimal PATH that omits ~/.local/bin,
 	// where `claude` is typically installed. Without it, exec.LookPath("claude")
 	// fails and every spawned/recovered session execs a non-existent binary,
@@ -70,11 +78,29 @@ func main() {
 	if !daemon.LockAgentRecords(agentRecordsDir) {
 		agentRecordsDir = ""
 	}
+	// Why the previous run ended (the installer's marker, or its own note of a clean stop), read
+	// once by the daemon that holds the records: the sessions it cut off are told.
+	stateDir := ""
+	if agentRecordsDir != "" {
+		stateDir = daemon.DaemonStateDir()
+	}
+	restartCause := daemon.ReadRestartCause(stateDir)
 
 	serverHTTP, fromPreviewURL := serverHTTPSetting(os.Getenv("BLERG_RUNNER_SERVER_HTTP"), os.Getenv("BLERG_RUNNER_PREVIEW_URL"))
 	if fromPreviewURL {
 		log.Printf("blerg-runner-daemon: BLERG_RUNNER_PREVIEW_URL is deprecated; set BLERG_RUNNER_SERVER_HTTP=%s instead (derived from it for now)", serverHTTP)
 	}
+
+	// The providers' usage limits (Codex from its app-server, Claude from its usage endpoint with
+	// the CLI's sign-in, and when it refuses a call for its limit), reported per provider: only
+	// percentages and reset times leave the machine.
+	claudeUsage := claudeUsageSetting(os.Getenv("BLERG_RUNNER_CLAUDE_USAGE"))
+	if claudeUsage {
+		log.Printf("claude usage meter: on (reads the CLI's usage endpoint with its sign-in; BLERG_RUNNER_CLAUDE_USAGE=0 turns it off)")
+	} else {
+		log.Printf("claude usage meter: off (BLERG_RUNNER_CLAUDE_USAGE); Claude shows only a cap when it refuses a call")
+	}
+	limits := daemon.NewUsageLimitsTracker(client.Send, daemon.UsageLimitsOptions{ClaudeUsage: claudeUsage, Version: version})
 
 	mgr := daemon.NewManager(client, daemon.ManagerConfig{
 		ReposRoot:        cfg.ReposRoot,
@@ -89,6 +115,9 @@ func main() {
 		AllowHostCredentialClone: cfg.AllowHostCredentialClone,
 
 		AgentRecordsDir: agentRecordsDir,
+		RestartCause:    restartCause,
+
+		UsageLimits: limits,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -96,9 +125,13 @@ func main() {
 	// First thing on a stop signal, before anything is torn down: no more recovery-record
 	// writes. The engines die with the daemon and report their turns over as they go; that must
 	// not erase what the next daemon needs to know about the turns that were cut off.
+	// Then a note that this run was told to stop rather than crashing (ReadRestartCause): the next
+	// run tells the sessions it cut off that nothing they ran stopped it. ctx ends only on the
+	// signal (stop runs as main returns).
 	go func() {
 		<-ctx.Done()
 		mgr.FreezeAgentRecords()
+		daemon.NoteCleanStop(stateDir)
 	}()
 
 	log.Printf("blerg-runner-daemon: starting (name=%s mode=%s repos_root=%s from %s)",
@@ -110,11 +143,16 @@ func main() {
 	prober := daemon.NewModelProber()
 	go prober.Run(ctx)
 	client.SetEngineModels(prober)
+	go limits.Run(ctx)
 
 	// Reattach to any persistent tmux sessions left by a prior run on every
 	// (re)connect, so Claude sessions survive a daemon restart.
 	client.SetOnConnect(func() {
 		prober.Kick()
+		// The server keeps limits per connection: say them again, and read them now (the first
+		// read waits for this, so it never races the hello).
+		limits.Resend()
+		limits.Kick()
 		// The hello says which sessions are alive, not what they are doing: a heartbeat now
 		// moves a session the server marked lost straight to its real state.
 		client.RequestHeartbeat()
@@ -124,15 +162,21 @@ func main() {
 	// Report per-session detector state in each heartbeat so the server can
 	// self-heal a dropped session_state_changed event.
 	client.SetSessionStates(mgr.SessionStates)
+	// ...and the spawns still in its queue, so a slow start is not read as a lost session.
+	client.SetQueuedSessions(mgr.QueuedSpawnIDs)
 
 	// Claim the agent sessions the previous run of the daemon left behind, before connecting:
 	// the hello then lists them and the server keeps their rows while they are hosted again.
 	if n := mgr.AdoptAgentSessions(client.RequestHeartbeat); n > 0 {
-		log.Printf("blerg-runner-daemon: recovering %d agent session(s) from before the restart", n)
+		log.Printf("blerg-runner-daemon: recovering %d agent session(s) from before the restart; restart %s", n, restartCause)
 	}
 
 	client.Run(ctx, mgr.ActiveSessionIDs)
 
+	if ctx.Err() != nil {
+		// Again, and before returning: the goroutine above may not have got to it yet.
+		daemon.NoteCleanStop(stateDir)
+	}
 	log.Println("blerg-runner-daemon: stopped")
 }
 
@@ -142,6 +186,16 @@ func requireEnv(key string) string {
 		log.Fatalf("required environment variable %s is not set", key)
 	}
 	return v
+}
+
+// claudeUsageSetting reads BLERG_RUNNER_CLAUDE_USAGE: the Claude usage meter is on unless it says
+// 0, false, off or no.
+func claudeUsageSetting(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
 }
 
 // sandboxNetworkSetting reads BLERG_RUNNER_SANDBOX_NETWORK: the docker network
@@ -232,4 +286,30 @@ func hostname() string {
 		return "unknown"
 	}
 	return h
+}
+
+const usage = `Usage:
+  blerg-runner-daemon                      run the daemon (its settings come from the environment)
+  blerg-runner-daemon status --open-work   list the agent sessions a restart would cut off:
+                                           a turn running, background tasks, subagents
+                                           (nothing printed: none; run inside an agent
+                                           session, that session's own turn is left out)
+`
+
+// runCommand runs a subcommand and returns the exit code. An argument it does not know is an
+// error rather than ignored: the daemon itself takes none, and must never start by mistake.
+func runCommand(args []string, stdout, stderr io.Writer) int {
+	switch {
+	case len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help"):
+		_, _ = fmt.Fprint(stdout, usage)
+		return 0
+	case len(args) == 2 && args[0] == "status" && args[1] == "--open-work":
+		// Run from inside an agent session (an agent updating the daemon), that session's own
+		// turn is the one asking.
+		self := os.Getenv("BLERG_RUNNER_SESSION_ID")
+		_, _ = fmt.Fprint(stdout, daemon.OpenWorkReport(daemon.AgentRecordsDir(daemon.DaemonStateDir()), self))
+		return 0
+	}
+	_, _ = fmt.Fprintf(stderr, "blerg-runner-daemon: unknown arguments: %s\n%s", strings.Join(args, " "), usage)
+	return 2
 }

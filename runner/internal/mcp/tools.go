@@ -42,7 +42,8 @@ var toolDefs = []map[string]any{
 	{
 		"name": "send_message",
 		"description": "Send a conversational turn to a running session — an answer, a correction, more context. " +
-			"A disconnected cluster session is resumed by it.",
+			"A disconnected cluster session is resumed by it. Sent while the agent waits on a blerg-runner ask, " +
+			"it answers that ask (unless the source is \"blerg-board\").",
 		"inputSchema": obj(props{
 			"session_id": str("session id"),
 			"text":       str("what to say to the agent"),

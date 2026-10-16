@@ -134,6 +134,10 @@ textarea:focus-visible {
   color: var(--blaze);
 }
 
+.shell-footer .build-commit {
+  opacity: 0.7;
+}
+
 .shell-footer .sep {
   color: var(--stone);
 }

@@ -4,8 +4,6 @@ import {
   ENGINE_LABELS,
   TERMINAL_NEEDS_DAEMON,
   AGENT_NO_PROMPTS,
-  ACK_AGENT,
-  ACK_TERMINAL,
   runtimeDisabledReason,
 } from '../lib/runtimes'
 import type { RunDaemon, RunRuntime, RunKind, RunEngine } from '../lib/runtimes'
@@ -77,6 +75,9 @@ export interface RunColumnProps {
   models: readonly EngineModel[]
   modelsLoading?: boolean
   modelsFallback?: boolean
+  modelsError?: string
+  modelsRefreshing?: boolean
+  onModelsRetry?: () => void
   model: string
   onModelChange: (id: string) => void
   effort?: string
@@ -103,8 +104,6 @@ export interface RunColumnProps {
 
   dangerouslySkipPermissions: boolean
   onSkipPermissionsChange: (v: boolean) => void
-  ack: boolean
-  onAckChange: (v: boolean) => void
 
   // Repo-dependent hints ("will clone to …") that belong next to the daemon.
   daemonNotes?: ReactNode
@@ -116,14 +115,16 @@ export interface RunColumnProps {
 export default function RunColumn(props: RunColumnProps) {
   const {
     runtime, onRuntimeChange, kind, onKindChange, engine, onEngineChange,
-    models, modelsLoading, modelsFallback, model, onModelChange, effort, onEffortChange, modelFreeText,
+    models, modelsLoading, modelsFallback, modelsError, modelsRefreshing, onModelsRetry, model, onModelChange, effort, onEffortChange, modelFreeText,
     daemons, selectedDaemon, onDaemonChange, clusterConfigured,
     availableEnginesHere, clusterEngineBlocked, clusterGitMissing, settingsLink, engineMissingNote,
-    dangerouslySkipPermissions, onSkipPermissionsChange, ack, onAckChange, daemonNotes,
+    dangerouslySkipPermissions, onSkipPermissionsChange, daemonNotes,
     onReposRootChanged,
   } = props
 
   const engineMissingHere = availableEnginesHere !== null && !availableEnginesHere.includes(engine)
+  const daemonChoice = daemons.length > 1 ||
+    (daemons.length === 1 && !!selectedDaemon && selectedDaemon.id !== daemons[0].id)
   const sandboxImageMissing =
     runtime === 'docker' && !!selectedDaemon && !selectedDaemon.sandbox_available
   const terminalDisabledReason = runtime === 'cluster' ? TERMINAL_NEEDS_DAEMON : null
@@ -189,8 +190,10 @@ export default function RunColumn(props: RunColumnProps) {
         )}
 
         {/* Daemon picker — only worth showing when there is a choice to make,
-            and only when the chosen runtime actually uses a daemon. */}
-        {daemons.length > 1 && runtime !== 'cluster' && (
+            and only when the chosen runtime actually uses a daemon. A picked
+            daemon that has since gone (the launch sheet opened from what it
+            last knew) is a choice to make again, even with one left. */}
+        {daemonChoice && runtime !== 'cluster' && (
           <div data-testid="daemon-picker" style={{ marginTop: 10 }}>
             <span style={sectionLabel}>Daemon</span>
             {daemons.map(d => (
@@ -222,7 +225,7 @@ export default function RunColumn(props: RunColumnProps) {
             ))}
           </div>
         )}
-        {daemons.length === 1 && runtime !== 'cluster' && (
+        {daemons.length === 1 && !daemonChoice && runtime !== 'cluster' && (
           <p data-testid="daemon-single" style={noteStyle}>on {daemons[0].name}</p>
         )}
         {daemons.length === 0 && (
@@ -342,6 +345,14 @@ export default function RunColumn(props: RunColumnProps) {
           (GET /api/models/{engine}); an engine with no list shows nothing —
           or, when the sheet passes modelFreeText, an optional model name box
           — and uses its own configured default. */}
+      {modelsLoading && models.length === 0 && (
+        <p role="status" style={noteStyle}>Loading {ENGINE_LABELS[engine]} models…</p>
+      )}
+      {modelsRefreshing && <p role="status" style={noteStyle}>Refreshing {ENGINE_LABELS[engine]} models… You can launch with the default model.</p>}
+      {modelsError && <p role="status" data-testid="models-error" style={noteStyle}>
+        {modelsError}{' '}
+        {onModelsRetry && <button type="button" onClick={onModelsRetry}>Retry</button>}
+      </p>}
       <ModelPicker
         models={models}
         loading={modelsLoading}
@@ -410,20 +421,6 @@ export default function RunColumn(props: RunColumnProps) {
           <p style={{ ...noteStyle, margin: 0 }}>Permission prompts stay on.</p>
         )}
       </div>
-
-      {/* 6. Acknowledgement — only where the session genuinely runs as you,
-          on your machine, with nothing between it and your filesystem. */}
-      {runtime === 'daemon' && (
-        <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: '0.8rem', color: 'var(--amber)', marginBottom: 16 }}>
-          <input
-            type="checkbox"
-            data-testid="agent-ack"
-            checked={ack}
-            onChange={e => onAckChange(e.target.checked)}
-          />
-          {kind === 'agent' ? ACK_AGENT : ACK_TERMINAL}
-        </label>
-      )}
     </div>
   )
 }

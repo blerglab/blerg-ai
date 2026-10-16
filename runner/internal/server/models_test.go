@@ -3,10 +3,14 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"testing"
 
+	"testing"
+	"time"
+
+	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -166,5 +170,132 @@ func TestClaudeModelsServesLiveCatalog(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &raw)
 	if _, ok := raw.Models[0]["efforts"].([]any); !ok {
 		t.Errorf("efforts for a model with none must be [], got %v", raw.Models[0]["efforts"])
+	}
+}
+
+func TestClusterCodexModelsDoesNotUseWorkstationCatalog(t *testing.T) {
+	api, token, core := newCredentialsAPI(t, nil)
+	defer core.Close()
+	api.SetRunnerKey("runner-key")
+	w, _ := getModels(t, api, "codex?runtime=cluster", token)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", w.Code)
+	}
+	w, _ = getModels(t, api, "codex?runtime=cluster", "runner-key")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("shared key got %d, want 401", w.Code)
+	}
+}
+
+func TestClusterCodexModelsServesAccountCatalogAndSafeFailure(t *testing.T) {
+	for _, authFailure := range []bool{false, true} {
+		t.Run(fmt.Sprint(authFailure), func(t *testing.T) {
+			api, token, core := newCredentialsAPI(t, nil)
+			defer core.Close()
+			f := &catalogFake{phase: "Succeeded", logs: clusterModelFixture}
+			if authFailure {
+				f.phase = "Failed"
+				f.exit = 42
+			}
+			api.hub.SetJobManager(catalogManager(t, f))
+			w, list := getModels(t, api, "codex?runtime=cluster", token)
+			if w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("private catalog response must not be shared-cached")
+			}
+			if w.Code != http.StatusOK || !list.Refreshing {
+				t.Fatalf("first snapshot: %d %+v", w.Code, list)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for list.Refreshing && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+				w, list = getModels(t, api, "codex?runtime=cluster", token)
+			}
+			if authFailure {
+				if w.Code != http.StatusOK || list.Error != ErrClusterCodexCatalogAuth.Error() || list.Refreshing {
+					t.Fatalf("auth failure: %d %s", w.Code, w.Body.String())
+				}
+			} else if w.Code != http.StatusOK || list.Source != models.SourceLive || len(list.Models) != 2 || list.Models[1].DefaultEffort != "medium" {
+				t.Fatalf("catalog: %d %+v", w.Code, list)
+			}
+		})
+	}
+}
+
+func TestClusterCodexModelsReturnsSnapshotBeforeProbeCompletes(t *testing.T) {
+	api, token, core := newCredentialsAPI(t, nil)
+	defer core.Close()
+	api.hub.SetJobManager(&JobManager{Image: "fixture-agent"})
+	release, done := make(chan struct{}), make(chan struct{})
+	api.clusterModels.probe = func(context.Context, string, string, coreProof) (models.List, error) {
+		defer close(done)
+		<-release
+		return models.List{}, ErrClusterCodexCatalog
+	}
+	defer func() { close(release); <-done }()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/models/codex?runtime=cluster", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	RegisterRunnerContractRoutes(mux, api)
+	mux.ServeHTTP(w, req)
+	var out struct {
+		Refreshing bool `json:"refreshing"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if w.Code != http.StatusOK || !out.Refreshing {
+		t.Fatalf("request waited for probe: status=%d refreshing=%v", w.Code, out.Refreshing)
+	}
+}
+
+func TestClusterCodexModelsRestoredAtStartupWithoutProbe(t *testing.T) {
+	pool := connectSrvTestSchemaPool(t)
+	if err := db.RunMigrations(context.Background(), pool); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	stored := models.List{Models: []models.Model{{ID: "fixture-fast", Name: "Fast", Section: "main", Efforts: []string{"low"}, DefaultEffort: "low"}}, Source: models.SourceLive, FetchedAt: &now}
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.StoreClusterModelCatalog(context.Background(), pool, "acct-1", "codex", "fixture-agent", raw, now); err != nil {
+		t.Fatal(err)
+	}
+	api, token, core := newCredentialsAPI(t, nil)
+	defer core.Close()
+	api.dbPool = pool
+	api.hub.SetJobManager(&JobManager{Image: "fixture-agent"})
+	api.WarmClusterModelCache(context.Background())
+	w, list := getModels(t, api, "codex?runtime=cluster", token)
+	if w.Code != http.StatusOK || list.Refreshing || len(list.Models) != 1 || list.Models[0].ID != "fixture-fast" || list.Models[0].DefaultEffort != "low" {
+		t.Fatalf("startup snapshot: %d %+v", w.Code, list)
+	}
+}
+
+func TestClusterModelsWithoutNativeProviderUsesOnlyPublicCatalog(t *testing.T) {
+	api, tok, coreSrv := newCredentialsAPI(t, nil)
+	defer coreSrv.Close()
+	reg := models.NewRegistry()
+	reg.Register("claude", models.BuiltinClaudeSource)
+	reg.Register("hermes", models.SourceFunc(func(_ context.Context, daemonID string) (models.List, error) {
+		if daemonID != "" {
+			t.Errorf("cluster lookup forwarded workstation %q", daemonID)
+		}
+		return models.List{Source: models.SourceDaemon, DaemonID: "workstation", Models: []models.Model{{ID: "local-only"}}}, nil
+	}))
+	api.SetModelSources(reg)
+	for _, engine := range []string{"claude", "hermes"} {
+		w, list := getModels(t, api, engine+"?runtime=cluster&daemon_id=workstation", tok)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", engine, w.Code, w.Body.String())
+		}
+		if engine == "claude" && (list.Source != models.SourceBuiltin || len(list.Models) == 0) {
+			t.Fatalf("public catalog lost: %+v", list)
+		}
+		if engine == "hermes" && (list.Source != models.SourceNone || len(list.Models) != 0 || list.DaemonID != "") {
+			t.Fatalf("workstation catalog leaked: %+v", list)
+		}
 	}
 }

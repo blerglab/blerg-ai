@@ -34,7 +34,7 @@ vars that the Blerg Runner daemon injects at session spawn:
 |----------|---------|
 | `BLERG_RUNNER_SERVER_HTTP` | HTTP base URL, e.g. `http://runner.example.test` |
 | `BLERG_RUNNER_SESSION_ID` | UUID of this session |
-| `BLERG_RUNNER_SESSION_TOKEN` | Per-session bearer token for the API (scoped to this session) |
+| `BLERG_RUNNER_SESSION_TOKEN` | Per-session bearer token for the API (scoped to this session); a token the server re-issued later, in `$BLERG_RUNNER_DAEMON_STATE_DIR` (default `~/.blerg-runner-daemon`)`/session-tokens/<session id>`, is used first |
 
 If any of these are absent (e.g. the project is opened outside Blerg Runner), the CLI
 prints a one-line notice to stderr and exits 0 — no crash, no noise.
@@ -155,6 +155,17 @@ session's 50 file slots are used — the user's attachments count too. `unpublis
 the session's own files (the newest version of that name by default) and frees the slot; a file
 the user attached is theirs and is refused. Use them when `publish` says the session is at its
 limit, instead of asking the user to delete something.
+
+### `blerg-runner topic "<title>"` / `blerg-runner topic --done ["<outcome>"] [--commit <sha> ...]`
+
+When you start a piece of work the user asked for that takes several steps, run `blerg-runner topic "<short imperative title>"`; when it is finished or dropped, `blerg-runner topic --done "<one-line outcome>"`, and when the work landed commits, pass them: `--commit <sha>`. One topic at a time; not for a quick question, and not from a subagent.
+
+```bash
+blerg-runner topic "Build the History tab"
+blerg-runner topic --done "Shipped on main" --commit 1a2b3c4 --commit 9f8e7d6
+```
+
+Starting a topic ends the open one; the person's History tab lists each topic with its files, subagents, outcome and commits. `--commit` goes with `--done` only; repeat it or comma-separate the shas (7 to 40 hex characters each, at most 50).
 
 ### `blerg-runner fetch [<id>|<name> ...|--all|--all-versions] [--out DIR] [--list]`
 

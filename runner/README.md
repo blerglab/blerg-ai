@@ -7,11 +7,17 @@ and the board is `blerg-board`.
 ## Components
 
 - **server** (`cmd/server`) — the hub. Serves the runner API, the daemon WebSocket, and the web UI.
-  Registers with `blerg-core` and validates `blerg-core`-issued tokens.
+  Registers with `blerg-core` and validates `blerg-core`-issued tokens. The web UI is a sidebar of
+  sessions (one status glyph per card, in an order that does not move when a state changes, with
+  the usage meters at its top and the version and commit at its foot) and, per session, the chat
+  with a side panel (Live, History, Files, Capabilities): see
+  [`docs/talking-to-an-agent.md`](../docs/talking-to-an-agent.md#the-session-panel).
 - **daemon** (`cmd/daemon`) — runs on a workstation, dials the server, and spawns/supervises the
-  actual agent sessions using the host's `claude` CLI. This is where sessions really run, so it
-  needs the operator's Claude auth (subscription via `claude setup-token` /
-  `CLAUDE_CODE_OAUTH_TOKEN`, or an already-logged-in `claude`).
+  actual agent sessions using the host's engine CLIs (`claude`, `codex`, …). This is where sessions
+  really run, so it needs the operator's engine login (for Claude a subscription via
+  `claude setup-token` / `CLAUDE_CODE_OAUTH_TOKEN`, or an already-logged-in `claude`; for Codex a
+  logged-in `codex`). It keeps a recovery record per agent session, so a restart or update of the
+  daemon continues a Claude Code or Codex agent session on the host rather than ending it.
 - **runner** (`cmd/runner`) — PID 1 of a per-session pod in the k8s runtime.
 
 To run the whole stack on a cluster, use [`install/k8s`](../install/k8s/README.md).
@@ -273,6 +279,17 @@ A session whose cluster Job has finished while the session never got past `start
 `error`, not a `starting` that never converges. A status value this build does not recognise is
 reported as `running`: an unknown value is not evidence the work is over.
 
+A desktop daemon reports, in its hello and every heartbeat, the sessions it runs
+(`active_sessions`) and the spawns it has received but not started yet (`queued_sessions`: waiting
+in its queue, cloning, installing plugins). The server stops a session its connected daemon reports
+in neither list — its messaging token revoked and its MCP gateway grants deleted — so a queued spawn
+must be listed: before `queued_sessions` (an older daemon) a slow start was read as lost, and it then
+came back, through its own `session_started`, without its credentials. Such a daemon still gets two
+minutes from the session's creation before the server reads "not listed" as "lost". A live session
+left without a valid messaging token is sent a new one (`session_token`, to a daemon whose hello says
+`session_token_file`; it answers `session_token_result`, and a token it did not store is revoked and
+tried again at the next heartbeat). Only the messaging token is re-issued: deleted MCP grants are not.
+
 ### Why a session ended
 
 A terminal session also says **why** it ended (`end_reason`) and, when an actor ended it, **what
@@ -330,14 +347,42 @@ addresses or a token-bearing clone URL). Reading pod status needs `get`/`list` o
 sessions namespace (`install/k8s/cluster-runtime.yaml` grants it); without it starts work the same,
 but `schedule`/`image` just sit "active" (no Unschedulable/ImagePullBackOff reason) until the pod's
 own reports arrive. A session with nothing queued goes `starting` → `idle` as
-soon as its engine is up — no "finished its turn" notification for that.
+soon as its engine is up — no "waiting for you" notification for that (see
+[Notifications](#notifications)).
+
+### Notifications
+
+The runner tells a person when a session needs them, as a toast in every open runner page and, when
+nobody has used one for three minutes, an OS push (never for a private session). The server decides
+when and words it (`internal/server/notices.go`) and sends browsers a `session_notice`
+(`{session_id, status, title, body, url}`), which they show as given:
+
+- **waiting** (a turn paused for input): at once, "<session> is waiting for your input."
+- **idle** (a turn finished): only once nothing the session started still runs — no subagent and
+  no background task by the live state's rules (`GET /api/sessions/{id}/live`'s Running count). If
+  some still run, the notice waits and goes out when the last of them ends while the session is
+  still idle, once: "<session> is waiting for you." The server also looks at a held notice every
+  minute, with the live state's stale rule, so a run that never reports its end or goes silent for
+  12 hours does not hold it; and a hold 30 minutes old whose only running work is background tasks
+  (no subagent) goes out anyway: "<session> is waiting for you (a background task is still
+  running)." A new turn, a question or the session's end, the reconcilers' included, drops the held
+  notice. (It is held in the server's memory: a server restart in between loses it.)
+- **a question** (`blerg-runner ask`): its own toast and push, as before.
+
+A session nobody watches sends none of these, and its questions are listed without a toast
+(`message_created` with `quiet: true`) or push: an unattended session (interaction
+`unattended`, or an older row a tool or cron started), a cron's (`cron_id`), one started with the
+operator key (`started_by_kind` `runner_key`), and one an agent token started (`agent`) unless it
+was started `interactive`. So a board's Discuss and board sessions (agent-token starts the board
+makes interactive) and its Assist sessions, which a person drives, keep their notices.
 
 ### Capabilities (skills & plugins)
 
 What an agent session has loaded — skills, plugins, MCP servers, slash commands, tools and
 subagents — is reported as a transcript event of kind `capabilities`. It persists and replays like
-any other event, appears in `…/events`, the SSE stream and MCP `get_events`, and is what the chat
-view's **Skills & plugins** panel shows. Only the latest one describes the session. Payload:
+any other event, appears in `…/events`, the SSE stream and MCP `get_events`, and is what the
+session panel's **Capabilities** tab shows (a terminal session's Skills & plugins dialog says it has
+none). Only the latest one describes the session. Payload:
 `{engine, engine_name?, model?, version?, cwd?, permission_mode?, note?, groups: [{id, label,
 note?, total?, items: [{name, description?, detail?, status?, source?}]}]}`, with group `id` one of
 `skills`, `plugins`, `mcp`, `commands`, `tools`, `agents` (in that order). A group the engine does
@@ -384,6 +429,124 @@ after 15 s of silence. When the session becomes terminal the stream sends a fina
 `event: end` whose `data` is the full result body, then closes. A `404` for an unknown session is
 an ordinary error response, never an empty stream.
 
+**Thinking and subagents.** A Claude Code session records each thinking block as an event of kind
+`assistant_thinking`, payload `{text}`; it is never the session's answer. While a block is open,
+the live stream carries a transient `thinking_started` and then `thinking_done` (with
+`parent_call_id` for a subagent's), which the daemon gets by starting Claude Code with
+`--include-partial-messages` when the CLI lists it. When the agent starts a
+subagent (its `Agent` tool), the runner records the ordinary `tool_call` and, after it,
+`subagent_started` `{child_id, agent_type, model, summary}` whose `child_id` is that call's
+`call_id`; the call's `tool_result` comes with `subagent_done` (same `child_id`, `summary` the start
+of the report or `error: …`, plus `model`, `usage`, `tool_uses` and `duration_ms`). While it runs,
+`subagent_update` carries its `model`, running `usage` and `tool_uses`, at most every 5 s. A
+background subagent's launch is a `subagent_done` with `background: true`; its real end is a later
+`subagent_done` for the same `child_id`, read from the CLI's completion notice. A finished subagent
+the agent resumes (Claude Code's `SendMessage`) is a new run: a `subagent_started` with
+`resumed: true`, `child_id` the `SendMessage` call's id and `resumed_from` the first run's
+`child_id`, ended by a `subagent_done` of its own. Every `assistant_text`, `assistant_thinking`, `tool_call` and
+`tool_result` the subagent produced carries `parent_call_id`, the `child_id` of its subagent; the
+main agent's own events carry none. A subagent's own text and thinking are streamed only when the
+CLI lists `--forward-subagent-text` in its `--help` (asked once per daemon on the host, once per
+session in a sandbox); an older CLI still gets the subagent's tool calls and results.
+
+`subagent_done` also carries `is_error: true` when the subagent failed (its Agent call returned an
+error, or its background notice's status was `failed`; `killed` and `stopped` mean a person stopped
+it); an older daemon leaves it out and says `error: …` in `summary`.
+
+Codex gives every child run its own transcript identity, including follow-ups and runs
+rediscovered after a restart. Recovery keeps a bounded allowlist of owned native child IDs,
+short display metadata and usage baselines; saved metadata never implies that a child is
+still running. When native notifications identify an unknown child, the daemon verifies its
+ancestry with native thread metadata before accepting its activity or questions. Same-account
+siblings and forks are not authorized merely because they share a session-tree ID.
+
+Codex native questions use the session's private ask/answer route. The pinned CLI (0.162.1)
+permits `request_user_input` only in the root thread, so a child sends its question to the
+parent; the parent asks, identifies the child and forwards the answer. Unrestricted sessions
+enable the pinned experimental `default_mode_request_user_input` feature so this tool is
+available in Default mode. This selects a native tool; it does not grant additional provider
+or filesystem permissions. Restricted sessions keep that feature disabled. The RPC bridge
+also accepts child questions from runtimes that expose them, but only for a verified owned
+child's current turn. Child completion closes that child's questions, and interruption closes
+all outstanding native questions. Secret questions must use credential setup instead.
+
+**Topics.** `blerg-runner topic` posts `POST /api/sessions/{id}/topics` (`{"action":"start","title"}`
+or `{"action":"done","outcome","commits"?}`, the session's own token), recorded as an event of kind
+`topic`, payload `{id, title, action, outcome?, commits?}`. `commits` (`topic --done --commit <sha>`)
+is `[{"sha"}]`, on a done only: each sha 7 to 40 hex characters, lower-cased, deduplicated in order,
+at most 50 (anything else is a `400`). `GET /api/sessions/{id}/topics` (a signed-in person who may
+see the session; `ETag`/`If-None-Match`) returns the session's topics as the History tab shows them;
+a done row's `commits` are `[{"sha", "url"}]`, `url` the commit's page when the session's repository
+is known (its clone URL, else its daemon's origin for the folder) and `null` otherwise.
+
+**Live state.** `GET /api/sessions/{id}/live` (the same people as `/topics`; `ETag`/`If-None-Match`,
+`Cache-Control: private, no-store`) answers what the session panel's Live tab shows, read from the
+session's whole event log: `{session_id, through_seq, generated_at, tokens_hidden, asks:[{event_id,
+message_id, question, asked_at, seq}], subagents:[{key, title, type, model, tokens, doing, started_at,
+active_at, background, seq}], tasks:[{task_id, call_id, kind, description, started_at, seq}],
+tool_changes, counts:{needs_you, running}}`. An ask is open until it is answered, its message is
+closed or the session ends (one the native loop asked also closes with its turn); a subagent runs
+until its final `subagent_done` (a foreground one only while its turn runs and no message but the system's has come since it started, as in the chat); a task until its
+`background_task_done`; anything with no sign of life for 12 hours is left out. Tokens follow the
+Insights rule, and `tool_changes` is the caller's own pending tool changes on the session. The page
+folds the events after `through_seq` into the reply until its next read. Migration 042 adds the
+partial index the read uses (`agent_events_live_idx`).
+
+**Background tasks.** When a Claude Code agent leaves something running (a `Bash` call with
+`run_in_background`, a `Monitor`, a background subagent), the runner records
+`background_task_started` `{task_id, call_id, kind, description, started_at}` once the call's result
+names the task (`kind` is `bash`, `monitor` or `agent`; `call_id` is the call that started it), and
+`background_task_done` `{task_id, call_id, kind, status, summary}` when the CLI reports it ended
+(`status` as the CLI says, e.g. `completed`, `failed`, `killed`, `expired` for a monitor, or `stopped`
+when the engine process ended under it; `summary` at most 120 bytes). A resumed run of a background
+subagent is a task as its launch was: kind `agent`, `task_id` and `call_id` its `SendMessage` call's id.
+
+**Messages from the agent.** In an agent session, `blerg-runner ask`, `update` and `note` are
+recorded as transcript events of kind `ask`, `update` and `note`, payload `{body, message_id}`
+(`message_id` is the id in the messages API; it can be missing on older events and on a native
+agent's updates and notes). An ask is answered with `POST /api/messages/{message_id}/reply`
+`{"answer": "…"}`, or from the runner's browser socket by an `agent_user_message` carrying
+`answer_message_id`; and a plain chat message (source `chat` or none) sent over that socket while
+one of those asks is open answers the newest open one instead of reaching the engine, which is
+blocked inside the ask. The answer is recorded as `user_message` with `source: "ask_answer"` and the
+ask's `message_id`, and the websocket broadcasts `message_answered` (`{message: {id, status,
+answer}}`, with an empty answer for an ask that expired). Nothing is recorded when an ask expires,
+so a client closes a card that carries a `message_id` on `message_answered`, on `initial_state`
+(which lists the open asks) or when the session ends — not when the turn ends or when the asking
+command returns, since the ask can outlive both. `POST …/message` (REST and the MCP `send_message`)
+with source `human`, `chat` or `runner` answers the newest open ask too (the response says
+`answered_ask: true`); a message from a board (`blerg-board`) never does. An update or note is
+reached the same way, and a reply to a note arrives as `user_message` with `source: "note_reply"`.
+
+**Errors, retries and system text.** `user_message` carries `source`, an optional `client_id` (the id
+the sender gave the message, echoed so a client can match its queued bubble; a message dropped
+because the queue was full is reported as an `error` carrying that `client_id`) and, for an
+answer, `message_id`. A text the daemon wrote and a person did not type has `source: "system"`: the
+restart note ("[system] Session resumed after a restart…") and the output of a slash command such as
+`/cost` (the body of `<local-command-stdout>`, tags removed, possibly several lines). A slash skill
+is recorded with the text the person typed. A failed model API call is an `error` event with
+`code: "api_error"` and `retryable: true`, never an `assistant_text`; a turn that ends in failure
+ends with `turn_done` whose `stop_reason` is `"error"`, after an `error` event with the reason (the
+engine's error text, or its first listed error). A retry in progress is an `error` with
+`code: "api_retry"` and `retryable: true`, with `attempt`, `max_retries` and `retry_in_ms` when the
+engine says them: it is a notice, the turn continues, and it ends nothing.
+A Claude Code compaction is a `compaction` event with an empty `summary` and `trigger` (`manual` or
+`auto`) and `pre_tokens`. Fields are additive: an older daemon omits them, and records an API
+failure as the agent's text.
+
+**Times, order and gaps.** `ts` is the daemon's time for the event, kept within ten minutes of the
+runner's clock. `seq` follows the order events are stored, which follows emission order (a failed
+store holds the session's later events back while the daemon keeps re-sending the refused event,
+and lets go two minutes after its last attempt; a payload the database rejects outright is never
+held for). `…/events/stream` and a
+re-poll from `after_seq` are always complete. On the live stream and the browser socket, a
+subscriber that falls behind can have live events dropped: the websocket then sends
+`{"type": "agent_events_gap", "session_id": "…", "from_seq": N}` (the lowest dropped seq) and the
+client asks again with `subscribe_agent_events` and `after_seq: N-1`, deduplicating on
+`client_event_id`; `…/events/live` refills the gap itself, inline and in seq order, with no new frame.
+Live order is not strictly seq order, so a client that sees a hole in the seqs should wait a moment
+(the chat package waits one second) before fetching it.
+
 **Live stream.** `GET …/events/live` is what the runner's own browser gets over its websocket,
 for the credential that started the session: it is fed by the hub, not by polling the table, so
 it carries the typing deltas and the status changes the polling stream cannot. It is what a chat
@@ -393,7 +556,7 @@ persisted events only:
 
 | Frame | Data | When |
 |---|---|---|
-| `agent_event` | the event as the browser receives it: `{type, session_id, client_event_id, seq, ts, kind, payload}`; a typing delta has `transient: true` and no `seq` | the opening page, then live |
+| `agent_event` | the event as the browser receives it: `{type, session_id, client_event_id, seq, ts, kind, payload}`; a typing delta, or a thinking block's start or end (`thinking_started` / `thinking_done`, no text), has `transient: true` and no `seq` | the opening page, then live |
 | `replay_done` | `{session_id, last_seq, has_more, server_time}`; with `tail=1` also `older: true, has_older, first_seq` | once, after the opening page |
 | `status` | `{session_id, status}` — `starting`, `running`, `waiting`, `idle`, `disconnected`, `stopped`, `ended` or `error` — plus `message`, `end_reason`, `ended_by` when known | once at open, then on every change |
 | `end` | the result body | when the session is over; the stream then closes |
@@ -402,7 +565,11 @@ persisted events only:
 transcript with the newest page, and the older part follows from
 `GET …/events?before_seq=<first_seq>&limit=` (oldest first, `has_older` until the start). An
 event may arrive both in the replay and live; deduplicate on `client_event_id`, as the browser
-does. A `: keepalive` comment goes out after 15 s of silence. A `404` for a session the
+does. Opening replay pages also include up to three older lifecycle events for each referenced
+subagent, so a completion outside the displayed window still determines its card’s status.
+Use the replay marker’s `first_seq` and `last_seq` for pagination, not the minimum seq of these
+sparse context rows. Older context keeps its original seq in JSON and omits the SSE `id:` line
+so it cannot rewind the reconnect cursor. A `: keepalive` comment goes out after 15 s of silence. A `404` for a session the
 credential may not see is an ordinary error response, never an empty stream.
 
 **Webhook.** A session started with a `callback_url` gets one `POST` of the same result body when
@@ -450,8 +617,13 @@ return the same object, with every field always present:
 ```
 
 `branch` is the convention the session runtime names its work after, derived from the session id.
-`last_assistant_message` is the newest completed assistant turn (streaming deltas are not
-persisted), found within the last 400 events. `artifacts` is reserved and always empty in v1.
+`last_assistant_message` is the main agent's last text in the session's **last turn** only
+(streaming deltas are not persisted, and a subagent's text is not the session's), found within the
+last 400 events; while a turn runs, that is the turn in progress. A turn that ended in failure
+(`stop_reason: "error"`) has no answer, so the field is empty, and the reason for the failure is in
+`error_reason` (when the session has no error of its own, the newest error of that turn that is not a
+retry notice). An earlier turn's answer is never reported in its place, and a model API failure's
+text is never taken for an answer. `artifacts` is reserved and always empty in v1.
 There is deliberately no `callback_secret` field.
 
 ### Session files
@@ -584,7 +756,29 @@ returns — an unparseable answer or an unreadable Hermes config) keeps the last
 definite "nothing" (the CLI is not installed or exits non-zero on its own, e.g. logged out; Hermes
 is not on a `custom` provider or has no config; the endpoint answers 401/403) reports an empty one.
 
-Lists are not scoped per user: any credential that can start a session reads every connected
+For Cluster Codex launches, the New session sheet requests
+`GET /api/models/codex?runtime=cluster` with the signed-in browser session. This probes the
+configured agent image using that account's credential (or the operator credential when no
+personal one exists), in a bounded temporary Job, rather than using a workstation's catalog.
+A native app-server `model/list` request must create a fresh account catalog; bundled fallback
+models are rejected.
+The picker preserves the CLI's model order, supported efforts and default for each model.
+Catalog probes receive access tokens only, so reading a model list cannot rotate the durable
+login's refresh token. Expired credentials and failed probes show an error in the sheet.
+A Codex login pasted into Settings is a snapshot, not a synchronized host login: replace it
+there after the source login is rotated or revoked. Cluster sessions now show an actionable
+expired-login error while remaining available to retry after repair.
+The endpoint returns an account/image-scoped cached snapshot immediately. Successful catalogs
+are persisted in the runner database and reloaded at server startup. Catalogs older than 15 minutes
+refresh in the background with a live browser proof; neither credential lookup nor pod startup
+blocks the response. `refreshing: true` tells the modal to poll while keeping launch controls
+usable. With no previous catalog, the engine's default and an optional model name remain
+available. A failed refresh preserves the previous list and exposes a safe `error`; Retry requests
+`refresh=1`. The modal stops polling when closed, preserves typed model choices and bounds any
+stalled HTTP request at ten seconds. The server needs `get` access to `pods/log` in the session
+namespace (included in `install/k8s/cluster-runtime.yaml`).
+
+Workstation lists are not scoped per user: any credential that can start a session reads every connected
 daemon's lists (model names only). That matches the runner's single-tenant model, in which every
 signed-in user can already see and launch on every daemon.
 
@@ -610,7 +804,9 @@ not passed: a proxy URL can carry credentials. So on a machine that reaches the 
 through a proxy, `codex debug models` may fail to fetch the account-aware catalog — it then exits
 non-zero (no list, and the free-text box appears) or falls back to its own bundled catalog — and a
 Hermes endpoint reachable only through a proxy gets no list. This concerns the lists only:
-sessions start from the daemon's usual session environment, not the probes' one.
+sessions start from the daemon's usual session environment, not the probes' one. When an engine
+reports no list the daemon log says why, once (`models: codex reports no model list: …`, with the
+tail of the CLI's stderr when it exited non-zero).
 
 The launch sheet asks for the list of the daemon it is about to launch on, shows the `main` models
 as pills and the rest under **More models**, then an **Effort** row for the selected model (its
@@ -679,14 +875,53 @@ effort that fails those rules (and logs it) rather than starting a pod that woul
    `FREE_TEXT_MODEL_ENGINES` for a free-text model box when nothing was reported. Without a list the
    engine simply has no picker.
 
+### Usage limits
+
+The sidebar shows, under **Where sessions run**, a thin meter per limit window for each provider a
+workstation daemon can read: the five-hour window ("5h") and the weekly one ("week"), the share
+used, and on hover when it resets; the bar turns amber from 70 % and red from 90 %. Limits belong
+to the provider account the machine is logged in to, not to a session, so the daemon reports them
+per provider (`usage_limits {provider, windows: [{id: "5h"|"7d"|"capped", used_percent,
+resets_at}], fetched_at}` over its socket). The server keeps the latest in memory, carries them in
+`initial_state` as `daemons[].usage_limits` and pushes `daemon_limits_changed {daemon_id,
+usage_limits}` when they change (`GET /api/daemons` carries them too); the cluster runtime reports
+none. Codex's come from `codex app-server` (`account/rateLimits/read`), read when the daemon
+connects, every 10 minutes and a few seconds after a Codex turn ends; three failed reads in a row
+withdraw its meters, and a window whose reset has passed is not drawn. Each bar is a progressbar with
+a spoken name ("Codex 5-hour window, 42% used, resets in 2h 10m, as of 11:50"); on a screen with no
+hover the reset shows as text ("↻2h"). Claude's come from the account usage endpoint the CLI's own
+usage view reads (`GET https://api.anthropic.com/api/oauth/usage`, `anthropic-beta:
+oauth-2025-04-20`; `five_hour` and `seven_day`, each a `utilization` 0–100 and a `resets_at`),
+called with the CLI's sign-in when the daemon connects, every 10 minutes and about 5 seconds after
+a Claude Code turn ends. It reads only when `claude` is installed and
+`~/.claude/.credentials.json` holds a `claudeAiOauth` sign-in (an API key has no such limits), and
+not while `BLERG_RUNNER_CLAUDE_USAGE=0`. The token is read from the CLI's file and never stored or
+sent anywhere but Anthropic: the daemon never reads the refresh token, never refreshes the sign-in
+and never writes the file, and refuses a file other users can read. While the token has expired,
+or after the endpoint refuses it (401/403), it does not ask again until the file changes (the CLI
+refreshes it as it runs); a 429 or 5xx backs off from 5 minutes, doubling up to an hour. While it
+holds back the meter keeps its last reading for up to an hour. There is no file to read on macOS
+(the CLI keeps its login in the Keychain) or for an API-key or `CLAUDE_CODE_OAUTH_TOKEN` setup, so
+no Claude meter there; the daemon says so once in its log. The meter reads the account in that
+file, and a daemon started with `CLAUDE_CODE_OAUTH_TOKEN` may run its sessions on another. The
+endpoint and the credential file are the CLI's own internals, not a documented API: they may change
+or refuse such reads at any time, and the meter then goes empty (logged once; nothing else
+breaks). The percentage is floored, as the CLI shows it. When
+Claude refuses a call for its limit and says when it resets, the row also reads "capped · resets
+14:00" until then. Only percentages and reset times leave the machine: never the account id, plan,
+credits or the token. A daemon that predates this sends nothing and no meter is drawn; a server that predates it logs
+the report as an unknown message and ignores it. Updating the desktop daemon needs its reinstall.
+
 ### What "runs as you" means
 
 A session started with an **agent token** runs as the token's owner, not as the operator. The
 token's `on_behalf_of` becomes the session's spawning account, and the token's own id travels with
 every credential fetch so core can confirm the token is still live — revoke the token and the
 sessions it can start stop being able to fetch anything. On the cluster runtime, that account's own
-engine credential and GitHub credential are written into a per-session Secret the Job reads by
-reference; an account with no personal credential falls back to the operator Secret. On a
+opaque engine credential and GitHub credential are written into a per-session Secret the Job reads by
+reference. Managed Codex connections instead deliver access tokens through the private broker;
+refresh tokens stay in Core. Operator fallback requires a verified live principal with no personal
+credential; lookup failures and revoked authority refuse startup. On a
 **daemon** the session runs on that workstation with the developer's own logins, attributed to the
 launcher — in the **Local sandbox** (the default for the launch sheet and for board-started
 sessions alike when there is no cluster and the daemon has the image) the engine runs inside a
@@ -709,8 +944,12 @@ exactly what an id that does not exist answers, so the contract is not an oracle
 are running. The static runner key, a human or service token, and an agent token carrying
 `board.admin` all keep the install-wide view.
 
-**Resume.** Sending a message to a `disconnected` cluster session re-creates its Job, and a resume
-restarts the 24 h expiry clock — a session picked up again gets a fresh window rather than being
+**Resume.** Sending a message to a `disconnected` cluster session re-creates its Job. New
+account-owned Claude and Codex sessions retain exact native conversation identity on a separate
+PVC; replacement verifies the same account, engine and original claim UID with current owner
+authorization and freshly rebuilt grants. Missing expected history refuses replacement. The
+workspace is reconstructed separately and commands are not replayed. Legacy sessions retain the
+archive recovery path; their resume restarts the 24 h expiry clock — a session picked up again gets a fresh window rather than being
 judged on how long it was gone. The resume carries the caller's own account, so an agent token
 resuming its own session re-mints that account's personal credentials; anyone else's resume (the
 static runner key included) runs on the operator Secret rather than spawning a pod that holds
@@ -721,7 +960,9 @@ message is dropped.
 end nobody reported, so a callback always arrives eventually: a cluster Job that succeeded, failed
 or vanished (after a **2 min** grace, since a Job that has not been created yet looks exactly like
 one that is gone) finalises the session; a `disconnected` session is left alone for **24 h** and
-only then declared `session expired without resume`; a desktop session whose daemon dropped is
+only then declared `session expired without resume`. Native-backed unended sessions do not
+expire on this clock; their history is retained until a true ending and the configured retention
+period. A desktop session whose daemon dropped is
 finalised **30 min** after the disconnect with `daemon did not return`. These windows are fixed
 constants, not environment variables. A status the session's own host reported always wins over the
 reconciler.
@@ -752,10 +993,23 @@ The launch sheet's list is `GET /api/repos` (browser-authed), merged from three 
 Every entry carries `provider` (`"github"`, `"gitlab"`; absent only on an unresolved folder) and
 entries are deduplicated by provider + `owner/name`, so a same-named repository on GitHub and on
 GitLab are two entries. Your lists are cached per person for 5 minutes (which tokens you hold is
-rechecked every minute, so a token removed in Settings takes its repositories with it); a
-provider whose refresh fails keeps its last good list and sets `stale_at`, without affecting the
-others. Picking a repository on the cluster runtime sends its `provider` with the launch, so the
-pod clones from that host with your token for it.
+rechecked every minute, so a token removed in Settings takes its repositories with it; the same
+check answers `GET /api/me/credentials`, so that answer can be up to a minute old). Past the
+5 minutes the cached list is still served at once while one background refresh per provider
+brings it up to date; only a list never fetched, or older than 30 minutes, makes the request wait
+(the operator's org list works the same way). A provider whose refresh fails keeps its last good
+list and sets `stale_at`, without affecting the others; a list merely being refreshed is not
+flagged. The response carries an `ETag` and `Cache-Control: private, no-store` (the browser keeps
+no copy); the launch sheet keeps the list itself and asks with `If-None-Match`, so an unchanged
+list comes back as `304 Not Modified`. Picking a repository on the cluster runtime sends its
+`provider` with the launch, so the pod clones from that host with your token for it.
+
+The sheet itself opens at once from what it last knew in this browser tab (kept in
+`sessionStorage` under your account, dropped on sign-out; MCP tool listings are never kept) and
+refreshes underneath, with a "Refreshing …" note while it does. With nothing kept yet it shows as
+soon as the daemons and cluster status answer, and the repository list streams in. Launch waits
+for a fresh daemon list to confirm the chosen daemon is still connected. Hovering or focusing
+**+ New** warms these answers, as does an idle moment after the app loads.
 
 ### No repository
 
@@ -946,7 +1200,7 @@ requires reading Go source to discover.
 | `BLERG_CORE_PUBLIC_URL` | no | — | core's browser-facing origin; when set, `/healthz` allows that origin (the landing page's status tiles) cross-origin |
 | `BLERG_RUNNER_ALLOWED_ORIGINS` | no | — | comma-separated `scheme://host` origins allowed to open `/ws/browser` cross-origin. Same-origin requests and requests with no `Origin` header are always allowed, so this is only needed when the frontend is served from a different origin than runner's API |
 | `BLERG_RUNNER_MODEL_CATALOG_URL` | no | `https://downloads.claude.ai/model-catalog/v1/catalog.json` | where the Claude model list (`GET /api/models/claude`, the launch sheet's Model/Effort picker) comes from: the public Claude Code model catalog, fetched at startup and every 6 h (https only — plain http is accepted only for a loopback host — same-host redirects only, 5 s timeout, 1 MB cap; the last good copy is kept). Set it **empty** to disable fetching — air-gapped installs — and serve the list compiled into this build instead |
-| `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official` | comma-separated GitHub `owner/repo` marketplaces **always-on plugins** may come from (`*` = any valid `owner/repo`). When a cluster session starts for an account, the server reads that account's list from core (`POST /internal/plugins/list`, see `core/docs/CONFIG.md`), drops entries whose marketplace is not allowed here, and hands the rest to the pod as `BLERG_RUNNER_PLUGINS` (non-secret JSON) together with this allow-list, which the pod checks again before running `claude plugin marketplace add` / `claude plugin install <plugin>@<marketplace> --scope user` (no shell, 90 s per command, 4 min overall, one after another). If core cannot be reached the session still starts without plugins and its start panel says so. Claude agent sessions only. A Local sandbox or This machine session gets the same list through `SpawnSession.plugins`, sent only to a daemon whose hello said `plugins`; the daemon re-checks its own `BLERG_RUNNER_PLUGIN_MARKETPLACES`, installs into its plugin workshop under its state dir with `CLAUDE_CONFIG_DIR` (never the person's `~/.claude`) and starts Claude with one `--plugin-dir=` per plugin (`install/desktop/DAEMON.md`). Restricted sessions never load any. Keep equal to core's `BLERG_CORE_PLUGIN_MARKETPLACES` |
+| `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official` | comma-separated GitHub `owner/repo` marketplaces **always-on plugins** may come from (`*` = any valid `owner/repo`). When a cluster session starts for an account, the server reads that account's list from core (`POST /internal/plugins/list`, see `core/docs/CONFIG.md`), drops entries whose marketplace is not allowed here, and hands the rest to the pod as `BLERG_RUNNER_PLUGINS` (non-secret JSON) together with this allow-list, which the pod checks again before running `claude plugin marketplace add` / `claude plugin install <plugin>@<marketplace> --scope user` (no shell, 90 s per command, 4 min overall, one after another). If core cannot be reached the session still starts without plugins and its start panel says so. Claude and Codex agent sessions. Codex installs through its native `plugin marketplace add` / `plugin add` commands in a credential-free installer home, then loads copied plugin caches and frozen catalogues from a private session `CODEX_HOME`; its existing login/config/rollouts are linked, never copied. A Local sandbox or This machine session gets the same list through `SpawnSession.plugins`, sent only to a daemon whose hello advertised that engine in `plugin_engines` (legacy `plugins` permits Claude only); the daemon re-checks its own `BLERG_RUNNER_PLUGIN_MARKETPLACES`, installs into its plugin workshop under its state dir with `CLAUDE_CONFIG_DIR` (never the person's `~/.claude`) and starts Claude with one `--plugin-dir=` per plugin (`install/desktop/DAEMON.md`). Restricted sessions never load any. Keep equal to core's `BLERG_CORE_PLUGIN_MARKETPLACES` |
 
 | `BLERG_RUNNER_METRICS_TOKEN` | no | — (endpoint off) | the bearer token a Prometheus scraper presents to `GET /metrics`. Unset: the endpoint answers `404`. Set: a missing or wrong token is `401`. Metrics are aggregates only; no session, account or title appears in them. See [`docs/telemetry.md`](../docs/telemetry.md) |
 | `BLERG_RUNNER_MCP_GW_ADDR` | no | — (gateway off) | listen address of the **MCP gateway**, a second listener and `http.Server` separate from the main port (for example `:8090`). Unset disables the gateway, and with it every session with MCP connections and every cron that uses one. It also needs the database and core (`BLERG_CORE_URL` plus `BLERG_RUNNER_CORE_INTERNAL_KEY`). Never route it through a public ingress; see [`docs/mcp-connections.md`](../docs/mcp-connections.md) |
@@ -988,6 +1242,7 @@ dropped after 30 min. See ["When nobody is watching"](#what-runs-as-you-means) a
 | `BLERG_RUNNER_AGENT_BUDGET_USD` | no | `25` | hard per-session cost cap for the native loop |
 | `BLERG_RUNNER_SANDBOX_IMAGE` | no | `blerg-runner-sandbox:latest` | Local Sandbox Docker image — pin a tag or point at a private registry |
 | `BLERG_RUNNER_PROVISION_CLAUDE_MD` | no | `false` | true = add/refresh the blerg-runner messaging block in ~/.claude/CLAUDE.md on every start |
+| `BLERG_RUNNER_CLAUDE_USAGE` | no | on | `0` (or `false`/`off`/`no`) = do not read Claude's usage meter from the account usage endpoint with the CLI's sign-in (see [Usage limits](#usage-limits)); Claude then shows only a reactive cap |
 | `BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE` | no | `false` | true = a This machine session may clone a private repository with the launching person's own git token, on the bare host (see [Launching on a repository by name](#launching-on-a-repository-by-name)). While it clones, any other unsandboxed session on this machine could read that token — **only set this on a daemon nobody else uses** |
 
 #### Changing the repos folder while the daemon runs
@@ -1050,8 +1305,8 @@ from the operator Secret. The personal git credential becomes `BLERG_RUNNER_GIT_
 which one is chosen by the clone URL's host: `github` for github.com, `gitlab` for gitlab.com
 (one kind per registered git provider — see [Git providers](#git-providers)). The pod injects
 it into the clone URL with that provider's token username (`x-access-token` for GitHub,
-`oauth2` for GitLab). Anything with no personal credential falls back to the operator Secret as
-before — except the git token, which only ever goes to the host it belongs to: the operator's
+`oauth2` for GitLab). A verified absence of a personal credential permits operator fallback;
+lookup errors or revoked authority refuse startup — except the git token, which only ever goes to the host it belongs to: the operator's
 `BLERG_RUNNER_GIT_TOKEN` is offered only for a clone from the operator's own git base (github.com
 by default), a personal token only for its own provider's host (so a GitLab clone gets only the
 launcher's GitLab token, and an operator base on a host no provider is registered for gets the
@@ -1061,11 +1316,23 @@ with no token at all. The cluster status payload's
 only — never the value). A cluster session records its (token-free) clone URL at start, and a
 resume clones from that same URL.
 
+Managed Codex connections use a dedicated device login under Settings. A pod receives a private
+broker flag and a current-launch messaging credential, with no refresh token or copied managed
+`auth.json`. Model probes use the same access-only flow. Existing snapshot imports stay snapshots;
+see the [credential lifecycle contract](../docs/design/engine-credential-lifecycle.md).
+
+Every pod receives its own runtime and messaging pair. The runtime token authorizes only that
+launch's session and repository; replacement revokes the old pair and its open WebSocket authority.
+The pod never receives the operator daemon master key or unrelated engines' credentials. Runtime
+pods cannot be targeted as workstation daemons. Native history retains only engine conversation
+files and a private identity journal, never credentials or tool grants.
+
 ### k8s pod env (`cmd/runner`) — set automatically by the Job manifest, not by you
 
 `BLERG_RUNNER_SERVER_WS`, `BLERG_RUNNER_SERVER_HTTP`, `BLERG_RUNNER_SESSION_ID`,
 `BLERG_RUNNER_REPO`, `BLERG_RUNNER_TITLE`, `BLERG_RUNNER_MODEL`, `BLERG_RUNNER_EFFORT`, `BLERG_RUNNER_ENGINE`,
-`BLERG_RUNNER_INITIAL_PROMPT`, `BLERG_RUNNER_GIT_URL`, `BLERG_RUNNER_RESUME`,
+`BLERG_RUNNER_INITIAL_PROMPT`, `BLERG_RUNNER_INITIAL_PROMPT_SOURCE`,
+`BLERG_RUNNER_INITIAL_PROMPT_CLIENT_ID`, `BLERG_RUNNER_GIT_URL`, `BLERG_RUNNER_RESUME`,
 `BLERG_RUNNER_HOME`, plus whichever credential env vars the session's engine needs
 (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` / `CODEX_AUTH_JSON` / `HERMES_ENV_CONTENTS` /
 `BLERG_RUNNER_GIT_TOKEN`) — listed here for completeness, not something you set directly.

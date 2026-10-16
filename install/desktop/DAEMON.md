@@ -43,11 +43,23 @@ By default the daemon does **not** edit `~/.claude/CLAUDE.md` — set
 `BLERG_RUNNER_PROVISION_CLAUDE_MD=true` to opt in to it adding/refreshing the
 blerg-runner messaging guidance block there on every start.
 
+The Claude usage meter is on by default: the daemon reads the account usage
+endpoint the CLI's usage view reads, with the CLI's sign-in from
+`~/.claude/.credentials.json` (read only, never refreshed or written; only
+percentages and reset times reach the server). Set
+`BLERG_RUNNER_CLAUDE_USAGE=0` to turn it off. Its start-up log line says which.
+The endpoint and the file are the CLI's internals, not a documented API: if
+they change the meter goes empty (logged once). On macOS the CLI's login is in
+the Keychain, not this file, so there is no Claude meter (the daemon logs "no
+~/.claude/.credentials.json … meter off" once). The meter reads the account in
+that file; a daemon started with `CLAUDE_CODE_OAUTH_TOKEN` may run sessions on
+a different account.
+
 **Setting a daemon option.** The daemon never reads `.env` itself; it reads
 its service environment (the systemd unit's `Environment=` lines, or the
 plist's `EnvironmentVariables`). `install.sh install` writes that environment,
-and it copies `BLERG_RUNNER_PROVISION_CLAUDE_MD` and
-`BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE` into it when either is set, from
+and it copies `BLERG_RUNNER_PROVISION_CLAUDE_MD`,
+`BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE` and `BLERG_RUNNER_CLAUDE_USAGE` into it when one is set, from
 your shell first, else from `install/desktop/.env`. So to turn one on, add it
 to `.env` and reinstall the service:
 
@@ -116,12 +128,60 @@ does not end the sessions it hosts:
 - **Agent sessions on Claude Code** are hosted again from a recovery record in the daemon's state
   directory (`~/.blerg-runner-daemon/agents/`, one 0600 file per session, holding the session's
   token and environment). The same session continues, with the same Claude conversation
-  (`claude --resume`). The step that was running is lost: the agent is told it was cut off and
-  must not repeat a command that may have caused the restart, and the chat says so. An
-  interactive session then waits for your next message; an unattended one is asked to continue,
-  once.
+  (`claude --resume`). The step that was running is lost: the agent is told it was cut off, which
+  of its own tool calls had not returned and what each ran, to check their state first and never
+  re-run anything destructive without checking, and why the daemon restarted (below), and the
+  chat says so. Then it is asked to continue, once, by itself, so you do not have to go through every
+  session after a restart: whether it was mid-generation, in a command of its own, or waiting on
+  subagents or background tasks (below), interactive or unattended. The exceptions: an
+  interactive session that was waiting for you (an open `blerg-runner ask`, a permission prompt)
+  waits for your answer instead; any session (unattended too) cut off in one of the commands
+  below waits for you to check it; so does one already continued once since its last finished
+  turn. A session cut off before it had a conversation is not continued either: its task is
+  unknown to the agent, and the chat asks you to send it again.
+  Such a session is **paused by a restart**: its card shows "?" (tooltip "paused by a restart")
+  and it waits for your message. A message
+  accepted for a paused session, from any tab, ends its pause. A question it had asked is
+  closed: your next message goes to the agent, which is told its question was cut off. A
+  message you send while the daemon is away is kept for it, not taken as the answer to that
+  dead question, and replaces the continue.
+- **Background work dies with the restart:** commands run in the background, Monitors and
+  subagents. The record lists them, so after the restart each one is marked stopped in the chat
+  ("the daemon restarted"; the sidebar's ⏱ count drops with them) and the agent is told, once,
+  what was cut off: each task and subagent by kind, description and id, with the instruction to
+  check the state of their worktrees and outputs first, resume a subagent by sending a message to
+  its agent id, re-run a background command that did not finish, and not re-run anything
+  destructive. The session is asked to pick it up straight away, once, by a system message that
+  carries the list and "Continue the task you were working on.", unless it is paused (above):
+  then the list shows in the chat as the system's message, and the agent gets it with your next
+  message. A message you write before the session is picked up again (also one sent while the
+  daemon was down) goes first and carries the list instead; nothing is
+  sent for you. Background work that ends while the daemon runs (its Claude Code process closed
+  or crashed) is marked stopped then ("the engine process ended"), and a later restart does not
+  report it again.
 - **Not brought back:** a sandboxed agent session, a session with MCP connections, a cron's
-  session, and sessions on other engines. They end as before.
+  session, and sessions on engines other than Claude Code and host Codex (a host Codex session
+  started before its recovery record existed is not brought back either). They end as before.
+
+**Why it restarted.** The agent is also told what caused the restart, so that it does not take
+its own last command (a test run, a build) for the cause and stop. Right before `install.sh
+install` (and so `blerg-up.sh`) restarts a running daemon, it writes `restart-planned` into the
+daemon's state directory (`$BLERG_RUNNER_DAEMON_STATE_DIR`, default `~/.blerg-runner-daemon`),
+holding `update` (the new build differs from the running one) or `reinstall` (the same build).
+The daemon itself writes `stopped-cleanly` there when it is told to stop (SIGTERM from systemd or
+launchd, Ctrl-C). The next daemon reads and removes both at start, and its log says which cause it
+found. With either, a session the restart cut off hears "The daemon was updated and restarted.
+Nothing you ran caused it. Continue where you left off; check the state of anything that was
+mid-run first — never re-run anything destructive without checking." ("reinstalled and
+restarted" for a reinstall, "restarted" for a stop with no installer marker, such as a
+`systemctl --user restart` by hand or a reboot). "Nothing you ran caused it." is left out when
+one of its cut-off commands was the installer or a service restart or stop, or, for a stop with
+no installer marker, a `kill`, `pkill` or `killall`. With neither marker (a crash, a `kill -9`, a
+power cut): "The daemon stopped unexpectedly. A test run, a build or ordinary commands cannot
+cause that; only re-check a command that could affect the daemon itself (an install, a service
+restart) before running it again. Continue where you left off; check the state of anything that
+was mid-run first." An installer marker older than 15 minutes (its restart never happened) is
+removed without being believed.
 
 The server gives a daemon 20 seconds to come back before it marks anything: within that, its
 sessions look as they did, a message you type is kept and delivered when the daemon returns, and
@@ -134,10 +194,47 @@ Only one daemon process uses the recovery records: a second daemon started by th
 while the first is running (a build run by hand, say) keeps none and recovers nothing, and says
 so in its log.
 
+#### Commands a restart never continues
+
+The agent's own tool calls are recorded as they start, and each Bash command is matched, whole
+and case-insensitively, against a fixed list. A session cut off in a matching command is paused
+(the notice says it "looked destructive"), and the agent is told not to run it again unless you
+ask; your message picks it up. The list:
+
+- a force push: `git push` with `--force`, `--force-with-lease`, `-f` (also in a flag group,
+  `-uf`) or a `+refspec`; `git reset --hard`; `git clean` with `-f` or `--force`;
+- a recursive forced delete: `rm` both recursive (`-r`, `-R`, `--recursive`) and forced (`-f`,
+  `--force`), the flags in any order and anywhere among its arguments (`rm -rf`, `rm x -rf`,
+  `rm --recursive --force`);
+- a migration: the words `migrate`, `migrates`, `migrated`, `migration`, `migrations`, or
+  `alembic`, `goose`, `flyway`, `liquibase`;
+- a deploy: a word starting with `deploy` or `redeploy` (`make deploy`, `./deploy.sh`),
+  `terraform apply|destroy`, `helm
+  install|upgrade|uninstall|delete|rollback`, `kubectl … apply|delete`;
+- the installer or a service restart: `install.sh`, `blerg-up.sh`, `systemctl …
+  restart|stop|kill`, `launchctl … kickstart|stop|unload|bootout`, `service <name> restart|stop`;
+- dropping data: `DROP TABLE|DATABASE|SCHEMA|INDEX|VIEW|OWNED`, `TRUNCATE`, `DELETE FROM`.
+
+Only the command is matched, never the call's description. It errs towards pausing: a command that only mentions one of these (`kubectl get deployment`)
+pauses too. Background tasks and subagents are not matched (their record keeps a description,
+not the command).
+
 The restart that installs a daemon with this behaviour over one without it still ends the agent
 sessions running at that moment: the old daemon kept no records. Updating the daemon from inside
 one of its own agent sessions works from then on; the session's turn is cut off when the
-installer restarts the service, and it picks up from your next message.
+installer restarts the service, and, `install.sh` being on the list above, the session is
+paused for you to resume. (A daemon older than the
+background-work records cannot list what its sessions run in the background, so the first update
+past it marks none of it stopped.)
+
+Before `install.sh install` restarts a running daemon, it asks the new build which agent sessions
+the restart would cut off (`blerg-runner-daemon status --open-work`, read from the recovery
+records): a turn running, background tasks, subagents. If there are any it lists them and asks
+"Reinstall anyway? [y/N]"; a no leaves the daemon and its binary as they were. `--yes` reinstalls
+without asking (`./blerg-up.sh --yes` passes it on); with no terminal to ask (an agent running
+the installer, a script), the install stops with exit code 5 and says to re-run it with `--yes`. Run from inside an agent session, the list leaves out
+that session's own running turn. Sessions that keep no record (sandboxed, with MCP connections)
+are not listed.
 
 ### Cloning a repository you name
 
@@ -335,6 +432,10 @@ daemon's PATH does it fall back to the native API loop, which needs
 Code and log in (`claude` on the daemon's PATH), or set ANTHROPIC_API_KEY for
 the daemon"* — and the launch sheet already says so: the daemon reports
 `claude_cli_available` / `anthropic_key_set` in its hello and heartbeats.
+The native loop is the only engine the daemon itself runs enabled Claude
+plugins' `SessionStart` hooks for (on the host, for its system prompt): Claude
+Code runs its own, and no other engine, restricted session or sandboxed
+session runs them while it is prepared.
 - **OpenClaw** stays host-only. A sandboxed spawn with `engine=openclaw` is
   refused with *"OpenClaw runs only on the host"*, and the launch sheet
   disables the Cluster pod and Local sandbox cards outright while OpenClaw is
@@ -483,20 +584,30 @@ OpenClaw's `openclaw onboard`).
   the toggle rather than showing one that does nothing.
 - **Resuming after a crash**: Claude sessions can pin a session id upfront
   (`--session-id`) and resume it later (`--resume <id>`) after a hard daemon
-  restart. Codex and Hermes have no equivalent for an interactive **Terminal**
-  session — they assign their own session identity on first spawn, and pairing
-  Hermes's own `-c/--continue <name> --create-if-missing` (which *could* pin
-  one upfront) only exists on its `chat` subcommand, not plain interactive
-  `hermes` — so a recovered Codex or Hermes Terminal session always starts
-  fresh with the stored initial prompt, the same fallback already used when a
-  Claude transcript is missing. Codex and Hermes **Agent** (headless) sessions
-  do track their own conversation identity between turns — Codex via a thread
-  id captured from its own output, Hermes via `--continue <blerg-session-id>
-  --create-if-missing` (deterministic: no id to capture) — but only in memory
-  for Codex, or in Hermes's own on-disk SQLite session store for Hermes; either
-  way a daemon restart loses the in-memory Codex case and starts fresh on the
-  next message, matching Claude Code's own headless driver in the same
-  situation.
+  restart. New Codex **Terminal** sessions keep native conversations in a private
+  per-session Codex home, preserving the existing login and settings. After tmux
+  loss the daemon resumes that terminal's latest interactive thread by exact ID;
+  subagent conversations cannot replace it. Missing or older untracked terminal
+  history is refused explicitly, without replaying the initial task. Docker
+  terminal sessions bind the same persistent home into their replacement container.
+  Hermes terminals still start fresh with the stored initial prompt; Hermes's
+  `-c/--continue` option belongs to its `chat` subcommand. Codex and Hermes **Agent** sessions
+  track their own conversation identity between turns. Host Codex agent sessions
+  persist their thread ID in private daemon recovery records and are reclaimed
+  before reconnecting to the server. Eligible interrupted work is continued once,
+  with the same destructive-command and open-question guards as Claude. A message
+  from the person goes first. A missing transcript is reported explicitly before
+  the agent starts fresh. Sandboxed, restricted and MCP-granted Codex sessions
+  are not recovered. This applies to sessions started with the updated daemon;
+  older Codex sessions have no recovery record. Hermes uses its own on-disk
+  SQLite session store.
+- **Codex Agent sessions** use a persistent `codex app-server` process rather
+  than starting `codex exec` for each message. Messages can steer the active turn;
+  interrupts retain the conversation. The session reports native skills, plugins,
+  MCP inventory, observed tools, subagents, background work and thinking/compaction.
+  The session images pin Codex 0.162.1; reinstall the workstation daemon to use the
+  new adapter on the host. Existing managed MCP/restricted/cron policies remain
+  separate from the capabilities a user's own Codex installation provides.
 - **Tool visibility (Hermes Agent-kind only)**: Hermes's headless mode
   (`hermes chat --oneshot -Q`) has no structured event stream — verified by
   testing, not assumed — it prints only the final response text (or an error
@@ -505,10 +616,10 @@ OpenClaw's `openclaw onboard`).
   `tool_call`/`tool_result` events, and turn token-usage isn't tracked either.
   Terminal-kind Hermes sessions are unaffected (real TUI, same as claude/codex).
 - **Model picker**: shows the engine's own model list (and an Effort choice
-  for models that take one). Today only Claude has one — what Claude Code's
-  `/model` offers, fetched live by the runner server — so picking Codex,
-  Hermes or OpenClaw hides it and lets the engine use your account's own
-  default model. See runner/README.md's "Model lists".
+  for models that take one). Codex's account-aware list is probed from its CLI;
+  the running app-server confirms its initial model and effort. Changes are
+  acknowledged in the session and apply to subsequent turns. Engines without a
+  model source use their own defaults. See runner/README.md's "Model lists".
 - **Cluster pod auth**: the k8s runtime has no host filesystem to mount
   account state from, so each engine gets its credential a different way
   there — Claude via the `CLAUDE_CODE_OAUTH_TOKEN` env var (from
@@ -750,3 +861,12 @@ agent sessions to work — killing it just means no new sessions can spawn until
 start it again.
 
 Running Blerg on a Kubernetes cluster instead? See [`install/k8s/README.md`](../k8s/README.md).
+
+### Automatic continuation after usage limits
+
+The server schedules **Resume when limit resets**, but the workstation daemon
+must report the session's provider refusal and reset time. After upgrading Blerg,
+run `install/desktop/daemon/install.sh install` from the updated checkout to rebuild
+and restart the daemon. Restarting an old binary alone does not install the new
+behavior. The option is in each owned Claude or Codex agent chat; see
+[Resume after a usage limit](../../docs/talking-to-an-agent.md#resume-after-a-usage-limit).

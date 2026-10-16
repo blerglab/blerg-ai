@@ -128,6 +128,9 @@ func (a *API) reconcileClusterJobsOnce(ctx context.Context) {
 		return
 	}
 	if jm := a.hub.JobManager(); jm != nil {
+		if err := jm.reclaimNativeHistory(ctx); err != nil {
+			log.Printf("cluster reconcile: native history cleanup unavailable")
+		}
 		rows, err := db.ListClusterSessionsToReconcile(ctx, a.dbPool)
 		if err != nil {
 			log.Printf("cluster reconcile: list sessions: %v", err)
@@ -151,6 +154,12 @@ func (a *API) reconcileClusterSession(ctx context.Context, jm *JobManager, row d
 			// A resume may be booting (its start attempt still open): pick
 			// its progress back up after a server restart, like a fresh start.
 			adoptClusterStart(ctx, a.hub, a.dbPool, row.ID, "", a.startWatchEvery())
+			return
+		}
+		// Retained native conversations do not expire while paused. A database
+		// outage must not turn unavailable retention metadata into data loss.
+		history, err := db.GetSessionNativeHistory(ctx, a.dbPool, row.ID)
+		if err != nil || history != nil {
 			return
 		}
 		// The write carries the same cutoff the decision was made on: a
@@ -264,6 +273,9 @@ func (a *API) finaliseLostDaemonSessions(ctx context.Context) {
 // the unread flag back from the database first — the same care setSessionStatus
 // takes, so a reconcile never silently clears a session's unread badge.
 func (a *API) broadcastReconciledStatus(ctx context.Context, sessionID, status string) {
+	if status != "idle" {
+		a.hub.CancelIdleNotice(sessionID) // the session is over: no idle notice is owed (notices.go)
+	}
 	var unread bool
 	var end sessionEnd
 	if row, err := db.GetSession(ctx, a.dbPool, sessionID); err != nil {

@@ -49,9 +49,9 @@ func TestResolveGrantRefusals(t *testing.T) {
 			status: 403, want: msgMCPHumanOnly},
 		{name: "human without a login session", who: grantRequester{Kind: "human", Account: mcpAcct}, sel: echoOK, target: cluster,
 			status: 401, want: msgMCPSignIn},
-		{name: "engine codex", who: humanWho(), sel: echoOK, status: 422, want: msgMCPEngine,
+		{name: "engine hermes", who: humanWho(), sel: echoOK, status: 422, want: msgMCPEngine,
 			target: func(*mcpFx) grantTarget {
-				return grantTarget{Runtime: runnerRuntimeCluster, Kind: "agent", Engine: "codex"}
+				return grantTarget{Runtime: runnerRuntimeCluster, Kind: "agent", Engine: "hermes"}
 			}},
 		{name: "kind terminal", who: humanWho(), sel: echoOK, status: 422, want: msgMCPKind,
 			target: func(*mcpFx) grantTarget { return grantTarget{Runtime: runnerRuntimeCluster, Kind: ""} }},

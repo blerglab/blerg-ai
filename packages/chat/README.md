@@ -32,8 +32,8 @@ your core, or the runner's own `GET <runner>/agents`) carries `ui.chat_package`:
   "ui": {
     "chat_package": {
       "name": "@blerglab/chat",
-      "version": "0.3.4",
-      "url": "https://runner.example.test/packages/blerglab-chat-0.3.4.tgz",
+      "version": "0.10.13",
+      "url": "https://runner.example.test/packages/blerglab-chat-0.10.13.tgz",
       "sha512": "…",
       "docs_url": "https://runner.example.test/packages/@blerglab/chat/README.md"
     }
@@ -174,7 +174,9 @@ export function JobChat({ sessionId }: { sessionId: string }) {
 
 `ChatView` is the whole surface: transcript (replay, then live, with older pages loaded as the
 person scrolls up), composer, the working and waiting indicators, the disconnected banner, and
-the Files panel. It needs nothing from the page but a height. Optional props:
+the Files panel. It needs nothing from the page but a height. A `topic` event (a piece of work
+the agent marked with `blerg-runner topic`) draws as a thin divider (`▸ <title>`, `✓ Done: <outcome>`);
+`topicDividerText(payload)` gives the words (0.10.0). Optional props:
 
 - `theme`: a `ThemeTokens` object instead of a CSS file.
 - `cards`: a registry from `createCardRegistry([...])`; see Cards.
@@ -200,14 +202,81 @@ createProxyTransport({
 `ChatView` takes a few props for the host's own rules. `describeUserMessage` says how a user
 message is drawn: return `{ author: 'the board' }` for one the app's automation sent rather than
 the person, `{ brief: true }` to fold the long prompt a session was started with into one line
-that opens, or nothing to leave it as the person's. `readOnly` shows the transcript and files
-with no composer. `placeholder` replaces the composer's prompt.
+that opens, or nothing to leave it as the person's. Its third argument says whether the message is the
+session's first (`{ first }`: the oldest user message, once nothing older is left to fetch), so
+only the brief folds. Text nobody typed (the daemon's notes, a slash command's output) never
+reaches it: the chat draws that as a system card. `readOnly` shows the transcript and files
+with no composer. `placeholder` replaces the composer's prompt. A host that keeps the chat's
+settings and files in a place of its own (the runner's session panel) passes `compact` (whether runs
+of tool calls fold into one row: the toolbar then has no "Compact tool calls" checkbox, and the host
+keeps the choice; `loadCompact` and `saveCompact` read and write the chat's own key) and
+`filesButton={false}` (no Files button or dialog: draw the list from `useLiveState`'s `files` with
+`FilesList`, below; `openFiles` is then not reported, from 0.10.10) (0.10.9).
+
+What is live in a session beside its chat is the host's to place: the runner draws it as a side
+panel. The working line names background tasks either way ("Waiting on 2 background tasks"); the
+chat itself draws no list of them (`backgroundTasks` takes `'none'` only). Two hooks read the
+session as the transcript store holds it:
+
+```tsx
+const { subagents, openAsks, backgroundRunning, settled, answer, openFiles, filesKey, files } = useLiveState(sessionId)
+const { running, recent, counts, now, dismiss } = useBackgroundTasks(sessionId)
+```
+
+`useLiveState` reads what the transcript has loaded, so on a long session its lists fill in as the
+history loads and miss what started before it; a host whose runner server answers
+`GET /api/sessions/{id}/live` (the whole log, server-side) should read that and keep this hook as the
+fallback for an older server, as the runner's side panel does (0.10.2). It lists the top-level subagents still running (`SubagentLive`: title, type, model,
+tokens, what it is doing, when it started, whether it runs in the background) and the agent's open
+questions (`AskLive`: the question, its message id, when it was asked), with the same rules as the
+subagent and ask cards (it reads the transcript's own timeline, built once for both), and
+`heldUntil`, the server time of the newest event held. `settled` is whether the session's initial history has
+finished loading (the lists are read from what is held either way). It re-evaluates by the minute, not
+by the second: a subagent or background task with no end whose newest event is over
+`STALE_RUNNING_MS` (12 hours) old no longer counts as running, and its transcript card reads
+"no end recorded". `answer(text, messageId)` answers an ask through the
+session's `ChatView` (draw it with `AskReply`, the ask card's own reply box), and `openFiles()` opens
+its Files panel (absent when the chat has `filesButton={false}`); both come from the `ChatView` showing the session, so they are absent until one has
+and gone once it unmounts. `filesKey` is the Files list's ids as the chat last read them (`''` until a
+`ChatView` reports), so a side view can reread what it shows when a file is deleted (0.10.0). Give `AskReply` `draft` and `onDraft` to keep what was typed when its box
+goes (a drawer that closes). `files` is the Files list as the chat holds it (`items`, `status`,
+`refresh()`), the transport's file operations (`ops`) and `attach()`, which opens the message box's
+file picker (absent for a read-only chat); `FilesList` draws it, the Files panel without its dialog:
+`<FilesList sessionId={id} files={files.ops} items={files.items} status={files.status} onView={…}
+onChanged={files.refresh} onAttach={files.attach} />` (0.10.9).
+`useBackgroundTasks` keeps a finished task for ten seconds and a failure until `dismiss`; render it
+under a key of the session. `KindIcon`, `StatusGlyph`, `elapsedOf` and `titleOf` draw a task.
+`scrollToCall(callId)` scrolls the page's transcript to the call that started a task or a subagent
+(a subagent's card carries its key) and flashes it; `scrollToEvent(eventId)` does the same for an
+event's own card: ask cards, and (0.10.0) person bubbles, briefs, artifact cards and topic dividers,
+which carry `data-event-id`. Both return false when the row is not drawn yet (it is older than what the transcript
+has loaded) (0.9.0).
 
 An app that wants its own surface uses the hook `ChatView` is built on:
 
 ```ts
 const { events, streaming, status, send, stop, artifacts } = useSession(transport, sessionId)
 ```
+
+`useSession` takes a replayed page in one transcript update when the transport hands it over
+whole (the optional `onEvents` handler); live events still come one by one through `onEvent`.
+The runner's `createBlergTransport` does this, and also bounds how far it replays forward: a
+session left and opened again a little behind keeps what it shows and catches up in a few
+batches, while one still behind after `MAX_FORWARD_PAGES` (5) full pages, about 1000 events, is
+dropped (the optional `onReset`) and loaded from its end as a reload does, the older part paged
+in behind it. Both handlers are optional: a transport without them, `createProxyTransport`
+among them, hands events over one by one as before.
+
+A long transcript is drawn a window at a time. The transcript draws its newest 300 rows (a row
+is a message, a card or a folded run of tool calls); scrolling near the top of what is drawn
+reveals 300 more, and once everything held is drawn, fetches the next older page. Older pages
+are not fetched up front: `useSession` asks for one page behind the tail (and one after a
+reconnect or on a later visit), and otherwise only when `loadOlder()` is called. `loadOlder()`
+fetches one page and does nothing while one is in flight; `loadingOlder` says one is, and
+`hasOlder` that the server holds more. Reopening a session whose long transcript is already held
+paints the switch at once (the skeleton) and draws the transcript on the next frame. A host that renders `Transcript` itself passes `sessionId`, `hasOlder` and `onLoadOlder`
+for this, and `since` (the turn's start, or `null`) with no `now`: the working line keeps its own
+clock (0.5.0).
 
 ## Theme
 

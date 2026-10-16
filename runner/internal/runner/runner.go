@@ -7,6 +7,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -25,28 +26,34 @@ import (
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
+	"github.com/blerglab/blerg-ai/runner/internal/nativehistory"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 // Config is assembled from the pod environment (set by the server's Job
 // manifest).
 type Config struct {
-	ServerWS      string // BLERG_RUNNER_SERVER_WS   e.g. ws://blerg-runner-server:8080/ws/daemon
-	ServerHTTP    string // BLERG_RUNNER_SERVER_HTTP e.g. http://blerg-runner-server:8080
-	DaemonToken   string // BLERG_RUNNER_DAEMON_TOKEN
-	SessionID     string // BLERG_RUNNER_SESSION_ID
-	Repo          string // BLERG_RUNNER_REPO
-	Title         string // BLERG_RUNNER_TITLE
-	Model         string // BLERG_RUNNER_MODEL
-	Effort        string // BLERG_RUNNER_EFFORT ("" = the model default)
-	Engine        string // BLERG_RUNNER_ENGINE ("" (claude) | "codex")
-	InitialPrompt string // BLERG_RUNNER_INITIAL_PROMPT
-	GitURL        string // BLERG_RUNNER_GIT_URL   clone URL for the repo
-	GitToken      string // BLERG_RUNNER_GIT_TOKEN optional; injected for https URLs
-	APIKey        string // ANTHROPIC_API_KEY
-	Resume        bool   // BLERG_RUNNER_RESUME=1  → rebuild transcript, expect wip branch
-	Home          string // workspace parent + $HOME; default /workspace
-	Version       string
+	ManagedCredential bool // access-only engine connection brokered by Core
+
+	ServerWS              string // BLERG_RUNNER_SERVER_WS   e.g. ws://blerg-runner-server:8080/ws/daemon
+	ServerHTTP            string // BLERG_RUNNER_SERVER_HTTP e.g. http://blerg-runner-server:8080
+	DaemonToken           string // BLERG_RUNNER_DAEMON_TOKEN
+	SessionID             string // BLERG_RUNNER_SESSION_ID
+	Repo                  string // BLERG_RUNNER_REPO
+	Title                 string // BLERG_RUNNER_TITLE
+	Model                 string // BLERG_RUNNER_MODEL
+	Effort                string // BLERG_RUNNER_EFFORT ("" = the model default)
+	Engine                string // BLERG_RUNNER_ENGINE ("" (claude) | "codex")
+	InitialPrompt         string // BLERG_RUNNER_INITIAL_PROMPT
+	InitialPromptSource   string // BLERG_RUNNER_INITIAL_PROMPT_SOURCE
+	InitialPromptClientID string // BLERG_RUNNER_INITIAL_PROMPT_CLIENT_ID
+	GitURL                string // BLERG_RUNNER_GIT_URL   clone URL for the repo
+	GitToken              string // BLERG_RUNNER_GIT_TOKEN optional; injected for https URLs
+	APIKey                string // ANTHROPIC_API_KEY
+	Resume                bool   // BLERG_RUNNER_RESUME=1  → rebuild transcript, expect wip branch
+	Home                  string // workspace parent + $HOME; default /workspace
+	Version               string
+	NativeHistory         *daemon.NativeHistoryConfig
 
 	// NoRepo (BLERG_RUNNER_NO_REPO=1) is a "No repository" session: an empty
 	// workspace directory, no clone and no git at all. Repo and GitURL are
@@ -159,6 +166,9 @@ func podSpawn(cfg Config, workDir string) protocol.SpawnSession {
 		RestrictTools: cfg.RestrictTools,
 		Interaction:   cfg.Interaction,
 	}
+	if daemon.NativePluginEngine(cfg.Engine) && !cfg.skipsUserConfig() {
+		spawn.Plugins = cfg.Plugins
+	}
 	if cfg.NoRepo {
 		// No Repo to resolve a path from: hand the host the directory itself.
 		spawn.ProjectPath = workDir
@@ -169,31 +179,39 @@ func podSpawn(cfg Config, workDir string) protocol.SpawnSession {
 func ConfigFromEnv() Config {
 	plugins, pluginsErr := ParsePluginsEnv(os.Getenv("BLERG_RUNNER_PLUGINS"))
 	gateway, gatewayErr := takeMCPGatewayEnv()
+	var retained *daemon.NativeHistoryConfig
+	if os.Getenv("BLERG_RUNNER_NATIVE_HISTORY") == "1" {
+		retained = &daemon.NativeHistoryConfig{Directory: nativehistory.IdentityPath, AccountID: os.Getenv("BLERG_RUNNER_NATIVE_HISTORY_ACCOUNT"), ClaimUID: os.Getenv("BLERG_RUNNER_NATIVE_HISTORY_UID"), Resume: os.Getenv("BLERG_RUNNER_RESUME") == "1"}
+	}
 	return Config{
-		RestrictTools: takeRestrictToolsEnv(),
-		Interaction:   takeInteractionEnv(),
-		MCPGateway:    gateway,
-		MCPGatewayErr: gatewayErr,
-		Plugins:       plugins,
-		PluginsErr:    pluginsErr,
-		ServerWS:      os.Getenv("BLERG_RUNNER_SERVER_WS"),
-		ServerHTTP:    os.Getenv("BLERG_RUNNER_SERVER_HTTP"),
-		DaemonToken:   os.Getenv("BLERG_RUNNER_DAEMON_TOKEN"),
-		SessionID:     os.Getenv("BLERG_RUNNER_SESSION_ID"),
-		Repo:          os.Getenv("BLERG_RUNNER_REPO"),
-		Title:         os.Getenv("BLERG_RUNNER_TITLE"),
-		Model:         os.Getenv("BLERG_RUNNER_MODEL"),
-		Effort:        os.Getenv("BLERG_RUNNER_EFFORT"),
-		Engine:        os.Getenv("BLERG_RUNNER_ENGINE"),
-		InitialPrompt: os.Getenv("BLERG_RUNNER_INITIAL_PROMPT"),
-		GitURL:        os.Getenv("BLERG_RUNNER_GIT_URL"),
-		GitToken:      os.Getenv("BLERG_RUNNER_GIT_TOKEN"),
-		APIKey:        os.Getenv("ANTHROPIC_API_KEY"),
-		Resume:        os.Getenv("BLERG_RUNNER_RESUME") == "1",
-		NoRepo:        os.Getenv("BLERG_RUNNER_NO_REPO") == "1",
-		NewRepo:       os.Getenv("BLERG_RUNNER_NEW_REPO") == "1",
-		IdleTimeout:   idleTimeoutFromEnv(os.Getenv("BLERG_RUNNER_IDLE_TIMEOUT_SECONDS")),
-		Home:          envDefault("BLERG_RUNNER_HOME", "/workspace"),
+		NativeHistory:         retained,
+		ManagedCredential:     os.Getenv("BLERG_RUNNER_MANAGED_CREDENTIAL") == "1",
+		RestrictTools:         takeRestrictToolsEnv(),
+		Interaction:           takeInteractionEnv(),
+		MCPGateway:            gateway,
+		MCPGatewayErr:         gatewayErr,
+		Plugins:               plugins,
+		PluginsErr:            pluginsErr,
+		ServerWS:              os.Getenv("BLERG_RUNNER_SERVER_WS"),
+		ServerHTTP:            os.Getenv("BLERG_RUNNER_SERVER_HTTP"),
+		DaemonToken:           os.Getenv("BLERG_RUNNER_DAEMON_TOKEN"),
+		SessionID:             os.Getenv("BLERG_RUNNER_SESSION_ID"),
+		Repo:                  os.Getenv("BLERG_RUNNER_REPO"),
+		Title:                 os.Getenv("BLERG_RUNNER_TITLE"),
+		Model:                 os.Getenv("BLERG_RUNNER_MODEL"),
+		Effort:                os.Getenv("BLERG_RUNNER_EFFORT"),
+		Engine:                os.Getenv("BLERG_RUNNER_ENGINE"),
+		InitialPrompt:         os.Getenv("BLERG_RUNNER_INITIAL_PROMPT"),
+		InitialPromptSource:   os.Getenv("BLERG_RUNNER_INITIAL_PROMPT_SOURCE"),
+		InitialPromptClientID: os.Getenv("BLERG_RUNNER_INITIAL_PROMPT_CLIENT_ID"),
+		GitURL:                os.Getenv("BLERG_RUNNER_GIT_URL"),
+		GitToken:              os.Getenv("BLERG_RUNNER_GIT_TOKEN"),
+		APIKey:                os.Getenv("ANTHROPIC_API_KEY"),
+		Resume:                os.Getenv("BLERG_RUNNER_RESUME") == "1",
+		NoRepo:                os.Getenv("BLERG_RUNNER_NO_REPO") == "1",
+		NewRepo:               os.Getenv("BLERG_RUNNER_NEW_REPO") == "1",
+		IdleTimeout:           idleTimeoutFromEnv(os.Getenv("BLERG_RUNNER_IDLE_TIMEOUT_SECONDS")),
+		Home:                  envDefault("BLERG_RUNNER_HOME", "/workspace"),
 	}
 }
 
@@ -565,17 +583,24 @@ func Run(ctx context.Context, cfg Config) error {
 	var workDir string
 	killed := make(chan struct{})
 	activity := newIdleTracker()
+	var credentialSource daemon.EngineCredentialSource
+	if cfg.ManagedCredential {
+		credentialSource = daemon.ManagedEngineCredentialSource(cfg.ServerHTTP, cfg.DaemonToken)
+	}
 	host := daemon.NewAgentHost(client, daemon.AgentHostConfig{
-		ReposRoot:   cfg.Home,
-		ServerHTTP:  cfg.ServerHTTP,
-		DaemonToken: cfg.DaemonToken,
-		APIKey:      cfg.APIKey,
+		CredentialSource: credentialSource,
+		ReposRoot:        cfg.Home,
+		ServerHTTP:       cfg.ServerHTTP,
+		DaemonToken:      cfg.DaemonToken,
+		APIKey:           cfg.APIKey,
 		// Subscription mode: bill sessions to the operator's Claude plan via
 		// headless Claude Code when its OAuth token is provided and no
 		// metered API key is.
-		ClaudeCode: os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" && cfg.APIKey == "",
-		HomeDir:    cfg.Home,
-		Pricing:    daemon.DefaultPricing(),
+		ClaudeCode:    (os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" && cfg.APIKey == "") || cfg.NativeHistory != nil,
+		NativeHistory: cfg.NativeHistory,
+		Plugins:       daemon.NewPluginWorkshop(filepath.Join(cfg.Home, ".blerg")),
+		HomeDir:       cfg.Home,
+		Pricing:       daemon.DefaultPricing(),
 		OnTurnDone: func(sessionID string) {
 			activity.touch()
 			go PushWip(workDir, sessionID)
@@ -592,7 +617,10 @@ func Run(ctx context.Context, cfg Config) error {
 		var msg protocol.AgentUserMessage
 		if json.Unmarshal(raw, &msg) == nil {
 			activity.touch()
-			host.UserMessage(msg.SessionID, msg.Text, msg.Source)
+			if msg.Source == "limit_resume" && msg.ExpectedTurnID == "" {
+				return
+			}
+			host.UserInput(msg.SessionID, agent.Input{Text: msg.Text, Source: msg.Source, ClientID: msg.ClientID, ExpectedTurnID: msg.ExpectedTurnID})
 		}
 	})
 	client.OnMessage("set_session_model", func(raw []byte) {
@@ -667,6 +695,11 @@ func Run(ctx context.Context, cfg Config) error {
 	} else if err := daemon.DownloadConfigBundle(ctx, cfg.ServerHTTP, cfg.DaemonToken, cfg.Home); err != nil {
 		log.Printf("runner: config bundle: %v (continuing without user config)", err)
 	}
+	if cfg.ManagedCredential {
+		if err := os.MkdirAll(filepath.Join(cfg.Home, ".codex"), 0700); err != nil {
+			return errors.New("managed engine private home could not be prepared")
+		}
+	}
 	if err := writeCodexAuthFromEnv(cfg.Home); err != nil {
 		log.Printf("runner: codex auth: %v (continuing without codex login)", err)
 	}
@@ -703,19 +736,26 @@ func Run(ctx context.Context, cfg Config) error {
 	reportWorkspaceReady(ctx, cfg, stages, installPlugins)
 
 	spawn := podSpawn(cfg, workDir)
+	spawn.InitialPromptSource = cfg.InitialPromptSource
+	spawn.InitialPromptClientID = cfg.InitialPromptClientID
 	if cfg.Resume {
-		events, err := FetchTranscript(ctx, cfg)
-		if err != nil {
-			log.Printf("runner: transcript fetch: %v (starting fresh)", err)
+		if cfg.NativeHistory != nil {
 			spawn.InitialPrompt = cfg.InitialPrompt
-			host.Spawn(spawn) //nolint:contextcheck // the session outlives this startup context; the prompt-context fetch inside has its own short timeout
+			host.Spawn(spawn) //nolint:contextcheck // The native session outlives startup validation; its prompt fetch is independently bounded.
 		} else {
-			// The resume prompt rides in the spawn, so the session goes
-			// straight to its turn: delivered separately after spawn, the host
-			// would first report the session idle (nothing queued) and the
-			// user would get a "finished its turn" for a turn that never ran.
-			spawn.InitialPrompt = cfg.InitialPrompt
-			host.SpawnResumed(spawn, events, wsState) //nolint:contextcheck // the session outlives this startup context; the prompt-context fetch inside has its own short timeout
+			events, err := FetchTranscript(ctx, cfg)
+			if err != nil {
+				log.Printf("runner: transcript fetch: %v (starting fresh)", err)
+				spawn.InitialPrompt = cfg.InitialPrompt
+				host.Spawn(spawn) //nolint:contextcheck // the session outlives this startup context; the prompt-context fetch inside has its own short timeout
+			} else {
+				// The resume prompt rides in the spawn, so the session goes
+				// straight to its turn: delivered separately after spawn, the host
+				// would first report the session idle (nothing queued) and the
+				// user would get a "finished its turn" for a turn that never ran.
+				spawn.InitialPrompt = cfg.InitialPrompt
+				host.SpawnResumed(spawn, events, wsState) //nolint:contextcheck // the session outlives this startup context; the prompt-context fetch inside has its own short timeout
+			}
 		}
 	} else {
 		spawn.InitialPrompt = cfg.InitialPrompt

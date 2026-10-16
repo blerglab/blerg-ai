@@ -123,6 +123,9 @@ input, textarea, select { font: inherit; }
   text-transform: uppercase; font-weight: 600; color: var(--fog);
 }
 .topbar .logo:hover .component { color: var(--chalk); }
+.topbar .build-version { font-family: var(--mono); font-size: 11px; color: var(--fog-dim); white-space: nowrap; }
+.topbar .build-version .build-commit { opacity: 0.7; }
+@media (max-width: 640px) { .topbar .build-version .build-commit { display: none; } }
 .topbar nav { margin-left: auto; display: flex; gap: 4px; }
 .topbar nav a {
   color: var(--fog-dim); padding: 6px 10px; border-radius: 6px;
@@ -858,6 +861,17 @@ textarea { resize: vertical; }
 .bootstrap-hint p { font-size: 13.5px; color: var(--chalk); margin: 0; line-height: 1.55; }
 
 /* stale-bundle nudge */
+/* "Couldn't sign you in · Retry": one line above the top bar (SignInBanner.tsx). */
+.signin-banner {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 6px 16px; background: var(--blaze-soft); border-bottom: 1px solid var(--blaze);
+  color: var(--chalk); font-size: 13px;
+}
+.signin-banner button {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--blaze); font: inherit; font-weight: 600; text-decoration: underline;
+}
+
 .stale-banner {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
   z-index: 80; cursor: pointer;

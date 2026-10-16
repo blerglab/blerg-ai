@@ -3,6 +3,7 @@ import { act, render, screen } from '@testing-library/react'
 import ChatView from './ChatView'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
 import { createFakeTransport, type FakeTransport } from '../test/fakeTransport'
+import { installIntersectionObserver, intersect } from '../test/intersection'
 import { SESSION, meta, resetChatState } from '../test/chat'
 import type { AgentEvent } from '../types'
 
@@ -69,51 +70,61 @@ describe('ChatView loads a long transcript from its end', () => {
     expect(screen.getByText('message 300')).toBeInTheDocument()
   })
 
-  it('puts older pages in front, in order, keeps asking until the start, then drops the indicator', async () => {
-    const { t } = mount()
+  it('fetches one older page behind the tail and no more until asked, then drops the indicator', async () => {
+    const { t, container } = mount()
     deliverTail(t)
+    const timeline = () => container.querySelector('.agent-timeline')
 
-    // Two older pages: the view asks again after the first says there is more.
+    // One older page, put in front of what is held.
     await act(async () => {
       t.answerOlder({ events: range(51, 100), hasOlder: true, firstSeq: 51 })
     })
-    expect(t.older).toHaveLength(2)
-    expect(t.older[1]).toEqual({ sessionId: SESSION, beforeSeq: 51, limit: 200 })
-    expect(screen.getByTestId('older-loading')).toBeTruthy()
-    await act(async () => {
-      t.answerOlder({ events: range(1, 50), hasOlder: false, firstSeq: 1 })
-    })
-
     const tr = useTranscriptStore.getState().sessions.s1
-    expect(tr.events).toHaveLength(300)
-    expect(tr.events[0].seq).toBe(1)
-    expect(tr.events[299].seq).toBe(300)
-    expect(tr.lastSeq).toBe(300)
-    expect(screen.queryByTestId('older-loading')).toBeNull()
-    expect(document.querySelector('.agent-timeline')?.classList.contains('backfilling')).toBe(false)
-    // the chain stopped: two older pages, nothing after
-    expect(t.older).toHaveLength(2)
+    expect(tr.events).toHaveLength(250)
+    expect(tr.events[0].seq).toBe(51)
+    expect(tr.events[249].seq).toBe(300)
+    expect(tr.hasOlder).toBe(true)
+    // Older events remain on the server, but none is being fetched: no request, no loading line,
+    // and the scrollbar is drawn as usual.
+    expect(t.older).toHaveLength(1)
     expect(t.pendingOlder).toBe(0)
-    expect(screen.getByText('message 1')).toBeInTheDocument()
+    expect(screen.queryByTestId('older-loading')).toBeNull()
+    expect(timeline()?.classList.contains('backfilling')).toBe(false)
   })
 
-  it('on a reconnect, resumes the older pages where the drop cut them off', async () => {
+  it('"Loading earlier" and the hidden scrollbar follow the page in flight, not whether older events remain', async () => {
+    const { t, container } = mount()
+    deliverTail(t)
+    const timeline = () => container.querySelector('.agent-timeline')
+    expect(screen.getByTestId('older-loading')).toBeTruthy()
+    expect(timeline()?.classList.contains('backfilling')).toBe(true)
+    await act(async () => {
+      t.answerOlder({ events: range(51, 100), hasOlder: true, firstSeq: 51 })
+    })
+    expect(useTranscriptStore.getState().sessions.s1.hasOlder).toBe(true)
+    expect(screen.queryByTestId('older-loading')).toBeNull()
+    expect(timeline()?.classList.contains('backfilling')).toBe(false)
+  })
+
+  it('on a reconnect, asks again for the page the drop cut off', async () => {
     const { t } = mount()
     deliverTail(t)
     expect(t.older).toHaveLength(1)
 
-    // The link drops while the older page was in flight: that request fails...
+    // The link drops while the older page was in flight: that request fails, and nothing is in
+    // flight any more...
     await act(async () => {
       t.setConnected(false)
       t.failOlder()
     })
     expect(t.older).toHaveLength(1)
-    expect(screen.getByTestId('older-loading')).toBeTruthy()
+    expect(screen.queryByTestId('older-loading')).toBeNull()
     // ...and the link coming back asks for the same page again (the transport resubscribes
     // forward from the last seq by itself).
     act(() => t.setConnected(true))
     expect(t.older).toHaveLength(2)
     expect(t.older[1]).toEqual({ sessionId: SESSION, beforeSeq: 101, limit: 200 })
+    expect(screen.getByTestId('older-loading')).toBeTruthy()
     await deliverOlder(t)
     expect(screen.queryByTestId('older-loading')).toBeNull()
     expect(useTranscriptStore.getState().sessions.s1.events).toHaveLength(300)
@@ -143,29 +154,72 @@ describe('ChatView loads a long transcript from its end', () => {
     expect(t.older).toHaveLength(0)
   })
 
-  it('R1: keeps the reader where they were when older events are put above them', async () => {
-    const { t, container } = mount()
-    deliverTail(t)
-    const timeline = container.querySelector('.agent-timeline') as HTMLElement
-    // jsdom has no layout: model a timeline whose height grows with its events (10px each),
-    // scrolled up so the reader is not at the bottom.
-    Object.defineProperty(timeline, 'scrollHeight', {
-      configurable: true,
-      get: () => useTranscriptStore.getState().sessions.s1.events.length * 10,
-    })
-    Object.defineProperty(timeline, 'clientHeight', { configurable: true, value: 100 })
-    timeline.scrollTop = 500
-    act(() => { timeline.dispatchEvent(new Event('scroll', { bubbles: true })) })
-    // re-render so the view records the height it now has
-    act(() => t.emit(ev(301)))
-    timeline.scrollTop = 500
+  it('draws an older page when the reader reaches the top, then asks for the next one exactly once', async () => {
+    installIntersectionObserver()
+    try {
+      const { t } = mount()
+      deliverTail(t)
+      // The page fetched behind the tail lands in front, out of sight.
+      await act(async () => {
+        t.answerOlder({ events: range(51, 100), hasOlder: true, firstSeq: 51 })
+      })
+      expect(screen.queryByText('message 100')).toBeNull()
+      expect(t.older).toHaveLength(1)
 
-    await deliverOlder(t)
-    // 100 events of 10px each were added above: the reader's view moves down by exactly that.
-    expect(timeline.scrollTop).toBe(1500)
+      // The reader reaches the top: the held page is drawn at once, without a request.
+      act(() => intersect())
+      expect(screen.getByText('message 51')).toBeInTheDocument()
+      expect(t.older).toHaveLength(1)
+
+      // At the top again with everything held drawn: one request, however often the top is seen.
+      act(() => intersect())
+      expect(t.older).toHaveLength(2)
+      expect(t.older[1]).toEqual({ sessionId: SESSION, beforeSeq: 51, limit: 200 })
+      expect(screen.getByTestId('older-loading')).toBeTruthy()
+      act(() => intersect())
+      act(() => intersect())
+      expect(t.older).toHaveLength(2)
+
+      await act(async () => {
+        t.answerOlder({ events: range(1, 50), hasOlder: false, firstSeq: 1 })
+      })
+      act(() => intersect())
+      expect(screen.getByText('message 1')).toBeInTheDocument()
+      expect(screen.queryByTestId('older-loading')).toBeNull()
+      expect(t.older).toHaveLength(2)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
-  it('does not move a reader who is at the bottom when older events arrive', async () => {
+  it('after an older page fails, the top asks again once the reader scrolls away and back', async () => {
+    installIntersectionObserver()
+    try {
+      const { t } = mount()
+      deliverTail(t)
+      await act(async () => {
+        t.answerOlder({ events: range(51, 100), hasOlder: true, firstSeq: 51 })
+      })
+      act(() => intersect())
+      act(() => intersect())
+      expect(t.older).toHaveLength(2)
+      // The page is refused (the link dropped and came back without a reconnect in between).
+      await act(async () => { t.failOlder() })
+      expect(screen.queryByTestId('older-loading')).toBeNull()
+      act(() => intersect())
+      expect(t.older).toHaveLength(2)
+      // Away and back: exactly one more request.
+      act(() => intersect(false))
+      act(() => intersect())
+      act(() => intersect())
+      expect(t.older).toHaveLength(3)
+      expect(t.older[2]).toEqual({ sessionId: SESSION, beforeSeq: 51, limit: 200 })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('keeps a reader at the bottom when older events arrive', async () => {
     const { t, container } = mount()
     deliverTail(t)
     const timeline = container.querySelector('.agent-timeline') as HTMLElement
@@ -174,12 +228,11 @@ describe('ChatView loads a long transcript from its end', () => {
       get: () => useTranscriptStore.getState().sessions.s1.events.length * 10,
     })
     Object.defineProperty(timeline, 'clientHeight', { configurable: true, value: 100 })
-    // At the bottom (within 80px of it): the view keeps following the end.
-    timeline.scrollTop = 1950
+    // At the bottom: the view keeps following the end as the content grows.
+    timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight
     act(() => { timeline.dispatchEvent(new Event('scroll', { bubbles: true })) })
     act(() => t.emit(ev(301)))
-    timeline.scrollTop = 1950
     await deliverOlder(t)
-    expect(timeline.scrollTop).toBe(1950)
+    expect(timeline.scrollTop).toBe(timeline.scrollHeight - timeline.clientHeight)
   })
 })

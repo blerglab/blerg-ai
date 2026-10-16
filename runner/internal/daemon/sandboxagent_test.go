@@ -415,8 +415,8 @@ func TestAgentHostSandboxedCLIEnginesRunInContainer(t *testing.T) {
 		effort   string
 		wantArgs string // the model/effort flags as the exec'd command carries them
 	}{
-		{"codex", "FAKE_CODEX_LOG", fakeCodex, "codex exec", "gpt-5.6-terra", "ultra",
-			"--model gpt-5.6-terra -c model_reasoning_effort=ultra"},
+		{"codex", "FAKE_CODEX_LOG", fakeCodex, "codex app-server", "gpt-5.6-terra", "ultra",
+			"app-server --listen stdio://"},
 		{"hermes", "FAKE_HERMES_LOG", func(t *testing.T) string { return fakeHermes(t, "hi there", 0) }, "hermes chat",
 			"qwen3-30b", "minimal", "-m qwen3-30b --reasoning minimal"},
 	}

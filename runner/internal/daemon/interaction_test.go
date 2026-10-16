@@ -182,7 +182,7 @@ func TestManagedBlockDefersToTheInteractionMode(t *testing.T) {
 		"`blerg-runner update` is a push to the user’s phone, so keep those infrequent",
 		"Writing in the chat is not a push",
 		"interactive", "unattended", "system prompt", "that is what governs",
-		"Works from subagents.", "is missing, skip silently.",
+		"Works from subagents (except `topic`, which only the main agent runs).", "is missing, skip silently.",
 	} {
 		if !strings.Contains(managedBlock, want) {
 			t.Errorf("managed block does not say %q", want)

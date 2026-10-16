@@ -38,27 +38,43 @@ type RepoInfo struct {
 // to everyone, alongside each person's own repositories (UserRepoLister). It
 // caches the results for ttl, and returns stale results with a stale_at
 // timestamp on API error rather than failing.
+//
+// Past ttl the cached list is still served at once while one background
+// refresh brings it up to date (stale-while-revalidate); only an empty cache,
+// or one older than maxStale, makes a request wait — on the refresh already
+// in flight, if there is one.
 type RepoLister struct {
 	org        string
 	token      string
 	hub        *Hub
 	ttl        time.Duration
+	maxStale   time.Duration
 	httpClient http.Client
-	mu         sync.RWMutex
+	now        func() time.Time
+	// fetch lists the organisation's repositories (fetchFromGitHub; tests
+	// swap it).
+	fetch      func(ctx context.Context) ([]githubRepo, error)
+	mu         sync.Mutex
 	cached     []RepoInfo
 	cachedAt   time.Time
 	staleAt    *time.Time
+	refreshing chan struct{} // non-nil while a refresh is in flight
+	bg         sync.WaitGroup
 }
 
 // NewRepoLister creates a RepoLister.  token may be empty for public orgs.
 func NewRepoLister(org, token string, hub *Hub) *RepoLister {
-	return &RepoLister{
+	rl := &RepoLister{
 		org:        org,
 		token:      token,
 		hub:        hub,
 		ttl:        5 * time.Minute,
+		maxStale:   30 * time.Minute,
 		httpClient: http.Client{Timeout: 10 * time.Second},
+		now:        time.Now,
 	}
+	rl.fetch = rl.fetchFromGitHub
+	return rl
 }
 
 // githubRepo is the minimal subset of the GitHub repo object we care about.
@@ -68,37 +84,55 @@ type githubRepo struct {
 }
 
 // List returns the cached repo list, refreshing from the GitHub API when the
-// cache is stale.  On API failure it returns the last-known results together
-// with a non-nil stale_at timestamp.
+// cache is past its ttl — in the background while the cached list is younger
+// than maxStale, otherwise before answering. On API failure it returns the
+// last-known results together with a non-nil stale_at timestamp.
 func (rl *RepoLister) List(ctx context.Context) ([]RepoInfo, *time.Time) {
-	// Check cache under read lock.
-	rl.mu.RLock()
-	if rl.cached != nil && time.Since(rl.cachedAt) < rl.ttl {
-		cached, staleAt := rl.cached, rl.staleAt
-		rl.mu.RUnlock()
-		return cached, staleAt
-	}
-	rl.mu.RUnlock()
-
-	// Fetch from GitHub outside any lock.
-	repos, err := rl.fetchFromGitHub(ctx)
-
-	// Re-acquire write lock to update cache.
 	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	// Another goroutine may have refreshed the cache while we were fetching.
-	if rl.cached != nil && time.Since(rl.cachedAt) < rl.ttl {
-		return rl.cached, nil
-	}
-
-	if err != nil {
-		// Return stale data (possibly nil on first call) and mark stale_at.
-		now := time.Now()
-		rl.staleAt = &now
+	age := rl.now().Sub(rl.cachedAt)
+	if rl.cached != nil && age < rl.ttl {
+		defer rl.mu.Unlock()
 		return rl.cached, rl.staleAt
 	}
+	servable := rl.cached != nil && age < rl.maxStale
+	if rl.refreshing == nil {
+		rl.refreshing = make(chan struct{})
+		rl.bg.Add(1)
+		// The refresh outlives this request: whoever waits for it, and
+		// whoever was served the old list meanwhile, all want its answer.
+		go rl.refresh(context.WithoutCancel(ctx))
+	}
+	wait := rl.refreshing
+	if servable {
+		defer rl.mu.Unlock()
+		return rl.cached, rl.staleAt
+	}
+	rl.mu.Unlock()
 
+	select {
+	case <-wait:
+	case <-ctx.Done():
+	}
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.cached, rl.staleAt
+}
+
+// refresh fetches the organisation's list into the cache and ends the flight.
+func (rl *RepoLister) refresh(ctx context.Context) {
+	defer rl.bg.Done()
+	repos, err := rl.fetch(ctx)
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	close(rl.refreshing)
+	rl.refreshing = nil
+	if err != nil {
+		// Keep the stale data (possibly nil on first call) and mark stale_at.
+		now := rl.now()
+		rl.staleAt = &now
+		return
+	}
 	result := make([]RepoInfo, len(repos))
 	for i, r := range repos {
 		result[i] = RepoInfo{
@@ -108,11 +142,9 @@ func (rl *RepoLister) List(ctx context.Context) ([]RepoInfo, *time.Time) {
 			CheckedOut: []string{},
 		}
 	}
-
 	rl.cached = result
-	rl.cachedAt = time.Now()
+	rl.cachedAt = rl.now()
 	rl.staleAt = nil
-	return rl.cached, nil
 }
 
 func (rl *RepoLister) fetchFromGitHub(ctx context.Context) ([]githubRepo, error) {

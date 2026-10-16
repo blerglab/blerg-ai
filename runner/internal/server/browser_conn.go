@@ -182,19 +182,25 @@ func (h *Hub) ServeBrowser(dbPool *pgxpool.Pool, authorize func(*http.Request) (
 
 // sendInitialState assembles and sends the initial_state message to bc.
 func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxpool.Pool) {
-	daemons := h.GetAllDaemons()
+	daemons := h.GetHostDaemons()
 	daemonInfos := make([]protocol.DaemonInfo, 0, len(daemons))
 	for _, d := range daemons {
-		if d.Mode == "runner" {
+		if !isHostDaemon(d) {
 			continue // a cluster session pod, not a machine the owner picks
 		}
 		daemonInfos = append(daemonInfos, protocol.DaemonInfo{
-			ID:        d.ID,
-			Name:      d.Name,
-			Mode:      d.Mode,
-			ReposRoot: d.CurrentReposRoot(),
-			Status:    "connected",
-			Version:   d.Version,
+			ID:              d.ID,
+			Name:            d.Name,
+			Mode:            d.Mode,
+			ReposRoot:       d.CurrentReposRoot(),
+			Status:          "connected",
+			Version:         d.Version,
+			MCPGateway:      d.CanMCPGateway(),
+			RestrictTools:   d.CanRestrictTools(),
+			CodexRestricted: d.CanCodexRestricted(),
+			PluginEngines:   d.PluginEngines(),
+			// nil (omitted) when no provider has reported.
+			UsageLimits: nilIfEmpty(d.UsageLimits()),
 		})
 	}
 
@@ -217,7 +223,7 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 	}
 
 	h.mu.RLock()
-	sv := h.serverVersion
+	sv, release, commit := h.serverVersion, h.serverRelease, h.serverCommit
 	h.mu.RUnlock()
 
 	// Messages (open + recent), so each session's thread is populated on load.
@@ -238,6 +244,8 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 		Sessions:      sessionInfos,
 		Messages:      messageInfos,
 		ServerVersion: sv,
+		ServerRelease: release,
+		ServerCommit:  commit,
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -491,24 +499,7 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 				log.Printf("browser %s malformed agent_user_message: %v", bc.ID, err)
 				continue
 			}
-			if h.FindDaemonForSession(msg.SessionID) == nil {
-				// A desktop daemon that is away for a moment (a restart): the message waits
-				// for it instead of being dropped (daemongrace.go).
-				if held, err := json.Marshal(protocol.AgentUserMessage{
-					Type: "agent_user_message", SessionID: msg.SessionID, Text: msg.Text, Source: msg.Source,
-				}); err == nil && h.HoldForAwayDaemon(msg.SessionID, held) {
-					continue
-				}
-				// Disconnected cluster session: re-create the runner Job with
-				// this message as the resume prompt. bc.AccountID is passed so
-				// the resume only re-mints personal credentials when the
-				// requester is the account the session was launched under.
-				resumeClusterSession(ctx, h, dbPool, msg.SessionID, msg.Text, bc.AccountID, bc.SessionID)
-				continue
-			}
-			forwardToSessionDaemon(h, bc, msg.SessionID, protocol.AgentUserMessage{
-				Type: "agent_user_message", SessionID: msg.SessionID, Text: msg.Text, Source: msg.Source,
-			})
+			handleBrowserAgentMessage(ctx, h, bc, dbPool, msg)
 
 		case "set_session_model":
 			var msg protocol.SetSessionModel
@@ -529,9 +520,12 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 				log.Printf("browser %s malformed interrupt_session: %v", bc.ID, err)
 				continue
 			}
-			forwardToSessionDaemon(h, bc, msg.SessionID, protocol.InterruptSession{
-				Type: "interrupt_session", SessionID: msg.SessionID,
-			})
+			if err := withCancelledLimitResume(ctx, dbPool, msg.SessionID, func() error {
+				forwardToSessionDaemon(h, bc, msg.SessionID, protocol.InterruptSession{Type: "interrupt_session", SessionID: msg.SessionID})
+				return nil
+			}); err != nil {
+				recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": "Continuation is busy; retry interrupt shortly.", "retryable": true})
+			}
 
 		case "mark_session_read":
 			var msg protocol.MarkSessionRead
@@ -591,7 +585,7 @@ func (h *Hub) forwardBrowserSpawn(_ *BrowserConn, msg protocol.BrowserSpawnSessi
 	if err := validateRepoName(msg.Repo); err != nil {
 		return "", fmt.Errorf("rejected repo %q: %w", msg.Repo, err)
 	}
-	dc := h.GetDaemon(msg.DaemonID)
+	dc := h.GetHostDaemon(msg.DaemonID)
 	if dc == nil {
 		return "", fmt.Errorf("daemon %s not found", msg.DaemonID)
 	}
@@ -765,4 +759,71 @@ func handleUnsubscribeSession(h *Hub, bc *BrowserConn, sessionID string) {
 		delete(bc.subs, sessionID)
 	}
 	bc.subMu.Unlock()
+}
+
+// handleBrowserAgentMessage routes a message the person sent to an agent session from the browser.
+//
+// A message typed while `blerg-runner ask` waits is its answer: the engine is blocked inside the
+// ask and would read the message only once the ask timed out (messageevents.go). Only while the
+// session's daemon is connected: with it away (a restart) the `ask` is dead, so the message is
+// held for the daemon, which hands it to the session hosted again — where it replaces recovery's
+// continue. A message accepted for the session (forwarded or held) ends its pause by a restart.
+func handleBrowserAgentMessage(ctx context.Context, h *Hub, bc *BrowserConn, dbPool *pgxpool.Pool, msg protocol.AgentUserMessage) {
+	if err := withCancelledPendingLimitResume(ctx, dbPool, msg.SessionID, func() error { handleBrowserAgentMessageUnlocked(ctx, h, bc, dbPool, msg); return nil }); err != nil {
+		recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": "Continuation is busy; retry your message shortly.", "retryable": true, "client_id": msg.ClientID})
+	}
+}
+
+func handleBrowserAgentMessageUnlocked(ctx context.Context, h *Hub, bc *BrowserConn, dbPool *pgxpool.Pool, msg protocol.AgentUserMessage) {
+	fresh, err := acceptSessionInput(ctx, h, dbPool, msg)
+	if err != nil {
+		recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": sessionInputError(err), "retryable": true, "client_id": msg.ClientID})
+		return
+	}
+	if !fresh {
+		return
+	}
+	daemonHere := h.FindDaemonForSession(msg.SessionID) != nil
+	if daemonHere && (msg.Source == "" || msg.Source == "chat" || msg.AnswerMessageID != "") &&
+		answerAskFromChat(ctx, h, dbPool, msg.SessionID, msg.Text, msg.ClientID, msg.AnswerMessageID) {
+		return
+	}
+	if !daemonHere {
+		// A desktop daemon that is away for a moment (a restart): the message waits
+		// for it instead of being dropped (daemongrace.go).
+		if held, err := json.Marshal(protocol.AgentUserMessage{
+			Type: "agent_user_message", SessionID: msg.SessionID, Text: msg.Text, Source: msg.Source,
+			ClientID: msg.ClientID,
+		}); err == nil && (dbPool == nil || msg.ClientID == "" || harnessCommand(msg.Text)) && h.HoldForAwayDaemon(msg.SessionID, held) {
+			clearPausedOnMessage(ctx, h, dbPool, msg.SessionID)
+			return
+		}
+		// Disconnected cluster session: re-create the runner Job with
+		// this message as the resume prompt. bc.AccountID is passed so
+		// the resume only re-mints personal credentials when the
+		// requester is the account the session was launched under.
+		if dbPool != nil && msg.ClientID != "" && !harnessCommand(msg.Text) {
+			row, lookupErr := db.GetSession(ctx, dbPool, msg.SessionID)
+			if lookupErr == nil && row != nil && (row.Runtime == nil || *row.Runtime != "cluster") {
+				// The durable outbox replaces the small in-memory grace buffer, including
+				// messages sent after grace expires. The daemon picks them up on return.
+				return
+			}
+			if err := resumeClusterSessionMode(ctx, h, dbPool, msg.SessionID, msg.Text, bc.AccountID, bc.SessionID, false, msg.ClientID); err != nil {
+				recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": "Session could not resume; retry shortly.", "retryable": true, "client_id": msg.ClientID})
+				_ = db.SettleSessionInput(ctx, dbPool, msg.SessionID, msg.ClientID)
+			}
+			// The initial prompt carries the same id as reconnect redelivery. Only
+			// its actual consumption settles the outbox; the daemon deduplicates both.
+			return
+		}
+		resumeClusterSession(ctx, h, dbPool, msg.SessionID, msg.Text, bc.AccountID, bc.SessionID)
+		return
+	}
+	if forwardToSessionDaemon(h, bc, msg.SessionID, protocol.AgentUserMessage{
+		Type: "agent_user_message", SessionID: msg.SessionID, Text: msg.Text, Source: msg.Source,
+		ClientID: msg.ClientID,
+	}) {
+		clearPausedOnMessage(ctx, h, dbPool, msg.SessionID) // only once it is on its way
+	}
 }

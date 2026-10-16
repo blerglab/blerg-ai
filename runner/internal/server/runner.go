@@ -824,6 +824,10 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 // req.GitURL is ignored here: unlike a cluster Job, which clones into a fresh
 // workspace, the daemon works from its own repos root.
 func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequest, principal runnerPrincipal, sessionID string) *APIError {
+	if req.DaemonID != "" && a.hub.GetHostDaemon(req.DaemonID) == nil {
+		return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the pinned daemon is not a connected host execution target")
+	}
+
 	var dc *DaemonConn
 	if req.NoRepo {
 		// No folder to look for: any connected daemon will do. The session
@@ -831,7 +835,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		// daemon exactly like a new folder.
 		if req.DaemonID != "" {
 			// An in-process pin (a cron's daemon_id): that daemon or none, never another one.
-			if dc = a.hub.GetDaemon(req.DaemonID); dc == nil {
+			if dc = a.hub.GetHostDaemon(req.DaemonID); dc == nil {
 				return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the pinned daemon is not connected")
 			}
 		} else {
@@ -857,7 +861,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		}
 	} else if req.CronID != "" {
 		// A cron session with no connections is still restricted: the daemon must be able to.
-		if apiErr := checkRestrictTarget(runtime, dc); apiErr != nil {
+		if apiErr := checkRestrictTarget(runtime, dc, req.Engine); apiErr != nil {
 			return apiErr
 		}
 	}
@@ -1089,7 +1093,32 @@ func (a *API) HandleRunnerMessage(w http.ResponseWriter, r *http.Request) {
 // SendMessage delivers one conversational turn to a session, resuming a
 // disconnected cluster session if that is what it takes. Shared with the MCP
 // send_message tool. source "" defaults to "runner".
+//
+// A message from a person or an API caller (source human, runner or chat) sent while a
+// `blerg-runner ask` of the session is open answers that ask, as a message typed in the runner's
+// chat does: the engine is blocked inside the ask and would read the message only once the ask
+// timed out. The reply then carries "answered_ask": true. A board's automation (blerg-board) never
+// answers an ask.
 func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string) (map[string]any, *APIError) {
+	if text == "" {
+		return nil, apiErrorf(http.StatusBadRequest, "text required")
+	}
+	if _, e := a.requireSessionAccess(ctx, principal, sessionID); e != nil {
+		return nil, e
+	}
+	var body map[string]any
+	var problem *APIError
+	err := withCancelledPendingLimitResume(ctx, a.dbPool, sessionID, func() error {
+		body, problem = a.sendMessage(ctx, principal, sessionID, text, source)
+		return nil
+	})
+	if err != nil {
+		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry shortly")
+	}
+	return body, problem
+}
+
+func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string) (map[string]any, *APIError) {
 	if text == "" {
 		return nil, apiErrorf(http.StatusBadRequest, "text required")
 	}
@@ -1100,7 +1129,13 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	if dc := a.hub.FindDaemonForSession(sessionID); dc != nil {
+	// Only while the session's daemon is connected: with it away (a restart) the `ask` that would
+	// read the answer is dead, and the message must reach the session instead.
+	dc := a.hub.FindDaemonForSession(sessionID)
+	if dc != nil && answersAsk(source) && answerAskFromChat(ctx, a.hub, a.dbPool, sessionID, text, "", "") {
+		return map[string]any{"ok": true, "answered_ask": true}, nil
+	}
+	if dc != nil {
 		raw, err := json.Marshal(protocol.AgentUserMessage{
 			Type: "agent_user_message", SessionID: sessionID, Text: text, Source: source,
 		})
@@ -1109,6 +1144,7 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 		}
 		select {
 		case dc.send <- raw:
+			clearPausedOnMessage(ctx, a.hub, a.dbPool, sessionID)
 			return map[string]any{"ok": true}, nil
 		default:
 			// Unlike the WS path, the runner caller gets a real error instead
@@ -1181,16 +1217,18 @@ func (a *API) HandleRunnerStop(w http.ResponseWriter, r *http.Request) {
 
 // Stop ends a session for good — kill the daemon session or delete the Job,
 // mark the row ended, fire the completion callback, revoke the session's
-// tokens. Shared with the MCP stop_session tool. Beyond "you may not stop this
-// session", it reports no failure: a stop is best-effort against whatever is
-// still alive.
+// tokens. Shared with the MCP stop_session tool. Runtime cleanup is best-effort;
+// if a concurrent automatic continuation cannot be cancelled, it returns a
+// retryable failure instead of claiming the session was stopped.
 func (a *API) Stop(ctx context.Context, principal RunnerPrincipal, sessionID string) (map[string]string, *APIError) {
 	// A session nobody has heard of cannot be stopped, and a session that is
 	// not this principal's is answered as if it did not exist.
 	if _, apiErr := a.requireSessionAccess(ctx, principal, sessionID); apiErr != nil {
 		return nil, apiErr
 	}
-	a.stopSession(ctx, sessionID, stopEndByRunner(principal))
+	if err := a.stopSession(ctx, sessionID, stopEndByRunner(principal)); err != nil {
+		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry stop shortly")
+	}
 	return map[string]string{"status": "stopped"}, nil
 }
 
@@ -1202,7 +1240,15 @@ func (a *API) Stop(ctx context.Context, principal RunnerPrincipal, sessionID str
 //
 // end is why, and by whom: recorded with the "ended" status (first write wins,
 // so an auto-stop's claim, which already recorded auto_stopped, keeps it).
-func (a *API) stopSession(ctx context.Context, sessionID string, end db.SessionEnd) {
+func (a *API) stopSession(ctx context.Context, sessionID string, end db.SessionEnd) error {
+	err := withCancelledLimitResume(ctx, a.dbPool, sessionID, func() error { a.stopSessionUnlocked(ctx, sessionID, end); return nil })
+	if err != nil {
+		log.Printf("stop %s: continuation cancellation: %v", sessionID, err)
+	}
+	return err
+}
+
+func (a *API) stopSessionUnlocked(ctx context.Context, sessionID string, end db.SessionEnd) {
 	// Desktop (R9): a board-driven session lives in a daemon process, not a
 	// Job. Marking the row "ended" without telling the daemon would leave the
 	// agent running — and still holding the repo — so kill it first.
@@ -1262,6 +1308,19 @@ func (a *API) HandleRunnerInterrupt(w http.ResponseWriter, r *http.Request) {
 // conflict, not a success — but a session this principal may not see is a 404
 // first, so the conflict never becomes an existence oracle.
 func (a *API) Interrupt(ctx context.Context, principal RunnerPrincipal, sessionID string) (map[string]bool, *APIError) {
+	if _, e := a.requireSessionAccess(ctx, principal, sessionID); e != nil {
+		return nil, e
+	}
+	var body map[string]bool
+	var problem *APIError
+	err := withCancelledLimitResume(ctx, a.dbPool, sessionID, func() error { body, problem = a.interrupt(ctx, principal, sessionID); return nil })
+	if err != nil {
+		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry shortly")
+	}
+	return body, problem
+}
+
+func (a *API) interrupt(ctx context.Context, principal RunnerPrincipal, sessionID string) (map[string]bool, *APIError) {
 	if _, apiErr := a.requireSessionAccess(ctx, principal, sessionID); apiErr != nil {
 		return nil, apiErr
 	}

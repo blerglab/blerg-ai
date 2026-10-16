@@ -707,3 +707,30 @@ func TestManagerPassesSandboxOptionsToBothKinds(t *testing.T) {
 		t.Errorf("agent host Sandbox = %+v, want %+v", got, want)
 	}
 }
+
+func TestSandboxRestrictedEngineMountsOnlySelectedLogin(t *testing.T) {
+	home := t.TempDir()
+	for _, p := range []string{".claude", ".codex", ".hermes"} {
+		if err := os.MkdirAll(filepath.Join(home, p), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{".claude.json", ".hermes/config.yaml", ".hermes/.env"} {
+		if err := os.WriteFile(filepath.Join(home, p), []byte("test"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := strings.Join(sandboxRunArgs("container", "/workspace", home, nil, sandboxRunExtras{restrictedEngine: "codex"}), " ")
+	if !strings.Contains(args, "/.codex:/home/agent/.codex") {
+		t.Fatal("Codex login missing")
+	}
+	for _, bad := range []string{"/.claude:", "/.claude.json:", "/.hermes/"} {
+		if strings.Contains(args, bad) {
+			t.Fatalf("unrelated login mounted: %s", bad)
+		}
+	}
+	unknown := strings.Join(sandboxRunArgs("container", "/workspace", home, nil, sandboxRunExtras{restrictedEngine: "unknown"}), " ")
+	if strings.Contains(unknown, "/home/agent/.codex") || strings.Contains(unknown, "/home/agent/.claude") {
+		t.Fatal("unknown restricted engine broadened login mounts")
+	}
+}

@@ -61,6 +61,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -134,6 +135,7 @@ type MCPToolSelection struct {
 type MCPSelection struct {
 	Connection string                      `json:"connection"`
 	Tools      map[string]MCPToolSelection `json:"tools,omitempty"`
+	Preset     string                      `json:"preset,omitempty"` // the launch-sheet preset the client claims; re-derived server-side
 }
 
 // ResolvedGrant is a validated set of MCP connections for one session: whose they are, the
@@ -159,6 +161,7 @@ type MCPConnection struct {
 	AuthKind     string
 	Status       string
 	DefaultTools map[string]mcpgw.ToolGrant
+	PinPolicy    string // mcpgw.PinPolicyStrict or PinPolicyAutoAccept (fail closed)
 }
 
 // ErrMCPProofInvalid means core does not consider the proof live (the login ended, the
@@ -218,6 +221,7 @@ type coreListResponse struct {
 		AuthKind     string          `json:"auth_kind"`
 		Status       string          `json:"status"`
 		DefaultTools json.RawMessage `json:"default_tools"`
+		PinPolicy    string          `json:"pin_policy"`
 	} `json:"connections"`
 }
 
@@ -259,7 +263,7 @@ func (c *HTTPMCPCoreClient) ListConnections(ctx context.Context, proof mcpgw.Pro
 	}
 	conns := make([]MCPConnection, 0, len(out.Connections))
 	for _, c := range out.Connections {
-		mc := MCPConnection{ID: c.ID, Name: c.Name, URL: c.URL, AuthKind: c.AuthKind, Status: c.Status}
+		mc := MCPConnection{ID: c.ID, Name: c.Name, URL: c.URL, AuthKind: c.AuthKind, Status: c.Status, PinPolicy: mcpgw.NormalizePinPolicy(c.PinPolicy)}
 		if t := bytes.TrimSpace(c.DefaultTools); len(t) > 0 && string(t) != "null" {
 			if err := json.Unmarshal(t, &mc.DefaultTools); err != nil {
 				return nil, fmt.Errorf("decode default_tools of %q: %w", c.Name, err)
@@ -338,6 +342,85 @@ type liveToolHasher interface {
 	LiveToolHashes(ctx context.Context, proof mcpgw.Proof, connectionID, urlSnapshot string) (map[string]string, error)
 }
 
+// liveToolListerComplete is the gateway's full listing with its completeness flag
+// (mcpgw.Gateway.ListToolsComplete).
+type liveToolListerComplete interface {
+	ListToolsComplete(ctx context.Context, proof mcpgw.Proof, connectionID, urlSnapshot string) ([]mcpgw.ListedTool, bool, error)
+}
+
+// repinnedTool is a tool the scheduler re-pinned at fire time under auto_accept (cronstart.go).
+type repinnedTool struct {
+	ConnectionID, ConnectionName, Tool, OldHash, NewHash, Mode string
+}
+
+func readOnlyHint(t mcpgw.ListedTool) bool {
+	var a struct {
+		ReadOnlyHint bool `json:"readOnlyHint"`
+	}
+	return json.Unmarshal(t.Annotations, &a) == nil && a.ReadOnlyHint
+}
+
+// derivePreset is the preset the selected modes amount to, if it equals what the client claimed;
+// anything else is custom. The client's claim is not trusted on its own: a server whose tools
+// are all read-only makes allow_all and approval identical, and an older client claims nothing.
+func derivePreset(claimed string, tools map[string]mcpgw.ToolGrant, live []mcpgw.ListedTool) string {
+	if claimed != db.PresetAllowAll && claimed != db.PresetApproval {
+		return db.PresetCustom
+	}
+	// Unreviewable tools are off in the picker under every preset; they do not count.
+	reviewable := make([]mcpgw.ListedTool, 0, len(live))
+	for _, t := range live {
+		if t.Unsafe == "" {
+			reviewable = append(reviewable, t)
+		}
+	}
+	live = reviewable
+	if len(live) == 0 || len(tools) != len(live) {
+		return db.PresetCustom
+	}
+	for _, t := range live {
+		want := mcpgw.ModeAllow
+		if claimed == db.PresetApproval && !readOnlyHint(t) {
+			want = mcpgw.ModePropose
+		}
+		if tg, ok := tools[t.Name]; !ok || tg.Mode != want {
+			return db.PresetCustom
+		}
+	}
+	return claimed
+}
+
+// storeDefinitions records the listed tools' definitions by hash (mcp_tool_definitions), so a
+// later change can show exactly the text the person confirmed. Best effort.
+func storeDefinitions(ctx context.Context, pool *pgxpool.Pool, live []mcpgw.ListedTool) {
+	if pool == nil {
+		return
+	}
+	for _, t := range live {
+		canon, hash := mcpgw.CanonicalTool(t.Name, t.Description, t.InputSchema)
+		unsafe := mcpgw.ClassifyDefinition(canon)
+		d := db.ToolDefinition{Hash: hash, Name: t.Name, Canonical: string(canon), Size: len(canon), Unsafe: unsafe}
+		if unsafe == db.UnsafeTooLarge {
+			d.Canonical = ""
+		}
+		if err := db.UpsertToolDefinition(ctx, pool, d); err != nil {
+			log.Printf("mcp start: store definition: %v", err)
+			return
+		}
+	}
+}
+
+// listedSafe reports whether the live definition of name can be pinned: listed once (ListTools
+// drops duplicated names) and reviewable (ListToolsComplete classifies each tool).
+func listedSafe(listed []mcpgw.ListedTool, name string) bool {
+	for _, t := range listed {
+		if t.Name == name {
+			return t.Unsafe == ""
+		}
+	}
+	return false
+}
+
 // mcpStartConfig is everything a session start needs to attach a grant.
 type mcpStartConfig struct {
 	Hasher     liveToolHasher      // nil: the gateway is not running
@@ -377,6 +460,7 @@ func (a *API) SetMCPGateway(handle *MCPGatewayHandle, gatewayURL, coreURL, coreI
 	cfg := &mcpStartConfig{GatewayURL: strings.TrimRight(strings.TrimSpace(gatewayURL), "/")}
 	if handle != nil && handle.Gateway != nil {
 		cfg.Hasher = handle.Gateway
+		handle.Gateway.SetRefresher(a.hub)
 		if handle.Gateway.BoardConfigured() {
 			cfg.Board = handle.Gateway
 		}
@@ -411,6 +495,21 @@ func (dc *DaemonConn) CanMCPGateway() bool {
 	dc.liveMu.RLock()
 	defer dc.liveMu.RUnlock()
 	return dc.mcpGateway
+}
+
+// CanSessionTokenFile reports whether the daemon said, in its hello, that it
+// stores a re-issued session token (protocol.SessionToken) and answers it.
+func (dc *DaemonConn) CanSessionTokenFile() bool {
+	dc.liveMu.RLock()
+	defer dc.liveMu.RUnlock()
+	return dc.sessionTokenFile
+}
+
+// SetSessionTokenFile records the hello's session_token_file capability.
+func (dc *DaemonConn) SetSessionTokenFile(v bool) {
+	dc.liveMu.Lock()
+	dc.sessionTokenFile = v
+	dc.liveMu.Unlock()
 }
 
 // SetMCPGateway records the hello's mcp_gateway capability.
@@ -460,7 +559,8 @@ type grantTarget struct {
 const (
 	msgMCPHumanOnly      = "MCP connections can only be attached by a signed-in person, not by an agent token or the runner key"
 	msgMCPSignIn         = "your sign-in is no longer valid for MCP connections: sign in again and retry"
-	msgMCPEngine         = "MCP connections work only with the claude engine"
+	msgMCPEngine         = "MCP connections work only with the claude or codex engine"
+	msgCodexRestrictOld  = "this daemon does not report codex_restricted: update it to run a Codex MCP or unattended session"
 	msgMCPKind           = "MCP connections need an agent session (kind \"agent\")"
 	msgMCPRuntime        = "MCP connections run only in a cluster pod or the Docker sandbox, never directly on the host"
 	msgMCPDaemonOld      = "this daemon does not report mcp_gateway: update it to start a session with MCP connections"
@@ -494,7 +594,7 @@ func (a *API) checkGrantTarget(t grantTarget) *APIError {
 	if a.dbPool == nil {
 		return apiErrorf(http.StatusServiceUnavailable, "%s", msgMCPNoDB)
 	}
-	if t.Engine != "" && t.Engine != "claude" {
+	if t.Engine != "" && t.Engine != "claude" && t.Engine != "codex" {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPEngine)
 	}
 	if t.Kind != "agent" {
@@ -508,6 +608,9 @@ func (a *API) checkGrantTarget(t grantTarget) *APIError {
 		}
 		if !t.Daemon.CanRestrictTools() {
 			return apiErrorf(http.StatusUnprocessableEntity, "%s", msgRestrictDaemonOld)
+		}
+		if t.Engine == "codex" && !t.Daemon.CanCodexRestricted() {
+			return apiErrorf(http.StatusUnprocessableEntity, "%s", msgCodexRestrictOld)
 		}
 	default:
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPRuntime)
@@ -525,13 +628,16 @@ func (a *API) checkGrantTarget(t grantTarget) *APIError {
 // checkRestrictTarget refuses a start that must be restricted (a cron session) but has no
 // placement that can restrict it: never the bare host, and on Docker only a daemon that says it
 // honours RestrictTools. A cluster pod is the same build as the server and always can.
-func checkRestrictTarget(runtime string, dc *DaemonConn) *APIError {
+func checkRestrictTarget(runtime string, dc *DaemonConn, engine ...string) *APIError {
 	switch runtime {
 	case runnerRuntimeCluster:
 		return nil
 	case runnerRuntimeDocker:
 		if dc == nil || !dc.CanRestrictTools() {
 			return apiErrorf(http.StatusUnprocessableEntity, "%s", msgRestrictDaemonOld)
+		}
+		if len(engine) > 0 && engine[0] == "codex" && !dc.CanCodexRestricted() {
+			return apiErrorf(http.StatusUnprocessableEntity, "%s", msgCodexRestrictOld)
 		}
 		return nil
 	}
@@ -560,72 +666,131 @@ func (a *API) resolveGrant(ctx context.Context, who grantRequester, sel []MCPSel
 	return a.resolveGrantProof(ctx, mcpgw.Proof{AccountID: who.Account, SessionID: who.Sid}, sel, t)
 }
 
-// resolveGrantProof is resolveGrant once the requester has been judged and the proof chosen: a
-// signed-in person's login session (resolveGrant) or a cron's token (the scheduler, cronstart.go).
-// The selection must be non-empty.
+// resolveGrantProof is resolveGrantProofOpts without re-pinning: a launch and the cron form
+// refuse a changed tool (the picker is right there).
 func (a *API) resolveGrantProof(ctx context.Context, proof mcpgw.Proof, sel []MCPSelection, t grantTarget) (*ResolvedGrant, *APIError) {
+	g, _, apiErr := a.resolveGrantProofOpts(ctx, proof, sel, t, false)
+	return g, apiErr
+}
+
+// resolveGrantProofOpts is resolveGrant once the requester has been judged and the proof chosen: a
+// signed-in person's login session (resolveGrant) or a cron's token (the scheduler, cronstart.go).
+// The selection must be non-empty. With repin (the scheduler) a tool whose definition changed is
+// re-pinned to the live one under a connection's auto_accept policy, and returned; otherwise the
+// change is a 409.
+func (a *API) resolveGrantProofOpts(ctx context.Context, proof mcpgw.Proof, sel []MCPSelection, t grantTarget, repin bool) (*ResolvedGrant, []repinnedTool, *APIError) {
 	if apiErr := a.checkGrantTarget(t); apiErr != nil {
-		return nil, apiErr
+		return nil, nil, apiErr
 	}
 	cfg := a.hub.mcpStart.get()
 	if cfg.Core == nil {
-		return nil, apiErrorf(http.StatusServiceUnavailable, "%s", msgMCPNoCore)
+		return nil, nil, apiErrorf(http.StatusServiceUnavailable, "%s", msgMCPNoCore)
 	}
 	if len(sel) > maxMCPSelections {
-		return nil, apiErrorf(http.StatusBadRequest, "at most %d MCP connections per session", maxMCPSelections)
+		return nil, nil, apiErrorf(http.StatusBadRequest, "at most %d MCP connections per session", maxMCPSelections)
 	}
 	conns, err := cfg.Core.ListConnections(ctx, proof)
 	switch {
 	case errors.Is(err, ErrMCPProofInvalid):
-		return nil, apiErrorCause(http.StatusUnauthorized, ErrMCPProofInvalid, "%s", msgMCPSignIn)
+		return nil, nil, apiErrorCause(http.StatusUnauthorized, ErrMCPProofInvalid, "%s", msgMCPSignIn)
 	case errors.Is(err, ErrMCPCoreOutdated):
-		return nil, apiErrorf(http.StatusServiceUnavailable, "%s", ErrMCPCoreOutdated.Error())
+		return nil, nil, apiErrorf(http.StatusServiceUnavailable, "%s", ErrMCPCoreOutdated.Error())
 	case err != nil:
 		log.Printf("mcp start: list connections: %v", err)
-		return nil, apiErrorf(http.StatusServiceUnavailable, "could not read your MCP connections from blerg-core")
+		return nil, nil, apiErrorf(http.StatusServiceUnavailable, "could not read your MCP connections from blerg-core")
 	}
 	byID := make(map[string]MCPConnection, len(conns))
 	for _, c := range conns {
 		byID[c.ID] = c
 	}
 	grant := &ResolvedGrant{AccountID: proof.AccountID, Proof: proof}
+	var repinned []repinnedTool
 	seen := map[string]bool{}
 	for _, s := range sel {
 		c, ok := byID[s.Connection]
 		if s.Connection == "" || !ok {
 			// Someone else's connection and one that does not exist look the same.
-			return nil, apiErrorf(http.StatusNotFound, "%s", msgMCPNotFound)
+			return nil, nil, apiErrorf(http.StatusNotFound, "%s", msgMCPNotFound)
 		}
 		if seen[c.ID] {
-			return nil, apiErrorf(http.StatusBadRequest, "connection %q is selected twice", c.Name)
+			return nil, nil, apiErrorf(http.StatusBadRequest, "connection %q is selected twice", c.Name)
 		}
 		seen[c.ID] = true
 		if c.Status != "ok" {
-			return nil, apiErrorf(http.StatusUnprocessableEntity, "connection %q cannot be used now (status %q): fix it in settings first", c.Name, c.Status)
+			return nil, nil, apiErrorf(http.StatusUnprocessableEntity, "connection %q cannot be used now (status %q): fix it in settings first", c.Name, c.Status)
 		}
 		if !mcpgw.ValidConnectionName(c.Name) {
-			return nil, apiErrorf(http.StatusUnprocessableEntity, "connection %q has a name the gateway cannot serve", c.Name)
+			return nil, nil, apiErrorf(http.StatusUnprocessableEntity, "connection %q has a name the gateway cannot serve", c.Name)
 		}
 		tools, apiErr := selectedTools(c, s)
 		if apiErr != nil {
-			return nil, apiErr
+			return nil, nil, apiErr
 		}
-		live, err := cfg.Hasher.LiveToolHashes(ctx, proof, c.ID, c.URL)
-		switch {
-		case errors.Is(err, mcpgw.ErrConnectionGone):
-			return nil, apiErrorf(http.StatusNotFound, "%s", msgMCPNotFound)
-		case err != nil:
-			return nil, apiErrorf(http.StatusBadGateway, "could not list the tools of connection %q: %v", c.Name, err)
-		}
-		for name, tg := range tools {
-			if h := live[name]; h == "" || h != tg.Hash {
-				return nil, apiErrorf(http.StatusConflict,
-					"tool %q of connection %q changed, or is not offered any more: open the tool picker and confirm it again", name, c.Name)
+		var listed []mcpgw.ListedTool
+		live := map[string]string{}
+		complete := false
+		if lister, ok := cfg.Hasher.(liveToolListerComplete); ok {
+			var err error
+			listed, complete, err = lister.ListToolsComplete(ctx, proof, c.ID, c.URL)
+			switch {
+			case errors.Is(err, mcpgw.ErrConnectionGone):
+				return nil, nil, apiErrorf(http.StatusNotFound, "%s", msgMCPNotFound)
+			case err != nil:
+				return nil, nil, apiErrorf(http.StatusBadGateway, "could not list the tools of connection %q: %v", c.Name, err)
+			}
+			for _, lt := range listed {
+				live[lt.Name] = lt.Hash
+			}
+			storeDefinitions(ctx, a.dbPool, listed)
+		} else {
+			var err error
+			live, err = cfg.Hasher.LiveToolHashes(ctx, proof, c.ID, c.URL)
+			switch {
+			case errors.Is(err, mcpgw.ErrConnectionGone):
+				return nil, nil, apiErrorf(http.StatusNotFound, "%s", msgMCPNotFound)
+			case err != nil:
+				return nil, nil, apiErrorf(http.StatusBadGateway, "could not list the tools of connection %q: %v", c.Name, err)
 			}
 		}
-		grant.Connections = append(grant.Connections, mcpgw.GrantSpec{ConnectionID: c.ID, Name: c.Name, URL: c.URL, Tools: tools})
+		for name, tg := range tools {
+			h := live[name]
+			if h != "" && h == tg.Hash {
+				if listed != nil && !listedSafe(listed, name) {
+					return nil, nil, apiErrorf(http.StatusUnprocessableEntity,
+						"tool %q of connection %q has a definition that cannot be reviewed (hidden characters, or too large), so it cannot be selected", name, c.Name)
+				}
+				continue
+			}
+			if repin && h != "" && c.PinPolicy == mcpgw.PinPolicyAutoAccept && listedSafe(listed, name) {
+				// The scheduler, under auto_accept: accept the live definition for this run.
+				repinned = append(repinned, repinnedTool{ConnectionID: c.ID, ConnectionName: c.Name, Tool: name, OldHash: tg.Hash, NewHash: h, Mode: tg.Mode})
+				tg.Hash = h
+				tools[name] = tg
+				continue
+			}
+			if repin {
+				return nil, nil, apiErrorf(http.StatusConflict,
+					"tool %q of connection %q changed, or is not offered any more: edit the cron's tools in the cron form, or set the connection's Definition changes to Accept automatically in Settings", name, c.Name)
+			}
+			return nil, nil, apiErrorf(http.StatusConflict,
+				"tool %q of connection %q changed, or is not offered any more: open the tool picker and confirm it again", name, c.Name)
+		}
+		spec := mcpgw.GrantSpec{ConnectionID: c.ID, Name: c.Name, URL: c.URL, Tools: tools, Preset: db.PresetCustom}
+		if s.Tools != nil && listed != nil && !repin {
+			// A cron's selection is always custom: it never gains tools (spec 7), whatever a
+			// stored body claims.
+			spec.Preset = derivePreset(s.Preset, tools, listed)
+		}
+		if listed != nil && complete {
+			spec.KnownTools = make([]string, 0, len(listed))
+			for _, lt := range listed {
+				spec.KnownTools = append(spec.KnownTools, lt.Name)
+			}
+			sort.Strings(spec.KnownTools)
+		}
+		grant.Connections = append(grant.Connections, spec)
 	}
-	return grant, nil
+	return grant, repinned, nil
 }
 
 // mcpProposeAllowed gates the `propose` tool mode. Proposals (spec 9) exist: the gateway freezes a

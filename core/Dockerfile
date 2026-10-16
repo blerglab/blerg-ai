@@ -7,7 +7,12 @@
 FROM golang:1.25@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 AS build
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 go build -o /blerg-core ./core/cmd/blerg-core
+# The release version is the repository's VERSION file; the commit is passed in (the build
+# context is a copy, so `git rev-parse` cannot run here). landing.Release/Commit report them.
+ARG COMMIT=
+RUN CGO_ENABLED=0 go build \
+    -ldflags "-X github.com/blerglab/blerg-ai/core/internal/landing.release=$(tr -d '[:space:]' < VERSION) -X github.com/blerglab/blerg-ai/core/internal/landing.commit=${COMMIT}" \
+    -o /blerg-core ./core/cmd/blerg-core
 
 # Stage 2: SPA (core/web — the login page, /app and /settings).
 #

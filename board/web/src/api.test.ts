@@ -17,7 +17,8 @@ vi.mock("./authClient", async (importOriginal) => {
 
 import { consumeAccessTokenFromFragment } from "./authClient";
 import { api, ApiError, boardSocket } from "./api";
-import { clearRefreshAttempted } from "./refreshGuard";
+import { clearRefreshAttempted, refreshReturnUrl } from "./refreshGuard";
+import { signInStuck } from "./signIn";
 
 describe("api", () => {
   beforeEach(() => {
@@ -58,7 +59,7 @@ describe("api", () => {
 
     await expect(api("/api/boards")).rejects.toBeInstanceOf(ApiError);
 
-    expect(redirectToRefresh).toHaveBeenCalledWith(location.href);
+    expect(redirectToRefresh).toHaveBeenCalledWith(refreshReturnUrl());
   });
 
   it("renews the token quietly on a 401 and repeats the request once with the new one, with no redirect", async () => {
@@ -120,6 +121,7 @@ describe("api", () => {
     // navigate again, or a broken refresh loops the tab forever.
     await expect(api("/api/boards")).rejects.toBeInstanceOf(ApiError);
     expect(redirectToRefresh).toHaveBeenCalledTimes(1);
+    expect(signInStuck()).toBe(true); // and the page says so
   });
 });
 

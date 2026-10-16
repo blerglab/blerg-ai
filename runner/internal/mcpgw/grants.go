@@ -35,6 +35,11 @@ type GrantSpec struct {
 	URL          string               // the connection URL at grant time (url_snapshot)
 	Tools        map[string]ToolGrant // only allow/propose entries matter; the rest are off
 	CallBudget   int                  // 0: DefaultCallBudget
+	// Preset is the launch-sheet preset that produced Tools (db.PresetAllowAll, db.PresetApproval,
+	// or db.PresetCustom when none); KnownTools is every tool name the launch listing contained
+	// (nil: unknown, never record a new tool). Both are stored on the grant (migration 039).
+	Preset     string
+	KnownTools []string
 	// Builtin marks a connection the runner provides (BuiltinBoard); BuiltinRef is what it needs
 	// (the target board id). Use BoardGrantSpec; buildGrants fixes the connection id and tools.
 	Builtin    string
@@ -137,6 +142,7 @@ func buildGrants(sessionID, accountID string, proof Proof, specs []GrantSpec) ([
 			SessionID: sessionID, ConnectionID: sp.ConnectionID, Name: sp.Name, AccountID: accountID,
 			Tools: tools, URLSnapshot: sp.URL, ProofKind: proof.Kind(), ProofValue: proof.Value(),
 			TokenHash: hashToken(raw), CallBudget: budget, Builtin: sp.Builtin, BuiltinRef: sp.BuiltinRef,
+			Preset: sp.Preset, KnownTools: sp.KnownTools,
 		})
 	}
 	return rows, tokens, nil

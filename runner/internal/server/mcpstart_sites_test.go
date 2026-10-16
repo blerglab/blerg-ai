@@ -235,7 +235,7 @@ func TestPostSessionsMCPRuntimeRefusals(t *testing.T) {
 		body map[string]any
 		want string
 	}{
-		{map[string]any{"repo": "acme/widget", "runtime": "cluster", "kind": "agent", "engine": "codex"}, msgMCPEngine},
+		{map[string]any{"repo": "acme/widget", "runtime": "cluster", "kind": "agent", "engine": "hermes"}, msgMCPEngine},
 		{map[string]any{"daemon_id": fx.dc.ID, "repo": "app", "runtime": "docker", "kind": ""}, msgMCPKind},
 		{map[string]any{"daemon_id": fx.dc.ID, "repo": "app", "runtime": "docker", "kind": "tmux"}, msgMCPKind},
 	} {
@@ -309,10 +309,11 @@ func TestSpawnSitesAreEnumerated(t *testing.T) {
 		"startClusterNoRepo":        {"resolveGrant", "attachGrant"},
 		"startRunnerSession":        {"checkGrant", "attachGrant"},
 		"startBoardSessionOnDaemon": {"checkGrant", "attachGrant"},
-		"resumeClusterSession":      {"grantResumeProblem", "reissueGrants"},
+		"resumeClusterSessionMode":  {"grantResumeProblem", "reissueGrants"},
 	}
 	// Paths that never carry a grant, by construction: nothing they decode names one.
-	grantless := map[string]bool{"HandlePostAssist": true, "forwardBrowserSpawn": true, "CreateSessionJob": true}
+	// reclaimNativeHistory builds a label/fencing spec solely to remove an ended writer; it never starts an engine.
+	grantless := map[string]bool{"HandlePostAssist": true, "forwardBrowserSpawn": true, "CreateSessionJob": true, "reclaimNativeHistory": true}
 
 	var found []string
 	for name, info := range funcs {
@@ -621,6 +622,7 @@ func TestResumeReissuesGrantsAndRefusesOthers(t *testing.T) {
 	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET status = 'disconnected' WHERE id = $1`, sid); err != nil {
 		t.Fatal(err)
 	}
+	fx.k8s.finishSessionJob(sid)
 	oldGrant := fx.grants(sid)[0]
 
 	// Refused: another account, the launcher without a login session, no account at all.
@@ -739,6 +741,7 @@ func TestResumeWithoutGrantsIsUnchanged(t *testing.T) {
 	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET status = 'disconnected' WHERE id = $1`, sid); err != nil {
 		t.Fatal(err)
 	}
+	fx.k8s.finishSessionJob(sid)
 	resumeClusterSession(ctx, fx.hub, fx.pool, sid, "carry on", "someone-else", "sid-9") // resumes on the operator credentials, as ever
 	if len(fx.k8s.created) != 2 {
 		t.Fatalf("%d Jobs, want 2", len(fx.k8s.created))

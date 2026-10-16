@@ -5,6 +5,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import ChatView from './ChatView'
 import type { DescribeUserMessage } from './cards/EventCards'
 import { createFakeTransport } from '../test/fakeTransport'
+import { useTranscriptStore } from '../hooks/useTranscriptStore'
 import { SESSION, ev, meta, resetChatState, seed } from '../test/chat'
 
 const live = meta({ status: 'idle' })
@@ -52,6 +53,28 @@ describe('ChatView: describeUserMessage', () => {
     render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={live}
       describeUserMessage={(_e, p) => (p.source === 'chat' ? { brief: 'kickoff' } : null)} />)
     expect(screen.getByTestId('message-brief').textContent).toMatch(/^.*kickoff · /)
+  })
+
+  it('tells the hook which message is the session’s first, and only once nothing older is left', () => {
+    const seen: Array<[string, boolean]> = []
+    const look: DescribeUserMessage = (e, _p, ctx) => {
+      seen.push([e.client_event_id, ctx.first])
+      return ctx.first ? { brief: true } : null
+    }
+    render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={live} describeUserMessage={look} />)
+    expect(screen.getAllByTestId('message-brief')).toHaveLength(1)
+    expect(screen.getByTestId('message-brief').textContent).toMatch(/session brief/)
+    expect(seen.filter(([, first]) => first).map(([id]) => id)).toEqual(['e1'])
+  })
+
+  it('the first message held is not the first while older ones remain on the server', () => {
+    resetChatState()
+    seed(ev({ seq: 500, payload: { text: 'a later message', source: 'chat' } }))
+    useTranscriptStore.getState().ingestReplayDone(SESSION, { lastSeq: 500, hasMore: false, older: true, hasOlder: true, firstSeq: 500 })
+    render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={live}
+      describeUserMessage={(_e, _p, ctx) => (ctx.first ? { brief: true } : null)} />)
+    expect(screen.queryByTestId('message-brief')).toBeNull()
+    expect(screen.getByText('a later message')).toBeInTheDocument()
   })
 
   it('without the hook every user message is the person’s, as before', () => {

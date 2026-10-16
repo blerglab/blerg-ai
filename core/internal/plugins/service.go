@@ -36,6 +36,11 @@ type Engine struct {
 
 // registry is the closed set of engines that may register plugins.
 var registry = map[string]Engine{
+	pluginspec.EngineCodex: {
+		ID:                 pluginspec.EngineCodex,
+		Validate:           pluginspec.ValidateCodex,
+		MarketplaceAllowed: func(a pluginspec.Allowlist, s string) bool { return a.Allows(s) },
+	},
 	pluginspec.EngineClaude: {
 		ID:                 pluginspec.EngineClaude,
 		Validate:           pluginspec.ValidateClaude,

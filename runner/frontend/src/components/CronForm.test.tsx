@@ -35,6 +35,7 @@ beforeEach(() => {
     }
     if (url === '/api/mcp/connections') return ok({ connections: CONNS })
     if (url === '/api/mcp/connections/c1/tools') return ok({ tools: TOOLS })
+    if (url === '/api/cluster/status') return ok({ configured: false })
     if (url === '/api/daemons') return ok([{ id: 'd1', name: 'workstation', mode: 'local', repos_root: '/r', status: 'connected' }])
     if (url === '/api/boards') return ok([{ id: 'b1', name: 'Focus', description: null, repos: [], default_daemon_id: null, created_at: '', updated_at: '' }])
     if (url.startsWith('/api/models/')) return ok({ models: [], source: 'none' })
@@ -68,6 +69,28 @@ function existing(over: Partial<CronInfo> = {}): CronInfo {
 }
 
 describe('CronForm', () => {
+  it('creates and edits Codex crons using the selected engine model list', async () => {
+    await renderForm(existing({ engine: 'codex', model: 'fixture-codex', effort: 'high' }))
+    expect(screen.getByLabelText('Engine')).toHaveValue('codex')
+    save()
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0].body.engine).toBe('codex')
+    expect(posted[0].body.model).toBe('fixture-codex')
+    expect(apiFetch.mock.calls.some(([url]) => String(url).startsWith('/api/models/codex'))).toBe(true)
+  })
+  it.each(['cluster', 'auto'] as const)('uses the cluster catalog for %s and saves Codex model and effort', async runtime => {
+    const previous = apiFetch.getMockImplementation()!
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => url === '/api/models/codex?runtime=cluster'
+      ? ok({ source: 'live', models: [{ id: 'fixture-codex', name: 'Fixture Codex', section: 'main', efforts: ['low', 'ultra'], default_effort: 'low' }] })
+      : url === '/api/cluster/status' ? ok({ configured: true }) : previous(url, init))
+    await renderForm(existing({ engine: 'codex', runtime, daemon_id: null }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Fixture Codex' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'ultra' }))
+    save()
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0].body).toMatchObject({ engine: 'codex', runtime, daemon_id: '', model: 'fixture-codex', effort: 'ultra' })
+    expect(apiFetch.mock.calls.some(([url]) => String(url).includes('daemon_id='))).toBe(false)
+  })
   it('gives every control of the form an id and a label', async () => {
     await renderForm()
     fireEvent.click(screen.getByRole('radio', { name: /advanced/i }))

@@ -56,9 +56,9 @@ describe('SessionList — where sessions run', () => {
     renderList()
     expect(screen.queryByText(/runner-1f3a9c/)).not.toBeInTheDocument()
     expect(screen.queryByText(/runner-b/)).not.toBeInTheDocument()
-    expect(screen.getByTestId('daemon-pill-d1')).toHaveTextContent('workstation')
-    // A lone workstation daemon is one place to run: no focus pills.
-    expect(screen.queryByTestId('focus-pill-row')).not.toBeInTheDocument()
+    expect(screen.getByTestId('focus-pill-d1')).toHaveTextContent('workstation')
+    // A lone workstation daemon is one place to run: nothing to filter, so no All.
+    expect(screen.queryByTestId('focus-pill-all')).not.toBeInTheDocument()
   })
 
   it('shows only the install hint when nothing is configured, even with pods in the store', () => {
@@ -75,7 +75,9 @@ describe('SessionList — where sessions run', () => {
       makeSession({ id: 'c2', runtime: 'cluster', daemon_id: 'runner-y', status: 'idle' }),
     ])
     renderList()
-    expect(await screen.findByTestId('cluster-pill')).toHaveTextContent('Cluster · 2/5 running')
+    const pill = await screen.findByTestId('focus-pill-cluster')
+    expect(pill).toHaveTextContent('Cluster 2/5')
+    expect(pill.title).toContain('2 of 5 cluster sessions running')
     expect(screen.queryByText(/No daemon connected/)).not.toBeInTheDocument()
   })
 
@@ -88,14 +90,14 @@ describe('SessionList — where sessions run', () => {
       makeSession({ id: 'h1', runtime: 'daemon', daemon_id: 'd1', status: 'running' }),
     ])
     renderList()
-    expect(await screen.findByTestId('cluster-pill')).toHaveTextContent('Cluster · 2/4 running')
+    expect(await screen.findByTestId('focus-pill-cluster')).toHaveTextContent('Cluster 2/4')
   })
 
-  it('the Cluster pill links to the Cluster page', async () => {
+  it('the Cluster pill links to the Cluster page when it is the only place (nothing to filter)', async () => {
     stubCluster({ configured: true, max_sessions: 5, active_sessions: 0 })
     seed([], [])
     renderList()
-    fireEvent.click(await screen.findByTestId('cluster-pill'))
+    fireEvent.click(await screen.findByTestId('focus-pill-cluster'))
     expect(screen.getByTestId('cluster-page')).toBeInTheDocument()
   })
 
@@ -107,21 +109,55 @@ describe('SessionList — where sessions run', () => {
       pod,
     ], [])
     renderList()
-    await screen.findByTestId('cluster-pill')
+    await screen.findByTestId('focus-pill-cluster')
     const strip = screen.getByTestId('runtime-strip')
-    expect(within(strip).getByTestId('daemon-pill-d1')).toHaveTextContent('workstation')
-    expect(within(strip).getByTestId('daemon-pill-d1')).toHaveTextContent('local')
+    expect(within(strip).getByTestId('focus-pill-d1')).toHaveTextContent('workstation')
+    expect(within(strip).getByTestId('focus-pill-d1').title).toContain('local')
+    // A version is shown only when it differs from the server's: then it warns.
     expect(within(strip).getByText('old')).toHaveStyle({ color: 'var(--blaze)' })
-    expect(within(strip).getAllByText('test')[0]).not.toHaveStyle({ color: 'var(--blaze)' })
+    expect(within(strip).queryByText('test')).not.toBeInTheDocument()
     expect(within(strip).queryByText(/runner-/)).not.toBeInTheDocument()
+  })
+
+  it('puts All, the cluster and every machine in ONE row of pills that show status and filter, with no separate label or focus row', async () => {
+    stubCluster({ configured: true, max_sessions: 5, active_sessions: 1 })
+    seed([ws, makeDaemon({ id: 'd2', name: 'laptop', status: 'disconnected' }), pod], [])
+    renderList()
+    await screen.findByTestId('focus-pill-cluster')
+    const row = screen.getByTestId('place-pills')
+    expect(row).toHaveAttribute('aria-label', 'Where sessions run')
+    expect([...row.children].map(c => c.getAttribute('data-testid'))).toEqual(['focus-pill-all', 'focus-pill-cluster', 'focus-pill-d1', 'focus-pill-d2'])
+    expect(screen.queryByText(/where sessions run/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('focus-pill-row')).not.toBeInTheDocument()
+    expect(screen.getByTestId('focus-pill-all')).toHaveAttribute('aria-pressed', 'true')
+    // A machine that is away shows its muted dot and is not a filter.
+    expect(screen.getByTestId('focus-pill-d2')).toBeDisabled()
+    fireEvent.click(screen.getByTestId('focus-pill-d1'))
+    expect(screen.getByTestId('focus-pill-d1')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('focus-pill-all')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('shows a meter row per reporting provider under the pills, and no strip of meters when none reports', () => {
+    seed([ws], [])
+    const { unmount } = renderList()
+    expect(screen.queryByTestId('usage-meters')).toBeNull()
+    unmount()
+    seed([{ ...ws, usage_limits: [{ provider: 'codex', windows: [{ id: '5h', used_percent: 75 }, { id: '7d', used_percent: 12 }] }] }, pod], [])
+    renderList()
+    const strip = screen.getByTestId('runtime-strip')
+    const meters = within(strip).getByTestId('usage-meters')
+    // Directly beneath the row of pills.
+    expect(screen.getByTestId('place-pills').nextElementSibling).toBe(meters)
+    expect(within(meters).getByTestId('usage-row-codex')).toHaveTextContent('Codex5h75%week12%')
+    expect(within(meters).getByTestId('usage-window-5h')).toHaveClass('usage-meter--warning')
   })
 
   it('the strip wraps instead of scrolling sideways', () => {
     seed([ws], [])
     renderList()
-    const strip = screen.getByTestId('runtime-strip')
-    expect(strip.style.flexWrap).toBe('wrap')
-    expect(strip.style.overflowX).toBe('')
+    const row = screen.getByTestId('place-pills')
+    expect(row.style.flexWrap).toBe('wrap')
+    expect(row.style.overflowX).toBe('')
   })
 })
 
@@ -140,19 +176,17 @@ describe('SessionList — focus across runtimes', () => {
     vi.unstubAllGlobals()
   })
 
-  it('groups by repo only: one group per repo across runtimes, each card keeping its runtime chip', async () => {
+  it('lists every runtime\'s sessions in one list, each card keeping its repo line and runtime chip', async () => {
     seed([ws, pod], [widgetHost, widgetCluster, otherCluster])
     renderList()
-    await screen.findByTestId('cluster-pill')
-    expect(screen.getAllByText('widget')).toHaveLength(1)
-    expect(screen.getAllByText('backend')).toHaveLength(1)
+    await screen.findByTestId('focus-pill-cluster')
+    expect(screen.getAllByTestId('session-repo').map(r => r.textContent).sort()).toEqual(['backend', 'widget', 'widget'])
     // No per-daemon section header is left behind.
     expect(screen.queryByText('workstation', { selector: 'span[style*="uppercase"]' })).not.toBeInTheDocument()
     expect(screen.getByText('Widget on host')).toBeInTheDocument()
     expect(screen.getByText('Widget on cluster')).toBeInTheDocument()
     const chips = screen.getAllByTestId('runtime-chip').map(c => c.textContent)
     expect(chips.sort()).toEqual(['Cluster', 'Cluster', 'Host'])
-    expect(screen.queryByTestId('cluster-section')).not.toBeInTheDocument()
   })
 
   it('offers All / Cluster / each workstation daemon when there is more than one place', async () => {
@@ -177,7 +211,9 @@ describe('SessionList — focus across runtimes', () => {
   it('a daemon focus shows that daemon\'s sessions and not the cluster ones', async () => {
     seed([ws, pod], [widgetHost, widgetCluster, otherCluster])
     renderList()
-    fireEvent.click(await screen.findByTestId('focus-pill-d1'))
+    // The daemon's pill is a filter once the cluster makes it one of two places.
+    await screen.findByTestId('focus-pill-all')
+    fireEvent.click(screen.getByTestId('focus-pill-d1'))
     expect(screen.getByText('Widget on host')).toBeInTheDocument()
     expect(screen.queryByText('Widget on cluster')).not.toBeInTheDocument()
     expect(screen.queryByText('Backend on cluster')).not.toBeInTheDocument()
@@ -187,7 +223,7 @@ describe('SessionList — focus across runtimes', () => {
     setFocus('cluster')
     seed([ws], [widgetHost, widgetCluster])
     renderList()
-    await screen.findByTestId('cluster-pill')
+    await screen.findByTestId('focus-pill-cluster')
     expect(screen.queryByText('Widget on host')).not.toBeInTheDocument()
     expect(screen.getByText('Widget on cluster')).toBeInTheDocument()
   })
@@ -205,7 +241,7 @@ describe('SessionList — focus across runtimes', () => {
     setFocus('vanished')
     seed([ws], [widgetHost, widgetCluster])
     renderList()
-    await screen.findByTestId('cluster-pill')
+    await screen.findByTestId('focus-pill-cluster')
     expect(screen.getByText('Widget on host')).toBeInTheDocument()
     expect(screen.getByText('Widget on cluster')).toBeInTheDocument()
   })
@@ -214,7 +250,7 @@ describe('SessionList — focus across runtimes', () => {
     setFocus('cluster')
     seed([ws], [widgetHost, widgetCluster])
     renderList()
-    await screen.findByTestId('cluster-pill')
+    await screen.findByTestId('focus-pill-cluster')
     fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'host' } })
     expect(screen.getByText('Widget on host')).toBeInTheDocument()
   })

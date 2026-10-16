@@ -10,7 +10,9 @@ import "./styles.css";
 consumeAccessTokenFromFragment();
 // A fresh token means the refresh actually worked — clear the guard so a
 // later, unrelated 401 (e.g. after this token itself expires) can trigger
-// another refresh instead of being silently swallowed by a stale guard.
+// another refresh instead of being silently swallowed by a stale guard. (A flag from an EARLIER
+// load was already dropped by refreshGuard.ts's beginPageLoad, unless this load is the tokenless
+// return leg from /auth/refresh.)
 if (getAccessToken()) clearRefreshAttempted();
 // Keep the token fresh in the background so a request after ten minutes does not have to send the
 // page away to renew it.

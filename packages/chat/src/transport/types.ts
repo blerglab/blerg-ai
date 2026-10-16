@@ -44,6 +44,10 @@ export interface SubscribeHandlers {
   /** A persisted event (replayed or live). The same event can arrive twice around a reconnect;
    *  the transcript dedupes by client_event_id. */
   onEvent: (ev: AgentEvent) => void
+  /** Optional: the events of one replay page (and any live ones that arrived while it did), in
+   *  one call at the page's end, ahead of its onReplayDone — one transcript update per page rather
+   *  than one per event. Absent: a transport hands them to onEvent one by one as before. */
+  onEvents?: (events: AgentEvent[]) => void
   /** A typing delta: the assistant's text so far this turn, never persisted. */
   onStreaming: (text: string) => void
   onReplayDone: (done: ReplayDone) => void
@@ -51,6 +55,14 @@ export interface SubscribeHandlers {
   /** The link to the session came up or went down. Down locks the composer; up means the
    *  transport has resubscribed from the last seq it saw. */
   onConnection: (connected: boolean) => void
+  /** Optional: the server says one of the session's asks was answered or closed (its messages
+   *  API id, and the answer: '' when it closed without one, an expiry). */
+  onAskClosed?: (messageId: string, answer: string) => void
+  /** Optional: the transport gave up replaying forward from what is held (too far behind) and is
+   *  loading the transcript again from its end, as on a first visit. Drop the events held; the
+   *  newest page follows with an `older` onReplayDone, and older pages come through loadOlder.
+   *  Absent: the transport replays forward however far it is. */
+  onReset?: () => void
 }
 
 export interface SubscribeOptions {
@@ -82,6 +94,15 @@ export interface TransportFiles {
   ): Promise<UploadedFile>
 }
 
+/** What goes with a message beyond its text. */
+export interface SendOptions {
+  /** The message's own id (its queued bubble's). */
+  clientId?: string
+  /** The message answers this open ask (its message_id): sent only by a transport with
+   *  answersAsks. */
+  answerTo?: string
+}
+
 export interface Transport {
   /** Replay then live. tail=true asks for the newest page first (how the runner opens a long
    *  transcript); onReplayDone carries hasMore/hasOlder/firstSeq/lastSeq/serverTime. Returns the
@@ -90,8 +111,10 @@ export interface Transport {
   /** The `limit` events just before `beforeSeq` (the next older page). */
   loadOlder(sessionId: string, beforeSeq: number, limit: number): Promise<OlderPage>
   session(sessionId: string): Promise<SessionMeta>
-  /** queued=false: not connected, nothing was sent (the text stays in the box). */
-  send(sessionId: string, text: string): Promise<{ queued: boolean }>
+  /** queued=false: not connected, nothing was sent (the text stays in the box). A transport that
+   *  can passes opts.clientId on (the daemon echoes it on the message's event, which is how its
+   *  queued bubble is matched); one that cannot ignores it and bubbles are matched by text. */
+  send(sessionId: string, text: string, opts?: SendOptions): Promise<{ queued: boolean }>
   /** Ends the session for good (the Stop in the start panel). */
   stop(sessionId: string): Promise<void>
   /** Optional: cuts the turn that is running short (the toolbar's Stop, Esc); the session goes on.
@@ -100,6 +123,10 @@ export interface Transport {
   /** Optional: the composer's /model and /effort. Either may be omitted to keep the current one. */
   setModel?(sessionId: string, model?: string, effort?: string): Promise<void>
   connected(): boolean
+  /** The transport passes SendOptions.answerTo on, so a reply goes to that ask, and a plain
+   *  message sent while one of the agent's asks is open answers it too (the runner's websocket
+   *  does both). Absent: an ask card has no reply box and points at the composer. */
+  answersAsks?: boolean
   /** Absent: ChatView shows no Files panel and no attach control. */
   files?: TransportFiles
 }

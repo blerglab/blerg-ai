@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import App from "./App";
 import * as authClient from "./authClient";
 
@@ -15,7 +15,7 @@ function fetchByUrl(me: Record<string, unknown> | null) {
     if (url === "/api/site") {
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ version: "v-test", board_url: "https://board.example.com", runner_url: "https://runner.example.com" }),
+        json: () => Promise.resolve({ version: "v-test", release: "0.2.0", commit: "510d0c0", board_url: "https://board.example.com", runner_url: "https://runner.example.com" }),
       });
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
@@ -93,6 +93,19 @@ describe("App / Home", () => {
     expect(screen.getByText("Go to sign in")).toHaveAttribute("href", "/login");
   });
 
+  it("clears both refresh-guard keys on Log out, so a login in this tab starts clean", async () => {
+    vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
+    vi.stubGlobal("fetch", fetchByUrl(alice));
+    sessionStorage.setItem("blerg_refresh_attempted", "1");
+    sessionStorage.setItem("blerg_refresh_attempts", JSON.stringify({ n: 3, since: Date.now() }));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Log out" }));
+
+    await waitFor(() => expect(sessionStorage.getItem("blerg_refresh_attempts")).toBeNull());
+    expect(sessionStorage.getItem("blerg_refresh_attempted")).toBeNull();
+  });
+
   it("renders the component tiles from /api/site with a live status chip", async () => {
     vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
     const fetchMock = fetchByUrl(alice);
@@ -104,6 +117,25 @@ describe("App / Home", () => {
     await waitFor(() => expect(board).toHaveAttribute("href", "https://board.example.com"));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("https://board.example.com/healthz", expect.anything()));
     await waitFor(() => expect(screen.getAllByText("Up").length).toBeGreaterThan(0));
+  });
+
+  it("shows the release version and commit in the footer", async () => {
+    vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
+    vi.stubGlobal("fetch", fetchByUrl(alice));
+    render(<App />);
+    const footer = await screen.findByText(/Blerg v0\.2\.0/);
+    expect(footer).toHaveTextContent("Blerg v0.2.0 · 510d0c0");
+    expect(footer).toHaveAttribute("title", expect.stringContaining("release 0.2.0"));
+  });
+
+  it("shows no version in the footer when /api/site fails", async () => {
+    vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
+    const ok = fetchByUrl(alice);
+    vi.stubGlobal("fetch", vi.fn((url: string) => (url === "/api/site" ? Promise.reject(new Error("down")) : ok(url))));
+    render(<App />);
+    await screen.findByText("/agents manifest");
+    await waitFor(() => expect(document.querySelector(".build-version")).toBeNull());
+    expect(screen.queryByText("…")).toBeNull();
   });
 
   it("links to settings and the change-password page when signed in", async () => {

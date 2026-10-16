@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-label="blerg[ai]">
+  <rect width="1280" height="640" fill="#0d1117"/>
+  <text x="640" y="290" text-anchor="middle" dominant-baseline="central"
+        font-family="ui-monospace, 'SF Mono', 'Cascadia Mono', 'Liberation Mono', monospace"
+        font-size="150" font-weight="500" textLength="800" lengthAdjust="spacingAndGlyphs"
+        fill="#e8ecef">blerg<tspan fill="#ff6a3d">[ai]</tspan></text>
+  <text x="640" y="420" text-anchor="middle" dominant-baseline="central"
+        font-family="ui-monospace, 'SF Mono', 'Cascadia Mono', 'Liberation Mono', monospace"
+        font-size="28" fill="#8b949e">Run coding agents on your own machine or cluster,</text>
+  <text x="640" y="462" text-anchor="middle" dominant-baseline="central"
+        font-family="ui-monospace, 'SF Mono', 'Cascadia Mono', 'Liberation Mono', monospace"
+        font-size="28" fill="#8b949e">under a login, a budget and a sandbox you control.</text>
+</svg>

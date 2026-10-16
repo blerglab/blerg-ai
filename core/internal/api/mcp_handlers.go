@@ -69,6 +69,7 @@ type mcpPatchRequest struct {
 	DefaultTools json.RawMessage `json:"default_tools"`
 	Secret       *string         `json:"secret"`
 	HeaderName   *string         `json:"header_name"`
+	PinPolicy    *string         `json:"pin_policy"`
 }
 
 type mcpListResponse struct {
@@ -186,12 +187,33 @@ func (d Deps) handlePatchMCPConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	c, err := d.MCPConnections.Patch(r.Context(), principal.Sub, r.PathValue("id"), mcpconn.PatchInput{
 		Name: body.Name, DefaultTools: body.DefaultTools, Secret: body.Secret, HeaderName: body.HeaderName,
+		PinPolicy: body.PinPolicy,
 	})
 	if err != nil {
 		writeMCPError(w, err)
 		return
 	}
 	writeJSON(w, viewMCPConnection(c))
+}
+
+// handleListMCPConnectionEvents is GET /api/mcp/connections/{id}/events: the settings changes of
+// one connection (a pin_policy flip), newest first. Another account's id is the same 404.
+func (d Deps) handleListMCPConnectionEvents(w http.ResponseWriter, r *http.Request) {
+	if d.MCPConnections == nil {
+		http.Error(w, "mcp connections unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	principal, ok := principalFromCtx(r.Context())
+	if !ok {
+		http.Error(w, "missing principal", http.StatusUnauthorized)
+		return
+	}
+	evs, err := d.MCPConnections.ListConnectionEvents(r.Context(), principal.Sub, r.PathValue("id"), 50)
+	if err != nil {
+		writeMCPError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"events": evs})
 }
 
 // handleDeleteMCPConnection is DELETE /api/mcp/connections/{id}. Another account's id is the same
@@ -237,6 +259,7 @@ type internalMCPConnection struct {
 	AuthKind     string          `json:"auth_kind"`
 	Status       string          `json:"status"`
 	DefaultTools json.RawMessage `json:"default_tools"`
+	PinPolicy    string          `json:"pin_policy"`
 }
 
 // newInternalMCPConnection is the runner-facing view of a connection (no secret, URL redacted).
@@ -244,6 +267,7 @@ func newInternalMCPConnection(c mcpconn.Connection) internalMCPConnection {
 	u, hidden := redactMCPURL(c.URL)
 	return internalMCPConnection{
 		ID: c.ID, Name: c.Name, URL: u, HasQuery: hidden, AuthKind: c.AuthKind, Status: c.Status, DefaultTools: c.DefaultTools,
+		PinPolicy: c.PinPolicy,
 	}
 }
 
@@ -262,6 +286,7 @@ type internalMCPTokenResponse struct {
 	HeaderName string     `json:"header_name,omitempty"`
 	Value      string     `json:"value,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	PinPolicy  string     `json:"pin_policy,omitempty"`
 }
 
 // internalMCPGate runs the checks shared by both internal routes: the internal key, service
@@ -377,5 +402,5 @@ func (d Deps) handleInternalMCPToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, internalMCPTokenResponse{URL: res.URL, HeaderName: res.HeaderName, Value: res.Value, ExpiresAt: res.ExpiresAt})
+	writeJSON(w, internalMCPTokenResponse{URL: res.URL, HeaderName: res.HeaderName, Value: res.Value, ExpiresAt: res.ExpiresAt, PinPolicy: res.PinPolicy})
 }

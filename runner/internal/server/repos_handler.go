@@ -1,6 +1,9 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strings"
@@ -61,7 +64,7 @@ func (a *API) HandleGetRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	repos := mergeHostedRepos(sources...)
 
-	daemons := a.hub.GetAllDaemons()
+	daemons := a.hub.GetHostDaemons()
 	checkedOut := make(map[string][]string)
 	for _, d := range daemons {
 		for _, folder := range d.CheckedOutRepos() {
@@ -135,7 +138,43 @@ func (a *API) HandleGetRepos(w http.ResponseWriter, r *http.Request) {
 		s := staleAt.UTC().Format(time.RFC3339)
 		resp.StaleAt = &s
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSONWithETag(w, r, resp)
+}
+
+// writeJSONWithETag answers 200 with v and an ETag naming its exact bytes, or
+// 304 with no body when the request's If-None-Match already names them. The
+// list names private repositories, so the browser is told to keep no copy
+// (no-store); the app keeps the last list itself, in this tab, and asks with
+// If-None-Match — an unchanged list then costs a header round trip.
+func writeJSONWithETag(w http.ResponseWriter, r *http.Request, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "encode response")
+		return
+	}
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "private, no-store")
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(append(body, '\n'))
+}
+
+// etagMatches reports whether an If-None-Match header names etag (weak
+// comparison, as RFC 9110 asks of If-None-Match; "*" matches any).
+func etagMatches(header, etag string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimPrefix(strings.TrimSpace(candidate), "W/")
+		if candidate == "*" || candidate == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // repoKey is a hosted repository's case-insensitive identity.

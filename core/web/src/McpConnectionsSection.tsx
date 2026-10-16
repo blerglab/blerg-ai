@@ -19,9 +19,14 @@ type Connection = {
   has_secret: boolean;
   status: string;
   oauth_issuer?: string;
+  pin_policy?: string;
   last_verified_at: string | null;
 };
 type ConnectionList = { connections: Connection[]; max: number };
+type ConnEvent = { id: number; action: string; from_value: string; to_value: string; created_at: string };
+const POLICY_LABEL: Record<string, string> = { strict: "Ask me", auto_accept: "Accept automatically" };
+const POLICY_HELP =
+  "Accept automatically trusts this server to change what an agent may do without asking you, and a changed description can steer the agent's use of your other connections and the session's own tools. Use it only for servers your organisation runs. Takes effect in running sessions within five minutes.";
 type AuthKind = "static" | "oauth" | "none";
 type Editing = { id: string; mode: "rename" | "secret" | "remove" };
 
@@ -149,6 +154,18 @@ function authLabel(c: Connection): string {
   return c.auth_kind;
 }
 
+// fetchEvents reads a connection's audit events; any failure just means none are shown.
+async function fetchEvents(id: string): Promise<ConnEvent[] | null> {
+  try {
+    const res = await apiFetch(`/api/mcp/connections/${id}/events`);
+    if (!res.ok) return null;
+    const body = (await res.json()) as { events?: ConnEvent[] };
+    return Array.isArray(body.events) ? body.events : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function McpConnectionsSection({ site }: { site?: Site | null }) {
   const [list, setList] = useState<ConnectionList | null>(null);
   const [loading, setLoading] = useState(true);
@@ -156,6 +173,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [events, setEvents] = useState<Record<string, ConnEvent[]>>({});
 
   const [authKind, setAuthKind] = useState<AuthKind>("static");
   const [name, setName] = useState("");
@@ -182,7 +200,15 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
         if (cancelled) return;
         if (res.status === 401) setError(SESSION_EXPIRED);
         else if (!res.ok) setError(`Failed to load MCP connections (${res.status}).`);
-        else setList(normalize(await res.json()));
+        else {
+          const loaded = normalize(await res.json());
+          setList(loaded);
+          for (const c of loaded.connections) {
+            void fetchEvents(c.id).then((evs) => {
+              if (!cancelled && evs) setEvents((m) => ({ ...m, [c.id]: evs }));
+            });
+          }
+        }
       } catch {
         if (!cancelled) setError("Could not reach the server. Please try again.");
       }
@@ -300,6 +326,10 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
     if (res) {
       replace((await res.json()) as Connection);
       stopEdit();
+      if (body.pin_policy !== undefined) {
+        const evs = await fetchEvents(c.id);
+        if (evs) setEvents((m) => ({ ...m, [c.id]: evs }));
+      }
     } else {
       setError(message);
       if (body.secret !== undefined) setEditValue("");
@@ -405,6 +435,34 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                       <p className="field-error">{NEEDS_AUTH_TEXT}</p>
                     )}
                     {c.auth_kind === "oauth" && c.status === "error" && <p className="field-error">{ERROR_TEXT}</p>}
+
+                    <label className="field" htmlFor={`mcp-policy-${c.id}`}>
+                      <span className="field-label">Definition changes</span>
+                      <select
+                        id={`mcp-policy-${c.id}`}
+                        aria-label={`Definition changes for ${c.name}`}
+                        value={c.pin_policy === "auto_accept" ? "auto_accept" : "strict"}
+                        disabled={busy}
+                        onChange={(e) => void patch(c, { pin_policy: e.target.value })}
+                      >
+                        <option value="strict">Ask me</option>
+                        <option value="auto_accept">Accept automatically</option>
+                      </select>
+                    </label>
+                    <p className="field-help">{POLICY_HELP}</p>
+                    {(events[c.id] ?? []).slice(0, 3).map((e) => (
+                      <p className="field-help" key={e.id}>
+                        {new Date(e.created_at).toLocaleString()}: {POLICY_LABEL[e.from_value] ?? e.from_value} → {POLICY_LABEL[e.to_value] ?? e.to_value}
+                      </p>
+                    ))}
+                    {runnerUrl && (
+                      <p className="field-help">
+                        <a href={`${runnerUrl}/proposals?connection=${encodeURIComponent(c.id)}`} rel="noreferrer">
+                          Tool change history
+                        </a>{" "}
+                        for this connection is in the runner app.
+                      </p>
+                    )}
 
                     {mode === null && (
                       <div className="card-actions">

@@ -300,6 +300,11 @@ func parseSSE(ctx context.Context, body io.Reader, ch chan<- agent.StreamEvent) 
 			acc := &blockAccum{kind: cb.Type, id: cb.ID, name: cb.Name, data: cb.Data}
 			acc.text.WriteString(cb.Text)
 			blocks[ev.Index] = acc
+			if cb.Type == "thinking" || cb.Type == "redacted_thinking" {
+				if !send(agent.StreamEvent{Kind: "thinking_start"}) {
+					return
+				}
+			}
 		case "content_block_delta":
 			acc := blocks[ev.Index]
 			if acc == nil {

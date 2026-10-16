@@ -416,7 +416,8 @@ type broadcastScope struct {
 //   - the affected_session_ids list a daemon_disconnected carries
 //   - at any depth: the id of an object under a key named `session`, and the
 //     string (or list of strings) under any key that is session_id, ends in
-//     _session_id, or ends in sessionId (parentSessionId, origin_session_id)
+//     _session_id, or ends in sessionId (parentSessionId, origin_session_id), and a
+//     session_ids list
 //
 // A field that does not decode as expected contributes every string in it
 // instead. Text that is not a JSON object at all contributes every string it
@@ -501,7 +502,8 @@ func walkSessionRefs(v any, add func(string)) {
 						add(id)
 					}
 				}
-			case lk == "session_id", strings.HasSuffix(lk, "_session_id"), strings.HasSuffix(lk, "sessionid"):
+			case lk == "session_id", strings.HasSuffix(lk, "_session_id"), strings.HasSuffix(lk, "sessionid"),
+				lk == "session_ids": // not affected_session_ids: daemon_disconnected is filtered, not withheld
 				switch ids := val.(type) {
 				case string:
 					add(ids)

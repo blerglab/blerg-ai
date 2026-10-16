@@ -150,9 +150,12 @@ export function approveFailureMessage(status: number, serverMessage: string): st
   }
 }
 
-// ---- pending count (the nav badge) ---------------------------------------------------------------------
+// ---- pending counts (the nav badge) ---------------------------------------------------------------------
 
-export const usePendingProposals = create<{ count: number }>(() => ({ count: 0 }))
+// Two numbers, two ticket pairs: proposals waiting (count) and tool changes waiting (changes). The
+// Proposals page refreshes `count` from its own list route and must not touch `changes`, and the
+// Tool changes section does the reverse, so neither can clobber the badge's sum.
+export const usePendingProposals = create<{ count: number; changes: number }>(() => ({ count: 0, changes: 0 }))
 
 export const PROPOSALS_POLL_MS = 30_000
 
@@ -169,15 +172,27 @@ export function applyPendingCount(ticket: number, n: number): boolean {
   return true
 }
 
-// fetchPendingCount reads the cheap count route. A failure leaves the last count.
+let changesTicket = 0
+let changesApplied = 0
+export const beginChangesRequest = () => ++changesTicket
+export function applyPendingChanges(ticket: number, n: number): boolean {
+  if (ticket < changesApplied) return false
+  changesApplied = ticket
+  usePendingProposals.setState({ changes: n })
+  return true
+}
+
+// fetchPendingCount reads the cheap count route (both numbers). A failure leaves the last counts.
 export async function fetchPendingCount(): Promise<void> {
   const ticket = beginCountRequest()
+  const cticket = beginChangesRequest()
   try {
     const res = await apiFetch('/api/proposals/count')
     if (!res.ok) return
-    const body = await res.json() as { pending_count?: number }
+    const body = await res.json() as { pending_count?: number; tool_changes_pending?: number }
     if (typeof body.pending_count === 'number') applyPendingCount(ticket, body.pending_count)
-  } catch { /* keep the last count */ }
+    if (typeof body.tool_changes_pending === 'number') applyPendingChanges(cticket, body.tool_changes_pending)
+  } catch { /* keep the last counts */ }
 }
 
 // useProposalCountPoll keeps the badge count fresh: now, every 30 s, and when the window regains

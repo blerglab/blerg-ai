@@ -1,7 +1,7 @@
 // The message box: the text, the paperclip and the chips of what is attached, Send, and the
 // keyboard: Enter sends, Shift+Enter breaks the line, Esc interrupts the running turn. The hidden
 // file input belongs to ChatView (the Files panel's empty state opens it too); onAttach opens it.
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import type { useAttachments } from '../hooks/useAttachments'
 import { ComposerChips } from './AttachmentChips'
 
@@ -20,14 +20,36 @@ export interface ComposerProps {
   onAttach?: () => void
   /** The host's own controls beside Send. */
   actions?: ReactNode
+  /**
+   * Put the cursor in the box when it appears and whenever the session unlocks, so a switch to a
+   * session is one click, not two. Skipped on touch screens, where focus would raise the keyboard.
+   * Default true.
+   */
+  autoFocus?: boolean
 }
 
-export default function Composer({ draft, onDraft, placeholder, locked, busy, onSubmit, onInterrupt, attachments, onAttach, actions }: ComposerProps) {
+// A coarse pointer means a touch screen: focusing the box there pops the keyboard over the chat.
+const touchScreen = () =>
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+
+export default function Composer({ draft, onDraft, placeholder, locked, busy, onSubmit, onInterrupt, attachments, onAttach, actions, autoFocus = true }: ComposerProps) {
   const canSend = (draft.trim() !== '' || attachments.done.length > 0) && !attachments.uploading && !locked
+  const box = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    if (!autoFocus || locked || touchScreen()) return
+    // Never take the cursor away from a field the person is already typing in. A focused button
+    // (the sidebar row they just clicked) is not one.
+    const active = document.activeElement
+    const typing = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
+      || (active instanceof HTMLElement && active.isContentEditable)
+    if (typing && active !== box.current) return
+    box.current?.focus({ preventScroll: true })
+  }, [autoFocus, locked])
   return (
     <>
       <div className="agent-composer">
         <textarea
+          ref={box}
           value={draft}
           placeholder={placeholder}
           disabled={locked}

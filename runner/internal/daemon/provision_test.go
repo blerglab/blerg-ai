@@ -662,3 +662,30 @@ func TestManagedBlockMentionsPublish(t *testing.T) {
 		}
 	}
 }
+
+// After a restart notice the standing rule is to verify the state of the cut-off work first, then
+// resume it (agentadopt.go's notice says the same for the case at hand).
+func TestManagedBlockSaysVerifyBeforeResumingAfterARestart(t *testing.T) {
+	for _, want := range []string{"hosting this session restarted", "Verify first", "agent id to resume it", "re-run a background command", "Never re-run anything destructive"} {
+		if !strings.Contains(managedBlock, want) {
+			t.Errorf("managed block does not say %q", want)
+		}
+	}
+}
+
+// The managed block carries the same topic line as the session guide.
+func TestManagedBlockNamesTopics(t *testing.T) {
+	if !strings.Contains(managedBlock, "- `blerg-runner topic`") || !strings.Contains(managedBlock, topicGuideLine) {
+		t.Errorf("managed block lacks the topic bullet:\n%s", managedBlock)
+	}
+	if !strings.HasSuffix(ccSessionGuide, " "+topicGuideLine) {
+		t.Errorf("the session guide must end with the topic line")
+	}
+	if !strings.Contains(topicGuideLine, "when the work landed commits, pass them: `--commit <sha>`") {
+		t.Errorf("the topic line must ask for the commits on a done: %s", topicGuideLine)
+	}
+	// R7: unmarked work is only a summary line, so the bullet says what skipping the marker costs.
+	if !strings.Contains(managedBlock, topicGuideLine+" Without markers the History tab shows only a summary.") {
+		t.Errorf("the topic bullet must say that without markers History is only a summary:\n%s", managedBlock)
+	}
+}

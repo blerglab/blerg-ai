@@ -43,7 +43,7 @@ password is in core's first-boot log:
 docker compose logs blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
 ```
 
-Sign in, choose a real password, open **Runner** (`http://localhost:8083`) → **+ New**, pick a
+Sign in, choose your username and a real password, open **Runner** (`http://localhost:8083`) → **+ New**, pick a
 repository and launch. The rest of the first-day details, day-to-day commands and uninstall are in
 [`install/desktop/README.md`](install/desktop/README.md). For a team, use the
 [Kubernetes install](install/k8s/README.md).
@@ -76,7 +76,13 @@ attach its results to its card.
   over and asks before big decisions. Unattended: it makes the call, notes its assumptions,
   carries the work to the end and finishes with a summary. [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md#interactive-and-unattended)
 - **Talk to a running agent:** send messages mid-turn, interrupt, pause a cluster session, and
-  review a published file passage by passage.
+  review a published file passage by passage. A panel beside the chat shows what needs you and
+  what is running (questions, subagents, background tasks), a History of the pieces of work the
+  agent marked with the files and commits each one produced, and the session's files and
+  capabilities (skills, plugins, MCP servers). A session you follow tells you when it needs you,
+  and once when all of its work is done. An agent session on your machine's host that a daemon
+  restart cut off carries on by itself unless it was waiting for you, and one stopped by a usage
+  limit can resume when the limit resets.
   [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md)
 - **A board agents write to.** Cards are drafted by agents and curated by people; an admission
   step rejects duplicates and vague cards; a card can start a session. [`board/README.md`](board/README.md)
@@ -87,10 +93,12 @@ attach its results to its card.
 - **Crons:** scheduled, unattended runs with only the tools you chose. [`docs/crons.md`](docs/crons.md)
 - **Proposals:** a write tool from an MCP connection can be set to queue each call for your
   approval instead of running it. [`docs/proposals.md`](docs/proposals.md)
-- **Plugins** loaded into every Claude agent session you start, on a cluster or your desktop.
+- **Plugins** loaded into every Claude or Codex agent session you start, on a cluster or your desktop.
   [`core/docs/CONFIG.md`](core/docs/CONFIG.md#always-on-plugins)
-- **Telemetry:** startup times, session durations, tokens and estimated cost, as a page and as
-  Prometheus metrics. [`docs/telemetry.md`](docs/telemetry.md)
+- **Telemetry:** startup times, session durations, tokens and estimated cost, as a page, per
+  session and as Prometheus metrics; the sidebar shows how much of your Claude and Codex usage
+  limits is used. [`docs/telemetry.md`](docs/telemetry.md),
+  [usage limits](runner/README.md#usage-limits)
 - **Your own session image**, with the tools your projects need. [`docs/sandbox-image.md`](docs/sandbox-image.md)
 - **Build your own app on it.** `@blerglab/chat` is the chat surface as a library: transcript,
   streaming, tool calls, files and a theme, over a pluggable transport, with a Go proxy so the

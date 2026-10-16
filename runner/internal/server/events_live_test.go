@@ -220,3 +220,52 @@ func TestRunnerEventsLiveAuth(t *testing.T) {
 		}
 	}
 }
+
+// liveSubscriberID is the hub registration of the one live stream open on a session.
+func liveSubscriberID(t *testing.T, h *Hub, sessionID string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		h.mu.RLock()
+		for id := range h.subscriptions[sessionID] {
+			if strings.HasPrefix(id, "live-") {
+				h.mu.RUnlock()
+				return id
+			}
+		}
+		h.mu.RUnlock()
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no live stream subscribed")
+	return ""
+}
+
+// A consumer that fell behind the hub's buffer misses live events; the stream reads them from the
+// database and sends them inline, in order, and a live copy of one it already sent is skipped.
+func TestRunnerEventsLiveRefillsAGap(t *testing.T) {
+	api, srv, sessionID := streamTestAPI(t, 10*time.Millisecond, time.Hour)
+	s := openSSEStream(t, srv, "/api/runner/sessions/"+sessionID+"/events/live", nil)
+	s.expectFrame(t, "replay_done", false)
+	s.expectFrame(t, "status", false)
+	sub := liveSubscriberID(t, api.hub, sessionID)
+
+	var seqs []int64
+	for i := 0; i < 4; i++ {
+		seqs = append(seqs, appendEvent(t, api, sessionID, "assistant_text", `{"text":"t","done":true}`))
+	}
+	// The hub dropped seqs[1] onward for this consumer; seqs[0] was still in its buffer.
+	api.hub.gaps.note(sessionID, sub, seqs[1])
+	api.hub.FanOutAgentEvent(sessionID, seqs[0], agentEventJSON(sessionID, seqs[0]))
+	for i, want := range seqs {
+		if id, _ := s.expectFrame(t, "agent_event", true); id != want {
+			t.Fatalf("frame %d id = %d, want %d", i, id, want)
+		}
+	}
+	// A copy of seqs[2] arriving late from the buffer is not sent again; a new event is.
+	api.hub.FanOutAgentEvent(sessionID, seqs[2], agentEventJSON(sessionID, seqs[2]))
+	next := appendEvent(t, api, sessionID, "assistant_text", `{"text":"t","done":true}`)
+	api.hub.FanOutAgentEvent(sessionID, next, agentEventJSON(sessionID, next))
+	if id, _ := s.expectFrame(t, "agent_event", true); id != next {
+		t.Fatalf("frame id = %d, want %d (the refilled one must not repeat)", id, next)
+	}
+}

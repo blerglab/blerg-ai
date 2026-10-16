@@ -34,6 +34,12 @@ import (
 // using the in-cluster service account. It deliberately speaks plain HTTP to
 // the API server (no client-go dependency) — the two calls we need are tiny.
 type JobManager struct {
+	codexCatalog  clusterCodexCatalogCache
+	NativeHistory NativeHistoryConfig
+	historyPool   *pgxpool.Pool
+	// Test seam; production always uses the durable current-launch binding.
+	mintRuntimeLaunch func(context.Context, string, string) (string, string, error)
+
 	BaseURL   string // https://<apiserver>
 	Token     string
 	Namespace string
@@ -106,11 +112,22 @@ type JobManager struct {
 	// gitCacheVal is filled by the same Secret sweep as engineCacheVal:
 	// whether the operator Secret(s) carry a non-empty BLERG_RUNNER_GIT_TOKEN.
 	gitCacheVal bool
+
+	// activeCache holds Status's live Job count for activeJobsCacheTTL: the
+	// launch sheet, the sessions sidebar and the app shell each read
+	// /api/cluster/status, and a Job list per read is the slowest part of it.
+	// Capacity checks never read it — they count Jobs live.
+	activeCacheMu  sync.Mutex
+	activeCacheAt  time.Time
+	activeCacheVal int
 }
 
 // clusterSecretsCacheTTL bounds how often AvailableEngines re-queries the
 // k8s API for the configured credential Secret(s).
 const clusterSecretsCacheTTL = 30 * time.Second
+
+// activeJobsCacheTTL bounds how often Status lists session Jobs.
+const activeJobsCacheTTL = 10 * time.Second
 
 // clusterDaemonID is the fixed synthetic daemon ID cluster-runtime sessions
 // are recorded under in the daemons/sessions tables — there's no real daemon
@@ -173,6 +190,7 @@ func NewJobManagerFromEnv(gitHubOrg string) *JobManager {
 		CoreURL:          os.Getenv("BLERG_CORE_URL"),
 		CoreInternalKey:  os.Getenv("BLERG_RUNNER_CORE_INTERNAL_KEY"),
 		CredentialClient: &http.Client{Timeout: 10 * time.Second},
+		NativeHistory:    NativeHistoryConfig{Enabled: strings.EqualFold(os.Getenv("BLERG_RUNNER_NATIVE_HISTORY"), "true"), StorageClass: os.Getenv("BLERG_RUNNER_NATIVE_HISTORY_STORAGE_CLASS"), Size: envOr("BLERG_RUNNER_NATIVE_HISTORY_SIZE", "1Gi"), MaxClaims: envOrInt("BLERG_RUNNER_NATIVE_HISTORY_MAX_CLAIMS", 128), Retention: time.Duration(envOrInt("BLERG_RUNNER_NATIVE_HISTORY_RETENTION_HOURS", 7*24)) * time.Hour},
 
 		CPURequest:              envOr("BLERG_RUNNER_POD_CPU_REQUEST", "500m"),
 		MemRequest:              envOr("BLERG_RUNNER_POD_MEM_REQUEST", "1Gi"),
@@ -422,12 +440,30 @@ func (j *JobManager) effectiveMaxSessions() int {
 	return j.MaxSessions
 }
 
-func (j *JobManager) Status() protocol.ClusterStatus {
-	active, err := j.ActiveSessionJobs()
+// EffectiveMaxSessions is effectiveMaxSessions for callers outside the package.
+func (j *JobManager) EffectiveMaxSessions() int { return j.effectiveMaxSessions() }
+
+// statusActiveSessions is the live session Job count for Status, at most
+// activeJobsCacheTTL old. Concurrent callers share one Job list. A failure is
+// not cached: -1 ("couldn't tell", distinct from a real 0), asked again next
+// time.
+func (j *JobManager) statusActiveSessions() int {
+	j.activeCacheMu.Lock()
+	defer j.activeCacheMu.Unlock()
+	if !j.activeCacheAt.IsZero() && time.Since(j.activeCacheAt) < activeJobsCacheTTL {
+		return j.activeCacheVal
+	}
+	n, err := j.ActiveSessionJobs()
 	if err != nil {
 		log.Printf("cluster status: list active jobs: %v", err)
-		active = -1 // -1 signals "couldn't tell", distinct from a real 0
+		return -1
 	}
+	j.activeCacheAt, j.activeCacheVal = time.Now(), n
+	return n
+}
+
+func (j *JobManager) Status() protocol.ClusterStatus {
+	active := j.statusActiveSessions()
 	ttl, idle := j.limits()
 	return protocol.ClusterStatus{
 		Configured:              true,
@@ -454,14 +490,17 @@ func (j *JobManager) Status() protocol.ClusterStatus {
 
 // SessionJobSpec is what the spawn/resume paths need to start a pod.
 type SessionJobSpec struct {
-	SessionID     string
-	Repo          string
-	Title         string
-	Model         string
-	Effort        string // "" | one of models.Efforts — see BLERG_RUNNER_EFFORT
-	Engine        string // "" (claude) | "codex" — see BLERG_RUNNER_ENGINE
-	InitialPrompt string
-	Resume        bool
+	nativeHistory         *db.SessionNativeHistory
+	SessionID             string
+	Repo                  string
+	Title                 string
+	Model                 string
+	Effort                string // "" | one of models.Efforts — see BLERG_RUNNER_EFFORT
+	Engine                string // "" (claude) | "codex" — see BLERG_RUNNER_ENGINE
+	InitialPrompt         string
+	InitialPromptSource   string
+	InitialPromptClientID string
+	Resume                bool
 	// ExtraEnv is caller-supplied env for runner-brokered sessions (e.g.
 	// blerg-board's BLERG_BOARD_URL/BLERG_BOARD_TOKEN). BLERG_RUNNER_*/ANTHROPIC_API_KEY are
 	// rejected upstream so callers cannot shadow blerg-owned variables.
@@ -667,7 +706,6 @@ var claudeKeys = []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}
 // the shared operator Secret — see CreateSessionJob's provenance log.
 var sessionCredentialKeys = []string{
 	"ANTHROPIC_API_KEY",
-	"BLERG_RUNNER_DAEMON_TOKEN",
 	"BLERG_RUNNER_GIT_TOKEN",
 	"CLAUDE_CODE_OAUTH_TOKEN",
 	"CODEX_AUTH_JSON",
@@ -853,15 +891,9 @@ type internalCredentialFetchResponse struct {
 	PlaintextBase64 string `json:"plaintext_base64"`
 }
 
-// fetchPersonalCredential calls blerg-core's internal credential-fetch
-// endpoint (Task 15) for accountID's personal credential for engine.
-// found=false, err=nil covers every case CreateSessionJob should treat as
-// "fall back to the shared Secret": the feature not being configured
-// (CoreURL/CoreInternalKey unset), a 404 (no personal credential — the
-// normal, common case), and any other failure (network error, 401, 403,
-// 503) — those latter cases usually mean real misconfiguration, so they are
-// logged loudly here for an operator to notice, even though the caller
-// still degrades gracefully.
+// fetchPersonalCredential reads the owner's credential. Only an absent credential
+// with a currently verified principal permits an operator fallback; failures do
+// not change whose account will run the session.
 func (j *JobManager) fetchPersonalCredential(ctx context.Context, accountID, engine string, proof coreProof) ([]byte, bool, error) {
 	return fetchCoreCredential(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, accountID, engine, proof)
 }
@@ -878,74 +910,64 @@ func (s SessionJobSpec) proof() coreProof {
 	return coreProof{TokenID: s.TokenID, SessionID: s.AuthSessionID}
 }
 
-// fetchCoreCredential is fetchPersonalCredential without a JobManager, for
-// callers that hold their own core address (the API's per-user repo
-// listing). Same contract: found=false, err=nil for everything that should
-// degrade to "no personal credential". client may be nil.
-//
-// The one exception is a call with no (or two) liveness proofs: that is a
-// caller bug or a pre-sid token, and it fails closed with errNoLivenessProof
-// without contacting core — never a silent fallback to the operator secret.
-func fetchCoreCredential(ctx context.Context, client *http.Client, coreURL, internalKey, accountID, engine string, proof coreProof) ([]byte, bool, error) {
+// fetchCoreCredential is the shared bounded, fail-closed Core fetch boundary.
+func fetchCoreCredential(parent context.Context, client *http.Client, coreURL, internalKey, accountID, engine string, proof coreProof) ([]byte, bool, error) {
 	if coreURL == "" || internalKey == "" || accountID == "" || engine == "" {
 		return nil, false, nil
 	}
 	if !proof.valid() {
 		return nil, false, errNoLivenessProof
 	}
-	client = coreHTTPClient(client) // never follows a redirect: the request carries the internal key
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
 	raw, err := json.Marshal(internalCredentialFetchRequest{AccountID: accountID, Engine: engine, TokenID: proof.TokenID, SessionID: proof.SessionID})
 	if err != nil {
-		return nil, false, err
+		return nil, false, errPersonalCredentialUnavailable
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coreURL+"/internal/credentials/fetch", bytes.NewReader(raw))
 	if err != nil {
-		return nil, false, err
+		return nil, false, errPersonalCredentialUnavailable
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Key", internalKey)
-	resp, err := client.Do(req)
+	resp, err := coreHTTPClient(client).Do(req)
 	if err != nil {
-		log.Printf("fetchPersonalCredential: request to core failed, falling back to shared secret: %v", err)
-		return nil, false, nil
+		return nil, false, errPersonalCredentialUnavailable
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch resp.StatusCode {
 	case http.StatusOK:
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20+1))
+		if err != nil || len(raw) > 1<<20 {
+			return nil, false, errPersonalCredentialUnavailable
+		}
 		var out internalCredentialFetchResponse
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			log.Printf("fetchPersonalCredential: decode response failed, falling back to shared secret: %v", err)
-			return nil, false, nil
+		if json.Unmarshal(raw, &out) != nil {
+			return nil, false, errPersonalCredentialUnavailable
 		}
 		plaintext, err := base64.StdEncoding.DecodeString(out.PlaintextBase64)
-		if err != nil {
-			log.Printf("fetchPersonalCredential: decode plaintext_base64 failed, falling back to shared secret: %v", err)
-			return nil, false, nil
-		}
-		// An empty (or whitespace-only) credential is not a credential:
-		// treated as found it would both suppress the operator fallback and
-		// ship an empty env var into the pod, i.e. a session that fails to
-		// authenticate with nothing to point at. Same answer as a 404.
-		if len(bytes.TrimSpace(plaintext)) == 0 {
-			log.Printf("fetchPersonalCredential: core returned an empty credential for account=%s engine=%s, falling back to shared secret",
-				accountID, engine)
-			return nil, false, nil
+		if err != nil || len(bytes.TrimSpace(plaintext)) == 0 {
+			return nil, false, errPersonalCredentialUnavailable
 		}
 		return plaintext, true, nil
+	case http.StatusConflict:
+		return nil, false, errCoreManagedCredential
 	case http.StatusNotFound:
-		// Normal, common case: account_id simply hasn't configured a
-		// personal credential for this engine.
+		// Core intentionally uses the same 404 for an absent credential and a
+		// revoked principal. Resolve that ambiguity before allowing fallback.
+		if verifyCorePrincipal(ctx, client, coreURL, internalKey, accountID, proof) != nil {
+			return nil, false, errPersonalCredentialUnavailable
+		}
 		return nil, false, nil
 	default:
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		log.Printf("fetchPersonalCredential: core returned %d for account=%s engine=%s, falling back to shared secret: %s",
-			resp.StatusCode, accountID, engine, body)
-		return nil, false, nil
+		return nil, false, errPersonalCredentialUnavailable
 	}
 }
 
 // CreateSessionJob creates the runner Job. Enforces the concurrency cap.
-func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
+func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error { return j.withNativeHistory(spec) }
+
+func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 	limit := j.effectiveMaxSessions()
 	if n, err := j.ActiveSessionJobs(); err == nil && n >= limit {
 		return fmt.Errorf("%w (%d)", errClusterCap, limit)
@@ -984,6 +1006,12 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	if spec.Resume {
 		env = append(env, map[string]any{"name": "BLERG_RUNNER_RESUME", "value": "1"})
 	}
+	if spec.nativeHistory != nil {
+		env = append(env,
+			map[string]any{"name": "BLERG_RUNNER_NATIVE_HISTORY", "value": "1"},
+			map[string]any{"name": "BLERG_RUNNER_NATIVE_HISTORY_ACCOUNT", "value": spec.nativeHistory.AccountID},
+			map[string]any{"name": "BLERG_RUNNER_NATIVE_HISTORY_UID", "value": spec.nativeHistory.ClaimUID})
+	}
 	if spec.NoRepo {
 		env = append(env, map[string]any{"name": "BLERG_RUNNER_NO_REPO", "value": "1"})
 	}
@@ -1005,6 +1033,46 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 		env = append(env, map[string]any{"name": interactionEnvVar, "value": spec.Interaction})
 	}
 
+	effectiveEngine := spec.Engine
+	if effectiveEngine == "" {
+		effectiveEngine = "claude"
+	}
+	// Every cluster pod gets a distinct, durable launch capability. No caller
+	// can select the daemon master or reuse a previous launch's runtime token.
+	var runtimeRaw, messageRaw string
+	var runtimeErr error
+	switch {
+	case j.historyPool != nil:
+		// A duplicate start must not revoke a pod that still owns a live Job.
+		// Unknown Kubernetes state is treated as live by jobPresence.
+		var enrolled bool
+		if err := j.historyPool.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM session_runtime WHERE session_id=$1)`, spec.SessionID).Scan(&enrolled); err != nil {
+			return errSessionJobCreate
+		}
+		if enrolled {
+			if exists, finished := j.jobPresence(spec.SessionID); exists && !finished {
+				return errSessionJobCreate
+			}
+		}
+		runtimeRaw, messageRaw, runtimeErr = db.MintRuntimeLaunch(context.Background(), j.historyPool, spec.SessionID, spec.ExtraEnv[sessionTokenEnv], sessionTokenTTL)
+	case j.mintRuntimeLaunch != nil:
+		runtimeRaw, messageRaw, runtimeErr = j.mintRuntimeLaunch(context.Background(), spec.SessionID, spec.ExtraEnv[sessionTokenEnv])
+	default:
+		runtimeErr = db.ErrTokenInvalid
+	}
+	if runtimeErr != nil || runtimeRaw == "" || messageRaw == "" {
+		return errSessionSecretCreate
+	}
+	launchEnv := make(map[string]string, len(spec.ExtraEnv)+2)
+	for k, v := range spec.ExtraEnv {
+		if !foreignEngineCredential(k, effectiveEngine) {
+			launchEnv[k] = v
+		}
+	}
+	launchEnv[runtimeTokenEnv] = runtimeRaw
+	launchEnv[sessionTokenEnv] = messageRaw
+	spec.ExtraEnv = launchEnv
+
 	// sessionData collects everything that must never appear as a literal
 	// env value in the Job spec (visible via `kubectl describe job`/`get job
 	// -o yaml` to anyone who can read Jobs but not Secrets): the initial
@@ -1013,6 +1081,19 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	// credential when one was found. Whatever ends up in here is written to
 	// one per-session Secret and referenced from the Job via secretKeyRef.
 	sessionData := make(map[string][]byte, len(spec.ExtraEnv)+2)
+	if spec.InitialPromptSource != "" || spec.InitialPromptClientID != "" {
+		copied := make(map[string]string, len(spec.ExtraEnv)+1)
+		for k, v := range spec.ExtraEnv {
+			copied[k] = v
+		}
+		spec.ExtraEnv = copied
+		if spec.InitialPromptSource != "" {
+			spec.ExtraEnv["BLERG_RUNNER_INITIAL_PROMPT_SOURCE"] = spec.InitialPromptSource
+		}
+		if spec.InitialPromptClientID != "" {
+			spec.ExtraEnv["BLERG_RUNNER_INITIAL_PROMPT_CLIENT_ID"] = spec.InitialPromptClientID
+		}
+	}
 	if spec.InitialPrompt != "" {
 		sessionData["BLERG_RUNNER_INITIAL_PROMPT"] = []byte(spec.InitialPrompt)
 	}
@@ -1040,11 +1121,8 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	// instead, and the rest are omitted from the pod entirely. Empty means no
 	// personal credential was found, i.e. today's behavior for every key.
 	personalKeys := map[string]bool{}
+	managedCredential := false
 	gitKind, gitOperatorOK := j.gitCredentialFor(cloneURL)
-	effectiveEngine := spec.Engine
-	if effectiveEngine == "" {
-		effectiveEngine = "claude"
-	}
 	if spec.SpawningAccountID != "" {
 		if effectiveEngine == "claude" {
 			plaintext, found, err := j.fetchPersonalCredential(context.Background(), spec.SpawningAccountID, "claude", spec.proof())
@@ -1053,7 +1131,10 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 					spec.SessionID, spec.SpawningAccountID)
 				return ErrNoPersonalCredential
 			}
-			if err == nil && found {
+			if err != nil {
+				return err
+			}
+			if found {
 				// Both claude keys become personal, only the chosen one is
 				// emitted: a personal API key must not run alongside the
 				// operator's OAuth token (or vice versa), because the pod
@@ -1065,12 +1146,28 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 			}
 		} else if credKey, ok := engineCredentialKey[effectiveEngine]; ok {
 			plaintext, found, err := j.fetchPersonalCredential(context.Background(), spec.SpawningAccountID, effectiveEngine, spec.proof())
+			if errors.Is(err, errCoreManagedCredential) {
+				for _, key := range []string{"CODEX_AUTH_JSON", "OPENAI_API_KEY", "CODEX_API_KEY"} {
+					if _, exists := spec.ExtraEnv[key]; exists {
+						return errManagedCredential
+					}
+				}
+				if err = j.bindManagedCredential(context.Background(), spec); err != nil {
+					return err
+				}
+				managedCredential = true
+				personalKeys[credKey] = true
+				env = append(env, map[string]any{"name": managedCredentialEnv, "value": "1"})
+				found = true
+			} else if err == nil && found {
+				sessionData[credKey] = plaintext
+				personalKeys[credKey] = true
+			}
 			if spec.NoOperatorFallback && (err != nil || !found) {
 				return ErrNoPersonalCredential
 			}
-			if err == nil && found {
-				sessionData[credKey] = plaintext
-				personalKeys[credKey] = true
+			if err != nil {
+				return err
 			}
 		}
 		// The git credential is independent of the engine: whoever launched
@@ -1081,10 +1178,20 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 			if spec.NoOperatorFallback && (err != nil || !found) {
 				return ErrNoPersonalCredential
 			}
-			if err == nil && found {
+			if err != nil {
+				return err
+			}
+			if found {
 				sessionData[gitTokenKey] = plaintext
 				personalKeys[gitTokenKey] = true
 			}
+		}
+	}
+	if !managedCredential && j.historyPool != nil {
+		// A replacement enrolled in raw/operator authentication must not leave
+		// the previous pod authorized to obtain a later managed connection.
+		if _, err := j.historyPool.Exec(context.Background(), "DELETE FROM session_managed_credential WHERE session_id=$1", spec.SessionID); err != nil {
+			return errManagedCredential
 		}
 	}
 	// The operator's shared git token belongs to its own base host only
@@ -1177,16 +1284,12 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 	// provenance records, per credential env var, where this session's value
 	// came from — see the log line after the loop. Keys only, never values.
 	provenance := make([]string, 0, len(sessionCredentialKeys))
-	// A restricted session (a cron, a grant, RestrictTools) runs claude with file tools only, so
-	// the operator's codex and hermes credentials are of no use to it and only widen what a
-	// compromised pod exposes: they are withheld.
-	restricted := spec.RestrictTools || spec.MCPGateway != nil || spec.NoOperatorFallback
+	// A pod receives provider authority only for its selected engine.
 	for _, key := range sessionCredentialKeys {
-		if restricted && (key == "CODEX_AUTH_JSON" || key == "HERMES_ENV_CONTENTS") {
-			if _, dup := spec.ExtraEnv[key]; !dup {
-				provenance = append(provenance, key+"=withheld")
-				continue
-			}
+		foreignProvider := foreignEngineCredential(key, effectiveEngine)
+		if foreignProvider {
+			provenance = append(provenance, key+"=withheld")
+			continue
 		}
 		// A caller-supplied ExtraEnv entry of the same name was already
 		// emitted (from the per-session Secret) by the loop above. Emitting
@@ -1213,6 +1316,10 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 			// operator Secret cannot supply it behind the user's back.
 			continue
 		}
+		if spec.NoOperatorFallback {
+			provenance = append(provenance, key+"=withheld")
+			continue
+		}
 		secretName := j.SecretName
 		// Operator-synced credentials (rotation flows from the secrets operator): the
 		// oauth token, codex's auth.json contents, hermes's whole .env
@@ -1229,7 +1336,7 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 				// HERMES_ENV_CONTENTS are only needed when the session's engine
 				// is codex or hermes respectively.
 				"secretKeyRef": map[string]any{"name": secretName, "key": key,
-					"optional": key != "BLERG_RUNNER_DAEMON_TOKEN"},
+					"optional": true},
 			},
 		})
 	}
@@ -1277,6 +1384,22 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 			},
 		},
 	}
+	// These shapes are constructed above; fail closed if a future manifest changes.
+	jobSpec, ok := job["spec"].(map[string]any)
+	if !ok {
+		return errNativeHistory
+	}
+	template, ok := jobSpec["template"].(map[string]any)
+	if !ok {
+		return errNativeHistory
+	}
+	pod, ok := template["spec"].(map[string]any)
+	if !ok {
+		return errNativeHistory
+	}
+	if err := nativeHistoryPod(spec, pod); err != nil {
+		return err
+	}
 	resp, err := j.do(http.MethodPost, "/apis/batch/v1/namespaces/"+j.Namespace+"/jobs", job)
 	if err != nil {
 		// The Secret was created moments ago for a Job that will never exist.
@@ -1302,7 +1425,7 @@ func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
 				return err
 			}
 			spec.retried = true
-			return j.CreateSessionJob(spec)
+			return j.createSessionJob(spec)
 		}
 		// The Job that already exists (the one holding the live Job's
 		// conflicting name) is not this call's Job — it will never adopt the
@@ -1472,19 +1595,27 @@ func (h *Hub) JobManager() *JobManager { h.mu.Lock(); defer h.mu.Unlock(); retur
 // stored spawning_account_id is only handed back to CreateSessionJob when the
 // requester IS that account. Anyone else resumes on the operator Secret.
 func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, requesterAccountID, requesterSessionID string) {
+	_ = resumeClusterSessionMode(ctx, h, pool, sessionID, text, requesterAccountID, requesterSessionID, false)
+}
+
+func resumeClusterSessionStrict(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, accountID, authSessionID string) error {
+	return resumeClusterSessionMode(ctx, h, pool, sessionID, text, accountID, authSessionID, true)
+}
+
+func resumeClusterSessionMode(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, requesterAccountID, requesterSessionID string, automatic bool, clientIDs ...string) error {
 	jm := h.JobManager()
 	if jm == nil || pool == nil {
 		log.Printf("agent_user_message %s: no daemon and no cluster runtime — dropping", sessionID)
-		return
+		return errors.New("cluster resume was not accepted")
 	}
 	row, err := db.GetSession(ctx, pool, sessionID)
 	if err != nil || row == nil {
 		log.Printf("resume %s: session lookup failed: %v", sessionID, err)
-		return
+		return errors.New("cluster resume was not accepted")
 	}
 	if row.Status != "disconnected" {
 		log.Printf("resume %s: status %q not resumable — dropping message", sessionID, row.Status)
-		return
+		return errors.New("cluster resume was not accepted")
 	}
 	title := ""
 	if row.Title != nil {
@@ -1537,12 +1668,18 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 			authSessionID = requesterSessionID
 		}
 	}
+	if automatic {
+		if launcher == "" || requesterAccountID != launcher || requesterSessionID == "" {
+			return errors.New("automatic resume needs retained owner authority")
+		}
+		tokenID, authSessionID = "", requesterSessionID
+	}
 	// A session that holds MCP connections resumes only for the account that started it, from
 	// a signed-in browser session; otherwise the resume is refused and nothing is started.
 	grants, problem := grantResumeProblem(ctx, pool, sessionID, launcher, requesterAccountID, requesterSessionID)
 	if problem != nil {
 		log.Printf("resume %s: refused: %s", sessionID, problem.Message)
-		return
+		return errors.New("cluster resume was not accepted")
 	}
 	// The session stays "disconnected" until the new pod connects, so restart
 	// its status clock now: the reconciler measures both the 24 h resume
@@ -1556,6 +1693,18 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 	spec := SessionJobSpec{
 		SessionID: sessionID, Repo: row.Repo, Title: title, Model: model, Effort: effort, Engine: engine,
 		InitialPrompt: text, Resume: true,
+		InitialPromptClientID: func() string {
+			if len(clientIDs) > 0 {
+				return clientIDs[0]
+			}
+			return ""
+		}(),
+		InitialPromptSource: func() string {
+			if automatic {
+				return limitResumeSource
+			}
+			return ""
+		}(),
 		// The old pod's token died with its session's last end; the new pod gets its own.
 		ExtraEnv: withClusterSessionToken(ctx, pool, sessionID, nil),
 		// A cluster row's repo is empty only for a "No repository" session:
@@ -1576,7 +1725,7 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 		AuthSessionID:      authSessionID,
 		// A resumed cron session is still a cron's: it never falls back to the operator credential
 		// (a resume by anyone but the owner has no account, and so no credential, and fails).
-		NoOperatorFallback: row.CronID != nil,
+		NoOperatorFallback: automatic || row.CronID != nil,
 		// A resumed session is restricted exactly when it was started so (migration 036): a
 		// cron's, or a board-started grant session. A launch-sheet session with connections
 		// comes back with its tools.
@@ -1593,7 +1742,7 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 			log.Printf("resume %s: re-issue MCP grants: %v", sessionID, err)
 			announceClusterStart(ctx, h, pool, sessionID, row.Repo, true, nil)
 			clusterJobCreateFailed(ctx, h, pool, sessionID, "MCP connections could not be granted again")
-			return
+			return errors.New("cluster resume was not accepted")
 		}
 		spec.MCPGateway = gateway
 	}
@@ -1602,9 +1751,10 @@ func resumeClusterSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessi
 	if err := jm.CreateSessionJob(spec); err != nil { //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
 		log.Printf("resume %s: %v", sessionID, err)
 		clusterJobCreateFailed(ctx, h, pool, sessionID, err.Error())
-		return
+		return errors.New("cluster resume was not accepted")
 	}
 	clusterJobCreated(ctx, h, pool, sessionID, 0)
+	return nil
 }
 
 // derefOrEmpty returns "" for a nil string pointer, else the pointed-to
@@ -1644,4 +1794,8 @@ func nonNilStrings(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+func foreignEngineCredential(key, engine string) bool {
+	return ((key == "ANTHROPIC_API_KEY" || key == "CLAUDE_CODE_OAUTH_TOKEN") && engine != "claude") || (key == "CODEX_AUTH_JSON" && engine != "codex") || (key == "HERMES_ENV_CONTENTS" && engine != "hermes")
 }

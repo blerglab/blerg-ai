@@ -337,16 +337,22 @@ func TestUsersCLI(t *testing.T) {
 	if code := runUsers([]string{"create", "--subject", "eve", "--role", "member"}, &out); code != 0 {
 		t.Fatalf("create exit %d: %s", code, out.String())
 	}
-	if !regexp.MustCompile(`^provider_subject=eve password=\S{20,}\n$`).MatchString(out.String()) {
+	if !regexp.MustCompile(`^username=eve password=\S{20,}\n$`).MatchString(out.String()) {
 		t.Fatalf("unexpected output %q", out.String())
 	}
 	out.Reset()
-	if code := runUsers([]string{"set-password", "--subject", "eve"}, &out); code != 0 || !strings.HasPrefix(out.String(), "provider_subject=eve password=") {
+	if code := runUsers([]string{"set-password", "--subject", "eve"}, &out); code != 0 || !strings.HasPrefix(out.String(), "username=eve password=") {
 		t.Fatalf("set-password exit %d: %s", code, out.String())
 	}
 	out.Reset()
 	if code := runUsers([]string{"create", "--subject", "x", "--role", "owner"}, &out); code != 2 {
 		t.Fatalf("bad role exit %d, want 2", code)
+	}
+	if code := runUsers([]string{"create", "--subject", "Bad Name", "--role", "member"}, &out); code != 2 || out.Len() != 0 {
+		t.Fatalf("invalid username exit %d (stdout %q), want 2 and nothing printed", code, out.String())
+	}
+	if code := runUsers([]string{"create", "--subject", "alice.b-2", "--role", "admin"}, &out); code != 0 || !strings.HasPrefix(out.String(), "username=alice.b-2 password=") {
+		t.Fatalf("create alice.b-2 exit %d: %s", code, out.String())
 	}
 }
 

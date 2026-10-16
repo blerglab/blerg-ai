@@ -246,6 +246,44 @@
 
 .agent-card.kind-ask {
   border-left-color: var(--chat-fg);
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.agent-card.kind-ask.closed {
+  border-left-color: var(--chat-border);
+}
+
+.ask-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.ask-reply {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.ask-reply-box {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  background: var(--chat-surface);
+  color: inherit;
+}
+
+.ask-reply-error {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--chat-danger);
 }
 
 .ask-hint {
@@ -266,6 +304,18 @@
   align-self: flex-start;
 }
 
+/* A topic the agent marked (▸ its title, ✓ Done: its outcome): a dashed rule across the
+   transcript with the words under it, as muted as the other markers. */
+.agent-card.marker.topic-divider {
+  align-self: stretch;
+  text-align: center;
+  font-size: var(--chat-text-xs);
+  opacity: 0.75;
+  border-top: 1px dashed var(--chat-border);
+  border-radius: 0;
+  padding-top: 4px;
+}
+
 /* A turn's footer (stop reason, model, tokens, time taken) sits inside the
    assistant bubble it closes, not as a floating line between bubbles. */
 .agent-card .turn-foot {
@@ -275,17 +325,253 @@
   opacity: 0.8;
 }
 
+/* A subagent is a side thread, so it is quieter than the conversation it hangs off: a faint tint of
+   the assistant bubble (darker than it on the dark theme, paler on the light), muted text. */
 .agent-card.subagent {
   align-self: stretch;
   font-size: 12px;
-  background: var(--chat-card-system-bg);
-  border-left: 3px solid var(--chat-border);
+  background: color-mix(in srgb, var(--chat-card-assistant-bg) 45%, transparent);
+  border-left: 2px solid var(--chat-border);
+}
+
+/* A subagent: one line, like a tool group's row, that opens on everything it did. It sits indented
+   under a thin guide line, a thread hanging off the conversation, at one width whatever it is doing;
+   the right edge lines up with the assistant bubbles' 92% cap. The 1px border is there in every
+   state, transparent but for a background subagent's dashed outline, so nothing shifts when the
+   state changes. The padding is the row's (a tool group's summary: 4px 8px, 11px type at 1.4), so
+   a collapsed card is exactly as tall as a tool group's line. */
+.agent-card.subagent-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-self: flex-start;
+  margin-left: 24px;
+  width: calc(92% - 24px);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+/* The guide line: 2px, about 10px in from the timeline's edge, the card's height. */
+.agent-card.subagent-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -14px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--chat-border);
+}
+
+/* An error tints the guide, not the card. */
+.agent-card.subagent-card.status-error::before {
+  background: color-mix(in srgb, var(--chat-danger) 45%, var(--chat-border));
+}
+
+/* Running in the background (the turn went on without it): a muted dashed outline, in that state only. */
+.agent-card.subagent-card.status-background {
+  border: 1px dashed color-mix(in srgb, var(--chat-border) 70%, transparent);
+}
+
+@media (max-width: 700px) {
+  /* border-box here so the border does not push the card past the screen's edge */
+  .agent-card.subagent-card {
+    box-sizing: border-box;
+    margin-left: 12px;
+    width: calc(100% - 12px);
+  }
+
+  .agent-card.subagent-card::before {
+    left: -7px;
+  }
+}
+
+/* The row: the title, a "resumed" marker when it is one, and the state glyph at the right. */
+.subagent-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  border-radius: inherit;
+  color: inherit;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.subagent-row:hover .subagent-title,
+.subagent-row:focus-visible .subagent-title {
+  color: var(--chat-fg);
+}
+
+/* The title takes the free space and is cut short with an ellipsis: the row stays one line. */
+.subagent-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--chat-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A resumed run of a finished subagent: a small muted word, the same agent going again. */
+.subagent-resumed {
+  flex: none;
+  color: var(--chat-muted-2);
+  font-size: 10.5px;
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.subagent-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--chat-muted-2);
+}
+
+/* In the background the spinner is muted and the ⏱ says why. */
+.subagent-status.background .tcg-spin {
+  opacity: 0.5;
+}
+
+.subagent-bg-glyph {
+  font-size: 0.9em;
+  opacity: 0.85;
+}
+
+.subagent-line {
+  color: var(--chat-muted-2);
+  opacity: 0.85;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 8px 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--chat-border);
+  font-size: 13px;
+}
+
+/* The first line of its report, under the end line. */
+.subagent-gist {
+  color: var(--chat-muted);
+}
+
+/* The report it returned, at the foot of the opened card. */
+.subagent-report {
+  color: var(--chat-muted);
+  overflow-wrap: anywhere;
+}
+
+.subagent-report-label {
+  color: var(--chat-muted-2);
+  font-size: 11px;
+}
+
+.subagent-report.error .subagent-report-label {
+  color: color-mix(in srgb, var(--chat-danger) 75%, var(--chat-muted-2));
+}
+
+.subagent-detail > summary {
+  cursor: pointer;
+  color: var(--chat-muted-2);
+  font-size: 11px;
+}
+
+/* A thinking block is an assistant card; its text is plain, so the line breaks are kept. */
+.thinking-text {
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A subagent's prompt, opened from its card. */
+.subagent-prompt {
+  margin-top: 4px;
+  padding: calc(6px * var(--chat-density)) calc(10px * var(--chat-density));
+  border-left: 2px solid var(--chat-border);
+  color: var(--chat-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .agent-card.error {
   align-self: stretch;
   background: var(--chat-card-system-bg);
   border-left: 3px solid var(--chat-danger);
+}
+
+/* An API failure: the model did not answer (not the model speaking). */
+.agent-card.error .error-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--chat-danger);
+  margin-right: 4px;
+}
+
+/* Text nobody typed: a daemon's note, a slash command's output. */
+.agent-card.system-note,
+.agent-card.system-output {
+  align-self: stretch;
+  background: var(--chat-card-system-bg);
+  border-left: 3px solid var(--chat-border);
+  color: var(--chat-muted);
+  font-size: var(--chat-text-sm);
+}
+
+.agent-card.system-note {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.system-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--chat-muted-2);
+}
+
+.system-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.system-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.system-pre {
+  margin: 4px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.card-author-note {
+  font-weight: 400;
+  color: var(--chat-muted-2);
 }
 
 .agent-composer-hint {
@@ -406,6 +692,24 @@
   overflow-wrap: anywhere;
 }
 
+/* ─── Background tasks (the pieces a host's list draws a task with) ────────── */
+
+.bg-time {
+  font-family: var(--chat-font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--chat-muted-2);
+}
+
+.bg-glyph.bg-ok { color: var(--chat-success); }
+.bg-glyph.bg-bad { color: var(--chat-danger); }
+
+/* The row a jump from a host's list lands on (a task's call, a subagent's card, an ask). */
+.bg-flash {
+  outline: 2px solid var(--chat-accent);
+  outline-offset: 2px;
+  transition: outline-color 0.4s;
+}
+
 /* ─── Working indicator ──────────────────────────────────────────────────── */
 
 .agent-working {
@@ -436,6 +740,25 @@
   font-variant-numeric: tabular-nums;
   color: var(--chat-muted-2);
   margin-left: 2px;
+}
+
+/* The tool clock stands apart from the turn clock, so the two never read as one number. */
+.agent-working-time.agent-waiting-on {
+  margin-left: 10px;
+}
+
+/* The "waiting on <tool>" suffix fades in rather than popping up. */
+.agent-waiting-on {
+  animation: agent-fade-in 0.3s ease-out;
+}
+
+.agent-working.static .agent-waiting-on {
+  animation: none;
+}
+
+@keyframes agent-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .agent-dots {
@@ -744,6 +1067,11 @@
   margin-left: 8px;
 }
 
+/* A caption that wraps a time ("thinking · 2m ago") is muted once, not twice. */
+.card-time .card-time {
+  opacity: 1;
+}
+
 .tool-header .card-time {
   margin-left: auto;
 }
@@ -967,7 +1295,16 @@
   background: var(--chat-muted-2);
 }
 
-/* the older part of a long transcript is still arriving above what is shown */
+/* above the first row drawn of a long transcript: scrolled near, it reveals more rows (or fetches an
+   older page). No height, and its negative margin takes back the timeline's gap after it, so the
+   rows sit exactly where they would without it. */
+.transcript-more {
+  flex: none;
+  height: 0;
+  margin-bottom: calc(-8px * var(--chat-density));
+}
+
+/* an older page of a long transcript is being fetched, above what is shown */
 .older-loading {
   display: flex;
   align-items: center;
@@ -978,8 +1315,43 @@
   color: var(--chat-muted-2);
 }
 
-/* while older messages are still arriving the scrollbar thumb would shrink and jump with every page,
-   so it is not drawn until the whole transcript is in */
+/* New output arrived below while the reader was scrolled up: a small pill over the bottom of the
+   timeline. The dock sticks to the bottom of the scrolled view and takes no room (its negative
+   margin gives back the timeline's gap). */
+.chat-new-output-dock {
+  position: sticky;
+  bottom: 0;
+  height: 0;
+  margin-top: calc(-8px * var(--chat-density));
+  align-self: stretch;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.chat-new-output {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  white-space: nowrap;
+  padding: 2px 10px;
+  border: 1px solid var(--chat-border);
+  border-radius: 999px;
+  background: var(--chat-surface-2);
+  color: var(--chat-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-new-output:hover,
+.chat-new-output:focus-visible {
+  color: var(--chat-fg);
+}
+
+/* while an older page is being fetched the scrollbar thumb would shrink and jump when it lands,
+   so it is not drawn until that page is in */
 .agent-timeline.backfilling {
   scrollbar-color: transparent transparent;
 }
@@ -1368,6 +1740,16 @@
   display: block;
   font-size: var(--chat-text-xs);
   color: var(--chat-muted-2);
+}
+
+/* A file the server lists but no longer has the bytes of: dimmed, struck through, Delete only. */
+.artifact-row-main.is-missing {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.artifact-row-main.is-missing .artifact-row-name {
+  text-decoration: line-through;
 }
 
 .artifact-row-actions {

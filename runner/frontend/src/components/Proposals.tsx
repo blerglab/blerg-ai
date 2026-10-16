@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
+import ToolChanges from './ToolChanges'
 import {
   PROPOSALS_POLL_MS, applyPendingCount, approveFailureMessage, beginCountRequest, collapsedArguments, formatArguments, isAwaitingYou, resultText,
   usePendingProposals,
@@ -143,21 +144,21 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
   )
 }
 
-// ProposalsBadge: the pending count next to the Proposals nav entry; nothing at 0. It only reads the
+// ProposalsBadge: the pending count (proposals plus tool changes) next to the Proposals nav entry; nothing at 0. It only reads the
 // shared count (the app keeps it fresh with useProposalCountPoll).
 export function ProposalsBadge({ style }: { style?: CSSProperties }) {
-  const count = usePendingProposals(s => s.count)
-  if (count <= 0) return null
+  const total = usePendingProposals(s => s.count + s.changes)
+  if (total <= 0) return null
   return (
     <span
       data-testid="proposals-count-badge"
-      aria-label={`${count} pending proposals`}
+      aria-label={`${total} items awaiting your review`}
       style={{
         background: 'var(--danger)', color: 'var(--chalk)', borderRadius: 8, minWidth: 16, height: 16, fontSize: '0.65rem',
         fontWeight: 700, lineHeight: '16px', textAlign: 'center', padding: '0 4px', boxSizing: 'border-box', ...style,
       }}
     >
-      {count}
+      {total}
     </span>
   )
 }
@@ -167,6 +168,8 @@ type Tab = 'pending' | 'decided'
 export default function Proposals() {
   const [params] = useSearchParams()
   const focusId = params.get('id')
+  // ?session=<id> (the session panel's link): that session's proposals and tool changes only.
+  const sessionFilter = params.get('session')
   const [open, setOpen] = useState<ProposalInfo[] | null>(null)
   const [decided, setDecided] = useState<ProposalInfo[] | null>(null)
   const [decidedNext, setDecidedNext] = useState<string | null>(null)
@@ -324,8 +327,9 @@ export default function Proposals() {
     }
   }
 
-  const pending = open ?? []
-  const listed = tab === 'pending' ? pending : (decided ?? [])
+  const ofSession = (ps: ProposalInfo[]) => (sessionFilter ? ps.filter(p => p.session_id === sessionFilter) : ps)
+  const pending = ofSession(open ?? [])
+  const listed = tab === 'pending' ? pending : ofSession(decided ?? [])
   // The deep-linked proposal shows on the tab it belongs to even when its page is not loaded.
   const focusedBelongs = focused !== null && isAwaitingYou(focused) === (tab === 'pending')
   const shown = focused && focusedBelongs && !listed.some(p => p.id === focused.id) ? [focused, ...listed] : listed
@@ -354,13 +358,18 @@ export default function Proposals() {
         {tabButton('pending', open === null ? 'Pending' : `Pending (${pending.length})`)}
         {tabButton('decided', 'Decided')}
       </div>
+      {sessionFilter && (
+        <div data-testid="proposals-session-filter" style={muted}>
+          Showing proposals for this session · <Link to="/proposals" style={{ color: 'var(--amber)' }}>Show all</Link>
+        </div>
+      )}
       {focusError && <div role="alert" data-testid="proposal-not-found" style={{ color: 'var(--danger)', fontSize: 13 }}>{focusError}</div>}
       {error && <div role="alert" style={{ color: 'var(--danger)', fontSize: 13 }}>Could not load proposals: {error}</div>}
       {loadingList && !error && <div style={muted}>Loading…</div>}
       {!loadingList && shown.length === 0 && (
         <div data-testid="proposals-empty" style={muted}>
           {tab === 'pending'
-            ? 'Nothing waiting. When an agent uses a tool you set to "queued for your approval", its call is held here until you approve or reject it.'
+            ? 'Nothing waiting. When an agent uses a tool you set to "queued for your approval", its call is held here until you approve or reject it; when an MCP server changes a tool a session uses, the change is listed below.'
             : 'No decided proposals yet. Decided proposals are kept for 30 days.'}
         </div>
       )}
@@ -379,6 +388,7 @@ export default function Proposals() {
           onResolve={outcome => void act(p.id, 'resolve', { outcome }, (_s, m) => m)}
         />
       ))}
+      {tab === 'pending' && <ToolChanges focusId={params.get('change')} connectionId={params.get('connection')} sessionId={sessionFilter} />}
       {tab === 'decided' && decidedNext && (
         <div>
           <button type="button" style={button} disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Loading…' : 'Load more'}</button>

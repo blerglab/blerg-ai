@@ -173,6 +173,32 @@ func TestCloneURL(t *testing.T) {
 	}
 }
 
+func TestCommitURL(t *testing.T) {
+	sha := "1a2b3c4"
+	if got := NewGitHub(nil).CommitURL("example-org", "example-repo", sha); got != "https://github.com/example-org/example-repo/commit/1a2b3c4" {
+		t.Errorf("github = %q", got)
+	}
+	if got := NewGitLab(nil).CommitURL("grp/sub", "proj", sha); got != "https://gitlab.com/grp/sub/proj/-/commit/1a2b3c4" {
+		t.Errorf("gitlab = %q", got)
+	}
+	if got := NewGitLabAt("gitlab-acme", "git.acme.example", "https://git.acme.example", nil).CommitURL("platform", "tools", sha); got != "https://git.acme.example/platform/tools/-/commit/1a2b3c4" {
+		t.Errorf("self-managed gitlab = %q", got)
+	}
+	ref := Ref{Provider: "github", Owner: "example-org", Name: "example-repo"}
+	if got, ok := Default.CommitURL(ref, sha); !ok || got != "https://github.com/example-org/example-repo/commit/1a2b3c4" {
+		t.Errorf("registry github = %q,%v", got, ok)
+	}
+	for _, bad := range []Ref{
+		{Provider: "nope", Owner: "o", Name: "r"},
+		{Provider: "github", Owner: "grp/sub", Name: "r"},
+		{Provider: "github", Owner: "o", Name: ""},
+	} {
+		if got, ok := Default.CommitURL(bad, sha); ok || got != "" {
+			t.Errorf("CommitURL(%+v) = %q,%v; want none", bad, got, ok)
+		}
+	}
+}
+
 func TestRedactURL(t *testing.T) {
 	for _, u := range []string{
 		NewGitHub(nil).CloneURL("o", "r", fakeToken),

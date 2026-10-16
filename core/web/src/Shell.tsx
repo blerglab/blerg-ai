@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { formatBuild } from "./buildInfo";
 
 // Shell is the frame every core screen sits in: the wordmark up top (a link back to the
 // home), an optional right-hand slot for the signed-in account, and a footer with the build
@@ -72,7 +73,9 @@ function ThemeToggle() {
 // Site mirrors GET /api/site (core/internal/api/router.go): the build version and the
 // browser-facing component URLs. Public — no token needed — so the footer and the home tiles
 // can render before or without identity.
-export type Site = { version: string; board_url: string; runner_url: string };
+export type Site = { version: string; release?: string; commit?: string; board_url: string; runner_url: string };
+
+const EMPTY_SITE: Site = { version: "", board_url: "", runner_url: "" };
 
 export function useSite(enabled = true): Site | null {
   const [site, setSite] = useState<Site | null>(null);
@@ -83,9 +86,14 @@ export function useSite(enabled = true): Site | null {
       .then(() => fetch("/api/site"))
       .then((r) => (r.ok ? r.json() : null))
       .then((s) => {
-        if (!cancelled && s && typeof s === "object") setSite(s as Site);
+        if (cancelled) return;
+        // A failed read leaves an empty site, not null: every reader falls back on empty fields,
+        // and the footer shows no version instead of an ellipsis forever.
+        setSite(s && typeof s === "object" ? (s as Site) : EMPTY_SITE);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setSite(EMPTY_SITE);
+      });
     return () => {
       cancelled = true;
     };
@@ -102,6 +110,7 @@ export default function Shell({
   children: ReactNode;
   site?: Site | null;
 }) {
+  const build = formatBuild(site);
   return (
     <div className="shell">
       <header className="shell-header">
@@ -110,10 +119,17 @@ export default function Shell({
       </header>
       <main className="shell-main">{children}</main>
       <footer className="shell-footer">
-        <span className="mono">blerg-core {site?.version ?? "…"}</span>
-        <span className="sep" aria-hidden="true">
-          ·
-        </span>
+        {build.main && (
+          <>
+            <span className="mono build-version" title={build.title || undefined}>
+              Blerg {build.main}
+              {build.commit && <span className="build-commit"> · {build.commit}</span>}
+            </span>
+            <span className="sep" aria-hidden="true">
+              ·
+            </span>
+          </>
+        )}
         <a href="/agents">/agents manifest</a>
         <ThemeToggle />
       </footer>

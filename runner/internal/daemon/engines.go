@@ -68,6 +68,8 @@ type EngineSpec struct {
 	// AgentDriverOpts (which carries this spec, so the driver renders its
 	// model/effort arguments through the same flags — see engineModel).
 	NewAgentDriver func(o AgentDriverOpts) sessionDriver
+	// PreparePlugins owns the native managed-plugin snapshot for this engine.
+	PreparePlugins prepareEnginePlugins
 	// ConfigVars lists this engine's operator-tunable env vars (e.g.
 	// OpenClaw's replay-context budget). Logged once at daemon startup (see
 	// NewManager) so they're discoverable without reading source — the log
@@ -92,10 +94,13 @@ type EngineSpec struct {
 	// nothing and the UI says so. An engine that does report its own (Claude
 	// Code's init line) emits the event from its driver instead.
 	Capabilities func(c CapabilityContext) []protocol.CapabilityGroup
+	// SandboxLoginPaths are engine-relative credential paths under the host home.
+	SandboxLoginPaths []string
 }
 
 // AgentDriverOpts is what an agent-kind driver is built from.
 type AgentDriverOpts struct {
+	CredentialSource EngineCredentialSource
 	// Spec is the engine's own EngineSpec: its flags render Model/Effort.
 	Spec    EngineSpec
 	WorkDir string
@@ -135,13 +140,14 @@ var engineRegistry = map[string]EngineSpec{
 	// claude does, so none is passed here; queueInitialPrompt injects it
 	// after spawn either way.
 	"codex": {
-		ID: "codex", DisplayName: "Codex",
+		ID: "codex", DisplayName: "Codex", SandboxLoginPaths: []string{".codex"},
 		Binary: "codex", ModelFlag: "--model", SkipPermsFlag: "--dangerously-bypass-approvals-and-sandbox",
 		// A config override: the value is TOML-parsed, and a bare level
 		// (already one of the rules table's tokens) parses as that string.
 		EffortArgs:      func(effort string) []string { return []string{"-c", "model_reasoning_effort=" + effort} },
 		ListModels:      probeCodexModels,
 		NewAgentDriver:  func(o AgentDriverOpts) sessionDriver { return newCodexDriver(o) },
+		PreparePlugins:  prepareCodexPluginEngine,
 		DetectAvailable: codexAlreadyLoggedIn,
 		Capabilities:    codexCapabilities,
 	},
@@ -151,7 +157,7 @@ var engineRegistry = map[string]EngineSpec{
 	// `chat` subcommand, not plain interactive `hermes` — so every tmux-kind
 	// hermes session (including post-crash recovery) starts fresh too.
 	"hermes": {
-		ID: "hermes", DisplayName: "Hermes",
+		ID: "hermes", DisplayName: "Hermes", SandboxLoginPaths: []string{".hermes/config.yaml", ".hermes/.env"},
 		Binary: "hermes", ModelFlag: "-m", SkipPermsFlag: "--yolo",
 		EffortArgs:      func(effort string) []string { return []string{"--reasoning", effort} },
 		ListModels:      probeHermesModels,
@@ -188,9 +194,21 @@ var engineRegistry = map[string]EngineSpec{
 // are declared here the same way every registered engine declares its own,
 // and built by the same modelEffortArgs.
 var claudeEngineSpec = EngineSpec{
-	ID: "claude", DisplayName: "Claude", Binary: "claude",
+	ID: "claude", DisplayName: "Claude", Binary: "claude", SandboxLoginPaths: []string{".claude", ".claude.json"},
 	ModelFlag: "--model", SkipPermsFlag: "--dangerously-skip-permissions",
 	EffortArgs: func(effort string) []string { return []string{"--effort", effort} },
+}
+
+// engineProblem refuses an engine this daemon cannot run. Only the documented
+// empty engine selects Claude; a newer server's engine never falls back to it.
+func engineProblem(engine string) string {
+	if engine == "" || engine == claudeEngineSpec.ID {
+		return ""
+	}
+	if _, ok := engineRegistry[engine]; ok {
+		return ""
+	}
+	return "unsupported engine: update the daemon or select a supported engine"
 }
 
 // modelEffortArgs is an engine invocation's model and effort arguments, from
@@ -422,3 +440,6 @@ func joinWithOr(items []string) string {
 	}
 	return out
 }
+
+// NativePluginEngine reports whether the engine registry owns its plugin startup lifecycle.
+func NativePluginEngine(engine string) bool { return engineRegistry[engine].PreparePlugins != nil }

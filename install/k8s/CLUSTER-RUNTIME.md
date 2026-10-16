@@ -21,6 +21,68 @@ unless you turn it off, and it needs **no operator-supplied credential at all**
 two runtimes coexist; a session picks one in the launch sheet, which defaults
 to the cluster runtime whenever no workstation daemon is connected.
 
+### Retained native conversations
+
+New account-owned Claude and Codex sessions retain their native conversation
+history in a separate `ReadWriteOnce` PVC per session. Pod replacement resumes
+that same native conversation, including its native child records. A fresh
+workspace is reconstructed separately; the agent is told to verify its current
+state before repeating earlier actions. Earlier commands are not replayed.
+Claude sessions with API keys use the Claude CLI with that same key when native
+history is enabled, so they can retain the same native identity.
+
+The PVC contains only native conversation files, Codex conversation SQLite
+state, and a runner identity/receipt journal (up to 256 receipts, which hold the
+text of recent messages). Credentials, configuration, plugins, MCP grants and
+service-account tokens are not retained there. Replacement
+requires a current authenticated account proof and rebuilds current grants. The
+runner verifies the claim's original Kubernetes UID and session/account/engine
+labels. A missing or replaced expected claim causes an explicit recovery failure;
+it never silently creates an empty conversation. Existing sessions without native
+history, ownerless operator sessions, and engines without a native adapter keep
+the existing archive recovery path. That path does not restore native identity.
+
+Session MCP selections remain the same across replacement; new gateway tokens
+carry those same selected connections, tools and budgets. Codex's native resume
+API retains its original dynamic tool definitions. If an upstream definition
+changes and the person accepts the change (or the connection auto-accepts it),
+a new Codex session may be required to advertise the updated definition. Current
+gateway policy still rejects revoked or unavailable tools even when an earlier
+native definition remains in the conversation. Blerg does not modify native
+SQLite records or create a different native identity to hide this limitation.
+Claude may also retain cached MCP descriptions after resume. An attempted call
+from a retained description still goes through the fresh gateway grant; cached
+descriptions never override its current authorization.
+
+The runner serializes replacements across replicas and waits for the previous
+Job **and all its pods** to disappear before admitting a new writer. RWO by
+itself does not prevent multiple pods on the same node from writing. Claims have
+no Job owner reference and survive normal Job garbage collection. Disconnected
+or paused conversations have no time-based expiry. After a true ending, cleanup
+reclaims the claim after seven days by default. Permanent session deletion also
+starts that retention period and preserves internal cleanup metadata. Resuming after that retention
+period requires a new session. Back up both PostgreSQL and the underlying PVC
+storage if conversation recovery must survive storage failure.
+
+These runner ConfigMap values control retention:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BLERG_RUNNER_NATIVE_HISTORY` | `true` in this install | Enable native history for new eligible sessions |
+| `BLERG_RUNNER_NATIVE_HISTORY_STORAGE_CLASS` | empty | Use the cluster's default StorageClass |
+| `BLERG_RUNNER_NATIVE_HISTORY_SIZE` | `1Gi` | Storage request per claim |
+| `BLERG_RUNNER_NATIVE_HISTORY_MAX_CLAIMS` | `128` | Maximum retained claims admitted by the runner |
+| `BLERG_RUNNER_NATIVE_HISTORY_RETENTION_HOURS` | `168` | Retention after a true ending |
+
+MicroK8s uses its configured default StorageClass, normally `microk8s-hostpath`.
+A storage request is **not a hard byte quota** with host-path provisioners. Use
+a provisioner that enforces volume capacity and namespace `ResourceQuota` or
+admission policy if hard storage/count limits are required. Monitor retained
+claims and disk usage. Long-paused sessions consume claims until ended. Turning
+off native history prevents new native-backed sessions and intentionally refuses
+replacement of existing native-backed sessions until the feature is re-enabled;
+it does not downgrade them to archive recovery or delete their data.
+
 ### What `deploy.sh` already did for you
 
 On every run, with `CLUSTER_RUNTIME` unset or `on`:
@@ -86,7 +148,9 @@ unused. Remove them yourself if you want them gone.
 
 Cluster sessions **run as the user who launched them**. When a session starts,
 the runner fetches that account's credentials out of core's encrypted per-user
-vault and writes them into the session's own Secret — so each person uses their
+vault and writes opaque credentials into the session's own Secret. Managed Codex
+connections instead use access-only delivery from Core; refresh material stays in
+the vault. Each person uses their
 own subscription, their own billing, and their own git identity.
 
 Users add credentials themselves at `<SCHEME>://<DOMAIN>/settings`. Each block
@@ -95,7 +159,7 @@ on that page explains how to produce the value:
 | Kind | What to paste |
 |---|---|
 | `claude` | The token printed by `claude setup-token` on a machine where they're logged in (starts with `sk-ant-oat`), or an Anthropic console API key to bill an organisation instead |
-| `codex` | The contents of `~/.codex/auth.json` from a machine where `codex login` has succeeded |
+| `codex` | Prefer Settings → Managed connections and complete the dedicated device login. Pasting `~/.codex/auth.json` remains a snapshot import with no coordinated refresh. |
 | `hermes` | The contents of `~/.hermes/.env` from a machine where Hermes is set up |
 | `github` | A fine-grained personal access token with Contents read+write and Metadata read on the repos sessions may touch — sessions clone and push as that user |
 

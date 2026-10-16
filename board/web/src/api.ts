@@ -4,8 +4,9 @@
 // the session can be silently renewed instead of just bouncing the user.
 // board no longer has its own /login route to fall back to (see Task 6).
 
-import { ensureFreshToken, getAccessToken, redirectToRefresh } from "./authClient";
-import { refreshAlreadyAttempted, markRefreshAttempted } from "./refreshGuard";
+import { ensureFreshToken, getAccessToken } from "./authClient";
+import { refreshAlreadyAttempted } from "./refreshGuard";
+import { bounceToRefresh, clearSignInStuck } from "./signIn";
 
 export class ApiError extends Error {
   status: number;
@@ -41,11 +42,9 @@ export async function api<T = unknown>(
     // Only navigate to core's /auth/refresh once per page load — a second
     // consecutive 401 (e.g. the refresh itself didn't fix things, or two
     // requests raced) must not re-trigger the redirect, or a broken refresh
-    // loops the tab forever between board and core.
-    if (!refreshAlreadyAttempted()) {
-      markRefreshAttempted();
-      redirectToRefresh(location.href);
-    }
+    // loops the tab forever between board and core. When it may not, bounceToRefresh raises the
+    // "Couldn't sign you in" banner instead.
+    bounceToRefresh();
     throw new ApiError(401, { error: "unauthorized" });
   }
   const text = await resp.text();
@@ -234,6 +233,7 @@ export function boardSocket(boardId: string, onPing: () => void): () => void {
     ws = new WebSocket(`${proto}://${location.host}/ws?board=${boardId}`, ["bearer", getAccessToken() ?? token]);
     ws.onopen = () => {
       opened = true;
+      clearSignInStuck();
     };
     ws.onmessage = onPing;
     ws.onclose = () => {
@@ -252,8 +252,7 @@ export function boardSocket(boardId: string, onPing: () => void): () => void {
             connect();
             return;
           }
-          markRefreshAttempted();
-          redirectToRefresh(location.href);
+          bounceToRefresh();
         });
         return;
       }

@@ -97,6 +97,15 @@ func TestPostSessionsDaemonCarriesPluginsOnlyWhereTheyLoad(t *testing.T) {
 			t.Errorf("%s session got plugins %v (core calls %d)", name, msg.Plugins, *calls)
 		}
 	}
+	// Codex requires an explicit native installer advertisement; a legacy
+	// Claude-only plugins=true bit above cannot opt it in.
+	api, dc, calls = pluginAPI(t, list, nil)
+	dc.SetPlugins(true)
+	dc.SetPluginEngines([]string{"codex"})
+	msg, _ = spawnPlugins(t, api, dc, map[string]any{"daemon_id": "d1", "repo": "my-app", "kind": "agent", "runtime": "docker", "engine": "codex"})
+	if len(msg.Plugins) != len(list) || *calls != 1 {
+		t.Fatal("modern Codex daemon did not receive its native plugins")
+	}
 }
 
 // Core failing never fails the start: the session starts without plugins and

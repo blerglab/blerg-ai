@@ -100,6 +100,25 @@ type artifactListEntry struct {
 	artifactInfo
 	LatestVersion int    `json:"latest_version"` // the highest version of this name and origin
 	CreatedAt     string `json:"created_at"`
+	// Missing: the row is here but its bytes are not on disk (a data directory that did not
+	// survive a restart). The file is listed so it can be deleted; it cannot be viewed.
+	Missing bool `json:"missing,omitempty"`
+}
+
+// fileGoneMsg is the body of a 410: the row exists, its bytes do not.
+const fileGoneMsg = "file no longer available"
+
+// artifactPath is where one artifact's bytes live; sid and the row's id must already be validated.
+func artifactPath(sid string, a db.ArtifactRow) string {
+	return filepath.Join(artifactDir(sid, a.ID), a.Name)
+}
+
+// artifactFileMissing reports whether a listed file's bytes are gone from disk. Only a definite
+// "does not exist" counts: any other error (permissions, a busy disk) leaves the file listed as
+// present, and the read path answers for itself.
+func artifactFileMissing(sid string, a db.ArtifactRow) bool {
+	_, err := os.Stat(artifactPath(sid, a)) //nolint:gosec // validated session id, our own id, a sanitised base name
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // latestVersions maps each (origin, name) of rows to its highest version.
@@ -334,7 +353,7 @@ func (a *API) recordArtifactEvent(ctx context.Context, sessionID string, info ar
 	}
 	ev.Seq = seq
 	if msg, err := json.Marshal(ev); err == nil {
-		a.hub.FanOutSessionOutput(sessionID, msg)
+		a.hub.FanOutAgentEvent(sessionID, seq, msg)
 	}
 }
 
@@ -422,7 +441,7 @@ func (h *artifactsHandler) listSession(w http.ResponseWriter, r *http.Request, s
 	latest := latestVersions(rows)
 	out := make([]artifactListEntry, 0, len(rows))
 	for _, a := range rows {
-		out = append(out, artifactListEntry{infoOf(a), latest[latestKey(a)], a.CreatedAt.UTC().Format(time.RFC3339)})
+		out = append(out, artifactListEntry{infoOf(a), latest[latestKey(a)], a.CreatedAt.UTC().Format(time.RFC3339), artifactFileMissing(sid, a)})
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"artifacts": out})
@@ -451,9 +470,16 @@ func (h *artifactsHandler) serveSession(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	f, err := os.Open(filepath.Join(artifactDir(sid, row.ID), row.Name))
+	f, err := os.Open(artifactPath(sid, *row)) //nolint:gosec // validated session id, our own id, a sanitised base name
+	if errors.Is(err, os.ErrNotExist) {
+		// The row survived but the bytes did not (a data directory lost on a restart): say so,
+		// distinctly from a file that was never there or was deleted (404).
+		writeError(w, http.StatusGone, fileGoneMsg)
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not found")
+		log.Printf("artifacts open %s/%s: %v", sid, row.ID, err)
+		writeError(w, http.StatusInternalServerError, "storage error")
 		return
 	}
 	defer func() { _ = f.Close() }()

@@ -62,6 +62,9 @@ The record is an allow-list, not the spawn message:
 | `model`, `effort` | as last changed by the person |
 | `claude_session_id` | as last reported by the engine; it can change when a resume fails |
 | `turn_active` | a turn was running when this was last written |
+| `tool_running`, `open_calls` | the agent's own tool calls that had started and not returned, each with its tool and what it ran (a command and its description, a file, a pattern); absent in a record from an older daemon |
+| `waiting` | the session was `waiting` for the person; absent (false) in a record from an older daemon |
+| `open_tasks`, `open_subagents` | the background tasks and subagents running |
 | `auto_continues` | how many times recovery has continued a cut-off turn by itself since a turn last finished |
 | `engine_pid`, `engine_started` | the engine process and its start time as `ps` prints it |
 
@@ -126,35 +129,97 @@ once it is; a `kill_session` for it means it is never hosted. For each record:
    closes the tool call left spinning: "The session's host restarted. The conversation was
    restored." plus, as applicable, "The step that was running was cut off." / "The earlier
    conversation could not be restored: the agent starts fresh, with the files as they were." /
-   "Its plugins could not be reinstalled."
+   "Its plugins could not be reinstalled." / "1 background task and 2 subagents were stopped."
+   Then each background task and subagent the record lists as running (`open_tasks`,
+   `open_subagents`, kept current by the driver as they start and end) is ended as its own end
+   would have been: `background_task_done` with status `stopped` and summary "the daemon
+   restarted" (which moves the server's `background_tasks` count down through the ordinary ingest,
+   so the sidebar drops to 0), and a final `subagent_done` "stopped: the daemon restarted". The
+   adopted record starts with none. (When the engine process ends while the daemon runs, its
+   tasks and subagents are ended then, "the engine process ended", so none is left open in the
+   record for a later restart to report.)
 6. **Tell the model, once, without it showing as the person's words.** The driver carries a
    one-shot adoption note that is prepended to the next message **only on the line written to
    the engine**; the `user_message` event keeps the person's own text. It survives the driver's
    retry, and is recomputed if the resume turns out to be refused:
    - a turn was cut off: "[system] The process hosting this session was restarted while you
      were working. The conversation is intact, but the step that was running was cut off: a
-     command may not have finished and a file may be half written. The restart may have been
-     caused by a command you ran: do not run it again. Check the state of your work before
-     continuing."
+     command may not have finished and a file may be half written."
    - the conversation is gone: "[system] The process hosting this session was restarted and the
      earlier conversation could not be restored. The files in the workspace are as they were.
      The person can still see the earlier transcript, but you cannot: ask them for what you need."
    - resumed with nothing cut off: no note.
-7. **Continue, or wait.** An `interactive` session always waits for the person. An `unattended`
-   session whose turn was cut off is continued once ("Continue the task you were working on.",
-   source `system`, with the note) if `auto_continues` is 0; the counter is set to 1 before
-   anything runs and only a turn that finishes resets it. A turn that restarts or crashes the
-   daemon is therefore re-entered at most once, with the note telling the model not to repeat
-   the command. The continue waits until the daemon has connected and the server has had a few
-   seconds to answer the hello: that answer is where a session stopped while the daemon was down
-   is killed. With no server, nothing is continued.
+   - why the daemon restarted ends the note of a resumed conversation (and the list below, when
+     that is all there is): the daemon reads it once at start, before adopting (`restartcause.go`).
+     `install.sh install` writes `restart-planned` (`update` or `reinstall`, by whether the new
+     build differs from the running one) into the state directory right before it restarts a
+     running daemon; the daemon writes `stopped-cleanly` there on SIGTERM or SIGINT (on the
+     signal and again before it exits). Both are removed when read, and an installer marker older
+     than 15 minutes is not believed. Either one: "The daemon was updated and restarted. Nothing
+     you ran caused it. Continue where you left off; check the state of anything that was mid-run
+     first — never re-run anything destructive without checking." ("reinstalled and restarted",
+     or "restarted" for a stop with no installer marker; "Nothing you ran caused it." is dropped
+     when a cut-off Bash call matches the installer/service-restart entry of the deny-list or,
+     for a stop with no installer marker, runs `kill`, `pkill` or `killall`). Neither: "The daemon
+     stopped unexpectedly. A test run, a build or ordinary commands cannot cause that; only
+     re-check a command that could affect the daemon itself (an install, a service restart)
+     before running it again. Continue where you left off; check the state of anything that was
+     mid-run first." The old note said the restart "may have been caused by a command you ran:
+     do not run it again", and an agent cut off in its own unit tests took that as its cause and
+     stopped.
+   - something was cut off and the session is not continued (step 7): the list below follows
+     the note.
+7. **Continue, or wait.** Whatever a restart cut off is picked up again by itself, so that
+   nobody has to go through every session after a restart: a turn (mid-generation, or in one of
+   the agent's own tool calls), background tasks, subagents. The session is continued once
+   ("Continue the task you were working on.", source `system`, with the note) if
+   `auto_continues` is 0, unattended or interactive alike. Two exceptions. Any session cut off in
+   a call on the restart deny-list (`destructive` in `open_calls`, set when the call starts from
+   the whole command; for an older record, its `detail` is matched): a force push, `rm -rf`, a
+   migration, a deploy, the installer or a service restart, `DROP`/`TRUNCATE` (the list is in
+   DAEMON.md). Deterministic, not left to the model. And, for an `interactive` session only: it
+   was waiting for the person. That is `waiting` (a permission prompt, a native
+   question), an open call that is a question (`blerg-runner ask` in a Bash command, or
+   `AskUserQuestion`), or, for a record that cannot say (an older daemon kept neither
+   `open_calls` nor `waiting`; a missing `waiting` reads as not waiting), an open ask the server
+   holds: after each hello the server sends the daemon `open_asks`, the sessions among those it
+   reported that have an ask open, and the continue checks it once connected. A session that
+   waits shows the list below at once as a `system` `user_message` (one the server's asks stop
+   says so with a second notice, adds the cut-off question to the agent's note, and its continue
+   is not counted), the agent gets it with the person's next message (after the note), and the
+   daemon reports it to the server as `session_state_changed` `idle` and then `session_paused`
+   (reason `restart`; below). So is a session it had already continued once (`auto_continues`
+   1) and one whose conversation could not be restored. A session cut off before the engine
+   named its conversation is neither continued nor reported paused: a continue would reach an
+   agent that does not know its task, so the notice asks the person to send it again. In either kind of
+   session, a message from the person that reaches the driver before the continue (held while
+   the daemon was down, or written during the wait) replaces it: the continue is not sent, that
+   message carries the note and the list, and the session is not reported paused. The list:
+   "[system] The process hosting this session restarted, and work that was running was cut off."
+   then "Your own tool calls that were cut off before they returned:" (each by tool and what it
+   ran: "- Bash: make deploy (Deploy to staging)"), with "Check its state first: it may not have
+   finished, or may have half written a file. Never re-run anything destructive without
+   checking." (and, for a question, that the message that follows may
+   answer it, or to ask again); then "Background tasks that were cut off:" and "Subagents that
+   were cut off:" (kind, description, id; a background subagent's agent id), then: check the
+   state of their worktrees and outputs before trusting anything they did, resume a subagent by
+   sending a message to its agent id, re-run a background command that did not finish, do not
+   re-run anything destructive without checking; then why the daemon restarted. The counter is
+   set to 1 before anything runs and only a turn that finishes with no background task left
+   running resets it (a task that restarts the daemon, an install run in the background, is not
+   picked up again on every start). A turn that restarts or crashes the daemon is therefore
+   re-entered at most once, with the note telling the model to re-check a command that could
+   affect the daemon itself before running it again. The continue waits until the daemon has connected and the server has had a few seconds to answer
+   the hello: that answer is where a session stopped while the daemon was down is killed, and
+   where its open asks are named. With no server, nothing is continued.
 
 A failed adoption deletes the record and reports `session_ended` with a non-zero exit code once
 the daemon is connected, so the row ends with a reason instead of flapping.
 
 Because the claim precedes the connection, the hello already lists the claimed ids and the
 server's existing reconcile keeps (or revives) their rows. The daemon asks for an immediate
-heartbeat after connecting and again when hosting is done, so each row goes to its real state
+heartbeat as soon as it has connected (the client kicks one right after the hello) and again
+when hosting is done (`AdoptAgentSessions`' callback), so each row goes to its real state
 (`idle`, or `running` for a continued turn) at once rather than at the next 30-second heartbeat.
 The reconcile path sets it without an unread badge or a push.
 
@@ -186,6 +251,24 @@ The reconcile path sets it without an unread badge or a push.
   session that is live, or was marked lost by its daemon's disconnect, answers 503 with
   `Retry-After`, "the session's host is not connected"; any other session has ended and
   answers 409.
+- **A session a restart left waiting is marked.** The daemon's `session_paused` (reason
+  `restart`) sets `sessions.paused_reason` (migration 043) on its own session that has not ended,
+  whatever its status (the row may still read `running` from before the restart), and is
+  broadcast as `session_paused_changed`; the sessions list carries `paused_reason` while the
+  session is `idle` or `waiting`, and the next `running`, an end or a revive clears it. So does a
+  message accepted for the session (forwarded or held), with a `session_paused_changed` of "",
+  so a second tab or a reload cannot resume it twice.
+- **A message for a session whose daemon is away is held, never taken as an answer.** The browser
+  and API paths offer a message to the session's open ask only while its daemon is connected:
+  with the daemon away the `blerg-runner ask` is dead, and the held message reaches the session
+  hosted again, where it replaces recovery's continue.
+  The session's open asks are closed then: the `blerg-runner ask` that waited for their answers
+  died with the restart, and a message the person sends must reach the agent instead of
+  answering an ask nobody reads. Their cards show the waiting "?" with the tooltip "paused by a
+  restart" (a banner count with a "Resume all" button was tried and removed for 0.2.0; it may
+  come back in a better form).
+- **A daemon is told which of its sessions have a question open** (`open_asks`, after each
+  hello), for the continue rule above.
 - **A daemon that does not have a session it is asked to message says so**, with a retryable
   `error` event in that session's transcript, unless the session is a terminal one or its spawn
   is still being prepared (those are dropped silently, as they always were).
@@ -196,7 +279,7 @@ The reconcile path sets it without an unread badge or a push.
 |---|---|---|
 | The session | ended, cannot be resumed | continues |
 | The Claude conversation | lost | resumed |
-| The turn in flight | lost | lost; the model and the person are told |
+| The turn in flight | lost | cut off; the model and the person are told, and it is continued once unless it was waiting for the person |
 | Messages queued in the daemon's memory | lost silently | lost |
 | A browser message sent while the daemon is down | dropped | delivered when it returns (within 20 s) |
 | A contract message sent while the daemon is down | answered ok, dropped | refused, retryable |
@@ -205,8 +288,11 @@ The reconcile path sets it without an unread badge or a push.
 
 Updating the daemon from inside a desktop session becomes: the session runs the installer, its
 turn is cut off as the daemon stops (the installer's own later steps do not run: it is killed at
-its restart line, which is its last meaningful one), the new daemon adopts the session, and the
-person's next message continues the work with the model knowing it was interrupted.
+its restart line, which is its last meaningful one), the new daemon adopts the session and
+continues it once, the model knowing it was interrupted and told not to run the install again. The
+installer asks first when the restart would cut work off (`blerg-runner-daemon status
+--open-work`, from the records); the asking session's own turn is left out of that list, and an
+agent runs the installer with `--yes` (it has no terminal to answer the question).
 
 One restart is not covered: the one that installs this change. The old daemon wrote no records,
 so the sessions running at that moment end as they do today.
@@ -225,6 +311,10 @@ so the sessions running at that moment end as they do today.
 - A daemon away for more than 30 minutes returns to a row already finalised: it is revived, as
   today, but its session token has been revoked.
 - A downgrade leaves `agents/*.json`, with session tokens, in the state directory.
+- `open_asks` is best effort: it is sent after the hello's database round trips, dropped (and
+  logged) if the daemon's send buffer is full, and must arrive within the continue's few seconds.
+  Only a record from an older daemon (no `open_calls`) depends on it, for one restart.
+- `session_paused` is sent once; if the connection drops at that moment the row is not marked.
 - A session whose row was deleted (not stopped) while the daemon was down is hosted again
   unseen. The server cannot safely tell "no row" from "row not created yet" for a reported id,
   so it sends no kill for one.
@@ -241,7 +331,15 @@ so the sessions running at that moment end as they do today.
 - Adoption (with the fake `claude` the daemon tests use): `--resume <recorded id>` when the
   transcript exists and not otherwise; no `session_started`, no initial prompt; recorded model,
   effort and interaction; the note reaches the engine once and never the `user_message` event;
-  an interactive session waits; an unattended cut-off session continues once and not twice; a
+  the rule on its own (`TestAdoptPlan`: every cut-off case continues except an interactive
+  session waiting for the person, including a record from an older daemon); an interactive
+  session cut off mid-run in its own tool call, mid-generation, or from an older record
+  continues once, the notice naming the call and what it ran; one waiting for the person (status
+  `waiting`, an open `blerg-runner ask`, or an ask the server reports for an older record) waits
+  and is reported idle and then `session_paused`; a session cut off in a deny-listed command
+  (`TestRestartDenyList`: matches and non-matches on the whole command) pauses, unattended too;
+  a message held by the server and delivered at the hello prevents the pause; a session cut off
+  before its conversation is not paused; a cut-off session continues once and not twice; a
   missing workspace or a changed driver deletes the record and reports the end.
 - Leftover engine: a live process with the recorded start time is terminated; a live process
   with another start time is not.
@@ -252,5 +350,13 @@ so the sessions running at that moment end as they do today.
   A hello listing a session stopped by its person does not revive it and sends `kill_session`;
   one listing a `daemon_lost` session revives it; `send_message` answers 503 for a session
   waiting for its daemon and 409 for an ended one; an overtaken disconnect marks nothing.
+  `session_paused` from the session's own daemon sets `paused_reason` on an idle session (not on a
+  running one, nor from another daemon), closes its asks and not its notes, and is broadcast
+  once; a row still `running` is paused too and shown once idle; running again, an end and a
+  revive clear it; `open_asks` names the sessions with an ask open. A message for a session whose
+  daemon is away is held and leaves its ask open (browser and API); a message accepted for a
+  paused session clears the pause and is broadcast once.
+- Web: a paused card shows "?" with "paused by a restart"; the store follows
+  `session_paused_changed` and drops the reason when the session runs.
 - The real CLI, opt-in (`BLERG_REAL_CLAUDE=1`): a session is killed mid-tool, adopted by a second
   host, and the resumed conversation remembers the first and knows it was interrupted.

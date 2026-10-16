@@ -17,6 +17,12 @@ import (
 // found, has been revoked, or has expired.
 var ErrTokenInvalid = errors.New("board token invalid")
 
+// ErrTokenRevoked is the ErrTokenInvalid of a token that exists but was
+// revoked or has expired: the caller once held a real credential, which is
+// worth telling it (a session that holds one may be handed a fresh token,
+// see protocol.SessionToken). errors.Is(err, ErrTokenInvalid) holds for it.
+var ErrTokenRevoked = fmt.Errorf("%w: revoked or expired", ErrTokenInvalid)
+
 // BoardTokenRow is a row from the board_tokens table.
 type BoardTokenRow struct {
 	ID           string
@@ -100,7 +106,8 @@ func SlideBoardTokenExpiry(ctx context.Context, pool *pgxpool.Pool, id string, t
 }
 
 // ValidateBoardToken hashes the raw hex token and looks it up by token_hash.
-// Returns ErrTokenInvalid if not found, revoked, or expired. A session token
+// Returns ErrTokenInvalid if not found, ErrTokenRevoked (which is also
+// ErrTokenInvalid) if revoked or expired. A session token
 // (no board) comes back with BoardID == "".
 func ValidateBoardToken(ctx context.Context, pool *pgxpool.Pool, raw string) (BoardTokenRow, error) {
 	rawBytes, err := hex.DecodeString(raw)
@@ -127,14 +134,9 @@ func ValidateBoardToken(ctx context.Context, pool *pgxpool.Pool, raw string) (Bo
 		return BoardTokenRow{}, fmt.Errorf("ValidateBoardToken query: %w", err)
 	}
 
-	// Reject revoked tokens.
-	if row.RevokedAt != nil {
-		return BoardTokenRow{}, ErrTokenInvalid
-	}
-
-	// Reject expired tokens.
-	if !time.Now().Before(row.ExpiresAt) {
-		return BoardTokenRow{}, ErrTokenInvalid
+	// Reject revoked and expired tokens.
+	if row.RevokedAt != nil || !time.Now().Before(row.ExpiresAt) {
+		return BoardTokenRow{}, ErrTokenRevoked
 	}
 
 	return row, nil
@@ -154,4 +156,53 @@ func RevokeBoardTokensForSession(ctx context.Context, pool *pgxpool.Pool, sessio
 		return fmt.Errorf("RevokeBoardTokensForSession: %w", err)
 	}
 	return nil
+}
+
+// RevokeBoardTokenRaw revokes the one token whose raw value is raw: a token
+// that was minted but could not be handed to anyone. Idempotent.
+func RevokeBoardTokenRaw(ctx context.Context, pool *pgxpool.Pool, raw string) error {
+	rawBytes, err := hex.DecodeString(raw)
+	if err != nil {
+		return fmt.Errorf("RevokeBoardTokenRaw: %w", err)
+	}
+	hash := sha256.Sum256(rawBytes)
+	if _, err := pool.Exec(ctx, `
+		UPDATE board_tokens SET revoked_at = now()
+		 WHERE token_hash = $1 AND revoked_at IS NULL`, hash[:]); err != nil {
+		return fmt.Errorf("RevokeBoardTokenRaw: %w", err)
+	}
+	return nil
+}
+
+// SessionsWithoutMessageToken returns those of ids that belong to daemonID,
+// are live or starting, and hold no valid (unrevoked, unexpired) token with
+// the message capability: the sessions that run, or are about to, unable to
+// use `blerg-runner`. Ended sessions are never returned — a token revoked at
+// a session's end stays revoked.
+func SessionsWithoutMessageToken(ctx context.Context, pool *pgxpool.Pool, daemonID string, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT s.id FROM sessions s
+		 WHERE s.daemon_id = $1 AND s.id::text = ANY($2)
+		   AND s.status IN ('starting', 'running', 'waiting', 'idle')
+		   AND NOT EXISTS (
+		       SELECT 1 FROM board_tokens t
+		        WHERE t.session_id = s.id AND t.revoked_at IS NULL
+		          AND t.expires_at > now() AND 'message' = ANY(t.capabilities))
+		 ORDER BY s.id`, daemonID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("SessionsWithoutMessageToken: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("SessionsWithoutMessageToken scan: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

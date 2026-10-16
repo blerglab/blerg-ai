@@ -2,7 +2,8 @@
 
 A Claude Code session can hand you a **file**: a report, a chart, an export, a generated
 document. The agent runs one command, and the file shows up as a card in the session's chat and in
-a **Files** panel, where you can download it or, for most types, read it in the app.
+the **Files** tab of the session panel (a dialog from the chat's Files button where the chat has
+no panel: the board), where you can download it or, for most types, read it in the app.
 
 ```bash
 blerg-runner publish report.md
@@ -85,10 +86,10 @@ The first publish of a name prints no version note.
   Migration `033` numbered the files that already existed, per name, oldest first.
 - **In the chat.** The card reads `📎 report.md · v3 · 12 KB`. The version shows from v2 on (and on
   a v1 card once its file has later versions); a file with a single version has none.
-- **In the Files panel.** One row per file, showing the latest version with a `v3` badge. Under it,
+- **In the Files tab (or panel).** One row per file, showing the latest version with a `v3` badge. Under it,
   **Earlier versions (2)** opens the older ones with their own time, Download, View and Delete.
   Deleting acts on that one version; deleting the latest makes the previous one the latest. The
-  header and the Files button count files, not versions. The same grouping applies to "Uploaded by
+  count above the list (and the board's Files button) counts files, not versions. The same grouping applies to "Uploaded by
   you".
 - **In the viewer.** The title reads `report.md · v2 of 3`, and an older version says so, with a
   **View latest** button. A `?artifact=<id>` link opens any version.
@@ -100,6 +101,11 @@ The first publish of a name prints no version note.
   session reads carry the "publish again under the same name" rule.
 - **API.** An artifact (list entry, upload reply, the `artifact` event) has `version`; the list also
   has `latest_version`, and the upload reply has `latest_version` (the version just made) and `previous` (the version it follows, or `null`).
+- **In the History tab.** The session panel's History tab lists each file under the topic that
+  published it, with every version as a chip; a file published outside every topic is listed under
+  the "Unmarked work" line instead
+  ([talking-to-an-agent.md](talking-to-an-agent.md#history)). An agent marks its topics with
+  `blerg-runner topic`, and names the commits a topic landed with `topic --done --commit <sha>`.
 
 ## Limits
 
@@ -241,10 +247,13 @@ loop. Design: [`docs/design/feedback-tools.md`](design/feedback-tools.md).
 On the runner's data volume, under `BLERG_RUNNER_DATA_DIR` (`/data` in the desktop stack and the
 cluster deployment), at `artifacts/<session id>/<artifact id>/<file name>`; the database holds
 the index (`session_artifacts`, migration `031`). The volume must be kept for the files to survive
-a restart of the runner: the desktop stack mounts the `blerg-desktop-runner-data` volume there.
-**The Kubernetes manifests mount an `emptyDir`**, which is emptied whenever the runner pod
-restarts. The list would still show the files, but downloading one would say it is no longer
-available. Swap the volume for a PersistentVolumeClaim in `runner-deployment.yaml` to keep them.
+a restart of the runner: the desktop stack mounts the `blerg-desktop-runner-data` volume there,
+the Kubernetes install the PersistentVolumeClaim `blerg-runner-data`
+([`install/k8s/README.md`](../install/k8s/README.md#runner-data-volume)). A file whose row
+survived but whose bytes did not (an install from before that claim existed, a lost volume) stays
+in the list marked "no longer available": View and Download are hidden, its raw and download
+routes answer `410 Gone` with `{"error":"file no longer available"}`, and it can still be
+deleted.
 
 A session's files are deleted with the session. The runner also removes, at start and then every
 hour, the directory of any session that no longer exists. You can delete a single file any time

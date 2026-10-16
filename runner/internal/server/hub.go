@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
@@ -39,9 +40,12 @@ type BrowserConn struct {
 
 // DaemonConn represents a connected daemon.
 type DaemonConn struct {
-	ID   string
-	Name string
-	Mode string
+	// BoundSessionID and RuntimeTokenID are immutable server-verified pod authority.
+	BoundSessionID string
+	RuntimeTokenID string
+	ID             string
+	Name           string
+	Mode           string
 	// ReposRoot is the root the daemon reported in its hello. The owner can
 	// change it live (set_repos_root), so read CurrentReposRoot instead.
 	ReposRoot string
@@ -54,20 +58,26 @@ type DaemonConn struct {
 	// the daemon was already running, are reflected without waiting for a
 	// reconnect (a hello-only snapshot bit a real user: repos checked out
 	// before AND after daemon start both stayed invisible until restart).
-	liveMu           sync.RWMutex
-	checkedOutRepos  []string                       // repo names present on disk at ReposRoot
-	repoRemotes      map[string]protocol.RepoOrigin // checked-out name → provider + "owner/name" of its origin (known ones only)
-	gitProviders     []string                       // providers the daemon can clone from (hello); nil = GitHub only
-	cloneFrom        bool                           // honours SpawnSession.CloneFrom (hello)
-	mcpGateway       bool                           // honours SpawnSession.MCPGateway (hello mcp_gateway)
-	restrictTools    bool                           // honours SpawnSession.RestrictTools (hello restrict_tools)
-	plugins          bool                           // honours SpawnSession.Plugins (hello plugins)
-	hostTokenClone   bool                           // owner allows personal-token clones on the bare host (hello)
-	sandboxAvailable bool
-	hostClaude       hostClaudeCaps
-	availableEngines []string                 // engine IDs detected as configured/usable on this daemon's host
-	engineModels     map[string]models.Report // engine → the model list this daemon probed (sanitized)
-	reposRoot        string                   // repos root changed since the hello; "" = ReposRoot
+	liveMu              sync.RWMutex
+	checkedOutRepos     []string                       // repo names present on disk at ReposRoot
+	repoRemotes         map[string]protocol.RepoOrigin // checked-out name → provider + "owner/name" of its origin (known ones only)
+	gitProviders        []string                       // providers the daemon can clone from (hello); nil = GitHub only
+	cloneFrom           bool                           // honours SpawnSession.CloneFrom (hello)
+	mcpGateway          bool                           // honours SpawnSession.MCPGateway (hello mcp_gateway)
+	inputReceipts       bool
+	sessionTokenFile    bool        // handles SessionToken and answers it (hello session_token_file)
+	tokenHealSkipLogged atomic.Bool // the "too old for a token heal" line was logged for this connection
+	restrictTools       bool        // honours SpawnSession.RestrictTools (hello restrict_tools)
+	codexRestricted     bool        // isolated Codex file/MCP runtime (hello codex_restricted)
+	plugins             bool        // honours SpawnSession.Plugins (hello plugins)
+	pluginEngines       []string
+	hostTokenClone      bool // owner allows personal-token clones on the bare host (hello)
+	sandboxAvailable    bool
+	hostClaude          hostClaudeCaps
+	availableEngines    []string                        // engine IDs detected as configured/usable on this daemon's host
+	engineModels        map[string]models.Report        // engine → the model list this daemon probed (sanitized)
+	reposRoot           string                          // repos root changed since the hello; "" = ReposRoot
+	usageLimits         map[string]protocol.UsageLimits // provider → latest usage_limits (usage_limits.go)
 }
 
 // SetReposRoot records the daemon's repos root after a live change (its
@@ -344,6 +354,8 @@ type Hub struct {
 	boardSubs            map[string]map[string]bool        // boardID → set[browserID]
 	lastActivity         time.Time                         // last time any browser reported user interaction
 	serverVersion        string
+	serverRelease        string      // the VERSION file the build was cut from; "" when unstamped
+	serverCommit         string      // the short git commit; "" when unstamped
 	jobs                 *JobManager // cluster runner Jobs; nil = runtime unavailable
 	// completionNotifier fires a session's completion webhook (webhook.go).
 	// Registered by NewAPI; nil until then (and in hub-only tests), which is
@@ -364,6 +376,18 @@ type Hub struct {
 	mcpStart mcpStartHolder
 	// away are the desktop daemons inside their disconnect grace period (daemongrace.go).
 	away awayDaemons
+	// ingest holds back a session's later agent events while an earlier one failed to store
+	// (ingestorder.go).
+	ingest ingestHolds
+	// gaps are the persisted agent events dropped for a full subscriber, for its forwarder to
+	// report (hubgap.go).
+	gaps agentGaps
+	// askSignal wakes an `ask` answer poll (messageevents.go). Registered by NewAPI; guarded by mu.
+	askSignal func(messageID string)
+	// idleNotices are the sessions whose idle notice waits for their running work (notices.go).
+	idleNotices idleNoticeSet
+	// tokenHeals are the re-issued session tokens awaiting their daemon's answer (sessiontokenheal.go).
+	tokenHeals tokenHeals
 }
 
 // NewHub creates a ready-to-use Hub.
@@ -523,6 +547,14 @@ func (h *Hub) SetServerVersion(v string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.serverVersion = v
+}
+
+// SetServerBuild stores the release version and git commit the server was built from; the
+// browser shows them beside the server version.
+func (h *Hub) SetServerBuild(release, commit string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.serverRelease, h.serverCommit = release, commit
 }
 
 // Register adds a daemon to the hub.
@@ -731,6 +763,10 @@ func (h *Hub) Subscribe(sessionID, browserID string, ch chan []byte) {
 // its active-browser record. Call this when a session ends to release all
 // associated hub state.
 func (h *Hub) UnsubscribeSession(sessionID string) {
+	h.gaps.mu.Lock()
+	delete(h.gaps.m, sessionID)
+	h.gaps.mu.Unlock()
+	h.ingest.forget(sessionID)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.subscriptions, sessionID)
@@ -740,13 +776,16 @@ func (h *Hub) UnsubscribeSession(sessionID string) {
 // Unsubscribe removes a browser from the session output fan-out.
 func (h *Hub) Unsubscribe(sessionID, browserID string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if subs, ok := h.subscriptions[sessionID]; ok {
 		delete(subs, browserID)
 		if len(subs) == 0 {
 			delete(h.subscriptions, sessionID)
 		}
 	}
+	h.mu.Unlock()
+	// After the removal: a fan-out in between could otherwise record a gap for a subscriber that
+	// is gone.
+	h.gaps.take(sessionID, browserID)
 }
 
 // FanOutSessionOutput sends data to every browser subscribed to a session.
@@ -790,6 +829,35 @@ func (h *Hub) FindDaemonForSession(sessionID string) *DaemonConn {
 	return h.daemons[daemonID]
 }
 
+// isHostDaemon is the shared launch-role boundary. A session pod may route
+// its own events and controls, but neither its advertised mode nor repository
+// inventory can grant it authority to host another session.
+func isHostDaemon(dc *DaemonConn) bool {
+	return dc != nil && dc.Mode != "runner" && dc.BoundSessionID == ""
+}
+
+// GetHostDaemon looks up a workstation execution target. GetDaemon deliberately
+// remains broader because session controls must also reach their own pods.
+func (h *Hub) GetHostDaemon(id string) *DaemonConn {
+	dc := h.GetDaemon(id)
+	if !isHostDaemon(dc) {
+		return nil
+	}
+	return dc
+}
+
+// GetHostDaemons returns connected workstation execution targets only.
+func (h *Hub) GetHostDaemons() []*DaemonConn {
+	all := h.GetAllDaemons()
+	out := make([]*DaemonConn, 0, len(all))
+	for _, dc := range all {
+		if isHostDaemon(dc) {
+			out = append(out, dc)
+		}
+	}
+	return out
+}
+
 // DaemonForRepo returns the connected daemon to run repo on: the one whose
 // CheckedOutRepos contains it (lowest daemon ID wins when several do — map
 // iteration order is random, and consecutive spawns for the same board must
@@ -804,8 +872,10 @@ func (h *Hub) DaemonForRepo(repo string) *DaemonConn {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	ids := make([]string, 0, len(h.daemons))
-	for id := range h.daemons {
-		ids = append(ids, id)
+	for id, dc := range h.daemons {
+		if isHostDaemon(dc) {
+			ids = append(ids, id)
+		}
 	}
 	slices.Sort(ids)
 	for _, id := range ids {
@@ -828,8 +898,10 @@ func (h *Hub) DaemonForScratch(runtime string) *DaemonConn {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	ids := make([]string, 0, len(h.daemons))
-	for id := range h.daemons {
-		ids = append(ids, id)
+	for id, dc := range h.daemons {
+		if isHostDaemon(dc) {
+			ids = append(ids, id)
+		}
 	}
 	if len(ids) == 0 {
 		return nil
@@ -852,7 +924,9 @@ func (h *Hub) AnyDaemon() *DaemonConn {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, d := range h.daemons {
-		return d
+		if isHostDaemon(d) {
+			return d
+		}
 	}
 	return nil
 }

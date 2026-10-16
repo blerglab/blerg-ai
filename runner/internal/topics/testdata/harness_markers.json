@@ -1,0 +1,4 @@
+{
+  "prefixes": ["<task-notification>", "<system-reminder>", "[SYSTEM NOTIFICATION", "<command-name>"],
+  "restart_note": "[system] Session resumed after a restart"
+}

@@ -367,12 +367,20 @@ with a fresh `iat` — it never persists a token that was dead on arrival.
 ### Always-on plugins
 
 Each account has an ordered list of plugins per engine (`user_plugins`, migration 014) that the
-runner installs into every new Claude agent session started as that account: a cluster pod
+runner installs into new Claude and Codex agent sessions started as that account: a cluster pod
 installs them into its throwaway HOME, and a workstation daemon installs them into its own
 plugin workshop (`~/.blerg-runner-daemon/plugins/claude`, never the person's `~/.claude`) and
-loads them for the session only with `--plugin-dir` — see `install/desktop/DAEMON.md`. Restricted
-sessions (an MCP grant, a cron) and terminal sessions get none. Only `claude` is
-registered today (`core/internal/plugins`); an entry is `{marketplace, plugin}` — a GitHub
+loads them for the session only with `--plugin-dir` — see `install/desktop/DAEMON.md`. Codex uses
+its native `plugin marketplace add` / `plugin add` commands in an isolated installer home, then
+copies only the selected plugins and their catalogues into a private session `CODEX_HOME`. Login,
+settings and native rollouts remain linked to the existing account state; installs do not change
+that account's config or plugin cache. The same private paths are mounted into Local sandbox
+sessions. A daemon advertises supported plugin engines in `plugin_engines`; the older `plugins`
+boolean authorizes Claude only. Restricted
+sessions and terminal sessions get none. Interactive Codex sessions with managed MCP connections
+retain native coding tools and selected plugin skills/hooks in a private configuration home; ambient
+user, project and plugin MCP servers are suppressed, and granted MCP tools use the daemon gateway. `claude` and `codex` are
+registered (`core/internal/plugins`); an entry is `{marketplace, plugin}` — a GitHub
 `owner/repo` and a plugin name (`^[a-z0-9][a-z0-9._-]{0,63}$`). Max 20 per account, no duplicates,
 marketplace must be allowed by `BLERG_CORE_PLUGIN_MARKETPLACES`. The list is not secret.
 
@@ -472,8 +480,15 @@ one admin account with a random password and logs it once, with a greppable
 prefix:
 
 ```
-BLERG_BOOTSTRAP_ADMIN_PASSWORD=<password> (login as provider_subject=<subject>; ...)
+BLERG_BOOTSTRAP_ADMIN_PASSWORD=<password> (username: <username>; ...)
 ```
+
+The username is random. On the forced password change at first login the
+person can choose their own (`POST /auth/password` takes an optional
+`provider_subject`), and change it later in Settings → Account
+(`POST /auth/username`, behind the current password). A username is 3–64
+lowercase letters, digits, `.`, `_` and `-`, starting with a letter or digit;
+a taken one is a 409. Only `local` accounts have one to change.
 
 It is logged, never written to disk — the container filesystem is ephemeral, so
 capture it from the logs on first boot (`docker compose logs blerg-core | grep
@@ -481,7 +496,7 @@ BLERG_BOOTSTRAP_ADMIN_PASSWORD`, or `kubectl logs`). Seeding is idempotent: a
 non-empty `accounts` table is a no-op, and it only runs under the `local`
 provider — so a restart, rebuild, or redeploy never prints the line again and
 never changes the password. If the log that had it is gone, mint a new
-one-time password with `blerg-core users set-password --subject <subject>`
+one-time password with `blerg-core users set-password --subject <username>`
 (see "Operator CLI" below).
 
 The bootstrap account is also seeded with `must_change_password = true`, and this
@@ -607,6 +622,26 @@ name can ever be encrypted and stored:
 | `claude`, `codex`, `hermes`, `openclaw` | The agent engine's own personal API credential, injected into the session the runner starts for that user. |
 | `github`, `gitlab` | The user's personal token for that git provider (`gitCredentialKinds`). Not an engine — it is what lets a session pod clone and push as the launching human rather than as a shared service identity, and what the runner lists that user's own repositories with (GitHub: a fine-grained token with Contents read/write and Metadata read; GitLab: a personal access token with `read_api`, `read_repository`, `write_repository`). Each is the id of a git provider the runner registers (`runner/internal/gitprovider`); a new provider adds its id here. |
 
+### Managed engine connections
+
+Settings → Managed connections offers a dedicated Codex device login for Cluster.
+The adapter registry currently registers `codex/codex_oauth`; it uses the same vault
+key backend as opaque imports. No new environment variable enables it. The person
+must complete provider consent, and the server needs outbound HTTPS to the provider.
+The workstation CLI login is independent and is never imported automatically.
+
+Core retains encrypted refresh material and serializes refresh across replicas with
+durable generation and claim fences. Pods and model probes obtain only short-lived
+access. The raw credential-fetch endpoint refuses managed credentials. Browser
+responses expose connection state and device codes, never access or refresh tokens.
+Replacing a credential or deleting it fences in-flight provider results. Revoked
+browser sessions cannot complete a pending login. An ambiguous provider rotation
+requires reconnecting instead of retrying a possibly consumed refresh token.
+
+The [credential lifecycle contract](../../docs/design/engine-credential-lifecycle.md)
+documents browser endpoints, the private access broker, authorization and test evidence.
+Opaque `auth.json` imports remain snapshots and do not gain coordinated refresh.
+
 ### `POST /internal/credentials/list`
 
 Component-to-component only (same `/internal/...` prefix, no CORS, never
@@ -643,19 +678,19 @@ register/internal key doesn't block admin recovery.
 | Subcommand | Purpose |
 |---|---|
 | `blerg-core mint --aud <audience> [--sub ...] [--project ...] [--caps ...] [--on-behalf-of ...] [--lineage ...]` | Mints a core-signed agent token for testing, printed to stdout. |
-| `blerg-core users create --subject S --role member\|admin` | Creates a new `local`-provider account with a fresh one-time password and `must_change_password=true`. Fails with `ErrSubjectExists` (exit 1) if `provider_subject` is already taken, or exit 2 for an invalid `--role`. |
+| `blerg-core users create --subject S --role member\|admin` | Creates a new `local`-provider account with username `S`, a fresh one-time password and `must_change_password=true`. `S` follows the same rules as a username a person picks: 3–64 characters of lowercase letters, digits, `.`, `_` and `-`, starting with a letter or digit. Fails with `ErrSubjectExists` (exit 1) if the username is already taken, or exit 2 for an invalid `--role` or `S`. |
 | `blerg-core users set-password --subject S` | Resets an existing `local` account's password to a fresh one-time value, sets `must_change_password=true`, and invalidates every existing session/token for that account (`identity.Service.RevokeAccountEverywhere`). Exit 1 if `S` has no local account. |
 
 Both `users` subcommands print **exactly one line** to stdout on success:
 
 ```
-provider_subject=<S> password=<one-time>
+username=<S> password=<one-time>
 ```
 
 That line is the only place the new password is ever available in
 plaintext — it is never logged, stored, or printed anywhere else. Exit
 codes: `0` success, `2` usage/argument error (missing `--subject`, bad
-`--role`), `1` any other failure (unreachable database, unknown subject on
+`--role`, a `create` username that breaks the rules), `1` any other failure (unreachable database, unknown subject on
 `set-password`, duplicate subject on `create`).
 
 Typical desktop usage (from `install/desktop`, with the stack already up):

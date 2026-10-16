@@ -110,6 +110,14 @@ data:
   # Service DNS name, not the public Ingress host.
   BLERG_RUNNER_INTERNAL_URL: "http://blerg-runner.blerg.svc.cluster.local:8080"
   BLERG_RUNNER_MAX_SESSIONS: "4"
+  # Account-owned Claude/Codex conversations survive pod replacement. Only
+  # native history is retained; credentials and current grants stay ephemeral.
+  # Empty storage class uses the cluster default (microk8s-hostpath on MicroK8s).
+  BLERG_RUNNER_NATIVE_HISTORY: "true"
+  BLERG_RUNNER_NATIVE_HISTORY_STORAGE_CLASS: ""
+  BLERG_RUNNER_NATIVE_HISTORY_SIZE: "1Gi"
+  BLERG_RUNNER_NATIVE_HISTORY_MAX_CLAIMS: "128"
+  BLERG_RUNNER_NATIVE_HISTORY_RETENTION_HOURS: "168"
   # MCP gateway: the runner's second listener, and the in-cluster address session
   # pods dial for it (the internal-only Service in runner-deployment.yaml).
   BLERG_RUNNER_MCP_GW_ADDR: ":8090"

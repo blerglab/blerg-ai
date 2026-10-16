@@ -4,8 +4,10 @@ import {
 } from "react-router-dom";
 import { api, ApiError, Board } from "./api";
 import { coreOrigin } from "./authClient";
+import { formatBuild, useBuildInfo } from "./buildInfo";
 import { MeProvider, useMe } from "./me";
 import ThemeToggle from "./ThemeToggle";
+import SignInBanner from "./SignInBanner";
 import { BoardView } from "./BoardView";
 import { SearchModal } from "./SearchModal";
 import { TimeAgo } from "./TimeAgo";
@@ -296,6 +298,7 @@ function Shell({ children }: { children: React.ReactNode }) {
 function ShellChrome({ children }: { children: React.ReactNode }) {
   const me = useMe();
   const stale = useNewVersion();
+  const build = formatBuild(useBuildInfo());
   const [searchOpen, setSearchOpen] = useState(false);
   const loc = useLocation();
   const boardId = loc.pathname.match(/^\/boards\/([0-9a-f-]{36})/)?.[1];
@@ -315,6 +318,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
 
   return (
     <>
+    <SignInBanner />
     {stale && (
       <button className="stale-banner" onClick={() => location.reload()}>
         blerg-board updated — click to reload
@@ -327,6 +331,12 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
           <span className="divider" aria-hidden="true" />
           <span className="component">Board</span>
         </a>
+        {build.main && (
+          <span className="build-version" title={build.title || undefined}>
+            {build.main}
+            {build.commit && <span className="build-commit"> · {build.commit}</span>}
+          </span>
+        )}
         <nav>
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>Boards</NavLink>
           <NavLink to="/gate" className={({ isActive }) => (isActive ? "active" : "")}>Gate</NavLink>

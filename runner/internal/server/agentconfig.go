@@ -73,8 +73,10 @@ func (a *API) HandlePostAgentConfig(w http.ResponseWriter, r *http.Request) {
 // HandleGetAgentConfig serves the stored bundle to runner pods (bearer:
 // daemon token). 404 when no daemon has uploaded yet.
 func (a *API) HandleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
-	if !checkBearerToken(w, r, a.daemonToken) {
-		return
+	if !a.isDaemonToken(a.rawBearer(r)) {
+		if _, ok := a.authDataPlane(w, r); !ok {
+			return
+		}
 	}
 	f, err := os.Open(agentConfigPath())
 	if err != nil {

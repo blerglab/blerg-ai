@@ -1,0 +1,119 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import { act, render, screen } from '@testing-library/react'
+import ChatView from './ChatView'
+import { useTranscriptStore } from '../hooks/useTranscriptStore'
+import { createFakeTransport } from '../test/fakeTransport'
+import { SESSION, ev as mk, meta, resetChatState, seed } from '../test/chat'
+import { compactionText } from './cards/EventCards'
+import { userMessageShape } from '../model/userMessages'
+import type { SessionMeta } from '../transport/types'
+import type { AgentEvent } from '../types'
+
+const idle: SessionMeta = meta({ status: 'idle', started_at: '2026-10-14T00:00:00Z' })
+
+function ev(seq: number, kind: AgentEvent['kind'], payload: unknown): AgentEvent {
+  return mk({ seq, kind, ts: '2026-10-14T00:00:00Z', payload })
+}
+
+function mount(m: SessionMeta = idle, t = createFakeTransport()) {
+  render(<ChatView session={SESSION} transport={t.transport} meta={m} />)
+  return t
+}
+
+describe('text nobody typed', () => {
+  beforeEach(() => resetChatState())
+
+  it('the restart note is a system note, not the person, from a current daemon and an older one', () => {
+    seed(
+      ev(1, 'user_message', { text: 'start', source: 'chat' }),
+      ev(2, 'user_message', { text: '[system] Session resumed after a restart. The workspace is a fresh clone.', source: 'system' }),
+      ev(3, 'user_message', { text: '[system] Session resumed after a restart. Older daemon.', source: 'chat' }),
+    )
+    mount()
+    expect(screen.getAllByText('You')).toHaveLength(1)
+    const notes = screen.getAllByTestId('system-note')
+    expect(notes).toHaveLength(2)
+    expect(notes[0].textContent).toContain('Session resumed after a restart. The workspace is a fresh clone.')
+    expect(notes[0].textContent).not.toContain('[system]')
+    expect(notes[1].textContent).toContain('Older daemon.')
+  })
+
+  it("a slash command's output is a system card, kept as written", () => {
+    const out = 'Total cost:            $0.0123\nTotal duration (API):  4.2s'
+    seed(
+      ev(1, 'user_message', { text: '/cost', source: 'chat' }),
+      ev(2, 'user_message', { text: out, source: 'system' }),
+    )
+    mount()
+    const card = screen.getByTestId('system-output')
+    expect(card.querySelector('pre')!.textContent).toBe(out)
+    expect(screen.getAllByText('You')).toHaveLength(1)
+  })
+
+  it('harness text and the native loop reminder stay hidden', () => {
+    seed(
+      ev(1, 'user_message', { text: '<system-reminder>\nx\n</system-reminder>', source: 'system' }),
+      ev(2, 'user_message', { text: '[system reminder] You made changes this turn', source: 'system' }),
+    )
+    mount()
+    expect(screen.queryByTestId('system-output')).toBeNull()
+    expect(screen.queryByTestId('system-note')).toBeNull()
+    expect(screen.queryByText(/system reminder/)).toBeNull()
+  })
+
+  it('an answer to an ask is the person, marked as an answer', () => {
+    seed(ev(1, 'user_message', { text: 'yes, ship it', source: 'ask_answer', message_id: 'm1' }))
+    mount()
+    expect(screen.getByText('yes, ship it').closest('.agent-card')!.textContent).toMatch(/You · answer/)
+  })
+
+  it("the daemon's continue after recovering a session is a system note", () => {
+    expect(userMessageShape({ text: 'Continue the task you were working on.', source: 'system' }))
+      .toEqual({ as: 'notice', text: 'Session recovered: the agent was asked to continue the task it was working on.' })
+    expect(userMessageShape({ text: 'Continue the task you were working on.', source: 'chat' })).toEqual({ as: 'person' })
+  })
+
+  it('userMessageShape: the person by default', () => {
+    expect(userMessageShape({ text: 'hello', source: 'chat' })).toEqual({ as: 'person' })
+    expect(userMessageShape({ text: '[system] note', source: 'human' })).toEqual({ as: 'person' })
+    expect(userMessageShape(null)).toEqual({ as: 'person' })
+    expect(userMessageShape({ text: '  ', source: 'system' })).toEqual({ as: 'hidden' })
+  })
+})
+
+describe('API errors, retries and compactions', () => {
+  beforeEach(() => resetChatState())
+
+  it('an API error is an error row labelled as such, never the model speaking', () => {
+    seed(
+      ev(1, 'user_message', { text: 'go', source: 'chat' }),
+      ev(2, 'error', { message: 'API Error: 529 overloaded', retryable: true, code: 'api_error' }),
+    )
+    mount()
+    const row = screen.getByTestId('api-error')
+    expect(row.textContent).toMatch(/API error.*529 overloaded/)
+    expect(document.querySelector('.agent-card.assistant')).toBeNull()
+  })
+
+  it('a retry notice is a muted line and the turn keeps working, its typing text kept', () => {
+    seed(ev(1, 'user_message', { text: 'go', source: 'chat' }))
+    mount(meta({ status: 'running', started_at: '2026-10-14T00:00:00Z' }))
+    act(() => useTranscriptStore.getState().appendStreaming(SESSION, 'Half an ans'))
+    act(() => useTranscriptStore.getState().ingest(ev(2, 'error', { message: 'retrying the API (attempt 2 of 10) after overloaded_error (529)…', retryable: true, code: 'api_retry' })))
+    expect(screen.getByTestId('retry-notice').textContent).toContain('attempt 2 of 10')
+    expect(screen.getByTestId('streaming').textContent).toContain('Half an ans')
+    expect(screen.getByTestId('composer-hint').textContent).toMatch(/Working/)
+  })
+
+  it('a Claude Code compaction says why and how big, not "0 char summary"', () => {
+    seed(
+      ev(1, 'compaction', { summary: '', through_index: 0, trigger: 'manual', pre_tokens: 151200 }),
+      ev(2, 'compaction', { summary: 'abc', through_index: 4 }),
+    )
+    mount()
+    const rows = screen.getAllByTestId('compaction')
+    expect(rows[0].textContent).toBe('✂ Conversation compacted (manual, 151k tokens before)')
+    expect(rows[1].textContent).toBe('✂ Conversation compacted (3 char summary)')
+    expect(compactionText({ summary: '', through_index: 0 })).toBe('Conversation compacted')
+  })
+})

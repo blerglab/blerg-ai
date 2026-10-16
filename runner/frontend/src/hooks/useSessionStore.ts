@@ -1,11 +1,13 @@
 import { create } from 'zustand'
-import type { DaemonInfo, SessionInfo, SessionStatus, InitialState, DaemonConnected, DaemonDisconnected, SessionStarted, SessionStateChanged, SessionReadChanged, SessionStarChanged, SessionMetaChanged, SessionTitleChanged, SessionEnded } from '../types'
+import type { DaemonInfo, SessionInfo, SessionStatus, InitialState, DaemonConnected, DaemonDisconnected, SessionStarted, SessionStateChanged, SessionReadChanged, SessionStarChanged, SessionMetaChanged, SessionTitleChanged, SessionEnded, SessionBackgroundChanged, SessionPausedChanged, SessionNotice, DaemonLimitsChanged } from '../types'
 import { onMessage } from '../ws'
-import { toastForTransition } from '../notify'
 import { useToastStore } from './useToastStore'
 
 // Module-level timer handles so they're cancellable without storing in zustand state.
 const pendingTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+// Statuses after which a session runs nothing (it ended, failed or lost its process).
+const TERMINAL_STATUSES = new Set<SessionStatus>(['stopped', 'ended', 'error', 'disconnected'])
 
 const PENDING_TIMEOUT_MS = 90_000
 const PENDING_TIMEOUT_MESSAGE = "This is taking longer than expected — it may have failed to start. Try again or check the sidebar."
@@ -14,6 +16,9 @@ interface SessionStore {
   daemons: DaemonInfo[]
   sessions: SessionInfo[]
   serverVersion: string
+  /** The release version (the VERSION file) and git commit the server was built from; '' when unstamped. */
+  serverRelease: string
+  serverCommit: string
   /** The server version this page was loaded from (the first one it was told). */
   loadedVersion: string
   /** The server has since reported a different version: this tab runs an old copy of the app. */
@@ -34,6 +39,8 @@ interface SessionStore {
   addPendingSession: (id: string) => void
   removePendingSession: (id: string) => void
   clearFailedSession: (id: string) => void
+  /** Forget that a session is paused (a message was just sent to resume it). */
+  clearPaused: (sessionId: string) => void
 }
 
 export const useSessionStore = create<SessionStore>((set, get) => {
@@ -47,11 +54,15 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     const serverVersion = msg.server_version ?? ""
     // The page was loaded from one version of the server; a reconnect that reports another
     // means the server was updated under it, and this tab is still running the old app.
-    const loaded = get().loadedVersion || serverVersion
+    // The key is the version and the commit: a desktop rebuild keeps the version "dev" and changes
+    // only the commit. A server that reports no version is never taken for an update.
+    const key = serverVersion === "" ? "" : `${serverVersion}@${msg.server_commit ?? ""}`
+    const loaded = get().loadedVersion || key
     set({
       daemons: msg.daemons, sessions: msg.sessions, statusChangedAt, serverVersion,
+      serverRelease: msg.server_release ?? "", serverCommit: msg.server_commit ?? "",
       loadedVersion: loaded,
-      updated: loaded !== "" && serverVersion !== "" && serverVersion !== loaded,
+      updated: loaded !== "" && key !== "" && key !== loaded,
     })
   })
 
@@ -64,6 +75,14 @@ export const useSessionStore = create<SessionStore>((set, get) => {
         return { daemons }
       }
       return { daemons: [...state.daemons, msg.daemon] }
+    })
+  })
+
+  // A daemon's usage limits changed: its full set, replacing what it said before.
+  onMessage<DaemonLimitsChanged>('daemon_limits_changed', (msg) => {
+    set((state) => {
+      if (!state.daemons.some(d => d.id === msg.daemon_id)) return {}
+      return { daemons: state.daemons.map(d => d.id === msg.daemon_id ? { ...d, usage_limits: msg.usage_limits ?? [] } : d) }
     })
   })
 
@@ -145,17 +164,6 @@ export const useSessionStore = create<SessionStore>((set, get) => {
       return
     }
 
-    // Always surface a waiting/idle transition as an in-app toast (with sound)
-    // when the page is open — independent of engagement. The server separately
-    // decides whether to also send an OS push (only when you're away; see
-    // activityTTL). "Always toast, sometimes notify." Only fire on an actual
-    // change; toastForTransition decides which states notify.
-    // starting → idle is a session becoming ready, not one finishing a turn.
-    const becameReady = (prev?.status === 'starting' || prev?.status === 'disconnected') && msg.status === 'idle'
-    if (prev && prev.status !== msg.status && !becameReady) {
-      const toast = toastForTransition({ ...prev, status: msg.status }, msg.status)
-      if (toast) useToastStore.getState().addToast(toast)
-    }
     set((curState) => ({
       sessions: curState.sessions.map(s =>
         s.id === msg.session_id
@@ -171,11 +179,24 @@ export const useSessionStore = create<SessionStore>((set, get) => {
               // means the session is going (again), so nothing ended it.
               end_reason: msg.end_reason,
               ended_by: msg.ended_by ?? null,
+              // A session that ended or failed runs nothing in the background any more.
+              background_tasks: TERMINAL_STATUSES.has(msg.status) ? 0 : s.background_tasks,
+              // Paused by a restart until it runs again or ends (the server clears it the same way).
+              paused_reason: msg.status === 'idle' || msg.status === 'waiting' ? s.paused_reason : undefined,
             }
           : s
       ),
       statusChangedAt: { ...curState.statusChangedAt, [msg.session_id]: Date.now() },
     }))
+  })
+
+  // The server's notice that a session needs the person (waiting for input, or idle with nothing
+  // left running): always an in-app toast (with sound) while the page is open, whatever the
+  // engagement. The server decides when one is due — never for a session nobody attends, and for
+  // an idle one only once its background work is done — and separately whether to also send an OS
+  // push (only when you're away). "Always toast, sometimes notify."
+  onMessage<SessionNotice>('session_notice', (msg) => {
+    useToastStore.getState().addToast({ title: msg.title, body: msg.body, url: msg.url })
   })
 
   onMessage<SessionReadChanged>('session_read_changed', (msg) => {
@@ -207,6 +228,25 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     }))
   })
 
+  // A background task of a session started or ended: the sidebar's "⏱ N" chip follows the count the
+  // server keeps, so it is right for a session nobody has open.
+  onMessage<SessionBackgroundChanged>('session_background_changed', (msg) => {
+    set((state) => ({
+      sessions: state.sessions.map(s =>
+        s.id === msg.session_id ? { ...s, background_tasks: msg.background_tasks } : s
+      ),
+    }))
+  })
+
+  // A session's daemon restarted and left it paused, waiting for a message (or it runs again).
+  onMessage<SessionPausedChanged>('session_paused_changed', (msg) => {
+    set((state) => ({
+      sessions: state.sessions.map(s =>
+        s.id === msg.session_id ? { ...s, paused_reason: msg.paused_reason || undefined } : s
+      ),
+    }))
+  })
+
   onMessage<SessionTitleChanged>('session_title_changed', (msg) => {
     set((state) => ({
       sessions: state.sessions.map(s => {
@@ -223,7 +263,7 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     set((state) => ({
       sessions: state.sessions.map(s =>
         s.id === msg.session_id
-          ? { ...s, status: 'stopped', end_reason: msg.end_reason ?? s.end_reason, ended_by: msg.ended_by ?? s.ended_by }
+          ? { ...s, status: 'stopped', end_reason: msg.end_reason ?? s.end_reason, ended_by: msg.ended_by ?? s.ended_by, background_tasks: 0 }
           : s
       ),
       statusChangedAt: { ...state.statusChangedAt, [msg.session_id]: Date.now() },
@@ -234,6 +274,8 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     daemons: [],
     sessions: [],
     serverVersion: "",
+    serverRelease: "",
+    serverCommit: "",
     loadedVersion: "",
     updated: false,
     statusChangedAt: {},
@@ -324,6 +366,14 @@ export const useSessionStore = create<SessionStore>((set, get) => {
         const { [id]: _removed, ...rest } = state.failedSessions
         return { failedSessions: rest }
       })
+    },
+
+    clearPaused: (sessionId) => {
+      set((state) => ({
+        sessions: state.sessions.map(s =>
+          s.id === sessionId && s.paused_reason ? { ...s, paused_reason: undefined } : s
+        ),
+      }))
     },
   }
 })

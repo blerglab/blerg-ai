@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { refreshReturnUrl } from './refreshGuard'
 
 // vi.mock factories are hoisted above top-level const declarations, so the
 // spies themselves must be created inside vi.hoisted to be visible in the
@@ -64,6 +65,7 @@ describe('ws.ts', () => {
     FakeWebSocket.instances = []
     vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket)
     sessionStorage.clear()
+    window.history.replaceState(null, '', '/')
   })
 
   afterEach(() => {
@@ -100,7 +102,7 @@ describe('ws.ts', () => {
     await vi.advanceTimersByTimeAsync(0) // the quiet renewal is tried first and (here) comes back empty
 
     expect(redirectToRefresh).toHaveBeenCalledTimes(1)
-    expect(redirectToRefresh).toHaveBeenCalledWith(location.href)
+    expect(redirectToRefresh).toHaveBeenCalledWith(refreshReturnUrl())
     // no reconnect scheduled — we're navigating away instead
     expect(vi.getTimerCount()).toBe(timersBefore)
 
@@ -140,5 +142,47 @@ describe('ws.ts', () => {
     expect(refreshAlreadyAttempted()).toBe(false)
 
     vi.useRealTimers()
+  })
+
+  // The live bug: a bounce that failed (a runner restart) left the flag in this tab's
+  // sessionStorage, and every later load — reloads included — silently skipped the socket.
+  it('a stale attempted flag from an earlier load is ignored: a fresh load with no token bounces', async () => {
+    sessionStorage.setItem('blerg_refresh_attempted', '1')
+    getAccessToken.mockReturnValue(null)
+
+    await import('./ws')
+
+    expect(redirectToRefresh).toHaveBeenCalledTimes(1)
+    expect(redirectToRefresh).toHaveBeenCalledWith(refreshReturnUrl())
+  })
+
+  it('the return leg from /auth/refresh without a token does not bounce again; it raises the banner', async () => {
+    sessionStorage.setItem('blerg_refresh_attempted', '1')
+    window.history.replaceState(null, '', '/sessions#blerg_refresh_return')
+    getAccessToken.mockReturnValue(null)
+
+    await import('./ws')
+    const { signInStuck } = await import('./signIn')
+
+    expect(redirectToRefresh).not.toHaveBeenCalled()
+    expect(FakeWebSocket.instances).toHaveLength(0)
+    expect(signInStuck()).toBe(true)
+    expect(location.hash).toBe('') // a reload from here is a fresh load
+  })
+
+  it('the rolling counter still caps fresh-load bounces at MAX_ATTEMPTS', async () => {
+    getAccessToken.mockReturnValue(null)
+    const { MAX_ATTEMPTS } = await import('./refreshGuard')
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      vi.resetModules()
+      await import('./ws')
+    }
+    expect(redirectToRefresh).toHaveBeenCalledTimes(MAX_ATTEMPTS)
+
+    vi.resetModules()
+    await import('./ws')
+    const { signInStuck } = await import('./signIn')
+    expect(redirectToRefresh).toHaveBeenCalledTimes(MAX_ATTEMPTS)
+    expect(signInStuck()).toBe(true)
   })
 })

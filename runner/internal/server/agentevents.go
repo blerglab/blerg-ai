@@ -15,22 +15,56 @@ import (
 
 // forwardToSessionDaemon routes a control message to the daemon owning a
 // session (send_input pattern).
-func forwardToSessionDaemon(h *Hub, bc *BrowserConn, sessionID string, msg any) {
+func forwardToSessionDaemon(h *Hub, bc *BrowserConn, sessionID string, msg any) bool {
 	dc := h.FindDaemonForSession(sessionID)
 	if dc == nil {
 		log.Printf("browser %s: no daemon found for session %s", bc.ID, sessionID)
-		return
+		return false
 	}
 	raw, err := json.Marshal(msg)
 	if err != nil {
-		return
+		return false
 	}
 	select {
 	case dc.send <- raw:
+		return true
 	default:
 		log.Printf("browser %s: daemon %s send channel full", bc.ID, dc.ID)
+		return false
 	}
 }
+
+// RefreshSessionTools tells the daemon running sessionID that the session's MCP tool definitions
+// changed (an accept, an auto-accept, a cron re-pin), so its agent lists them again at the next
+// idle point. Best effort: false when no daemon holds the session (a resume will re-list anyway)
+// or its queue is full.
+func (h *Hub) RefreshSessionTools(sessionID string) bool {
+	dc := h.FindDaemonForSession(sessionID)
+	if dc == nil {
+		return false
+	}
+	raw, err := json.Marshal(protocol.RefreshSessionTools{Type: "refresh_session_tools", SessionID: sessionID})
+	if err != nil {
+		return false
+	}
+	// trySendToDaemon (reposroot.go) checks the connection is still current and recovers from a
+	// send on a channel the read pump closed: this runs from accept handlers and cron goroutines.
+	if !h.trySendToDaemon(dc, raw) {
+		log.Printf("refresh tools %s: daemon %s gone or send channel full", sessionID, dc.ID)
+		return false
+	}
+	return true
+}
+
+// appendAgentEvent stores an agent event (a variable so a test can make the database fail).
+var appendAgentEvent = db.AppendAgentEventAt
+
+// The agent event kinds a background task's start and end are recorded as (the Claude Code driver's
+// claudebackground.go); the session row counts the tasks running from them.
+const (
+	backgroundStartedKind = "background_task_started"
+	backgroundDoneKind    = "background_task_done"
+)
 
 // HandleAgentEvent processes one non-transient agent event from a daemon:
 // persist (server-assigned seq, idempotent on client_event_id), ack back to
@@ -55,22 +89,65 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		msg.Payload = raw
 	}
 	seq := msg.Seq
+	// Without a database every event counts as new; with one, only an event this call stored does.
+	inserted := pool == nil
+	// An older daemon may still send a NUL escape, which jsonb refuses; store U+FFFD instead of
+	// refusing the event for good (protocol.StripNUL).
+	msg.Payload = protocol.StripNUL(msg.Payload)
+	// The event's time is when the daemon saw it happen, not when it reached us (a resend after
+	// an outage would otherwise carry the reconnect time), within limits (eventTime). The live
+	// fan-out carries the same value the row stores, so a reload shows the same time.
+	limitEvent := msg // cancellation uses the original engine time, never the display-time clamp
+	at := eventTime(msg.Ts, time.Now())
+	msg.Ts = at.UTC().Format(time.RFC3339Nano)
 	if pool != nil {
-		s, _, err := db.AppendAgentEvent(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload))
+		// In order (ingestorder.go): while an earlier event of this session failed to store, a later
+		// one waits, unacknowledged, for the daemon to re-send both in order. It stays in the
+		// daemon's buffer meanwhile; a buffer at its cap (pendingCap) stalls the session's engine
+		// rather than dropping anything.
+		if !h.ingest.admit(msg.SessionID, msg.ClientEventID) {
+			return
+		}
+		s, fresh, err := appendAgentEvent(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), at)
 		if err != nil {
 			log.Printf("agent_event append %s/%s: %v", msg.SessionID, msg.Kind, err)
+			h.ingest.failed(msg.SessionID, msg.ClientEventID, err)
 			return // no ack — the daemon will re-send
 		}
-		seq = s
+		seq, inserted = s, fresh
 	}
 
-	// Ack persistence so the daemon can drop it from its pending buffer.
+	if err := settleSessionInput(ctx, pool, msg); err != nil {
+		h.ingest.failed(msg.SessionID, msg.ClientEventID, err)
+		return
+	}
+
+	// Retry scheduling is durable before acknowledgement, including a replay
+	// whose event append succeeded but whose scheduling write failed.
+	if err := ingestLimitResume(ctx, h, pool, limitEvent, seq); err != nil {
+		log.Printf("limit resume ingest %s: %v", msg.SessionID, err)
+		h.ingest.failed(msg.SessionID, msg.ClientEventID, err)
+		return
+	}
+
+	if pool != nil {
+		h.ingest.stored(msg.SessionID, msg.ClientEventID)
+	}
+	// Ack persistence so the daemon can drop it from its pending buffer. A duplicate is acked
+	// too: it is stored, and the daemon must stop re-sending it.
 	ackAgentEvent(dc, msg, seq)
+	if !inserted {
+		// A re-sent event already recorded (its ack was lost, or the daemon reconnected): it
+		// was fanned out and its side effects applied when it was stored. Applying them again
+		// would let a stale status_changed{running} flip an idle row back, or an old
+		// model_changed restore the old model.
+		return
+	}
 
 	// Fan out to subscribed browsers with the assigned seq.
 	msg.Seq = seq
 	if raw, err := json.Marshal(msg); err == nil {
-		h.FanOutSessionOutput(msg.SessionID, raw)
+		h.FanOutAgentEvent(msg.SessionID, seq, raw)
 	}
 
 	// Side effects.
@@ -107,13 +184,61 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		if err := json.Unmarshal(msg.Payload, &p); err == nil {
 			h.starts.merge(msg.SessionID, p.Stages, true)
 		}
+	case backgroundStartedKind, backgroundDoneKind:
+		// The sessions list counts the tasks running, for a session nobody has open. Counted once
+		// per event: a re-sent one (already recorded) returned above.
+		if pool == nil {
+			break
+		}
+		delta := 1
+		if msg.Kind == backgroundDoneKind {
+			delta = -1
+		}
+		n, err := db.AddSessionBackgroundTasks(ctx, pool, msg.SessionID, delta)
+		if err != nil {
+			log.Printf("agent background tasks %s: %v", msg.SessionID, err)
+			break
+		}
+		h.BroadcastJSON(protocol.SessionBackgroundChanged{
+			Type: "session_background_changed", SessionID: msg.SessionID, BackgroundTasks: n,
+		})
 	case turnDoneKind:
 		// A one-shot session (start with auto_stop) is over as soon as its
 		// first turn is recorded; every other session is untouched by this.
 		// It runs after the append above, so the transcript the result reports
 		// already contains the turn that ended the session.
 		h.AutoStopOnTurnDone(msg.SessionID)
+	case "ask":
+		// The agent asked the person something: that question's own notice says so, and a
+		// deferred idle notice (notices.go) would only repeat it.
+		h.CancelIdleNotice(msg.SessionID)
 	}
+
+	// Work the session ran has ended: an idle session waiting on it may now be done (notices.go).
+	if msg.Kind == backgroundDoneKind || msg.Kind == "subagent_done" {
+		noticeOnWorkEnded(ctx, h, pool, msg.SessionID)
+	}
+}
+
+// eventTimeSkew bounds how far a daemon-reported event time may sit from the server's clock. A
+// daemon's clock can be wrong; an event is never stored as happening more than this far in the
+// past or the future.
+const eventTimeSkew = 10 * time.Minute
+
+// eventTime is the time an agent event is stored with: the daemon's ts (RFC 3339) clamped to
+// eventTimeSkew around now, or now when the ts is missing or unreadable.
+func eventTime(ts string, now time.Time) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if ts == "" || err != nil {
+		return now
+	}
+	if lo := now.Add(-eventTimeSkew); t.Before(lo) {
+		return lo
+	}
+	if hi := now.Add(eventTimeSkew); t.After(hi) {
+		return hi
+	}
+	return t
 }
 
 // ackAgentEvent tells the daemon an event is settled (persisted, or
@@ -186,14 +311,31 @@ func handleSubscribeAgentEvents(ctx context.Context, h *Hub, bc *BrowserConn, po
 
 	replayAgentEvents(ctx, h, bc, pool, msg)
 
+	// forward delivers one buffered live message, then — if the hub had to drop a persisted event
+	// for this browser because the buffer was full — the gap notice (hubgap.go), so the browser
+	// fetches what it missed instead of moving past it.
+	forward := func(ctx context.Context, m []byte) bool {
+		select {
+		case bc.send <- m:
+		case <-ctx.Done():
+			return false
+		}
+		if from := h.TakeAgentEventGap(msg.SessionID, bc.ID); from > 0 {
+			select {
+			case bc.send <- agentEventsGapMessage(msg.SessionID, from):
+			case <-ctx.Done():
+				return false
+			}
+		}
+		return true
+	}
+
 	// Drain live events buffered during the DB query, then start forwarding.
 drainLoop:
 	for {
 		select {
 		case m := <-bufferChan:
-			select {
-			case bc.send <- m:
-			case <-ctx.Done():
+			if !forward(ctx, m) {
 				h.Unsubscribe(msg.SessionID, bc.ID)
 				return
 			}
@@ -210,9 +352,7 @@ drainLoop:
 		for {
 			select {
 			case m := <-bufferChan:
-				select {
-				case bc.send <- m:
-				case <-subCtx.Done():
+				if !forward(subCtx, m) {
 					return
 				}
 			case <-subCtx.Done():
@@ -226,8 +366,24 @@ drainLoop:
 // Forward (the default) is the oldest events after AfterSeq. Tail or BeforeSeq
 // read backwards from the end of the transcript instead: a long transcript is
 // shown from its newest events at once and the older ones follow in pages.
-func replayAgentEvents(ctx context.Context, _ *Hub, bc *BrowserConn, pool *pgxpool.Pool, msg protocol.SubscribeAgentEvents) {
+func replayAgentEvents(ctx context.Context, h *Hub, bc *BrowserConn, pool *pgxpool.Pool, msg protocol.SubscribeAgentEvents) {
+	repairEndedSessionInputs(ctx, h, pool, msg.SessionID)
 	rows, done := replayAgentEventsPage(ctx, pool, msg)
+	// Pending acceptance may precede the requested tail: include it so a fresh page can
+	// show every message still waiting, even when the current turn has a long transcript.
+	if pool != nil && msg.BeforeSeq == 0 {
+		if pending, err := db.PendingSessionInputs(ctx, pool, msg.SessionID); err == nil {
+			for _, input := range pending {
+				raw, _ := json.Marshal(replayedAgentEvent(input.Event))
+				select {
+				case bc.send <- raw:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}
+
 	for _, r := range rows {
 		raw, err := json.Marshal(replayedAgentEvent(r))
 		if err != nil {
@@ -287,6 +443,7 @@ func replayAgentEventsPage(ctx context.Context, pool *pgxpool.Pool, msg protocol
 		if err != nil {
 			log.Printf("agent replay %s: %v", msg.SessionID, err)
 		}
+		rows = supplementReplayContext(ctx, pool, msg.SessionID, rows)
 	}
 	return rows, done
 }
@@ -304,16 +461,21 @@ func replayedAgentEvent(r db.AgentEventRow) protocol.AgentEvent {
 // (bearer: daemon token). Runner pods use it to rebuild provider context on
 // resume; ?after_seq= and ?limit= mirror the WS replay parameters.
 func (a *API) HandleGetAgentEvents(w http.ResponseWriter, r *http.Request) {
-	if !checkBearerToken(w, r, a.daemonToken) {
-		return
-	}
 	sessionID := r.PathValue("id")
+	if !a.isDaemonToken(a.rawBearer(r)) {
+		bound, err := a.authenticateRuntimeToken(r)
+		if err != nil || bound.ID != sessionID {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+	}
 	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if a.dbPool == nil {
 		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
+	repairEndedSessionInputs(r.Context(), a.hub, a.dbPool, sessionID)
 	rows, err := db.ListAgentEvents(r.Context(), a.dbPool, sessionID, afterSeq, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list error")

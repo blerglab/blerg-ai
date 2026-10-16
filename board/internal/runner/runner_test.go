@@ -285,3 +285,41 @@ func TestParseRuntime(t *testing.T) {
 		}
 	}
 }
+
+// Events blerg-board does not draw are not stored: raw provider blocks, thinking, the running
+// totals of a subagent and the background-task events. Everything else comes through (unmapped
+// kinds as "status").
+func TestBlergRunnerEventsDropsUndrawnKinds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"has_more":false,"events":[
+			{"seq":1,"kind":"provider_blocks","payload":{}},
+			{"seq":2,"kind":"assistant_thinking","payload":{"text":"hmm"}},
+			{"seq":3,"kind":"subagent_update","payload":{"child_id":"c"}},
+			{"seq":4,"kind":"assistant_text","payload":{"text":"hi","done":true}},
+			{"seq":5,"kind":"background_task_started","payload":{"task_id":"b1"}},
+			{"seq":6,"kind":"subagent_done","payload":{"child_id":"c"}},
+			{"seq":7,"kind":"background_task_done","payload":{"task_id":"b1"}}]}`))
+	}))
+	defer srv.Close()
+
+	k := NewBlergRunner(srv.URL, "key", "")
+	events, _, err := k.Events(context.Background(), "ext-1", 0, 200)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	var kinds []string
+	for _, ev := range events {
+		kinds = append(kinds, ev.Kind)
+	}
+	if got := strings.Join(kinds, ","); got != "assistant_turn,status" {
+		t.Fatalf("kinds = %s, want assistant_turn,status", got)
+	}
+	var wrapped struct {
+		SourceKind string `json:"source_kind"`
+	}
+	_ = json.Unmarshal(events[1].Payload, &wrapped)
+	if wrapped.SourceKind != "subagent_done" {
+		t.Fatalf("source_kind = %q", wrapped.SourceKind)
+	}
+}

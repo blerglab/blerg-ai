@@ -292,11 +292,19 @@ func TestWebhookStopsOn4xx(t *testing.T) {
 // Redirects are refused: the signed body must never be replayed to a host the
 // caller did not name.
 func TestWebhookDoesNotFollowRedirects(t *testing.T) {
+	// Asynchronous deliveries from earlier fixtures may outlive a closed
+	// receiver and encounter a reused loopback port. A unique path keeps
+	// those unrelated requests distinct from this redirect regression.
+	hookPath := "/hook/" + newUUID()
 	var (
 		mu               sync.Mutex
 		target, redirect int
 	)
 	dest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != hookPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		mu.Lock()
 		target++
 		mu.Unlock()
@@ -304,14 +312,18 @@ func TestWebhookDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer dest.Close()
 	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != hookPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		mu.Lock()
 		redirect++
 		mu.Unlock()
-		http.Redirect(w, r, dest.URL+"/hook", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, dest.URL+hookPath, http.StatusTemporaryRedirect)
 	}))
 	defer recv.Close()
 
-	api, pool, sessionID := webhookSession(t, recv.URL+"/hook", "")
+	api, pool, sessionID := webhookSession(t, recv.URL+hookPath, "")
 	api.deliverCompletion(context.Background(), sessionID)
 
 	mu.Lock()
@@ -334,11 +346,24 @@ func TestWebhookDoesNotFollowRedirects(t *testing.T) {
 // A false completion there would also burn the session's one delivery, so the
 // test follows the disconnect with a genuine end and requires that to deliver.
 func TestCompletionHooksFireOnEndNotOnDisconnect(t *testing.T) {
+	sessionID := newUUID()
 	var (
 		mu   sync.Mutex
 		hits int
 	)
 	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/hook" || r.Header.Get("X-Blerg-Session") != sessionID {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var result struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&result); err != nil || result.SessionID != sessionID {
+			t.Error("completion callback body does not match its session header")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		mu.Lock()
 		hits++
 		mu.Unlock()
@@ -360,13 +385,26 @@ func TestCompletionHooksFireOnEndNotOnDisconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	hub.Register(dc)
-	sessionID := newUUID()
 	if err := db.InsertSession(ctx, pool, sessionID, dc.ID, "running", "/repos/org/proj", "org/proj", "T", ""); err != nil {
 		t.Fatal(err)
 	}
 	allowLoopbackDelivery(t, recv.URL+"/hook")
 	if err := db.SetSessionCallback(ctx, pool, sessionID, recv.URL+"/hook", ""); err != nil {
 		t.Fatal(err)
+	}
+	// A background client from an earlier fixture may reach a reused test port.
+	// Neither its unrelated GET nor another session's POST is this callback.
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		req, err := http.NewRequest(method, recv.URL+"/hook", strings.NewReader(`{"session_id":"unrelated-session"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Blerg-Session", "unrelated-session")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
 	}
 
 	// The daemon's WS drops. The session is marked "error" but is revivable.
@@ -375,6 +413,16 @@ func TestCompletionHooksFireOnEndNotOnDisconnect(t *testing.T) {
 		t.Fatalf("session after disconnect = %+v, want error", row)
 	}
 	time.Sleep(200 * time.Millisecond)
+	var claimed bool
+	if err := pool.QueryRow(ctx, `SELECT webhook_delivered_at IS NOT NULL FROM sessions WHERE id=$1`, sessionID).Scan(&claimed); err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("a daemon disconnect claimed the session's completion callback")
+	}
+	if events := webhookEvents(t, pool, sessionID); len(events) != 0 {
+		t.Fatalf("a daemon disconnect recorded %d webhook attempts, want 0", len(events))
+	}
 	if n := hitCount(); n != 0 {
 		t.Fatalf("a daemon disconnect delivered %d webhooks, want 0", n)
 	}

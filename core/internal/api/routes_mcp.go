@@ -13,6 +13,7 @@ func (d Deps) registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/mcp/connections", requireHumanPrincipal(d.handleCreateMCPConnection, d, "card.read"))
 	mux.HandleFunc("PATCH /api/mcp/connections/{id}", requireHumanPrincipal(d.handlePatchMCPConnection, d, "card.read"))
 	mux.HandleFunc("DELETE /api/mcp/connections/{id}", requireHumanPrincipal(d.handleDeleteMCPConnection, d, "card.read"))
+	mux.HandleFunc("GET /api/mcp/connections/{id}/events", requireHumanPrincipal(d.handleListMCPConnectionEvents, d, "card.read"))
 	// OAuth connections (mcp_oauth_handlers.go). The callback is reached by the browser coming
 	// back from the authorization server: no bearer token, protected by the single-use state row
 	// and the Lax state cookie.

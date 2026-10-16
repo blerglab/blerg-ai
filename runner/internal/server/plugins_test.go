@@ -215,7 +215,7 @@ func TestCreateSessionJobPluginsFailSoft(t *testing.T) {
 	}
 }
 
-func TestPluginsOnlyForClaudeSessionsWithAnAccount(t *testing.T) {
+func TestPluginsOnlyForNativeEnginesWithAnAccount(t *testing.T) {
 	f := &fakeK8s{pluginLists: map[string][]pluginspec.Entry{"acct-1": {pe("superpowers")}}}
 	jm := newPluginJM(t, f, "")
 	for name, spec := range map[string]SessionJobSpec{
@@ -229,10 +229,10 @@ func TestPluginsOnlyForClaudeSessionsWithAnAccount(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, has := envValue(t, f, "BLERG_RUNNER_PLUGINS")
-		if want := name == "claude blank"; has != want {
+		if want := name == "claude blank" || name == "codex"; has != want {
 			t.Errorf("%s: has plugins = %v, want %v", name, has, want)
 		}
-		if asked := len(f.pluginRequests) > before; asked != (name == "claude blank") {
+		if asked := len(f.pluginRequests) > before; asked != (name == "claude blank" || name == "codex") {
 			t.Errorf("%s: asked core = %v", name, asked)
 		}
 	}

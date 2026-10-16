@@ -6,7 +6,11 @@
 
 export type AgentEventKind =
   | 'user_message'
+  | 'input_accepted'
   | 'assistant_text'
+  | 'assistant_thinking'
+  | 'thinking_started'
+  | 'thinking_done'
   | 'tool_call'
   | 'tool_result'
   | 'provider_blocks'
@@ -17,13 +21,17 @@ export type AgentEventKind =
   | 'note'
   | 'model_changed'
   | 'subagent_started'
+  | 'subagent_update'
   | 'subagent_done'
+  | 'background_task_started'
+  | 'background_task_done'
   | 'turn_done'
   | 'error'
   | 'compaction'
   | 'start_stage'
   | 'capabilities'
   | 'artifact'
+  | 'topic'
 
 export interface AgentEvent {
   type: 'agent_event'
@@ -36,15 +44,61 @@ export interface AgentEvent {
   transient?: boolean
 }
 
-export interface UserMessagePayload { text: string; source: string }
-export interface AssistantTextPayload { text: string; done: boolean }
-export interface ToolCallPayload { tool: string; call_id: string; input: unknown }
-export interface ToolResultPayload { call_id: string; output: string; is_error: boolean; duration_ms: number }
+// source: chat (the person, in the app) | human (a person through an app's proxy) | ask_answer (an
+// answer to an ask) | note_reply | system (text the daemon, engine or harness wrote: never the
+// person) | runner | blerg-board | ….
+// client_id: the id the sender gave the message (a queued bubble's), echoed by the daemon; absent
+// from a daemon older than the field and on messages no browser sent.
+// message_id: on an ask_answer, the ask (messages API id) it answers.
+export interface UserMessagePayload { text: string; source: string; client_id?: string; message_id?: string }
+// parent_call_id (on assistant text, thinking, tool calls and results): the event belongs to a
+// subagent, started by the tool call with this call id (its subagent_started child_id). Absent on
+// the main agent's own events, and on every event of a daemon older than the field.
+export interface AssistantTextPayload { text: string; done: boolean; parent_call_id?: string }
+/** kind "assistant_thinking": one thinking block's text. Never the assistant's answer. */
+export interface AssistantThinkingPayload { text: string; parent_call_id?: string }
+/** kinds "thinking_started" / "thinking_done": a thinking block opened or closed. Transient (sent
+ *  live only, never held in the transcript) and without text; model/workingActivity reads them. */
+export interface ThinkingPayload { parent_call_id?: string }
+export interface ToolCallPayload { tool: string; call_id: string; input: unknown; parent_call_id?: string }
+export interface ToolResultPayload { call_id: string; output: string; is_error: boolean; duration_ms: number; parent_call_id?: string }
 export interface StatusPayload { status: string; reason: string }
 export interface CheckInPayload { phase: string; summary: string }
-export interface MessagingPayload { body: string }
+// kinds ask | update | note: what the agent sent the person (blerg-runner ask/update/note, or the
+// native loop's tools). message_id: the messages API id (an ask's answer names it); absent on
+// older events and on native updates and notes.
+export interface MessagingPayload { body: string; message_id?: string }
 export interface ModelChangedPayload { model: string; effort: string; source: string }
-export interface SubagentPayload { child_id: string; agent_type: string; model: string; summary: string }
+// kinds subagent_started | subagent_update | subagent_done. The optional fields come from a Claude
+// Code session: an update carries the subagent's model and running totals; a done carries the
+// final totals and duration_ms, or background: true when it is only the launch of a background
+// subagent (a later done for the same child_id is its real end).
+export interface TokenUsage { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number }
+export interface SubagentPayload {
+  child_id: string; agent_type: string; model: string; summary: string
+  usage?: TokenUsage; tool_uses?: number; duration_ms?: number; background?: boolean
+  // it failed (a daemon older than the field leaves it out; an "error:" summary says the same)
+  is_error?: boolean
+  // A finished subagent the main agent resumed (Claude Code's SendMessage): a new instance whose
+  // child_id is the SendMessage call's, resumed_from the original's child_id. On its start,
+  // background says how the original ran. It runs until a subagent_done of its own.
+  resumed?: boolean
+  resumed_from?: string
+}
+// A piece of work the agent marked (`blerg-runner topic`; the server records it): "start" opens topic
+// id with its title and ends the open one; "done" closes the open one, with an optional outcome.
+export interface TopicPayload { id: string; title: string; action: 'start' | 'done'; outcome?: string }
+// kinds background_task_started | background_task_done: something the agent left running in the
+// background (a background shell, a Monitor, a background subagent) and its end. task_id is the
+// engine's id for it, call_id the tool call that started it. Only a Claude Code session sends them.
+export type BackgroundTaskKind = 'bash' | 'monitor' | 'agent'
+export interface BackgroundTaskStartedPayload {
+  task_id: string; call_id: string; kind: BackgroundTaskKind | string; description: string; started_at: string
+}
+/** status: completed | failed | killed | expired (a monitor) | stopped (the engine ended) | … */
+export interface BackgroundTaskDonePayload {
+  task_id: string; call_id: string; kind: BackgroundTaskKind | string; status: string; summary: string; description?: string
+}
 export interface TurnDonePayload {
   stop_reason: string
   model: string
@@ -61,9 +115,21 @@ export interface TurnDonePayload {
 export interface ArtifactPayload {
   id: string; name: string; size: number; content_type: string; view: string
   origin?: 'agent' | 'user'; version?: number; latest_version?: number
+  /** Set by the server's list when the file is still listed but its bytes are no longer stored
+   *  (a data volume that did not survive a restart): it can be deleted, not opened. */
+  missing?: boolean
 }
-export interface ErrorPayload { message: string; retryable: boolean }
-export interface CompactionPayload { summary: string; through_index: number }
+// code: 'api_error' (the model API failed) or 'api_retry' (a notice: the engine is retrying the API;
+// the turn goes on). client_id: on a message the session dropped (its queue was full), that
+// message's client id. attempt, max_retries and retry_in_ms: on an api_retry notice, the engine's
+// word on the retry (absent when not said, and from a daemon older than the fields).
+export interface ErrorPayload {
+  message: string; retryable: boolean; code?: string; client_id?: string
+  attempt?: number; max_retries?: number; retry_in_ms?: number
+}
+// trigger and pre_tokens come from a Claude Code compaction ('manual' | 'auto', the context's size
+// before it), whose summary the CLI keeps (summary is then empty).
+export interface CompactionPayload { summary: string; through_index: number; trigger?: string; pre_tokens?: number }
 
 // Session start progress (kind "start_stage"). A payload with plan=true opens
 // a new start attempt and lists every stage in order; later payloads update
@@ -124,6 +190,14 @@ export interface AgentEventsReplayDone {
   server_time?: string // server clock at replay end — for skew-free elapsed times
 }
 
+/** The server dropped live events of a session for this browser (its buffer was full); the first
+ *  one missed has seq from_seq. Later ones may already have arrived. */
+export interface AgentEventsGap {
+  type: 'agent_events_gap'
+  session_id: string
+  from_seq: number
+}
+
 // ─── Sessions ─────────────────────────────────────────────────────────────────
 
 // Session status values
@@ -163,6 +237,9 @@ export interface SessionInfo {
   // watching: it decides, notes its assumptions, finishes and summarises). Absent from a runner
   // or daemon older than the field.
   interaction?: 'interactive' | 'unattended'
+  // How many background tasks the session's agent has running; absent when none (and from a runner
+  // older than the field).
+  background_tasks?: number
 }
 
 export interface StartedBy {
@@ -230,6 +307,10 @@ export interface AgentUserMessage {
   session_id: string
   text: string
   source?: string
+  /** The sender's id for the message, echoed on its user_message (and on a drop's error). */
+  client_id?: string
+  /** This message answers that open ask (an ask card's reply). */
+  answer_message_id?: string
 }
 
 export interface SetSessionModel {

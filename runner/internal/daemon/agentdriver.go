@@ -54,6 +54,9 @@ func chooseAgentDriver(in agentDriverInputs) (agentDriverKind, string) {
 	if _, cli := engineRegistry[in.Engine]; cli {
 		return driverCLI, ""
 	}
+	if problem := engineProblem(in.Engine); problem != "" {
+		return driverNone, problem
+	}
 	if in.Sandbox {
 		return driverClaudeCode, ""
 	}

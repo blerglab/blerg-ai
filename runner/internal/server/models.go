@@ -54,7 +54,7 @@ func reportedModelList(hub *Hub, engine, daemonID string) models.List {
 	engine = models.NormalizeEngine(engine)
 	none := models.List{Models: []models.Model{}, Source: models.SourceNone}
 	if daemonID != "" {
-		dc := hub.GetDaemon(daemonID)
+		dc := hub.GetHostDaemon(daemonID)
 		if dc == nil {
 			return none
 		}
@@ -65,7 +65,7 @@ func reportedModelList(hub *Hub, engine, daemonID string) models.List {
 		t := rep.FetchedAt
 		return models.List{Models: rep.Models, Source: models.SourceDaemon, FetchedAt: &t, DaemonID: dc.ID}
 	}
-	daemons := hub.GetAllDaemons()
+	daemons := hub.GetHostDaemons()
 	sort.Slice(daemons, func(i, j int) bool { return daemons[i].ID < daemons[j].ID })
 	type reported struct {
 		id  string
@@ -123,15 +123,31 @@ func (a *API) modelRegistry() *models.Registry {
 // who may start a session: a signed-in browser or a runner-contract
 // credential.
 func (a *API) HandleGetModels(w http.ResponseWriter, r *http.Request) {
+	// Cluster catalogs are private to the launching account. A shared runner
+	// key or another workstation's list cannot authorise this lookup.
+	if _, supported := clusterModelProviderFor(r.PathValue("engine")); r.URL.Query().Get("runtime") == "cluster" && supported {
+		a.handleClusterModels(w, r)
+		return
+	}
 	if !a.authBrowserOrRunner(w, r) {
 		return
 	}
 	engine := r.PathValue("engine")
-	list, err := a.modelRegistry().Models(r.Context(), engine, r.URL.Query().Get("daemon_id"))
+	daemonID := r.URL.Query().Get("daemon_id")
+	cluster := r.URL.Query().Get("runtime") == "cluster"
+	if cluster {
+		daemonID = ""
+	}
+	list, err := a.modelRegistry().Models(r.Context(), engine, daemonID)
 	if err != nil {
 		log.Printf("models %s: %v", engine, err)
 		writeError(w, http.StatusBadGateway, "model list unavailable")
 		return
+	}
+	// Workstation catalogs cannot describe an engine running in Cluster.
+	// Public catalogs remain usable until a native Cluster provider is added.
+	if cluster && list.Source == models.SourceDaemon {
+		list = models.List{Source: models.SourceNone}
 	}
 	if list.Models == nil {
 		list.Models = []models.Model{}
@@ -235,4 +251,24 @@ func sanitizeSetSessionModel(msg protocol.SetSessionModel) (protocol.SetSessionM
 	return protocol.SetSessionModel{
 		Type: "set_session_model", SessionID: msg.SessionID, Model: msg.Model, Effort: msg.Effort,
 	}, true
+}
+
+func (a *API) handleClusterModels(w http.ResponseWriter, r *http.Request) {
+	principal, ok := a.authBrowser(w, r)
+	if !ok {
+		return
+	}
+	if principal.Kind != "human" {
+		writeError(w, http.StatusUnauthorized, "a browser session is required")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	jobs := a.hub.JobManager()
+	if jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "Cluster runtime is not configured")
+		return
+	}
+	list := a.clusterModelSnapshot(r.Context(), r.PathValue("engine"), principal.Sub, proofFromPrincipal(principal), r.URL.Query().Get("refresh") == "1")
+	list.EngineEfforts = models.EffortsFor(r.PathValue("engine"))
+	writeJSON(w, http.StatusOK, list)
 }

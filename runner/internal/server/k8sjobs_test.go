@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -110,6 +111,12 @@ func (f *fakeK8s) setJobStatus(name string, status map[string]any) {
 		f.jobStatuses = map[string]map[string]any{}
 	}
 	f.jobStatuses[name] = status
+}
+
+// finishSessionJob models the old pod having exited before a resume. A DB
+// disconnect alone does not grant permission to replace a still-live Job.
+func (f *fakeK8s) finishSessionJob(sessionID string) {
+	f.setJobStatus("blerg-runner-agent-"+strings.ToLower(sessionID), map[string]any{"succeeded": 1})
 }
 
 // setJobMissing makes the fake 404 the named Job, as k8s does once a Job has
@@ -261,6 +268,22 @@ func (f *fakeK8s) credentialHandler() http.HandlerFunc {
 			f.pluginHandler(w, r)
 			return
 		}
+		if r.URL.Path == "/internal/credentials/list" {
+			if r.Header.Get("X-Internal-Key") != testInternalKey {
+				w.WriteHeader(401)
+				return
+			}
+			var proof struct {
+				TokenID   string `json:"token_id"`
+				SessionID string `json:"session_id"`
+			}
+			if json.NewDecoder(r.Body).Decode(&proof) != nil || (proof.TokenID != "") == (proof.SessionID != "") {
+				w.WriteHeader(400)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"engines": []string{}})
+			return
+		}
 		f.mu.Lock()
 		f.credentialFetchCalls++
 		f.mu.Unlock()
@@ -305,6 +328,12 @@ func newTestJobManager(t *testing.T, f *fakeK8s) *JobManager {
 	credSrv := httptest.NewServer(f.credentialHandler())
 	t.Cleanup(credSrv.Close)
 	return &JobManager{
+		mintRuntimeLaunch: func(_ context.Context, _ string, message string) (string, string, error) {
+			if message == "" {
+				message = "test-message-capability"
+			}
+			return "test-runtime-capability", message, nil
+		},
 		BaseURL: srv.URL, Token: "tok", Namespace: "blerg-runner-sessions",
 		Image: "blerg-runner-devcontainer:test", Client: srv.Client(),
 		ServerWSURL: "ws://server/ws/daemon", ServerHTTPURL: "http://server",
@@ -547,8 +576,8 @@ func TestCreateSessionJobPersonalClaudeOAuth(t *testing.T) {
 }
 
 // TestCreateSessionJobNoPersonalCredentialsFallsBack: with neither an engine
-// nor a github personal credential, every key keeps coming from the operator
-// Secret exactly as before.
+// nor a github personal credential, provider/git keys use the operator Secret;
+// pod runtime authority always comes from the per-launch Secret.
 func TestCreateSessionJobNoPersonalCredentialsFallsBack(t *testing.T) {
 	f := &fakeK8s{}
 	jm := newTestJobManager(t, f)
@@ -557,8 +586,8 @@ func TestCreateSessionJobNoPersonalCredentialsFallsBack(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.createdSecrets) != 0 {
-		t.Errorf("no personal credential means no per-session secret, got %d", len(f.createdSecrets))
+	if len(f.createdSecrets) != 1 {
+		t.Errorf("runtime authority requires one per-launch secret, got %d", len(f.createdSecrets))
 	}
 	raw, _ := json.Marshal(f.created[0])
 	body := string(raw)
@@ -621,58 +650,26 @@ func TestStatusReportsGitConfigured(t *testing.T) {
 	}
 }
 
-// TestCreateSessionJobEmptyPersonalCredentialFallsBack: core answering 200
-// with an empty (or whitespace-only) plaintext must be treated exactly like a
-// 404. Otherwise the empty value would suppress the operator fallback and ship
-// an empty credential var into the pod — a session that fails to authenticate
-// for no visible reason.
-func TestCreateSessionJobEmptyPersonalCredentialFallsBack(t *testing.T) {
+// A malformed stored credential must not change the billing identity to the operator.
+func TestCreateSessionJobEmptyPersonalCredentialFailsClosed(t *testing.T) {
 	for name, value := range map[string][]byte{"empty": {}, "whitespace": []byte(" \n\t")} {
 		t.Run(name, func(t *testing.T) {
-			f := &fakeK8s{credentialFetchResponses: map[string][]byte{
-				"acct-1:claude": value,
-			}}
+			f := &fakeK8s{credentialFetchResponses: map[string][]byte{"acct-1:claude": value}}
 			jm := newTestJobManager(t, f)
-			if err := jm.CreateSessionJob(SessionJobSpec{
-				SessionID: "s-empty", Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID,
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if len(f.createdSecrets) != 0 {
-				t.Errorf("an empty personal credential must not create a per-session secret, got %d", len(f.createdSecrets))
-			}
-			raw, _ := json.Marshal(f.created[0])
-			body := string(raw)
-			for _, want := range []string{
-				`"key":"ANTHROPIC_API_KEY","name":"blerg-runner-agent"`,
-				`"key":"CLAUDE_CODE_OAUTH_TOKEN","name":"blerg-runner-agent"`,
-			} {
-				if !strings.Contains(body, want) {
-					t.Errorf("must fall back to the operator secret, missing %s\n%s", want, body)
-				}
+			err := jm.CreateSessionJob(SessionJobSpec{SessionID: "s-empty", Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID})
+			if !errors.Is(err, errPersonalCredentialUnavailable) || len(f.created) != 0 || len(f.createdSecrets) != 0 {
+				t.Fatal("invalid personal credential permitted launch/fallback")
 			}
 		})
 	}
 }
 
-// TestCreateSessionJobEmptyPersonalGitTokenFallsBack: same rule on the github
-// branch — an empty personal git token must not shadow the operator's.
-func TestCreateSessionJobEmptyPersonalGitTokenFallsBack(t *testing.T) {
-	f := &fakeK8s{credentialFetchResponses: map[string][]byte{
-		"acct-1:github": {},
-	}}
+func TestCreateSessionJobEmptyPersonalGitTokenFailsClosed(t *testing.T) {
+	f := &fakeK8s{credentialFetchResponses: map[string][]byte{"acct-1:github": {}}}
 	jm := newTestJobManager(t, f)
-	if err := jm.CreateSessionJob(SessionJobSpec{
-		SessionID: "s-empty-gh", Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.createdSecrets) != 0 {
-		t.Errorf("an empty personal git token must not create a per-session secret, got %d", len(f.createdSecrets))
-	}
-	raw, _ := json.Marshal(f.created[0])
-	if !strings.Contains(string(raw), `"key":"BLERG_RUNNER_GIT_TOKEN","name":"blerg-runner-agent"`) {
-		t.Errorf("must fall back to the operator git token, got %s", raw)
+	err := jm.CreateSessionJob(SessionJobSpec{SessionID: "s-empty-gh", Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID})
+	if !errors.Is(err, errPersonalCredentialUnavailable) || len(f.created) != 0 || len(f.createdSecrets) != 0 {
+		t.Fatal("invalid personal git credential permitted launch/fallback")
 	}
 }
 
@@ -771,9 +768,9 @@ func TestCreateSessionJobAdoptsSecretIntoJob(t *testing.T) {
 	}
 }
 
-// TestCreateSessionJobNoSecretNoAdoption: sessions with no personal credential
-// create no Secret, so there is nothing to patch.
-func TestCreateSessionJobNoSecretNoAdoption(t *testing.T) {
+// TestCreateSessionJobRuntimeSecretAdoption: even without a personal provider
+// credential, the current launch capability belongs to its Job.
+func TestCreateSessionJobRuntimeSecretAdoption(t *testing.T) {
 	f := &fakeK8s{}
 	jm := newTestJobManager(t, f)
 	if err := jm.CreateSessionJob(SessionJobSpec{
@@ -781,8 +778,8 @@ func TestCreateSessionJobNoSecretNoAdoption(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.patchedSecrets) != 0 {
-		t.Errorf("patched secrets with no per-session secret: %v", f.patchedSecrets)
+	if len(f.patchedSecrets) != 1 {
+		t.Errorf("runtime secret must be adopted by Job: %v", f.patchedSecrets)
 	}
 }
 
@@ -825,8 +822,8 @@ func TestCreateSessionJobFallsBackToSharedSecretWithNoPersonalCredential(t *test
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.createdSecrets) != 0 {
-		t.Error("expected no per-session secret when the account has no personal credential")
+	if len(f.createdSecrets) != 1 {
+		t.Error("expected per-launch runtime secret even with operator provider credentials")
 	}
 	raw, _ := json.Marshal(f.created[0])
 	if !strings.Contains(string(raw), `"key":"CLAUDE_CODE_OAUTH_TOKEN","name":"blerg-runner-agent"`) {

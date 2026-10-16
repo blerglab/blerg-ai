@@ -43,7 +43,7 @@ docker-build: docker-build-server docker-build-daemon
 
 .PHONY: docker-build-server
 docker-build-server: ## Repo-root context required (contracts/ replace) — confirmed by testing
-	cd .. && docker build -f runner/Dockerfile.server -t $(SERVER_IMAGE) --build-arg VERSION=$(VERSION) .
+	cd .. && docker build -f runner/Dockerfile.server -t $(SERVER_IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo dev) .
 
 # NOTE: this target (and Dockerfile.daemon) predates
 # DAEMON.md's current architecture — the daemon "can't be containerized: it

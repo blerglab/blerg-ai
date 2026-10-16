@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import LaunchSheet from './LaunchSheet'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { coreOrigin } from '../authClient'
 import { ACK_AGENT, ACK_TERMINAL, AGENT_NO_PROMPTS, NO_DAEMON_REASON, TERMINAL_NEEDS_DAEMON } from '../lib/runtimes'
+import { clearLaunchCache, fetchRepos, fetchDaemons, fetchCluster, fetchCreds, launchClock } from '../lib/launchCache'
 
 // Pin randomSessionName to a stable value so assertions are deterministic.
 vi.mock('../sessionNames', () => ({
@@ -142,6 +143,10 @@ function makeMemoryStorage(): Storage {
 }
 
 const CLUSTER_ON = { configured: true, available_engines: ['claude'], git_configured: false }
+
+// What the sheet last knew lives in module memory (lib/launchCache): every
+// test below starts cold unless it primes the cache itself.
+beforeEach(() => clearLaunchCache())
 
 describe('LaunchSheet', () => {
   let captureBody: { value?: Record<string, unknown> }
@@ -405,9 +410,27 @@ describe('LaunchSheet — Run column defaults', () => {
     expect(order('launch-col-repo')).toBe(1)
     expect(order('launch-col-run')).toBe(2)
     expect(order('launch-col-config')).toBe(3)
-    // The submit button lives in the column that stacks last.
-    const config = screen.getByTestId('launch-col-config')
-    expect(config).toContainElement(screen.getByText(/Launch/).closest('button'))
+    // The submit button lives in the footer, which follows every column.
+    const footer = screen.getByTestId('launch-footer')
+    expect(footer).toContainElement(screen.getByText(/Launch/).closest('button'))
+    expect(screen.getByTestId('launch-col-config')).not.toContainElement(footer)
+  })
+
+  // The acknowledgement is the cause of a disabled Launch, so it sits in the
+  // footer next to the button (not at the foot of the Run column).
+  it('puts the acknowledgement in the footer above Launch, only on the unsandboxed runtime', async () => {
+    await renderSheet()
+    const footer = screen.getByTestId('launch-footer')
+    expect(within(footer).queryByTestId('agent-ack')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('runtime-daemon'))
+    const ack = within(footer).getByLabelText(ACK_AGENT)
+    expect(ack).toBe(screen.getByTestId('agent-ack'))
+    expect(screen.getByTestId('launch-col-run')).not.toContainElement(ack)
+    const launch = screen.getByText(/Launch/).closest('button')!
+    expect(footer).toContainElement(launch)
+    expect(ack.compareDocumentPosition(launch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    expect(within(footer).queryByTestId('agent-ack')).not.toBeInTheDocument()
   })
 
   // The repo list's height comes from LaunchSheet.css (it fills the modal's row on
@@ -1321,6 +1344,41 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
     return captureBody.value!
   }
 
+  it('uses the cluster catalog and each model’s own efforts and default', async () => {
+    const asked: string[] = []
+    await renderSheet({
+      clusterStatus: { configured: true, available_engines: ['codex'], git_configured: true },
+      modelsByEngine: {
+        'codex?runtime=cluster': { ...CODEX_D1, source: 'live', daemon_id: undefined },
+      },
+      modelRequests: asked,
+    })
+    fireEvent.click(screen.getByTestId('engine-codex'))
+    await screen.findByTestId('model-gpt-6-astra')
+    expect(asked).toContain('codex?runtime=cluster')
+    expect(screen.getByTestId('effort-low')).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByTestId('effort-ultra'))
+    fireEvent.click(screen.getByTestId('model-gpt-5.5'))
+    expect(screen.queryByTestId('effort-ultra')).not.toBeInTheDocument()
+    expect(screen.getByTestId('effort-medium')).toHaveAttribute('aria-checked', 'true')
+    const body = await launch()
+    expect(body).toMatchObject({ runtime: 'cluster', model: 'gpt-5.5', effort: 'medium' })
+  })
+
+  it('preserves a model typed while the first cluster catalog request is pending', async () => {
+    await renderSheet({ clusterStatus: { configured: true, available_engines: ['codex'], git_configured: true } })
+    const baseFetch = globalThis.fetch
+    let answer!: (response: unknown) => void
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => url === '/api/models/codex?runtime=cluster'
+      ? new Promise(resolve => { answer = resolve }) : baseFetch(url, init))
+    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.change(screen.getByTestId('model-free-text-input'), { target: { value: 'custom-model' } })
+    await act(async () => answer({ ok: true, json: async () => ({ ...CODEX_D1, source: 'live' }) }))
+    expect(screen.getByTestId('model-free-text-input')).toHaveValue('custom-model')
+    const body = await launch()
+    expect(body.model).toBe('custom-model')
+  })
+
   it("asks the selected daemon for Codex's list and sends its model and effort", async () => {
     const asked: string[] = []
     await renderSheet({ modelsByEngine: { 'codex?daemon_id=d1': CODEX_D1 }, modelRequests: asked })
@@ -1426,7 +1484,7 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
     expect(screen.queryByTestId('model-gpt-6-astra')).not.toBeInTheDocument()
     expect(screen.queryByTestId('model-gpt-5.5')).not.toBeInTheDocument()
     expect((input as HTMLInputElement).value).toBe('')
-    expect(asked).toContain('codex')
+    expect(asked).toContain('codex?runtime=cluster')
     // Typed on the cluster, then back to the daemon and back again: cleared.
     fireEvent.change(input, { target: { value: 'gpt-typed' } })
     fireEvent.click(screen.getByTestId('runtime-docker'))
@@ -1831,6 +1889,13 @@ describe('LaunchSheet MCP servers', () => {
     expect('mcp' in body).toBe(false)
   })
 
+  it('offers Codex connections on an updated sandbox daemon', async () => {
+    await renderSheet({ daemon: { codex_restricted: true } })
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    fireEvent.click(screen.getByTestId('engine-codex'))
+    expect(await screen.findByTestId('mcp-picker')).toBeInTheDocument()
+  })
+
   it('sends no mcp for a checked connection with every tool off', async () => {
     await renderSheet()
     fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
@@ -1877,5 +1942,203 @@ describe('LaunchSheet MCP servers', () => {
     const body = await launch()
     expect(body.runtime).toBe('daemon')
     expect('mcp' in body).toBe(false)
+  })
+})
+
+// The sheet opens at once from what it last knew (lib/launchCache) and
+// refreshes underneath; on a cold start it waits for daemons and cluster
+// status only, never for the repository list.
+describe('LaunchSheet — opens from what it last knew', () => {
+  let captureBody: { value?: Record<string, unknown> }
+  const realNow = launchClock.now
+  const TWO_DAEMONS = [
+    { id: 'd1', name: 'alpha', mode: 'local', repos_root: '/repos', status: 'connected', sandbox_available: true },
+    { id: 'd2', name: 'beta', mode: 'local', repos_root: '/repos', status: 'connected', sandbox_available: true },
+  ]
+
+  beforeEach(() => {
+    captureBody = {}
+    useSessionStore.setState({ pendingSessionIds: {}, failedSessions: {} })
+    vi.stubGlobal('localStorage', makeMemoryStorage())
+  })
+  afterEach(() => {
+    launchClock.now = realNow
+    vi.unstubAllGlobals()
+  })
+
+  // prime fills the cache as an earlier open would have, then moves the
+  // clock past FRESH_MS so the next open refreshes every part.
+  async function prime(opts?: Parameters<typeof buildFetchMock>[1]) {
+    vi.stubGlobal('fetch', buildFetchMock({}, opts))
+    await Promise.all([fetchRepos(), fetchDaemons(), fetchCluster(), fetchCreds()])
+    const later = Date.now() + 60_000
+    launchClock.now = () => later
+  }
+
+  // holdFetch answers like buildFetchMock, except that the held URLs wait
+  // until released.
+  function holdFetch(held: string[], opts?: Parameters<typeof buildFetchMock>[1]) {
+    const base = buildFetchMock(captureBody, opts)
+    const releases = new Map<string, () => void>()
+    const gates = new Map(held.map(u => [u, new Promise<void>(r => releases.set(u, r))]))
+    const fn = vi.fn((url: string, init?: RequestInit) => {
+      const gate = gates.get(url)
+      return gate ? gate.then(() => base(url, init)) : base(url, init)
+    })
+    vi.stubGlobal('fetch', fn)
+    return { fn, release: (url: string) => releases.get(url)!() }
+  }
+
+  function renderSheet() {
+    render(
+      <MemoryRouter>
+        <LaunchSheet open={true} onClose={vi.fn()} />
+      </MemoryRouter>,
+    )
+  }
+
+  const launchButton = () => screen.getByRole('button', { name: /Launch/ })
+
+  it('shows the body from the cache before any request answers, and enables Launch once the daemon is confirmed', async () => {
+    await prime()
+    const { release } = holdFetch(['/api/repos', '/api/daemons', '/api/cluster/status', '/api/me/credentials'])
+    renderSheet()
+    // At once: no "Loading...", the cached list, the cached defaults.
+    expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
+    expect(screen.getByText('Repository')).toBeInTheDocument()
+    expect(screen.getByText('myrepo')).toBeInTheDocument()
+    expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByTestId('launch-refreshing')).toHaveTextContent('Refreshing repositories, daemons, cluster, credentials')
+    // The daemon is only what the cache says: Launch waits for a fresh list.
+    expect(launchButton()).toBeDisabled()
+    expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('Checking that workstation is still connected')
+
+    release('/api/daemons')
+    await waitFor(() => expect(launchButton()).toBeEnabled())
+    expect(screen.queryByTestId('launch-blocked-reason')).not.toBeInTheDocument()
+    expect(screen.getByTestId('launch-refreshing')).not.toHaveTextContent('daemons')
+    release('/api/repos')
+    release('/api/cluster/status')
+    release('/api/me/credentials')
+    await waitFor(() => expect(screen.queryByTestId('launch-refreshing')).not.toBeInTheDocument())
+  })
+
+  it('on a cold start shows the body once daemons and cluster answer, with a skeleton until the repositories stream in', async () => {
+    const { release } = holdFetch(['/api/repos'])
+    renderSheet()
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    await screen.findByText('Repository')
+    expect(screen.getAllByTestId('repos-skeleton')).toHaveLength(3)
+    expect(screen.queryByText('myrepo')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('repos-empty-hint')).not.toBeInTheDocument()
+    // Nothing waits on the list: No repository launches right away.
+    expect(launchButton()).toBeEnabled()
+
+    release('/api/repos')
+    await screen.findByText('myrepo')
+    expect(screen.queryByTestId('repos-skeleton')).not.toBeInTheDocument()
+  })
+
+  it("keeps the person's runtime pick when a late refresh makes it impossible, and corrects only a default", async () => {
+    await prime({ clusterStatus: CLUSTER_ON })
+    const { release } = holdFetch(['/api/daemons'], { clusterStatus: CLUSTER_ON, daemons: [] })
+    renderSheet()
+    expect(screen.getByTestId('runtime-cluster')).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    // The daemon is gone by the time the list answers: the pick stays, and
+    // Launch says why it cannot go.
+    release('/api/daemons')
+    await waitFor(() => expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent(NO_DAEMON_REASON))
+    expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'true')
+    expect(launchButton()).toBeDisabled()
+  })
+
+  it('moves a default runtime that a refresh made impossible', async () => {
+    await prime()
+    const { release } = holdFetch(['/api/daemons'], { clusterStatus: CLUSTER_ON, daemons: [] })
+    renderSheet()
+    expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'true')
+    release('/api/daemons')
+    await waitFor(() => expect(screen.getByTestId('runtime-cluster')).toHaveAttribute('aria-checked', 'true'))
+    await waitFor(() => expect(launchButton()).toBeEnabled())
+  })
+
+  it('disables Launch, saying so, when the picked daemon is gone from the fresh list', async () => {
+    await prime({ daemons: TWO_DAEMONS })
+    const { release } = holdFetch(['/api/daemons'], { daemons: [TWO_DAEMONS[0]] })
+    renderSheet()
+    fireEvent.click(screen.getByTestId('daemon-d2'))
+    expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('Checking that beta is still connected')
+    release('/api/daemons')
+    await waitFor(() => expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('beta is no longer connected'))
+    expect(launchButton()).toBeDisabled()
+    // Picking one that is still there clears it.
+    fireEvent.click(screen.getByTestId('daemon-d1'))
+    expect(screen.queryByTestId('launch-blocked-reason')).not.toBeInTheDocument()
+    expect(launchButton()).toBeEnabled()
+  })
+
+  it('treats a cached missing engine credential as advice until fresh answers confirm it', async () => {
+    const CREDS = { engines: [], git: true, git_providers: ['github'] }
+    const CLUSTER_CODEX_ONLY = { configured: true, available_engines: ['codex'], git_configured: false }
+    await prime({ clusterStatus: CLUSTER_CODEX_ONLY, myCreds: CREDS })
+    const { release } = holdFetch(['/api/me/credentials'], { clusterStatus: CLUSTER_CODEX_ONLY, myCreds: CREDS })
+    renderSheet()
+    await waitFor(() => expect(screen.queryByTestId('launch-refreshing')).toHaveTextContent('credentials'))
+    expect(screen.getByTestId('runtime-cluster')).toHaveAttribute('aria-checked', 'true')
+    expect(launchButton()).toBeEnabled()
+    release('/api/me/credentials')
+    await waitFor(() => expect(launchButton()).toBeDisabled())
+  })
+
+  it("does not let the first repository answer, landing late, undo a repos-folder change", async () => {
+    const base = buildFetchMock(captureBody)
+    let releaseFirst!: () => void
+    const firstHeld = new Promise<void>(r => { releaseFirst = r })
+    let reposAsked = 0
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (url !== '/api/repos') return base(url, init)
+      reposAsked++
+      const list = reposAsked === 1 ? 'old-folder-repo' : 'new-folder-repo'
+      const answer = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ repos: [{ name: list, full_name: 'org/' + list, checked_out: ['workstation'] }], stale_at: null }) })
+      return reposAsked === 1 ? firstHeld.then(answer) : answer()
+    }))
+    renderSheet()
+    await screen.findByText('Repository')
+    fireEvent.click(screen.getByTestId('repos-root-edit'))
+    fireEvent.change(screen.getByTestId('repos-root-input'), { target: { value: '/elsewhere' } })
+    fireEvent.click(screen.getByTestId('repos-root-save'))
+    await screen.findByText('new-folder-repo')
+    releaseFirst()
+    await waitFor(() => expect(screen.queryByTestId('repos-skeleton')).not.toBeInTheDocument())
+    expect(screen.queryByText('old-folder-repo')).not.toBeInTheDocument()
+    expect(screen.getByText('new-folder-repo')).toBeInTheDocument()
+  })
+
+  it('never serves MCP tools from the cache: each open lists them live', async () => {
+    const MCP = {
+      mcpConnections: [{ id: 'c1', name: 'calendar', url: 'https://x/mcp', auth_kind: 'static', status: 'ok', default_tools: {} }],
+      mcpTools: [{ name: 'read', description: 'reads', hash: 'h-read', annotations: { readOnlyHint: true } }],
+    }
+    const first = holdFetch([], MCP)
+    const view = render(
+      <MemoryRouter>
+        <LaunchSheet open={true} onClose={vi.fn()} />
+      </MemoryRouter>,
+    )
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
+    await screen.findByTestId('mcp-presets-calendar')
+    const toolCalls = (fn: typeof first.fn) => fn.mock.calls.filter(([u]) => u === '/api/mcp/connections/c1/tools').length
+    expect(toolCalls(first.fn)).toBe(1)
+    view.unmount()
+
+    // Reopened with the connection list held: it shows from the cache at
+    // once, and checking the connection asks for its tools again.
+    launchClock.now = (() => { const later = Date.now() + 60_000; return () => later })()
+    const second = holdFetch(['/api/mcp/connections'], MCP)
+    renderSheet()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'calendar' }))
+    await screen.findByTestId('mcp-presets-calendar')
+    expect(toolCalls(second.fn)).toBe(1)
   })
 })

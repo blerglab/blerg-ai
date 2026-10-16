@@ -146,7 +146,7 @@ func TestPutClusterSettingsMaxSessions(t *testing.T) {
 
 	// Raise: the status reports the effective value and the env default, and an extra pod is allowed.
 	fx.k8s.active = 2
-	if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "a", Repo: "r"}); !errors.Is(err, errClusterCap) {
+	if err := jm.CreateSessionJob(SessionJobSpec{SessionID: newUUID(), Repo: "r"}); !errors.Is(err, errClusterCap) {
 		t.Fatalf("before: %v", err)
 	}
 	w := putClusterSettings(t, fx, admin, `{"max_sessions":3}`)
@@ -156,7 +156,15 @@ func TestPutClusterSettingsMaxSessions(t *testing.T) {
 	if cur, def := status(w); cur != 3 || def != 2 {
 		t.Fatalf("raise status: %d / %d, want 3 / 2", cur, def)
 	}
-	if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "b", Repo: "r"}); err != nil {
+	// A real launch needs a persisted Cluster identity for its scoped runtime token.
+	sessionID := newUUID()
+	if err := db.InsertSession(context.Background(), fx.pool, sessionID, fx.dc.ID, "starting", "/workspace/r", "r", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionPosture(context.Background(), fx.pool, sessionID, "cluster", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := jm.CreateSessionJob(SessionJobSpec{SessionID: sessionID, Repo: "r"}); err != nil {
 		t.Fatalf("raised cap allows an extra pod: %v", err)
 	}
 
@@ -165,7 +173,7 @@ func TestPutClusterSettingsMaxSessions(t *testing.T) {
 	if w := putClusterSettings(t, fx, admin, `{"max_sessions":1}`); w.Code != http.StatusOK {
 		t.Fatalf("lower: %d %s", w.Code, w.Body.String())
 	}
-	if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "c", Repo: "r"}); !errors.Is(err, errClusterCap) {
+	if err := jm.CreateSessionJob(SessionJobSpec{SessionID: newUUID(), Repo: "r"}); !errors.Is(err, errClusterCap) {
 		t.Fatalf("lowered cap refuses: %v", err)
 	}
 
@@ -190,7 +198,7 @@ func TestPutClusterSettingsMaxSessions(t *testing.T) {
 		}
 	}
 	fx.k8s.active = 2
-	if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "d", Repo: "r"}); !errors.Is(err, errClusterCap) {
+	if err := jm.CreateSessionJob(SessionJobSpec{SessionID: newUUID(), Repo: "r"}); !errors.Is(err, errClusterCap) {
 		t.Fatalf("default restored: %v", err)
 	}
 

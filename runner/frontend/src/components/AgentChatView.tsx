@@ -1,30 +1,28 @@
 // Chat/timeline view for agent-kind sessions: the runner's page over @blerglab/chat's ChatView.
 // The package draws the transcript, composer, files and viewer; this file adds what is the
-// runner's own — the model and effort pickers, the Rules and Skills & plugins panels, the ready
-// card's repo line — and wires the package to the runner's websocket and token.
-import { useEffect, useMemo, useState } from 'react'
+// runner's own — the model and effort pickers, the Rules panel, the ready card's repo line — and
+// wires the package to the runner's websocket and token. The chat's settings (Show thinking,
+// Compact tool calls), its Files and the Skills & plugins are in the session panel (SessionRail).
+import { memo, useEffect, useMemo, useState } from 'react'
 import {
   ChatView,
   ReadyCard,
   createBlergTransport,
-  useTranscriptStore,
   type SessionMeta,
   type Transport,
 } from '@blerglab/chat'
 import '@blerglab/chat/blerg.css'
 import * as ws from '../ws'
-import { ensureFreshToken, getAccessToken, redirectToRefresh } from '../authClient'
-import { markRefreshAttempted, refreshAlreadyAttempted } from '../refreshGuard'
+import { ensureFreshToken, getAccessToken } from '../authClient'
+import { bounceToRefresh } from '../signIn'
 import { tokenExpired } from '../claims'
 import { apiFetch } from '../apiFetch'
-import { useEngineModels } from '../lib/engineModels'
-import { ENGINE_LABELS } from '../lib/runtimes'
+import { effectiveEffort, modelCatalogTarget, useEngineModels } from '../lib/engineModels'
+import { ENGINE_LABELS, RUNTIME_LABELS } from '../lib/runtimes'
 import { repoDetail } from '../lib/noRepo'
-import { capabilityCount } from '../lib/capabilities'
-import { useCapabilities } from '../hooks/useCapabilities'
-import CapabilitiesPanel from './CapabilitiesPanel'
 import type { SessionInfo } from '../types'
 import './AgentChatView.css'
+import ModelCatalogNotice from './ModelCatalogNotice'
 
 // The ?artifact=<id> of the address: the link `blerg-runner publish` prints.
 function artifactParam(): string | null {
@@ -54,9 +52,7 @@ function blergTransport(): Transport {
       return getAccessToken()
     },
     onUnauthorized: () => {
-      if (refreshAlreadyAttempted()) return
-      markRefreshAttempted()
-      redirectToRefresh(location.href)
+      bounceToRefresh()
     },
   })
   return shared
@@ -108,30 +104,39 @@ function RulesPanel({ project }: { project: string }) {
   )
 }
 
-const RUNTIME_LABELS: Record<string, string> = {
-  cluster: 'Cluster pod',
-  docker: 'Local sandbox',
-  daemon: 'This machine',
+
+interface Props {
+  session: SessionInfo
+  /** Whether the model's thinking is drawn (the panel's Show thinking). */
+  thinking: boolean
+  /** Whether runs of tool calls fold into one row (the panel's Compact tool calls). */
+  compact: boolean
+  /** A file the History tab asked to open; n changes with every request. */
+  openArtifact?: { id: string; n: number } | null
 }
 
-const NO_EVENTS: never[] = []
+// Memoised: the page around it re-renders as the side panel's state moves, the chat need not.
+export default memo(AgentChatView)
 
-export default function AgentChatView({ session }: { session: SessionInfo }) {
+function AgentChatView({ session, thinking, compact, openArtifact }: Props) {
   const sessionId = session.id
   const transport = blergTransport()
-  const events = useTranscriptStore(s => s.sessions[sessionId]?.events) ?? NO_EVENTS
   const [showRules, setShowRules] = useState(false)
-  const [showCaps, setShowCaps] = useState(false)
   const [linked, setLinked] = useState<string | null>(artifactParam)
-  const capabilities = useCapabilities(sessionId, events)
-  const capsCount = capabilityCount(capabilities?.payload)
+  // A request from the History tab, taken once: the chat consumes the link when its viewer opens it.
+  const [askSeen, setAskSeen] = useState(openArtifact?.n ?? 0)
+  if (openArtifact && openArtifact.n !== askSeen) {
+    setAskSeen(openArtifact.n)
+    setLinked(openArtifact.id)
+  }
   // The in-session switcher offers the same list the launch sheet does for
   // this session's engine, and the efforts of the model it is on now. A model
   // the list doesn't know (an alias, an older id) gets every level any model
   // of the engine offers; one that takes no effort (Haiku) gets no effort
   // control at all, and neither does an engine with no model list. A list a
   // daemon reports (Codex, Hermes) is asked of the session's own daemon.
-  const engineModels = useEngineModels(session.engine ?? '', session.daemon_id || undefined)
+  const catalogTarget = modelCatalogTarget(session.runtime, session.daemon_id)
+  const engineModels = useEngineModels(session.engine ?? '', catalogTarget.daemonId, { runtime: catalogTarget.runtime })
   const currentModel = engineModels.models.find(m => m.id === session.model)
   const sessionEfforts: readonly string[] = currentModel
     ? currentModel.efforts
@@ -143,10 +148,15 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
   const slots = useMemo(() => ({
     header: (
       <>
+        <ModelCatalogNotice state={engineModels} />
         <select
           aria-label="Model"
           value={session.model ?? ''}
-          onChange={e => ws.send({ type: 'set_session_model', session_id: sessionId, model: e.target.value })}
+          onChange={e => {
+            const model = e.target.value
+            const effort = effectiveEffort(engineModels.models.find(m => m.id === model), session.effort ?? null)
+            ws.send({ type: 'set_session_model', session_id: sessionId, model, ...(effort ? { effort } : {}) })
+          }}
         >
           {!session.model && <option value="">model…</option>}
           {/* A session launched on an id or alias the list doesn't have
@@ -181,20 +191,7 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
           <span className="tb-icon" aria-hidden="true">⚖</span>
           <span className="tb-label">Rules</span>
         </button>
-        <button
-          type="button"
-          className="caps-toggle"
-          data-testid="capabilities-toggle"
-          aria-haspopup="dialog"
-          aria-label={capabilities ? `Skills & plugins (${capsCount} loaded)` : 'Skills & plugins'}
-          onClick={() => setShowCaps(true)}
-        >
-          <span className="tb-icon" aria-hidden="true">🧩</span>
-          <span className="tb-label">Skills &amp; plugins</span>
-          {capabilities && <span className="caps-badge" data-testid="capabilities-badge" aria-hidden="true">{capsCount}</span>}
-        </button>
         {showRules && <RulesPanel project={session.repo} />}
-        {showCaps && <CapabilitiesPanel report={capabilities} onClose={() => setShowCaps(false)} />}
       </>
     ),
     readyCard: (m: SessionMeta, readyAt: number) => (
@@ -202,7 +199,7 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
         <div><dt>Repo</dt><dd data-testid="ready-repo">{repoDetail(session.repo)}</dd></div>
       </ReadyCard>
     ),
-  }), [session.model, session.effort, session.repo, sessionId, currentModel, engineModels.models, sessionEfforts, capabilities, capsCount, showRules, showCaps, engine, runtime])
+  }), [session.model, session.effort, session.repo, sessionId, currentModel, engineModels, sessionEfforts, showRules, engine, runtime])
 
   return (
     <ChatView
@@ -210,6 +207,9 @@ export default function AgentChatView({ session }: { session: SessionInfo }) {
       transport={transport}
       meta={meta}
       slots={slots}
+      thinking={thinking ? 'shown' : 'hidden'}
+      compact={compact}
+      filesButton={false}
       linkedArtifact={linked}
       onLinkedArtifactConsumed={() => { setLinked(null); clearArtifactParam() }}
     />

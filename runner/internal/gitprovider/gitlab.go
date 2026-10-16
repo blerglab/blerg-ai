@@ -100,6 +100,11 @@ func (g *GitLab) CloneURL(owner, name, token string) string {
 	return httpsCloneURL(g.host, owner, name, gitlabTokenUser, token)
 }
 
+// CommitURL is https://gitlab.com/owner/name/-/commit/sha.
+func (g *GitLab) CommitURL(owner, name, sha string) string {
+	return webURL(g.host, owner, name, "-", "commit", sha)
+}
+
 // gitlabProject is the subset of GitLab's (simple) project object ListMine
 // reads.
 type gitlabProject struct {

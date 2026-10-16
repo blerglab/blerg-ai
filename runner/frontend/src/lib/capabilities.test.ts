@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { capabilityCount, latestCapabilities, matchesQuery, newerReport, normalizeCapabilities } from './capabilities'
+import { capabilityCount, enabledCapabilityCount, latestCapabilities, matchesQuery, newerReport, normalizeCapabilities } from './capabilities'
 import type { AgentEvent, AgentEventKind } from '../types'
 
 const ev = (seq: number, kind: AgentEventKind, payload: unknown): AgentEvent => ({
@@ -42,6 +42,15 @@ describe('capabilities', () => {
     expect(newerReport(older, latest)).toBe(latest)
     expect(newerReport(latest, older)).toBe(latest)
     expect(newerReport(null, latest)).toBe(latest)
+  })
+
+  it('counts enabled skills and plugins but excludes disabled Codex inventory', () => {
+    const payload = normalizeCapabilities({ engine: 'codex', groups: [
+      { id: 'skills', items: [{ name: 'implicit' }, { name: 'active', status: 'enabled' }, { name: 'inactive', status: 'disabled' }] },
+      { id: 'plugins', items: [{ name: 'active', status: 'enabled' }, { name: 'inactive', status: 'disabled' }] },
+      { id: 'mcp', items: [{ name: 'online', status: 'connected' }, { name: 'offline', status: 'failed' }] },
+    ] })!
+    expect(enabledCapabilityCount(payload)).toBe(4)
   })
 
   it('matches a query against any shown field', () => {

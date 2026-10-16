@@ -7,6 +7,20 @@ export interface Quantiles {
   max: number
 }
 
+/** StepSpread is one step of a start as a box: seconds, fastest to slowest; slow is how many starts took more than twice the median. */
+export interface StepSpread {
+  runtime: string
+  step: string
+  count: number
+  min: number
+  p25: number
+  p50: number
+  p75: number
+  p90: number
+  max: number
+  slow: number
+}
+
 export interface CountRow {
   key: string
   count: number
@@ -41,7 +55,7 @@ export interface InsightsResponse {
   }
   startup: {
     groups: { runtime: string; kind: 'start' | 'resume'; attempts: number; failed: number; seconds: Quantiles }[]
-    steps: { runtime: string; step: string; count: number; p50: number; p90: number }[]
+    steps: StepSpread[]
     failures: CountRow[]
     slowest: { session_id: string; title: string; runtime: string; seconds: number; at: string }[]
   }
@@ -55,6 +69,44 @@ export interface InsightsResponse {
   }
   cluster: { active: number; max: number; peak_concurrent: number } | null
   crons: { runs: number; late: number; manual: number; by_status: CountRow[]; seconds: Quantiles }
+}
+
+export type ModelTokens = TokenCounts & { model: string; priced: boolean }
+
+/** The shape of GET /api/sessions/{id}/insights: one session's figures. */
+export interface SessionInsightsResponse {
+  session_id: string
+  title: string
+  kind: string
+  status: string
+  runtime: string
+  engine: string
+  model: string
+  started_at: string
+  ended_at: string | null
+  generated_at: string
+  lifetime_seconds: number
+  running_seconds: number
+  waiting_seconds: number
+  idle_seconds: number
+  turns: number
+  tool_calls: number
+  tool_calls_by_tool: CountRow[]
+  messages_from_person: number
+  subagents: { count: number; by_type: CountRow[]; by_model: CountRow[]; tool_calls: number }
+  // null, with tokens_hidden, for anyone but the session's owner and an administrator
+  tokens: {
+    totals: TokenCounts
+    main: TokenCounts
+    subagents: TokenCounts
+    by_model: ModelTokens[]
+    cache_hit_rate: number
+    unpriced_models: string[]
+  } | null
+  tokens_hidden?: boolean
+  artifacts: number
+  proposals: { pending: number; approved: number; declined: number; expired: number }
+  mcp_calls: { total: number; by_outcome: CountRow[] }
 }
 
 export interface ModelPrice {
@@ -124,6 +176,58 @@ const STEP_LABELS: Record<string, string> = {
   clone: 'Cloning repo',
   plugins: 'Plugins',
   engine: 'Starting agent',
+}
+
+/** TimeAxis places durations on one shared horizontal axis: pos maps seconds to 0..1. */
+export interface TimeAxis {
+  kind: 'linear' | 'log'
+  ticks: number[]
+  pos: (seconds: number) => number
+}
+
+// The tick spacings a linear axis picks from, in seconds, and the ticks a log axis may show.
+const LINEAR_STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14_400, 43_200, 86_400]
+const LOG_TICKS = [0.1, 0.5, 1, 5, 15, 60, 300, 900, 3600, 14_400, 86_400, 604_800]
+
+/** LOG_RATIO: an axis goes log only when the slowest start is more than this many times the largest median. */
+export const LOG_RATIO = 20
+
+/**
+ * timeAxis builds the axis for start steps. It is linear from zero, unless one start was so slow
+ * (over LOG_RATIO times the largest step median) that a linear axis would squash every box into
+ * its first few percent; then it is logarithmic, from the round tick under the fastest box. Values
+ * outside the axis clamp to its ends.
+ */
+export function timeAxis(steps: Pick<StepSpread, 'min' | 'p25' | 'p50' | 'max'>[]): TimeAxis {
+  const max = Math.max(0, ...steps.map((s) => s.max))
+  const bigMedian = Math.max(0, ...steps.map((s) => s.p50))
+  const clamp = (f: number) => (Number.isFinite(f) ? Math.min(1, Math.max(0, f)) : 0)
+  if (bigMedian > 0 && max > LOG_RATIO * bigMedian) {
+    const positive = steps.flatMap((s) => [s.min, s.p25, s.p50]).filter((v) => v > 0)
+    const low = positive.length ? Math.min(...positive) : LOG_TICKS[0]
+    const lo = [...LOG_TICKS].reverse().find((t) => t <= low) ?? LOG_TICKS[0]
+    const hi = LOG_TICKS.find((t) => t >= max) ?? max
+    let ticks = LOG_TICKS.filter((t) => t >= lo && t <= hi)
+    if (ticks.length > 7) ticks = ticks.filter((_, i) => i % 2 === 0 || i === ticks.length - 1)
+    const span = Math.log(hi) - Math.log(lo)
+    return { kind: 'log', ticks, pos: (v) => (v <= lo ? 0 : clamp((Math.log(v) - Math.log(lo)) / span)) }
+  }
+  const step = LINEAR_STEPS.find((st) => Math.ceil(max / st) <= 6) ?? LINEAR_STEPS[LINEAR_STEPS.length - 1]
+  const top = Math.max(step, Math.ceil(max / step) * step)
+  const ticks: number[] = []
+  for (let t = 0; t <= top + 1e-9; t += step) ticks.push(t)
+  return { kind: 'linear', ticks, pos: (v) => clamp(v / top) }
+}
+
+/** formatTick labels an axis tick compactly: "0", "500 ms", "15 s", "1.5 min", "2 h". */
+export function formatTick(seconds: number): string {
+  const one = (n: number) => trimZeros(n.toFixed(1))
+  if (seconds <= 0) return '0'
+  if (seconds < 1) return `${Math.round(seconds * 1000)} ms`
+  if (seconds < 60) return `${one(seconds)} s`
+  if (seconds < 3600) return `${one(seconds / 60)} min`
+  if (seconds < 86_400) return `${one(seconds / 3600)} h`
+  return `${one(seconds / 86_400)} d`
 }
 
 /** stepLabel names a start step for people. */

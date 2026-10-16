@@ -21,32 +21,113 @@ type Event struct {
 type Emitter interface{ Emit(Event) }
 
 // UserMessagePayload — kind "user_message".
+//
+// Source is who the message is from: "chat" (the person), "ask_answer" (the person answering
+// an ask), "system" (text the daemon, the engine or its harness wrote — never shown as the person),
+// and a few more ("note_reply", "runner"…). ClientID is the id the sender gave the message (a
+// browser's queued bubble), echoed so the sender can match it; MessageID, on an ask_answer, is the
+// id of the ask it answers.
 type UserMessagePayload struct {
-	Text   string `json:"text"`
-	Source string `json:"source"` // "chat" | "ask_answer"
+	TurnID    string `json:"turn_id,omitempty"`
+	Text      string `json:"text"`
+	Source    string `json:"source"`
+	ClientID  string `json:"client_id,omitempty"`
+	MessageID string `json:"message_id,omitempty"`
+}
+
+// Input is one message for a session's engine. Text is what the engine is given; Shown, when set,
+// is what the transcript records instead (a slash skill: the person typed "/review x", the engine
+// gets the skill's instructions). ClientID is echoed on the user_message (UserMessagePayload).
+type Input struct {
+	ExpectedTurnID string
+	Text           string
+	Shown          string
+	Source         string
+	ClientID       string
+}
+
+// Payload is the user_message an input is recorded as.
+func (in Input) Payload() UserMessagePayload {
+	text := in.Shown
+	if text == "" {
+		text = in.Text
+	}
+	return UserMessagePayload{Text: text, Source: in.Source, ClientID: in.ClientID}
+}
+
+// UsageLimitPayload is an actual provider refusal of the identified input turn.
+// An absent reset is unknown and must never be guessed from account usage meters.
+type UsageLimitPayload struct {
+	Provider string     `json:"provider"`
+	ResetAt  *time.Time `json:"reset_at,omitempty"`
+	TurnID   string     `json:"turn_id"`
 }
 
 // AssistantTextPayload — kind "assistant_text". Done=false events are
 // transient streaming deltas; only the Done=true consolidated event is
 // persisted by the transport layer.
+//
+// ParentCallID, on this payload and on the thinking, tool call and tool result
+// ones, is set when the event belongs to a subagent: it is the call id of the
+// tool call that started that subagent (its subagent_started child_id). The
+// main agent's own events carry none.
 type AssistantTextPayload struct {
-	Text string `json:"text"`
-	Done bool   `json:"done"`
+	Text         string `json:"text"`
+	Done         bool   `json:"done"`
+	ParentCallID string `json:"parent_call_id,omitempty"`
+}
+
+// AssistantThinkingPayload — kind "assistant_thinking": the text of one
+// thinking block. Persisted; never the session's answer (that is
+// assistant_text).
+type AssistantThinkingPayload struct {
+	Text         string `json:"text"`
+	ParentCallID string `json:"parent_call_id,omitempty"`
+}
+
+// ThinkingPayload — kinds "thinking_started" and "thinking_done": the model opened, or closed, a
+// thinking block. They carry no text (that comes in assistant_thinking, when there is any to show)
+// and are transient like a typing delta: sent live, never persisted or replayed. They only let a
+// reader say "Thinking…" while a long think runs; one that missed the done reads the
+// assistant_thinking, the next tool call or the turn's end instead.
+type ThinkingPayload struct {
+	ParentCallID string `json:"parent_call_id,omitempty"`
+}
+
+// The ThinkingPayload kinds.
+const (
+	KindThinkingStarted = "thinking_started"
+	KindThinkingDone    = "thinking_done"
+)
+
+// IsTransient reports whether an event is sent live only, never persisted: a typing delta
+// (assistant_text not done) or a thinking block's start or end.
+func IsTransient(ev Event) bool {
+	switch ev.Kind {
+	case "assistant_text":
+		p, ok := ev.Payload.(AssistantTextPayload)
+		return ok && !p.Done
+	case KindThinkingStarted, KindThinkingDone:
+		return true
+	}
+	return false
 }
 
 // ToolCallPayload — kind "tool_call".
 type ToolCallPayload struct {
-	Tool   string          `json:"tool"`
-	CallID string          `json:"call_id"`
-	Input  json.RawMessage `json:"input"`
+	Tool         string          `json:"tool"`
+	CallID       string          `json:"call_id"`
+	Input        json.RawMessage `json:"input"`
+	ParentCallID string          `json:"parent_call_id,omitempty"`
 }
 
 // ToolResultPayload — kind "tool_result".
 type ToolResultPayload struct {
-	CallID     string `json:"call_id"`
-	Output     string `json:"output"`
-	IsError    bool   `json:"is_error"`
-	DurationMs int64  `json:"duration_ms"`
+	CallID       string `json:"call_id"`
+	Output       string `json:"output"`
+	IsError      bool   `json:"is_error"`
+	DurationMs   int64  `json:"duration_ms"`
+	ParentCallID string `json:"parent_call_id,omitempty"`
 }
 
 // ProviderBlocksPayload — kind "provider_blocks": the raw assistant content
@@ -68,9 +149,14 @@ type CheckInPayload struct {
 	Summary string `json:"summary"`
 }
 
-// MessagingPayload — kinds "ask" | "update" | "note".
+// MessagingPayload — kinds "ask" | "update" | "note": a message from the session to the person
+// (the native loop's tools, or `blerg-runner ask|update|note`, recorded by the server). MessageID is
+// the message's id in the messages API, when known: an ask is answered (and a note replied to) with
+// POST /api/messages/{id}/reply.
 type MessagingPayload struct {
-	Body string `json:"body"`
+	Body      string `json:"body"`
+	MessageID string `json:"message_id,omitempty"`
+	TurnID    string `json:"turn_id,omitempty"`
 }
 
 // ModelChangedPayload — kind "model_changed".
@@ -80,12 +166,77 @@ type ModelChangedPayload struct {
 	Source string `json:"source"` // "start" | "ui" | "command"
 }
 
-// SubagentPayload — kinds "subagent_started" | "subagent_done".
+// SubagentPayload — kinds "subagent_started" | "subagent_update" | "subagent_done".
+//
+// The optional fields are set by the Claude Code driver. subagent_update carries the running
+// totals of a subagent still at work (Model as the API reports it, Usage, ToolUses), at most every
+// few seconds. subagent_done carries the final totals and DurationMs; one with Background set is
+// the launch of a background subagent (its call returned at once), and a later subagent_done for
+// the same ChildID, without Background, is its real end.
 type SubagentPayload struct {
-	ChildID   string `json:"child_id"`
-	AgentType string `json:"agent_type"`
-	Model     string `json:"model"`
-	Summary   string `json:"summary"`
+	ChildID    string `json:"child_id"`
+	AgentType  string `json:"agent_type"`
+	Model      string `json:"model"`
+	Summary    string `json:"summary"`
+	Usage      *Usage `json:"usage,omitempty"`
+	ToolUses   int    `json:"tool_uses,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	Background bool   `json:"background,omitempty"`
+	// IsError: the subagent failed — its Agent call's result was an error, or its background
+	// notice's status was "failed" (killed and stopped mean a person stopped it). Absent from a
+	// daemon older than the field (a reader then falls back to an "error:" summary).
+	IsError bool `json:"is_error,omitempty"`
+	// Resumed: this run is a finished subagent the main agent resumed (Claude Code's SendMessage).
+	// ChildID is then the call that resumed it, a new instance with the original's AgentType and
+	// Summary; ResumedFrom is the original's ChildID, and Background on subagent_started says
+	// whether the original ran in the background. A resumed run is not tied to its call: it ends
+	// with a subagent_done of its own (or the engine's end), whatever the main agent's turn does.
+	Resumed     bool   `json:"resumed,omitempty"`
+	ResumedFrom string `json:"resumed_from,omitempty"`
+}
+
+// TopicPayload — kind "topic": a piece of work the agent marked with `blerg-runner topic`, recorded by
+// the server (POST /api/sessions/{id}/topics). Action "start" opens topic ID with Title and ends the
+// one that was open (no separate "done" is written for it); "done" closes the open one, repeating its
+// ID and Title, with an optional one-line Outcome and the Commits the work landed (the agent's
+// `--commit <sha>`: lower-case hex, deduplicated, in its order, at most topics.MaxCommits).
+type TopicPayload struct {
+	ID      string        `json:"id"`
+	Title   string        `json:"title"`
+	Action  string        `json:"action"`
+	Outcome string        `json:"outcome,omitempty"`
+	Commits []TopicCommit `json:"commits,omitempty"`
+}
+
+// TopicCommit is one commit a topic's done names.
+type TopicCommit struct {
+	Sha string `json:"sha"`
+}
+
+// BackgroundTaskStartedPayload — kind "background_task_started": something the agent left running
+// in the background (a Bash call with run_in_background, a Monitor, a background subagent), sent
+// once its id is known (its call's result). TaskID is the CLI's id for it (the agentId of a
+// subagent), CallID the tool call that started it, Kind "bash" | "monitor" | "agent", StartedAt
+// RFC 3339.
+type BackgroundTaskStartedPayload struct {
+	TaskID      string `json:"task_id"`
+	CallID      string `json:"call_id"`
+	Kind        string `json:"kind"`
+	Description string `json:"description"`
+	StartedAt   string `json:"started_at"`
+}
+
+// BackgroundTaskDonePayload — kind "background_task_done": the end of a background task, read from
+// the notice the CLI injects when it finishes (or "stopped" when the engine process ended under
+// it). Status is the notice's ("completed", "failed", "killed"…), Summary its summary cut to 120
+// bytes. Description repeats the start's, for a reader that does not hold it.
+type BackgroundTaskDonePayload struct {
+	TaskID      string `json:"task_id"`
+	CallID      string `json:"call_id"`
+	Kind        string `json:"kind"`
+	Status      string `json:"status"`
+	Summary     string `json:"summary"`
+	Description string `json:"description,omitempty"`
 }
 
 // TurnDonePayload — kind "turn_done".
@@ -109,14 +260,42 @@ type TurnDonePayload struct {
 type ErrorPayload struct {
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable"`
+	// Code, when set, says what kind of error this is, for a reader that shows them differently:
+	// ErrorCodeAPI or ErrorCodeAPIRetry. Most errors have none.
+	Code string `json:"code,omitempty"`
+	// ClientID, on the error of a message that was dropped (the queue was full), is that
+	// message's client id (Input.ClientID).
+	ClientID string `json:"client_id,omitempty"`
+	// Attempt, MaxRetries and RetryInMs, on an ErrorCodeAPIRetry notice, are the engine's word on
+	// the retry: which attempt this is, how many it makes at most, and how long it waits before it
+	// (each 0 when not said).
+	Attempt    int `json:"attempt,omitempty"`
+	MaxRetries int `json:"max_retries,omitempty"`
+	RetryInMs  int `json:"retry_in_ms,omitempty"`
 }
+
+// The ErrorPayload codes.
+const (
+	// ErrorCodeAPI: the engine's call to the model's API failed (the Claude CLI reports it as an
+	// assistant line flagged isApiErrorMessage). The turn usually ends with it.
+	ErrorCodeAPI = "api_error"
+	// ErrorCodeAPIRetry: the engine is retrying a failed API call. A notice, not an outcome: the
+	// turn goes on.
+	ErrorCodeAPIRetry = "api_retry"
+)
 
 // CompactionPayload — kind "compaction". Summary is the full replacement
 // text (persisted so crash recovery rebuilds context as summary + events
 // after it).
+//
+// The Claude Code driver reports the CLI's own compaction (its compact_boundary line) with no
+// summary (the CLI keeps it): Trigger is "manual" or "auto" and PreTokens the conversation's size
+// before it, when the CLI says.
 type CompactionPayload struct {
 	Summary      string `json:"summary"`
 	ThroughIndex int    `json:"through_index"`
+	Trigger      string `json:"trigger,omitempty"`
+	PreTokens    int    `json:"pre_tokens,omitempty"`
 }
 
 // newUUID returns a random UUID v4 string (same shape as the server's).

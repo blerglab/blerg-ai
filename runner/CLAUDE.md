@@ -4,7 +4,9 @@ This file provides guidance to AI coding assistants working in this directory.
 
 ## Project
 
-blerg-runner is a local tool for managing Claude Code projects and driving agent sessions. Keep scope small and focused on local Claude/agent management use cases.
+blerg-runner manages agent and terminal sessions across workstation, sandbox and cluster runtimes.
+Engine-specific behavior belongs in registered adapters; shared launch, persistence and UI paths
+should use the engine contracts rather than assuming Claude Code.
 
 ## Building & testing
 

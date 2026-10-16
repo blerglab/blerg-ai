@@ -206,6 +206,34 @@ func TestInsightsAMemberSeesOnlyTheirOwnSessions(t *testing.T) {
 	near(t, "alice running seconds", r.Sessions.RunningSeconds, 600)
 }
 
+// A subagent's usage counts under its own model, beside the turns of the session that ran it; it
+// is not a turn. A subagent_done without usage (a background launch) adds nothing.
+func TestInsightsCountsSubagentUsageUnderItsModel(t *testing.T) {
+	f := newInsightsFixture(t)
+	const daemon = "00000000-0000-4000-8000-0000000000da"
+	at := time.Now().UTC().Add(-3 * time.Hour)
+	id := seedSession(t, f.pool, daemon, "carol", "cluster", "idle", false, at, nil)
+	seedEvent(t, f.pool, id, at.Add(time.Minute), "turn_done", turnDonePayload("m-main", 100, 200, 300, 400))
+	sub := turnDonePayload("m-sub", 10, 20, 30, 40)
+	sub["child_id"], sub["summary"] = "toolu_1", "done"
+	seedEvent(t, f.pool, id, at.Add(2*time.Minute), "subagent_done", sub)
+	seedEvent(t, f.pool, id, at.Add(2*time.Minute), "subagent_done",
+		map[string]any{"child_id": "toolu_2", "model": "m-sub", "summary": "running in the background", "background": true})
+	r := f.insights(t, "/api/insights?range=7d", f.mint("carol", "session.start"))
+	if r.Tokens.Totals.Turns != 1 || r.Tokens.Totals.Input != 110 || r.Tokens.Totals.Output != 220 ||
+		r.Tokens.Totals.CacheRead != 330 || r.Tokens.Totals.CacheWrite != 440 {
+		t.Errorf("totals = %+v", r.Tokens.Totals)
+	}
+	byModel := map[string]modelRow{}
+	for _, m := range r.Tokens.ByModel {
+		byModel[m.Model] = m
+	}
+	if len(byModel) != 2 || byModel["m-main"].Turns != 1 || byModel["m-main"].Input != 100 ||
+		byModel["m-sub"].Turns != 0 || byModel["m-sub"].Input != 10 || byModel["m-sub"].Output != 20 {
+		t.Errorf("by model = %+v", r.Tokens.ByModel)
+	}
+}
+
 func TestInsightsAnAdministratorSeesEverythingButNotPrivateSessionsByName(t *testing.T) {
 	f := newInsightsFixture(t)
 	admin := f.mint("root", "session.start", insightsAdminCap)

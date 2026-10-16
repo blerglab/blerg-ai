@@ -31,12 +31,21 @@ Subcommands
   review reply <id> done|declined "<line>"
                                 Answer one request; publishes <file>.review.json.
                                 `review --help` explains the loop.
+  topic "<title>"               Mark the start of a piece of work the user asked for (it ends the
+                                open one); the session page's History tab lists each topic with its
+                                files, subagents and outcome. `topic --help` says when.
+  topic --done ["<outcome>"] [--commit <sha> ...]
+                                Close the open topic, with a one-line outcome and the
+                                commits the work landed.
 
 Environment (injected by the Blerg Runner daemon):
   BLERG_RUNNER_SERVER_HTTP    e.g. http://runner.example.test
   BLERG_RUNNER_SESSION_ID     UUID of the owning session
   BLERG_RUNNER_SESSION_TOKEN  Per-session bearer token with "message" cap (every
-                              session; scoped to this session only)
+                              session; scoped to this session only). A token the server
+                              re-issued later (the first was revoked by a start race) is in
+                              $BLERG_RUNNER_DAEMON_STATE_DIR (default ~/.blerg-runner-daemon)
+                              /session-tokens/<session id>, and is used first.
   BLERG_RUNNER_BOARD_TOKEN    Bearer token with "message" cap (Assist sessions)
   BLERG_RUNNER_DAEMON_TOKEN   Legacy: the daemon master token. No longer injected
                               into any session; honoured only if present.
@@ -104,7 +113,37 @@ def _derive_session_id():
 
 SERVER_HTTP   = _derive_server_http()
 SESSION_ID    = _derive_session_id()
-SESSION_TOKEN = os.environ.get("BLERG_RUNNER_SESSION_TOKEN", "")
+
+
+def _session_token_file():
+    """The file a fresh session token lands in when the server re-issues one (a session can be
+    left running with a revoked token; the daemon cannot change this process's environment):
+    $BLERG_RUNNER_DAEMON_STATE_DIR (else ~/.blerg-runner-daemon)/session-tokens/<session id>.
+    The daemon writes it (runner/internal/daemon/sessiontoken.go); keep the two in step."""
+    if not SESSION_ID or not re.fullmatch(r"[A-Za-z0-9_-]+", SESSION_ID):
+        return ""
+    state = os.environ.get("BLERG_RUNNER_DAEMON_STATE_DIR", "").strip()
+    if not state:
+        state = os.path.join(os.path.expanduser("~"), ".blerg-runner-daemon")
+    return os.path.join(state, "session-tokens", SESSION_ID)
+
+
+def _session_token():
+    """The per-session token: the re-issued one in the token file when there is one, else the
+    one the session was started with (BLERG_RUNNER_SESSION_TOKEN)."""
+    path = _session_token_file()
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                tok = f.read().strip()
+            if tok and not any(c in tok for c in "\r\n\0"):
+                return tok
+        except OSError:
+            pass
+    return os.environ.get("BLERG_RUNNER_SESSION_TOKEN", "")
+
+
+SESSION_TOKEN = _session_token()
 DAEMON_TOKEN  = os.environ.get("BLERG_RUNNER_DAEMON_TOKEN", "")
 BOARD_ID      = os.environ.get("BLERG_RUNNER_BOARD_ID", "")
 BOARD_TOKEN   = os.environ.get("BLERG_RUNNER_BOARD_TOKEN", "")
@@ -141,6 +180,27 @@ def _headers():
     }
 
 
+# What a 401 says when the token was real but is dead now (the server's
+# "session_token_revoked"), as opposed to never having been valid.
+TOKEN_REVOKED_HINT = "token revoked or expired — restart the session or wait for a refreshed token"
+
+
+def _token_revoked(code, body):
+    """Whether an error reply is the server saying this session's token was revoked or expired."""
+    if code != 401:
+        return False
+    try:
+        return json.loads(body).get("code") == "session_token_revoked"
+    except (ValueError, AttributeError):
+        return False
+
+
+def _http_error_line(code, url, body):
+    if _token_revoked(code, body):
+        return f"blerg-runner: HTTP {code} from {url}: {TOKEN_REVOKED_HINT}"
+    return f"blerg-runner: HTTP {code} from {url}: {body}"
+
+
 def _post(path, payload, timeout=30):
     """POST JSON payload; return parsed response body.  Exits on any error."""
     url = f"{SERVER_HTTP}{path}"
@@ -151,7 +211,7 @@ def _post(path, payload, timeout=30):
             return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         body = exc.read().decode(errors="replace")
-        print(f"blerg-runner: HTTP {exc.code} from {url}: {body}", file=sys.stderr)
+        print(_http_error_line(exc.code, url, body), file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as exc:
         print(f"blerg-runner: connection error to {url}: {exc.reason}", file=sys.stderr)
@@ -172,7 +232,7 @@ def _get(path, timeout=30):
             return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         body = exc.read().decode(errors="replace")
-        print(f"blerg-runner: HTTP {exc.code} from {url}: {body}", file=sys.stderr)
+        print(_http_error_line(exc.code, url, body), file=sys.stderr)
         sys.exit(1)
     # urllib.error.URLError (including socket.timeout) propagates to caller
 
@@ -332,6 +392,8 @@ def _publish_error_message(code, body):
         detail = json.loads(body).get("error") or ""
     except (ValueError, AttributeError):
         detail = body.strip()
+    if _token_revoked(code, body):
+        return TOKEN_REVOKED_HINT
     if code in (401, 403):
         return "not allowed to publish from this session (the session token was refused)"
     if code == 413:
@@ -449,6 +511,97 @@ def cmd_publish(path, name=None, card=None):
         _attach_to_card(card, out, shown)
 
 
+# ── topic (mark a piece of work for the History tab) ─────────────────────────
+
+# The agent reads this (topic --help and the top-level usage). Its first paragraph is the line the
+# session guide and the managed CLAUDE.md block carry (daemon/claudecode.go topicGuideLine).
+TOPIC_GUIDE = """\
+When you start a piece of work the user asked for that takes several steps, run
+`blerg-runner topic "<short imperative title>"`; when it is finished or dropped,
+`blerg-runner topic --done "<one-line outcome>"`, and when the work landed commits, pass them:
+`--commit <sha>`. One topic at a time; not for a quick question, and not from a subagent.
+
+Starting a topic ends the one that is open. The person's History tab lists each topic with the files
+it published, the subagents it ran, its outcome and its commits (a chip per sha, a link when the
+session's repository is known). A title is at most 80 characters, an outcome 200; --commit takes a
+sha of 7 to 40 hex characters, repeated or comma-separated, at most 50.
+"""
+
+TOPIC_MAX_COMMITS = 50
+_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+
+
+def _topic_fail(msg):
+    print(f"blerg-runner topic: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _topic_commits(given):
+    """The --commit values (each one sha or a comma-separated list), in order; refuses a bad one."""
+    shas = []
+    for value in given:
+        for piece in value.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            if not _SHA_RE.fullmatch(piece):
+                _topic_fail(f"--commit {piece!r} is not a commit sha (7 to 40 hex characters)")
+            shas.append(piece)
+    if not shas:
+        _topic_fail("give a commit sha with --commit (7 to 40 hex characters)")
+    if len(shas) > TOPIC_MAX_COMMITS:
+        _topic_fail(f"at most {TOPIC_MAX_COMMITS} commits on one topic, got {len(shas)}")
+    return shas
+
+
+def cmd_topic(title, done, commits=None):
+    """Start a topic (title) or close the open one (done: the outcome, possibly empty), with the
+    commits the work landed (done only)."""
+    if done is not None and title:
+        _topic_fail("give a title to start a topic, or --done to close the open one, not both")
+    if commits and done is None:
+        _topic_fail("--commit goes with --done: name the commits when the topic is finished")
+    if done is None and not (title or "").strip():
+        _topic_fail('give a title: blerg-runner topic "<short imperative title>"')
+    body = {"action": "done", "outcome": done} if done is not None else {"action": "start", "title": title}
+    if commits:
+        body["commits"] = [{"sha": s} for s in _topic_commits(commits)]
+    url = f"{SERVER_HTTP}/api/sessions/{urllib.parse.quote(SESSION_ID, safe='')}/topics"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=_headers(), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode(errors="replace")
+        try:
+            msg = json.loads(text).get("error") or text.strip()
+        except (ValueError, AttributeError):
+            msg = text.strip() or exc.reason
+        if _token_revoked(exc.code, text):
+            msg = TOKEN_REVOKED_HINT
+        _topic_fail(f"{msg} (HTTP {exc.code})")
+    except urllib.error.URLError as exc:
+        _topic_fail(f"connection error to {url}: {exc.reason}")
+    if "application/json" not in ctype:
+        _topic_fail("this runner server does not know topics yet; nothing was recorded")
+    reply = json.loads(raw or b"{}")
+    if done is not None:
+        line = f"Topic done: {reply.get('title', '')}"
+        if reply.get("outcome"):
+            line += f" ({reply['outcome']})"
+        n = len(reply.get("commits") or [])
+        if n:
+            line += f" · {n} commit{'' if n == 1 else 's'}"
+        print(line)
+        return
+    line = f"Topic started: {reply.get('title', title)}"
+    closed = reply.get("closed")
+    if closed:
+        line += f" (closed: {closed.get('title', '')})"
+    print(line)
+
+
 # ── fetch (files the user attached to this session) ───────────────────────────
 
 FETCH_GUIDE = """\
@@ -471,12 +624,15 @@ def _fetch_fail(msg):
 
 
 def _fetch_http_error(exc):
+    body = exc.read().decode(errors="replace")
+    if _token_revoked(exc.code, body):
+        return TOKEN_REVOKED_HINT
     if exc.code in (401, 403):
         return "not allowed to fetch from this session (the session token was refused)"
     if exc.code == 404:
         return "attachment not found"
     try:
-        detail = json.loads(exc.read().decode(errors="replace")).get("error") or ""
+        detail = json.loads(body).get("error") or ""
     except (ValueError, AttributeError):
         detail = ""
     return detail or f"HTTP {exc.code}"
@@ -1387,7 +1543,8 @@ def main():
         description="Send messages and files from a Claude session to the user via Blerg Runner.",
         epilog="publish <file|dir>: give the user a file.\n\n" + PUBLISH_GUIDE
                + "\nfetch: download the files the user attached.\n\n" + FETCH_GUIDE
-               + "\nreview: answer a person's review of a published file.\n\n" + REVIEW_GUIDE,
+               + "\nreview: answer a person's review of a published file.\n\n" + REVIEW_GUIDE
+               + "\ntopic: mark a piece of work for the person's History tab.\n\n" + TOPIC_GUIDE,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1465,6 +1622,19 @@ def main():
     pr_reply.add_argument("id", help="The request id, as review list and the chat message show it")
     pr_reply.add_argument("status", choices=list(REVIEW_STATUSES), help="done: you made the change; declined: you did not")
     pr_reply.add_argument("line", help="One line for the person: what you did, or why not")
+
+    p_topic = sub.add_parser(
+        "topic",
+        help="Mark the start of a piece of work (or --done its end) for the person's History tab",
+        description="Mark a piece of work the user asked for: its start (a title) or the end of the open one (--done).",
+        epilog=TOPIC_GUIDE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_topic.add_argument("title", nargs="?", default=None, help="Short imperative title of the work you start")
+    p_topic.add_argument("--done", nargs="?", const="", default=None, metavar="OUTCOME",
+                         help="Close the open topic, with a one-line outcome")
+    p_topic.add_argument("--commit", action="append", default=None, metavar="SHA",
+                         help="With --done: a commit the work landed (repeat it, or comma-separate the shas)")
 
     # ── board ──────────────────────────────────────────────────────────────────
     p_board =sub.add_parser("board", help="Board commands")
@@ -1583,7 +1753,7 @@ def main():
     args = parser.parse_args()
 
     # ── session messaging commands (existing) ──────────────────────────────────
-    if args.cmd in ("update", "ask", "note", "publish", "fetch", "files", "unpublish", "review"):
+    if args.cmd in ("update", "ask", "note", "publish", "fetch", "files", "unpublish", "review", "topic"):
         if not _configured():
             _noop_notice()
             sys.exit(0)
@@ -1592,6 +1762,8 @@ def main():
                 cmd_review_list(args.file)
             elif args.review_cmd == "reply":
                 cmd_review_reply(args.id, args.status, args.line)
+        elif args.cmd == "topic":
+            cmd_topic(args.title, args.done, args.commit)
         elif args.cmd == "files":
             cmd_files()
         elif args.cmd == "unpublish":

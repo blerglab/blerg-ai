@@ -3,10 +3,12 @@
 // and restore the link, answer an older page, and hold or fail an upload. Every call into the
 // component's handlers must be wrapped in act() by the TEST; the fake never does that itself.
 import type { AgentEvent, AssistantTextPayload, SessionStatus } from '../types'
+import { ArtifactGoneError } from '../transport/files'
 import type {
   ArtifactInfo,
   OlderPage,
   ReplayDone,
+  SendOptions,
   SessionMeta,
   SubscribeHandlers,
   SubscribeOptions,
@@ -54,6 +56,8 @@ export interface FakeTransportOptions {
   /** false: no interrupt (ChatView then shows no Stop). */
   interrupt?: boolean
   setModel?: boolean
+  /** true: the transport passes a reply's answerTo on (as the runner's websocket does). */
+  answersAsks?: boolean
   /** Pages loadOlder is answered with at once, in order; afterwards each call waits for answerOlder. */
   olderPages?: OlderPage[]
 }
@@ -87,7 +91,8 @@ export function createFakeFiles(initial: ArtifactInfo[] = []): FakeFiles {
     removeError: null,
     serve(body, status = 200) {
       rawBody = body
-      rawError = status >= 400 ? new Error(status === 404 ? 'This file is no longer available.' : `HTTP ${status}`) : null
+      rawError = status === 410 ? new ArtifactGoneError()
+        : status >= 400 ? new Error(status === 404 ? 'This file is no longer available.' : `HTTP ${status}`) : null
     },
     created(name, size) {
       nextId++
@@ -133,6 +138,7 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
   const subs = new Set<Sub>()
   const subscriptions: SubscribeRecord[] = []
   const sent: string[] = []
+  const sentWith: Array<{ text: string; opts?: SendOptions }> = []
   const older: OlderRequest[] = []
   const olderPages = [...(opts.olderPages ?? [])]
   const pendingOlder: Array<{ resolve: (p: OlderPage) => void; reject: (e: unknown) => void }> = []
@@ -160,9 +166,10 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
     async session() {
       return { ...meta }
     },
-    async send(_sessionId, text) {
+    async send(_sessionId, text, sendOpts) {
       if (!connected || refuse) return { queued: false }
       sent.push(text)
+      sentWith.push({ text, opts: sendOpts })
       return { queued: true }
     },
     async stop() {
@@ -171,6 +178,7 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
     connected: () => connected,
     files,
   }
+  if (opts.answersAsks) transport.answersAsks = true
   if (opts.interrupt !== false) transport.interrupt = async () => { interrupts++ }
   if (opts.setModel !== false) transport.setModel = async (_sessionId, model, effort) => { setModelCalls.push({ model, effort }) }
 
@@ -181,6 +189,8 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
     /** The file fake, or undefined when the transport has none. */
     files,
     sent,
+    /** Every message sent, with the options it went with. */
+    sentWith,
     older,
     setModelCalls,
     subscriptions,
@@ -199,6 +209,14 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
     replayDone(done: Partial<ReplayDone> = {}) {
       const full: ReplayDone = { lastSeq: 0, hasMore: false, ...done }
       each(h => h.onReplayDone(full))
+    },
+    /** The server says an ask was answered or closed (message_answered). */
+    closeAsk(messageId: string, answer = '') {
+      each(h => h.onAskClosed?.(messageId, answer))
+    },
+    /** The transport found the gap too long to replay: the held transcript is dropped. */
+    reset() {
+      each(h => h.onReset?.())
     },
     setStatus(status: SessionStatus) {
       each(h => h.onStatus(status))

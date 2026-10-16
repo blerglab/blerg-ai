@@ -1,10 +1,12 @@
 // CapabilitiesPanel: what a session has loaded — skills, plugins, MCP
 // servers, slash commands, tools, subagents — from its latest capabilities
 // report. Driven only by the report's data (no per-engine branches): a group
-// the report doesn't carry says "not reported by this engine". A modal on
-// desktop, a full-screen sheet on narrow screens (CSS). All text renders as
-// plain text.
-import { useEffect, useId, useRef, useState } from 'react'
+// the report doesn't carry says "not reported by this engine". CapabilitiesView
+// is the content, which the session panel's Capabilities tab shows; CapabilitiesPanel
+// puts it in a dialog (a terminal session's, which says why it has none): a
+// modal on desktop, a full-screen sheet on narrow screens (CSS). All text
+// renders as plain text.
+import { useEffect, useId, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { CapabilityGroup, CapabilityItem } from '../types'
 import { CAPABILITY_GROUPS, capabilityCount, matchesQuery, type CapabilitiesReport } from '../lib/capabilities'
@@ -16,27 +18,29 @@ const COLLAPSE_OVER = 15
 // Descriptions longer than this are cut, with a toggle to read the rest.
 const DESC_PREVIEW = 160
 
-interface Props {
+interface ViewProps {
   report: CapabilitiesReport | null
   // When set, capabilities can't be reported for this session at all (a
   // terminal session); this says why, instead of the "nothing yet" state.
   unavailable?: string
+  // Tool changes waiting on this session (MCP tools that changed or were
+  // added); noted on the MCP servers group with a link to the Proposals page.
+  pendingToolChanges?: number
+  // The filter box, for a dialog that focuses it when it opens.
+  searchRef?: RefObject<HTMLInputElement | null>
+}
+
+interface Props extends Omit<ViewProps, 'searchRef'> {
   onClose: () => void
 }
 
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
 
-export default function CapabilitiesPanel({ report, unavailable, onClose }: Props) {
+export default function CapabilitiesPanel({ onClose, ...view }: Props) {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const backdrop = useBackdropClose(onClose)
   const searchRef = useRef<HTMLInputElement | null>(null)
-  const [query, setQuery] = useState('')
-  const payload = report?.payload ?? null
-  // Groups the user opened or closed; the rest follow their default (long
-  // groups start closed), which also holds for a report that arrives later.
-  const [openState, setOpenState] = useState<Record<string, boolean>>({})
-
   // Focus moves into the dialog on open and back to whatever had it on close.
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null
@@ -65,9 +69,51 @@ export default function CapabilitiesPanel({ report, unavailable, onClose }: Prop
     }
   }
 
+  return createPortal(
+    <div
+      className="caps-overlay"
+      data-testid="caps-overlay"
+      {...backdrop}
+    >
+      <div
+        ref={dialogRef}
+        className="caps-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        data-testid="capabilities-panel"
+        onKeyDown={onKeyDown}
+      >
+        <header className="caps-header">
+          <h2 id={titleId}>Skills &amp; plugins</h2>
+          <button type="button" className="caps-close" aria-label="Close" onClick={onClose}>✕</button>
+        </header>
+        <CapabilitiesView {...view} searchRef={searchRef} />
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/** What the session loaded, with the report's facts, a filter and a section per group. */
+export function CapabilitiesView({ report, unavailable, pendingToolChanges, searchRef }: ViewProps) {
+  const listBase = useId()
+  const [query, setQuery] = useState('')
+  const payload = report?.payload ?? null
+  // Groups the user opened or closed; the rest follow their default (long
+  // groups start closed), which also holds for a report that arrives later.
+  const [openState, setOpenState] = useState<Record<string, boolean>>({})
+
   const q = query.trim()
   const isOpen = (g: CapabilityGroup) => openState[g.id] ?? g.items.length <= COLLAPSE_OVER
   const toggle = (g: CapabilityGroup) => setOpenState(prev => ({ ...prev, [g.id]: !isOpen(g) }))
+
+  const pendingNote = pendingToolChanges && pendingToolChanges > 0 ? (
+    <p className="caps-group-note" data-testid="caps-mcp-pending">
+      {pendingToolChanges} tool {pendingToolChanges === 1 ? 'change' : 'changes'} pending: an MCP server changed or added a tool this session uses; it is off until you decide on the{' '}
+      <a href="/proposals">Proposals page</a>.
+    </p>
+  ) : null
 
   let body: React.ReactNode
   if (unavailable) {
@@ -85,20 +131,24 @@ export default function CapabilitiesPanel({ report, unavailable, onClose }: Prop
     const sections = CAPABILITY_GROUPS.map(({ id, label }) => {
       const group = byId.get(id)
       if (!group) {
-        if (q) return null
+        const note = id === 'mcp' ? pendingNote : null
+        if (q && !note) return null
         return (
           <section key={id} className="caps-group not-reported" data-testid={`caps-group-${id}`}>
             <h3 className="caps-group-head static">
               <span className="caps-group-label">{label}</span>
               <span className="caps-group-missing">not reported by this engine</span>
             </h3>
+            {note}
           </section>
         )
       }
+      const note = id === 'mcp' ? pendingNote : null
       const items = group.items.filter(it => matchesQuery(it, q))
-      if (q && items.length === 0) return null
-      const open = q !== '' || isOpen(group)
-      const listId = `${titleId}-${id}`
+      if (q && items.length === 0 && !note) return null
+      // A pending note keeps its group open so it is never hidden.
+      const open = q !== '' || isOpen(group) || note !== null
+      const listId = `${listBase}-${id}`
       const count = q ? `${items.length} of ${group.items.length}` : String(group.items.length)
       return (
         <section key={id} className="caps-group" data-testid={`caps-group-${id}`}>
@@ -108,7 +158,7 @@ export default function CapabilitiesPanel({ report, unavailable, onClose }: Prop
               aria-expanded={open}
               aria-controls={listId}
               onClick={() => toggle(group)}
-              disabled={q !== ''}
+              disabled={q !== '' || note !== null}
             >
               <span className="caps-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
               <span className="caps-group-label">{group.label}</span>
@@ -117,6 +167,7 @@ export default function CapabilitiesPanel({ report, unavailable, onClose }: Prop
           </h3>
           {open && (
             <div id={listId} className="caps-group-body">
+              {note}
               {group.note && <p className="caps-group-note">{group.note}</p>}
               {group.items.length === 0 ? (
                 <p className="caps-group-empty">None loaded.</p>
@@ -150,54 +201,35 @@ export default function CapabilitiesPanel({ report, unavailable, onClose }: Prop
     if (engine) meta.push(engine)
   }
 
-  return createPortal(
-    <div
-      className="caps-overlay"
-      data-testid="caps-overlay"
-      {...backdrop}
-    >
-      <div
-        ref={dialogRef}
-        className="caps-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        data-testid="capabilities-panel"
-        onKeyDown={onKeyDown}
-      >
-        <header className="caps-header">
-          <h2 id={titleId}>Skills &amp; plugins</h2>
-          <button type="button" className="caps-close" aria-label="Close" onClick={onClose}>✕</button>
-        </header>
-        {payload && !unavailable && (
-          <div className="caps-meta">
-            {meta.length > 0 && <p data-testid="caps-meta">{meta.join(' · ')}</p>}
-            {(payload.cwd || payload.permission_mode) && (
-              <p className="caps-meta-dim">
-                {[payload.cwd, payload.permission_mode && `permissions: ${payload.permission_mode}`].filter(Boolean).join(' · ')}
-              </p>
-            )}
-            <p className="caps-meta-dim">
-              {payload.note ?? 'What the session reported it loaded.'} It reflects what was loaded at start;
-              changes on disk since then aren’t shown until the engine reports again.
-            </p>
-          </div>
+  return (
+    <>
+    {payload && !unavailable && (
+      <div className="caps-meta">
+        {meta.length > 0 && <p data-testid="caps-meta">{meta.join(' · ')}</p>}
+        {(payload.cwd || payload.permission_mode) && (
+          <p className="caps-meta-dim">
+            {[payload.cwd, payload.permission_mode && `permissions: ${payload.permission_mode}`].filter(Boolean).join(' · ')}
+          </p>
         )}
-        {payload && !unavailable && capabilityCount(payload) > 0 && (
-          <input
-            ref={searchRef}
-            className="caps-search"
-            type="search"
-            placeholder="Filter by name, description, source…"
-            aria-label="Filter skills, plugins and tools"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-          />
-        )}
-        <div className="caps-body">{body}</div>
+        <p className="caps-meta-dim">
+          {payload.note ?? 'What the session reported it loaded.'} It reflects what was loaded at start;
+          changes on disk since then aren’t shown until the engine reports again.
+        </p>
       </div>
-    </div>,
-    document.body,
+    )}
+    {payload && !unavailable && capabilityCount(payload) > 0 && (
+      <input
+        ref={searchRef}
+        className="caps-search"
+        type="search"
+        placeholder="Filter by name, description, source…"
+        aria-label="Filter skills, plugins and tools"
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+      />
+    )}
+    <div className="caps-body">{body}</div>
+    </>
   )
 }
 

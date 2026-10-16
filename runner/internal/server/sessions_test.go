@@ -86,7 +86,7 @@ func TestSessionStateMachine(t *testing.T) {
 // TestSessionNotification verifies which state transitions produce a push
 // notification and that the body uses the session's human label. Only the
 // "stop, the human is needed" states notify: waiting (needs input) and idle
-// (turn finished). running/starting/stopped/error stay silent.
+// (its work done). running/starting/stopped/error stay silent.
 func TestSessionNotification(t *testing.T) {
 	tests := []struct {
 		status   string
@@ -95,7 +95,7 @@ func TestSessionNotification(t *testing.T) {
 		wantBody string
 	}{
 		{"waiting", "auth: add login", true, "auth: add login is waiting for your input."},
-		{"idle", "auth: add login", true, "auth: add login finished its turn."},
+		{"idle", "auth: add login", true, "auth: add login is waiting for you."},
 		{"running", "auth: add login", false, ""},
 		{"starting", "auth: add login", false, ""},
 		{"stopped", "auth: add login", false, ""},

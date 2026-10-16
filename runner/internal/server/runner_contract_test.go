@@ -758,7 +758,7 @@ func TestResumeClusterSessionCarriesTokenID(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessionID := newUUID()
-	if err := db.InsertSession(ctx, pool, sessionID, daemonID, "disconnected", "/workspace/org/proj", "org/proj", "T", ""); err != nil {
+	if err := db.InsertClusterSession(ctx, pool, sessionID, daemonID, "disconnected", "/workspace/org/proj", "org/proj", "T", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SetSessionSpawningAccount(ctx, pool, sessionID, "acct-1"); err != nil {
@@ -771,15 +771,26 @@ func TestResumeClusterSessionCarriesTokenID(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// This persisted Cluster session has no remaining Kubernetes Job.
+	f.setJobMissing(hub.JobManager().jobName(sessionID))
+
 	resumeClusterSession(ctx, hub, pool, sessionID, "carry on", "acct-1", testSID)
 
 	f.mu.Lock()
 	ids := append([]string(nil), f.credentialFetchTokenIDs...)
+	sessionProofs := append([]string(nil), f.credentialFetchSessionIDs...)
+	jobs := len(f.created)
 	f.mu.Unlock()
+	if jobs != 1 {
+		t.Fatalf("resume created %d Jobs, want 1", jobs)
+	}
 	if len(ids) == 0 {
 		t.Fatal("resume made no credential fetch")
 	}
-	for _, got := range ids {
+	for i, got := range ids {
+		if sessionProofs[i] != "" {
+			t.Error("agent-owned resume substituted browser-session authority")
+		}
 		if got != "tok-abc" {
 			t.Errorf("resume credential fetch token_id = %q, want tok-abc", got)
 		}

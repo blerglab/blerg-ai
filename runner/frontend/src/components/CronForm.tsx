@@ -8,12 +8,13 @@ import { apiFetch } from '../apiFetch'
 import { listBoards } from '../lib/boardApi'
 import { buildExpression, describeSchedule, hasFiveFields, parseExpression, DAY_NAMES } from '../lib/cronSchedule'
 import type { PresetKind } from '../lib/cronSchedule'
-import { useEngineModels } from '../lib/engineModels'
+import { modelCatalogTarget, useEngineModels } from '../lib/engineModels'
 import { FOCUS_BOARD_PROMPT } from '../lib/focusPrompt'
 import type { Board, CronInfo, CronRuntime, McpSelectionEntry } from '../types'
 import type { RunDaemon } from '../lib/runtimes'
 import McpPicker from './McpPicker'
 import ModelPicker from './ModelPicker'
+import ModelCatalogNotice from './ModelCatalogNotice'
 
 interface Props {
   cron?: CronInfo
@@ -94,6 +95,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
   const [dow, setDow] = useState(initial.dow)
   const [expr, setExpr] = useState(initial.expr)
   const [timezone, setTimezone] = useState(cron?.timezone ?? browserZone())
+  const [engine, setEngine] = useState(cron?.engine === 'codex' ? 'codex' : 'claude')
   const [model, setModel] = useState(cron?.model ?? '')
   const [effort, setEffort] = useState(cron?.effort ?? '')
   const [runtime, setRuntime] = useState<CronRuntime>(cron?.runtime ?? 'auto')
@@ -110,6 +112,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
   const [saving, setSaving] = useState(false)
   const [confirmStarter, setConfirmStarter] = useState(false)
 
+  const [clusterConfigured, setClusterConfigured] = useState(false)
   const [daemons, setDaemons] = useState<RunDaemon[]>([])
   const [boards, setBoards] = useState<Board[] | null>(null)
   useEffect(() => {
@@ -118,13 +121,18 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
       .then(r => (r.ok ? r.json() : []))
       .then(d => { if (live && Array.isArray(d)) setDaemons(d as RunDaemon[]) })
       .catch(() => { /* the pin is optional */ })
+    apiFetch('/api/cluster/status')
+      .then(r => r.ok ? r.json() : null)
+      .then(status => { if (live) setClusterConfigured(status?.configured === true) })
+      .catch(() => {})
     listBoards()
       .then(b => { if (live) setBoards(b) })
       .catch(() => { if (live) setBoards(null) })
     return () => { live = false }
   }, [])
 
-  const engineModels = useEngineModels('claude')
+  const catalogTarget = modelCatalogTarget(runtime === 'auto' && clusterConfigured ? 'cluster' : runtime, daemonId)
+  const engineModels = useEngineModels(engine, catalogTarget.daemonId, { runtime: catalogTarget.runtime })
   const zones = useMemo(() => zoneList(timezone), [timezone])
 
   const built = kind === 'advanced' ? null : buildExpression({ kind, times, dow })
@@ -159,6 +167,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
     const body: Record<string, unknown> = {
       name: name.trim(), schedule: expression, timezone, prompt, runtime, max_runtime_seconds: Math.round(maxRun * 60),
     }
+    if (engine !== 'claude' || (cron && cron.engine !== engine)) body.engine = engine
     if (graceSeconds !== null) body.grace_seconds = graceSeconds
     // A create always names its tools (possibly none). An edit sends `mcp` only when the person
     // changed it: the server checks a sent value against the live connections, and a cron whose
@@ -302,6 +311,15 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
         <p style={note}>Files your mail and calendar items as cards, keeps one card per item, and queues anything outward for your approval. It works with a board made from the focus-board template.</p>
       </div>
 
+      <div style={field}>
+        <label style={label} htmlFor="cron-engine">Engine</label>
+        <select id="cron-engine" value={engine} onChange={e => { setEngine(e.target.value); setModel(''); setEffort('') }} style={control}>
+          <option value="claude">Claude</option>
+          <option value="codex">Codex</option>
+        </select>
+      </div>
+
+      <ModelCatalogNotice state={engineModels} />
       <ModelPicker
         models={engineModels.models}
         loading={engineModels.loading}
@@ -399,7 +417,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
         <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--fog)', fontSize: '0.8rem', display: 'flex', flexDirection: 'column', gap: 4 }}>
           <li>{'A cron run has no shell or web tools: it can work with files in its own scratch folder and use the MCP tools you turn on above.'}</li>
           <li>{'Sessions started by a cron are private to you: no other account on this install can see them.'}</li>
-          <li>{"On a desktop, a run in the local sandbox uses the host developer's own Claude login, not a personal credential, and can use any connected daemon; every account on an install shares the connected daemons."}</li>
+          <li>{"On a desktop, a run in the local sandbox uses the host developer's own Claude login or Codex login, and can use any compatible connected daemon; every account on an install shares the connected daemons."}</li>
           <li>{'The cron holds its own access token, which expires after a year and can be renewed from the list. Deleting or pausing the cron revokes it.'}</li>
         </ul>
       </div>

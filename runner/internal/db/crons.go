@@ -134,6 +134,9 @@ var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 // concurrent creates cannot overshoot the limit. The caller supplies NextRunAt
 // and the token id and expiry.
 func InsertCron(ctx context.Context, conn *pgxpool.Pool, c Cron, maxPerAccount int) (*Cron, error) {
+	if c.Engine == "" {
+		c.Engine = "claude"
+	}
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -157,12 +160,12 @@ func InsertCron(ctx context.Context, conn *pgxpool.Pool, c Cron, maxPerAccount i
 	row := tx.QueryRow(ctx, `
 		INSERT INTO crons (owner_account_id, name, enabled, schedule, timezone, prompt, model, effort,
 		                   runtime, daemon_id, board_id, mcp, token_id, token_expires_at,
-		                   grace_seconds, max_runtime_seconds, next_run_at, paused_reason)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::uuid, $11, $12::jsonb, $13, $14, $15, $16, $17, $18)
+		                   grace_seconds, max_runtime_seconds, next_run_at, paused_reason, engine)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::uuid, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19)
 		RETURNING `+cronColumns,
 		c.OwnerAccountID, c.Name, c.Enabled, c.Schedule, c.Timezone, c.Prompt, c.Model, c.Effort,
 		c.Runtime, c.DaemonID, c.BoardID, mcp, c.TokenID, c.TokenExpiresAt,
-		c.GraceSeconds, c.MaxRuntimeSeconds, c.NextRunAt, c.PausedReason)
+		c.GraceSeconds, c.MaxRuntimeSeconds, c.NextRunAt, c.PausedReason, c.Engine)
 	out, err := scanCron(row)
 	if err != nil {
 		return nil, err
@@ -266,12 +269,12 @@ func UpdateCronTx(ctx context.Context, conn *pgxpool.Pool, owner, id string, mut
 		UPDATE crons SET name = $2, enabled = $3, schedule = $4, timezone = $5, prompt = $6, model = $7,
 		       effort = $8, runtime = $9, daemon_id = $10::text::uuid, board_id = $11, mcp = $12::jsonb,
 		       token_id = $13, token_expires_at = $14, grace_seconds = $15, max_runtime_seconds = $16,
-		       next_run_at = $17, consecutive_failures = $18, paused_reason = $19, updated_at = now()
+		       next_run_at = $17, consecutive_failures = $18, paused_reason = $19, updated_at = now(), engine=$20
 		 WHERE id = $1
 		RETURNING `+cronColumns,
 		id, c.Name, c.Enabled, c.Schedule, c.Timezone, c.Prompt, c.Model, c.Effort, c.Runtime, c.DaemonID,
 		c.BoardID, mcp, c.TokenID, c.TokenExpiresAt, c.GraceSeconds, c.MaxRuntimeSeconds, c.NextRunAt,
-		c.ConsecutiveFailures, c.PausedReason))
+		c.ConsecutiveFailures, c.PausedReason, c.Engine))
 	if err != nil {
 		return nil, err
 	}

@@ -1,5 +1,6 @@
 // What the main pane shows on a wide screen when no session is selected: the list is already in the
 // sidebar, so this points at it and offers the other way in.
+import { prefetchLaunchData } from '../lib/launchCache'
 
 interface Props {
   onNewSession: () => void
@@ -41,6 +42,9 @@ export default function SessionsHome({ onNewSession }: Props) {
       <button
         type="button"
         onClick={onNewSession}
+        // About to open the sheet: warm what it opens on (lib/launchCache).
+        onPointerEnter={prefetchLaunchData}
+        onFocus={prefetchLaunchData}
         style={{
           background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))',
           color: 'var(--amber)',

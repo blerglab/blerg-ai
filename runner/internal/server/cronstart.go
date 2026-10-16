@@ -55,6 +55,7 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/cron"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
+	"github.com/jackc/pgx/v5"
 )
 
 // Reasons the cron machinery pauses a cron with.
@@ -126,8 +127,8 @@ func cronStartProblem(req runnerStartRequest) string {
 	switch {
 	case req.Runtime != runnerRuntimeCluster && req.Runtime != runnerRuntimeDocker:
 		return "a cron session runs in a cluster pod or the Docker sandbox, never on the host"
-	case req.Engine != "claude":
-		return "a cron session uses the claude engine"
+	case req.Engine != "claude" && req.Engine != "codex":
+		return "a cron session uses the claude or codex engine"
 	case !req.NoRepo || !req.AutoStop:
 		return "a cron session has no repository and runs a single turn"
 	case !req.NoOperatorFallback:
@@ -507,16 +508,17 @@ func (s *CronService) start(ctx context.Context, c *db.Cron, run *db.CronRun) (s
 		return "", err
 	}
 	hasBoard := c.BoardID != nil && *c.BoardID != ""
-	dc, err := s.preflight(rt, c.DaemonID, len(sel) > 0 || hasBoard) //nolint:contextcheck // the cluster count is bounded by the JobManager client timeout, like every cluster call
+	dc, err := s.preflight(rt, c.DaemonID, len(sel) > 0 || hasBoard, c.Engine) //nolint:contextcheck // the cluster count is bounded by the JobManager client timeout, like every cluster call
 	if err != nil {
 		return "", err
 	}
 
 	// 5. The grant.
 	var grant *ResolvedGrant
-	target := grantTarget{Runtime: rt, Engine: "claude", Kind: "agent", Daemon: dc}
+	var repinned []repinnedTool
+	target := grantTarget{Runtime: rt, Engine: c.Engine, Kind: "agent", Daemon: dc}
 	if len(sel) > 0 {
-		if grant, err = s.buildGrant(ctx, c, sel, target); err != nil {
+		if grant, repinned, err = s.buildGrant(ctx, c, sel, target); err != nil {
 			return "", err
 		}
 	}
@@ -529,7 +531,7 @@ func (s *CronService) start(ctx context.Context, c *db.Cron, run *db.CronRun) (s
 	// 6. Start.
 	req := RunnerStartRequest{
 		Title: cronSessionTitle(c, run), Prompt: c.Prompt, Model: derefOrEmpty(c.Model), Effort: derefOrEmpty(c.Effort),
-		Engine: "claude", Runtime: rt, AutoStop: true, NoRepo: true,
+		Engine: c.Engine, Runtime: rt, AutoStop: true, NoRepo: true,
 		Grant: grant, CronID: c.ID, NoOperatorFallback: true, IdemScope: scope,
 	}
 	if dc != nil {
@@ -538,6 +540,9 @@ func (s *CronService) start(ctx context.Context, c *db.Cron, run *db.CronRun) (s
 	resp, apiErr := a.StartSession(ctx, principal, req, key)
 	if apiErr != nil {
 		return "", &sessionStartError{s.startError(ctx, c, apiErr)}
+	}
+	if len(repinned) > 0 {
+		s.recordRepins(ctx, c, resp.SessionID, repinned)
 	}
 	return resp.SessionID, nil
 }
@@ -579,7 +584,7 @@ func (s *CronService) pauseRevoked(ctx context.Context, c *db.Cron) error {
 
 // preflight is the capacity check. It writes nothing. For the Docker runtime it returns the daemon
 // the session must run on (the request pins it, so the check and the start agree).
-func (s *CronService) preflight(rt string, pin *string, needGateway bool) (*DaemonConn, error) {
+func (s *CronService) preflight(rt string, pin *string, needGateway bool, engine ...string) (*DaemonConn, error) {
 	if rt == runnerRuntimeCluster {
 		jm := s.api.hub.JobManager()
 		n, err := jm.ActiveSessionJobs()
@@ -591,27 +596,33 @@ func (s *CronService) preflight(rt string, pin *string, needGateway bool) (*Daem
 		}
 		return nil, nil
 	}
-	return s.pickDaemon(pin, needGateway)
+	return s.pickDaemon(pin, needGateway, engine...)
 }
 
 // pickDaemon chooses the connected daemon a Docker sandbox cron runs on: the pinned one, which
 // must be connected and able, or the lowest id among those that can.
-func (s *CronService) pickDaemon(pin *string, needGateway bool) (*DaemonConn, error) {
+func (s *CronService) pickDaemon(pin *string, needGateway bool, engine ...string) (*DaemonConn, error) {
 	problem := func(dc *DaemonConn) string {
 		switch {
+		case !isHostDaemon(dc):
+			return "session pods cannot host cron sessions"
 		case !dc.SandboxAvailable():
 			return fmt.Sprintf("daemon %q has no sandbox image", dc.Name)
 		// Every cron session is restricted, grant or no grant: a daemon that would ignore the
 		// field runs it unrestricted, so it is no capacity (the run is held, not run open).
 		case !dc.CanRestrictTools():
 			return fmt.Sprintf("daemon %q does not report restrict_tools: update it", dc.Name)
+		case len(engine) > 0 && engine[0] == "codex" && !dc.CanCodexRestricted():
+			return fmt.Sprintf("daemon %q does not report codex_restricted: update it", dc.Name)
+		case len(engine) > 0 && dc.AvailableEngines() != nil && !slices.Contains(dc.AvailableEngines(), engine[0]):
+			return fmt.Sprintf("daemon %q does not report the requested engine as configured", dc.Name)
 		case needGateway && !dc.CanMCPGateway():
 			return fmt.Sprintf("daemon %q does not report mcp_gateway: update it", dc.Name)
 		}
 		return ""
 	}
 	if pin != nil {
-		dc := s.api.hub.GetDaemon(*pin)
+		dc := s.api.hub.GetHostDaemon(*pin)
 		if dc == nil {
 			return nil, capacityErrorf("the pinned daemon is not connected")
 		}
@@ -620,7 +631,7 @@ func (s *CronService) pickDaemon(pin *string, needGateway bool) (*DaemonConn, er
 		}
 		return dc, nil
 	}
-	all := s.api.hub.GetAllDaemons()
+	all := s.api.hub.GetHostDaemons()
 	if len(all) == 0 {
 		return nil, capacityErrorf("no daemon is connected")
 	}
@@ -673,27 +684,88 @@ func (s *CronService) connectionProblems(ctx context.Context, c *db.Cron, sel []
 }
 
 // buildGrant is step 5: the fire-time connection check, then the shared resolver with the cron
-// token as proof.
-func (s *CronService) buildGrant(ctx context.Context, c *db.Cron, sel []MCPSelection, target grantTarget) (*ResolvedGrant, error) {
+// token as proof. It also returns the tools re-pinned under auto_accept.
+func (s *CronService) buildGrant(ctx context.Context, c *db.Cron, sel []MCPSelection, target grantTarget) (*ResolvedGrant, []repinnedTool, error) {
 	problems, err := s.connectionProblems(ctx, c, sel)
 	switch {
 	case errors.Is(err, ErrMCPProofInvalid):
-		return nil, s.pauseRevoked(ctx, c)
+		return nil, nil, s.pauseRevoked(ctx, c)
 	case err != nil:
-		return nil, capacityErrorf("cannot read the cron's MCP connections from blerg-core, will retry: %v", err)
+		return nil, nil, capacityErrorf("cannot read the cron's MCP connections from blerg-core, will retry: %v", err)
 	}
 	if len(problems) > 0 {
 		reasons := make([]string, len(problems))
 		for i, p := range problems {
 			reasons[i] = p.Reason
 		}
-		return nil, credentialErrorf("%s", strings.Join(reasons, "; "))
+		return nil, nil, credentialErrorf("%s", strings.Join(reasons, "; "))
 	}
-	g, apiErr := s.api.resolveGrantProof(ctx, mcpgw.Proof{AccountID: c.OwnerAccountID, TokenID: c.TokenID}, sel, target)
+	// The scheduler alone may re-pin: a connection the owner set to auto_accept takes the live
+	// definition of a changed tool for this run (recorded after the start succeeds).
+	g, repinned, apiErr := s.api.resolveGrantProofOpts(ctx, mcpgw.Proof{AccountID: c.OwnerAccountID, TokenID: c.TokenID}, sel, target, true)
 	if apiErr != nil {
-		return nil, s.startError(ctx, c, apiErr)
+		return nil, nil, s.startError(ctx, c, apiErr)
 	}
-	return g, nil
+	return g, repinned, nil
+}
+
+// updateCronForRepins is the cron write behind recordRepins, a variable so a test can fail it.
+var updateCronForRepins = db.UpdateCronTx
+
+// recordRepins records the re-pins the fire accepted under auto_accept: one pin event per tool
+// naming the run's session (the run's grant WAS re-pinned, so the event is written whatever
+// happens to the stored selection), and the cron's stored selection moved to the new hashes,
+// each as a compare-and-set on the old hash (a concurrent human save wins), in one transaction.
+// A deleted cron, or one whose selection cannot be moved, still gets its events. Best effort: a failure is logged and the next fire
+// re-pins again.
+func (s *CronService) recordRepins(ctx context.Context, c *db.Cron, sessionID string, repinned []repinnedTool) {
+	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), cronCallTimeout)
+	defer cancel()
+	event := func(rp repinnedTool) db.PinEvent {
+		return db.PinEvent{
+			AccountID: c.OwnerAccountID, SessionID: sessionID, ConnectionID: rp.ConnectionID, ConnectionName: rp.ConnectionName,
+			Tool: rp.Tool, Action: db.PinRepinned, OldHash: rp.OldHash, NewHash: rp.NewHash, Mode: rp.Mode, Actor: "policy:auto_accept",
+		}
+	}
+	_, err := updateCronForRepins(bg, s.api.dbPool, c.OwnerAccountID, c.ID, func(ctx context.Context, tx pgx.Tx, cur *db.Cron) error {
+		sel, err := parseCronMCP(cur.MCP)
+		if err != nil {
+			return err
+		}
+		for _, rp := range repinned {
+			if err := db.InsertPinEvent(ctx, tx, event(rp)); err != nil {
+				return err
+			}
+			for i := range sel {
+				if sel[i].Connection != rp.ConnectionID {
+					continue
+				}
+				if ts, ok := sel[i].Tools[rp.Tool]; ok && ts.Hash == rp.OldHash {
+					ts.Hash = rp.NewHash
+					sel[i].Tools[rp.Tool] = ts
+				}
+			}
+		}
+		raw, err := json.Marshal(sel)
+		if err != nil {
+			return err
+		}
+		cur.MCP = raw
+		return nil
+	})
+	if err == nil {
+		return
+	}
+	// The run's grant WAS re-pinned, so its events are written whatever went wrong with the cron:
+	// it went while the run started (not found), or its stored selection could not be moved.
+	if !errors.Is(err, db.ErrCronNotFound) {
+		s.cfg.Logf("cron %s: record re-pinned tools: %v", c.ID, err)
+	}
+	for _, rp := range repinned {
+		if err := db.InsertPinEvent(bg, s.api.dbPool, event(rp)); err != nil {
+			s.cfg.Logf("cron %s: re-pin event: %v", c.ID, err)
+		}
+	}
 }
 
 // startError maps a failed StartSession (or grant resolution) to the typed error the scheduler
@@ -812,8 +884,10 @@ func (s *CronService) StopCronSessions(ctx context.Context, cronID string) (int,
 	if err != nil {
 		return 0, err
 	}
-	for _, sess := range active {
-		s.api.stopSession(ctx, sess.SessionID, cronStopEnd(sess.Account))
+	for i, sess := range active {
+		if err := s.api.stopSession(ctx, sess.SessionID, cronStopEnd(sess.Account)); err != nil {
+			return i, err
+		}
 	}
 	return len(active), nil
 }
@@ -843,7 +917,10 @@ func (s *CronService) WatchdogOnce(ctx context.Context) int {
 		default:
 			continue
 		}
-		s.api.stopSession(ctx, sess.SessionID, cronStopEnd(sess.Account))
+		if err := s.api.stopSession(ctx, sess.SessionID, cronStopEnd(sess.Account)); err != nil {
+			s.cfg.Logf("cron watchdog: stopping session %s failed: %v", sess.SessionID, err)
+			continue
+		}
 		stopped++
 	}
 	return stopped

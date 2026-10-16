@@ -1,0 +1,17 @@
+{"type": "system", "subtype": "init", "session_id": "cc-err-1"}
+{"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10, "retry_delay_ms": 600, "error_status": 529, "error": "overloaded_error", "session_id": "cc-err-1"}
+{"type": "assistant", "parent_tool_use_id": null, "isApiErrorMessage": true, "message": {"id": "msg_e1", "model": "<synthetic>", "content": [{"type": "text", "text": "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"}]}}
+{"type": "result", "subtype": "success", "is_error": true, "result": "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}", "session_id": "cc-err-1"}
+{"type": "system", "subtype": "init", "session_id": "cc-err-1"}
+{"type": "system", "subtype": "compact_boundary", "session_id": "cc-err-1", "compact_metadata": {"trigger": "manual", "pre_tokens": 151200}}
+{"type": "user", "isReplay": true, "uuid": "cmd-out-1", "message": {"role": "user", "content": "<local-command-stdout>Total cost: $0.12\nTotal duration: 4m</local-command-stdout>"}}
+{"type": "result", "subtype": "success", "is_error": false, "result": "", "session_id": "cc-err-1"}
+{"type": "system", "subtype": "init", "session_id": "cc-err-1"}
+{"type": "assistant", "parent_tool_use_id": null, "error": "rate_limit", "message": {"id": "msg_e2", "content": [{"type": "text", "text": "API Error: Rate limit reached"}]}}
+{"type": "assistant", "parent_tool_use_id": null, "message": {"id": "msg_e3", "content": [{"type": "text", "text": "Still working on it."}]}}
+{"type": "result", "subtype": "error_max_turns", "is_error": true, "errors": ["Reached the maximum number of turns (3)"], "session_id": "cc-err-1"}
+{"type": "system", "subtype": "init", "session_id": "cc-err-1"}
+{"type": "result", "subtype": "error_during_execution", "is_error": true, "errors": [{"message": "Tool execution failed"}], "session_id": "cc-err-1"}
+{"type": "system", "subtype": "init", "session_id": "cc-err-1"}
+{"type": "assistant", "parent_tool_use_id": null, "message": {"id": "msg_e4", "model": "<synthetic>", "content": [{"type": "text", "text": "API Error: Connection error."}]}}
+{"type": "result", "subtype": "success", "is_error": true, "result": "API Error: Connection error.", "session_id": "cc-err-1"}

@@ -17,6 +17,13 @@ type Messenger interface {
 	SendAsk(body string) (msgID string, err error)
 }
 
+// AskCloser is a Messenger that can mark an ask answered with an answer that reached the loop some
+// other way (typed in the chat while the ask waited), so the ask's card stops asking and its answer
+// is not delivered a second time. Optional.
+type AskCloser interface {
+	CloseAsk(msgID, answer string)
+}
+
 // installMessagingTools registers update/note/ask on the loop's registry.
 // Requires cfg.Messenger. Called by the host at session setup.
 func (l *Loop) installMessagingTools() {
@@ -93,21 +100,34 @@ func (t askTool) Execute(ctx context.Context, in json.RawMessage) (string, error
 		l.mu.Unlock()
 		return "", errors.New("another ask is already waiting for an answer; ask one question at a time")
 	}
-	ch := make(chan string, 1)
+	ch := make(chan Input, 1)
 	l.askCh = ch
 	l.mu.Unlock()
 
-	l.emit("ask", MessagingPayload{Body: args.Question})
-	if _, err := l.cfg.Messenger.SendAsk(args.Question); err != nil {
+	id, err := l.cfg.Messenger.SendAsk(args.Question)
+	if err != nil {
 		l.clearAsk()
 		return "", err
 	}
+	// With its message id, so the ask's card can be answered in place.
+	l.emit("ask", MessagingPayload{Body: args.Question, MessageID: id})
 	l.emit("status_changed", StatusPayload{Status: "waiting", Reason: "blocked on ask"})
 	defer l.emit("status_changed", StatusPayload{Status: "running", Reason: "ask answered"})
 	select {
 	case ans := <-ch:
 		l.clearAsk()
-		return ans, nil
+		// The answer is recorded when it is taken, as the person's answer to this ask: it never
+		// starts a turn of its own, so nothing else would record it.
+		p := ans.Payload()
+		p.Source, p.MessageID = "ask_answer", id
+		l.emit("user_message", p)
+		if ans.Source != "ask_answer" {
+			// Typed in the chat rather than on the ask: answer the ask's message too.
+			if c, ok := l.cfg.Messenger.(AskCloser); ok && id != "" {
+				c.CloseAsk(id, ans.Text)
+			}
+		}
+		return ans.Text, nil
 	case <-ctx.Done():
 		l.clearAsk()
 		return "", errors.New("ask interrupted")
@@ -123,7 +143,7 @@ func (l *Loop) clearAsk() {
 		// (or interrupt) and this teardown — preserve it as a queued message.
 		select {
 		case leftover := <-ch:
-			l.queue = append(l.queue, queuedMsg{leftover, "chat"})
+			l.queue = append(l.queue, leftover)
 		default:
 		}
 	}

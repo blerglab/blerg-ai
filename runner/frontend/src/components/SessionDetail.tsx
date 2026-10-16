@@ -1,10 +1,13 @@
 import { useParams, useNavigate } from 'react-router-dom'
 import { isAutomated, startedByLabel } from '../lib/startedBy'
-import { useRef, useState, useEffect, useMemo } from 'react'
+import { useCallback, useRef, useState, useEffect, useMemo } from 'react'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { useToastStore } from '../hooks/useToastStore'
 import { useMessageStore } from '../hooks/useMessageStore'
 import { useIsMobile } from '../hooks/useIsMobile'
+import { useMediaQuery } from '../hooks/useMediaQuery'
+import { usePendingToolChanges } from '../hooks/usePendingToolChanges'
+import { useSessionLive } from '../hooks/useSessionLive'
 import { send } from '../ws'
 import { arrowSeq, KEY_SEQ, type ArrowDir } from '../terminalKeys'
 import { sessionViewportBox } from '../terminalRenderer'
@@ -14,7 +17,15 @@ import { MessageThread } from './MessageThread'
 import { apiFetch } from '../apiFetch'
 import { StartProgress, placeholderAttempt, describeSessionEnd } from '@blerglab/chat'
 import CapabilitiesPanel from './CapabilitiesPanel'
+import SessionInsights from './SessionInsights'
+import StatusPill from './StatusPill'
+import { backgroundCount, displayState } from '../lib/displayState'
+import SessionRail, { PanelIcon } from './SessionRail'
+import { readCompact, readRailPref, readThinking, writeCompact, writeRailPref, writeThinking } from '../lib/sessionRail'
 import { isNoRepo, repoLabel } from '../lib/noRepo'
+
+// Below this width the side panel is a drawer over the chat rather than a column beside it.
+const RAIL_DRAWER_QUERY = '(max-width: 1023px)'
 
 // PendingStart is the start panel shown before the server has announced the
 // session; its clock starts when it first shows.
@@ -93,8 +104,104 @@ export default function SessionDetail() {
   const [editValue, setEditValue] = useState('')
   const [saving, setSaving] = useState(false)
   const [killArmed, setKillArmed] = useState(false)
+  // A terminal session's Skills & plugins dialog (an agent session's are the panel's Capabilities tab).
   const [showCaps, setShowCaps] = useState(false)
+  const [showInsights, setShowInsights] = useState(false)
   const killTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // ─── The side panel (agent sessions) ──────────────────────────────────────
+  // What needs the person and what runs, read once here: the header badge counts it, the panel
+  // lists it. On a wide screen the panel is a column whose open state is the person's choice, kept
+  // per browser. Until they make one it opens by itself when something runs or needs them (and
+  // stays open for this session). Once they close it, it opens by itself again only when something
+  // new needs them (an ask or a tool change that came after they closed it, or after the session
+  // was opened), once. On a narrow screen it is a drawer, opened only from the toggle.
+  const agentSession = session?.kind === 'agent'
+  const railId = useMemo(() => `session-rail-${sessionId ?? ''}`, [sessionId])
+  const narrow = useMediaQuery(RAIL_DRAWER_QUERY)
+  const [railPref, setRailPref] = useState<boolean | null>(readRailPref)
+  const [autoOpenFor, setAutoOpenFor] = useState<string | null>(null)
+  const [reopenFor, setReopenFor] = useState<string | null>(null)
+  // Closed by choice: what needed the person then (asks up to `since`, server time; `tools` tool
+  // changes) is not new.
+  const [quiet, setQuiet] = useState<{ id: string; since: number; tools: number | null } | null>(null)
+  const [drawerFor, setDrawerFor] = useState<string | null>(null)
+  // Read again when the person opens the panel or its Capabilities tab comes on screen.
+  const [toolsNonce, setToolsNonce] = useState(0)
+  const toolsLook = useCallback(() => setToolsNonce(n => n + 1), [])
+  // The chat's settings, which the panel's Live tab holds; kept per browser.
+  const [showThinking, setShowThinking] = useState(readThinking)
+  const [compactTools, setCompactTools] = useState(readCompact)
+  const railSettings = useMemo(() => ({
+    thinking: showThinking,
+    onThinking: (on: boolean) => { setShowThinking(on); writeThinking(on) },
+    compact: compactTools,
+    onCompact: (on: boolean) => { setCompactTools(on); writeCompact(on) },
+  }), [showThinking, compactTools])
+  // Read from the server's whole log (useSessionLive), again when the session's status changes or
+  // the person opens the panel or its Capabilities tab; from the chat's loaded events on an older server.
+  // The session's asks the message store holds as closed: one closed elsewhere is read again.
+  const closedAsks = useMemo(() => sessionMessages.filter(m => m.kind === 'ask' && m.status !== 'open').map(m => m.id).join(','), [sessionMessages])
+  const sessionLive = useSessionLive(sessionId ?? '', agentSession, `${session?.status ?? ''}|${toolsNonce}|${closedAsks}`)
+  const liveState = sessionLive.live
+  // The tool changes come with the live state; an older server's page reads them itself.
+  const toolChangesOwn = usePendingToolChanges(sessionId ?? '', agentSession && sessionLive.source === 'client', toolsNonce)
+  const toolChangesRead = sessionLive.source === 'client' ? toolChangesOwn : sessionLive.toolChanges
+  const toolChanges = toolChangesRead ?? 0
+  // With no saved choice the panel is open; a close is remembered, and something new reopens it once.
+  const panelOpen = railPref === null ? true : railPref || reopenFor === sessionId
+  const drawerOpen = drawerFor === sessionId
+  const railOpen = agentSession && (narrow ? drawerOpen : panelOpen)
+  // A file the History tab opens: handed to the chat, whose viewer opens it. n grows with every
+  // request, so the same file opens again after its viewer was closed.
+  const [fileAsk, setFileAsk] = useState<{ id: string; n: number } | null>(null)
+  const openArtifact = useCallback((id: string) => setFileAsk(a => ({ id, n: (a?.n ?? 0) + 1 })), [])
+  // The panel opened by itself for a question: a request (the session's id) that it show Live, the
+  // tab the person chose staying theirs. Cleared once the panel has acted on it, and on a switch of
+  // session, so coming back does not force Live again.
+  const [liveAsk, setLiveAsk] = useState<string | null>(null)
+  const showLive = (id: string) => setLiveAsk(id)
+  const liveShown = useCallback(() => setLiveAsk(null), [])
+  if (liveAsk !== null && liveAsk !== sessionId) setLiveAsk(null)
+  // A background subagent is listed (and counted) once, as a subagent.
+  const needsYou = liveState.openAsks.length + toolChanges
+  const runningNow = liveState.subagents.length + liveState.backgroundRunning
+  if (agentSession && sessionId) {
+    if (railPref === null && needsYou + runningNow > 0 && autoOpenFor !== sessionId) {
+      setAutoOpenFor(sessionId)
+      if (needsYou > 0) showLive(sessionId)
+    }
+    if (railPref === false && quiet?.id !== sessionId && liveState.heldUntil !== null) {
+      setQuiet({ id: sessionId, since: liveState.heldUntil, tools: toolChangesRead })
+    } else if (quiet?.id === sessionId && quiet.tools === null && toolChangesRead !== null) {
+      setQuiet({ ...quiet, tools: toolChangesRead })
+    }
+    // The promise is a new question. The tool change count is read only when the session, the panel
+    // or its Capabilities tab opens (nothing pushes a new proposal to the page), so its half rarely fires.
+    const somethingNew = railPref === false && quiet?.id === sessionId && (
+      liveState.openAsks.some(a => a.askedAt !== null && a.askedAt > quiet.since) ||
+      (quiet.tools !== null && toolChanges > quiet.tools))
+    if (somethingNew && reopenFor !== sessionId) {
+      setReopenFor(sessionId)
+      showLive(sessionId)
+    }
+  }
+  const choose = (open: boolean) => {
+    writeRailPref(open)
+    setRailPref(open)
+    setReopenFor(null)
+    if (open) setToolsNonce(n => n + 1)
+    else if (sessionId) setQuiet({ id: sessionId, since: Date.now() - liveState.clockOffset, tools: toolChangesRead })
+  }
+  const toggleRail = () => {
+    if (!narrow) choose(!panelOpen)
+    else if (drawerOpen) setDrawerFor(null)
+    else {
+      setDrawerFor(sessionId ?? null)
+      setToolsNonce(n => n + 1)
+    }
+  }
+  const closeRail = () => (narrow ? setDrawerFor(null) : choose(false))
 
   function sendKey(seq: string) {
     if (!sessionId) return
@@ -166,6 +273,15 @@ export default function SessionDetail() {
   const endLine = describeSessionEnd(session)
 
   // A live cluster session can be paused: its pod is freed, the session stays and a message resumes it.
+  // The state the header shows: idle to the engine with background work running (by the server's
+  // count or this page's live state) reads as working in the background.
+  // The live state counts only when read from the server's whole log: its running subagents and the
+  // tasks not done. The panel's Status row reads the same number.
+  const liveRunning = sessionLive.source === 'server'
+    ? liveState.subagents.length + (sessionLive.tasks ?? []).filter(t => !t.done).length
+    : null
+  const shownState = displayState(session, liveRunning)
+  const shownTasks = backgroundCount(session, liveRunning)
   const canPause = session.runtime === 'cluster' && ['running', 'idle', 'waiting'].includes(session.status)
 
   async function handlePauseClick() {
@@ -268,6 +384,9 @@ export default function SessionDetail() {
             </div>
           )}
           <div style={{ fontSize: 12, color: 'var(--fog)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {/* The header shows no status (the chat or terminal does), except this one, which nothing
+                else on the page says: its turn is over, its background work is not. */}
+            {shownState === 'background' && <><StatusPill state={shownState} tasks={shownTasks} testId="detail-status" />{' '}</>}
             {isAutomated(session) && <span data-testid="detail-started-by">started by {startedByLabel(session)} · </span>}
             {/* Fixed at start; an interactive session is the ordinary case and goes unmarked. */}
             {session.interaction === 'unattended' && (
@@ -296,8 +415,37 @@ export default function SessionDetail() {
         >
           {session.starred ? '★' : '☆'}
         </button>
-        {/* Agent sessions have this in their chat toolbar; a terminal session
-            has no structured report to show, and says so. */}
+        {/* This session's figures: time, work, subagents, tokens and cost. */}
+        <button
+          type="button"
+          className="caps-toggle"
+          data-testid="session-insights-toggle"
+          aria-haspopup="dialog"
+          title="This session's time, work, tokens and cost"
+          aria-label={isMobile ? 'Insights' : undefined}
+          onClick={() => setShowInsights(true)}
+          style={{ flexShrink: 0, ...(isMobile ? { padding: '4px 7px' } : null) }}
+        >
+          {/* on a phone the header has no room for the word: a small bar chart stands in for it */}
+          {isMobile ? (
+            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="currentColor">
+              <rect x="1" y="7" width="3" height="6" rx="0.5" />
+              <rect x="5.5" y="3" width="3" height="10" rx="0.5" />
+              <rect x="10" y="5" width="3" height="8" rx="0.5" />
+            </svg>
+          ) : 'Insights'}
+        </button>
+        {showInsights && (
+          <SessionInsights
+            sessionId={session.id}
+            title={session.title || repoLabel(session.repo)}
+            live={isActive}
+            background={shownState === 'background'}
+            onClose={() => setShowInsights(false)}
+          />
+        )}
+        {/* Agent sessions have this in their side panel (its Capabilities tab); a terminal
+            session has no structured report to show, and says so. */}
         {!isAgent && (
           <button
             type="button"
@@ -311,7 +459,7 @@ export default function SessionDetail() {
             🧩
           </button>
         )}
-        {showCaps && (
+        {showCaps && !isAgent && (
           <CapabilitiesPanel
             report={null}
             unavailable="Not available for terminal sessions. A terminal session runs the engine's interactive CLI, which doesn't report what it loaded; start an agent session to see its skills, plugins and MCP servers here."
@@ -409,7 +557,33 @@ export default function SessionDetail() {
             {killArmed ? '✕ Confirm kill?' : '✕ Kill'}
           </button>
         )}
+        {/* The side panel: what needs you, what runs, this session. The badge counts the first two. */}
+        {isAgent && (
+          <button
+            type="button"
+            className="caps-toggle rail-toggle"
+            data-testid="rail-toggle"
+            aria-expanded={railOpen}
+            aria-controls={railId}
+            aria-label={railLabel(needsYou, runningNow)}
+            title={railOpen ? 'Hide the session panel' : 'Show the session panel: what needs you, what is running, this session'}
+            onClick={toggleRail}
+            style={{ flexShrink: 0, ...(isMobile ? { padding: '4px 7px' } : null) }}
+          >
+            <PanelIcon />
+            {needsYou + runningNow > 0 && (
+              <span className={`rail-badge${needsYou > 0 ? ' attention' : ''}`} data-testid="rail-badge" aria-hidden="true">{needsYou + runningNow}</span>
+            )}
+          </button>
+        )}
+        {/* What the badge counts, said to a screen reader when it changes. */}
+        {isAgent && <span className="rail-announce" role="status" aria-live="polite" data-testid="rail-announce">{railLabel(needsYou, runningNow)}</span>}
       </div>
+
+      {/* Below the header: the session's column (banners, the chat or terminal) and, for an agent
+          session on a wide screen, the side panel beside it. */}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
 
       {/* Posture banner — states plainly how this session runs and whether
           permission prompts are bypassed (R5); persistent, not dismissible. */}
@@ -420,7 +594,7 @@ export default function SessionDetail() {
         {session.runtime === 'cluster'
           ? `Cluster session — runs in a Kubernetes pod with your (or the cluster's) credentials${isAgent ? ', no permission prompts' : ''}`
           : session.runtime === 'docker'
-            ? `Docker sandbox — ${isNoRepo(session.repo) ? 'scratch folder' : 'repo'} mounted at /workspace; your ~/.claude is shared${isAgent || session.skip_permissions ? ' · permission prompts bypassed' : ''}`
+            ? `Docker sandbox — ${isNoRepo(session.repo) ? 'scratch folder' : 'repo'} mounted at /workspace; using your engine login${isAgent || session.skip_permissions ? ' · permission prompts bypassed' : ''}`
             : isAgent
               ? `Agent session — runs unsandboxed on ${daemon?.name ?? session.daemon_id} as you, no permission prompts, using your engine login`
               : `Runs directly on ${daemon?.name ?? session.daemon_id} as you, using your engine login`}
@@ -521,7 +695,7 @@ export default function SessionDetail() {
         {isAgent
           // Keyed by id: draft, pending turn and notices belong to one
           // session and must not carry over when the route switches sessions.
-          ? <AgentChatView key={session.id} session={session} />
+          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} />
           : <TerminalDOMView sessionId={sessionId ?? ''} ref={termRef} />}
       </div>
 
@@ -591,7 +765,40 @@ export default function SessionDetail() {
           ))}
         </div>
       )}
+      </div>
+
+      {isAgent && (
+        <SessionRail
+          key={session.id}
+          id={railId}
+          session={session}
+          machine={daemon?.name}
+          live={liveState}
+          tasks={sessionLive.tasks}
+          liveRunning={liveRunning}
+          toolChanges={toolChanges}
+          mode={narrow ? 'drawer' : 'panel'}
+          open={railOpen}
+          onClose={closeRail}
+          onInsights={() => setShowInsights(true)}
+          onCapabilitiesShown={toolsLook}
+          settings={railSettings}
+          onOpenArtifact={openArtifact}
+          // A drawer only ever opens from the toggle: it shows the tab the person chose.
+          showLive={!narrow && liveAsk === session.id}
+          onLiveShown={liveShown}
+        />
+      )}
+      </div>
 
     </div>
   )
+}
+
+// The toggle's name: what it opens, and what its badge counts.
+function railLabel(needsYou: number, running: number): string {
+  const parts: string[] = []
+  if (needsYou > 0) parts.push(`${needsYou} ${needsYou === 1 ? 'needs' : 'need'} you`)
+  if (running > 0) parts.push(`${running} running`)
+  return parts.length > 0 ? `Session panel: ${parts.join(', ')}` : 'Session panel'
 }

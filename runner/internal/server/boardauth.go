@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"slices"
@@ -11,6 +12,10 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
+
+// sessionTokenRevokedCode is the "code" of authMessaging's 401 for a token
+// that exists but was revoked or has expired. The `blerg-runner` CLI matches it.
+const sessionTokenRevokedCode = "session_token_revoked"
 
 // authMessaging validates the bearer token for session→user messaging endpoints
 // (HandlePostMessages, HandleGetMessageAnswer, HandlePostMessageExpire).
@@ -49,10 +54,22 @@ func (a *API) authMessaging(w http.ResponseWriter, r *http.Request) (boardSessio
 		return "", true
 	}
 
+	if runtime, err := db.ValidateRuntimeToken(r.Context(), a.dbPool, raw); err == nil {
+		return runtime.SessionID, true
+	}
+
 	// Board-token path.
 	row, err := db.ValidateBoardToken(r.Context(), a.dbPool, raw)
 	if err != nil {
-		// Invalid or expired token — not the daemon token either.
+		// Invalid or expired token — not the daemon token either. One that was
+		// real once is told so (never echoing it): the `blerg-runner` CLI
+		// turns that into "revoked or expired" rather than a bare 401.
+		if errors.Is(err, db.ErrTokenRevoked) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "session token revoked or expired", "code": sessionTokenRevokedCode,
+			})
+			return "", false
+		}
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return "", false
 	}

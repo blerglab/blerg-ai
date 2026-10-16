@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, within, act } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { render, screen, fireEvent, within, act, waitFor } from '@testing-library/react'
+import { Suspense, use } from 'react'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import SessionList from './SessionList'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { useMessageStore } from '../hooks/useMessageStore'
@@ -27,6 +28,15 @@ function renderList(props = {}) {
   )
 }
 
+// The titles of the sessions in the store, in the order their cards sit on the page.
+function cardTitles(): string[] {
+  const body = document.body.textContent!
+  return useSessionStore.getState().sessions
+    .map(s => s.title)
+    .filter(t => body.includes(t))
+    .sort((x, y) => body.indexOf(x) - body.indexOf(y))
+}
+
 describe('SessionList', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -47,6 +57,24 @@ describe('SessionList', () => {
     expect(screen.getByTestId('crons-nav')).toHaveTextContent('Crons')
   })
 
+  it('shows the release version and commit at the foot of the sidebar and of the phone list', () => {
+    seed()
+    useSessionStore.setState({ serverVersion: '510d0c0', serverRelease: '0.2.0', serverCommit: '510d0c0' })
+    const { unmount } = renderList({ variant: 'sidebar' })
+    expect(screen.getByTestId('build-version')).toHaveTextContent('Blerg v0.2.0 · 510d0c0')
+    expect(screen.getByTestId('build-version').title).toContain('release 0.2.0')
+    unmount()
+    renderList()
+    expect(screen.getByTestId('build-version')).toHaveTextContent('Blerg v0.2.0 · 510d0c0')
+  })
+
+  it('falls back to the server version when the server reports no release', () => {
+    seed()
+    useSessionStore.setState({ serverVersion: 'dev', serverRelease: '', serverCommit: '' })
+    renderList({ variant: 'sidebar' })
+    expect(screen.getByTestId('build-version')).toHaveTextContent('Blerg dev')
+  })
+
   it('links to Proposals in the sidebar with the pending count, hidden at zero', () => {
     usePendingProposals.setState({ count: 2 })
     const { unmount } = renderList({ variant: 'sidebar' })
@@ -58,6 +86,39 @@ describe('SessionList', () => {
     expect(screen.queryByTestId('proposals-count-badge')).toBeNull()
   })
 
+  it('highlights the clicked session at once, while the switch to it is still rendering', () => {
+    seed([makeDaemon()], [
+      makeSession({ id: 'a', status: 'running', title: 'Session A' }),
+      makeSession({ id: 'b', status: 'running', title: 'Session B' }),
+    ])
+    // Opening b never finishes rendering (it suspends inside a transition), so the route stays on a.
+    const never = new Promise<never>(() => {})
+    function Opening(): null {
+      use(never)
+      return null
+    }
+    const { container } = render(
+      <MemoryRouter initialEntries={['/sessions/a']}>
+        <Suspense fallback={<div data-testid="fallback" />}>
+          <SessionList variant="sidebar" />
+          <Routes>
+            <Route path="/sessions/a" element={<div data-testid="route-a" />} />
+            <Route path="/sessions/b" element={<Opening />} />
+          </Routes>
+        </Suspense>
+      </MemoryRouter>,
+    )
+    const active = () => Array.from(container.querySelectorAll('[data-active="true"]')).map(el => el.textContent)
+    expect(active()).toHaveLength(1)
+    expect(active()[0]).toContain('Session A')
+
+    fireEvent.click(screen.getByText('Session B'))
+    expect(screen.getByTestId('route-a')).toBeInTheDocument()
+    expect(screen.queryByTestId('fallback')).toBeNull()
+    expect(active()).toHaveLength(1)
+    expect(active()[0]).toContain('Session B')
+  })
+
   it('links to Insights in the sidebar, and only there', () => {
     const { unmount } = renderList({ variant: 'sidebar' })
     expect(screen.getByTestId('insights-nav')).toHaveTextContent('Insights')
@@ -66,12 +127,66 @@ describe('SessionList', () => {
     expect(screen.queryByTestId('insights-nav')).toBeNull()
   })
 
-  it('renders active sessions grouped under their repo', () => {
-    seed([makeDaemon()], [makeSession({ status: 'running', repo: 'widget', title: 'Task one' })])
+  it('lists active sessions one after the next, each card saying its repo, with no repo groups', () => {
+    seed([makeDaemon()], [
+      makeSession({ id: 'a', status: 'running', repo: 'blerglab/widget', title: 'Task one' }),
+      makeSession({ id: 'b', status: 'running', repo: 'blerglab/engine', title: 'Task two' }),
+    ])
     renderList()
-    // Repo header is uppercased via CSS but the text node is the raw repo name.
-    expect(screen.getByText('widget')).toBeInTheDocument()
     expect(screen.getByText('Task one')).toBeInTheDocument()
+    expect(screen.getAllByTestId('session-repo').map(r => r.textContent).sort()).toEqual(['blerglab/engine', 'blerglab/widget'])
+    // No repo heading, no group toggle.
+    expect(screen.queryByText('▶', { selector: 'span' })).toBeNull()
+    expect(screen.queryByTestId(/^repo-group/)).toBeNull()
+  })
+
+  it('orders the list by start time, newest first, across repos and whatever the status', () => {
+    seed([makeDaemon()], [
+      makeSession({ id: 'i', status: 'idle', repo: 'a/alpha', title: 'Idle alpha', started_at: '2026-06-15T00:00:00Z' }),
+      makeSession({ id: 'r1', status: 'running', repo: 'z/zulu', title: 'Running old', started_at: '2026-01-01T00:00:00Z' }),
+      makeSession({ id: 'w', status: 'waiting', repo: 'm/mike', title: 'Waiting', started_at: '2026-02-01T00:00:00Z' }),
+      makeSession({ id: 'r2', status: 'running', repo: 'a/alpha', title: 'Running new', started_at: '2026-06-01T00:00:00Z' }),
+    ])
+    renderList()
+    expect(cardTitles()).toEqual(['Idle alpha', 'Running new', 'Waiting', 'Running old'])
+  })
+
+  it('does not move a card when its status changes', () => {
+    seed([makeDaemon()], [
+      makeSession({ id: 'a', status: 'running', title: 'Newest', started_at: '2026-06-03T00:00:00Z' }),
+      makeSession({ id: 'b', status: 'running', title: 'Middle', started_at: '2026-06-02T00:00:00Z' }),
+      makeSession({ id: 'c', status: 'idle', title: 'Oldest', started_at: '2026-06-01T00:00:00Z' }),
+    ])
+    renderList()
+    const before = ['Newest', 'Middle', 'Oldest']
+    expect(cardTitles()).toEqual(before)
+    const setStatus = (id: string, status: 'running' | 'idle' | 'waiting', background_tasks = 0) => act(() => {
+      useSessionStore.setState(st => ({
+        sessions: st.sessions.map(s => (s.id === id ? { ...s, status, background_tasks } : s)),
+      }))
+    })
+    setStatus('a', 'idle')
+    expect(cardTitles()).toEqual(before)
+    setStatus('c', 'running')
+    expect(cardTitles()).toEqual(before)
+    setStatus('b', 'idle', 2)
+    expect(cardTitles()).toEqual(before)
+    setStatus('c', 'waiting')
+    expect(cardTitles()).toEqual(before)
+  })
+
+  it('puts a newly started session at the top of the list', () => {
+    seed([makeDaemon()], [
+      makeSession({ id: 'a', status: 'idle', title: 'Existing one', started_at: '2026-06-02T00:00:00Z' }),
+      makeSession({ id: 'b', status: 'running', title: 'Existing two', started_at: '2026-06-01T00:00:00Z' }),
+    ])
+    renderList()
+    act(() => {
+      useSessionStore.setState(st => ({
+        sessions: [...st.sessions, makeSession({ id: 'n', status: 'starting', title: 'Brand new', started_at: '2026-06-10T00:00:00Z' })],
+      }))
+    })
+    expect(cardTitles()).toEqual(['Brand new', 'Existing one', 'Existing two'])
   })
 
   it('lists an active cluster session whose pod daemon is not in the daemon list', () => {
@@ -82,13 +197,13 @@ describe('SessionList', () => {
     expect(screen.getByText('Cluster task')).toBeInTheDocument()
   })
 
-  it('groups every no-repo session under "No repository", never a scratch folder name', () => {
+  it('shows no repo line for a no-repo session, never a scratch folder name', () => {
     seed([makeDaemon()], [
       makeSession({ id: 's1', status: 'running', repo: '.scratch-granite-8000', title: 'Scratch one' }),
       makeSession({ id: 's2', status: 'running', repo: '.scratch-ember-01ab', title: 'Scratch two' }),
     ])
     renderList()
-    expect(screen.getAllByText('No repository')).toHaveLength(1)
+    expect(screen.queryByTestId('session-repo')).toBeNull()
     expect(screen.getByText('Scratch one')).toBeInTheDocument()
     expect(screen.getByText('Scratch two')).toBeInTheDocument()
     expect(screen.queryByText(/\.scratch-/)).not.toBeInTheDocument()
@@ -103,11 +218,55 @@ describe('SessionList', () => {
     expect(screen.getByText('2 sessions waiting for input')).toBeInTheDocument()
   })
 
+  it('does not count a session working in the background as waiting for input', () => {
+    seed([makeDaemon()], [
+      makeSession({ id: 's1', status: 'waiting' }),
+      makeSession({ id: 's2', status: 'idle', background_tasks: 3 }),
+    ])
+    renderList()
+    expect(screen.getByText('1 session waiting for input')).toBeInTheDocument()
+  })
+
+  it('leaves sessions a restart left paused out of the banner, with no Resume all', () => {
+    seed([makeDaemon()], [
+      makeSession({ id: 's1', status: 'waiting' }),
+      makeSession({ id: 'p1', status: 'idle', paused_reason: 'restart' }),
+    ])
+    renderList()
+    expect(screen.getByTestId('waiting-banner')).toHaveTextContent(/^⚡1 session waiting for input$/)
+    expect(screen.queryByText(/paused by a restart/)).toBeNull()
+    expect(screen.queryByTestId('resume-all')).toBeNull()
+  })
+
+  it('shows no banner when the only session is one a restart left paused', () => {
+    seed([makeDaemon()], [makeSession({ id: 'p1', status: 'idle', paused_reason: 'restart' })])
+    renderList()
+    expect(screen.queryByTestId('waiting-banner')).toBeNull()
+  })
+
+  it('shows no waiting banner when the only live sessions work in the background', () => {
+    seed([makeDaemon()], [makeSession({ id: 's1', status: 'idle', background_tasks: 1 })])
+    renderList()
+    expect(screen.queryByText(/waiting for input/)).toBeNull()
+  })
+
   it('tells the user how to start a daemon when none is connected', () => {
     seed([], [])
     renderList()
     expect(screen.getByText(/No daemon connected\. Start it:/)).toBeInTheDocument()
     expect(screen.getByText(/daemon\/install\.sh status/)).toBeInTheDocument()
+  })
+
+  it('offers notifications as a small bell beside + New, not as a row of its own', () => {
+    vi.stubGlobal('Notification', { permission: 'default', requestPermission: vi.fn() })
+    seed()
+    renderList({ variant: 'sidebar' })
+    const bell = screen.getByRole('button', { name: 'Enable notifications' })
+    expect(bell.title).toBe('Enable notifications')
+    expect(bell.textContent).toBe('')
+    expect(bell.parentElement).toContainElement(screen.getByText('+ New'))
+    expect(screen.queryByText('Enable notifications')).toBeNull()
+    vi.unstubAllGlobals()
   })
 
   it('calls onNewSession when the New button is clicked', () => {
@@ -130,7 +289,7 @@ describe('SessionList — single daemon', () => {
       [makeSession({ id: 's1', daemon_id: 'd1', title: 'Widget task', status: 'running' })],
     )
     renderList()
-    expect(screen.queryByTestId('focus-pill-row')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('focus-pill-all')).not.toBeInTheDocument()
     expect(screen.queryByTestId('collapse-all')).not.toBeInTheDocument()
   })
 })
@@ -158,7 +317,7 @@ describe('SessionList — two daemons', () => {
   it('renders focus pill row when 2 daemons', () => {
     seedTwo()
     renderList()
-    expect(screen.getByTestId('focus-pill-row')).toBeInTheDocument()
+    expect(screen.getByTestId('place-pills')).toBeInTheDocument()
     expect(screen.getByTestId('focus-pill-all')).toBeInTheDocument()
     expect(screen.getByTestId('focus-pill-d1')).toBeInTheDocument()
     expect(screen.getByTestId('focus-pill-d2')).toBeInTheDocument()
@@ -282,13 +441,12 @@ describe('SessionList — search', () => {
     expect(screen.queryByText('UI work')).not.toBeInTheDocument()
   })
 
-  it('non-matching repos and daemons are hidden during search', () => {
+  it('sessions that do not match are hidden during search, whatever their repo or daemon', () => {
     seedSearch()
     renderList()
     fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'backend' } })
-    // widget repo section should be gone (no matching session)
+    // Neither the other cards nor their repo lines are left.
     expect(screen.queryByText('widget')).not.toBeInTheDocument()
-    // frontend repo section should be gone too
     expect(screen.queryByText('frontend')).not.toBeInTheDocument()
     // only backend match is visible
     expect(screen.getByText('Backend task')).toBeInTheDocument()
@@ -330,32 +488,6 @@ describe('SessionList — search', () => {
 
 })
 
-describe('SessionList — sort tiebreak', () => {
-  beforeEach(() => {
-    localStorage.clear()
-    useSessionStore.setState({ daemons: [], sessions: [], statusChangedAt: {}, serverVersion: '' })
-  })
-
-  it('two same-status sessions sort newest-first by started_at', () => {
-    const d = makeDaemon({ id: 'd1' })
-    const sOld = makeSession({
-      id: 'old', daemon_id: 'd1', repo: 'widget', title: 'Older task',
-      status: 'running', started_at: '2026-01-01T00:00:00Z',
-    })
-    const sNew = makeSession({
-      id: 'new', daemon_id: 'd1', repo: 'widget', title: 'Newer task',
-      status: 'running', started_at: '2026-06-15T00:00:00Z',
-    })
-    useSessionStore.setState({
-      daemons: [d], sessions: [sOld, sNew],
-      statusChangedAt: { old: Date.now(), new: Date.now() }, serverVersion: 'test',
-    })
-    renderList()
-    const body = document.body.textContent!
-    expect(body.indexOf('Newer task')).toBeLessThan(body.indexOf('Older task'))
-  })
-})
-
 describe('SessionList — starred section', () => {
   const d1 = makeDaemon({ id: 'd1', name: 'workstation', status: 'connected' })
   const d2 = makeDaemon({ id: 'd2', name: 'laptop', status: 'connected' })
@@ -365,7 +497,7 @@ describe('SessionList — starred section', () => {
     useSessionStore.setState({ daemons: [], sessions: [], statusChangedAt: {}, serverVersion: '' })
   })
 
-  it('starred active session appears inside starred-section and is absent from its repo group', () => {
+  it('starred active session appears inside starred-section and not again in the list', () => {
     const starred = makeSession({ id: 's1', daemon_id: 'd1', repo: 'widget', title: 'Starred task', status: 'running', starred: true })
     const normal = makeSession({ id: 's2', daemon_id: 'd1', repo: 'widget', title: 'Normal task', status: 'running', starred: false })
     useSessionStore.setState({
@@ -380,13 +512,39 @@ describe('SessionList — starred section', () => {
     const starredSection = screen.getByTestId('starred-section')
     expect(within(starredSection).getByText('Starred task')).toBeInTheDocument()
 
-    // Starred task appears exactly once (not also in the repo group)
+    // Starred task appears exactly once (not also in the list below)
     const allMatches = screen.getAllByText('Starred task')
     expect(allMatches).toHaveLength(1)
 
-    // Normal task is NOT in the starred section, but IS in the repo group
+    // Normal task is NOT in the starred section, but IS in the list
     expect(within(starredSection).queryByText('Normal task')).not.toBeInTheDocument()
     expect(screen.getByText('Normal task')).toBeInTheDocument()
+  })
+
+  it('keeps starred sessions first, newest started first among them, and does not move them on a status change', () => {
+    useSessionStore.setState({
+      daemons: [d1],
+      sessions: [
+        makeSession({ id: 'n1', daemon_id: 'd1', title: 'Plain newest', status: 'running', started_at: '2026-06-09T00:00:00Z' }),
+        makeSession({ id: 's1', daemon_id: 'd1', title: 'Star older', status: 'idle', starred: true, started_at: '2026-06-01T00:00:00Z' }),
+        makeSession({ id: 's2', daemon_id: 'd1', title: 'Star newer', status: 'idle', starred: true, started_at: '2026-06-05T00:00:00Z' }),
+        makeSession({ id: 'n2', daemon_id: 'd1', title: 'Plain older', status: 'waiting', started_at: '2026-06-02T00:00:00Z' }),
+      ],
+      statusChangedAt: {}, serverVersion: 'test',
+    })
+    renderList()
+    const order = ['Star newer', 'Star older', 'Plain newest', 'Plain older']
+    const titles = () => {
+      const body = document.body.textContent!
+      return [...order].sort((x, y) => body.indexOf(x) - body.indexOf(y))
+    }
+    expect(titles()).toEqual(order)
+    act(() => {
+      useSessionStore.setState(st => ({
+        sessions: st.sessions.map(x => (x.id === 's1' ? { ...x, status: 'running' as const } : x.id === 's2' ? { ...x, status: 'waiting' as const } : x)),
+      }))
+    })
+    expect(titles()).toEqual(order)
   })
 
   it('does not render starred-section when no active session is starred', () => {
@@ -440,24 +598,21 @@ describe('SessionList — starred section', () => {
   })
 })
 
-describe('SessionList — idle repos are always shown', () => {
+describe('SessionList — idle sessions are always shown', () => {
   beforeEach(() => {
     localStorage.clear()
     useSessionStore.setState({ daemons: [], sessions: [], statusChangedAt: {}, serverVersion: '' })
   })
 
-  it('all-idle repo shows its sessions immediately, with no collapse one-liner', () => {
+  it('an idle session is listed with no expand step', () => {
     const d = makeDaemon({ id: 'd1' })
     const s1 = makeSession({ id: 's1', daemon_id: 'd1', repo: 'widget', title: 'Idle task', status: 'idle' })
     useSessionStore.setState({ daemons: [d], sessions: [s1], statusChangedAt: { s1: Date.now() }, serverVersion: 'test' })
     renderList()
-    // Session is visible without any expand action — idle repos no longer auto-collapse.
     expect(screen.getByText('Idle task')).toBeInTheDocument()
-    // The dashed collapse one-liner is gone entirely.
-    expect(screen.queryByTestId('idle-repo-widget')).not.toBeInTheDocument()
   })
 
-  it('active repo with a running session is shown', () => {
+  it('a running session is listed', () => {
     const d = makeDaemon({ id: 'd1' })
     const s1 = makeSession({ id: 's1', daemon_id: 'd1', repo: 'widget', title: 'Running task', status: 'running' })
     useSessionStore.setState({ daemons: [d], sessions: [s1], statusChangedAt: { s1: Date.now() }, serverVersion: 'test' })
@@ -465,7 +620,7 @@ describe('SessionList — idle repos are always shown', () => {
     expect(screen.getByText('Running task')).toBeInTheDocument()
   })
 
-  it('a mix of idle and active repos all show their sessions', () => {
+  it('idle and running sessions of different repos are all listed', () => {
     const d = makeDaemon({ id: 'd1' })
     const idle = makeSession({ id: 's1', daemon_id: 'd1', repo: 'widget', title: 'Idle task', status: 'idle' })
     const running = makeSession({ id: 's2', daemon_id: 'd1', repo: 'engine', title: 'Running task', status: 'running' })
@@ -490,7 +645,7 @@ describe('SessionList — cluster pill count', () => {
     ])
     renderList()
     // the server says 3 are in use but the store has 2 active cluster sessions: the pill shows the live 2
-    expect(await screen.findByText(/Cluster · 2\/4 running/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('focus-pill-cluster')).toHaveTextContent('Cluster 2/4'))
     // one is killed: the pill drops at once, with no refetch needed
     act(() => {
       useSessionStore.setState({ sessions: [
@@ -498,7 +653,7 @@ describe('SessionList — cluster pill count', () => {
         makeSession({ id: 'c2', runtime: 'cluster', status: 'running', daemon_id: 'pod-2' }),
       ] })
     })
-    expect(await screen.findByText(/Cluster · 1\/4 running/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('focus-pill-cluster')).toHaveTextContent('Cluster 1/4'))
   })
 
   it('follows a cap saved on the Cluster page without a reload', async () => {
@@ -508,11 +663,11 @@ describe('SessionList — cluster pill count', () => {
     })))
     seed([], [])
     renderList()
-    expect(await screen.findByText(/Cluster · 0\/4 running/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('focus-pill-cluster')).toHaveTextContent('Cluster 0/4'))
     act(() => {
       window.dispatchEvent(new CustomEvent('blerg:cluster-settings-saved', { detail: { configured: true, max_sessions: 12 } }))
     })
-    expect(await screen.findByText(/Cluster · 0\/12 running/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('focus-pill-cluster')).toHaveTextContent('Cluster 0/12'))
   })
 })
 
@@ -538,7 +693,7 @@ describe('History order', () => {
 })
 
 describe('Automated sessions', () => {
-  it('keeps tool-, cron- and key-started sessions out of the repo groups and History, in a collapsed section that counts them', () => {
+  it('keeps tool-, cron- and key-started sessions out of the list and History, in a collapsed section that counts them', () => {
     useSessionStore.setState({
       sessions: [
         makeSession({ id: 'mine', status: 'running', repo: '/r/widget', title: 'Mine' }),

@@ -17,7 +17,8 @@ vi.mock('./authClient', async (importOriginal) => {
 
 import { consumeAccessTokenFromFragment } from './authClient'
 import { apiFetch } from './apiFetch'
-import { clearRefreshAttempted } from './refreshGuard'
+import { signInStuck } from './signIn'
+import { clearRefreshAttempted, refreshReturnUrl } from './refreshGuard'
 
 const flush = () => new Promise<void>((r) => setTimeout(r, 0))
 
@@ -74,7 +75,7 @@ describe('apiFetch', () => {
     // let the fetch promise's .then chain run
     await flush()
 
-    expect(redirectToRefresh).toHaveBeenCalledWith(location.href)
+    expect(redirectToRefresh).toHaveBeenCalledWith(refreshReturnUrl())
     // the 401 response is never handed back to the caller
     expect(settled).toBe(false)
   })
@@ -96,6 +97,7 @@ describe('apiFetch', () => {
     const resp = await apiFetch('/api/sessions')
     expect(redirectToRefresh).toHaveBeenCalledTimes(1)
     expect(resp.status).toBe(401)
+    expect(signInStuck()).toBe(true) // and the page says so
   })
 
   it('renews the token quietly on a 401 and repeats the request once with the new one, with no redirect', async () => {

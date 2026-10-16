@@ -216,9 +216,19 @@ repository's up-to-date `main` with CI green:
 
 | Service | Where to read it | What stamps it |
 |---|---|---|
-| core | `version` in `GET /api/site` (public) and in the `GET /agents` manifest; the web footer | `BLERG_VERSION` in the image environment, set from the `VERSION` build argument |
+| core | `version` in `GET /api/site` (public) and in the `GET /agents` manifest; the web footer shows the release version and commit, with `version` on hover (and as the fallback when no release is reported) | `BLERG_VERSION` in the image environment, set from the `VERSION` build argument |
 | board | `GET /api/version`; the `GET /agents` manifest | `-X main.version`, from the `VERSION` build argument |
 | runner server and daemon | the server's `GET /agents` manifest, the version the UI shows for the server and each daemon, and the version core's component registry lists | `-X main.version`, from the `VERSION` build argument, or `git describe` in `runner/Makefile` |
+
+**Where the version shows.** The apps show the release version and commit as one line, "v0.2.0 · 510d0c0": at the foot of the runner's
+sidebar (and of its list on a phone), in core's page footer, and beside the title in the board's top
+bar. The first number is the **release**, the `VERSION` file the image was built from; the muted
+second one is the **git commit** it was built at (`dev` outside a git checkout), and is left out when
+the build did not record one. A hover shows both and the older `version` string. The same
+`release` and `commit` fields are in core's `GET /api/site`, the board's `GET /api/version` and the
+runner's `initial_state`. The Dockerfiles read `VERSION` and take the commit from a `COMMIT` build
+argument that `install/k8s/deploy.sh` and `install/desktop/blerg-up.sh` fill in (`BLERG_COMMIT`
+overrides it for the desktop stack).
 
 The Kubernetes installer passes the image `TAG` from `install/k8s/.env` as that build argument,
 so set `TAG` to the release version (for example `v0.1.0`) to have the cluster report it. The

@@ -103,7 +103,7 @@ function ToolRow({ entry, open, onToggle, live }: {
   const ms = useRunningFor(entry, live && !entry.result)
   const { summary, shell } = describeInput(call.input)
   return (
-    <div className={`tcg-row ${result?.is_error ? 'tcg-row-bad' : ''}`} data-testid="tool-row">
+    <div className={`tcg-row ${result?.is_error ? 'tcg-row-bad' : ''}`} data-testid="tool-row" data-call-id={call.call_id}>
       <button type="button" className="tcg-row-head" aria-expanded={open} onClick={onToggle} title={rowTitle(entry)}>
         <Status result={result} running={live} />
         <span className="tcg-name">{call.tool}</span>
@@ -167,7 +167,12 @@ export const ToolGroup = memo(function ToolGroup({ entries, live }: ToolGroupPro
   const stats = groupStats(entries)
   const failures = entries.filter(e => e.result?.is_error)
   return (
-    <div className={`tcg-group ${stats.failed > 0 ? 'tcg-group-bad' : ''}`} data-testid="tool-group">
+    <div
+      className={`tcg-group ${stats.failed > 0 ? 'tcg-group-bad' : ''}`}
+      data-testid="tool-group"
+      // Every call the group holds, so a link to one finds the group while it is folded.
+      data-call-ids={entries.map(e => e.call.call_id).join(' ')}
+    >
       <button
         type="button"
         className="tcg-summary"

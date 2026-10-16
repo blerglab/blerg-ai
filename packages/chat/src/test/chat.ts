@@ -1,5 +1,7 @@
 // Shared bits of the ChatView suites: an event factory, a session row, the transcript seeding the
 // runner's tests did through its store, and the reset every test starts from.
+import { useBackgroundLiveStore } from '../hooks/useBackgroundTasks'
+import { useChatReportStore } from '../hooks/useLiveState'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
 import { resetKeptAttachments } from '../hooks/useAttachments'
 import { clearPreviewCache } from '../model/artifactPreview'
@@ -51,6 +53,8 @@ export function ingest(...events: AgentEvent[]) {
 export function resetChatState() {
   counter = 0
   useTranscriptStore.setState({ sessions: {} })
+  useBackgroundLiveStore.setState({ live: {} })
+  useChatReportStore.setState({ reports: {} })
   resetKeptAttachments()
   clearPreviewCache()
   localStorageChatStorage.set(COMPACT_KEY, null)

@@ -122,6 +122,8 @@ func TestRootRedirectsIntoApp(t *testing.T) {
 // inverted from OriginAudiences, so the SPA home can render its tiles without a token.
 func TestSiteEndpointIsPublic(t *testing.T) {
 	t.Setenv("BLERG_VERSION", "v-test")
+	t.Setenv("BLERG_RELEASE", "9.8.7")
+	t.Setenv("BLERG_COMMIT", "abc1234")
 	h := NewRouter(Deps{Audience: "blerg-core", OriginAudiences: map[string]string{
 		"https://board.example.com":  "blerg-board",
 		"https://runner.example.com": "blerg-runner",
@@ -132,7 +134,7 @@ func TestSiteEndpointIsPublic(t *testing.T) {
 		t.Fatalf("GET /api/site = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`"version":"v-test"`, `"board_url":"https://board.example.com"`, `"runner_url":"https://runner.example.com"`} {
+	for _, want := range []string{`"version":"v-test"`, `"release":"9.8.7"`, `"commit":"abc1234"`, `"board_url":"https://board.example.com"`, `"runner_url":"https://runner.example.com"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("GET /api/site body missing %s: %s", want, body)
 		}

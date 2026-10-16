@@ -20,6 +20,11 @@ package server
 // Query: after_seq=N replays forward from a cursor; tail=1 replays the newest `limit` events and
 // marks the page older (has_older, first_seq) for a client that pages backwards from there, as the
 // websocket's Tail does. A `: keepalive` comment goes out every 15 s of silence.
+//
+// A consumer too slow for the hub's buffer misses live events (hubgap.go). The stream then reads
+// the missed events from the database and sends them inline, in seq order, before going on; a live
+// event the refill already carried is not sent twice. Events can still repeat across a reconnect
+// (after_seq from the last id seen), deduplicated on client_event_id as before.
 
 import (
 	"encoding/json"
@@ -145,13 +150,20 @@ func (a *API) HandleRunnerEventsLive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The opening page, its marker, and where the session stands.
+	repairEndedSessionInputs(ctx, a.hub, a.dbPool, sessionID)
 	rows, done := replayAgentEventsPage(ctx, a.dbPool, page)
 	for _, ev := range rows {
 		raw, err := json.Marshal(replayedAgentEvent(ev))
 		if err != nil {
 			continue
 		}
-		if !frame(ev.Seq, "agent_event", raw) {
+		seq := ev.Seq
+		if (done.Older && seq < done.FirstSeq) || (!done.Older && seq <= page.AfterSeq) {
+			// Older lifecycle context keeps its real seq in JSON, but must
+			// not move EventSource's Last-Event-ID behind its resume cursor.
+			seq = 0
+		}
+		if !frame(seq, "agent_event", raw) {
 			return
 		}
 	}
@@ -168,6 +180,39 @@ func (a *API) HandleRunnerEventsLive(w http.ResponseWriter, r *http.Request) {
 	if terminalSessionStatus(row.Status) {
 		end()
 		return
+	}
+
+	// refilled is the newest seq a gap refill sent: a live event at or below it was sent already.
+	var refilled int64
+	refill := func() bool {
+		from := a.hub.TakeAgentEventGap(sessionID, id)
+		if from <= 0 {
+			return true
+		}
+		after := from - 1
+		if refilled > after {
+			after = refilled
+		}
+		for {
+			rows, err := db.ListAgentEvents(ctx, a.dbPool, sessionID, after, 500)
+			if err != nil {
+				log.Printf("runner live stream %s: gap refill: %v", sessionID, err)
+				return true // the consumer can still resume from the last id it saw
+			}
+			for _, ev := range rows {
+				raw, err := json.Marshal(replayedAgentEvent(ev))
+				if err != nil {
+					continue
+				}
+				if !frame(ev.Seq, "agent_event", raw) {
+					return false
+				}
+				after, refilled = ev.Seq, ev.Seq
+			}
+			if len(rows) < 500 {
+				return true
+			}
+		}
 	}
 
 	keepalive := a.sseKeepalive()
@@ -192,6 +237,9 @@ func (a *API) HandleRunnerEventsLive(w http.ResponseWriter, r *http.Request) {
 			}
 			switch env.Type {
 			case "agent_event":
+				if env.Seq > 0 && env.Seq <= refilled {
+					break // a gap refill sent it already
+				}
 				if !frame(env.Seq, "agent_event", m) {
 					return
 				}
@@ -205,7 +253,14 @@ func (a *API) HandleRunnerEventsLive(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+			if !refill() {
+				return
+			}
 		case <-tick.C:
+			// A gap whose last missed event was followed only by other sessions' broadcasts.
+			if !refill() {
+				return
+			}
 			// A broadcast this stream was not registered for in time, or one the hub dropped,
 			// must not leave a consumer holding a stream for a session that is long over: the
 			// row is the record, so it is re-read on the keepalive beat.

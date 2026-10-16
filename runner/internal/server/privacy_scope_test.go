@@ -162,8 +162,9 @@ func types2str(e ast.Expr) string {
 var scopeRegistry = map[string]any{
 	"SessionStarted": protocol.SessionStarted{},
 	"SessionOutput":  protocol.SessionOutput{}, "SessionStateChanged": protocol.SessionStateChanged{},
-	"SessionMetaChanged": protocol.SessionMetaChanged{}, "SessionTitleChanged": protocol.SessionTitleChanged{},
-	"SessionEnded": protocol.SessionEnded{}, "SpawnSession": protocol.SpawnSession{},
+	"SessionMetaChanged": protocol.SessionMetaChanged{}, "SessionBackgroundChanged": protocol.SessionBackgroundChanged{},
+	"SessionTitleChanged": protocol.SessionTitleChanged{},
+	"SessionEnded":        protocol.SessionEnded{}, "SpawnSession": protocol.SpawnSession{},
 	"SendInput": protocol.SendInput{}, "KillSession": protocol.KillSession{},
 	"InjectNoteReply": protocol.InjectNoteReply{}, "ResizeSession": protocol.ResizeSession{},
 	"InitialState": protocol.InitialState{}, "DaemonDisconnected": protocol.DaemonDisconnected{},
@@ -179,7 +180,15 @@ var scopeRegistry = map[string]any{
 	"AgentUserMessage": protocol.AgentUserMessage{}, "SetSessionModel": protocol.SetSessionModel{},
 	"InterruptSession": protocol.InterruptSession{}, "SubscribeAgentEvents": protocol.SubscribeAgentEvents{},
 	"AgentEventsReplayDone": protocol.AgentEventsReplayDone{}, "MessageCreated": protocol.MessageCreated{},
-	"MessageAnswered": protocol.MessageAnswered{},
+	"MessageAnswered":      protocol.MessageAnswered{},
+	"RefreshSessionTools":  protocol.RefreshSessionTools{},
+	"AgentEventsGap":       protocol.AgentEventsGap{},
+	"SessionToken":         protocol.SessionToken{},
+	"SessionTokenResult":   protocol.SessionTokenResult{},
+	"SessionNotice":        protocol.SessionNotice{},
+	"SessionPaused":        protocol.SessionPaused{},
+	"SessionPausedChanged": protocol.SessionPausedChanged{},
+	"OpenAsks":             protocol.OpenAsks{},
 }
 
 func TestScopeRegistryIsComplete(t *testing.T) {
@@ -213,7 +222,7 @@ func fillForScope(v reflect.Value, structName string) {
 			case tag == "session_id" && fv.Kind() == reflect.String,
 				tag == "id" && structName == "SessionInfo" && fv.Kind() == reflect.String:
 				fv.SetString(scopeSecretID)
-			case tag == "affected_session_ids":
+			case tag == "affected_session_ids", tag == "session_ids":
 				fv.Set(reflect.ValueOf([]string{scopeSecretID}))
 			default:
 				fillForScope(fv, f.Type.Name())

@@ -1,16 +1,18 @@
 // useCapabilities: a session's latest capabilities report. Live and replayed
 // events carry it, but a browser replays only the first window of a long
-// transcript, so the latest is also asked for directly; whichever is newer
-// wins.
+// transcript, so the latest is also asked for directly (each time `active`
+// turns on: the session panel's Capabilities tab coming on screen); whichever is
+// newer wins.
 import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../apiFetch'
 import type { AgentEvent } from '../types'
 import { latestCapabilities, newerReport, normalizeCapabilities, type CapabilitiesReport } from '../lib/capabilities'
 
-export function useCapabilities(sessionId: string, events: AgentEvent[]): CapabilitiesReport | null {
+export function useCapabilities(sessionId: string, events: AgentEvent[], active = true): CapabilitiesReport | null {
   // Keyed by session, so a switch never shows the previous session's report.
   const [fetched, setFetched] = useState<{ sessionId: string; report: CapabilitiesReport } | null>(null)
   useEffect(() => {
+    if (!active) return
     let live = true
     void apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/capabilities`)
       .then(r => (r.ok ? r.json() : null))
@@ -27,7 +29,7 @@ export function useCapabilities(sessionId: string, events: AgentEvent[]): Capabi
       })
       .catch(() => {})
     return () => { live = false }
-  }, [sessionId])
+  }, [sessionId, active])
   const fromEvents = useMemo(() => latestCapabilities(events), [events])
   return newerReport(fetched?.sessionId === sessionId ? fetched.report : null, fromEvents)
 }

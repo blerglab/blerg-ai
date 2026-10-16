@@ -7,7 +7,7 @@ import Shell, { useSite, type Site } from "./Shell";
 import { getAccessToken, redirectToRefresh } from "./authClient";
 import { apiFetch } from "./apiFetch";
 import { mustChangePassword } from "./claims";
-import { markRefreshAttempted, refreshAlreadyAttempted } from "./refreshGuard";
+import { markRefreshAttempted, refreshAlreadyAttempted, resetRefreshGuard } from "./refreshGuard";
 
 // Me mirrors GET /api/me's response body (core/internal/api/me_handler.go). Kept minimal —
 // only the fields Home actually renders.
@@ -139,6 +139,7 @@ function HomeScreen() {
     try {
       await fetch("/auth/logout", { method: "POST" });
     } finally {
+      resetRefreshGuard();
       location.href = "/login";
     }
   };
@@ -152,6 +153,7 @@ function HomeScreen() {
     try {
       await apiFetch("/auth/logout-all", { method: "POST" });
     } finally {
+      resetRefreshGuard();
       location.href = "/login";
     }
   };

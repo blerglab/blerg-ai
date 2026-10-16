@@ -5,10 +5,13 @@ FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d8
 WORKDIR /src
 COPY contracts/ /src/contracts/
 COPY runner/ /src/runner/
+COPY VERSION /src/VERSION
 WORKDIR /src/runner
 RUN go mod download
+# release is the repository's VERSION file; commit is the short git commit, passed in.
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o blerg-runner-server ./cmd/server
+ARG COMMIT=
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION} -X main.release=$(tr -d '[:space:]' < /src/VERSION) -X main.commit=${COMMIT}" -o blerg-runner-server ./cmd/server
 
 # Stage 2: Build frontend
 # The web app and the chat package it is built from (@blerglab/chat, packages/chat) are members

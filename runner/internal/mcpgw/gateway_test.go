@@ -310,7 +310,7 @@ func TestHashMismatchHidesAndRefuses(t *testing.T) {
 		t.Errorf("changed tool must be hidden, got %v", got)
 	}
 	_, _, before := h.up.snapshot()
-	if r := h.callTool(gh, "echo", nil); !strings.Contains(r.errMessage(), "changed on the server") {
+	if r := h.callTool(gh, "echo", nil); !strings.Contains(r.errMessage(), "do not ask the person") {
 		t.Errorf("changed tool must be refused: %s", r.raw)
 	}
 	if _, _, after := h.up.snapshot(); after != before {
@@ -1020,8 +1020,8 @@ func TestChangedToolIsRefusedWithTheReason(t *testing.T) {
 	h.up.setDescription("echo", "now does something else")
 	h.clock.Advance(time.Minute) // past the live-hash refresh window
 	r := h.callTool(gh, "echo", map[string]any{"text": "hi"})
-	if msg := r.errMessage(); !strings.Contains(msg, "changed on the server") || !strings.Contains(msg, "new session") {
-		t.Fatalf("message = %q, want the cause and the fix", msg)
+	if msg := r.errMessage(); !strings.Contains(msg, "definition changed") || !strings.Contains(msg, "do not ask the person") {
+		t.Fatalf("message = %q, want the cause and the neutral instruction", msg)
 	}
 	if got := toolNames(h.call(gh, "tools/list", map[string]any{})); len(got) != 0 {
 		t.Errorf("a changed tool is still listed: %v", got)

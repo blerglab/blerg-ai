@@ -8,6 +8,8 @@
 #
 # Usage:
 #   install.sh install     build the daemon binary, install + start the service
+#                          (over a running daemon with agent work in progress it
+#                          lists that work and asks first; --yes skips the question)
 #   install.sh uninstall   stop and remove the service (binary is left in place)
 #   install.sh status      show whether it's running
 #   install.sh preflight   check only (used by blerg-up.sh before doing anything
@@ -38,9 +40,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")"            # install/desktop/daemon
 
 usage() {
   cat <<EOF
-Usage: $0 {install|uninstall|status|preflight}
+Usage: $0 {install [--yes]|uninstall|status|preflight}
 
-  install     build the daemon binary, install and start the service
+  install     build the daemon binary, install and start the service. A
+              reinstall over a running daemon that has agent work in
+              progress lists it and asks first; --yes reinstalls anyway.
+              With no terminal to ask, it stops with exit code 5
   uninstall   stop and remove the service (the binary is left in place)
   status      show whether it is running
   preflight   check only (used by blerg-up.sh); tries to start a missing
@@ -60,6 +65,17 @@ case "$CMD" in
     usage >&2
     exit 1 ;;
 esac
+shift
+ASSUME_YES=0
+for arg in "$@"; do
+  case "$arg" in
+    --yes|-y) [ "$CMD" = install ] && ASSUME_YES=1 && continue ;;
+  esac
+  echo "install.sh: unknown option: $arg" >&2
+  echo >&2
+  usage >&2
+  exit 1
+done
 
 if [ "$(id -u)" -eq 0 ]; then
   # This script always runs as you; it escalates only two specific commands
@@ -80,6 +96,12 @@ REPO_ROOT="$(cd ../../.. && pwd)"
 RUNNER_DIR="$REPO_ROOT/runner"
 BIN_DIR="$REPO_ROOT/bin"
 BIN_PATH="$BIN_DIR/blerg-runner-daemon"
+# install's exit code when it stopped because agent work is running and there
+# was no terminal to ask (blerg-up.sh says so instead of "didn't work").
+EXIT_WORK_RUNNING=5
+# The build lands here first, and replaces BIN_PATH only once the reinstall goes
+# ahead (put_binary_in_place): a "no" leaves the running daemon's binary alone.
+NEW_BIN_PATH="$BIN_PATH.new"
 ENV_FILE="$DESKTOP_DIR/.env"
 SERVICE_NAME="blerg-runner-daemon"
 OS="$(uname -s)"
@@ -169,7 +191,7 @@ EOF
   # puts any build under the repo tree into workspace mode and rejects
   # ./runner as a non-member module.
   if HOST_GO="$(find_host_go)"; then
-    ( cd "$RUNNER_DIR" && GOOS="$(go_os)" GOARCH="$(go_arch)" GOWORK=off "$HOST_GO" build -o "$BIN_PATH" ./cmd/daemon )
+    ( cd "$RUNNER_DIR" && GOOS="$(go_os)" GOARCH="$(go_arch)" GOWORK=off "$HOST_GO" build -o "$NEW_BIN_PATH" ./cmd/daemon )
   elif command -v docker >/dev/null 2>&1; then
     # No suitable host go — build inside a matching container instead. Only
     # the BUILD is containerized; the resulting binary runs directly on the
@@ -184,7 +206,7 @@ EOF
       -v "$HOME/.cache/blerg-go":/gopath \
       -v "$HOME/.cache/blerg-gocache":/gocache \
       -v "$REPO_ROOT":/src -w /src/runner \
-      golang:1.25@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 go build -o "/src/bin/blerg-runner-daemon" ./cmd/daemon
+      golang:1.25@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 go build -o "/src/bin/blerg-runner-daemon.new" ./cmd/daemon
   else
     blerg_fail "Need either go >=1.25 or docker on PATH to build the daemon."
     exit 1
@@ -220,6 +242,53 @@ EOF
   exit 1
 }
 
+# put_binary_in_place RUNNING: the last step before the service is (re)started.
+# RUNNING=1 when the daemon is running now: the new build is asked which agent
+# sessions the restart would cut off, and when there are some the person
+# decides (confirm_reinstall_over_work, hostcheck.sh). A "no" ends the install
+# here with nothing changed; otherwise the new build replaces the binary, and
+# RESTART_REASON says what the restart is for: "update" when the build differs
+# from the running one, "reinstall" when it is the same (note_planned_restart).
+RESTART_REASON=""
+put_binary_in_place() {
+  if [ "$1" = 1 ]; then
+    RESTART_REASON=update
+    cmp -s "$NEW_BIN_PATH" "$BIN_PATH" 2>/dev/null && RESTART_REASON=reinstall
+    local rc=0
+    confirm_reinstall_over_work "$NEW_BIN_PATH" "$ASSUME_YES" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      rm -f "$NEW_BIN_PATH"
+      if [ "$rc" -eq 1 ]; then
+        blerg_ok "Not reinstalled: the daemon was left running as it was."
+        exit 0
+      fi
+      exit "$EXIT_WORK_RUNNING"
+    fi
+  fi
+  mv -f "$NEW_BIN_PATH" "$BIN_PATH"
+}
+
+# note_planned_restart: right before the service restarts a running daemon,
+# leave it a marker in its state directory saying the restart is planned and
+# why (RESTART_REASON). The next daemon reads and removes it
+# (runner/internal/daemon/restartcause.go) and tells the agent sessions the
+# restart cut off that nothing they ran caused it; without it they are told
+# the daemon stopped unexpectedly. Nothing when no daemon was running. Never
+# fatal: a marker that cannot be written only changes those words.
+daemon_state_dir() { printf '%s' "${BLERG_RUNNER_DAEMON_STATE_DIR:-$HOME/.blerg-runner-daemon}"; }
+note_planned_restart() {
+  [ -n "$RESTART_REASON" ] || return 0
+  local dir
+  dir="$(daemon_state_dir)"
+  if mkdir -p "$dir" 2>/dev/null &&
+     printf '%s\n' "$RESTART_REASON" 2>/dev/null > "$dir/restart-planned.tmp" &&
+     mv -f "$dir/restart-planned.tmp" "$dir/restart-planned" 2>/dev/null; then
+    return 0
+  fi
+  blerg_step "Warning: couldn't note the planned restart in $dir; the sessions it cuts off will be told the daemon stopped unexpectedly."
+  return 0
+}
+
 require_env_file() {
   [ -f "$ENV_FILE" ] || {
     blerg_fail "No $ENV_FILE — run install/desktop/blerg-up.sh first."
@@ -242,7 +311,7 @@ render_placeholders() {
 # putting one in install/desktop/.env and re-running `install.sh install`
 # (or blerg-up.sh) bakes it into the unit/plist. The daemon itself never
 # reads .env — only its service environment.
-OPTIONAL_DAEMON_ENV="BLERG_RUNNER_PROVISION_CLAUDE_MD BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE"
+OPTIONAL_DAEMON_ENV="BLERG_RUNNER_PROVISION_CLAUDE_MD BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE BLERG_RUNNER_CLAUDE_USAGE"
 daemon_extra_env() {
   local k v
   if [ -n "${OAUTH_TOKEN:-}" ]; then printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$OAUTH_TOKEN"; fi
@@ -468,11 +537,16 @@ $(daemon_extra_env)
 EOF
   LOG_DIR=""  # unused by the systemd template; journald captures stdout/stderr
 
+  local running=0
+  systemctl --user is-active --quiet "$SERVICE_NAME.service" 2>/dev/null && running=1
+  put_binary_in_place "$running"
+
   render_placeholders < "$SERVICE_NAME.service.tmpl" | replace_marker_line __EXTRA_ENV__ "$extra_lines" > "$UNIT_PATH"
   chmod 600 "$UNIT_PATH"
 
   systemctl --user daemon-reload
   systemctl --user enable "$SERVICE_NAME.service"
+  note_planned_restart
   systemctl --user restart "$SERVICE_NAME.service"
   if ! loginctl enable-linger "$USER" 2>/dev/null; then
     # Usually harmless and only a warning: the daemon is running now, it just
@@ -580,9 +654,14 @@ install_launchd() {
 $(daemon_extra_env)
 EOF
 
+  local running=0
+  launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 && running=1
+  put_binary_in_place "$running"
+
   render_placeholders < dev.blerg.runner-daemon.plist.tmpl | replace_marker_line __EXTRA_ENV__ "$extra_entries" > "$PLIST_PATH"
   chmod 600 "$PLIST_PATH"
 
+  note_planned_restart
   launchctl bootout "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
   launchctl enable "gui/$(id -u)/$LABEL"

@@ -74,12 +74,19 @@ type startGroup struct {
 	Seconds  quantiles `json:"seconds"`
 }
 
+// stepRow is one step of a start as a box: seconds from the fastest to the slowest, and Slow, how
+// many starts took more than twice the median at it.
 type stepRow struct {
 	Runtime string  `json:"runtime"`
 	Step    string  `json:"step"`
 	Count   int     `json:"count"`
+	Min     float64 `json:"min"`
+	P25     float64 `json:"p25"`
 	P50     float64 `json:"p50"`
+	P75     float64 `json:"p75"`
 	P90     float64 `json:"p90"`
+	Max     float64 `json:"max"`
+	Slow    int     `json:"slow"`
 }
 
 type slowRow struct {
@@ -389,8 +396,11 @@ func summariseStartup(attempts []startRecord, byID map[string]db.InsightSession,
 		return out.Groups[i].Kind < out.Groups[j].Kind
 	})
 	for sk, v := range steps {
-		q := quantilesOf(v)
-		out.Steps = append(out.Steps, stepRow{Runtime: sk[0], Step: sk[1], Count: q.Count, P50: q.P50, P90: q.P90})
+		q := spreadOf(v)
+		out.Steps = append(out.Steps, stepRow{
+			Runtime: sk[0], Step: sk[1], Count: q.Count,
+			Min: q.Min, P25: q.P25, P50: q.P50, P75: q.P75, P90: q.P90, Max: q.Max, Slow: slowCount(v, q.P50),
+		})
 	}
 	sort.Slice(out.Steps, func(i, j int) bool {
 		if out.Steps[i].Runtime != out.Steps[j].Runtime {

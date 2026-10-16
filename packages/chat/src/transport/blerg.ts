@@ -9,12 +9,16 @@
 // It works from the runner's origin with a core-issued browser token, the only place such a token
 // exists; an outside app never uses it (that app's chat goes through proxy.ts).
 import type {
-  AgentEvent, AgentEventsReplayDone, AgentUserMessage, AssistantTextPayload, InterruptSession, SessionInfo, SessionStatus,
-  SetSessionModel, SubscribeAgentEvents, UnsubscribeSession,
+  AgentEvent, AgentEventsGap, AgentEventsReplayDone, AgentUserMessage, AssistantTextPayload, InterruptSession, SessionInfo,
+  SessionStatus, SetSessionModel, SubscribeAgentEvents, UnsubscribeSession,
 } from '../types'
 import { createFiles } from './files'
 import { createBrowserSocket } from './socket'
 import type { OlderPage, SessionMeta, SubscribeHandlers, SubscribeOptions, Transport } from './types'
+
+/** A message the session sent the person (the runner's MessageInfo), as initial_state and
+ *  message_answered carry it. */
+interface MessageInfo { id: string; session_id: string; kind: string; status: string; answer?: string | null }
 
 /** The messages a chat sends the runner over its socket (a subset of the runner's BrowserMessage). */
 export type ChatBrowserMessage = SubscribeAgentEvents | UnsubscribeSession | AgentUserMessage | SetSessionModel | InterruptSession
@@ -46,6 +50,20 @@ export interface BlergTransportOptions {
 /** The newest events shown at once on opening a transcript; the rest follow in pages of the same
  *  size (the runner's INITIAL_TAIL / OLDER_PAGE). */
 export const INITIAL_TAIL = 200
+
+/** How many full forward pages (the server's 200 events each, so about 1000 events) a subscriber
+ *  that can reset is replayed before the transport stops and loads the transcript from its end
+ *  instead. A revisit a little behind keeps the transcript it holds and catches up in a few
+ *  batches; one far behind would replay its whole gap forward, page after page, before showing
+ *  anything new, so it takes the path a reload takes: the newest page at once, the older part
+ *  paged in behind it (the events held are dropped and fetched again). */
+export const MAX_FORWARD_PAGES = 5
+
+/** How long a hole in the live seqs may stay open before the transport asks the server for it.
+ *  Seqs are contiguous per session, but live delivery is not strictly in seq order (the daemon's,
+ *  the artifacts' and the start stages' events are fanned out from different places), so an
+ *  event a little ahead of its predecessor is waited for briefly rather than fetched at once. */
+export const GAP_WAIT_MS = 1000
 
 /** How long a backward page may take before loadOlder gives up. */
 const OLDER_TIMEOUT_MS = 30_000
@@ -110,19 +128,111 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
   const subscribe = (sessionId: string, o: SubscribeOptions, h: SubscribeHandlers): (() => void) => {
     let lastSeq = o.afterSeq ?? 0
     const offs: Array<() => void> = []
+    // The events of the replay page in flight, held for one onEvents at its replay_done (a
+    // subscriber without onEvents gets them one by one as they come). null: no page in flight,
+    // events are live and go to onEvent as they arrive.
+    let page: AgentEvent[] | null = null
+    // Full forward pages in a row since the last subscribe, for the MAX_FORWARD_PAGES bound.
+    let fullPages = 0
+    // A tail asked for and not yet answered: a reconnect asks for it again rather than replaying
+    // forward from a live event that came in meanwhile.
+    let tailPending = false
+    // Where an unfinished forward replay has reached (the request's after_seq, then each page's
+    // last_seq while has_more); null when none is under way. A live event can come in mid-replay
+    // and move lastSeq past the gap still to be replayed, so a reconnect resumes from here.
+    let cursor: number | null = null
+    // Gap tracking: every persisted seq up to contig has been handed over; ahead holds the seqs
+    // handed over above it. A seq left out (a live event the server dropped for this browser, or
+    // one still on its way) keeps ahead non-empty: after GAP_WAIT_MS, or at once when the server
+    // says it dropped events (agent_events_gap), the transport replays forward from contig, and
+    // the transcript dedupes what it already holds.
+    let contig = o.afterSeq ?? 0
+    const ahead = new Set<number>()
+    let gapTimer: ReturnType<typeof setTimeout> | null = null
+    // A refill asked for while a replay was under way: sent once that replay is over.
+    let refillAfter: number | null = null
+
+    const batching = h.onEvents != null
+    const startPage = () => { if (batching && page == null) page = [] }
+    const flush = () => {
+      const held = page
+      page = null
+      if (held && held.length > 0) h.onEvents!(held)
+    }
+    const askTail = () => {
+      tailPending = true
+      cursor = null
+      startPage()
+      socket.send({ type: 'subscribe_agent_events', session_id: sessionId, after_seq: 0, tail: INITIAL_TAIL })
+    }
+    const askForward = (afterSeq: number) => {
+      cursor = afterSeq
+      startPage()
+      socket.send({ type: 'subscribe_agent_events', session_id: sessionId, after_seq: afterSeq })
+    }
+    const replaying = () => cursor != null || tailPending
+    const absorb = () => {
+      while (ahead.delete(contig + 1)) contig++
+      for (const seq of ahead) if (seq <= contig) ahead.delete(seq)
+    }
+    const noteSeq = (seq: number) => {
+      if (seq <= contig) return
+      if (seq === contig + 1) {
+        contig = seq
+        absorb()
+      } else {
+        ahead.add(seq)
+      }
+    }
+    const clearGapTimer = () => {
+      if (gapTimer) clearTimeout(gapTimer)
+      gapTimer = null
+    }
+    // Replays forward from afterSeq to fill a hole; while a replay is under way, once it is over.
+    const refill = (afterSeq: number) => {
+      clearGapTimer()
+      if (replaying()) {
+        refillAfter = refillAfter == null ? afterSeq : Math.min(refillAfter, afterSeq)
+        return
+      }
+      // Not connected: the next connection resumes from contig anyway.
+      if (!connected()) return
+      askForward(afterSeq)
+    }
+    const armGap = () => {
+      if (gapTimer || ahead.size === 0 || replaying()) return
+      gapTimer = setTimeout(() => {
+        gapTimer = null
+        if (ahead.size > 0) refill(contig)
+      }, GAP_WAIT_MS)
+    }
 
     offs.push(socket.onMessage('agent_event', (msg: never) => {
       const ev = msg as AgentEvent
       if (ev.session_id !== sessionId) return
       if (ev.transient && ev.kind === 'assistant_text') {
-        // A typing delta: the text so far this turn grows by it; never persisted.
-        h.onStreaming((ev.payload as AssistantTextPayload).text)
+        // A typing delta: the text so far this turn grows by it; never persisted. While a page is
+        // held it waits in it, behind the events before it: a closing event there must not
+        // clear text that came after it.
+        if (page) page.push(ev)
+        else h.onStreaming((ev.payload as AssistantTextPayload).text)
         return
       }
       const older = pendingOlder.get(sessionId)
       if (older && ev.seq != null && ev.seq < older.beforeSeq) return // loadOlder's page, collected there
       if (ev.seq != null && ev.seq > lastSeq) lastSeq = ev.seq
-      h.onEvent(ev)
+      if (ev.seq != null && ev.seq > 0) noteSeq(ev.seq)
+      if (page) page.push(ev)
+      else h.onEvent(ev)
+      armGap()
+    }))
+
+    // The server dropped live events for this browser (its buffer was full), the first with seq
+    // from_seq: fetched again at once, from wherever the transcript is complete up to.
+    offs.push(socket.onMessage('agent_events_gap', (msg: never) => {
+      const gap = msg as AgentEventsGap
+      if (gap.session_id !== sessionId || typeof gap.from_seq !== 'number' || gap.from_seq <= 0) return
+      refill(Math.min(contig, gap.from_seq - 1))
     }))
 
     offs.push(socket.onMessage('agent_events_replay_done', (msg: never) => {
@@ -130,7 +240,34 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       if (done.session_id !== sessionId) return
       // The answer to a loadOlder in flight is its own to resolve.
       if (done.older && pendingOlder.has(sessionId)) return
+      // How far the answered request reached back: a forward page from at or below contig, or a
+      // tail, covers every seq up to its last_seq, held or not (a seq the server never stored is
+      // not waited for again).
+      const from = cursor
+      if (done.older) tailPending = false
+      const more = !done.older && done.has_more
+      fullPages = more ? fullPages + 1 : 0
+      if (more && h.onReset && fullPages >= MAX_FORWARD_PAGES) {
+        // Too far behind to catch up forward: this page goes with the rest of what is held, and
+        // the transcript loads again from its end.
+        page = null
+        fullPages = 0
+        lastSeq = 0
+        contig = 0
+        ahead.clear()
+        refillAfter = null
+        clearGapTimer()
+        h.onReset()
+        askTail()
+        return
+      }
+      flush()
+      if (!done.older) cursor = more ? done.last_seq : null
       if (done.last_seq > lastSeq) lastSeq = done.last_seq
+      if (done.older || (from != null && from <= contig)) {
+        if (done.last_seq > contig) contig = done.last_seq
+        absorb()
+      }
       h.onReplayDone({
         lastSeq: done.last_seq,
         hasMore: done.has_more,
@@ -141,9 +278,17 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       })
       // The server replays a page at a time. A longer transcript needs the following pages too,
       // or everything between the first page and the live tail is silently missing.
-      if (!done.older && done.has_more) {
-        socket.send({ type: 'subscribe_agent_events', session_id: sessionId, after_seq: done.last_seq })
+      if (more) {
+        askForward(done.last_seq)
+        return
       }
+      if (refillAfter != null) {
+        const after = Math.min(refillAfter, contig)
+        refillAfter = null
+        askForward(after)
+        return
+      }
+      armGap()
     }))
 
     offs.push(socket.onMessage('session_state_changed', (msg: never) => {
@@ -152,24 +297,52 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
     }))
 
     offs.push(socket.onMessage('initial_state', (msg: never) => {
-      const s = (msg as { sessions: SessionInfo[] }).sessions.find(x => x.id === sessionId)
+      const state = msg as { sessions: SessionInfo[]; messages?: MessageInfo[] | null }
+      const s = state.sessions.find(x => x.id === sessionId)
       if (s) h.onStatus(s.status)
+      // The session's asks that are no longer open (answered elsewhere, expired while away).
+      for (const m of state.messages ?? []) {
+        if (m && m.session_id === sessionId && m.kind === 'ask' && m.status !== 'open') h.onAskClosed?.(m.id, m.answer ?? '')
+      }
     }))
 
-    // Subscribe on every (re)connection, resuming from lastSeq. First load: the newest events
-    // now, the rest behind them (loadOlder, driven by the hook).
+    offs.push(socket.onMessage('message_answered', (msg: never) => {
+      const m = (msg as { message?: MessageInfo }).message
+      if (m && m.session_id === sessionId && typeof m.id === 'string') h.onAskClosed?.(m.id, m.answer ?? '')
+    }))
+
+    // Subscribe on every (re)connection, resuming from lastSeq (or, mid-replay, from where the
+    // replay reached). First load: the newest events now, the rest behind them (loadOlder, driven
+    // by the hook).
     offs.push(socket.onOpen(() => {
+      // Whatever a page cut short had brought is handed over first: lastSeq already counts it.
+      flush()
+      fullPages = 0
+      clearGapTimer()
       h.onConnection(true)
-      if (lastSeq === 0 && o.tail) {
-        socket.send({ type: 'subscribe_agent_events', session_id: sessionId, after_seq: 0, tail: INITIAL_TAIL })
+      if (tailPending || (lastSeq === 0 && o.tail)) {
+        refillAfter = null
+        askTail()
         return
       }
-      socket.send({ type: 'subscribe_agent_events', session_id: sessionId, after_seq: lastSeq })
+      // From below any hole still open, so the resume fills it.
+      let from = cursor ?? lastSeq
+      if (ahead.size > 0) from = Math.min(from, contig)
+      if (refillAfter != null) from = Math.min(from, refillAfter)
+      refillAfter = null
+      askForward(from)
     }))
 
-    if (socket.onClose) offs.push(socket.onClose(() => h.onConnection(false)))
+    if (socket.onClose) {
+      offs.push(socket.onClose(() => {
+        flush()
+        clearGapTimer()
+        h.onConnection(false)
+      }))
+    }
 
     return () => {
+      clearGapTimer()
       for (const off of offs) off()
       socket.send({ type: 'unsubscribe_session', session_id: sessionId })
     }
@@ -193,6 +366,13 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       offs.push(socket.onMessage('agent_events_replay_done', (msg: never) => {
         const done = msg as AgentEventsReplayDone
         if (done.session_id !== sessionId || !done.older) return
+        // Only the answer to this request: every event it carries is older than beforeSeq. Another
+        // backward replay_done is not, above all the tail's own: the hook asks for the first older
+        // page while that one is being handled, and a socket that dispatches to a Set (the runner's
+        // ws.ts) calls this handler for it too. Taken as the answer, the page resolved empty at once,
+        // the real one came in as live events one at a time with nothing shown as loading, and its
+        // replay_done asked for the next page, and so on through the whole history.
+        if (done.first_seq != null && done.first_seq > 0 && done.first_seq >= beforeSeq) return
         finish()
         resolve({
           events: pending.events,
@@ -201,6 +381,14 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
           serverTime: done.server_time,
         })
       }))
+      // A drop cuts the answer off: finish now rather than at the timeout, or the entry left in
+      // pendingOlder would keep the subscription from taking the next older replay_done (a tail).
+      if (socket.onClose) {
+        offs.push(socket.onClose(() => {
+          finish()
+          reject(new Error('Not connected.'))
+        }))
+      }
       pendingOlder.set(sessionId, pending)
       if (!socket.send({ type: 'subscribe_agent_events', session_id: sessionId, before_seq: beforeSeq, limit })) {
         finish()
@@ -228,8 +416,16 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       return toMeta(s)
     },
 
-    async send(sessionId, text) {
-      return { queued: socket.send({ type: 'agent_user_message', session_id: sessionId, text }) }
+    async send(sessionId, text, sendOpts) {
+      return {
+        queued: socket.send({
+          type: 'agent_user_message',
+          session_id: sessionId,
+          text,
+          ...(sendOpts?.clientId ? { client_id: sendOpts.clientId } : {}),
+          ...(sendOpts?.answerTo ? { answer_message_id: sendOpts.answerTo } : {}),
+        }),
+      }
     },
 
     // The runner's web app ends a session through DELETE /api/sessions/{id}.
@@ -253,6 +449,7 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
     },
 
     connected,
+    answersAsks: true,
 
     files: createFiles({
       base: (sessionId) => `${baseUrl}/api/sessions/${enc(sessionId)}`,

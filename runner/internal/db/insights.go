@@ -129,7 +129,8 @@ func ListInsightEvents(ctx context.Context, pool *pgxpool.Pool, from, to time.Ti
 	return out, rows.Err()
 }
 
-// TokenRow is the turn_done usage of one session, model and UTC day.
+// TokenRow is the token usage of one session, model and UTC day: its turns' (turn_done) and its
+// subagents' (subagent_done, under the subagent's own model). Turns counts turn_done only.
 type TokenRow struct {
 	SessionID  string
 	Model      string
@@ -141,19 +142,29 @@ type TokenRow struct {
 	CacheWrite int64
 }
 
-// ListTokenUsage sums turn_done usage per session, model and UTC day in [from, to).
+// usageSums adds up the four token counts of the usage events selected (as e), ignoring a figure that is
+// not a plain number. usageEvents selects those events: every turn_done, and the subagent_done events that
+// carry usage.
+const (
+	usageSums = `
+		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'input_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'input_tokens')::bigint END), 0),
+		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'output_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'output_tokens')::bigint END), 0),
+		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'cache_read_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'cache_read_tokens')::bigint END), 0),
+		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'cache_write_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'cache_write_tokens')::bigint END), 0)`
+	usageEvents = `(e.kind = 'turn_done' OR (e.kind = 'subagent_done' AND e.payload ? 'usage'))`
+)
+
+// ListTokenUsage sums turn_done and subagent_done usage per session, model and UTC day in
+// [from, to). A subagent_done without usage (a background launch, the native loop's) adds nothing.
 func ListTokenUsage(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string) ([]TokenRow, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT e.session_id::text, COALESCE(e.payload->>'model', ''),
 		       date_trunc('day', e.ts AT TIME ZONE 'UTC'),
-		       count(*),
-		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'input_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'input_tokens')::bigint END), 0),
-		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'output_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'output_tokens')::bigint END), 0),
-		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'cache_read_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'cache_read_tokens')::bigint END), 0),
-		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'cache_write_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'cache_write_tokens')::bigint END), 0)
+		       count(*) FILTER (WHERE e.kind = 'turn_done'), `+usageSums+`
 		  FROM agent_events e
 		  JOIN sessions s ON s.id = e.session_id
-		 WHERE e.kind = 'turn_done' AND e.ts >= $1 AND e.ts < $2
+		 WHERE `+usageEvents+`
+		   AND e.ts >= $1 AND e.ts < $2
 		   AND ($3 = '' OR s.spawning_account_id = $3)
 		 GROUP BY 1, 2, 3`, from, to, owner)
 	if err != nil {
@@ -169,6 +180,154 @@ func ListTokenUsage(ctx context.Context, pool *pgxpool.Pool, from, to time.Time,
 		}
 		r.Day = day.UTC()
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ─── one session ──────────────────────────────────────────────────────────────
+// The loaders below feed GET /api/sessions/{id}/insights: one session's figures, read through the
+// (session_id, seq) index of agent_events and the per-session indexes of the other tables.
+
+// SessionTokenRow is one session's token usage under one model, either its own turns' (turn_done) or its
+// subagents' (subagent_done with usage). Turns counts turn_done only.
+type SessionTokenRow struct {
+	Subagent   bool
+	Model      string
+	Turns      int64
+	Input      int64
+	Output     int64
+	CacheRead  int64
+	CacheWrite int64
+}
+
+// ListSessionTokenUsage sums a session's usage by source (main agent or subagents) and model, under the
+// same rules as ListTokenUsage.
+func ListSessionTokenUsage(ctx context.Context, pool *pgxpool.Pool, sessionID string) ([]SessionTokenRow, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT e.kind = 'subagent_done', COALESCE(e.payload->>'model', ''),
+		       count(*) FILTER (WHERE e.kind = 'turn_done'), `+usageSums+`
+		  FROM agent_events e
+		 WHERE e.session_id = $1 AND `+usageEvents+`
+		 GROUP BY 1, 2`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list session token usage: %w", err)
+	}
+	defer rows.Close()
+	var out []SessionTokenRow
+	for rows.Next() {
+		var r SessionTokenRow
+		if err := rows.Scan(&r.Subagent, &r.Model, &r.Turns, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// SessionToolCount is how many tool calls a session made with one tool, by its main agent or by its
+// subagents (a call with a parent_call_id).
+type SessionToolCount struct {
+	Tool     string
+	Subagent bool
+	Count    int
+}
+
+// SessionActivity is a session's tool calls by tool and the messages a person sent it.
+type SessionActivity struct {
+	ToolCalls          []SessionToolCount
+	MessagesFromPerson int
+}
+
+// GetSessionActivity counts a session's tool_call events by tool and by whether a subagent made them,
+// and its user_message events that a person sent: every source but "system" (text the engine or the
+// runner put in the user's place, such as a subagent's completion notice) and "runner" (a message sent
+// through the runner contract or MCP send_message, which may come from another agent).
+func GetSessionActivity(ctx context.Context, pool *pgxpool.Pool, sessionID string) (SessionActivity, error) {
+	var out SessionActivity
+	rows, err := pool.Query(ctx, `
+		SELECT e.kind, COALESCE(e.payload->>'tool', ''), COALESCE(e.payload->>'parent_call_id', '') <> '', count(*)
+		  FROM agent_events e
+		 WHERE e.session_id = $1
+		   AND (e.kind = 'tool_call' OR (e.kind = 'user_message' AND COALESCE(e.payload->>'source', '') NOT IN ('system', 'runner')))
+		 GROUP BY 1, 2, 3`, sessionID)
+	if err != nil {
+		return out, fmt.Errorf("session activity: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind string
+		var c SessionToolCount
+		if err := rows.Scan(&kind, &c.Tool, &c.Subagent, &c.Count); err != nil {
+			return out, err
+		}
+		if kind == "user_message" {
+			out.MessagesFromPerson += c.Count
+			continue
+		}
+		out.ToolCalls = append(out.ToolCalls, c)
+	}
+	return out, rows.Err()
+}
+
+// ListSessionTimeline returns a session's status_changed, subagent_started and subagent_done events in
+// order.
+func ListSessionTimeline(ctx context.Context, pool *pgxpool.Pool, sessionID string) ([]InsightEvent, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT e.session_id::text, e.seq, e.kind, e.ts, e.payload::text
+		  FROM agent_events e
+		 WHERE e.session_id = $1 AND e.kind IN ('status_changed', 'subagent_started', 'subagent_done')
+		 ORDER BY e.seq`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session timeline: %w", err)
+	}
+	defer rows.Close()
+	var out []InsightEvent
+	for rows.Next() {
+		var e InsightEvent
+		if err := rows.Scan(&e.SessionID, &e.Seq, &e.Kind, &e.Ts, &e.Payload); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// SessionSideCounts is what a session left outside its transcript: the files it published, its MCP
+// proposals by state, and its MCP tool calls by outcome.
+type SessionSideCounts struct {
+	Artifacts   int
+	Proposals   map[string]int
+	MCPOutcomes map[string]int
+}
+
+// GetSessionSideCounts counts a session's published files (origin agent; a person's uploads are not
+// counted), its MCP proposals by state, and its logged MCP gateway calls by outcome, tool listings left out.
+func GetSessionSideCounts(ctx context.Context, pool *pgxpool.Pool, sessionID string) (SessionSideCounts, error) {
+	out := SessionSideCounts{Proposals: map[string]int{}, MCPOutcomes: map[string]int{}}
+	rows, err := pool.Query(ctx, `
+		SELECT 'artifact', '', count(*) FROM session_artifacts WHERE session_id = $1 AND origin = 'agent'
+		UNION ALL
+		SELECT 'proposal', state, count(*) FROM mcp_proposals WHERE session_id = $1 GROUP BY state
+		UNION ALL
+		SELECT 'mcp', outcome, count(*) FROM mcp_call_log WHERE session_id = $1 AND mode <> 'list' GROUP BY outcome`, sessionID)
+	if err != nil {
+		return out, fmt.Errorf("session side counts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var what, key string
+		var n int
+		if err := rows.Scan(&what, &key, &n); err != nil {
+			return out, err
+		}
+		switch what {
+		case "artifact":
+			out.Artifacts = n
+		case "proposal":
+			out.Proposals[key] = n
+		case "mcp":
+			out.MCPOutcomes[key] = n
+		}
 	}
 	return out, rows.Err()
 }

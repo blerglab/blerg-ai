@@ -255,7 +255,7 @@ func (g *Gateway) ExecuteApproved(ctx context.Context, c ApprovedCall) (Approved
 		return changed("the connection's address changed since this action was proposed")
 	}
 
-	tools, rerr, err := st.listUpstream(ctx, gr, maxPages, false)
+	tools, _, rerr, err := st.listUpstream(ctx, gr, maxPages, false)
 	switch {
 	case err != nil:
 		return unsent(upstreamMessage(err), err)

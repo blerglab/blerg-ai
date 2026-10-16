@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import SessionList from './components/SessionList'
 import UpdateBanner from './components/UpdateBanner'
+import SignInBanner from './components/SignInBanner'
 import SessionsHome from './components/SessionsHome'
 import SessionDetail from './components/SessionDetail'
 import LaunchSheet from './components/LaunchSheet'
@@ -18,6 +19,7 @@ import ToastContainer from './components/ToastContainer'
 import ThemeToggle from './components/ThemeToggle'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useLaunchSheetOpen } from './hooks/useLaunchSheetOpen'
+import { prefetchLaunchData } from './lib/launchCache'
 import { startActivityTracking } from './activity'
 import { apiFetch } from './apiFetch'
 import { coreOrigin } from './authClient'
@@ -252,6 +254,18 @@ function Layout() {
       .catch(() => setClusterConfigured(false))
   }, [])
 
+  // Once the app has settled, warm what the New session sheet opens on, so
+  // even the first "+ New" of this tab opens at once (lib/launchCache). Only
+  // for a signed-in page; prefetchLaunchData checks.
+  useEffect(() => {
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(() => prefetchLaunchData(), { timeout: 5000 })
+      return () => window.cancelIdleCallback(id)
+    }
+    const t = setTimeout(prefetchLaunchData, 2000)
+    return () => clearTimeout(t)
+  }, [])
+
   const routes = (
     <Routes>
       <Route path="/" element={<Navigate to="/sessions" replace />} />
@@ -285,6 +299,7 @@ function Layout() {
           paddingBottom: '60px',
         }}
       >
+        <SignInBanner />
         <UpdateBanner />
         <AppHeader />
         {routes}
@@ -306,6 +321,7 @@ function Layout() {
         overflow: 'hidden',
       }}
     >
+      <SignInBanner />
       <UpdateBanner />
       <AppHeader />
       <div style={{ display: 'flex', flexDirection: 'row', flex: 1, minHeight: 0 }}>
@@ -355,10 +371,15 @@ export function NotificationsButton() {
     typeof Notification !== 'undefined' && Notification.permission === 'granted' ? 'on' : 'idle')
   if (state === 'on') return null
   if (typeof Notification !== 'undefined' && Notification.permission === 'denied') return null
+  // A small bell beside "+ New" in the sessions header; gone once notifications are on.
   return (
-    <button type="button" onClick={() => enableNotifications().then(() => setState(Notification.permission === 'granted' ? 'on' : 'off')).catch(console.error)}
-      style={{ fontSize: '0.75rem', color: 'var(--fog)', background: 'none', border: '1px solid var(--stone)', borderRadius: 6, padding: '4px 8px', cursor: 'pointer' }}>
-      Enable notifications
+    <button type="button" aria-label="Enable notifications" title="Enable notifications"
+      onClick={() => enableNotifications().then(() => setState(Notification.permission === 'granted' ? 'on' : 'off')).catch(console.error)}
+      style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, color: 'var(--fog)', background: 'none', border: '1px solid var(--stone)', borderRadius: 6, padding: 0, cursor: 'pointer' }}>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+        <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+      </svg>
     </button>
   )
 }

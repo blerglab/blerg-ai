@@ -65,11 +65,14 @@ func TestBuildSessionResultRunningAndEnded(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Only the consolidated (done=true) assistant_text events count; a later
-	// streaming delta must not win, nor a tool_result.
+	// streaming delta must not win, nor a subagent's text, a thinking block or
+	// a tool_result.
 	for _, ev := range []struct{ kind, payload string }{
 		{"assistant_text", `{"text":"first answer","done":true}`},
 		{"assistant_text", `{"text":"final answer","done":true}`},
 		{"assistant_text", `{"text":"partial…","done":false}`},
+		{"assistant_text", `{"text":"a subagent's report","done":true,"parent_call_id":"toolu_1"}`},
+		{"assistant_thinking", `{"text":"thinking is not an answer"}`},
 		{"tool_result", `{"output":"not an assistant message"}`},
 	} {
 		if _, _, err := db.AppendAgentEvent(ctx, pool, sessionID, newUUID(), ev.kind, ev.payload); err != nil {
@@ -227,5 +230,72 @@ func TestRunnerStatusUsesTheDocumentedEnum(t *testing.T) {
 	}
 	if out.Lifecycle != "ended" {
 		t.Errorf("lifecycle = %q, want ended", out.Lifecycle)
+	}
+}
+
+// The result's last_assistant_message is the last turn's answer, never an earlier turn's: a turn
+// that wrote nothing has none, and a failed turn has none and gives its error as error_reason
+// (unless the session itself failed). While a turn is in progress, its own newest text counts.
+func TestBuildSessionResultReportsTheLastTurnOnly(t *testing.T) {
+	api, _, pool := clusterRunnerAPI(t, &fakeK8s{})
+	ctx := context.Background()
+	const daemonID = "00000000-0000-4000-8000-0000000000d3"
+	if err := db.UpsertDaemon(ctx, pool, daemonID, "cluster", "runner", ""); err != nil {
+		t.Fatal(err)
+	}
+	type ev struct{ kind, payload string }
+	result := func(events ...ev) sessionResult {
+		t.Helper()
+		sessionID := newUUID()
+		if err := db.InsertSession(ctx, pool, sessionID, daemonID, "idle", "/workspace/org/proj", "org/proj", "T", ""); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range events {
+			if _, _, err := db.AppendAgentEvent(ctx, pool, sessionID, newUUID(), e.kind, e.payload); err != nil {
+				t.Fatal(err)
+			}
+		}
+		res, err := api.buildSessionResult(ctx, sessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	first := []ev{
+		{"user_message", `{"text":"q1","source":"chat"}`},
+		{"assistant_text", `{"text":"answer one","done":true}`},
+		{"turn_done", `{"stop_reason":"end_turn"}`},
+	}
+	for name, c := range map[string]struct {
+		events       []ev
+		text, reason string
+	}{
+		"a clean last turn": {append(first,
+			ev{"user_message", `{"text":"q2","source":"chat"}`},
+			ev{"assistant_text", `{"text":"answer two","done":true}`},
+			ev{"assistant_text", `{"text":"a subagent's report","done":true,"parent_call_id":"toolu_1"}`},
+			ev{"turn_done", `{"stop_reason":"end_turn"}`}), "answer two", ""},
+		"a last turn with no text": {append(first,
+			ev{"user_message", `{"text":"/cost","source":"chat"}`},
+			ev{"turn_done", `{"stop_reason":"end_turn"}`}), "", ""},
+		"a failed last turn": {append(first,
+			ev{"user_message", `{"text":"q2","source":"chat"}`},
+			ev{"error", `{"message":"retrying the API (attempt 1)…","retryable":true,"code":"api_retry"}`},
+			ev{"assistant_text", `{"text":"partial","done":true}`},
+			ev{"error", `{"message":"API Error: 529 Overloaded","retryable":true,"code":"api_error"}`},
+			ev{"turn_done", `{"stop_reason":"error"}`}), "", "API Error: 529 Overloaded"},
+		"a turn in progress": {append(first,
+			ev{"user_message", `{"text":"q2","source":"chat"}`},
+			ev{"assistant_text", `{"text":"working on it","done":true}`}), "working on it", ""},
+		"a retry notice in a clean turn": {append(first,
+			ev{"error", `{"message":"retrying the API (attempt 1)…","retryable":true,"code":"api_retry"}`},
+			ev{"assistant_text", `{"text":"answer two","done":true}`},
+			ev{"turn_done", `{"stop_reason":"end_turn"}`}), "answer two", ""},
+	} {
+		res := result(c.events...)
+		if res.LastAssistantMessage != c.text || res.ErrorReason != c.reason {
+			t.Errorf("%s: last_assistant_message=%q error_reason=%q, want %q / %q",
+				name, res.LastAssistantMessage, res.ErrorReason, c.text, c.reason)
+		}
 	}
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import Insights from './Insights'
+import Insights, { NARROW_QUERY } from './Insights'
 import type { InsightsResponse, ModelPrice } from '../lib/insights'
 
 const apiFetch = vi.hoisted(() => vi.fn())
@@ -26,10 +26,11 @@ function report(over: Partial<InsightsResponse> = {}): InsightsResponse {
     },
     startup: {
       groups: [{ runtime: 'cluster', kind: 'start', attempts: 10, failed: 1, seconds: q(42.3, 110.7, 1211, 9) }],
+      // the slowest start at any step is 60 s, so the shared axis runs 0 to 60 s in 10 s ticks
       steps: [
-        { runtime: 'cluster', step: 'schedule', count: 9, p50: 2, p90: 6 },
-        { runtime: 'cluster', step: 'clone', count: 9, p50: 30, p90: 80 },
-        { runtime: 'cluster', step: 'engine', count: 9, p50: 8, p90: 12 },
+        { runtime: 'cluster', step: 'schedule', count: 9, min: 1, p25: 1.5, p50: 2, p75: 3, p90: 6, max: 9, slow: 1 },
+        { runtime: 'cluster', step: 'clone', count: 9, min: 5, p25: 15, p50: 30, p75: 45, p90: 55, max: 60, slow: 0 },
+        { runtime: 'cluster', step: 'engine', count: 3, min: 6, p25: 7, p50: 8, p75: 10, p90: 11.6, max: 12, slow: 0 },
       ],
       failures: [{ key: 'queued', count: 1 }],
       slowest: [{ session_id: 'sess-slow', title: 'the slow one', runtime: 'cluster', seconds: 1211, at: '2026-10-01T10:00:00Z' }],
@@ -89,13 +90,120 @@ describe('Insights', () => {
     expect(screen.getByTestId('card-cache')).toHaveTextContent('98%')
   })
 
-  it('breaks a start down by step, in order', async () => {
+  it('breaks a start down by step, in order, each with its count, slowest and slow starts', async () => {
     renderPage()
     const steps = await screen.findByTestId('start-steps')
-    const rows = within(steps).getAllByRole('listitem').map((li) => li.textContent ?? '')
-    expect(rows[0]).toMatch(/Scheduling.*2 s/)
-    expect(rows[1]).toMatch(/Cloning repo.*30 s/)
-    expect(rows[2]).toMatch(/Starting agent.*8 s/)
+    const rows = ['schedule', 'clone', 'engine'].map((k) => within(steps).getByTestId(`step-${k}`).textContent ?? '')
+    expect(rows[0]).toMatch(/Scheduling.*n 9 · max 9 s · 1 slow/)
+    expect(rows[1]).toMatch(/Cloning repo.*n 9 · max 1 min$/) // no "0 slow"
+    expect(rows[2]).toMatch(/Starting agent.*n 3 · max 12 s · too few starts for a box/)
+    expect(within(steps).getAllByTestId(/^step-/).map((li) => li.dataset.testid)).toEqual(['step-schedule', 'step-clone', 'step-engine'])
+  })
+
+  it('names every mark in one legend, with what slow means', async () => {
+    renderPage()
+    const legend = (await screen.findByTestId('start-steps-legend')).textContent ?? ''
+    expect(legend).toMatch(/middle half of starts \(25th–75th percentile\)/)
+    expect(legend).toMatch(/median/)
+    expect(legend).toMatch(/90th percentile/)
+    expect(legend).toMatch(/fastest to slowest/)
+    expect(legend).toMatch(/slow = more than twice the median/)
+  })
+
+  it('draws the whisker, box, median and 90th mark in proportion on the shared axis', async () => {
+    renderPage()
+    const clone = await screen.findByTestId('step-clone')
+    const part = (name: string) => clone.querySelector<HTMLElement>(`[data-part="${name}"]`)!.style
+    const num = (v: string) => parseFloat(v)
+    expect(num(part('whisker').left)).toBeCloseTo((5 / 60) * 100, 2)
+    expect(num(part('whisker').width)).toBeCloseTo((55 / 60) * 100, 2)
+    expect(num(part('box').left)).toBeCloseTo(25, 2)
+    expect(num(part('box').width)).toBeCloseTo(50, 2)
+    expect(num(part('median').left)).toBeCloseTo(50, 2)
+    expect(num(part('p90').left)).toBeCloseTo((55 / 60) * 100, 2)
+    const ticks = Array.from(screen.getByTestId('start-steps').querySelectorAll('.sb-tick')).map((t) => t.textContent)
+    expect(ticks).toEqual(['0', '10 s', '20 s', '30 s', '40 s', '50 s', '1 min'])
+    expect(screen.getByText('linear scale')).toBeInTheDocument()
+  })
+
+  it('draws a step with under five starts as its fastest, median and slowest dots, not a box', async () => {
+    renderPage()
+    const engine = await screen.findByTestId('step-engine')
+    expect(engine.querySelector('[data-part="box"]')).toBeNull()
+    expect(engine.querySelector('[data-part="p90"]')).toBeNull()
+    const dots = Array.from(engine.querySelectorAll<HTMLElement>('[data-part="dot"]')).map((d) => parseFloat(d.style.left))
+    expect(dots).toHaveLength(3)
+    ;[6, 8, 12].forEach((v, i) => expect(dots[i]).toBeCloseTo((v / 60) * 100, 2))
+  })
+
+  it('shows every number for a step on hover and on keyboard focus', async () => {
+    renderPage()
+    const clone = await screen.findByTestId('step-clone')
+    expect(screen.queryByRole('tooltip')).toBeNull()
+    fireEvent.mouseEnter(clone)
+    const tip = screen.getByRole('tooltip')
+    expect(within(clone).getByRole('button')).toHaveAttribute('aria-describedby', tip.id)
+    const lines = within(tip).getAllByRole('listitem').map((li) => li.textContent)
+    expect(lines).toEqual([
+      '5 s fastest', '15 s 25th percentile', '30 s median', '45 s 75th percentile', '55 s 90th percentile', '1 min slowest',
+      '9 starts', '0 slow (over 1 min)',
+    ])
+    fireEvent.mouseLeave(clone)
+    expect(screen.queryByRole('tooltip')).toBeNull()
+    fireEvent.focus(screen.getByTestId('step-schedule'))
+    expect(screen.getByRole('tooltip')).toHaveTextContent(/1 slow \(over 4 s\)/)
+  })
+
+  it('pins a step\'s tooltip on a click or tap; a second tap, Esc or a press elsewhere closes it', async () => {
+    renderPage()
+    const row = await screen.findByTestId('step-clone')
+    const name = within(row).getByRole('button', { name: 'Cloning repo' })
+    expect(name).toHaveAttribute('aria-expanded', 'false')
+    // a tap on a touch screen: an emulated hover and focus, then the click
+    fireEvent.mouseEnter(row)
+    fireEvent.focus(name)
+    fireEvent.click(name)
+    expect(name).toHaveAttribute('aria-expanded', 'true')
+    expect(name).toHaveAttribute('aria-controls', screen.getByRole('tooltip').id)
+    // pinned: leaving the row keeps it open
+    fireEvent.mouseLeave(row)
+    expect(screen.getByRole('tooltip')).toBeInTheDocument()
+    fireEvent.click(name)
+    expect(screen.queryByRole('tooltip')).toBeNull()
+    expect(name).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(name)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('tooltip')).toBeNull()
+
+    fireEvent.click(name)
+    fireEvent.pointerDown(within(row).getByRole('tooltip'))
+    expect(screen.getByRole('tooltip')).toBeInTheDocument()
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('tooltip')).toBeNull()
+  })
+
+  it('stacks the tokens and startup tables into one entry per row on a narrow screen', async () => {
+    const wide = window.matchMedia
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === NARROW_QUERY, media: query, onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    }))
+    try {
+      renderPage()
+      const tokens = await screen.findByTestId('tokens-stack')
+      const entries = within(tokens).getAllByRole('listitem')
+      expect(entries).toHaveLength(2)
+      expect(within(entries[0]).getByText('m-one')).toBeInTheDocument()
+      const figs = (li: HTMLElement) => Array.from(li.querySelectorAll('dt')).map((dt) => `${dt.textContent} ${dt.nextElementSibling?.textContent}`)
+      expect(figs(entries[0])).toEqual(['Turns 150', 'Input 5k', 'Output 300k', 'Cache read 40M', 'Cache write 600k', 'Est. cost $4.20'])
+      expect(figs(entries[1])).toContain('Est. cost no price')
+      const startup = screen.getByTestId('startup-stack')
+      expect(within(startup).getByRole('listitem')).toHaveTextContent(/cluster · start.*10 attempts, 1 failed/)
+      expect(screen.queryAllByRole('table').map((t) => t.closest('[data-testid="prices-scroll"]'))).not.toContain(null)
+    } finally {
+      window.matchMedia = wide
+    }
   })
 
   it('links the slowest starts and the biggest token users to their sessions', async () => {

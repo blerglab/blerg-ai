@@ -6,8 +6,6 @@ import {
   defaultRuntime,
   runtimeDisabledReason,
   RUNTIME_CARDS,
-  ACK_AGENT,
-  ACK_TERMINAL,
   AGENT_NO_PROMPTS,
   TERMINAL_NEEDS_DAEMON,
   OPENCLAW_HOST_ONLY,
@@ -45,13 +43,25 @@ function renderColumn(over: Partial<RunColumnProps> = {}) {
     settingsLink: <a href="/settings">Settings</a>,
     dangerouslySkipPermissions: false,
     onSkipPermissionsChange: vi.fn(),
-    ack: false,
-    onAckChange: vi.fn(),
     ...over,
   }
   render(<RunColumn {...props} />)
   return props
 }
+
+it('keeps a model name control available while cluster choices refresh', () => {
+  renderColumn({ engine: 'codex', runtime: 'cluster', clusterConfigured: true, models: [], model: '', modelsRefreshing: true,
+    modelFreeText: { value: '', onChange: vi.fn(), invalid: false, efforts: [], onEffortChange: vi.fn() } })
+  expect(screen.getByText(/Refreshing Codex models/)).toBeInTheDocument()
+  expect(screen.getByRole('textbox', { name: 'Model name (optional)' })).toBeInTheDocument()
+})
+
+it('lets the person retry a failed cluster catalog without reopening the sheet', () => {
+  const retry = vi.fn()
+  renderColumn({ engine: 'codex', runtime: 'cluster', clusterConfigured: true, models: [], model: '', modelsError: 'Model choices timed out.', onModelsRetry: retry })
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  expect(retry).toHaveBeenCalledOnce()
+})
 
 describe('defaultRuntime', () => {
   it('prefers the cluster pod whenever one is configured', () => {
@@ -169,26 +179,6 @@ describe('RunColumn', () => {
   it('hides the permissions toggle for a terminal session on the host', () => {
     renderColumn({ kind: 'tmux', runtime: 'daemon' })
     expect(screen.queryByTestId('skip-permissions-toggle')).not.toBeInTheDocument()
-  })
-
-  it('asks for no acknowledgement in the sandbox or the cluster', () => {
-    renderColumn({ runtime: 'docker' })
-    expect(screen.queryByTestId('agent-ack')).not.toBeInTheDocument()
-  })
-
-  it('asks for no acknowledgement on the cluster pod', () => {
-    renderColumn({ runtime: 'cluster', clusterConfigured: true })
-    expect(screen.queryByTestId('agent-ack')).not.toBeInTheDocument()
-  })
-
-  it('words the acknowledgement for an agent session on the host', () => {
-    renderColumn({ runtime: 'daemon', kind: 'agent' })
-    expect(screen.getByLabelText(ACK_AGENT)).toBeInTheDocument()
-  })
-
-  it('words the acknowledgement for a terminal session on the host', () => {
-    renderColumn({ runtime: 'daemon', kind: 'tmux' })
-    expect(screen.getByLabelText(ACK_TERMINAL)).toBeInTheDocument()
   })
 
   it('shows the model picker for Claude only', () => {

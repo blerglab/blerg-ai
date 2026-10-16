@@ -84,14 +84,19 @@ func (d *hermesDriver) useSandbox(prefix sandboxExec) { d.prefix = prefix }
 
 func (d *hermesDriver) Start() {}
 
+// Enqueue accepts a plain message (EnqueueInput).
 func (d *hermesDriver) Enqueue(text, source string) {
-	if source == "" {
-		source = "chat"
+	d.EnqueueInput(agent.Input{Text: text, Source: source})
+}
+
+func (d *hermesDriver) EnqueueInput(in agent.Input) {
+	if in.Source == "" {
+		in.Source = "chat"
 	}
 	select {
-	case d.queue <- queuedMsg{text: text, source: source}:
+	case d.queue <- queuedMsg{Input: in}:
 	default:
-		d.emit("error", agent.ErrorPayload{Message: "message queue full — dropped", Retryable: true})
+		d.emit("error", queueFullError(in))
 	}
 }
 
@@ -127,9 +132,9 @@ func (d *hermesDriver) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case msg := <-d.queue:
-			d.emit("user_message", agent.UserMessagePayload{Text: msg.text, Source: msg.source})
+			d.emit("user_message", msg.Payload())
 			d.emit("status_changed", agent.StatusPayload{Status: "running", Reason: "turn"})
-			d.runTurn(ctx, msg.text)
+			d.runTurn(ctx, msg.Text)
 			d.emit("status_changed", agent.StatusPayload{Status: "idle", Reason: "turn_done"})
 		}
 	}

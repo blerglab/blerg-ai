@@ -97,3 +97,24 @@ export function matchesQuery(it: CapabilityItem, q: string): boolean {
   const needle = q.toLowerCase()
   return [it.name, it.description, it.detail, it.status, it.source].some(v => v?.toLowerCase().includes(needle))
 }
+
+// latestCapabilitiesEvent is the newest capabilities event in a transcript (the event itself, so a
+// store selector gets a stable reference), or undefined.
+export function latestCapabilitiesEvent(events: AgentEvent[] | undefined): AgentEvent | undefined {
+  if (!events) return undefined
+  for (let i = events.length - 1; i >= 0; i--) if (events[i].kind === CAPABILITIES_KIND) return events[i]
+  return undefined
+}
+
+// enabledCapabilityCount: what the session has switched on, for the Capabilities tab's badge: its
+// skills, its plugins that are enabled (or carry no status), and its MCP servers that are connected.
+// Slash commands, tools and subagents are what those bring, not more of them.
+export function enabledCapabilityCount(p: CapabilitiesPayload | null | undefined): number {
+  if (!p) return 0
+  let n = 0
+  for (const g of p.groups) {
+    if (g.id === 'skills' || g.id === 'plugins') n += g.items.filter(i => !i.status || i.status === 'enabled').length
+    else if (g.id === 'mcp') n += g.items.filter(i => i.status === 'connected').length
+  }
+  return n
+}

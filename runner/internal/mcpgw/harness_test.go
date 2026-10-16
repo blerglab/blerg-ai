@@ -160,6 +160,24 @@ func (u *fakeUpstream) setDescription(name, desc string) {
 	u.mu.Unlock()
 }
 
+func (u *fakeUpstream) addTool(t fakeTool) {
+	u.mu.Lock()
+	u.tools = append(u.tools, t)
+	u.mu.Unlock()
+}
+
+func (u *fakeUpstream) removeTool(name string) {
+	u.mu.Lock()
+	kept := u.tools[:0]
+	for _, t := range u.tools {
+		if t.Name != name {
+			kept = append(kept, t)
+		}
+	}
+	u.tools = kept
+	u.mu.Unlock()
+}
+
 func (u *fakeUpstream) hash(name string) string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -287,10 +305,12 @@ func (u *fakeUpstream) handle(w http.ResponseWriter, r *http.Request) {
 // ---- fake core ---------------------------------------------------------------------
 
 type fakeCore struct {
-	mu        sync.Mutex
-	url       string
-	header    string
-	value     string
+	mu     sync.Mutex
+	url    string
+	header string
+	value  string
+	// policy is what the fake core reports as the connection's pin_policy ("" is strict).
+	policy    string
 	expiresIn time.Duration // 0: no expiry
 	clock     *fakeClock
 	err       error
@@ -307,11 +327,17 @@ func (c *fakeCore) Token(_ context.Context, p Proof, connectionID string) (Crede
 	if c.err != nil {
 		return Credential{}, c.err
 	}
-	cred := Credential{URL: c.url, HeaderName: c.header, Value: c.value}
+	cred := Credential{URL: c.url, HeaderName: c.header, Value: c.value, PinPolicy: NormalizePinPolicy(c.policy)}
 	if c.expiresIn != 0 {
 		cred.ExpiresAt = c.clock.Now().Add(c.expiresIn)
 	}
 	return cred, nil
+}
+
+func (c *fakeCore) setPolicy(p string) {
+	c.mu.Lock()
+	c.policy = p
+	c.mu.Unlock()
 }
 
 func (c *fakeCore) count() int {
@@ -480,4 +506,90 @@ func resultText(r rpcReply) string {
 		sb.WriteString(s)
 	}
 	return sb.String()
+}
+
+// grantSpec creates a grant from a full spec (preset, known tools) on the harness's upstream;
+// spec.ConnectionID, Name and URL are filled in.
+func (h *harness) grantSpec(name string, spec GrantSpec) grantHandle {
+	h.t.Helper()
+	gh := grantHandle{sessionID: newUUID(h.t), connectionID: newUUID(h.t), name: name}
+	spec.ConnectionID, spec.Name = gh.connectionID, name
+	if spec.URL == "" {
+		spec.URL = h.up.url()
+	}
+	toks, err := CreateGrants(context.Background(), h.pool, gh.sessionID, "acct-1",
+		Proof{AccountID: "acct-1", SessionID: "login-1"}, []GrantSpec{spec})
+	if err != nil {
+		h.t.Fatalf("CreateGrants: %v", err)
+	}
+	gh.token = toks[gh.connectionID]
+	return gh
+}
+
+// pins is the harness upstream's current hashes for tools, each with mode.
+func (h *harness) pins(tools map[string]string) map[string]ToolGrant {
+	out := map[string]ToolGrant{}
+	for tool, mode := range tools {
+		out[tool] = ToolGrant{Mode: mode, Hash: h.up.hash(tool)}
+	}
+	return out
+}
+
+// known is every tool name the harness upstream lists.
+func (h *harness) known() []string {
+	h.up.mu.Lock()
+	defer h.up.mu.Unlock()
+	names := make([]string, 0, len(h.up.tools))
+	for _, t := range h.up.tools {
+		names = append(names, t.Name)
+	}
+	return names
+}
+
+// fakeRefresher records refresh requests (Config.Refresher).
+type fakeRefresher struct {
+	mu       sync.Mutex
+	sessions []string
+}
+
+func (f *fakeRefresher) RefreshSessionTools(sessionID string) bool {
+	f.mu.Lock()
+	f.sessions = append(f.sessions, sessionID)
+	f.mu.Unlock()
+	return true
+}
+
+func (f *fakeRefresher) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sessions)
+}
+
+// grantRow reads the grant behind a handle.
+func (h *harness) grantRow(gh grantHandle) *db.MCPGrant {
+	h.t.Helper()
+	gr, err := db.MCPGrantByTokenHash(context.Background(), h.pool, hashToken(gh.token))
+	if err != nil {
+		h.t.Fatalf("grant row: %v", err)
+	}
+	return gr
+}
+
+// lastOutcome is the newest call-log outcome of the grant's session.
+func (h *harness) lastOutcome(gh grantHandle) string {
+	h.t.Helper()
+	var out string
+	if err := h.pool.QueryRow(context.Background(), `SELECT outcome FROM mcp_call_log WHERE session_id = $1 ORDER BY id DESC LIMIT 1`, gh.sessionID).Scan(&out); err != nil {
+		h.t.Fatalf("call log: %v", err)
+	}
+	return out
+}
+
+// restart returns a gateway with no in-memory state over the same database, upstream and core.
+func (h *harness) restart() *harness {
+	h.t.Helper()
+	gw := New(h.gw.cfg)
+	srv := httptest.NewServer(gw.Handler())
+	h.t.Cleanup(srv.Close)
+	return &harness{t: h.t, pool: h.pool, gw: gw, srv: srv, up: h.up, core: h.core, clock: h.clock}
 }

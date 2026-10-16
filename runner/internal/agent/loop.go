@@ -32,7 +32,7 @@ type Config struct {
 // Price is a model's USD cost per million tokens, by token class.
 type Price struct{ InputPerM, OutputPerM, CacheReadPerM, CacheWritePerM float64 }
 
-type queuedMsg struct{ text, source string }
+type queuedMsg = Input
 
 // Loop is one agent session's engine. Not safe for concurrent Run calls;
 // Enqueue is safe from any goroutine.
@@ -41,8 +41,8 @@ type Loop struct {
 	mu       sync.Mutex
 	queue    []queuedMsg
 	wake     chan struct{}
-	messages []Message   // provider-format context
-	askCh    chan string // non-nil while an ask blocks; Enqueue routes here
+	messages []Message  // provider-format context
+	askCh    chan Input // non-nil while an ask blocks; Enqueue routes here
 
 	pending    *modelChange // model/effort change awaiting application
 	turnBlocks []Block      // assistant blocks emitted this turn (thinking detection)
@@ -167,20 +167,27 @@ func NewLoop(cfg Config) *Loop {
 
 // Enqueue delivers a user message. If idle, it starts a turn; if mid-turn it
 // is injected at the next provider call.
-func (l *Loop) Enqueue(text, source string) {
+func (l *Loop) Enqueue(text, source string) { l.EnqueueInput(Input{Text: text, Source: source}) }
+
+// EnqueueInput is Enqueue with what the transcript records and the sender's id (Input). While an
+// ask is waiting, the message is its answer instead (askTool).
+func (l *Loop) EnqueueInput(in Input) {
+	if in.Source == "" {
+		in.Source = "chat"
+	}
 	l.mu.Lock()
 	if l.askCh != nil {
 		// Non-blocking send under the lock: if the ask is mid-teardown or the
 		// buffer already holds an answer, fall through to the normal queue so
 		// no user message is ever lost or blocks the transport goroutine.
 		select {
-		case l.askCh <- text:
+		case l.askCh <- in:
 			l.mu.Unlock()
 			return
 		default:
 		}
 	}
-	l.queue = append(l.queue, queuedMsg{text, source})
+	l.queue = append(l.queue, in)
 	l.mu.Unlock()
 	select {
 	case l.wake <- struct{}{}:
@@ -239,9 +246,9 @@ func (l *Loop) Run(ctx context.Context) {
 const completionReminder = `[system reminder] You made changes this turn but did not check in. Summarize what you did and its verification status via check_in(phase="completion").`
 
 func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
-	l.emit("user_message", UserMessagePayload{Text: msg.text, Source: msg.source})
+	l.emit("user_message", msg.Payload())
 	l.emit("status_changed", StatusPayload{Status: "running", Reason: "turn started"})
-	l.messages = append(l.messages, Message{Role: "user", Blocks: []Block{{Type: "text", Text: msg.text}}})
+	l.messages = append(l.messages, Message{Role: "user", Blocks: []Block{{Type: "text", Text: msg.Text}}})
 	l.turnBlocks = nil
 	l.applyPendingModel(true) // turn boundary — always safe
 
@@ -318,8 +325,8 @@ func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
 		// Inject queued user messages alongside tool results (tool_result
 		// blocks must come first in the user message — API pairing rule).
 		for _, q := range l.drainQueue() {
-			l.emit("user_message", UserMessagePayload{Text: q.text, Source: q.source})
-			resultBlocks = append(resultBlocks, Block{Type: "text", Text: q.text})
+			l.emit("user_message", q.Payload())
+			resultBlocks = append(resultBlocks, Block{Type: "text", Text: q.Text})
 		}
 		if len(resultBlocks) > 0 {
 			l.messages = append(l.messages, Message{Role: "user", Blocks: resultBlocks})
@@ -350,8 +357,14 @@ func (l *Loop) callProvider(ctx context.Context) ([]Block, string, Usage, error)
 		case "text_delta":
 			textBuf += ev.TextDelta
 			l.emit("assistant_text", AssistantTextPayload{Text: ev.TextDelta, Done: false})
+		case "thinking_start":
+			// A thinking block opened: transient, so the chat can say "Thinking…" while it runs.
+			l.emit(KindThinkingStarted, ThinkingPayload{})
 		case "block":
 			blocks = append(blocks, *ev.Block)
+			if ev.Block.Type == "thinking" {
+				l.emit(KindThinkingDone, ThinkingPayload{})
+			}
 		case "done":
 			stop = ev.StopReason
 			if ev.Usage != nil {

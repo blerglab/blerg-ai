@@ -15,13 +15,14 @@ import (
 
 // runUsers implements `blerg-core users create|set-password` (R8: admin recovery and minimal
 // user management, without psql or a hand-made bcrypt hash). It prints exactly one line to
-// stdout on success — "provider_subject=<S> password=<one-time>" — the one and only place the
+// stdout on success — "username=<S> password=<one-time>" — the one and only place the
 // new password is ever available in plaintext, and returns the exit code the caller should use:
-// 2 for a usage/argument error, 1 for a runtime failure (bad DSN, DB unreachable, unknown
+// 2 for a usage/argument error (including a --subject for create that fails
+// authprovider.ValidateUsername), 1 for a runtime failure (bad DSN, DB unreachable, unknown
 // subject, ...), 0 on success.
 func runUsers(args []string, stdout io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: blerg-core users create --subject S --role member|admin | set-password --subject S")
+		fmt.Fprintln(os.Stderr, "usage: blerg-core users create --subject USERNAME --role member|admin | set-password --subject USERNAME")
 		return 2
 	}
 	switch args[0] {
@@ -32,7 +33,7 @@ func runUsers(args []string, stdout io.Writer) int {
 	}
 
 	fs := flag.NewFlagSet("users "+args[0], flag.ContinueOnError)
-	subject := fs.String("subject", "", "provider_subject (the username)")
+	subject := fs.String("subject", "", "the username")
 	role := fs.String("role", "member", "admin|member (create only)")
 	if err := fs.Parse(args[1:]); err != nil || *subject == "" {
 		fs.Usage()
@@ -41,6 +42,13 @@ func runUsers(args []string, stdout io.Writer) int {
 	if args[0] == "create" && *role != "admin" && *role != "member" {
 		fmt.Fprintln(os.Stderr, "users create: --role must be admin or member")
 		return 2
+	}
+	// A new username follows the same rules as one a person picks for themselves.
+	if args[0] == "create" {
+		if err := authprovider.ValidateUsername(*subject); err != nil {
+			fmt.Fprintf(os.Stderr, "users create: --subject: %v\n", err)
+			return 2
+		}
 	}
 
 	ctx := context.Background()
@@ -74,6 +82,6 @@ func runUsers(args []string, stdout io.Writer) int {
 		log.Printf("users %s: %v", args[0], err)
 		return 1
 	}
-	_, _ = fmt.Fprintf(stdout, "provider_subject=%s password=%s\n", *subject, pw)
+	_, _ = fmt.Fprintf(stdout, "username=%s password=%s\n", *subject, pw)
 	return 0
 }

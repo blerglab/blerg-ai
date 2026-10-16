@@ -694,6 +694,50 @@ func TestArtifactsListNewestFirst(t *testing.T) {
 	}
 }
 
+// A row whose bytes are gone (a data directory that did not survive a restart): the list keeps the
+// file and flags it missing; its raw and download routes answer 410 with a JSON reason, never a 500;
+// it can still be deleted.
+func TestArtifactsMissingFileIsGone(t *testing.T) {
+	fx := newArtFx(t)
+	kept := fx.publish(fx.sessTok, fx.sess, "kept.txt", []byte("1"))
+	lost := fx.publish(fx.sessTok, fx.sess, "lost.md", []byte("# 2"))
+	if err := os.RemoveAll(fx.path(fx.sess, lost.ID)); err != nil {
+		t.Fatal(err)
+	}
+	rec := fx.get("GET", "/api/sessions/"+fx.sess+"/artifacts", fx.human(artUser))
+	if rec.Code != 200 {
+		t.Fatalf("list = %d", rec.Code)
+	}
+	var out struct {
+		Artifacts []struct {
+			ID      string `json:"id"`
+			Missing *bool  `json:"missing"`
+		} `json:"artifacts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	flags := map[string]*bool{}
+	for _, a := range out.Artifacts {
+		flags[a.ID] = a.Missing
+	}
+	if len(flags) != 2 || flags[lost.ID] == nil || !*flags[lost.ID] || flags[kept.ID] != nil {
+		t.Errorf("list = %s: want lost missing:true, kept with no flag", rec.Body.String())
+	}
+	for _, route := range []string{"raw", "download"} {
+		rec := fx.get("GET", "/api/sessions/"+fx.sess+"/artifacts/"+lost.ID+"/"+route, fx.human(artUser))
+		if rec.Code != http.StatusGone || strings.TrimSpace(rec.Body.String()) != `{"error":"file no longer available"}` {
+			t.Errorf("%s of a lost file = %d %s, want 410 and the JSON reason", route, rec.Code, rec.Body.String())
+		}
+		if rec := fx.get("GET", "/api/sessions/"+fx.sess+"/artifacts/"+kept.ID+"/"+route, fx.human(artUser)); rec.Code != 200 {
+			t.Errorf("%s of a present file = %d", route, rec.Code)
+		}
+	}
+	if rec := fx.get("DELETE", "/api/sessions/"+fx.sess+"/artifacts/"+lost.ID, fx.human(artUser)); rec.Code != http.StatusNoContent {
+		t.Errorf("delete of a lost file = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestArtifactsDeleteRemovesRowAndFile(t *testing.T) {
 	fx := newArtFx(t)
 	m := fx.publish(fx.sessTok, fx.sess, "gone.txt", []byte("x"))

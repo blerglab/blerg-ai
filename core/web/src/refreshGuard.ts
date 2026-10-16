@@ -58,3 +58,15 @@ export function clearRefreshAttempted(): void {
     /* ignore */
   }
 }
+
+// resetRefreshGuard drops both keys on an explicit logout, so a login in this tab starts clean
+// on core's own pages. sessionStorage is per origin: the runner and the board keep their own
+// copies and drop a stale flag themselves on their next page load.
+export function resetRefreshGuard(): void {
+  try {
+    sessionStorage.removeItem(ATTEMPTED_KEY);
+    sessionStorage.removeItem(COUNT_KEY);
+  } catch {
+    /* ignore */
+  }
+}

@@ -23,6 +23,29 @@ export interface FilesOptions {
 
 const enc = encodeURIComponent
 
+/** What reading a file says when the server answers 410: the file is still listed, its bytes are
+ *  no longer stored. A viewer tells it apart from a failed read by `instanceof` (or its name). */
+export const FILE_GONE_MESSAGE = 'This file is no longer available.'
+export class ArtifactGoneError extends Error {
+  constructor() {
+    super(FILE_GONE_MESSAGE)
+    this.name = 'ArtifactGoneError'
+  }
+}
+
+/** True for the error raw() and download() throw on a file whose bytes are gone. */
+export function isArtifactGone(e: unknown): boolean {
+  return e instanceof ArtifactGoneError || (e instanceof Error && e.name === 'ArtifactGoneError')
+}
+
+// 410: listed but gone. 404 (an older server's answer for the same, or a file deleted meanwhile)
+// reads the same to a person.
+function readFailure(status: number, other: string): Error {
+  if (status === 410) return new ArtifactGoneError()
+  if (status === 404) return new Error(FILE_GONE_MESSAGE)
+  return new Error(other)
+}
+
 /** The file name in a `Content-Disposition: attachment; filename*=UTF-8''...` header, with any
  *  folder dropped; null when there is none or it does not decode. */
 export function filenameFromDisposition(header: string | null): string | null {
@@ -133,7 +156,7 @@ export function createFiles(opts: FilesOptions): TransportFiles {
 
     async raw(sessionId, id) {
       const r = await request(`${artifacts(sessionId)}/${enc(id)}/raw`)
-      if (!r.ok) throw new Error(r.status === 404 ? 'This file is no longer available.' : `HTTP ${r.status}`)
+      if (!r.ok) throw readFailure(r.status, `HTTP ${r.status}`)
       return r.blob()
     },
 
@@ -142,7 +165,7 @@ export function createFiles(opts: FilesOptions): TransportFiles {
      *  else its id. */
     async download(sessionId, id) {
       const r = await request(`${artifacts(sessionId)}/${enc(id)}/download`)
-      if (!r.ok) throw new Error(r.status === 404 ? 'This file is no longer available.' : `Download failed (HTTP ${r.status}).`)
+      if (!r.ok) throw readFailure(r.status, `Download failed (HTTP ${r.status}).`)
       const saveAs = filenameFromDisposition(r.headers.get('Content-Disposition')) ?? id
       saveBlob(await r.blob(), saveAs)
     },

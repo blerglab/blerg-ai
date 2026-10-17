@@ -5,10 +5,11 @@
 // loaded) and, over CAP_OVER lines, shows its first CAP_SHOW with a fade, "Show all N lines" and
 // "Open" (CodeViewer). A fence still streaming is plain and uncapped: re-colouring it on every
 // delta would cost a tokenizer run per delta, and capping it would make it jump.
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { type CodeLang } from '../model/codeLang'
 import { useHighlight } from '../model/highlight'
 import { CAP_OVER, CAP_SHOW, countLines, firstLines } from '../model/lineCap'
+import { useCopySource } from './LongPress'
 import CodeText from './CodeText'
 import CodeViewer from './CodeViewer'
 
@@ -37,9 +38,11 @@ export default function CodeBlock({ children, note, lang = null, closed = false 
   const capped = closed && total > CAP_OVER
   const collapsed = capped && !expanded
   const shown = collapsed ? firstLines(text, CAP_SHOW) : text
+  const box = useRef<HTMLDivElement>(null)
+  useCopySource(box, null, text)
   const highlighted = useHighlight(lang, shown, closed)
   return (
-    <div className={`md-codeblock${collapsed ? ' is-capped' : ''}`}>
+    <div ref={box} className={`md-codeblock${collapsed ? ' is-capped' : ''}`}>
       {canCopy && (
         <button
           type="button"

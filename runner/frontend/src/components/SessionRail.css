@@ -652,7 +652,7 @@
   color: var(--fog-dim);
 }
 
-/* Files: the chat's Files list, in the panel's width (rows wrap their actions under the name). */
+/* Files: the chat's Files list, in the panel's width. */
 .rail-files {
   display: flex;
   flex-direction: column;
@@ -668,10 +668,6 @@
   padding: 4px 0 8px;
   font-size: var(--text-xs);
   color: var(--fog-dim);
-}
-
-.rail-files .artifact-row-main {
-  flex-basis: 100%;
 }
 
 .rail-files .artifact-empty {
@@ -727,18 +723,30 @@
   white-space: nowrap;
 }
 
+/* A short rounded bar beside the count, never the panel's width. */
 .rail-progress {
-  height: 3px;
-  border-radius: 2px;
-  background: var(--stone);
+  flex: none;
+  width: 72px;
+  height: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--fog) 22%, transparent);
   overflow: hidden;
-  margin-bottom: 6px;
 }
 
 .rail-progress-fill {
   height: 100%;
-  background: var(--fog);
-  opacity: 0.6;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.rail-progress.complete .rail-progress-fill {
+  background: var(--lichen);
+}
+
+.rail-section-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .rail-plan-items li.now .checklist-text {
@@ -768,98 +776,96 @@
   text-decoration: underline;
 }
 
+.rail-ticket-title.canceled {
+  text-decoration: line-through;
+  color: var(--fog);
+}
+
 .rail-ticket.current .rail-ticket-title {
   display: block;
   margin-top: 4px;
   font-weight: 500;
 }
 
-/* MCP servers: one quiet toggle line, an optional list; failures in the warning (amber) colour. */
-.rail-mcp-toggle {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  background: none;
-  border: none;
-  padding: 2px 0;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-  overflow-wrap: anywhere;
-}
-
-.rail-mcp-list {
-  list-style: none;
-  margin: 4px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 12px;
-  color: var(--fog);
-  overflow-wrap: anywhere;
-}
-
-.rail-mcp-warn {
-  color: var(--amber);
-}
-
-.rail-mcp-released {
-  margin: 2px 0 0;
-  font-size: 12px;
-  color: var(--fog);
-}
-
-/* Live's one line about the plan: progress and the next item; it opens the Plan tab. */
+/* Live's one line about the plan: the ticket chip (opens its modal) and the list button (opens the
+   Plan tab) are separate hit areas. */
 .rail-plan-summary {
-  display: block;
-  width: 100%;
-  padding: 8px 16px 10px;
-  background: none;
-  border: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--scree-2);
   color: var(--fog);
-  font: inherit;
   font-size: var(--text-xs);
-  text-align: left;
+}
+
+.rail-plan-summary button {
+  font: inherit;
+  color: inherit;
   cursor: pointer;
+  border-radius: 6px;
 }
 
-.rail-plan-summary:hover .rail-plan-summary-text {
-  color: var(--chalk);
-}
-
-.rail-plan-summary:focus-visible {
+.rail-plan-summary button:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.rail-plan-summary-line {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin-bottom: 5px;
-  min-width: 0;
+  outline-offset: 1px;
 }
 
 .rail-plan-summary-ticket {
   display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
+  align-items: center;
+  gap: 5px;
   flex: none;
+  padding: 2px 8px;
+  background: var(--scree-2);
+  border: 1px solid var(--stone);
+}
+
+.rail-plan-summary-ticket:hover {
+  border-color: var(--fog-dim);
+}
+
+.rail-plan-summary-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 3px 4px;
+  background: none;
+  border: none;
+  text-align: left;
+}
+
+.rail-plan-summary-list:hover .rail-plan-summary-text,
+.rail-plan-summary-list:hover .rail-plan-summary-go {
+  color: var(--chalk);
 }
 
 .rail-plan-summary-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: 1;
+  min-width: 0;
+}
+
+.rail-plan-summary-head {
+  flex: none;
+  white-space: nowrap;
+}
+
+.rail-plan-summary-next {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.rail-plan-summary .rail-progress {
-  margin-bottom: 0;
+.rail-plan-summary-go {
+  flex: none;
+  font-size: var(--text-sm);
 }
 
 .rail-diff {
@@ -893,4 +899,27 @@
   flex: none;
   color: var(--fog-dim);
   font-size: var(--text-xs);
+}
+
+/* A background shell command reads as a command: terminal glyph, the command in monospace
+   (truncated; the card's title holds it whole), then shell · elapsed · status. */
+.rail-shell .bg-icon {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fog-dim);
+}
+
+.rail-cmd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: none;
+  padding: 0;
+  border: 0;
+  display: block;
+  max-width: 100%;
 }

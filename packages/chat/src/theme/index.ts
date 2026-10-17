@@ -21,6 +21,7 @@ export const TOKEN_NAMES = {
   radius: '--chat-radius',
   font: '--chat-font',
   fontMono: '--chat-font-mono',
+  fontDisplay: '--chat-font-display',
   textXs: '--chat-text-xs',
   textSm: '--chat-text-sm',
   density: '--chat-density',

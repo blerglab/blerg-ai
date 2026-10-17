@@ -3,21 +3,17 @@
 // runner's own — the model and effort pickers, the Rules panel, the ready card's repo line — and
 // wires the package to the runner's websocket and token. The chat's settings (Show thinking,
 // Compact tool calls), its Files and the Skills & plugins are in the session panel (SessionRail).
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import {
   ChatView,
   McpHoldLine,
   ReadyCard,
-  createBlergTransport,
   type McpHold,
   type SessionMeta,
-  type Transport,
 } from '@blerglab/chat'
 import '@blerglab/chat/blerg.css'
 import * as ws from '../ws'
-import { ensureFreshToken, getAccessToken } from '../authClient'
-import { bounceToRefresh } from '../signIn'
-import { tokenExpired } from '../claims'
+import { blergTransport } from '../lib/chatTransport'
 import { apiFetch } from '../apiFetch'
 import { effectiveEffort, modelCatalogTarget, useEngineModels } from '../lib/engineModels'
 import { ENGINE_LABELS, RUNTIME_LABELS } from '../lib/runtimes'
@@ -39,26 +35,6 @@ function clearArtifactParam() {
   if (!u.searchParams.has('artifact')) return
   u.searchParams.delete('artifact')
   window.history.replaceState(window.history.state, '', u.pathname + u.search + u.hash)
-}
-
-// One transport for the page: the runner's shared socket and its browser token. A token that
-// looks expired is renewed before a request; a route that still answers 401 sends the page to
-// core's refresh, as apiFetch does.
-let shared: Transport | null = null
-function blergTransport(): Transport {
-  if (shared) return shared
-  shared = createBlergTransport({
-    socket: ws,
-    getToken: async () => {
-      const tok = getAccessToken()
-      if (!tok || tokenExpired(tok)) await ensureFreshToken()
-      return getAccessToken()
-    },
-    onUnauthorized: () => {
-      bounceToRefresh()
-    },
-  })
-  return shared
 }
 
 interface AgentRule {
@@ -114,31 +90,32 @@ interface Props {
   thinking: boolean
   /** Whether runs of tool calls fold into one row (the panel's Compact tool calls). */
   compact: boolean
-  /** A file the History tab asked to open; n changes with every request. */
-  openArtifact?: { id: string; n: number } | null
+  /** A file the History tab asked to open; n changes with every request. A diff opens at `commit`
+   *  when one is given (a checklist item's sha chip). */
+  openArtifact?: { id: string; n: number; commit?: string } | null
   /** The first message is held while the session's MCP servers connect (from the live state). */
   mcpHold?: McpHold | null
   /** The viewer owns the session: "Send now" works for them, and they may open the files the agent names. */
   canReleasePrompt?: boolean
-  /** The web page of each commit the checklist names (the live state's), for the chat's chips. */
-  commitUrls?: Readonly<Record<string, string>>
 }
 
 // Memoised: the page around it re-renders as the side panel's state moves, the chat need not.
 export default memo(AgentChatView)
 
-function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canReleasePrompt, commitUrls }: Props) {
+function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canReleasePrompt }: Props) {
   const sessionId = session.id
   const transport = blergTransport()
   // The server's per-file limit (initial_state): the chat refuses a larger attachment before sending it.
   const maxFileBytes = useSessionStore(s => s.maxFileBytes)
   const [showRules, setShowRules] = useState(false)
   const [linked, setLinked] = useState<string | null>(artifactParam)
+  const [linkedCommit, setLinkedCommit] = useState<string | null>(null)
   // A request from the History tab, taken once: the chat consumes the link when its viewer opens it.
   const [askSeen, setAskSeen] = useState(openArtifact?.n ?? 0)
   if (openArtifact && openArtifact.n !== askSeen) {
     setAskSeen(openArtifact.n)
     setLinked(openArtifact.id)
+    setLinkedCommit(openArtifact.commit ?? null)
   }
   // The in-session switcher offers the same list the launch sheet does for
   // this session's engine, and the efforts of the model it is on now. A model
@@ -156,7 +133,6 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
   const meta: SessionMeta = session
   const engine = ENGINE_LABELS[session.engine || 'claude'] ?? session.engine
   const runtime = RUNTIME_LABELS[session.runtime || 'daemon'] ?? session.runtime
-  const commitUrl = useCallback((sha: string) => commitUrls?.[sha] ?? null, [commitUrls])
   const slots = useMemo(() => ({
     header: (
       <>
@@ -228,8 +204,8 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
       canOpenWorkspaceFiles={canReleasePrompt === true}
       maxFileBytes={maxFileBytes ?? undefined}
       linkedArtifact={linked}
-      commitUrl={commitUrl}
-      onLinkedArtifactConsumed={() => { setLinked(null); clearArtifactParam() }}
+      linkedCommit={linkedCommit}
+      onLinkedArtifactConsumed={() => { setLinked(null); setLinkedCommit(null); clearArtifactParam() }}
     />
   )
 }

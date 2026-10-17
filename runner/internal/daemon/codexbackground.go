@@ -70,7 +70,7 @@ func (a *codexApp) backgroundTerminals() {
 			}
 			for id, t := range current {
 				if _, exists := known[id]; !exists {
-					a.d.emit("background_task_started", agent.BackgroundTaskStartedPayload{TaskID: id, CallID: t.ItemID, Kind: "bash", Description: t.Command, StartedAt: time.Now().Format(time.RFC3339)})
+					a.d.emit("background_task_started", agent.BackgroundTaskStartedPayload{TaskID: id, CallID: t.ItemID, Kind: "bash", Description: t.Command, Command: cutRunes(t.Command, 500), StartedAt: time.Now().Format(time.RFC3339)})
 				}
 			}
 			for id, t := range known {

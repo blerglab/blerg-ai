@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import ArtifactViewer from './ArtifactViewer'
 import { ChatContext, type ChatContextValue } from './context'
 import { HTML_ARTIFACT_CSP } from '../model/artifacts'
+import { testing as hl } from '../model/highlight'
 import { createFakeFiles, type FakeFiles } from '../test/fakeTransport'
 import { FileRequestError } from '../transport/files'
 import type { ArtifactInfo } from '../transport/types'
@@ -50,6 +51,8 @@ function showInChat(a: ArtifactInfo) {
 }
 
 beforeEach(() => {
+  // The real highlighter (a lazy chunk, imported directly: the test cannot code-split).
+  hl.reset(() => import('../model/highlighter'))
   files = createFakeFiles()
   blobs = []
   revoked = []
@@ -159,6 +162,7 @@ describe('ArtifactViewer: csv', () => {
     expect(within(rows[1]).getAllByRole('cell').map(c => c.textContent)).toEqual(['Smith, J', 'two\nlines'])
     expect(within(rows[2]).getAllByRole('cell').map(c => c.textContent)).toEqual(['say "hi"', '<b>x</b>'])
     expect(table.querySelector('b')).toBeNull()
+    expect(table).toHaveClass('data-table') // the inline preview's table is the same component
   })
 
   it('caps at 500 rows and says how many it shows', async () => {
@@ -468,5 +472,52 @@ describe('ArtifactViewer: versions', () => {
     await screen.findByRole('heading', { name: 'report.md · v2 of 3' })
     fireEvent.click(screen.getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(files.downloads).toEqual(['b2']))
+  })
+})
+
+describe('ArtifactViewer: highlighted code and json', () => {
+  it('colors a .go file by its extension, with line numbers', async () => {
+    serve('package main\n\nfunc main() {\n\treturn\n}\n')
+    show(art({ name: 'main.go' }))
+    const code = await screen.findByTestId('artifact-text')
+    await waitFor(() => expect(code.querySelector('span[class^="hljs-"]')).not.toBeNull())
+    expect(code.textContent).toBe('package main\n\nfunc main() {\n\treturn\n}\n')
+    expect(document.querySelector('.code-viewer-gutter')?.textContent).toBe('1\n2\n3\n4\n5')
+  })
+
+  it('pretty-prints json and colors it as json', async () => {
+    serve('{"a":1,"b":"x"}')
+    show(art({ name: 'd.json', view: 'json', content_type: 'application/json' }))
+    const code = await screen.findByTestId('artifact-text')
+    await waitFor(() => expect(code.querySelector('span[class^="hljs-"]')).not.toBeNull())
+    expect(code.textContent).toBe('{\n  "a": 1,\n  "b": "x"\n}')
+    expect(code.querySelector('.hljs-number')?.textContent).toBe('1')
+  })
+
+  it('leaves a file of no known language as plain text', async () => {
+    serve('just words')
+    show(art({ name: 'notes.txt' }))
+    const pre = await screen.findByTestId('artifact-text')
+    expect(pre.querySelector('span')).toBeNull()
+    expect(document.querySelector('.code-viewer-gutter')).toBeNull()
+  })
+
+  it('colors only the head of a big file and keeps every character', async () => {
+    const line = 'x := 1 // ' + 'y'.repeat(60) + '\n'
+    const big = line.repeat(Math.ceil(150_000 / line.length))
+    serve(big)
+    show(art({ name: 'big.go', size: big.length }))
+    const code = await screen.findByTestId('artifact-text')
+    await waitFor(() => expect(code.querySelector('span[class^="hljs-"]')).not.toBeNull())
+    expect(code.textContent!.length).toBe(Math.min(big.length, 200 * 1024))
+  })
+})
+
+describe('ArtifactViewer: markdown body', () => {
+  it('draws a markdown file in the document style', async () => {
+    serve('# Title\n\ntext')
+    show(art({ name: 'r.md', view: 'markdown', content_type: 'text/markdown' }))
+    await screen.findByRole('heading', { name: 'Title' })
+    expect(document.querySelector('.md.md-doc')).not.toBeNull()
   })
 })

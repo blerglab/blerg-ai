@@ -86,6 +86,7 @@ type Task struct {
 	CallID      string    `json:"call_id"`
 	Kind        string    `json:"kind"`
 	Description string    `json:"description"`
+	Command     string    `json:"command,omitempty"`
 	StartedAt   time.Time `json:"started_at"`
 	Seq         int64     `json:"seq"`
 }

@@ -2,61 +2,101 @@
 // collapsed, that opens to the list; consecutive changes are folded into the latest by the
 // timeline) and a pinned ticket (a card; an unpin is a marker line). Everything they say is in the
 // event's payload: the server recorded the change, so nothing here compares events.
-import { useState } from 'react'
-import { checklistRowText, commitsText, readChecklist, readTicketEvent, sourceLabel, ticketChanges } from '../../model/worklist'
+import { useEffect, useState } from 'react'
+import { checklistRowText, readChecklist, readTicketEvent, sourceLabel, ticketChanges } from '../../model/worklist'
+import type { PatchSummary } from '../../model/patch'
 import type { AgentEvent, ChecklistItem } from '../../types'
 import { CommitChips } from '../CommitChips'
 import { useChat } from '../context'
 import { TimeLabel } from '../TimeLabel'
-import { TicketDetails, TicketHead } from '../TicketView'
+import { TicketHead, TicketModal, TicketSummary } from '../TicketView'
 import '../worklist.css'
 
-/** An item's commits: one chip ("2 commits") that opens to the shas, and "View diff" when the
- *  item names the diff the CLI published of them and the host can open it. */
-function ItemCommits({ commits, urls, onViewDiff }: {
-  commits: readonly string[]; urls?: (sha: string) => string | null | undefined; onViewDiff?: (() => void) | null
+/** "± View diff", with the diff's +/− counts once they are read. */
+function ViewDiffButton({ onClick, summary }: { onClick: () => void; summary?: () => Promise<PatchSummary> }) {
+  const [counts, setCounts] = useState<PatchSummary | null>(null)
+  useEffect(() => {
+    let live = true
+    summary?.().then(s => { if (live) setCounts(s) }, () => {})
+    return () => { live = false }
+  }, [summary])
+  const label = counts ? `View diff, ${counts.adds} added and ${counts.dels} removed lines` : 'View diff'
+  return (
+    <button type="button" className="commit-view-diff" aria-label={label} title="View the diff of these commits" onClick={onClick}>
+      <span className="commit-view-diff-glyph" aria-hidden="true">±</span>
+      <span>View diff</span>
+      {counts && (
+        <span className="commit-view-diff-counts" aria-hidden="true">
+          <span className="commit-plus">+{counts.adds}</span>
+          <span className="commit-minus">−{counts.dels}</span>
+        </span>
+      )}
+    </button>
+  )
+}
+
+/** An item's commits: up to three short shas, then "± View diff" when the item names the diff the CLI
+ *  published of them and the host can open it. With that diff a sha opens it at the commit; without,
+ *  a sha copies itself. Nothing links out of Blerg. */
+function ItemCommits({ commits, open, summary }: {
+  commits: readonly string[]
+  open: ((commit?: string) => void) | null
+  summary?: () => Promise<PatchSummary>
 }) {
-  const [open, setOpen] = useState(false)
   return (
     <span className="checklist-commits">
-      <button type="button" className="commit-chip checklist-commit-toggle" aria-expanded={open} onClick={() => setOpen(o => !o)}>
-        {commitsText(commits.length)}
-      </button>
-      {onViewDiff && (
-        <button type="button" className="commit-diff checklist-view-diff" title="View the diff of these commits" onClick={onViewDiff}>View diff</button>
-      )}
-      {open && <CommitChips commits={commits.map(sha => ({ sha, url: urls?.(sha) }))} />}
+      {commits.length > 0 && <CommitChips commits={commits.map(sha => ({ sha }))} onOpen={open ? sha => open(sha) : undefined} />}
+      {open && <ViewDiffButton onClick={() => open()} summary={summary} />}
     </span>
   )
 }
 
-/** The list with its boxes (read-only: only the agent ticks). An item that holds commits has a commit
- *  chip. `commitUrls` (sha to page) and `onViewDiff` are the host's hooks: the links of the chips, and
- *  what "View diff" does with the id of the item's diff (a file of the session). They default to the
- *  chat's own: ChatView's `commitUrl`, and its viewer (the button shows when the file is listed).
- *  An item without a diff has no "View diff". */
-export function ChecklistItems({ items, commitUrls, onViewDiff }: {
-  items: readonly ChecklistItem[]; commitUrls?: Readonly<Record<string, string>>; onViewDiff?: (artifactId: string) => void
+/** The list with its boxes (read-only: only the agent ticks). An item that holds commits has its
+ *  sha chips and, with a published diff, "± View diff". `onViewDiff` (the diff's id and, from a sha
+ *  chip, the commit) and `diffSummary` are the host's hooks; they default to the chat's own viewer
+ *  (the button shows when the file is listed) and its cached reading of the diff. `commitUrls` is
+ *  accepted for compatibility and not used: commits never link out of Blerg. */
+export function ChecklistItems({ items, onViewDiff, diffSummary }: {
+  items: readonly ChecklistItem[]
+  /** @deprecated Not used since 0.19.0. */
+  commitUrls?: Readonly<Record<string, string>>
+  onViewDiff?: (artifactId: string, commit?: string) => void
+  diffSummary?: (artifactId: string) => Promise<PatchSummary>
 }) {
   const chat = useChat()
-  const urls = commitUrls ? (sha: string) => commitUrls[sha] : chat?.commitUrl
-  const diff = (id: string | undefined): (() => void) | null => {
+  const opener = (id: string | undefined): ((commit?: string) => void) | null => {
     if (!id) return null
-    if (onViewDiff) return () => onViewDiff(id)
+    if (onViewDiff) return (commit?: string) => onViewDiff(id, commit)
     return chat?.viewDiff?.(id) ?? null
   }
+  const reader = diffSummary ?? chat?.diffSummary
   return (
     <ul className="checklist-items">
-      {items.map((it, i) => (
-        <li key={i} className={it.done ? 'done' : undefined}>
-          <span className="checklist-box" aria-hidden="true">{it.done ? '☑' : '☐'}</span>
-          <span className="checklist-text">{it.text}</span>
-          <span className="worklist-sr">{it.done ? ' (done)' : ' (to do)'}</span>
-          {it.commits && it.commits.length > 0 && <ItemCommits commits={it.commits} urls={urls} onViewDiff={diff(it.diff)} />}
-        </li>
-      ))}
+      {items.map((it, i) => {
+        const open = opener(it.diff)
+        return (
+          <li key={i} className={it.done ? 'done' : undefined}>
+            <span className="checklist-box" aria-hidden="true">{it.done ? '☑' : '☐'}</span>
+            <span className="checklist-text">{it.text}</span>
+            <span className="worklist-sr">{it.done ? ' (done)' : ' (to do)'}</span>
+            {((it.commits && it.commits.length > 0) || open) && (
+              <ItemCommits commits={it.commits ?? []} open={open} summary={open && it.diff && reader ? summaryOf(reader, it.diff) : undefined} />
+            )}
+          </li>
+        )
+      })}
     </ul>
   )
+}
+
+// One stable function per reader and diff, so ViewDiffButton's effect runs once.
+const summaries = new WeakMap<object, Map<string, () => Promise<PatchSummary>>>()
+function summaryOf(reader: (id: string) => Promise<PatchSummary>, id: string): () => Promise<PatchSummary> {
+  let m = summaries.get(reader)
+  if (!m) { m = new Map(); summaries.set(reader, m) }
+  let f = m.get(id)
+  if (!f) { f = () => reader(id); m.set(id, f) }
+  return f
 }
 
 export function ChecklistRow({ ev }: { ev: AgentEvent }) {
@@ -79,6 +119,7 @@ export function ChecklistRow({ ev }: { ev: AgentEvent }) {
 }
 
 export function TicketCard({ ev }: { ev: AgentEvent }) {
+  const [open, setOpen] = useState(false)
   const p = readTicketEvent(ev.payload)
   if (!p) return null
   const key = ev.client_event_id
@@ -94,12 +135,16 @@ export function TicketCard({ ev }: { ev: AgentEvent }) {
   return (
     <div className="agent-card ticket-card" data-testid="ticket-card" data-event-id={key} data-ticket-key={t.key}>
       <div className="ticket-kicker">
-        <span>{p.action === 'update' ? 'Ticket updated' : 'Ticket pinned'}</span>
+        <span>{p.action === 'update' ? 'Updated' : 'Pinned ticket'}</span>
         {changes.length > 0 && <span className="ticket-changes" data-testid="ticket-changes"> · {changes.join(' · ')}</span>}
         <TimeLabel ts={ev.ts} className="card-time-end" />
       </div>
       <TicketHead ticket={t} />
-      <TicketDetails ticket={t} />
+      <TicketSummary ticket={t} />
+      <div className="ticket-actions">
+        <button type="button" className="ticket-open" onClick={() => setOpen(true)}>Open ticket</button>
+      </div>
+      {open && <TicketModal ticket={t} onClose={() => setOpen(false)} />}
     </div>
   )
 }

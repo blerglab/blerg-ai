@@ -322,6 +322,6 @@ describe('messages with attachments in the transcript', () => {
     // opening the panel reads it again too
     fireEvent.click(screen.getByRole('button', { name: /Files/ }))
     await waitFor(() => expect(listCalls()).toBeGreaterThan(afterUpload))
-    expect(await screen.findByTestId('uploaded-section')).toBeInTheDocument()
+    expect(await screen.findByText('you')).toBeInTheDocument()
   })
 })

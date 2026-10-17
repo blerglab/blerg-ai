@@ -1,11 +1,13 @@
 // FilesList: every file the session holds, newest first — the body of the Files panel, and of a host's
-// own place for it (the runner's session panel has a Files tab). A file with several versions (the
+// own place for it (the runner's session panel has a Files tab). Rows are compact: glyph, name, size ·
+// version · time. With more than a few files a filter box, a sort and an origin choice appear. A file with several versions (the
 // agent, or you, added the same name again) is ONE row showing its latest version, with the earlier
 // ones behind an "Earlier versions" disclosure. Each version can be downloaded, viewed (when the app
 // can show that type) or deleted on its own (after an in-page confirmation). A version the server
 // still lists but no longer has the bytes of (`missing`) is drawn disabled, says "no longer
 // available", and offers Delete only.
 import { useId, useState, type ReactNode } from 'react'
+import { localStorageChatStorage } from '../model/storage'
 import { formatSize, groupArtifacts, type ArtifactGroup } from '../model/artifacts'
 import { ARTIFACT_VIEWS, isViewable } from '../model/artifactViews'
 import type { ArtifactsStatus } from '../hooks/useArtifacts'
@@ -13,6 +15,51 @@ import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { fileErrorText } from '../transport/files'
 import ErrorId from './ErrorId'
 import { TimeLabel } from './TimeLabel'
+
+const SORT_KEY = 'blerg.files.sort'
+const ORIGIN_KEY = 'blerg.files.origin'
+/** The list gets a filter box, sort and origin choice once it holds more files than this. */
+const SEARCH_OVER = 6
+
+type Sort = 'newest' | 'name'
+type Origin = 'all' | 'agent' | 'user'
+
+// One small glyph per view: a page with a mark that tells the kinds apart.
+const GLYPHS: Record<string, string> = {
+  markdown: 'M6 11V8l1.5 2L9 8v3',
+  pdf: 'M6.5 12V8h2a1 1 0 0 1 0 2h-2',
+  image: 'm5 12 2-3 1.5 2 1-1 2 2z',
+  csv: 'M5.5 8.5h6M5.5 10.5h6M8.5 7v6',
+  json: 'm7 8-2 2 2 2m3-4 2 2-2 2',
+  diff: 'M8.5 7v3M7 8.5h3M7 12h3',
+  html: 'M8.5 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6',
+  audio: 'M7 12V8.5l4-1V11',
+  video: 'M7 8v4l3.5-2z',
+  text: 'M6 8.5h5M6 10.5h5M6 12.5h3',
+}
+
+function FileGlyph({ view, label }: { view: string; label: string }) {
+  return (
+    <svg className="artifact-glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <title>{label}</title>
+      <path d="M3.5 1.5h6L13 5v9.5H3.5zM9.5 1.5V5H13" fill="none" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" />
+      <path d={GLYPHS[view] ?? GLYPHS.text} fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+const DOWNLOAD_ICON = 'M8 2.5v8m-3-3 3 3 3-3M3 13h10'
+const DELETE_ICON = 'M3.5 4.5h9M6.5 4.5v-2h3v2M5 4.5l.5 9h5l.5-9'
+
+function IconButton({ label, path, danger, onClick, disabled }: { label: string; path: string; danger?: boolean; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button type="button" className={`artifact-icon-btn${danger ? ' danger' : ''}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}>
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+        <path d={path} fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  )
+}
 
 export interface FilesListProps {
   sessionId: string
@@ -36,6 +83,14 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
   const [busy, setBusy] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, { message: string; errorId?: string }>>({})
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const [query, setQuery] = useState('')
+  const [sort, setSortState] = useState<Sort>(() => (localStorageChatStorage.get(SORT_KEY) === 'name' ? 'name' : 'newest'))
+  const [origin, setOriginState] = useState<Origin>(() => {
+    const v = localStorageChatStorage.get(ORIGIN_KEY)
+    return v === 'agent' || v === 'user' ? v : 'all'
+  })
+  const setSort = (v: Sort) => { setSortState(v); localStorageChatStorage.set(SORT_KEY, v) }
+  const setOrigin = (v: Origin) => { setOriginState(v); localStorageChatStorage.set(ORIGIN_KEY, v) }
 
   const fail = (id: string, err: { message: string; errorId?: string }) => setErrors(prev => ({ ...prev, [id]: err }))
   const clear = (id: string) => setErrors(prev => {
@@ -72,39 +127,46 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
     }
   }
 
-  // The name, size, kind and time of one version, and its Download / View / Delete.
+  // One version: its glyph, name (the click opens it when the app can show it), size · version · time ·
+  // "you", and Download / Delete (on hover or focus; always shown on touch).
   const details = (a: ArtifactInfo, g: ArtifactGroup, badge: boolean) => {
     const versioned = g.earlier.length > 0 || (a.version ?? 1) > 1
     const gone = a.missing === true
-    const kind = gone ? 'no longer available' : isViewable(a.view) ? ARTIFACT_VIEWS[a.view].label : 'Download only'
+    const viewable = !gone && isViewable(a.view)
+    const kind = isViewable(a.view) ? ARTIFACT_VIEWS[a.view].label : 'Download only'
+    const mainProps = {
+      className: `artifact-row-main${gone ? ' is-missing' : ''}`,
+      'aria-disabled': gone || undefined,
+      title: gone ? `${a.name}${badge ? ` v${a.version}` : ''} is no longer available` : a.name,
+      'data-testid': gone ? 'artifact-missing' : undefined,
+    }
+    const main = (
+      <>
+        <span className="artifact-row-name" data-testid="artifact-name">{a.name}</span>
+        <span className="artifact-row-meta">
+          {gone ? 'no longer available' : formatSize(a.size)}
+          {badge && <> · <span className="artifact-version" data-testid="artifact-version">v{a.version}</span></>}
+          {a.created_at && <> · <TimeLabel ts={a.created_at} /></>}
+          {a.origin === 'user' && <> · <span className="artifact-you" title="Attached by you">you</span></>}
+        </span>
+      </>
+    )
     return (
       <>
-        <div
-          className={`artifact-row-main${gone ? ' is-missing' : ''}`}
-          aria-disabled={gone || undefined}
-          title={gone ? `${a.name}${badge ? ` v${a.version}` : ''} is no longer available` : undefined}
-          data-testid={gone ? 'artifact-missing' : undefined}
-        >
-          <span className="artifact-row-name" data-testid="artifact-name" title={gone ? undefined : a.name}>{a.name}</span>
-          {badge && <span className="artifact-version" data-testid="artifact-version">v{a.version}</span>}
-          <span className="artifact-row-meta">
-            {[formatSize(a.size), kind, ...(a.origin === 'user' ? ['uploaded by you'] : [])].join(' · ')}
-            {a.created_at && <> · <TimeLabel ts={a.created_at} /></>}
-          </span>
-        </div>
+        <FileGlyph view={a.view} label={gone ? 'No longer available' : kind} />
+        {viewable
+          ? <button type="button" {...mainProps} aria-label={`View ${a.name}`} onClick={() => onView(a)}>{main}</button>
+          : <div {...mainProps}>{main}</div>}
         {confirming === a.id ? (
-          <div className="artifact-row-actions">
+          <div className="artifact-row-actions is-confirming">
             <span className="artifact-confirm">{versioned ? `Delete v${a.version ?? 1}?` : 'Delete this file?'}</span>
             <button type="button" className="artifact-btn danger" disabled={busy === a.id} onClick={() => void remove(a)}>Yes, delete</button>
             <button type="button" className="artifact-btn" onClick={() => setConfirming(null)}>Cancel</button>
           </div>
         ) : (
           <div className="artifact-row-actions">
-            {!gone && <button type="button" className="artifact-btn" onClick={() => void download(a)}>Download</button>}
-            {!gone && isViewable(a.view) && (
-              <button type="button" className="artifact-btn" onClick={() => onView(a)}>View</button>
-            )}
-            <button type="button" className="artifact-btn" onClick={() => { clear(a.id); setConfirming(a.id) }}>Delete</button>
+            {!gone && <IconButton label="Download" path={DOWNLOAD_ICON} onClick={() => void download(a)} />}
+            <IconButton label="Delete" path={DELETE_ICON} onClick={() => { clear(a.id); setConfirming(a.id) }} />
           </div>
         )}
         {errors[a.id] && <div className="artifact-error" role="alert">{errors[a.id].message}<ErrorId id={errors[a.id].errorId} /></div>}
@@ -172,18 +234,41 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
       </div>
     )
   } else {
-    const groups = groupArtifacts(items)
-    const uploaded = groups.filter(g => g.origin === 'user')
-    const published = groups.filter(g => g.origin !== 'user')
-    const list = (rows: ArtifactGroup[], label?: string) => (
-      <ul className="artifact-list" aria-label={label}>{rows.map(groupRow)}</ul>
-    )
-    // Files you attached to a message get their own section; with none, the list is as it always was.
-    body = uploaded.length === 0 ? list(groups) : (
+    const all = groupArtifacts(items)
+    const tools = all.length > SEARCH_OVER // search, sort and origin only earn their room on a long list
+    const needle = query.trim().toLowerCase()
+    const shown = (tools ? all.filter(g => (origin === 'all' || g.origin === origin) && g.name.toLowerCase().includes(needle)) : all)
+      .sort((x, y) => (tools && sort === 'name' ? x.name.localeCompare(y.name, undefined, { sensitivity: 'base' }) : 0))
+    body = (
       <>
-        {published.length > 0 && <><h3 className="artifact-section">Published by the agent</h3>{list(published, 'Published by the agent')}</>}
-        <h3 className="artifact-section" data-testid="uploaded-section">Uploaded by you</h3>
-        {list(uploaded, 'Uploaded by you')}
+        {tools && (
+          <div className="artifact-tools">
+            <input
+              type="search"
+              className="artifact-search"
+              placeholder="Filter files"
+              aria-label="Filter files"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Escape' && query) { e.stopPropagation(); setQuery('') }
+              }}
+            />
+            <select className="artifact-select" aria-label="Sort files" value={sort} onChange={e => setSort(e.target.value as Sort)}>
+              <option value="newest">Newest</option>
+              <option value="name">Name</option>
+            </select>
+            <select className="artifact-select" aria-label="Show files from" value={origin} onChange={e => setOrigin(e.target.value as Origin)}>
+              <option value="all">All</option>
+              <option value="agent">From the agent</option>
+              <option value="user">From you</option>
+            </select>
+            {shown.length !== all.length && <span className="artifact-shown" data-testid="artifacts-shown">{shown.length} of {all.length}</span>}
+          </div>
+        )}
+        {shown.length === 0
+          ? <p className="artifact-status" data-testid="artifacts-no-match">No files match</p>
+          : <ul className="artifact-list">{shown.map(groupRow)}</ul>}
       </>
     )
   }

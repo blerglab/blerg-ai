@@ -8,7 +8,7 @@
 // preview, and only the small result (an excerpt, a thumbnail) is kept, in a bounded cache.
 import { TEXT_VIEW_MAX, blobTypeFor } from './artifactViews'
 import { excerptOf, type Excerpt } from './previewExcerpt'
-import { patchSummary, type PatchSummary } from './patch'
+import { parsePatch, patchSummary, type PatchFile, type PatchSummary } from './patch'
 import { renderPdfThumb } from '../pdf/thumb'
 
 /** An image over this size keeps the plain card: the transcript is not a download manager. */
@@ -109,12 +109,29 @@ export function loadPreviewExcerpt(
   })
 }
 
-const diffs = new Map<string, Promise<PatchSummary>>()
+/** A patch of one file with at most this many changed lines (adds + dels) is drawn in its card. */
+export const INLINE_DIFF_LINES = 20
+
+export interface DiffPreviewData { summary: PatchSummary; inline: PatchFile | null }
+
+const diffs = new Map<string, Promise<DiffPreviewData>>()
 
 /** What a diff's card says (files, +/−, the first names), read once per session and file. The
  *  patch is read whole (at most INLINE_TEXT_MAX, by previewKind) but only the summary is kept. */
 export function loadDiffSummary(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>): Promise<PatchSummary> {
-  return remember(diffs, `${sessionId}/${artifactId}`, async () => patchSummary(await (await raw(artifactId)).text()))
+  return loadDiffPreview(sessionId, artifactId, raw).then(d => d.summary)
+}
+
+/** The card's summary and, for a small patch of ONE file (at most INLINE_DIFF_LINES changed lines),
+ *  that file parsed, to draw its hunks in the card. The patch is parsed once. */
+export function loadDiffPreview(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>): Promise<DiffPreviewData> {
+  return remember(diffs, `${sessionId}/${artifactId}`, async () => {
+    const parsed = parsePatch(await (await raw(artifactId)).text())
+    const summary = patchSummary(parsed)
+    const one = parsed.files.length === 1 ? parsed.files[0] : null
+    const inline = one && !one.binary && one.hunks.length > 0 && one.adds + one.dels > 0 && one.adds + one.dels <= INLINE_DIFF_LINES ? one : null
+    return { summary, inline }
+  })
 }
 
 const thumbs = new Map<string, Promise<string>>()

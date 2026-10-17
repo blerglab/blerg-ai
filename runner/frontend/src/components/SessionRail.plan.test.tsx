@@ -70,7 +70,20 @@ describe('Plan tab', () => {
     const rows = screen.getAllByTestId('rail-diff-row')
     expect(rows.map(r => r.textContent)).toEqual([expect.stringContaining('second-change.diff'), expect.stringContaining('first-change.diff')])
     fireEvent.click(within(rows[1]).getByRole('button', { name: 'first-change.diff' }))
-    expect(open).toHaveBeenCalledWith('d1')
+    expect(open).toHaveBeenCalledWith('d1', undefined)
+  })
+
+  it('opens an item\'s diff at the commit of the sha chip clicked, and whole from View diff', () => {
+    const open = vi.fn()
+    const diff = 'd'.repeat(32)
+    const items = [{ text: 'Fix', done: true, commits: ['abcdef1234', '1234567'], diff }]
+    rail(makeLive({ checklist: { items, eventId: 'c1', updatedAt: null } }), { onOpenArtifact: open })
+    fireEvent.click(screen.getByRole('tab', { name: /Plan/ }))
+    const list = screen.getByTestId('rail-checklist')
+    fireEvent.click(within(list).getByRole('button', { name: 'Open commit 1234567 in the diff' }))
+    expect(open).toHaveBeenLastCalledWith(diff, '1234567')
+    fireEvent.click(within(list).getByRole('button', { name: /View diff/ }))
+    expect(open).toHaveBeenLastCalledWith(diff, undefined)
   })
 })
 
@@ -79,7 +92,19 @@ describe('Live summary line', () => {
     rail(makeLive({ checklist: { items: planItems, eventId: 'c1', updatedAt: null } }))
     const line = screen.getByTestId('rail-plan-summary')
     expect(within(line).getByTestId('rail-plan-summary-text').textContent).toBe('Checklist · 18 of 23 · Next: Step 19: update the docs')
-    expect(within(line).getByRole('progressbar')).toBeTruthy()
+    const bar = within(line).getByRole('progressbar')
+    expect(bar).toHaveAttribute('aria-valuenow', '18')
+    expect(bar).toHaveAttribute('aria-valuemax', '23')
+    expect(bar.classList.contains('complete')).toBe(false)
+  })
+
+  it('draws a short bar, in the success color when all are done, on the Plan tab header too', () => {
+    rail(makeLive({ checklist: { items: planItems.map(i => ({ ...i, done: true })), eventId: 'c1', updatedAt: null } }))
+    expect(within(screen.getByTestId('rail-plan-summary')).getByRole('progressbar').classList.contains('complete')).toBe(true)
+    fireEvent.click(screen.getByTestId('rail-plan-summary-open'))
+    const head = within(screen.getByTestId('rail-checklist')).getByRole('progressbar')
+    expect(head).toHaveAttribute('aria-valuenow', '23')
+    expect(screen.getByTestId('rail-checklist-meta')).toContainElement(head)
   })
 
   it('says all done', () => {
@@ -96,14 +121,34 @@ describe('Live summary line', () => {
     rail(makeLive({ tickets: [ticket], checklist: { items: planItems, eventId: 'c1', updatedAt: null } }))
     const line = screen.getByTestId('rail-plan-summary')
     expect(line.textContent).toMatch(/^PRJ-12In progressChecklist/)
+    expect(within(line).getByTestId('ticket-status').getAttribute('data-tone')).toBe('active')
   })
 
-  it('switches to the Plan tab and focuses it on click', () => {
-    rail(makeLive({ checklist: { items: planItems, eventId: 'c1', updatedAt: null } }))
-    fireEvent.click(screen.getByTestId('rail-plan-summary'))
+  it('colors every pinned ticket row by its status; a canceled title is struck', () => {
+    const tickets = [
+      ticket,
+      { ...ticket, key: 'PRJ-9', title: 'Old', status: 'Blocked', eventId: 'e2' },
+      { ...ticket, key: 'PRJ-3', title: 'Dropped', status: 'Duplicate', eventId: 'e3' },
+    ]
+    rail(makeLive({ tickets }))
+    const rows = screen.getAllByTestId('rail-ticket-row')
+    expect(rows.map(r => within(r).getByTestId('ticket-status').getAttribute('data-tone'))).toEqual(['active', 'blocked', 'canceled'])
+    expect(within(rows[2]).getByText('Dropped').classList.contains('canceled')).toBe(true)
+  })
+
+  it('the list part switches to the Plan tab and focuses it; the ticket part does not', () => {
+    rail(makeLive({ tickets: [ticket], checklist: { items: planItems, eventId: 'c1', updatedAt: null } }))
+    fireEvent.click(screen.getByTestId('rail-plan-summary-open'))
     const tab = screen.getByRole('tab', { name: /Plan/ })
     expect(tab.getAttribute('aria-selected')).toBe('true')
     expect(document.activeElement).toBe(tab)
     expect(localStorage.getItem(RAIL_TAB_KEY)).toBe('plan')
+  })
+
+  it('the ticket part opens the ticket modal and stays on Live', () => {
+    rail(makeLive({ tickets: [ticket], checklist: { items: planItems, eventId: 'c1', updatedAt: null } }))
+    fireEvent.click(screen.getByTestId('rail-plan-summary-ticket'))
+    expect(screen.getByRole('dialog')).toHaveTextContent('Fix the thing')
+    expect(screen.getByRole('tab', { name: /Live/ }).getAttribute('aria-selected')).toBe('true')
   })
 })

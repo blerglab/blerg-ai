@@ -41,7 +41,7 @@ Subcommands
   topic --done ["<outcome>"] [--commit <sha> ...]
                                 Close the open topic, with a one-line outcome and the
                                 commits the work landed.
-  checklist set|add|tick|untick|clear ...
+  checklist set|add|tick|untick|remove|clear ...
                                 Keep the session's checklist (the person's session panel shows it);
                                 `checklist --help` says how.
   pin <file.json|->  [--checklist]
@@ -1328,6 +1328,7 @@ tick each item as it is done, add one you discover. Only you change it.
   blerg-runner checklist tick 3 --commit 1a2b3c4   (name the commits that finished it; repeat or comma-separate)
   blerg-runner checklist untick 2
   blerg-runner checklist add "Update the docs"
+  blerg-runner checklist remove 4          (or its exact text; the other items keep their ticks, commits and diffs)
   blerg-runner checklist clear
 
 At most 50 items of 200 characters. Each command prints the list after the change. With --commit,
@@ -1473,7 +1474,7 @@ def cmd_checklist(op, values, force_text=None, commits=None):
         if len(values) != 1 or not values[0].strip():
             _work_fail("checklist", 'give one item: blerg-runner checklist add "<item>"')
         body["item"] = values[0]
-    elif op in ("tick", "untick"):
+    elif op in ("tick", "untick", "remove"):
         if force_text is not None:
             if values or not force_text:
                 _work_fail("checklist", f'name one item: blerg-runner checklist {op} --text "<exact text>"')
@@ -2588,16 +2589,16 @@ def main():
 
     p_check = sub.add_parser(
         "checklist",
-        help="Keep the session's checklist: set, add, tick, untick, clear (checklist --help)",
+        help="Keep the session's checklist: set, add, tick, untick, remove, clear (checklist --help)",
         description="Keep the session's checklist, shown at the top of the person's session panel.",
         epilog=CHECKLIST_GUIDE,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_check.add_argument("op", choices=["set", "add", "tick", "untick", "clear"], help="What to do")
+    p_check.add_argument("op", choices=["set", "add", "tick", "untick", "remove", "clear"], help="What to do")
     p_check.add_argument("values", nargs="*", metavar="ITEM",
-                         help="set: the items; add: one item; tick/untick: its number (1 is the first) or exact text")
+                         help="set: the items; add: one item; tick/untick/remove: its number (1 is the first) or exact text")
     p_check.add_argument("--text", default=None, dest="force_text", metavar="TEXT",
-                         help="tick/untick: the item's exact text, even when it is a number")
+                         help="tick/untick/remove: the item's exact text, even when it is a number")
     p_check.add_argument("--commit", action="append", default=None, metavar="SHA",
                          help="add/tick: a commit that finished the item (repeat it, or comma-separate the shas)")
 

@@ -235,3 +235,48 @@ func TestReadDropsAMalformedDiff(t *testing.T) {
 		t.Fatalf("read = %+v changed %+v", p, p.Changed)
 	}
 }
+
+func TestRemoveByIndexAndTextKeepsTheOthersCommitsAndDiffs(t *testing.T) {
+	diff := strings.Repeat("a", 32)
+	cur := []Item{{Text: "a", Done: true, Commits: []string{"abcdef1"}, Diff: diff}, {Text: "b", Done: true, Commits: []string{"1234567"}}, {Text: "c"}, {Text: "b"}}
+	p, err := Apply(cur, Request{Op: "remove", Index: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Items) != 3 || p.Items[0].Diff != diff || p.Items[1].Commits[0] != "1234567" || p.Items[2].Text != "b" {
+		t.Fatalf("items = %+v", p.Items)
+	}
+	if p.Op != "remove" || p.Changed == nil || p.Changed.Index != 3 || p.Changed.Text != "c" {
+		t.Fatalf("changed = %+v", p.Changed)
+	}
+	if len(cur) != 4 || cur[2].Text != "c" {
+		t.Fatal("Apply changed the list it was given")
+	}
+	// By text it takes the first match, ticked or not, and reports what it held.
+	p, err = Apply(cur, Request{Op: "remove", Text: "b"})
+	if err != nil || len(p.Items) != 3 || p.Items[1].Text != "c" || p.Changed.Index != 2 || !p.Changed.Done || p.Changed.Commits[0] != "1234567" {
+		t.Fatalf("by text: %+v %v", p, err)
+	}
+	// The last item goes too; the list is then empty.
+	p, err = Apply(items("only"), Request{Op: "remove", Index: 1})
+	if err != nil || len(p.Items) != 0 || p.Items == nil {
+		t.Fatalf("last: %+v %v", p, err)
+	}
+}
+
+func TestRemoveRefusals(t *testing.T) {
+	for name, req := range map[string]Request{
+		"out of range": {Op: "remove", Index: 3},
+		"no match":     {Op: "remove", Text: "zzz"},
+		"neither":      {Op: "remove"},
+		"both":         {Op: "remove", Index: 1, Text: "a"},
+		"commits":      {Op: "remove", Index: 1, Commits: []string{"abcdef1"}},
+	} {
+		if _, err := Apply(items("a", "b"), req); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := Apply(nil, Request{Op: "remove", Index: 1}); err == nil {
+		t.Error("an empty list accepted a remove")
+	}
+}

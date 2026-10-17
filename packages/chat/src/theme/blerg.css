@@ -21,6 +21,7 @@
   --chat-radius: 10px;
   --chat-font: var(--body, system-ui, -apple-system, "Segoe UI", sans-serif);
   --chat-font-mono: var(--mono, ui-monospace, "SF Mono", "Cascadia Mono", monospace);
+  --chat-font-display: var(--display, "Avenir Next Condensed", "Bahnschrift", "Arial Narrow", "Helvetica Neue", sans-serif);
   --chat-text-xs: var(--text-xs, 12px);
   --chat-text-sm: var(--text-sm, 13px);
   --chat-density: 1;
@@ -64,6 +65,7 @@
     --chat-radius: 10px;
     --chat-font: var(--body, system-ui, -apple-system, "Segoe UI", sans-serif);
     --chat-font-mono: var(--mono, ui-monospace, "SF Mono", "Cascadia Mono", monospace);
+    --chat-font-display: var(--display, "Avenir Next Condensed", "Bahnschrift", "Arial Narrow", "Helvetica Neue", sans-serif);
     --chat-text-xs: var(--text-xs, 12px);
     --chat-text-sm: var(--text-sm, 13px);
     --chat-density: 1;

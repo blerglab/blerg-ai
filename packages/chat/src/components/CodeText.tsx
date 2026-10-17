@@ -15,7 +15,9 @@ function diffClass(line: string): string | undefined {
   return undefined
 }
 
-export default function CodeText({ text, diff, highlighted }: { text: string; diff?: boolean; highlighted?: Token[] | null }) {
+/** `highlighted` colours `text`; with `tail` the colours cover only the start of the file and the
+ *  rest follows as plain text (see useHighlightHead, where `text` is the whole file). */
+export default function CodeText({ text, diff, highlighted, tail }: { text: string; diff?: boolean; highlighted?: Token[] | null; tail?: string }) {
   if (diff) {
     return (
       <>
@@ -25,6 +27,6 @@ export default function CodeText({ text, diff, highlighted }: { text: string; di
       </>
     )
   }
-  if (highlighted) return <>{tokens(highlighted)}</>
+  if (highlighted) return <>{tokens(highlighted)}{tail}</>
   return <>{text}</>
 }

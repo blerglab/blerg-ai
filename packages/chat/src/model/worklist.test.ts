@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent } from '../types'
 import {
-  checklistFromEvents, checklistRowText, commitsText, pinnedFromEvents, planLabel, readChecklist, readTicket, readTicketEvent,
-  sourceLabel, ticketChanges, ticketHref,
+  checklistFromEvents, checklistRowText, commitsText, pinnedFromEvents, planLabel, priorityGlyph, readChecklist, readTicket,
+  readTicketEvent, sourceLabel, statusTone, ticketChanges, ticketHref, ticketMeta,
 } from './worklist'
 
 let n = 0
@@ -107,5 +107,40 @@ describe('tickets', () => {
   it('names the tracker', () => {
     expect(sourceLabel('jira')).toBe('JIRA')
     expect(sourceLabel('redmine')).toBe('redmine')
+  })
+})
+
+describe('statusTone', () => {
+  it.each([
+    ['To Do', 'neutral'], ['open', 'neutral'], ['Backlog', 'neutral'], ['NEW', 'neutral'], ['Triage', 'neutral'],
+    ['In Progress', 'active'], ['in review', 'active'], ['Review', 'active'], ['started', 'active'], ['Doing', 'active'],
+    ['ACTIVE', 'active'], ['Testing', 'active'], ['QA', 'active'], ['in-progress', 'active'], ['IN_PROGRESS', 'active'],
+    ['Blocked', 'blocked'], ['On Hold', 'blocked'], ['waiting', 'blocked'], ['Paused', 'blocked'],
+    ['Done', 'done'], ['closed', 'done'], ['RESOLVED', 'done'], ['Fixed', 'done'], ['Complete', 'done'], ['completed', 'done'],
+    ['Merged', 'done'], ['released', 'done'], ['Shipped', 'done'],
+    ["Won't Do", 'canceled'], ["won’t fix", 'canceled'], ['WONTFIX', 'canceled'], ['Canceled', 'canceled'], ['cancelled', 'canceled'],
+    ['Duplicate', 'canceled'], ['invalid', 'canceled'], ['Rejected', 'canceled'],
+    ['  In Progress  ', 'active'], ['Ready for lunch', 'neutral'], ['', 'neutral'], ['ASSIGNED', 'neutral'],
+  ])('%s → %s', (status, tone) => {
+    expect(statusTone(status)).toBe(tone)
+  })
+})
+
+describe('priorityGlyph', () => {
+  it.each([
+    ['High', '↑'], ['critical', '↑'], ['Urgent', '↑'], ['Highest', '↑'], ['Medium', '→'], ['normal', '→'],
+    ['Low', '↓'], ['lowest', '↓'], ['', ''], ['Sev 2', ''], ['whatever', ''],
+    ['P0', '↑'], ['p1', '↑'], ['P2', '→'], ['P2 - Major', '→'], ['P3', '↓'], ['P4', '↓'], ['P5', ''], ['P10', ''], ['p1x', ''],
+  ])('%s → %s', (priority, glyph) => {
+    expect(priorityGlyph(priority)).toBe(glyph)
+  })
+})
+
+describe('ticketMeta', () => {
+  it('is type, priority and assignee, the missing ones left out', () => {
+    expect(ticketMeta({ source: 'x', key: 'K', title: 'T', type: 'Task', priority: 'High', assignee: 'Release owner' }))
+      .toEqual(['Task', 'High', 'Release owner'])
+    expect(ticketMeta({ source: 'x', key: 'K', title: 'T', priority: 'Low' })).toEqual(['Low'])
+    expect(ticketMeta({ source: 'x', key: 'K', title: 'T' })).toEqual([])
   })
 })

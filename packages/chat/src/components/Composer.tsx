@@ -1,7 +1,7 @@
 // The message box: the text, the paperclip and the chips of what is attached, Send, and the
 // keyboard: Enter sends, Shift+Enter breaks the line, Esc interrupts the running turn. The hidden
 // file input belongs to ChatView (the Files panel's empty state opens it too); onAttach opens it.
-import { markdownForPaste } from '../model/richClipboard'
+import { insideOpenFence, markdownForPaste } from '../model/richClipboard'
 import { useEffect, useRef, type ReactNode } from 'react'
 import type { useAttachments } from '../hooks/useAttachments'
 import { ComposerChips } from './AttachmentChips'
@@ -79,6 +79,10 @@ export default function Composer({ draft, onDraft, placeholder, locked, busy, on
             if (plainOnly || e.defaultPrevented) return
             const html = e.clipboardData?.getData('text/html')
             if (!html) return
+            // Inside an open code fence the text goes in as copied, like any editor: converting it
+            // would fence it again inside the fence.
+            const ta = e.currentTarget
+            if (insideOpenFence(ta.value.slice(0, ta.selectionStart))) return
             const md = markdownForPaste(html, e.clipboardData.getData('text/plain'))
             if (md === null) return
             e.preventDefault()

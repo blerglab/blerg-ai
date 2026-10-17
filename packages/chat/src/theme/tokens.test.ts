@@ -33,7 +33,7 @@ const EXEMPT = new Set(['theme/blerg.css'])
 
 const CONTRACT = [
   'bg', 'surface', 'surface-2', 'fg', 'muted', 'muted-2', 'accent', 'accent-fg',
-  'success', 'warning', 'info', 'danger', 'border', 'radius', 'font', 'font-mono',
+  'success', 'warning', 'info', 'danger', 'border', 'radius', 'font', 'font-mono', 'font-display',
   'text-xs', 'text-sm', 'density',
   'card-user-bg', 'card-assistant-bg', 'card-tool-bg', 'card-system-bg',
   'code-keyword', 'code-string', 'code-number', 'code-comment', 'code-title', 'code-type',

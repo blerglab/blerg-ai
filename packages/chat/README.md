@@ -32,8 +32,8 @@ your core, or the runner's own `GET <runner>/agents`) carries `ui.chat_package`:
   "ui": {
     "chat_package": {
       "name": "@blerglab/chat",
-      "version": "0.17.1",
-      "url": "https://runner.example.test/packages/blerglab-chat-0.17.1.tgz",
+      "version": "0.21.0",
+      "url": "https://runner.example.test/packages/blerglab-chat-0.21.0.tgz",
       "sha512": "…",
       "docs_url": "https://runner.example.test/packages/@blerglab/chat/README.md"
     }
@@ -190,7 +190,8 @@ the agent marked with `blerg-runner topic`) draws as a thin divider (`▸ <title
 - `theme`: a `ThemeTokens` object instead of a CSS file.
 - `cards`: a registry from `createCardRegistry([...])`; see Cards.
 - `slots`: `header`, `composerActions`, `messageFooter` and, since 0.15.0, `aboveComposer` (a node between the transcript and the composer) for your own chrome.
-- `commitUrl(sha)` (0.15.0): where a commit named on a checklist item links (null: the chip copies the sha). 0.15.0's `onViewCommitDiff(sha)` is gone in 0.16.0: an item's "View diff" opens the diff the agent published of its commits, in the chat's own viewer.
+- `commitUrl(sha)` (0.15.0): unused since 0.19.0 (commit chips never link out of Blerg), still accepted. 0.15.0's `onViewCommitDiff(sha)` is gone in 0.16.0: an item's "View diff" opens the diff the agent published of its commits, in the chat's own viewer.
+- `linkedCommit` (0.19.0): with `linkedArtifact` a diff, the commit it opens at (its section scrolled to and marked).
 - `maxFileBytes`: the largest file a person may attach, in bytes; a larger one is refused in the
   browser, with the limit named, before it is sent (0.11.0). Without it the chat uses the
   session's `limits.max_file_bytes`, which the runner (0.2.1 on) puts in its session status and
@@ -346,6 +347,7 @@ for dark mode; the components never branch on light or dark themselves.
 | `--chat-radius` | corner radius |
 | `--chat-font` | text face |
 | `--chat-font-mono` | code face |
+| `--chat-font-display` | section headings (condensed, uppercase) |
 | `--chat-text-xs` | smallest text size |
 | `--chat-text-sm` | small text size |
 | `--chat-density` | spacing scale (1 = default) |
@@ -474,6 +476,33 @@ Added in 0.13.0; no new props, nothing removed.
   the model helpers (`foldTicketEvent`, `readChecklist`, `planLabel`, …) are exported for a side
   panel.
 
+## Tickets and commit chips
+
+Changed in 0.19.0. New: ChatView's `linkedCommit`, `StatusChip`, `TicketSummary`, `statusTone`,
+`priorityGlyph`, `ticketMeta`, `loadDiffSummary`, `ChecklistItems`'s `diffSummary`. Unused, still
+accepted: ChatView's `commitUrl`, `ChecklistItems`'s `commitUrls`, `CommitRef.url`. Removed:
+`CommitChips`'s per-sha `onViewDiff` (nothing passed it), replaced by `onOpen`.
+
+- **Status chips by meaning.** `statusTone(status)` maps a tracker's word, case- and
+  separator-insensitive, to `neutral` (to do, open, backlog, new, triage, and anything unknown),
+  `active` (in progress, in review, started, doing, testing, QA…), `blocked` (blocked, on hold,
+  waiting, paused), `done` (done, closed, resolved, fixed, merged, released, shipped…) or `canceled`
+  (won't do, won't fix, canceled, duplicate, invalid, rejected). `StatusChip` draws it as a muted tint
+  of `--chat-info`, `--chat-warning` or `--chat-success` with a dot; a canceled ticket's title is
+  struck through. The chat's card, the modal and the runner's panel all use it.
+- **The ticket card is a summary.** Badge, key and status; the title one size up; one meta line
+  (type · priority · assignee, the priority with a muted ↑ → ↓); the first lines of the description,
+  faded; **Open ticket** opens `TicketModal`. Fields, criteria and comments are in the modal only.
+- **The modal is an issue view.** Header: badge, key, status, a large title and "Open in <Source>".
+  Body: Description (the `md-doc` look), Acceptance criteria (a plain ☐ list) and Comments (an
+  initials avatar, the name, a relative time), with **Details** (Type, Priority, Assignee, Reporter,
+  Labels as chips, then the extra fields) beside them from 900 px and above them under it. Tab stays
+  inside; the focus returns where it was.
+- **Commit chips.** A checklist item shows up to three short shas, then "+N more". With the item's
+  published diff a sha opens it in the viewer at that commit's section (`DiffView`'s and
+  `ArtifactViewer`'s `commit`); without one it copies the sha ("Copied"). Nothing links to a forge.
+  **± View diff** is a small button with the diff's +/− counts, read once (`loadDiffSummary`).
+
 ## MCP servers and checklist commits
 
 Added in 0.15.0; nothing removed. Older builds draw neither.
@@ -487,9 +516,8 @@ Added in 0.15.0; nothing removed. Older builds draw neither.
   0:30 · Send now". Mount it in `slots.aboveComposer`; pass `onSendNow` only for a viewer who may
   release the prompt (the runner's session owner), otherwise it has no button.
 - **Checklist items carry commits.** An item (and a checklist event's `changed`) may hold `commits`,
-  shas of 7 to 40 hex characters. The checklist row and `ChecklistItems` draw a chip ("2 commits")
-  that opens to the shas, linked when `commitUrl` (or `ChecklistItems`'s `commitUrls`) knows the page,
-  otherwise copy buttons. `CommitChips` is the shared chip list. (0.16.0 replaces the per-sha
+  shas of 7 to 40 hex characters. The checklist row and `ChecklistItems` draw them as chips (see
+  Tickets and commit chips for 0.19.0). `CommitChips` is the shared chip list. (0.16.0 replaces the per-sha
   "View diff" hook: see Diffs.)
 
 ## Files the agent mentions
@@ -501,6 +529,21 @@ Added in 0.16.0; nothing removed. Older builds leave such text as text.
   `src/a.go:120`, `docs/a.md#L12`) opens that file from the session's folder in the viewer, at the
   line named, with Copy path, Download and Save a copy to Files. Pass it only for a viewer the route
   accepts (the runner's session owner).
+
+## Files in the viewer
+
+Changed in 0.18.0; nothing removed, no new props.
+
+- **Code and JSON are colored in the viewer.** A text file opens as numbered lines, colored by its
+  extension (the grammars the inline preview uses); JSON is pretty-printed when it parses and colored
+  as JSON. Only the first 100,000 characters are colored, the rest of a large file follows plain. A
+  file of no known language stays plain wrapped text.
+- **One table for CSV and TSV.** The viewer and the inline preview draw the same bordered table with a
+  header row and zebra rows; the preview is its first rows and columns.
+- **Markdown files read like a README.** A markdown file (inline preview, viewer, the review page)
+  takes the `md-doc` class: a system UI font at 16 px, ruled h1 and h2, chips for inline code, padded
+  code blocks, bordered zebra tables, a bar on a quote. Chat messages keep their compact scale, with
+  only the code chip, table, and quote refined to match. Colors are the usual `--chat-*` tokens.
 
 ## Copying and pasting
 

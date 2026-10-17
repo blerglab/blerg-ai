@@ -73,7 +73,7 @@ function fileTitle(f: PatchFile): string {
   return (f.status === 'renamed' || f.status === 'copied') && f.oldPath && f.newPath ? `${f.oldPath} → ${f.newPath}` : f.path
 }
 
-function FileBlock({ file, index, mode, ready, startOpen }: { file: PatchFile; index: number; mode: Mode; ready: boolean; startOpen: boolean }) {
+function FileBlock({ file, index, mode, ready, startOpen, bare = false }: { file: PatchFile; index: number; mode: Mode; ready: boolean; startOpen: boolean; bare?: boolean }) {
   const [open, setOpen] = useState(startOpen)
   const [limit, setLimit] = useState(DIFF_FILE_LINES)
   const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(() => new Set())
@@ -156,15 +156,15 @@ function FileBlock({ file, index, mode, ready, startOpen }: { file: PatchFile; i
   const shown = limit - budget
 
   return (
-    <section className="diff-file" id={`diff-file-${index}`} data-testid="diff-file">
-      <header className="diff-file-head">
+    <section className={`diff-file${bare ? ' diff-file-bare' : ''}`} id={bare ? undefined : `diff-file-${index}`} data-testid="diff-file">
+      {!bare && <header className="diff-file-head">
         <button type="button" className="diff-file-toggle" aria-expanded={open} onClick={() => setOpen(o => !o)}>
           <span aria-hidden="true">{open ? '▾' : '▸'}</span>
         </button>
         <span className={`diff-status diff-status-${file.status}`} title={STATUS_WORD[file.status]}>{STATUS_LABEL[file.status]}</span>
         <span className="diff-file-path">{fileTitle(file)}</span>
         <span className="diff-file-counts"><span className="diff-plus">+{file.adds}</span> <span className="diff-minus">−{file.dels}</span></span>
-      </header>
+      </header>}
       {open && (
         <div className="diff-file-body">
           {file.meta.length > 0 && <p className="diff-meta">{file.meta.join(' · ')}</p>}
@@ -192,10 +192,10 @@ function FileBlock({ file, index, mode, ready, startOpen }: { file: PatchFile; i
   )
 }
 
-function CommitHead({ commit }: { commit: PatchCommit }) {
+function CommitHead({ commit, index, target }: { commit: PatchCommit; index: number; target: boolean }) {
   const rest = commit.lines.filter(l => l.trim() !== '' && !/^ {4}/.test(l))
   return (
-    <div className="diff-commit" data-testid="diff-commit">
+    <div className={`diff-commit${target ? ' target' : ''}`} id={`diff-commit-${index}`} data-testid="diff-commit">
       <span className="diff-commit-sha" title={commit.sha}>{commit.sha.slice(0, 7)}</span>
       <span className="diff-commit-subject">{commit.subject || '(no message)'}</span>
       {rest.length > 0 && <span className="diff-commit-meta">{rest.join(' · ')}</span>}
@@ -203,8 +203,18 @@ function CommitHead({ commit }: { commit: PatchCommit }) {
   )
 }
 
-export default function DiffView({ text }: { text: string }) {
+/** One small file's hunks, drawn unified without the file header (a published diff's card). The
+ *  same table, colors and tints as the viewer. */
+export function InlineDiff({ file }: { file: PatchFile }) {
+  const ready = useHighlighterReady(langFromName(file.path) !== null)
+  return <FileBlock file={file} index={0} mode="unified" ready={ready} startOpen bare />
+}
+
+/** `commit`: a sha (or the start of one) to open at: its section is scrolled to and marked. */
+export default function DiffView({ text, commit }: { text: string; commit?: string | null }) {
   const patch = useMemo(() => parsePatch(text), [text])
+  const want = (commit ?? '').toLowerCase()
+  const target = want.length >= 7 ? patch.commits.findIndex(c => c.sha.startsWith(want)) : -1
   const wide = useWide()
   const [mode, setMode] = useState<Mode>('unified')
   const [copied, setCopied] = useState(false)
@@ -223,6 +233,12 @@ export default function DiffView({ text }: { text: string }) {
     }
     return out
   }, [patch])
+
+  useEffect(() => {
+    if (target < 0) return
+    const el = mainRef.current?.querySelector(`#diff-commit-${target}`)
+    if (el && 'scrollIntoView' in el) (el as HTMLElement).scrollIntoView({ block: 'start' })
+  }, [target])
 
   if (patch.files.length === 0) {
     return <pre className="artifact-text" data-testid="artifact-text">{text}</pre>
@@ -279,7 +295,7 @@ export default function DiffView({ text }: { text: string }) {
             const startsCommit = f.commit !== undefined && (i === 0 || patch.files[i - 1].commit !== f.commit)
             return (
               <Fragment key={i}>
-                {startsCommit && <CommitHead commit={patch.commits[f.commit as number]} />}
+                {startsCommit && <CommitHead commit={patch.commits[f.commit as number]} index={f.commit as number} target={f.commit === target} />}
                 <FileBlock file={f} index={i} mode={effective} ready={ready} startOpen={opens[i]} />
               </Fragment>
             )

@@ -1,52 +1,83 @@
-/* Commit chips (CommitChips.tsx): muted, small, wrapping. The runner's History tab uses its own
-   .reel-chip classes instead (variant="reel"). */
+/* Commit chips (CommitChips.tsx) like a forge's commit references: a short sha in monospace on a
+   faint tint, a thin border, rounded. The checklist's "± View diff" is a small secondary button with
+   the diff's counts. The runner's History tab uses its own .reel-chip classes (variant="reel"). */
 .commit-chips {
-  display: flex;
+  display: inline-flex;
   flex-wrap: wrap;
-  gap: 4px 6px;
+  gap: 4px;
   align-items: center;
   min-width: 0;
 }
 
-.commit-one {
-  display: inline-flex;
-  gap: 2px;
-  align-items: baseline;
-}
-
-.commit-chip,
-.commit-diff {
+.commit-chip {
   font: inherit;
+  font-family: var(--chat-font-mono, ui-monospace, monospace);
   font-size: var(--chat-text-xs, 0.75em);
+  line-height: 18px;
   color: var(--chat-muted, inherit);
-  background: none;
+  background: color-mix(in srgb, var(--chat-fg) 6%, transparent);
   border: 1px solid var(--chat-border);
-  border-radius: 8px;
+  border-radius: 6px;
   padding: 0 6px;
   cursor: pointer;
   text-decoration: none;
 }
 
-.commit-chip {
-  font-family: var(--chat-font-mono, ui-monospace, monospace);
-}
-
-.commit-diff {
-  border-style: dashed;
-}
-
 .commit-chip:hover,
-.commit-diff:hover,
-.commit-chip:focus-visible,
-.commit-diff:focus-visible {
+.commit-chip:focus-visible {
   color: var(--chat-fg, inherit);
+  border-color: var(--chat-muted-2);
+  background: color-mix(in srgb, var(--chat-fg) 10%, transparent);
 }
 
 .commit-chip.copied {
   color: var(--chat-fg, inherit);
+  border-color: var(--chat-muted-2);
+}
+
+.commit-chip.commit-more {
+  font-family: inherit;
+  background: none;
+  border-style: dashed;
 }
 
 .commit-copied {
   font-size: var(--chat-text-xs, 0.75em);
-  color: var(--chat-muted, inherit);
+  color: var(--chat-muted-2, inherit);
 }
+
+.commit-view-diff {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: inherit;
+  font-size: var(--chat-text-xs, 0.75em);
+  line-height: 18px;
+  color: var(--chat-fg, inherit);
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  padding: 1px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.commit-view-diff:hover,
+.commit-view-diff:focus-visible {
+  border-color: var(--chat-muted-2);
+  background: var(--chat-surface-2);
+}
+
+.commit-view-diff-glyph {
+  color: var(--chat-muted);
+  font-weight: 600;
+}
+
+.commit-view-diff-counts {
+  display: inline-flex;
+  gap: 4px;
+  font-family: var(--chat-font-mono, ui-monospace, monospace);
+}
+
+.commit-plus { color: var(--chat-diff-add); }
+.commit-minus { color: var(--chat-diff-del); }

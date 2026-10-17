@@ -418,7 +418,8 @@ describe('Transcript reads the reader going up from their input', () => {
       .filter((c, i) => (at === null || spy.mock.contexts[i] === at) && kinds.includes(c[0] as string))
       .map(c => `${c[0] as string}${tag}`)
     const on = (el: Spy, win: Spy) => [...names(el, tl, ''), ...names(win, null, '@window')].sort()
-    const ours = ['keydown', 'touchcancel@window', 'touchend@window', 'touchmove', 'touchstart', 'wheel']
+    // Plus the long-press listeners (LongPress) on the timeline itself.
+    const ours = ['keydown', 'touchcancel', 'touchcancel@window', 'touchend', 'touchend@window', 'touchmove', 'touchmove', 'touchstart', 'touchstart', 'wheel']
     const addAll = () => on(add, addWin)
     const removeAll = () => on(remove, removeWin)
     expect(addAll()).toEqual(ours)

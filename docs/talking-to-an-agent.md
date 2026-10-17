@@ -191,9 +191,13 @@ line.
 
 ## Copying and pasting
 
-The chat copies and pastes the way other products do. **Copy** on a message (hover, or keyboard focus;
-always shown on a phone) copies the message as Markdown, and as formatted text for an editor that
-takes it. Selecting part of the chat and copying keeps the structure (headings, lists, links, tables,
+The chat copies and pastes the way other products do. **Copy** on a message (hover, or keyboard focus)
+copies the message as Markdown, and as formatted text for an editor that takes it. On a touch screen
+there are no Copy buttons: hold a message, code block, ticket card or checklist for half a second
+(moving your finger or scrolling cancels) and a sheet offers **Copy message**, **Select text** (opens the
+text full screen, all of it selected with the phone's own handles: drag them in, then **Copy** takes
+what is still selected, or everything) and **Cancel**. A press on a link keeps the
+browser's own menu. Selecting part of the chat and copying keeps the structure (headings, lists, links, tables,
 code) without the timestamps and buttons; a selection inside one code block copies that code exactly.
 Pasting formatted text from a web page, Docs, Slack or GitHub into the message box inserts it as
 Markdown: images and scripts are dropped, a code block keeps its language. Plain text, code copied
@@ -264,13 +268,14 @@ the finished row.
 ## The session panel
 
 An agent session's page has a panel on its right with what is live in the session and what it has
-done. The panel has up to five tabs: **Live** (a one-line summary of the checklist, Needs you, Running now,
-MCP servers and Session, below), **Plan**, **History**, **Files** and **Capabilities** (below); the tab you chose is remembered per browser, and a new
+done. The panel has up to five tabs: **Live** (a one-line summary of the checklist, Needs you, Running now
+and Session, below), **Plan**, **History**, **Files** and **Capabilities** (below); the tab you chose is remembered per browser, and a new
 question shows Live without changing that choice. **Plan** holds the pinned tickets, the checklist (or the engine's own plan) and the diffs the session
 published, newest first; click a diff to open it in the viewer. It shows only when the session has one of
 them, and its label carries the progress ("Plan 18/23", or a count of tickets and diffs when there is
-no list). Live keeps one line at its top for the list ("Checklist · 18 of 23 · Next: ..."), with a thin
-bar under it; click it to go to Plan. A long checklist therefore never pushes Needs you and Running now
+no list). Live keeps one line at its top for the list ("Checklist · 18 of 23 · Next: ..."), as two controls: the pinned ticket
+(key and status, a chip that opens the ticket over the page) and the list (with a short bar beside the
+count; it goes to Plan). A long checklist therefore never pushes Needs you and Running now
 off Live. The chat's toolbar above the conversation keeps
 the model and effort pickers, Rules and Stop; what belongs to the session as a whole is in the
 panel. On a wide
@@ -288,7 +293,7 @@ Terminal sessions have no panel.
   ([tickets and checklists](#tickets-and-checklists), below): the current one with its key (a link
   to the tracker), status and title, the others one line each. Clicking a title opens the whole
   ticket over the page, with "Show in conversation" to its card.
-- **Checklist**: the agent's checklist, with "3 of 7 done" beside the title, a thin bar and the items
+- **Checklist**: the agent's checklist, with "3 of 7 done" beside the title, a short progress bar beside the count (green when all are done) and the items
   (ticked ones struck through; you cannot tick them, only the agent does). When the agent set none, a
   Claude Code or Codex session shows the engine's own plan here instead, titled **Plan**, its header saying
   what is in progress ("Writing tests · 3 of 7"). Hidden when there is neither. An item the agent
@@ -298,10 +303,6 @@ Terminal sessions have no panel.
   answers it (the same answer as the ask card's), and the MCP tool changes waiting on your decision
   for this session, with a link to the Proposals page showing that session's proposals and tool
   changes (with a link back to all of them).
-- **MCP servers**: when the session's engine reported any, one quiet line: "Connecting 2 of 3…" with
-  a spinner while they connect, then "3 connected" (or "2 connected · 1 failed · 1 needs sign-in",
-  the failures in the warning color). It opens to each server's name, state, source and, when
-  connected, tool count. Hidden when the session has none, and on a daemon older than the report.
 - **Running now**: the subagents at work, each with its task, type, model, tokens, what it is doing
   and how long it has run; and the background tasks.
 - **Session**: where it runs, the engine and model, when it started and how long it has lived. The
@@ -312,16 +313,22 @@ Terminal sessions have no panel.
 - **History** is the panel's second tab: the pieces of work the agent marked, newest first
   ([History](#history), below).
 - **Files** lists every file the session holds, as the Files dialog over the chat used to: published
-  by the agent or attached by you, newest first, a file's earlier versions under it, each with
-  Download, View (it opens in the chat's viewer; in the drawer, the drawer closes first) and Delete,
-  and **Attach files** to attach some to your next message ([files from a session](artifacts.md)).
-  It is read again each time the tab comes on screen. The tab's badge counts the files (names, not
-  versions), and is hidden when there are none.
+  by the agent or attached by you (marked "you"), one compact row each with its kind, size, version and
+  time. Click a row to open it in the chat's viewer (in the drawer, the drawer closes first); Download
+  and Delete are icons on the row (hover or focus; always shown on touch), and a file's earlier
+  versions sit under it. With more than six files, a filter box, a sort (newest or name) and an
+  origin choice (all, from the agent, from you) appear, and "4 of 21" shows while filtering; Esc clears
+  the filter, and the sort and origin are remembered per browser. **Attach files** attaches some to your
+  next message ([files from a session](artifacts.md)). It is read again each time the tab comes on
+  screen. The tab's badge counts the files (names, not versions), and is hidden when there are none.
 - **Capabilities** shows what the session loaded (skills, plugins, MCP servers, slash commands, tools and
   subagents), with a filter, as the Skills & plugins dialog used to; it asks the server only while it
   is on screen. A terminal session keeps its Skills & plugins button in the header, which says why
   it has nothing to show. The tab's badge counts what is enabled (skills, plugins that are enabled and
-  MCP servers that are connected), and is hidden at zero.
+  MCP servers that are connected), and is hidden at zero. Its MCP servers group shows each server's
+  status as it is now (connecting, connected, failed, needs sign-in, disabled), with the tool count when
+  connected and why a held first message was let go; before the first update it shows the start-up
+  snapshot.
 
 "Show in conversation" under a row scrolls the chat to that question, subagent card or call and
 flashes it; in the drawer it then closes the drawer. A row whose place is further back than the
@@ -360,7 +367,7 @@ addresses. The tracker's name on the card is what the agent said; its tooltip sa
 it.
 
 The agent keeps a checklist of the work with `blerg-runner checklist set "<item>" …`, then `tick`,
-`untick`, `add` and `clear` (`blerg-runner checklist --help`); `pin --checklist` sets it to the
+`untick`, `add`, `remove` (one item, the rest untouched) and `clear` (`blerg-runner checklist --help`); `pin --checklist` sets it to the
 ticket's acceptance criteria. Each change is a compact row in the chat ("Checklist · 3 of 7 done ·
 ticked “Write tests”") that opens to the list; changes one after another with nothing between them
 are one row, the latest. The session guide asks the agent for both. A session reloaded later shows the

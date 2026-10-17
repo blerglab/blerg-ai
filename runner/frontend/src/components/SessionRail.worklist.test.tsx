@@ -162,8 +162,12 @@ describe('session panel: ticket, checklist and plan', () => {
     const panel = await screen.findByTestId('session-rail')
     fireEvent.click(await within(panel).findByRole('tab', { name: /Plan/ }))
     const list = within(panel).getByTestId('rail-checklist')
-    const buttons = within(list).getAllByRole('button', { name: 'View diff' })
+    const buttons = within(list).getAllByRole('button', { name: /View diff/ })
     expect(buttons).toHaveLength(1)
+    // The item with a diff opens it at a sha; the one without copies its sha.
+    expect(within(list).getByRole('button', { name: 'Open commit abcdef1 in the diff' })).toBeTruthy()
+    expect(within(list).getByRole('button', { name: 'Copy commit 1234567' })).toBeTruthy()
+    expect(list.querySelector('a')).toBeNull()
     fireEvent.click(buttons[0])
   })
 

@@ -41,7 +41,7 @@ func OpenBackgroundTasks(events []Event) []BackgroundTaskState {
 			if parsed, err := time.Parse(time.RFC3339Nano, p.StartedAt); err == nil {
 				at = parsed
 			}
-			current[p.TaskID] = BackgroundTaskState{Task: Task{TaskID: p.TaskID, CallID: p.CallID, Kind: p.Kind, Description: p.Description, StartedAt: at, Seq: event.Seq}, StartEventID: event.ID, Lifetime: p.Lifetime, OriginalSeq: original}
+			current[p.TaskID] = BackgroundTaskState{Task: Task{TaskID: p.TaskID, CallID: p.CallID, Kind: p.Kind, Description: p.Description, Command: p.Command, StartedAt: at, Seq: event.Seq}, StartEventID: event.ID, Lifetime: p.Lifetime, OriginalSeq: original}
 		case "background_task_done":
 			var p struct {
 				TaskID       string `json:"task_id"`

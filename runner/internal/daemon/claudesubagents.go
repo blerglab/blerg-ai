@@ -163,7 +163,7 @@ func (d *claudeCodeDriver) endSubagent(id, output string, isError bool) {
 		}
 		p.Summary = "running in the background"
 		p.Background = true
-		bg := d.trackBackgroundTaskLocked(m[1], id, "agent", s.p.Summary, s.started)
+		bg := d.trackBackgroundTaskLocked(m[1], id, "agent", s.p.Summary, "", s.started)
 		d.reportOpenWorkLocked()
 		d.subMu.Unlock()
 		d.emit("subagent_done", p)

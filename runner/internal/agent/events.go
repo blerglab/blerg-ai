@@ -230,7 +230,10 @@ type BackgroundTaskStartedPayload struct {
 	CallID      string `json:"call_id"`
 	Kind        string `json:"kind"`
 	Description string `json:"description"`
-	StartedAt   string `json:"started_at"`
+	// Command is the shell command of a bash or monitor task, cut to 500 bytes (empty for an
+	// agent, and for a start recorded before the field existed).
+	Command   string `json:"command,omitempty"`
+	StartedAt string `json:"started_at"`
 }
 
 // BackgroundTaskDonePayload — kind "background_task_done": the end of a background task, read from

@@ -328,3 +328,21 @@ func TestChecklistCommitsAreRecordedAndLive(t *testing.T) {
 		t.Fatalf("live = %s", r.Body.String())
 	}
 }
+
+func TestChecklistRemoveKeepsTheOthersAndRecordsTheChange(t *testing.T) {
+	fx := newWorkFx(t)
+	fx.postWork("checklist", fx.sess, fx.sessTok, map[string]any{"op": "set", "items": []string{"Fix", "Docs", "Ship"}})
+	fx.postWork("checklist", fx.sess, fx.sessTok, map[string]any{"op": "tick", "index": 3, "commits": []string{"abcdef1"}})
+	code, body := fx.postWork("checklist", fx.sess, fx.sessTok, map[string]any{"op": "remove", "text": "Docs"})
+	changed, _ := body["changed"].(map[string]any)
+	if code != http.StatusCreated || itemsLine(body["items"]) != "☐Fix ☑Ship" || body["op"] != "remove" || changed["index"] != float64(2) || changed["text"] != "Docs" {
+		t.Fatalf("remove = %d %v", code, body)
+	}
+	items, _ := body["items"].([]any)
+	if last, _ := items[1].(map[string]any); fmt.Sprint(last["commits"]) != "[abcdef1]" {
+		t.Fatalf("the commits of the other item were lost: %v", body)
+	}
+	if code, body = fx.postWork("checklist", fx.sess, fx.sessTok, map[string]any{"op": "remove", "index": 7}); code != http.StatusBadRequest {
+		t.Fatalf("remove 7 = %d %v", code, body)
+	}
+}

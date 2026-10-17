@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { codePayload, copyPayload, htmlToMarkdown, looksLikeMarkdown, markdownForPaste } from './richClipboard'
+import { codePayload, copyPayload, htmlToMarkdown, insideOpenFence, looksLikeMarkdown, markdownForPaste } from './richClipboard'
 
 const md = (html: string) => htmlToMarkdown(html).markdown
 const frag = (html: string) => { const d = document.createElement('div'); d.innerHTML = html; return d }
@@ -136,5 +136,34 @@ describe('bounds and literal text', () => {
   it('escapes list numbers properly and every line start', () => {
     expect(md('<p>1. x</p>')).toBe('1\\. x')
     expect(md('<p>a<br># h<br>- x</p>')).toBe('a  \n\\# h  \n\\- x')
+  })
+})
+
+describe('inside an open code fence', () => {
+  it('is odd fence lines before the caret', () => {
+    expect(insideOpenFence('')).toBe(false)
+    expect(insideOpenFence('hello\n')).toBe(false)
+    expect(insideOpenFence('```go\n')).toBe(true)
+    expect(insideOpenFence('```\ncode\n```\n')).toBe(false)
+    expect(insideOpenFence('```\ncode\n```\n\n```py\n')).toBe(true)
+  })
+
+  it('counts ~~~ fences and fences indented up to three spaces', () => {
+    expect(insideOpenFence('~~~\n')).toBe(true)
+    expect(insideOpenFence('~~~sh\nx\n~~~')).toBe(false)
+    expect(insideOpenFence('   ```\nx')).toBe(true)
+    expect(insideOpenFence('    ```\nx')).toBe(false)
+  })
+
+  it('a different mark or a shorter fence does not close, and a longer one nests the shorter', () => {
+    expect(insideOpenFence('```\n~~~\n')).toBe(true)
+    expect(insideOpenFence('````md\n```\ninner\n```\n')).toBe(true)
+    expect(insideOpenFence('````md\n```\ninner\n```\n````')).toBe(false)
+    expect(insideOpenFence('```\n``` not a close\n')).toBe(true)
+  })
+
+  it('names the language of a GitHub block from its wrapper, a few levels up', () => {
+    expect(md('<div class="snippet-clipboard-content"><div class="highlight highlight-source-go notranslate"><pre><code>x := 1</code></pre></div></div>')).toBe('```go\nx := 1\n```')
+    expect(md('<pre data-language="rust"><code>fn a() {}</code></pre>')).toBe('```rust\nfn a() {}\n```')
   })
 })

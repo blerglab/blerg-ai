@@ -177,7 +177,7 @@ describe('History tab', () => {
     expect(onOpenArtifact).not.toHaveBeenCalled()
   })
 
-  it('draws the commits on the Done row as short chips: a link when the repository is known, else a copy button', async () => {
+  it('draws the commits on the Done row as short chips that copy the sha, never a link out of Blerg', async () => {
     const writeText = vi.fn(() => Promise.resolve())
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     show(ready())
@@ -185,15 +185,10 @@ describe('History tab', () => {
     const done = within(cards()[1]).getByTestId('reel-done')
     const chips = within(done).getAllByTestId('reel-commit')
     expect(chips.map(c => c.textContent)).toEqual(['1a2b3c4', '9f8e7d6', '0badc0f'])
-    const [long, short, bare] = chips
-    expect(long.tagName).toBe('A')
-    expect(long).toHaveAttribute('href', 'https://github.com/example-org/example-repo/commit/1a2b3c4d5e6f708192a3b4c5d6e7f80912a3b4c5')
-    expect(long).toHaveAttribute('target', '_blank')
-    expect(long).toHaveAttribute('rel', 'noopener noreferrer')
-    expect(long).toHaveAttribute('title', '1a2b3c4d5e6f708192a3b4c5d6e7f80912a3b4c5')
-    expect(short).toHaveAttribute('href', 'https://github.com/example-org/example-repo/commit/9f8e7d6')
-    expect(bare.tagName).toBe('BUTTON')
-    expect(bare).toHaveAttribute('title', '0badc0ffee0ddf00d (click to copy)')
+    expect(done.querySelector('a')).toBeNull()
+    for (const c of chips) expect(c.tagName).toBe('BUTTON')
+    const [long, , bare] = chips
+    expect(long).toHaveAttribute('title', '1a2b3c4d5e6f708192a3b4c5d6e7f80912a3b4c5 (click to copy)')
     expect(within(done).getByRole('button', { name: 'Copy commit 0badc0ffee0ddf00d' })).toBe(bare)
     await act(async () => { fireEvent.click(bare) })
     expect(writeText).toHaveBeenCalledWith('0badc0ffee0ddf00d')

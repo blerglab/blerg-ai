@@ -119,11 +119,17 @@ const para = (s: string) => s.replace(/[ \t]+\n/g, m => (m.startsWith('  ') ? ' 
 
 function langOf(pre: Element): string {
   const code = pre.querySelector('code')
-  const cands = [code?.className, pre.className, pre.parentElement?.className, pre.getAttribute('data-lang'), pre.getAttribute('data-language')]
+  // GitHub marks a block on a wrapper ("highlight highlight-source-go", a few levels up in its
+  // newer views), a highlighter on the pre or the code (language-go), some pages on a data attribute.
+  const up: (string | undefined)[] = []
+  for (let a: Element | null = pre.parentElement, i = 0; a && i < 3; a = a.parentElement, i++) up.push(a.className)
+  const cands = [code?.className, pre.className, ...up, pre.getAttribute('data-lang'), pre.getAttribute('data-language'),
+    code?.getAttribute('data-lang'), code?.getAttribute('data-language')]
   for (const c of cands) {
     const m = /(?:^|\s)(?:language|lang|highlight-source|brush:?)[-_ ]?([\w#+.-]+)/.exec(c ?? '')
     if (m) return m[1]
-    if (c && /^[\w#+.-]+$/.test(c) && c === pre.getAttribute('data-lang')) return c
+    if (c && /^[\w#+.-]+$/.test(c) && (c === pre.getAttribute('data-lang') || c === pre.getAttribute('data-language') ||
+      c === code?.getAttribute('data-lang') || c === code?.getAttribute('data-language'))) return c
   }
   return ''
 }
@@ -308,6 +314,21 @@ const MD_SIGNALS = [/^ {0,3}(```|~~~)/m, /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)
 export function looksLikeMarkdown(text: string): boolean {
   const hits = MD_SIGNALS.filter(r => r.test(text)).length
   return hits >= 2 || MD_SIGNALS.slice(0, 4).some(r => r.test(text))
+}
+
+/** Is the end of text inside a code fence that is still open (``` or ~~~, three or more, indented up
+ *  to three spaces)? A fence closes on the same mark, as long or longer, with nothing after it. */
+export function insideOpenFence(text: string): boolean {
+  let open: { ch: string; len: number } | null = null
+  for (const line of text.split('\n')) {
+    const m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    if (!m) continue
+    const ch = m[1][0]
+    if (open) {
+      if (ch === open.ch && m[1].length >= open.len && m[2].trim() === '') open = null
+    } else if (ch !== '`' || !m[2].includes('`')) open = { ch, len: m[1].length }
+  }
+  return open !== null
 }
 
 /** The Markdown to insert for a paste, or null to let the plain text go in as it is. */

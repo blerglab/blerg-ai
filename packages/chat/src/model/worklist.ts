@@ -103,12 +103,13 @@ export function doneCount(items: readonly { done?: boolean; status?: string }[])
 /** checklistRowText: the chat's one-line row for a checklist event, e.g.
  *  `Checklist · 3 of 7 done · ticked "Write tests"`. */
 export function checklistRowText(p: ChecklistPayload): string {
-  if (p.items.length === 0) return 'Checklist cleared'
+  if (p.items.length === 0) return p.op === 'remove' && p.changed ? `Checklist · removed “${p.changed.text}”, none left` : 'Checklist cleared'
   const head = `Checklist · ${progressText(doneCount(p.items), p.items.length)}`
   const c = p.changed
   switch (p.op) {
     case 'tick': return c ? `${head} · ticked “${c.text}”` : head
     case 'untick': return c ? `${head} · unticked “${c.text}”` : head
+    case 'remove': return c ? `${head} · removed “${c.text}”` : head
     case 'add': return c ? `${head} · added “${c.text}”` : head
     case 'set': return `${head} · set`
     default: return head
@@ -235,4 +236,43 @@ export function pinnedFromEvents(events: readonly AgentEvent[]): PinnedLive {
   let st = NO_PINS
   for (const ev of events) st = foldTicketEvent(st, ev)
   return st
+}
+
+/** A status by what it means, for its chip's color: to do (and anything unknown) is neutral, then
+ *  active (being worked), blocked, done, and canceled (the title struck through). */
+export type StatusTone = 'neutral' | 'active' | 'blocked' | 'done' | 'canceled'
+
+const TONES: Record<Exclude<StatusTone, 'neutral'>, string[]> = {
+  active: ['in progress', 'in review', 'review', 'started', 'doing', 'active', 'testing', 'qa', 'in qa', 'in testing', 'in development', 'wip'],
+  blocked: ['blocked', 'on hold', 'waiting', 'paused'],
+  done: ['done', 'closed', 'resolved', 'fixed', 'complete', 'completed', 'merged', 'released', 'shipped'],
+  canceled: ["won't do", "won't fix", 'wontfix', 'wontdo', 'canceled', 'cancelled', 'duplicate', 'invalid', 'rejected'],
+}
+const TONE_OF = new Map<string, StatusTone>(
+  (Object.entries(TONES) as [StatusTone, string[]][]).flatMap(([tone, words]) => words.map(w => [w, tone] as [string, StatusTone])),
+)
+
+/** statusTone: a tracker's status word by meaning ("In Progress", "in_progress" and "IN-PROGRESS"
+ *  are the same); a word not known is neutral. */
+export function statusTone(status: string | undefined): StatusTone {
+  const s = (status ?? '').trim().toLowerCase().replace(/[’‘`]/g, "'").replace(/[\s_-]+/g, ' ')
+  return TONE_OF.get(s) ?? 'neutral'
+}
+
+/** priorityGlyph: ↑ for a high priority, → for a medium one, ↓ for a low one; '' for any other.
+ *  Words (High, Minor…) and the P-scale (P0 and P1 high, P2 medium, P3 and P4 low, also as
+ *  "P1 - Critical"); the priority itself is always shown as the tracker wrote it. */
+export function priorityGlyph(priority: string | undefined): string {
+  const p = (priority ?? '').trim().toLowerCase()
+  const scale = /^p([0-4])(?![\w])/.exec(p)
+  if (scale) return ['↑', '↑', '→', '↓', '↓'][Number(scale[1])]
+  if (['highest', 'high', 'critical', 'urgent', 'blocker'].includes(p)) return '↑'
+  if (['medium', 'normal', 'moderate', 'major'].includes(p)) return '→'
+  if (['low', 'lowest', 'minor', 'trivial'].includes(p)) return '↓'
+  return ''
+}
+
+/** ticketMeta: the card's one meta line, type · priority · assignee, the missing ones left out. */
+export function ticketMeta(t: Partial<Ticket>): string[] {
+  return [t.type, t.priority, t.assignee].filter((x): x is string => !!x)
 }

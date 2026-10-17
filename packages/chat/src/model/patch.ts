@@ -281,8 +281,8 @@ export function parsePatch(text: string): Patch {
 export interface PatchSummary { files: number; adds: number; dels: number; names: string[] }
 
 /** What a card says of a patch: how many files (each path once), +adds −dels, the first names. */
-export function patchSummary(text: string, names = 3): PatchSummary {
-  const p = parsePatch(text)
+export function patchSummary(text: string | Patch, names = 3): PatchSummary {
+  const p = typeof text === 'string' ? parsePatch(text) : text
   const seen: string[] = []
   for (const f of p.files) if (!seen.includes(f.path)) seen.push(f.path)
   return { files: seen.length, adds: p.adds, dels: p.dels, names: seen.slice(0, names) }

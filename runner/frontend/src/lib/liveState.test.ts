@@ -32,7 +32,7 @@ describe('foldLive', () => {
     const v = foldLive(r, [ev('subagent_done', { child_id: 'k1' }, 9), ev('ask', { body: 'old', message_id: 'm0' }, 10)], T0)
     expect(v.asks).toEqual([{ eventId: 'a1', messageId: 'm1', question: 'Ship it?', askedAt: T0 }])
     expect(v.subagents).toEqual([{ key: 'k1', title: 'Implement', type: 'general-purpose', model: 'sonnet', tokens: 10, doing: 'running Bash · npm test', startedAt: T0, background: false }])
-    expect(v.tasks).toEqual([{ taskId: 't1', callId: 'c1', kind: 'bash', description: 'npm run dev', startedAt: T0, done: null }])
+    expect(v.tasks).toEqual([{ taskId: 't1', callId: 'c1', kind: 'bash', description: 'npm run dev', command: '', startedAt: T0, done: null }])
     expect(v.counts).toEqual({ needsYou: 3, running: 2 })
   })
 

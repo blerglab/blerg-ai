@@ -1,7 +1,7 @@
 // Highlighting for the chat's code: lazy, cached, and never blocking. The first call starts
 // loading the highlighter chunk (model/highlighter.ts); until it arrives, and for any text it
 // cannot or should not colour, `highlightSync` answers null and the caller shows plain text.
-import { useEffect, useReducer } from 'react'
+import { useEffect, useMemo, useReducer } from 'react'
 import type { CodeLang } from './codeLang'
 
 /** A run of text, or a classed span of runs: what the highlighter hands back. */
@@ -58,6 +58,22 @@ export function useHighlight(lang: CodeLang | null, text: string, enabled: boole
     return () => { live = false }
   }, [wanted])
   return wanted ? highlightSync(lang, text) : null
+}
+
+/** A big text cut where colouring stops: `head` (up to HIGHLIGHT_MAX_CHARS, ending at a newline
+ *  when there is one) is coloured, `tail` is shown plain. head + tail is always the whole text. */
+export function splitHead(text: string): { head: string; tail: string } {
+  if (text.length <= HIGHLIGHT_MAX_CHARS) return { head: text, tail: '' }
+  const nl = text.lastIndexOf('\n', HIGHLIGHT_MAX_CHARS - 1)
+  const at = nl > 0 ? nl + 1 : HIGHLIGHT_MAX_CHARS
+  return { head: text.slice(0, at), tail: text.slice(at) }
+}
+
+/** Like useHighlight for a file of any size: the first HIGHLIGHT_MAX_CHARS are coloured, the rest
+ *  is `tail`, plain (a 2 MiB file stays fast). */
+export function useHighlightHead(lang: CodeLang | null, text: string): { tokens: Token[] | null; tail: string } {
+  const { head, tail } = useMemo(() => splitHead(text), [text])
+  return { tokens: useHighlight(lang, head, true), tail }
 }
 
 /** Whether the highlighter is loaded; starts loading it when `enabled` (a view that colours many

@@ -2,6 +2,7 @@
 // loaded. The server already sanitizes them; this still treats the payload
 // as untrusted JSON so a malformed one renders as "nothing" instead of
 // crashing the chat view.
+import type { McpLive } from '@blerglab/chat'
 import type { AgentEvent, CapabilitiesPayload, CapabilityGroup, CapabilityGroupId, CapabilityItem } from '../types'
 
 export const CAPABILITIES_KIND = 'capabilities'
@@ -118,4 +119,39 @@ export function enabledCapabilityCount(p: CapabilitiesPayload | null | undefined
     else if (g.id === 'mcp') n += g.items.filter(i => i.status === 'connected').length
   }
   return n
+}
+
+const MCP_RELEASED_NOTES: Record<string, string> = {
+  settled: 'The first message was sent once the servers were ready.',
+  timeout: 'The first message was sent after the wait ran out.',
+  person: 'The first message was sent when you chose Send now.',
+}
+
+/** The words a status chip says ("needs-auth" reads "needs sign-in"; "pending" is "connecting"). */
+export function statusWord(status: string): string {
+  return status === 'needs-auth' ? 'needs sign-in' : status === 'pending' ? 'connecting' : status
+}
+
+/** withLiveMcp: the payload with its MCP servers group read from the live state (each server's status
+ *  now), or the payload as it is when the live state has no servers. A server the live state does not
+ *  name keeps its start-up row. */
+export function withLiveMcp(payload: CapabilitiesPayload, live: McpLive | null | undefined): CapabilitiesPayload {
+  if (!live || live.servers.length === 0) return payload
+  const old = payload.groups.find(g => g.id === 'mcp')
+  const snap = new Map((old?.items ?? []).map(i => [i.name, i]))
+  const items: CapabilityItem[] = live.servers.map(sv => {
+    const was = snap.get(sv.name)
+    return {
+      ...was,
+      name: sv.name,
+      status: sv.status === 'unknown' ? was?.status : sv.status,
+      source: sv.source || was?.source,
+      detail: sv.status === 'connected' && sv.tools > 0 ? `${sv.tools} ${sv.tools === 1 ? 'tool' : 'tools'}` : was?.detail,
+    }
+  })
+  const names = new Set(items.map(i => i.name))
+  for (const i of old?.items ?? []) if (!names.has(i.name)) items.push(i)
+  const note = live.released ? MCP_RELEASED_NOTES[live.released] : old?.note
+  const group: CapabilityGroup = { id: 'mcp', label: old?.label ?? 'MCP servers', note, total: old?.total, items }
+  return { ...payload, groups: old ? payload.groups.map(g => (g.id === 'mcp' ? group : g)) : [...payload.groups, group] }
 }

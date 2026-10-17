@@ -379,6 +379,39 @@ describe('session side panel', () => {
       expect(status).not.toHaveTextContent('idle')
     })
 
+    it('a background shell command reads as a command: glyph, the command, the description, shell · elapsed · status, no model or effort', async () => {
+      seedSession({ status: 'running' })
+      seedEvents(user(), ...subagent(), ev('background_task_started', {
+        task_id: 'b1', call_id: 'c1', kind: 'bash', description: 'Wait for the deploy', command: 'bash /srv/app/run.sh --wait',
+        started_at: new Date(Date.now() - 65_000).toISOString(),
+      }, 65_000))
+      localStorage.setItem(RAIL_PREF_KEY, '1')
+      await renderPage()
+      const t = within(rail()!).getByTestId('rail-task')
+      expect(within(t).getByRole('img', { name: 'Background command' })).toHaveTextContent('>_')
+      expect(within(t).getByTestId('rail-command')).toHaveTextContent('$ bash /srv/app/run.sh --wait')
+      expect(t.getAttribute('title')).toContain('$ bash /srv/app/run.sh --wait')
+      expect(within(t).getByTestId('rail-task-note')).toHaveTextContent('Wait for the deploy')
+      expect(within(t).getByTestId('rail-shell-kind')).toHaveTextContent('shell')
+      expect(within(t).getByTestId('rail-elapsed')).toHaveTextContent(/^01:0\d$/)
+      expect(within(t).getByTestId('rail-shell-status')).toHaveTextContent('running')
+      expect(t).not.toHaveTextContent(/effort/)
+      // The subagent keeps its own look: the agent glyph, model, effort.
+      const sub = within(rail()!).getByTestId('rail-subagent')
+      expect(within(sub).getByRole('img', { name: 'Subagent' })).toHaveTextContent('🤖')
+      expect(within(sub).getByTestId('rail-sub-effort')).toBeInTheDocument()
+    })
+
+    it('an older start with only a description shows that as the command line', async () => {
+      seedSession({ status: 'running' })
+      seedEvents(user(), ...task('b1', 'c1', 'Wait for the deploy'))
+      localStorage.setItem(RAIL_PREF_KEY, '1')
+      await renderPage()
+      const t = within(rail()!).getByTestId('rail-task')
+      expect(within(t).getByTestId('rail-command')).toHaveTextContent(/^Wait for the deploy$/)
+      expect(within(t).queryByTestId('rail-task-note')).toBeNull()
+    })
+
     it('an idle session whose live state has a task running reads as working in the background, before the server\'s count arrives', async () => {
       seedSession({ status: 'idle' })
       seedEvents(user())

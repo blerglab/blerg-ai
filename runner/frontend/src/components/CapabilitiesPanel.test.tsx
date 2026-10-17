@@ -54,7 +54,7 @@ describe('CapabilitiesPanel', () => {
     expect(dialog.textContent).toContain('~/repos/example')
     expect(dialog.textContent).toContain('reflects what was loaded at start')
     // Status and source chips.
-    expect(within(screen.getByTestId('caps-group-mcp')).getByText('needs-auth')).toBeTruthy()
+    expect(within(screen.getByTestId('caps-group-mcp')).getByText('needs sign-in')).toBeTruthy()
   })
 
   it('collapses long groups, expands on click, and says when a list was cut', () => {

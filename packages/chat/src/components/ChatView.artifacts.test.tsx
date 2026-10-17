@@ -152,7 +152,7 @@ describe('the Files panel', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Files \(2\)/ }))
     const panel = await screen.findByRole('dialog', { name: /Files/ })
     expect(within(panel).getAllByTestId('artifact-name').map(n => n.textContent)).toEqual(['report.md', 'memo.docx'])
-    fireEvent.click(within(within(panel).getAllByTestId('artifact-row')[0]).getByRole('button', { name: 'View' }))
+    fireEvent.click(within(within(panel).getAllByTestId('artifact-row')[0]).getByRole('button', { name: /^View / }))
     expect(await screen.findByRole('dialog', { name: /report\.md/ })).toBeInTheDocument()
   })
 
@@ -407,6 +407,14 @@ describe('inline previews of text-like files', () => {
     const table = await screen.findByTestId('artifact-preview-table')
     expect(within(table).getByRole('columnheader', { name: 'name' })).toBeInTheDocument()
     expect(within(table).getByRole('cell', { name: 'bolt' })).toBeInTheDocument()
+    expect(table).toHaveClass('data-table', 'is-preview') // the viewer's table, fewer rows and columns
+  })
+
+  it('draws a markdown preview in the document style', async () => {
+    seed(artifactEvent(report, 1))
+    mount()
+    const box = await screen.findByTestId('artifact-preview-excerpt')
+    await waitFor(() => expect(box.querySelector('.md.md-doc')).not.toBeNull())
   })
 
   it('fetches only when the card scrolls into view', async () => {

@@ -107,7 +107,7 @@ describe('Transcript draws a window of the newest rows', () => {
     // Everything drawn and nothing older: no sentinel, and the ready card heads it all.
     expect(screen.queryByTestId('transcript-more')).toBeNull()
     expect(screen.getByTestId('ready-card')).toBeInTheDocument()
-  })
+  }, 20_000) // draws all 1000 rows: past the 5 s default when the whole suite runs at once
 
   it('with everything held drawn and older events on the server, asks for the next page exactly once', () => {
     const onLoadOlder = vi.fn()

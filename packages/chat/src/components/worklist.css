@@ -93,7 +93,7 @@
   align-items: baseline;
   font-size: var(--chat-text-xs);
   color: var(--chat-muted-2);
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 
 .ticket-head {
@@ -103,31 +103,38 @@
 .ticket-line {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 6px 8px;
   align-items: center;
+  min-width: 0;
 }
 
 .ticket-source {
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--chat-muted);
+  line-height: 16px;
+  color: var(--chat-muted-2);
   border: 1px solid var(--chat-border);
   border-radius: 4px;
-  padding: 0 4px;
+  padding: 0 5px;
 }
 
 .ticket-key {
   font-family: var(--chat-font-mono);
-  font-size: var(--chat-text-sm);
-  color: var(--chat-fg);
+  font-size: var(--chat-text-xs);
+  color: var(--chat-muted);
   overflow-wrap: anywhere;
 }
 
 a.ticket-key {
+  text-decoration: none;
+}
+
+a.ticket-key:hover,
+a.ticket-key:focus-visible {
+  color: var(--chat-fg);
   text-decoration: underline;
-  text-decoration-color: var(--chat-muted-2);
 }
 
 .ticket-chips {
@@ -139,6 +146,7 @@ a.ticket-key {
 .ticket-chip,
 .ticket-label {
   font-size: var(--chat-text-xs);
+  line-height: 18px;
   color: var(--chat-muted);
   background: var(--chat-surface);
   border: 1px solid var(--chat-border);
@@ -147,45 +155,135 @@ a.ticket-key {
   overflow-wrap: anywhere;
 }
 
-.ticket-chip.status {
-  color: var(--chat-fg);
+/* The status chip: a muted tint of what the status means, a dot of it, text mixed toward the
+   foreground so it reads (AA) in both themes. Unknown and to-do statuses are gray. */
+.ticket-chip.ticket-status {
+  --chat-tone: var(--chat-muted-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--chat-tone) 50%, var(--chat-fg));
+  background: color-mix(in srgb, var(--chat-tone) 14%, transparent);
+  border-color: color-mix(in srgb, var(--chat-tone) 30%, transparent);
+}
+
+.ticket-chip.ticket-status::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chat-tone);
+}
+
+.ticket-chip.ticket-status.tone-neutral { color: var(--chat-muted); }
+.ticket-chip.ticket-status.tone-active { --chat-tone: var(--chat-info); }
+.ticket-chip.ticket-status.tone-blocked { --chat-tone: var(--chat-warning); }
+.ticket-chip.ticket-status.tone-done { --chat-tone: var(--chat-success); }
+.ticket-chip.ticket-status.tone-canceled {
+  color: var(--chat-muted-2);
+  background: transparent;
+  border-color: var(--chat-border);
 }
 
 .ticket-title {
+  font-size: 1.07em;
   font-weight: 600;
-  margin-top: 4px;
+  line-height: 1.35;
+  margin-top: 6px;
+  color: var(--chat-fg);
   overflow-wrap: anywhere;
 }
 
-.ticket-details {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 6px;
-  min-width: 0;
-}
-
-.ticket-people {
-  font-size: var(--chat-text-xs);
+.ticket-title.canceled,
+.ticket-modal-title.canceled {
+  text-decoration: line-through;
+  text-decoration-color: var(--chat-muted-2);
   color: var(--chat-muted);
 }
 
-.ticket-labels {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+/* The priority's glyph (↑ → ↓) is drawn, not said: the text stays the tracker's word. */
+.ticket-priority[data-glyph]::before {
+  content: attr(data-glyph);
+  margin-right: 3px;
+  color: var(--chat-muted-2);
 }
 
-.ticket-description-body {
-  min-width: 0;
+.ticket-meta {
+  margin-top: 3px;
+  font-size: var(--chat-text-xs);
+  color: var(--chat-muted);
   overflow-wrap: anywhere;
 }
 
-.ticket-description-body.collapsed {
-  max-height: 12em;
+.ticket-meta-sep {
+  color: var(--chat-muted-2);
+}
+
+/* The start of the description: three lines at most, faded, at the meta's quiet level. Headings
+   and blocks are flattened to text size so the excerpt reads as a preview, not a page. */
+.ticket-excerpt {
+  margin-top: 8px;
+  max-height: 4.2em;
+  line-height: 1.4;
   overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
-  mask-image: linear-gradient(to bottom, #000 70%, transparent);
+  font-size: var(--chat-text-sm);
+  color: var(--chat-muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
+  mask-image: linear-gradient(to bottom, #000 55%, transparent);
+}
+
+.ticket-excerpt .md {
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.ticket-excerpt .md > * {
+  margin: 0;
+}
+
+.ticket-excerpt .md :is(h1, h2, h3, h4, h5, h6) {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 600;
+  color: inherit;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.ticket-excerpt .md :is(ul, ol) {
+  padding-left: 0;
+  list-style-position: inside;
+}
+
+.ticket-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.ticket-open {
+  background: none;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  padding: 2px 10px;
+  color: var(--chat-fg);
+  font: inherit;
+  font-size: var(--chat-text-xs);
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.ticket-open:hover,
+.ticket-open:focus-visible {
+  background: var(--chat-surface);
+  border-color: var(--chat-muted-2);
 }
 
 .ticket-more {
@@ -200,78 +298,362 @@ a.ticket-key {
   text-decoration: underline;
 }
 
+.ticket-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* ── the modal: an issue view ─────────────────────────────────────────── */
+/* Drawn after Blerg Board's card sheet: a header block (badge, key, status; a large title), then
+   sections under small uppercase display-face headings split by hairlines; the fields as a
+   label/value grid on a panel of their own; comments as boxed entries on a trail. */
+.artifact-dialog.ticket-modal {
+  width: min(980px, 100%);
+}
+
+/* A grid: the badges and the actions share the first row, the title takes the whole second, so a
+   phone never squeezes the title beside the buttons. */
+.artifact-header.ticket-modal-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 16px;
+  padding: 18px 16px 18px 28px;
+  border-bottom: 1px solid var(--chat-border);
+  background: var(--chat-surface);
+  flex: none;
+}
+
+.ticket-modal-header .artifact-header-text {
+  display: contents;
+}
+
+.ticket-modal-header .ticket-line {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.ticket-modal-header .ticket-modal-actions {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.artifact-header .ticket-modal-title {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+
+.ticket-modal-header .ticket-key {
+  font-size: var(--chat-text-sm);
+}
+
+.ticket-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.ticket-open-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  font-size: var(--chat-text-xs);
+  font-weight: 500;
+  line-height: 18px;
+  color: var(--chat-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.ticket-open-link:hover,
+.ticket-open-link:focus-visible {
+  color: var(--chat-fg);
+  border-color: var(--chat-muted-2);
+  background: var(--chat-surface-2);
+}
+
+.artifact-header .ticket-modal-title {
+  margin: 10px 0 0;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--chat-fg);
+  overflow-wrap: anywhere;
+}
+
+.artifact-body.ticket-modal-body {
+  padding: 4px 28px 28px;
+}
+
+.ticket-modal-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  min-width: 0;
+}
+
+.ticket-main {
+  min-width: 0;
+}
+
+/* Sections: a hairline above each but the first, the way the Board splits its sheet. */
+.ticket-main > .ticket-section,
+.ticket-main > .ticket-empty {
+  padding: 20px 0;
+  border-top: 1px solid var(--chat-border);
+}
+
+.ticket-main > :first-child {
+  border-top: none;
+}
+
+.ticket-main > .ticket-more {
+  margin-top: 4px;
+}
+
+.ticket-section-title {
+  margin: 0 0 12px;
+  font-family: var(--chat-font-display);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--chat-muted-2);
+}
+
+/* Details: a panel of its own: on top on a narrow screen, beside the rest on a wide one. */
+.ticket-side {
+  min-width: 0;
+  margin-top: 20px;
+  padding: 14px 16px 16px;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+}
+
+@media (min-width: 900px) {
+  .ticket-modal-grid {
+    grid-template-columns: minmax(0, 1fr) 272px;
+    grid-template-areas: 'main side';
+    gap: 32px;
+  }
+  .ticket-main { grid-area: main; }
+  .ticket-side {
+    grid-area: side;
+    align-self: start;
+    position: sticky;
+    top: 20px;
+  }
+}
+
+/* The description reads like a document, but its headings stay under the issue's title. */
+.ticket-description.md.md-doc {
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.ticket-description.md.md-doc :is(h1, h2) {
+  font-size: 1.15em;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.ticket-description.md.md-doc :is(h3, h4, h5, h6) {
+  font-size: 1.02em;
+}
+
+.ticket-description.md.md-doc :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1.25em 0 0.5em;
+}
+
+.ticket-description.md.md-doc > :first-child {
+  margin-top: 0;
+}
+
+.ticket-empty {
+  margin: 0;
+  font-size: var(--chat-text-sm);
+  color: var(--chat-muted-2);
+  font-style: italic;
+}
+
 .ticket-fields {
   display: grid;
-  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
-  gap: 2px 12px;
+  grid-template-columns: minmax(0, 96px) minmax(0, 1fr);
   margin: 0;
-  font-size: var(--chat-text-xs);
+  font-size: var(--chat-text-sm);
+  line-height: 1.4;
 }
 
 .ticket-fields > div {
   display: contents;
 }
 
+.ticket-fields dt,
+.ticket-fields dd {
+  padding: 7px 0;
+  border-top: 1px solid color-mix(in srgb, var(--chat-border) 60%, transparent);
+}
+
+.ticket-fields > div:first-child > :is(dt, dd) {
+  border-top: none;
+  padding-top: 0;
+}
+
 .ticket-fields dt {
+  padding-right: 12px;
   color: var(--chat-muted-2);
   overflow-wrap: anywhere;
 }
 
 .ticket-fields dd {
   margin: 0;
+  color: var(--chat-fg);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.ticket-fields .ticket-label {
+  font-weight: 400;
+}
+
+.ticket-acceptance,
+.ticket-comments {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Acceptance criteria: one row each in a bordered list, an empty box before the text. */
+.ticket-acceptance {
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.ticket-acceptance li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 9px 12px;
   overflow-wrap: anywhere;
 }
 
-.ticket-subhead {
-  font-size: var(--chat-text-xs);
-  color: var(--chat-muted-2);
-  margin-bottom: 2px;
+.ticket-acceptance li + li {
+  border-top: 1px solid var(--chat-border);
 }
 
-.ticket-acceptance ul,
-.ticket-comments ul {
-  margin: 0;
-  padding-left: 18px;
-  font-size: var(--chat-text-sm);
+.ticket-box {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 0.15em;
+  border: 1.5px solid var(--chat-muted-2);
+  border-radius: 4px;
 }
 
-.ticket-comments ul {
-  list-style: none;
-  padding-left: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 4px;
+/* Comments: a trail down the avatars, each comment a box with a header strip. */
+.ticket-comments {
+  gap: 16px;
+  position: relative;
 }
 
-.ticket-comments summary {
-  cursor: pointer;
-  font-size: var(--chat-text-xs);
-  color: var(--chat-muted);
+.ticket-comments::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 14px;
+  border-left: 2px solid var(--chat-border);
 }
 
 .ticket-comment {
-  border-left: 2px solid var(--chat-border);
-  padding-left: 8px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 12px;
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+}
+
+.ticket-avatar {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--chat-fg);
+  background: color-mix(in srgb, var(--chat-accent) 22%, var(--chat-surface-2));
+  border: 1px solid color-mix(in srgb, var(--chat-accent) 45%, var(--chat-border));
+}
+
+.ticket-comment-box {
+  min-width: 0;
+  border: 1px solid var(--chat-border);
+  border-left: 2px solid var(--chat-accent);
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 .ticket-comment-head {
-  font-size: var(--chat-text-xs);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  padding: 7px 12px;
+  background: var(--chat-surface-2);
+  border-bottom: 1px solid var(--chat-border);
+}
+
+.ticket-comment-author {
+  font-size: var(--chat-text-sm);
+  font-weight: 600;
+  color: var(--chat-fg);
+}
+
+.ticket-comment-time {
+  font-family: var(--chat-font-mono);
+  font-size: 11px;
   color: var(--chat-muted-2);
 }
 
-.ticket-modal-body {
-  padding: 12px 16px;
-  overflow: auto;
+.ticket-comment-body {
+  padding: 10px 12px;
+  font-size: 14px;
 }
 
-@media (max-width: 480px) {
-  .ticket-fields {
-    grid-template-columns: minmax(0, 1fr);
+.ticket-comment-body > :first-child {
+  margin-top: 0;
+}
+
+.ticket-comment-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* A narrow screen: less padding, Open in … stays, the title wraps. */
+@media (max-width: 560px) {
+  .artifact-header.ticket-modal-header {
+    padding: 14px 12px 14px 16px;
   }
-  .ticket-fields dd {
-    margin-bottom: 4px;
+  .artifact-body.ticket-modal-body {
+    padding: 4px 16px 20px;
+  }
+  .artifact-header .ticket-modal-title {
+    font-size: 19px;
   }
 }

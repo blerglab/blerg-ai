@@ -100,7 +100,7 @@ export interface TopicPayload { id: string; title: string; action: 'start' | 'do
 export interface ChecklistItem { text: string; done: boolean; commits?: string[]; diff?: string }
 export interface ChecklistPayload {
   items: ChecklistItem[]
-  op: 'set' | 'add' | 'tick' | 'untick' | 'clear' | string
+  op: 'set' | 'add' | 'tick' | 'untick' | 'remove' | 'clear' | string
   changed?: { index: number; text: string; done: boolean; commits?: string[]; diff?: string }
 }
 // kind "ticket" (`blerg-runner pin` / `unpin`): a tracker's ticket the agent pinned, in one
@@ -136,6 +136,8 @@ export interface TicketPayload {
 export type BackgroundTaskKind = 'bash' | 'monitor' | 'agent'
 export interface BackgroundTaskStartedPayload {
   task_id: string; call_id: string; kind: BackgroundTaskKind | string; description: string; started_at: string
+  /** The shell command of a bash or monitor task (absent on an older start). */
+  command?: string
 }
 /** status: completed | failed | killed | expired (a monitor) | stopped (the engine ended) | … */
 export interface BackgroundTaskDonePayload {

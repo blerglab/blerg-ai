@@ -19,6 +19,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatSize, parseCsv, prettyJson, withCsp } from '../model/artifacts'
+import { langFromName } from '../model/codeLang'
 import {
   ARTIFACT_VIEWS,
   CSV_MAX_COLS,
@@ -34,6 +35,8 @@ import { composeMarkupMessage } from '../model/feedback'
 import { FILE_GONE_MESSAGE, FileRequestError, fileErrorText, isArtifactGone } from '../transport/files'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { useChat } from './context'
+import CodeLines from './CodeLines'
+import DataTable from './DataTable'
 import ErrorId from './ErrorId'
 import DiffView from './DiffView'
 import Markdown from './Markdown'
@@ -61,9 +64,11 @@ interface Props {
   onOpen?: (artifact: ArtifactInfo) => void
   /** Start a video or audio file playing at once (opened by a click on its preview). */
   autoplay?: boolean
+  /** A diff opens at this commit's section (a checklist item's sha chip). */
+  commit?: string | null
 }
 
-export default function ArtifactViewer({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false }: Props) {
+export default function ArtifactViewer({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null }: Props) {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const backdrop = useBackdropClose(onClose)
@@ -204,7 +209,7 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
           ) : loaded.kind === 'blob' ? (
             <BlobView artifact={artifact} url={loaded.url} autoplay={autoplay} />
           ) : (
-            <TextView artifact={artifact} text={loaded.text} showAll={showAll} onShowAll={() => setShowAll(true)} />
+            <TextView artifact={artifact} text={loaded.text} showAll={showAll} onShowAll={() => setShowAll(true)} commit={commit} />
           )}
         </div>
       </div>
@@ -250,7 +255,7 @@ export function BlobView({ artifact, url, autoplay }: { artifact: ArtifactInfo; 
   }
 }
 
-export function TextView({ artifact, text, showAll, onShowAll }: { artifact: ArtifactInfo; text: string; showAll: boolean; onShowAll: () => void }) {
+export function TextView({ artifact, text, showAll, onShowAll, commit }: { artifact: ArtifactInfo; text: string; showAll: boolean; onShowAll: () => void; commit?: string | null }) {
   if (artifact.view === 'html') {
     return (
       <iframe
@@ -263,16 +268,20 @@ export function TextView({ artifact, text, showAll, onShowAll }: { artifact: Art
     )
   }
   if (artifact.view === 'csv') return <CsvView artifact={artifact} text={text} />
-  if (artifact.view === 'diff') return <DiffView text={text} />
+  if (artifact.view === 'diff') return <DiffView text={text} commit={commit} />
 
   const body = artifact.view === 'json' ? prettyJson(text) : text
+  // Code is coloured by its extension, json as json; no known language stays plain wrapped text.
+  const lang = artifact.view === 'json' ? 'json' : artifact.view === 'text' ? langFromName(artifact.name) : null
   const capped = !showAll && body.length > TEXT_PREVIEW_CAP
   const shown = capped ? body.slice(0, TEXT_PREVIEW_CAP) : body
   return (
     <>
       {artifact.view === 'markdown'
-        ? <Markdown text={shown} className="artifact-markdown" />
-        : <pre className="artifact-text" data-testid="artifact-text">{shown}</pre>}
+        ? <Markdown text={shown} className="artifact-markdown md-doc" />
+        : lang
+          ? <CodeLines text={shown} lang={lang} />
+          : <pre className="artifact-text" data-testid="artifact-text">{shown}</pre>}
       {capped && (
         <p className="artifact-status">
           Showing the first {formatSize(TEXT_PREVIEW_CAP)} of {formatSize(body.length)}.{' '}
@@ -287,19 +296,9 @@ function CsvView({ artifact, text }: { artifact: ArtifactInfo; text: string }) {
   const tab = /\.tsv$/i.test(artifact.name) || artifact.content_type.includes('tab-separated')
   const { rows, moreRows, moreCols } = parseCsv(text, tab ? '\t' : ',', CSV_MAX_ROWS, CSV_MAX_COLS)
   if (rows.length === 0) return <p className="artifact-status">This file is empty.</p>
-  const [head, ...rest] = rows
   return (
     <>
-      <div className="artifact-table-wrap" tabIndex={0}>
-        <table className="artifact-table" data-testid="artifact-table">
-          <thead>
-            <tr>{head.map((c, i) => <th key={i} scope="col">{c}</th>)}</tr>
-          </thead>
-          <tbody>
-            {rest.map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j}>{c}</td>)}</tr>)}
-          </tbody>
-        </table>
-      </div>
+      <DataTable rows={rows} testId="artifact-table" />
       {(moreRows || moreCols) && (
         <p className="artifact-status">
           {moreRows && `Showing the first ${CSV_MAX_ROWS} rows. `}

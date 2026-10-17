@@ -7,15 +7,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { useChat } from './context'
 import { formatSize, withCsp } from '../model/artifacts'
-import { EXCERPT_KINDS, HTML_PREVIEW_PAGE, loadDiffSummary, loadPdfThumb, loadPreviewExcerpt, loadPreviewText, loadPreviewUrl, previewKind } from '../model/artifactPreview'
+import { EXCERPT_KINDS, HTML_PREVIEW_PAGE, type DiffPreviewData, loadDiffPreview, loadPdfThumb, loadPreviewExcerpt, loadPreviewText, loadPreviewUrl, previewKind } from '../model/artifactPreview'
 import type { Excerpt } from '../model/previewExcerpt'
-import { patchSummaryText, type PatchSummary } from '../model/patch'
+import { patchSummaryText } from '../model/patch'
 import { useHighlight } from '../model/highlight'
 import { isViewable } from '../model/artifactViews'
 import { fileErrorText } from '../transport/files'
 import type { TransportFiles } from '../transport/types'
 import type { ArtifactPayload } from '../types'
 import CodeText from './CodeText'
+import DataTable from './DataTable'
+import { InlineDiff } from './DiffView'
 import ErrorId from './ErrorId'
 import Markdown from './Markdown'
 import { TimeLabel } from './TimeLabel'
@@ -126,7 +128,7 @@ function ExcerptPreview({ sessionId, files, artifact, onOpen }: {
   if (failed) return null
   return (
     <div ref={ref} className={`artifact-preview artifact-preview-excerpt${excerpt?.more ? ' has-more' : ''}`} data-testid="artifact-preview-excerpt">
-      {excerpt?.kind === 'markdown' && <Markdown text={excerpt.text} className="artifact-preview-md" />}
+      {excerpt?.kind === 'markdown' && <Markdown text={excerpt.text} className="artifact-preview-md md-doc" />}
       {code && (
         <div className="md-codeblock">
           <pre><code><CodeText text={code.text} highlighted={highlighted} /></code></pre>
@@ -136,14 +138,7 @@ function ExcerptPreview({ sessionId, files, artifact, onOpen }: {
         excerpt.rows.length === 0
           ? <p className="artifact-status">This file is empty.</p>
           : (
-            <table className="artifact-preview-table" data-testid="artifact-preview-table">
-              <thead>
-                <tr>{excerpt.rows[0].map((c, i) => <th key={i} scope="col">{c}</th>)}</tr>
-              </thead>
-              <tbody>
-                {excerpt.rows.slice(1).map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j}>{c}</td>)}</tr>)}
-              </tbody>
-            </table>
+            <DataTable rows={excerpt.rows} preview testId="artifact-preview-table" />
           )
       )}
       {!excerpt && <span className="artifact-preview-loading" />}
@@ -162,21 +157,22 @@ function DiffPreview({ sessionId, files, artifact, onOpen }: {
 }) {
   const ref = useRef<HTMLButtonElement | null>(null)
   const near = useNear(ref, true)
-  const [summary, setSummary] = useState<PatchSummary | null>(null)
+  const [data, setData] = useState<DiffPreviewData | null>(null)
   const [failed, setFailed] = useState(false)
+  const summary = data?.summary ?? null
 
   useEffect(() => {
     if (!near) return
     let live = true
-    loadDiffSummary(sessionId, artifact.id, id => files.raw(sessionId, id)).then(
-      s => { if (live) setSummary(s) },
+    loadDiffPreview(sessionId, artifact.id, id => files.raw(sessionId, id)).then(
+      d => { if (live) setData(d) },
       () => { if (live) setFailed(true) },
     )
     return () => { live = false }
   }, [near, sessionId, artifact.id, files])
 
   if (failed || (summary && summary.files === 0)) return null
-  return (
+  const tile = (
     <button ref={ref} type="button" className="artifact-preview artifact-preview-diff" data-testid="artifact-preview-diff" onClick={onOpen} aria-label={`View the diff ${artifact.name}`}>
       {summary
         ? (
@@ -192,6 +188,14 @@ function DiffPreview({ sessionId, files, artifact, onOpen }: {
           )
         : <span className="artifact-preview-loading" />}
     </button>
+  )
+  // A small patch of one file shows its hunks under the summary line.
+  if (!data?.inline) return tile
+  return (
+    <div className="artifact-preview-diff-stack" data-testid="artifact-preview-diff-inline">
+      {tile}
+      <div className="artifact-preview-diff-hunks"><InlineDiff file={data.inline} /></div>
+    </div>
   )
 }
 

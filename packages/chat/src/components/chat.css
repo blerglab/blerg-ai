@@ -1724,28 +1724,57 @@
   padding: 0;
 }
 
-.artifact-row {
+/* A row is one ~28px line: glyph, name (ellipsis) and its muted meta, then the actions. */
+.artifact-row,
+.artifact-version-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 12px;
-  padding: 10px 0;
-  border-top: 1px solid var(--chat-surface-2);
+  gap: 0 8px;
+  min-height: 28px;
+  padding: 1px 6px;
+  margin: 0 -6px;
+  border-radius: 6px;
+}
+
+.artifact-row:hover,
+.artifact-row:focus-within {
+  background: color-mix(in srgb, var(--chat-surface-2) 55%, transparent);
+}
+
+.artifact-glyph {
+  flex: none;
+  color: var(--chat-muted-2);
 }
 
 .artifact-row-main {
-  flex: 1 1 220px;
+  flex: 1 1 0;
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 4px 0;
+  text-align: left;
 }
 
+button.artifact-row-main { cursor: pointer; }
+button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); outline-offset: 1px; border-radius: 4px; }
+
 .artifact-row-name {
-  display: block;
-  font-weight: 600;
-  overflow-wrap: anywhere;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .artifact-row-meta {
-  display: block;
+  flex: none;
+  margin-left: auto;
+  white-space: nowrap;
   font-size: var(--chat-text-xs);
   color: var(--chat-muted-2);
 }
@@ -1767,15 +1796,84 @@
   gap: 6px;
 }
 
-.artifact-row .artifact-error {
+/* Download and Delete appear over the row's right end on hover or focus (not in the way of the
+   name); on touch (no hover) they are always shown, in line. */
+.artifact-row,
+.artifact-version-row { position: relative; }
+.artifact-row-actions:not(.is-confirming) {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  gap: 2px;
+  padding-left: 14px;
+  background: linear-gradient(90deg, transparent, var(--chat-surface-2) 14px);
+  border-radius: 6px;
+  opacity: 0;
+}
+.artifact-row:hover:not(:has(.artifact-version-row:hover)) > .artifact-row-actions,
+.artifact-version-row:hover > .artifact-row-actions,
+.artifact-row:has(> .artifact-row-main:focus-visible, > .artifact-row-actions :focus-visible) > .artifact-row-actions,
+.artifact-version-row:has(> .artifact-row-main:focus-visible, > .artifact-row-actions :focus-visible) > .artifact-row-actions { opacity: 1; }
+@media (hover: none) {
+  .artifact-row-actions:not(.is-confirming) { position: static; opacity: 1 !important; padding-left: 0; background: none; }
+}
+
+.artifact-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--chat-muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.artifact-icon-btn:hover,
+.artifact-icon-btn:focus-visible { background: var(--chat-surface-2); color: var(--chat-fg); }
+.artifact-icon-btn.danger:hover,
+.artifact-icon-btn.danger:focus-visible { color: var(--chat-danger); }
+
+.artifact-row .artifact-error,
+.artifact-version-row .artifact-error {
   flex-basis: 100%;
-  margin: 0;
+  margin: 0 0 4px 24px;
 }
 
 .artifact-confirm {
   font-size: var(--chat-text-sm);
   color: var(--chat-muted);
 }
+
+/* filter box, sort and origin: one line above the list */
+.artifact-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 8px;
+}
+
+.artifact-search,
+.artifact-select {
+  height: 26px;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  font-size: var(--chat-text-xs);
+  padding: 0 8px;
+}
+
+.artifact-search { flex: 1 1 70px; min-width: 0; }
+.artifact-select { flex: none; padding: 0 4px; }
+.artifact-search:focus-visible,
+.artifact-select:focus-visible { outline: 2px solid var(--chat-accent); outline-offset: 0; }
+.artifact-shown { flex-basis: 100%; font-size: var(--chat-text-xs); color: var(--chat-muted-2); }
 
 /* ── viewer bodies ───────────────────────────────────────────────────────── */
 .artifact-text {
@@ -1825,24 +1923,27 @@
   background: #fff;
 }
 
-.artifact-table-wrap {
+.data-table-wrap {
   overflow: auto;
   max-height: 100%;
   border: 1px solid var(--chat-border);
   border-radius: 8px;
 }
 
-.artifact-table {
+/* One look for a CSV or TSV, in the viewer and in the inline preview (which is the same table cut
+   to its first rows and columns): bordered cells, a header row, zebra rows. */
+.data-table {
   border-collapse: collapse;
-  font-size: var(--chat-text-xs);
+  font-size: var(--chat-text-sm);
+  line-height: 1.4;
   width: max-content;
   min-width: 100%;
 }
 
-.artifact-table th,
-.artifact-table td {
-  border: 1px solid var(--chat-surface-2);
-  padding: 4px 8px;
+.data-table th,
+.data-table td {
+  border: 1px solid var(--chat-border);
+  padding: 6px 13px;
   text-align: left;
   vertical-align: top;
   white-space: pre-wrap;
@@ -1850,12 +1951,36 @@
   overflow-wrap: anywhere;
 }
 
-.artifact-table th {
+.data-table th {
   position: sticky;
   top: 0;
   background: var(--chat-surface-2);
   font-weight: 600;
 }
+
+.data-table tbody tr:nth-child(2n) td {
+  background: color-mix(in srgb, var(--chat-surface-2) 55%, transparent);
+}
+
+/* The inline preview: nothing scrolls, each cell is one line, and the table fills the card. */
+.data-table-wrap.is-preview {
+  overflow: hidden;
+  border-width: 1px 0 0;
+  border-radius: 0;
+}
+.data-table.is-preview {
+  width: 100%;
+  font-size: var(--chat-text-xs);
+}
+.data-table.is-preview th,
+.data-table.is-preview td {
+  padding: 4px 10px;
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.data-table.is-preview th { position: static; }
 
 .artifact-nopreview {
   padding-top: 8px;
@@ -1979,19 +2104,6 @@
   background: color-mix(in srgb, var(--chat-accent) 32%, var(--chat-bg));
 }
 
-/* list rows read as items: padded, with a hover state */
-.artifact-panel .artifact-row {
-  padding: 12px 10px;
-  margin: 0 -10px;
-  border-radius: 8px;
-  border-top: none;
-  border-bottom: 1px solid var(--chat-surface-2);
-}
-
-.artifact-panel .artifact-row:hover {
-  background: color-mix(in srgb, var(--chat-surface-2) 55%, transparent);
-}
-
 .artifact-section {
   margin: 16px 0 4px;
   font-size: var(--chat-text-xs);
@@ -2007,26 +2119,12 @@
   font-size: var(--chat-text-sm);
 }
 
-/* the v3 badge beside a file's name in the Files panel */
-.artifact-version {
-  display: inline-block;
-  margin: 0 0 0 8px;
-  padding: 0 7px;
-  border: 1px solid var(--chat-border);
-  border-radius: 999px;
-  color: var(--chat-muted);
-  font-size: var(--chat-text-xs);
-  font-weight: 600;
-  line-height: 1.6;
-  vertical-align: baseline;
-}
-
-.artifact-row-name:has(+ .artifact-version) {
-  display: inline;
-}
+/* the v3 in a row's meta */
+.artifact-version { font-weight: 600; color: var(--chat-muted); }
 
 .artifact-earlier-toggle {
   flex-basis: 100%;
+  margin-left: 24px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2048,28 +2146,12 @@
 }
 
 .artifact-versions {
+  min-width: 0;
   flex-basis: 100%;
   list-style: none;
   margin: 0;
   padding: 0 0 0 14px;
   border-left: 2px solid var(--chat-surface-2);
-}
-
-.artifact-version-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 12px;
-  padding: 8px 0;
-}
-
-.artifact-version-row + .artifact-version-row {
-  border-top: 1px solid var(--chat-surface-2);
-}
-
-.artifact-version-row .artifact-error {
-  flex-basis: 100%;
-  margin: 0;
 }
 
 /* viewer: "This is an older version. View latest" */
@@ -2576,25 +2658,6 @@
   padding: 8px 10px;
   font-size: var(--chat-text-sm);
 }
-.artifact-preview-table {
-  border-collapse: collapse;
-  width: 100%;
-  font-size: var(--chat-text-xs);
-}
-.artifact-preview-table th,
-.artifact-preview-table td {
-  padding: 3px 8px;
-  border-bottom: 1px solid var(--chat-border);
-  text-align: left;
-  max-width: 12em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.artifact-preview-table th {
-  color: var(--chat-muted);
-  font-weight: 600;
-}
 .artifact-preview-pdf img {
   max-height: 320px;
   width: 100%;
@@ -2690,10 +2753,85 @@
 .msg-copy.is-copied { color: var(--chat-accent); }
 .msg-copy-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (hover: none) {
-  .msg-copy { opacity: 0.7; }
-  /* The button is always there on a touch screen: keep text out from under it. */
-  .agent-card.user,
-  .agent-card.assistant { padding-right: 36px; }
+  /* A touch screen copies by long-press (LongPress): no button on the card. */
+  .msg-copy { display: none; }
+  /* Hold to copy: no browser callout while a press is being timed (links keep theirs). */
+  [data-pressing] .agent-card, [data-pressing] .md-codeblock { -webkit-touch-callout: none; }
+  /* …and nothing under the held finger is selected by the browser's own long-press. */
+  [data-pressing] .agent-card, [data-pressing] .md-codeblock { -webkit-user-select: none; user-select: none; }
+  [data-pressing] a { -webkit-touch-callout: default; }
+}
+/* The long-press action sheet, at the bottom of the screen. */
+.lp-backdrop { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; justify-content: center; background: rgba(0, 0, 0, 0.35); }
+.lp-sheet {
+  width: min(100%, 420px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border);
+  border-radius: 14px 14px 0 0;
+}
+.lp-sheet button {
+  min-height: 46px;
+  background: var(--chat-surface-2);
+  color: var(--chat-fg, inherit);
+  border: 1px solid var(--chat-border);
+  border-radius: 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.lp-sheet .lp-cancel { color: var(--chat-muted); }
+.lp-toast { padding: 14px; text-align: center; color: var(--chat-accent); }
+/* The sheet is never selected by the press that opened it. */
+.lp-backdrop, .lp-sheet { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+/* Select text: the text full screen in a read-only box; the browser's own handles select in it. */
+.lp-select {
+  position: fixed;
+  inset: 0;
+  z-index: 61;
+  display: flex;
+  flex-direction: column;
+  background: var(--chat-bg);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.lp-select-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px;
+  border-bottom: 1px solid var(--chat-border);
+  background: var(--chat-surface);
+  -webkit-user-select: none;
+  user-select: none;
+}
+.lp-select-title { flex: 1; font-weight: 600; color: var(--chat-fg); }
+.lp-select-bar button {
+  min-height: 40px;
+  padding: 0 16px;
+  background: var(--chat-surface-2);
+  color: var(--chat-fg);
+  border: 1px solid var(--chat-border);
+  border-radius: 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.lp-select-bar .lp-select-done { color: var(--chat-accent); }
+.lp-select-text {
+  flex: 1;
+  width: 100%;
+  margin: 0;
+  padding: 16px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--chat-fg);
+  font: 16px/1.5 var(--chat-font);
+  white-space: pre-wrap;
+  -webkit-user-select: text;
+  user-select: text;
 }
 /* The icon is drawn in CSS: a transcript holds hundreds of these, and an inline SVG each is dear. */
 .msg-copy-icon { position: relative; flex: none; width: 14px; height: 14px; }

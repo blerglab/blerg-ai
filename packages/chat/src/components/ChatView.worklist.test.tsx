@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import ChatView from './ChatView'
 import { buildTimeline } from '../model/toolGroups'
 import { createFakeTransport } from '../test/fakeTransport'
@@ -44,35 +44,52 @@ describe('checklist rows', () => {
     expect(within(rows[1]).getAllByRole('listitem').map(li => li.textContent)).toEqual(['☑Read (done)', '☑Write tests (done)'])
   })
 
-  it('an item with commits shows a commit chip that opens to the shas, and View diff opens its diff', async () => {
-    const write = vi.fn(() => Promise.resolve())
-    Object.assign(navigator, { clipboard: { writeText: write } })
+  it('an item shows its short shas; with a diff, a sha opens the diff at that commit, and View diff has its counts', async () => {
     const diffId = 'd'.repeat(32)
+    const sha1 = 'abcdef1234abcdef1234abcdef1234abcdef1234'
+    const sha2 = '1234567890123456789012345678901234567890'
     seed(ev({ seq: 1, kind: 'checklist', payload: {
-      items: [{ text: 'Fix', done: true, commits: ['abcdef1234', '1234567'], diff: diffId }, { text: 'Ship', done: false }], op: 'tick',
+      items: [{ text: 'Fix', done: true, commits: [sha1, sha2], diff: diffId }, { text: 'Ship', done: false }], op: 'tick',
     } }))
+    const patch = [
+      `commit ${sha1}`, 'Author: A <a@example.test>', '', '    First', '',
+      'diff --git a/x.txt b/x.txt', '--- a/x.txt', '+++ b/x.txt', '@@ -1 +1,2 @@', ' a', '+b',
+      `commit ${sha2}`, 'Author: A <a@example.test>', '', '    Second', '',
+      'diff --git a/y.txt b/y.txt', '--- a/y.txt', '+++ b/y.txt', '@@ -1,2 +1 @@', ' a', '-b', '',
+    ].join('\n')
     const t = createFakeTransport({ files: { items: [
-      { id: diffId, name: 'fix.diff', size: 60, content_type: 'text/x-diff', view: 'diff', origin: 'agent' },
+      { id: diffId, name: 'fix.diff', size: patch.length, content_type: 'text/x-diff', view: 'diff', origin: 'agent' },
     ] } })
+    t.files!.serve(patch)
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'idle' })}
-      commitUrl={sha => (sha === '1234567' ? 'https://forge.example.test/c/1234567' : null)} />)
+      commitUrl={() => 'https://forge.example.test/c/x'} />)
     const row = await screen.findByTestId('checklist-row')
     fireEvent.click(within(row).getByRole('button', { name: /Checklist/ }))
-    const chip = within(row).getByRole('button', { name: '2 commits' })
-    expect(chip).toHaveAttribute('aria-expanded', 'false')
-    fireEvent.click(chip)
-    const shas = within(row).getAllByTestId('reel-commit')
+    const shas = await within(row).findAllByTestId('reel-commit')
     expect(shas.map(s => s.textContent)).toEqual(['abcdef1', '1234567'])
-    expect(shas[0].tagName).toBe('BUTTON')
-    expect(shas[1]).toHaveAttribute('href', 'https://forge.example.test/c/1234567')
-    fireEvent.click(shas[0])
-    expect(write).toHaveBeenCalledWith('abcdef1234')
-    // One View diff for the item (its diff covers its commits), once the file list has it.
-    const view = await within(row).findByRole('button', { name: 'View diff' })
-    expect(within(row).getAllByRole('button', { name: 'View diff' })).toHaveLength(1)
-    fireEvent.click(view)
+    expect(row.querySelector('a[href^="https://forge"]')).toBeNull() // never a link out of Blerg
+    const view = await within(row).findByRole('button', { name: /View diff/ })
+    await within(view).findByText('+1')
+    expect(view).toHaveTextContent('−1')
+    fireEvent.click(shas[1])
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText('fix.diff')).toBeTruthy()
+    const heads = await within(dialog).findAllByTestId('diff-commit')
+    expect(heads[1]).toHaveClass('target')
+    expect(heads[0]).not.toHaveClass('target')
+  })
+
+  it('shows three shas, then "+N more" that opens in place', async () => {
+    const commits = ['a1', 'b2', 'c3', 'd4', 'e5'].map(x => x.repeat(4).padEnd(7, '0'))
+    seed(ev({ seq: 1, kind: 'checklist', payload: { items: [{ text: 'Fix', done: true, commits }], op: 'tick' } }))
+    mount()
+    const row = await screen.findByTestId('checklist-row')
+    fireEvent.click(within(row).getByRole('button', { name: /Checklist/ }))
+    expect(within(row).getAllByTestId('reel-commit')).toHaveLength(3)
+    const more = within(row).getByRole('button', { name: '+2 more' })
+    fireEvent.click(more)
+    expect(within(row).getAllByTestId('reel-commit')).toHaveLength(5)
+    expect(within(row).queryByRole('button', { name: '+2 more' })).toBeNull()
   })
 
   it('an item whose diff is not in the file list has no View diff', async () => {
@@ -81,17 +98,21 @@ describe('checklist rows', () => {
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'idle' })} />)
     const row = await screen.findByTestId('checklist-row')
     fireEvent.click(within(row).getByRole('button', { name: /Checklist/ }))
-    expect(within(row).queryByRole('button', { name: 'View diff' })).toBeNull()
+    expect(within(row).queryByRole('button', { name: /View diff/ })).toBeNull()
   })
 
-  it('without the host hooks the commits are copyable shas and there is no View diff', async () => {
-    seed(ev({ seq: 1, kind: 'checklist', payload: { items: [{ text: 'Fix', done: true, commits: ['abcdef1'] }], op: 'tick' } }))
+  it('without a diff a sha copies itself and says Copied; there is no View diff', async () => {
+    const write = vi.fn(() => Promise.resolve())
+    Object.assign(navigator, { clipboard: { writeText: write } })
+    seed(ev({ seq: 1, kind: 'checklist', payload: { items: [{ text: 'Fix', done: true, commits: ['abcdef1234'] }], op: 'tick' } }))
     mount()
     const row = await screen.findByTestId('checklist-row')
     fireEvent.click(within(row).getByRole('button', { name: /Checklist/ }))
-    fireEvent.click(within(row).getByRole('button', { name: '1 commit' }))
-    expect(within(row).getByTestId('reel-commit').tagName).toBe('BUTTON')
-    expect(within(row).queryByRole('button', { name: 'View diff' })).toBeNull()
+    const chip = within(row).getByRole('button', { name: 'Copy commit abcdef1234' })
+    await act(async () => { fireEvent.click(chip) })
+    expect(write).toHaveBeenCalledWith('abcdef1234')
+    expect(within(row).getByRole('status')).toHaveTextContent('Copied')
+    expect(within(row).queryByRole('button', { name: /View diff/ })).toBeNull()
   })
 
   it('a checklist change is its own row between tool calls', () => {
@@ -110,7 +131,7 @@ describe('ticket cards', () => {
     seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: evil } }))
     mount()
     const card = await screen.findByTestId('ticket-card')
-    expect(card).toHaveTextContent('Ticket pinned')
+    expect(card).toHaveTextContent('Pinned ticket')
     expect(card).toHaveTextContent('JIRA')
     expect(card).toHaveTextContent('Crash <img src=x onerror=alert(1)>')
     expect(card.querySelector('img, script')).toBeNull()
@@ -118,22 +139,44 @@ describe('ticket cards', () => {
     expect(within(card).getByText('ABC-1').tagName).toBe('SPAN') // the javascript: url links nothing
     for (const a of card.querySelectorAll('a')) expect(a.getAttribute('href')).toMatch(/^https:/)
     expect((window as unknown as { pwned?: number }).pwned).toBeUndefined()
-    expect(card).toHaveTextContent('In Progress')
-    expect(card).toHaveTextContent('Sprint')
-    expect(card).toHaveTextContent('No crash')
-    expect(within(card).getByText(/Latest comment/)).toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: 'Open ticket' }))
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.querySelector('img, script')).toBeNull()
+    expect(dialog.querySelector('[data-card-kind]')).toBeNull()
+    for (const a of dialog.querySelectorAll('a')) expect(a.getAttribute('href')).toMatch(/^https:/)
+    expect(within(dialog).queryByRole('link', { name: /Open in/ })).toBeNull()
+    expect((window as unknown as { pwned?: number }).pwned).toBeUndefined()
   })
 
-  it('a long description starts collapsed with Show all', async () => {
-    const description = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n\n')
-    seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: { source: 'github', key: '12', url: 'https://example.test/i/12', title: 'T', description } } }))
+  it('the card is a summary: header, title, one meta line, an excerpt; no fields, comments or criteria', async () => {
+    seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: { ...evil, url: 'https://tracker.example.test/ABC-1', type: 'Task', priority: 'High', assignee: 'Release owner', description: 'First line\n\n## Second\n\nThird' } } }))
     mount()
     const card = await screen.findByTestId('ticket-card')
-    expect(within(card).getByRole('link', { name: '12' })).toHaveAttribute('href', 'https://example.test/i/12')
-    const more = within(card).getByRole('button', { name: 'Show all' })
-    expect(card.querySelector('.ticket-description-body.collapsed')).not.toBeNull()
-    fireEvent.click(more)
-    expect(card.querySelector('.ticket-description-body.collapsed')).toBeNull()
+    const chip = within(card).getByTestId('ticket-status')
+    expect(chip).toHaveTextContent('In Progress')
+    expect(chip).toHaveAttribute('data-tone', 'active')
+    expect(within(card).getByTestId('ticket-meta')).toHaveTextContent('Task · High · Release owner')
+    expect(within(card).getByTestId('ticket-excerpt')).toHaveTextContent('First line')
+    expect(card).not.toHaveTextContent('Sprint')
+    expect(card).not.toHaveTextContent('No crash')
+    expect(card).not.toHaveTextContent('seen it')
+    expect(card.querySelector('.ticket-fields, .ticket-comments, .ticket-acceptance')).toBeNull()
+    expect(within(card).getByRole('link', { name: 'ABC-1' })).toHaveAttribute('href', 'https://tracker.example.test/ABC-1')
+  })
+
+  it('Open ticket opens the modal; it closes and gives the focus back', async () => {
+    seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: evil } }))
+    mount()
+    const card = await screen.findByTestId('ticket-card')
+    const open = within(card).getByRole('button', { name: 'Open ticket' })
+    open.focus()
+    fireEvent.click(open)
+    const dialog = screen.getByRole('dialog', { name: evil.title })
+    expect(dialog).toHaveTextContent('Sprint')
+    expect(dialog).toHaveTextContent('seen it')
+    fireEvent.keyDown(dialog, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(open)
   })
 
   it('a re-pin says what changed, from its own payload; an unpin is a line', async () => {
@@ -143,8 +186,17 @@ describe('ticket cards', () => {
     )
     mount()
     expect(await screen.findByTestId('ticket-changes')).toHaveTextContent('status NEW → RESOLVED')
-    expect(screen.getByTestId('ticket-card')).toHaveTextContent('Ticket updated')
+    expect(screen.getByTestId('ticket-card')).toHaveTextContent('Updated')
+    expect(screen.getByTestId('ticket-status')).toHaveAttribute('data-tone', 'done')
     expect(screen.getByTestId('ticket-unpinned')).toHaveTextContent('Unpinned Bugzilla 77 · Crash')
+  })
+
+  it('a canceled ticket has its title struck through', async () => {
+    seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: { source: 'jira', key: 'K-2', title: 'Dropped', status: "Won't Do" } } }))
+    mount()
+    const card = await screen.findByTestId('ticket-card')
+    expect(within(card).getByTestId('ticket-status')).toHaveAttribute('data-tone', 'canceled')
+    expect(within(card).getByText('Dropped')).toHaveClass('canceled')
   })
 
   it('a malformed ticket event draws nothing', async () => {
@@ -156,13 +208,64 @@ describe('ticket cards', () => {
     await screen.findByText('after')
     expect(screen.queryByTestId('ticket-card')).toBeNull()
   })
+})
 
-  it('the modal shows the ticket and closes on Escape', () => {
+describe('ticket modal', () => {
+  const full = {
+    ...evil, url: 'https://tracker.example.test/ABC-1', reporter: 'Cy', labels: ['ui', 'beta'],
+    description: '## Steps\n\nOpen it.',
+    comments: [{ author: 'Bo Lee', at: '2026-10-01T10:00:00Z', body: '**seen** it' }, { author: '', at: 'last week', body: 'me too' }],
+  }
+
+  it('shows the ticket and closes on Escape', () => {
     const onClose = vi.fn()
     render(<TicketModal ticket={{ source: 'jira', key: 'A-1', title: 'Title', description: 'Body' }} onClose={onClose} />)
     const dialog = screen.getByRole('dialog', { name: 'Title' })
     expect(dialog).toHaveTextContent('Body')
     fireEvent.keyDown(dialog, { key: 'Escape' })
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('has its header, then Details, Description, Acceptance criteria and Comments, in that order', () => {
+    render(<TicketModal ticket={full} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    const header = dialog.querySelector('header')!
+    expect(within(header).getByText('JIRA')).toBeInTheDocument()
+    expect(within(header).getByTestId('ticket-status')).toHaveAttribute('data-tone', 'active')
+    expect(within(header).getByRole('link', { name: /Open in JIRA/ })).toHaveAttribute('href', 'https://tracker.example.test/ABC-1')
+    const heads = [...dialog.querySelectorAll('.ticket-section-title')].map(h => h.textContent)
+    expect(heads).toEqual(['Details', 'Description', 'Acceptance criteria', 'Comments'])
+    // Details come first in the page: on a narrow screen they are on top; a wide one puts them on the side.
+    expect(dialog.querySelector('.ticket-modal-grid > :first-child')).toHaveClass('ticket-side')
+  })
+
+  it('lists the details with their names, labels as chips, then the extra fields', () => {
+    render(<TicketModal ticket={full} onClose={() => {}} />)
+    const details = screen.getByTestId('ticket-modal-details')
+    const names = [...details.querySelectorAll('dt')].map(d => d.textContent)
+    expect(names).toEqual(['Type', 'Priority', 'Assignee', 'Reporter', 'Labels', 'Sprint'])
+    expect(details.querySelectorAll('.ticket-label')).toHaveLength(2)
+  })
+
+  it('draws acceptance criteria as an unticked list and comments with an avatar, a name and a time', () => {
+    render(<TicketModal ticket={full} onClose={() => {}} />)
+    const criteria = screen.getByTestId('ticket-modal-acceptance')
+    expect(within(criteria).getAllByRole('listitem').map(li => li.textContent)).toEqual(['Saves', 'No crash'])
+    expect(criteria.querySelectorAll('.ticket-box')).toHaveLength(2)
+    const comments = screen.getAllByTestId('ticket-comment')
+    expect(comments).toHaveLength(2)
+    expect(within(comments[0]).getByText('BL')).toHaveClass('ticket-avatar')
+    expect(comments[0]).toHaveTextContent('Bo Lee')
+    expect(comments[0].querySelector('time')).not.toBeNull()
+    expect(comments[0].querySelector('strong')).toHaveTextContent('seen')
+    expect(comments[1]).toHaveTextContent('last week') // a time the tracker wrote in words stays as it came
+    expect(screen.getByTestId('ticket-modal-description').querySelector('.md-doc h2')).toHaveTextContent('Steps')
+  })
+
+  it('leaves out the sections the ticket has nothing for', () => {
+    render(<TicketModal ticket={{ source: 'github', key: '9', title: 'Bare' }} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    expect([...dialog.querySelectorAll('.ticket-section-title')].map(h => h.textContent)).toEqual([])
+    expect(dialog).toHaveTextContent('No description.')
   })
 })

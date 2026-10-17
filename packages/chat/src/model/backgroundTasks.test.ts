@@ -26,6 +26,11 @@ describe('backgroundTasks', () => {
     expect(runningTasks(tasks, false, T0 + 6000)).toEqual([])
   })
 
+  it('reads the command of a shell task, and leaves it empty for an older start', () => {
+    const withCmd = ev('background_task_started', { task_id: 'x', call_id: 'c-x', kind: 'bash', description: 'Run', command: 'bash run.sh', started_at: new Date(T0).toISOString() }, T0)
+    expect(backgroundTasks([withCmd, started('y', T0)]).map(t => t.command)).toEqual(['bash run.sh', ''])
+  })
+
   it('does not count a task with no end that began over 12 hours ago, nor list it', () => {
     const tasks = backgroundTasks([started('old', T0), started('new', T0 + STALE_RUNNING_MS - 3600_000), done('fin', T0)])
     const now = T0 + STALE_RUNNING_MS + 3600_000

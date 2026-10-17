@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,10 +32,11 @@ const fixtureStart = "2027-01-15T08:00:00Z"
 func TestBackgroundTasksFromBashAndMonitor(t *testing.T) {
 	got := backgroundEvents(feedFixture(t, "claude_background_tasks.jsonl"))
 	want := []any{
-		agent.BackgroundTaskStartedPayload{TaskID: "bu90kf38e", CallID: "toolu_sh", Kind: "bash", Description: "Wait for the deploy", StartedAt: fixtureStart},
-		agent.BackgroundTaskStartedPayload{TaskID: "bs3tbt4gf", CallID: "toolu_mon", Kind: "monitor", Description: "Watch the build log", StartedAt: fixtureStart},
+		agent.BackgroundTaskStartedPayload{TaskID: "bu90kf38e", CallID: "toolu_sh", Kind: "bash", Description: "Wait for the deploy", Command: "until curl -s http://example.test/ready; do sleep 20; done", StartedAt: fixtureStart},
+		agent.BackgroundTaskStartedPayload{TaskID: "bs3tbt4gf", CallID: "toolu_mon", Kind: "monitor", Description: "Watch the build log", Command: "tail -f /tmp/build.log | grep --line-buffered ERROR", StartedAt: fixtureStart},
 		agent.BackgroundTaskStartedPayload{TaskID: "b2longcmd", CallID: "toolu_sh2", Kind: "bash",
-			Description: "while true; do date; sleep 600; done # a long command that goes on well past eig", StartedAt: fixtureStart},
+			Description: "while true; do date; sleep 600; done # a long command that goes on well past eig",
+			Command:     "while true; do date; sleep 600; done # a long command that goes on well past eighty characters", StartedAt: fixtureStart},
 		agent.BackgroundTaskDonePayload{TaskID: "bu90kf38e", CallID: "toolu_sh", Kind: "bash", Status: "completed",
 			Summary: `Background command "Wait for the deploy" completed (exit code 0)`, Description: "Wait for the deploy"},
 		agent.BackgroundTaskDonePayload{TaskID: "b2longcmd", CallID: "toolu_sh2", Kind: "bash", Status: "failed",
@@ -233,5 +235,25 @@ func TestBackgroundTaskNoticeUserLineThenSystemLine(t *testing.T) {
 	}
 	if !reflect.DeepEqual(done, want) {
 		t.Fatalf("background_task_done:\n got  %+v\n want %+v", done, want)
+	}
+}
+
+// A started shell task carries its command (cut to 500 runes) beside the description.
+func TestBackgroundTaskStartCarriesTheCommand(t *testing.T) {
+	em := &collectEmitter{}
+	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
+	long := strings.Repeat("x", 600)
+	d.noteBackgroundCall("c1", "Bash", json.RawMessage(`{"command":"bash run.sh","description":"Run it","run_in_background":true}`))
+	d.startBackgroundTask("c1", "Command running in background with ID: bs1. Output is being written to: x", false)
+	d.noteBackgroundCall("c2", "Bash", json.RawMessage(`{"command":"`+long+`","run_in_background":true}`))
+	d.startBackgroundTask("c2", "Command running in background with ID: bs2. Output is being written to: x", false)
+	var got []agent.BackgroundTaskStartedPayload
+	for _, ev := range em.snapshot() {
+		if ev.Kind == "background_task_started" {
+			got = append(got, ev.Payload.(agent.BackgroundTaskStartedPayload))
+		}
+	}
+	if len(got) != 2 || got[0].Command != "bash run.sh" || got[0].Description != "Run it" || len([]rune(got[1].Command)) > 500 || got[1].Command == "" {
+		t.Fatalf("started = %+v", got)
 	}
 }

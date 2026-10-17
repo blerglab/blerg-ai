@@ -31,15 +31,12 @@ describe('FilesPanel', () => {
     expect(screen.getByRole('dialog', { name: /Files/ })).toBeInTheDocument()
   })
 
-  it('puts files you uploaded in their own section, marked as yours', () => {
+  it('marks a file you attached with a quiet "you", and leaves the agent\u2019s unmarked', () => {
     const mine: ArtifactInfo = { id: 'up1', name: 'brief.pdf', size: 1258291, content_type: 'application/pdf', view: 'pdf', origin: 'user', created_at: '2026-09-30T12:30:00Z' }
     setup([mine, ...items])
-    const uploaded = screen.getByRole('list', { name: 'Uploaded by you' })
-    expect(within(uploaded).getByTestId('artifact-name')).toHaveTextContent('brief.pdf')
-    expect(uploaded).toHaveTextContent('uploaded by you')
-    const agent = screen.getByRole('list', { name: 'Published by the agent' })
-    expect(within(agent).getAllByTestId('artifact-row')).toHaveLength(2)
-    expect(agent).not.toHaveTextContent('uploaded by you')
+    const [up, ...agent] = screen.getAllByTestId('artifact-row')
+    expect(up.querySelector('.artifact-you')).toHaveTextContent('you')
+    expect(agent.every(r => r.querySelector('.artifact-you') === null)).toBe(true)
   })
 
   it('deletes an uploaded file through the same operation', async () => {
@@ -54,8 +51,8 @@ describe('FilesPanel', () => {
   it('offers View only for a file the app can show', () => {
     setup()
     const [md, docx] = screen.getAllByTestId('artifact-row')
-    expect(within(md).getByRole('button', { name: 'View' })).toBeInTheDocument()
-    expect(within(docx).queryByRole('button', { name: 'View' })).toBeNull()
+    expect(within(md).getByRole('button', { name: /^View / })).toBeInTheDocument()
+    expect(within(docx).queryByRole('button', { name: /^View / })).toBeNull()
     expect(within(docx).getByRole('button', { name: 'Download' })).toBeInTheDocument()
   })
 
@@ -67,7 +64,7 @@ describe('FilesPanel', () => {
     expect(main).toHaveAttribute('aria-disabled', 'true')
     expect(main).toHaveAttribute('title', 'plan.md is no longer available')
     expect(row).toHaveTextContent('no longer available')
-    expect(within(row).queryByRole('button', { name: 'View' })).toBeNull()
+    expect(within(row).queryByRole('button', { name: /^View / })).toBeNull()
     expect(within(row).queryByRole('button', { name: 'Download' })).toBeNull()
     expect(within(ok).queryByTestId('artifact-missing')).toBeNull()
     expect(within(ok).getByRole('button', { name: 'Download' })).toBeInTheDocument()
@@ -79,7 +76,7 @@ describe('FilesPanel', () => {
 
   it('opens a file in the viewer', () => {
     const p = setup()
-    fireEvent.click(within(screen.getAllByTestId('artifact-row')[0]).getByRole('button', { name: 'View' }))
+    fireEvent.click(within(screen.getAllByTestId('artifact-row')[0]).getByRole('button', { name: /^View / }))
     expect(p.onView).toHaveBeenCalledWith(items[0])
   })
 
@@ -228,7 +225,7 @@ describe('FilesPanel: versions', () => {
     const p = setup(report3)
     fireEvent.click(screen.getByRole('button', { name: 'Earlier versions (2)' }))
     const [v2, v1] = screen.getAllByTestId('artifact-version-row')
-    fireEvent.click(within(v1).getByRole('button', { name: 'View' }))
+    fireEvent.click(within(v1).getByRole('button', { name: /^View / }))
     expect(p.onView).toHaveBeenCalledWith(report3[2])
     fireEvent.click(within(v2).getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(files.downloads).toEqual(['r2']))
@@ -277,18 +274,15 @@ describe('FilesPanel: versions', () => {
     expect(within(row).queryByTestId('artifact-version')).toBeNull()
   })
 
-  it('groups the Uploaded by you section the same way, apart from the agent file of the same name', () => {
+  it('groups your versions apart from the agent file of the same name', () => {
     const mine = [
       v('u2', 'report.md', 2, { origin: 'user', latest_version: 2 }),
       v('u1', 'report.md', 1, { origin: 'user', latest_version: 2 }),
     ]
     setup([...mine, ...report3])
-    const uploaded = screen.getByRole('list', { name: 'Uploaded by you' })
-    const up = within(uploaded).getByTestId('artifact-row')
+    const [up, ag] = screen.getAllByTestId('artifact-row')
     expect(within(up).getByTestId('artifact-version')).toHaveTextContent('v2')
     expect(within(up).getByRole('button', { name: 'Earlier versions (1)' })).toBeInTheDocument()
-    const agent = screen.getByRole('list', { name: 'Published by the agent' })
-    const ag = within(agent).getByTestId('artifact-row')
     expect(within(ag).getByTestId('artifact-version')).toHaveTextContent('v3')
     expect(within(ag).getByRole('button', { name: 'Earlier versions (2)' })).toBeInTheDocument()
   })

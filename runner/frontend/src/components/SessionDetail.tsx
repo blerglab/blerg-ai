@@ -148,8 +148,8 @@ export default function SessionDetail() {
   const railOpen = agentSession && (narrow ? drawerOpen : panelOpen)
   // A file the History tab opens: handed to the chat, whose viewer opens it. n grows with every
   // request, so the same file opens again after its viewer was closed.
-  const [fileAsk, setFileAsk] = useState<{ id: string; n: number } | null>(null)
-  const openArtifact = useCallback((id: string) => setFileAsk(a => ({ id, n: (a?.n ?? 0) + 1 })), [])
+  const [fileAsk, setFileAsk] = useState<{ id: string; n: number; commit?: string } | null>(null)
+  const openArtifact = useCallback((id: string, commit?: string) => setFileAsk(a => ({ id, n: (a?.n ?? 0) + 1, ...(commit ? { commit } : {}) })), [])
   // The panel opened by itself for a question: a request (the session's id) that it show Live, the
   // tab the person chose staying theirs. Cleared once the panel has acted on it, and on a switch of
   // session, so coming back does not force Live again.
@@ -689,7 +689,7 @@ export default function SessionDetail() {
         {isAgent
           // Keyed by id: draft, pending turn and notices belong to one
           // session and must not carry over when the route switches sessions.
-          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} mcpHold={liveState.mcpHold ?? null} canReleasePrompt={liveState.canReleasePrompt === true} commitUrls={liveState.checklist?.commitUrls} />
+          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} mcpHold={liveState.mcpHold ?? null} canReleasePrompt={liveState.canReleasePrompt === true} />
           : <TerminalDOMView sessionId={sessionId ?? ''} ref={termRef} />}
       </div>
 

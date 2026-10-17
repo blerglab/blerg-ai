@@ -85,6 +85,19 @@ describe('Composer paste', () => {
     delete (document as { execCommand?: unknown }).execCommand
   })
 
+  it('pastes as typed when the caret is inside an open code fence', () => {
+    const { box, onDraft } = setup({ draft: '```go\n' })
+    box.setSelectionRange(6, 6)
+    fireEvent.paste(box, { clipboardData: data() })
+    expect(onDraft).not.toHaveBeenCalled()
+  })
+
+  it('still converts when the fence is closed', () => {
+    const closed = setup({ draft: '```go\nx\n```\n' })
+    fireEvent.paste(closed.box, { clipboardData: data() })
+    expect(closed.onDraft).toHaveBeenCalledWith(expect.stringContaining('## Plan\n\nSee [the doc](https://e.test/x)'))
+  })
+
   it('leaves Ctrl+Shift+V alone, once', () => {
     const { box, onDraft } = setup()
     fireEvent.keyDown(box, { key: 'V', ctrlKey: true, shiftKey: true })

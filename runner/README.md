@@ -528,7 +528,9 @@ is known (its clone URL, else its daemon's origin for the folder) and `null` oth
 **Checklist.** `blerg-runner checklist` posts `POST /api/sessions/{id}/checklist` (the session's own
 token, as topics; at most 64 KiB): `{"op":"set","items":["…"]}`, `{"op":"add","item":"…"}`,
 `{"op":"tick"|"untick","index":N}` (1-based) or `{"op":"tick"|"untick","text":"…"}` (exact,
-case-sensitive; of several matches the first not yet in that state), `{"op":"clear"}`. At most 50
+case-sensitive; of several matches the first not yet in that state), `{"op":"remove","index":N}` or
+`{"op":"remove","text":"…"}` (drops that item, the first of several matches; the other items keep their
+ticks, commits and diffs; the event's `changed` is the item removed), `{"op":"clear"}`. At most 50
 items of 200 characters, cleaned of control characters. The read of the current list and the append
 run in one transaction under a per-session advisory lock. Recorded as an event of kind `checklist`
 holding the full list after the change: `{items:[{text, done}], op, changed?:{index, text, done}}`;

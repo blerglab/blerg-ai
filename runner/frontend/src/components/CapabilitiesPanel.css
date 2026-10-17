@@ -236,8 +236,12 @@
   border-color: color-mix(in srgb, var(--lichen) 45%, transparent);
 }
 
-.caps-chip.status-needs-auth,
 .caps-chip.status-pending {
+  color: var(--batch);
+  border-color: color-mix(in srgb, var(--batch) 45%, transparent);
+}
+
+.caps-chip.status-needs-auth {
   color: var(--amber);
   border-color: color-mix(in srgb, var(--amber) 45%, transparent);
 }

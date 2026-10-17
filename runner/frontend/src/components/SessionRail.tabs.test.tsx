@@ -204,7 +204,7 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
     // Not a dialog: the list is in the panel.
     expect(screen.queryByTestId('artifacts-panel')).toBeNull()
 
-    fireEvent.click(within(within(panel).getAllByTestId('artifact-row')[0]).getByRole('button', { name: 'View' }))
+    fireEvent.click(within(within(panel).getAllByTestId('artifact-row')[0]).getByRole('button', { name: /^View / }))
     expect(await screen.findByRole('dialog', { name: /report\.md/ })).toBeInTheDocument()
     fireEvent.keyDown(screen.getByRole('dialog', { name: /report\.md/ }), { key: 'Escape' })
 
@@ -363,7 +363,7 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
       const drawer = screen.getByRole('dialog', { name: 'Session panel' })
       expect(within(drawer).getAllByRole('tab').map(t => t.textContent)).toEqual(['Live', 'History', 'Files2, 2 files', 'Capabilities'])
       const row = (await within(drawer).findAllByTestId('artifact-row'))[0]
-      fireEvent.click(within(row).getByRole('button', { name: 'View' }))
+      fireEvent.click(within(row).getByRole('button', { name: /^View / }))
       expect(screen.queryByRole('dialog', { name: 'Session panel' })).toBeNull()
       expect(await screen.findByRole('dialog', { name: /report\.md/ })).toBeInTheDocument()
     })

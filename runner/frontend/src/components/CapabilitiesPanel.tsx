@@ -6,11 +6,11 @@
 // puts it in a dialog (a terminal session's, which says why it has none): a
 // modal on desktop, a full-screen sheet on narrow screens (CSS). All text
 // renders as plain text.
-import { useEffect, useId, useRef, useState, type RefObject } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { CapabilityGroup, CapabilityItem } from '../types'
-import { CAPABILITY_GROUPS, capabilityCount, matchesQuery, type CapabilitiesReport } from '../lib/capabilities'
-import { useBackdropClose } from '@blerglab/chat'
+import { CAPABILITY_GROUPS, capabilityCount, matchesQuery, statusWord, withLiveMcp, type CapabilitiesReport } from '../lib/capabilities'
+import { useBackdropClose, type McpLive } from '@blerglab/chat'
 import './CapabilitiesPanel.css'
 import ToolSchemaGuidance from './ToolSchemaGuidance'
 
@@ -27,6 +27,8 @@ interface ViewProps {
   // Tool changes waiting on this session (MCP tools that changed or were
   // added); noted on the MCP servers group with a link to the Proposals page.
   pendingToolChanges?: number
+  // The live state's MCP servers: their status now, over the report's start-up snapshot.
+  liveMcp?: McpLive | null
   // The filter box, for a dialog that focuses it when it opens.
   searchRef?: RefObject<HTMLInputElement | null>
 }
@@ -97,10 +99,11 @@ export default function CapabilitiesPanel({ onClose, ...view }: Props) {
 }
 
 /** What the session loaded, with the report's facts, a filter and a section per group. */
-export function CapabilitiesView({ report, unavailable, pendingToolChanges, searchRef }: ViewProps) {
+export function CapabilitiesView({ report, unavailable, pendingToolChanges, liveMcp, searchRef }: ViewProps) {
   const listBase = useId()
   const [query, setQuery] = useState('')
-  const payload = report?.payload ?? null
+  const snapshot = report?.payload ?? null
+  const payload = useMemo(() => (snapshot ? withLiveMcp(snapshot, liveMcp) : null), [snapshot, liveMcp])
   // Groups the user opened or closed; the rest follow their default (long
   // groups start closed), which also holds for a report that arrives later.
   const [openState, setOpenState] = useState<Record<string, boolean>>({})
@@ -243,7 +246,7 @@ function Item({ item }: { item: CapabilityItem }) {
     <li className="caps-item" data-testid="caps-item">
       <div className="caps-item-line">
         <span className="caps-item-name">{item.name}</span>
-        {item.status && <span className={`caps-chip status-${item.status}`}>{item.status}</span>}
+        {item.status && <span className={`caps-chip status-${item.status}`}>{statusWord(item.status)}</span>}
         {item.source && <span className="caps-chip source">{item.source}</span>}
         {item.detail && <span className="caps-item-detail">{item.detail}</span>}
       </div>

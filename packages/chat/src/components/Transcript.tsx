@@ -17,6 +17,7 @@ import Markdown from './Markdown'
 import StartProgress from './StartProgress'
 import { SubagentCard } from './SubagentCard'
 import { DayDivider } from './TimeLabel'
+import { LongPressSheet, useLongPress } from './LongPress'
 import { ToolGroup } from './ToolGroup'
 import WorkingIndicator from './WorkingIndicator'
 import type { QueuedMessage } from '../hooks/useSession'
@@ -246,6 +247,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   )
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const timelineRef = useRef<HTMLDivElement | null>(null)
+  const lp = useLongPress(timelineRef)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const loadingHistory = p.showSkeleton
   const sessionId = p.sessionId ?? ''
@@ -759,6 +761,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
           </div>
         )}
         <div ref={bottomRef} />
+        {lp.sheet && <LongPressSheet target={lp.sheet} onClose={lp.close} />}
         {unseen && (
           <div className="chat-new-output-dock">
             <button type="button" className="chat-new-output" aria-live="off" data-testid="new-output" onClick={showNew}>

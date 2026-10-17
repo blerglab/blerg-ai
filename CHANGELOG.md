@@ -8,6 +8,72 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-17
+
+### Upgrade notes
+- Desktop: reinstall the daemon (`./daemon/install.sh install`) so a background shell command shows its
+  command line in Running now; until then it shows its description, as before.
+- Chat (`@blerglab/chat`) is 0.21.0, with a new theme token `--chat-font-display` (section headings;
+  a theme that does not set it gets a condensed system face); `commitUrl` is accepted but no longer used (commit chips stay in
+  Blerg: they open the item's diff or copy the sha).
+
+### Added
+- On a touch screen, holding a message, code block, ticket card or checklist row opens a sheet with
+  Copy message, Select text and Cancel; the always-visible Copy buttons are gone there (desktop keeps
+  the hover button). Nothing is selected by the hold itself, and Select text opens the text full
+  screen, all of it selected with the phone's own handles, with Copy (the part still selected) and
+  Done.
+- `blerg-runner checklist remove <n|--text …>` drops one checklist item; the other items keep their
+  ticks, commits and diffs (before, removing one meant setting the whole list again).
+- A published diff of one file with 20 or fewer changed lines shows its hunks in its card, colored
+  and numbered like the diff viewer, with View kept.
+
+### Changed
+- The session panel's Live tab no longer has an MCP servers section; the Capabilities tab's MCP servers
+  group shows each server's status as it is now (connecting, connected, failed, needs sign-in, disabled).
+- Live's one-line summary is two controls: the ticket chip opens the ticket over the page, the checklist
+  part goes to the Plan tab.
+- The checklist's progress bar is a short rounded bar beside the count (green when done), not a thin
+  line across the panel.
+- A background shell command in the panel's Running now reads as a command: a `>_` glyph, the
+  command in monospace (the full text on hover), what it is for, and shell, elapsed and status
+  chips, with no model or effort. Subagents get an agent glyph. The daemon now sends the command
+  with the task's start (reinstall the daemon; older starts show their description).
+- The Files list is compact: one ~28 px row per file with a glyph for its kind, the name, and a muted
+  size, version, time and "you" (for files you attached); Download and Delete are small icons that
+  show on hover or focus (always on touch), and clicking the row opens the file. Past six files a
+  filter box, a sort (newest or name) and an origin choice (all, from the agent, from you) appear,
+  and are remembered per browser.
+- The file viewer colors code and JSON: a `.go`, `.ts`, `.py` and so on opens as numbered, colored
+  lines, and JSON is pretty-printed and colored (the start of a very large file; the rest plain).
+- A CSV or TSV is one table style in the viewer and in the inline preview (borders, header row, zebra
+  rows); the preview is the first rows and columns of the same table.
+- Markdown files (inline preview, viewer, the review page) read like a README: system UI font, ruled
+  headings, code chips, padded code blocks, bordered zebra tables. Chat messages keep their compact
+  scale, with the code chip, table, and quote refined to match (chat 0.18.0).
+- A pinned ticket reads like an issue in a tracker. Its status chip is tinted by meaning (gray to do,
+  blue in progress, amber blocked, green done, faded and struck through when canceled) in the chat,
+  the modal and the session panel. The chat's card is a summary: key, status, title, one line of type,
+  priority and assignee, the start of the description and **Open ticket**. The modal has the
+  description, the acceptance criteria, the comments with avatars and a Details column (chat 0.19.0).
+  It is laid out like the Board's card sheet: uppercase section headings split by hairlines, Details
+  as a panel of label/value rows, acceptance criteria as a list of boxes, comments as boxed entries
+  on a trail, and **Open in …** as a button beside Close; on a phone the title takes the full width.
+  A P-scale priority (P0 to P4, also "P1 - Critical") gets the same ↑ → ↓ glyph as High, Medium and
+  Low (chat 0.21.0).
+- A checklist item shows its commits' short shas directly (three, then "+N more") instead of an
+  "N commits" toggle. With the item's diff, a sha opens it in Blerg's diff viewer at that commit;
+  without one it copies the sha. **± View diff** is a real button with the diff's +/− counts. Commit
+  chips, the History tab's too, no longer link to GitHub or another forge; `commitUrl` is accepted
+  and unused (chat 0.19.0).
+
+### Fixed
+- Pasting code copied from a web page into the message box, inside a code fence you typed, no longer
+  fences it a second time: inside an open fence the text goes in as copied. A code block copied from
+  GitHub keeps its language on the fence.
+- The card of a published diff shows its summary again ("6 files · +58 −11" and the file names); in the
+  app it was squashed to a thin line because the image-preview style won over it (chat 0.17.2).
+
 ## [0.3.0] - 2026-10-17
 
 ### Upgrade notes
@@ -1078,7 +1144,8 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/blerglab/blerg-ai/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/blerglab/blerg-ai/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/blerglab/blerg-ai/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/blerglab/blerg-ai/compare/v0.1.2...v0.2.0

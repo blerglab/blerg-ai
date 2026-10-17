@@ -44,7 +44,7 @@ type Item struct {
 	Diff string `json:"diff,omitempty"`
 }
 
-// Change is the item an add, a tick or an untick touched: its 1-based index, its text and whether
+// Change is the item an add, a tick, an untick or a remove touched: its 1-based index, its text and whether
 // it is done after the change.
 type Change struct {
 	Index int    `json:"index"`
@@ -64,8 +64,8 @@ type Payload struct {
 	Changed *Change `json:"changed,omitempty"`
 }
 
-// Request is POST /api/sessions/{id}/checklist's body: op is set, add, tick, untick or clear; set
-// takes items, add takes item; tick and untick name the item by index (1-based) or by text (exact,
+// Request is POST /api/sessions/{id}/checklist's body: op is set, add, tick, untick, remove or clear; set
+// takes items, add takes item; tick, untick and remove name the item by index (1-based) or by text (exact,
 // case-sensitive).
 type Request struct {
 	Op    string   `json:"op"`
@@ -176,10 +176,21 @@ func Apply(cur []Item, req Request) (Payload, error) {
 			}
 		}
 		return Payload{Items: next, Op: req.Op, Changed: &Change{Index: i + 1, Text: next[i].Text, Done: done, Commits: next[i].Commits, Diff: next[i].Diff}}, nil
+	case "remove":
+		if len(req.Commits) > 0 || req.Diff != "" {
+			return Payload{}, refuse("commits go with add and tick, not remove")
+		}
+		i, err := findAny(next, req)
+		if err != nil {
+			return Payload{}, err
+		}
+		gone := next[i]
+		next = append(next[:i], next[i+1:]...)
+		return Payload{Items: next, Op: "remove", Changed: &Change{Index: i + 1, Text: gone.Text, Done: gone.Done, Commits: gone.Commits, Diff: gone.Diff}}, nil
 	case "clear":
 		return Payload{Items: []Item{}, Op: "clear"}, nil
 	default:
-		return Payload{}, refuse(`op must be "set", "add", "tick", "untick" or "clear"`)
+		return Payload{}, refuse(`op must be "set", "add", "tick", "untick", "remove" or "clear"`)
 	}
 }
 
@@ -251,6 +262,19 @@ func find(list []Item, req Request, want bool) (int, error) {
 	default:
 		return 0, refuse("name the item by its number (1 is the first) or by its exact text")
 	}
+}
+
+// findAny is the 0-based index of the item req names, by its number or by its exact text (the
+// first of several matches), whatever state it is in.
+func findAny(list []Item, req Request) (int, error) {
+	if req.Text != "" && req.Index == 0 {
+		for i, it := range list {
+			if it.Text == req.Text {
+				return i, nil
+			}
+		}
+	}
+	return find(list, req, true)
 }
 
 // Done counts the items ticked.

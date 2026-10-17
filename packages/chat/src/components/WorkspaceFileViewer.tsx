@@ -13,7 +13,7 @@ import { useBackdropClose } from '../hooks/useBackdropClose'
 import { formatSize } from '../model/artifacts'
 import { ARTIFACT_VIEWS, blobTypeFor, isViewable, tooBigToPreview } from '../model/artifactViews'
 import { langFromName, langLabel } from '../model/codeLang'
-import { useHighlight } from '../model/highlight'
+import { useHighlightHead } from '../model/highlight'
 import { countLines } from '../model/lineCap'
 import { workspaceErrorText } from '../model/workspaceErrors'
 import { fileErrorText, saveBlob, WorkspaceFileError } from '../transport/files'
@@ -188,7 +188,7 @@ function Body({ state, name, line }: { state: Extract<State, { kind: 'ready' }>;
 // Numbered, highlighted lines (the code viewer's look); the named line is marked and scrolled to.
 function CodeFile({ text, name, line }: { text: string; name: string; line?: number }) {
   const lang = langFromName(name)
-  const highlighted = useHighlight(lang, text, true)
+  const { tokens: highlighted, tail } = useHighlightHead(lang, text)
   const lines = countLines(text)
   const at = line && line >= 1 && line <= lines ? line : undefined
   const scroller = useRef<HTMLDivElement | null>(null)
@@ -208,7 +208,7 @@ function CodeFile({ text, name, line }: { text: string; name: string; line?: num
       <pre className="code-viewer-gutter" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join('\n')}</pre>
       <pre className="code-viewer-code workspace-code" ref={code} data-lang={lang ? langLabel(lang) : undefined}>
         {at && <span className="workspace-line-band" data-testid="workspace-line" style={{ '--chat-ws-line': at } as CSSProperties} />}
-        <code><CodeText text={text} highlighted={highlighted} /></code>
+        <code><CodeText text={text} highlighted={highlighted} tail={tail} /></code>
       </pre>
     </div>
   )

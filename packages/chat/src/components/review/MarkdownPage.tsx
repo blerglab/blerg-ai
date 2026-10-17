@@ -36,7 +36,7 @@ export default function MarkdownPage({ source, published, showDiff, requests, fo
           )}
         </pre>
       ) : (
-        <Markdown text={source} className="artifact-markdown" />
+        <Markdown text={source} className="artifact-markdown md-doc" />
       )}
     </div>
   )

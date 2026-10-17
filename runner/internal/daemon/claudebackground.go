@@ -19,8 +19,8 @@ import (
 
 // ccBgCall is a background Bash or Monitor call whose result has not arrived yet.
 type ccBgCall struct {
-	kind, description string
-	at                time.Time
+	kind, description, command string
+	at                         time.Time
 }
 
 // ccBgTask is a background task started and not yet done.
@@ -66,7 +66,7 @@ func (d *claudeCodeDriver) noteBackgroundCall(id, tool string, raw json.RawMessa
 	if d.bgCalls == nil {
 		d.bgCalls = map[string]ccBgCall{}
 	}
-	d.bgCalls[id] = ccBgCall{kind: kind, description: desc, at: d.clock()}
+	d.bgCalls[id] = ccBgCall{kind: kind, description: desc, command: cutRunes(strings.TrimSpace(in.Command), 500), at: d.clock()}
 	d.subMu.Unlock()
 }
 
@@ -90,16 +90,16 @@ func (d *claudeCodeDriver) startBackgroundTask(callID, output string, isError bo
 		d.subMu.Unlock()
 		return
 	}
-	p := d.trackBackgroundTaskLocked(m[1], callID, c.kind, c.description, c.at)
+	p := d.trackBackgroundTaskLocked(m[1], callID, c.kind, c.description, c.command, c.at)
 	d.reportOpenWorkLocked()
 	d.subMu.Unlock()
 	d.emit("background_task_started", p)
 }
 
 // trackBackgroundTaskLocked records a started task and returns its payload. Called with subMu held.
-func (d *claudeCodeDriver) trackBackgroundTaskLocked(taskID, callID, kind, description string, at time.Time) agent.BackgroundTaskStartedPayload {
+func (d *claudeCodeDriver) trackBackgroundTaskLocked(taskID, callID, kind, description, command string, at time.Time) agent.BackgroundTaskStartedPayload {
 	p := agent.BackgroundTaskStartedPayload{
-		TaskID: taskID, CallID: callID, Kind: kind, Description: description,
+		TaskID: taskID, CallID: callID, Kind: kind, Description: description, Command: command,
 		StartedAt: at.UTC().Format(time.RFC3339),
 	}
 	if d.bgTasks == nil {
@@ -201,7 +201,7 @@ func (d *claudeCodeDriver) trackResumedRunLocked(call string) (agent.BackgroundT
 	if s == nil || !s.resumed || !s.resumedBg || !s.background || d.bgTasks[call] != nil {
 		return agent.BackgroundTaskStartedPayload{}, false
 	}
-	p := d.trackBackgroundTaskLocked(call, call, "agent", s.p.Summary, s.started)
+	p := d.trackBackgroundTaskLocked(call, call, "agent", s.p.Summary, "", s.started)
 	d.bgTasks[call].agentID = s.agentID
 	return p, true
 }

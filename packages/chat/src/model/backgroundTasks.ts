@@ -15,6 +15,8 @@ export interface BackgroundTask {
   /** bash | monitor | agent (anything else is shown as a task). */
   kind: string
   description: string
+  /** The shell command of a bash or monitor task; '' for an agent or a start recorded without it. */
+  command: string
   /** Server-time ms it started; null when its start is not held (it began on an older page). */
   startedAt: number | null
   /** Its end, once the engine reported it; at is server-time ms. */
@@ -54,7 +56,7 @@ function readTasks(events: AgentEvent[]): BackgroundTask[] {
     if (ev.kind === 'background_task_started') {
       const p = ev.payload as unknown as BackgroundTaskStartedPayload
       const fresh: BackgroundTask = {
-        taskId: id, callId: str(p.call_id), kind: str(p.kind), description: str(p.description),
+        taskId: id, callId: str(p.call_id), kind: str(p.kind), description: str(p.description), command: str(p.command),
         startedAt: parseTs(str(p.started_at)) ?? parseTs(ev.ts), done: t?.done ?? null,
       }
       byId.set(id, fresh)
@@ -62,7 +64,7 @@ function readTasks(events: AgentEvent[]): BackgroundTask[] {
     }
     const p = ev.payload as unknown as BackgroundTaskDonePayload
     if (!t) {
-      t = { taskId: id, callId: str(p.call_id), kind: str(p.kind), description: str(p.description), startedAt: null, done: null }
+      t = { taskId: id, callId: str(p.call_id), kind: str(p.kind), description: str(p.description), command: '', startedAt: null, done: null }
       byId.set(id, t)
     }
     t.done = { status: str(p.status), summary: str(p.summary), at: parseTs(ev.ts) }

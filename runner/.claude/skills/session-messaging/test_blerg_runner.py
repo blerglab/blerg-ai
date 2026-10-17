@@ -1914,7 +1914,8 @@ class TestWork(unittest.TestCase):
 
     def test_add_untick_clear(self):
         for args, want in ((["add", "Docs"], {"op": "add", "item": "Docs"}), (["untick", "1"], {"op": "untick", "index": 1}),
-                           (["clear"], {"op": "clear"})):
+                           (["remove", "2"], {"op": "remove", "index": 2}), (["remove", "Old step"], {"op": "remove", "text": "Old step"}),
+                           (["remove", "--text", "2"], {"op": "remove", "text": "2"}), (["clear"], {"op": "clear"})):
             server = make_topic_server(reply={"items": [], "op": want["op"]})
             result = self._run(["checklist"] + args, server)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -1934,7 +1935,7 @@ class TestWork(unittest.TestCase):
 
     def test_bad_commits_are_refused_before_sending(self):
         for args in (["tick", "1", "--commit", "xyz"], ["tick", "1", "--commit", ""], ["untick", "1", "--commit", "abcdef1"],
-                     ["set", "a", "--commit", "abcdef1"], ["clear", "--commit", "abcdef1"],
+                     ["remove", "1", "--commit", "abcdef1"], ["remove"], ["remove", "1", "2"], ["set", "a", "--commit", "abcdef1"], ["clear", "--commit", "abcdef1"],
                      ["tick", "1", "--commit", ",".join(["abcdef%d" % i for i in range(10)] * 3)]):
             server = make_topic_server()
             result = self._run(["checklist"] + args, server)

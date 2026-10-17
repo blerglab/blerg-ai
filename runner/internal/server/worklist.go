@@ -2,7 +2,7 @@ package server
 
 // What a session works through, for the session panel and the chat (docs/talking-to-an-agent.md):
 //
-//   POST /api/sessions/{id}/checklist — `blerg-runner checklist`: set, add, tick, untick or clear the
+//   POST /api/sessions/{id}/checklist — `blerg-runner checklist`: set, add, tick, untick, remove or clear the
 //     session's checklist. Each write records a checklist event holding the FULL list after the change
 //     and the item it touched (checklist.Payload), so a reload replays it from the event alone.
 //   POST /api/sessions/{id}/tickets — `blerg-runner pin` / `unpin`: pin a tracker's ticket (any

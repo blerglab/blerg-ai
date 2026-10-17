@@ -31,6 +31,8 @@
   /* Type. */
   --chat-font: system-ui, -apple-system, "Segoe UI", sans-serif;
   --chat-font-mono: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+  /* Headings that name a section (the ticket view's): a condensed face, uppercase. */
+  --chat-font-display: "Avenir Next Condensed", "Bahnschrift", "Arial Narrow", "Helvetica Neue", sans-serif;
   --chat-text-xs: 12px;
   --chat-text-sm: 13px;
 

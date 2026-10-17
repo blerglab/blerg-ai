@@ -245,7 +245,7 @@ text or come from a tool rather than the model.
 `theme/tokens.css` is the contract: `--chat-bg`, `--chat-surface`, `--chat-surface-2`,
 `--chat-fg`, `--chat-muted`, `--chat-muted-2`, `--chat-accent`, `--chat-accent-fg`,
 `--chat-success`, `--chat-warning`, `--chat-info`, `--chat-danger`, `--chat-border`,
-`--chat-radius`, `--chat-font`, `--chat-font-mono`, `--chat-text-xs`, `--chat-text-sm`,
+`--chat-radius`, `--chat-font`, `--chat-font-mono`, `--chat-font-display`, `--chat-text-xs`, `--chat-text-sm`,
 `--chat-density` (spacing scale), plus the per-kind card tokens (`--chat-card-user-bg`,
 `--chat-card-assistant-bg`, …). The runner's chat CSS today uses seventeen palette names
 (`--basalt`, `--scree`, `--stone`, `--blaze`, `--lichen`, `--amber`, `--batch`…) in ~170 places

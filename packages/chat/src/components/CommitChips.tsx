@@ -1,19 +1,25 @@
-// The commits an agent named, as chips: seven characters each, the full sha on hover; a link to the
-// commit's page when the host knows the repository, else a button that copies the sha. Shared by the
-// checklist (here) and the runner's History tab. `onViewDiff` is the hook for "View diff": when the
-// host supplies it, each commit gets a small button that calls it with the sha; absent, none is drawn.
+// The commits an agent named, as chips: seven characters each, the full sha on hover. Nothing links
+// out of Blerg: with `onOpen` (the host has a diff of them) a chip opens that diff at the commit,
+// else it copies the sha and says "Copied". Three show; "+N more" opens the rest in place. Shared by
+// the checklist (here) and the runner's History tab.
 import { useEffect, useState } from 'react'
 import './commitChips.css'
 
+/** `url` is accepted for compatibility and not used: commits never link to a forge. */
 export interface CommitRef { sha: string; url?: string | null }
 
-export function CommitChips({ commits, onViewDiff, variant }: {
+/** How many chips show before "+N more". */
+export const COMMITS_SHOWN = 3
+
+export function CommitChips({ commits, onOpen, variant }: {
   commits: readonly CommitRef[]
-  onViewDiff?: (sha: string) => void
+  /** Opens the host's diff of these commits at `sha`; absent, a chip copies its sha. */
+  onOpen?: (sha: string) => void
   /** 'reel': the runner's History classes (its own stylesheet styles them). */
   variant?: 'reel'
 }) {
   const [copied, setCopied] = useState<string | null>(null)
+  const [all, setAll] = useState(false)
   useEffect(() => {
     if (!copied) return
     const t = setTimeout(() => setCopied(null), 2000)
@@ -24,27 +30,27 @@ export function CommitChips({ commits, onViewDiff, variant }: {
   }
   const reel = variant === 'reel'
   const chip = reel ? 'reel-chip reel-commit' : 'commit-chip'
+  const shown = all ? commits : commits.slice(0, COMMITS_SHOWN)
+  const rest = commits.length - shown.length
   return (
-    <div className={reel ? 'reel-chips' : 'commit-chips'}>
-      {commits.map(c => (
-        <span key={c.sha} className="commit-one">
-          {c.url
-            ? (
-              <a className={chip} href={c.url} target="_blank" rel="noopener noreferrer"
-                title={c.sha} aria-label={`Commit ${c.sha}`} data-testid="reel-commit">{c.sha.slice(0, 7)}</a>
+    <span className={reel ? 'reel-chips' : 'commit-chips'}>
+      {shown.map(c => (
+        onOpen
+          ? (
+              <button key={c.sha} type="button" className={chip} title={`${c.sha} · open in the diff`}
+                aria-label={`Open commit ${c.sha.slice(0, 7)} in the diff`} data-testid="reel-commit"
+                onClick={() => onOpen(c.sha)}>{c.sha.slice(0, 7)}</button>
             )
-            : (
-              <button type="button" className={`${chip}${copied === c.sha ? ' copied' : ''}`}
+          : (
+              <button key={c.sha} type="button" className={`${chip}${copied === c.sha ? ' copied' : ''}`}
                 title={`${c.sha} (click to copy)`} aria-label={`Copy commit ${c.sha}`} data-testid="reel-commit"
                 onClick={() => copy(c.sha)}>{c.sha.slice(0, 7)}</button>
-            )}
-          {onViewDiff && (
-            <button type="button" className="commit-diff" aria-label="View diff" title={`View the diff of ${c.sha.slice(0, 7)}`}
-              onClick={() => onViewDiff(c.sha)}>diff</button>
-          )}
-        </span>
+            )
       ))}
+      {rest > 0 && (
+        <button type="button" className={`${chip} commit-more`} aria-expanded={false} onClick={() => setAll(true)}>+{rest} more</button>
+      )}
       {copied && <span className={reel ? 'reel-copied' : 'commit-copied'} role="status">Copied</span>}
-    </div>
+    </span>
   )
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { capabilityCount, enabledCapabilityCount, latestCapabilities, matchesQuery, newerReport, normalizeCapabilities } from './capabilities'
+import { capabilityCount, enabledCapabilityCount, latestCapabilities, matchesQuery, newerReport, normalizeCapabilities, withLiveMcp } from './capabilities'
 import type { AgentEvent, AgentEventKind } from '../types'
 
 const ev = (seq: number, kind: AgentEventKind, payload: unknown): AgentEvent => ({
@@ -69,4 +69,20 @@ it('keeps only declared adapter tool-schema refresh policies', () => {
   for (const policy of ['immediate', 'NEXT_TURN', { secret: 'untrusted' }, null]) {
     expect(normalizeCapabilities({ groups: [], tool_schema_refresh: policy })?.tool_schema_refresh).toBeUndefined()
   }
+})
+
+describe('withLiveMcp', () => {
+  const base = { engine: 'claude', groups: [{ id: 'mcp' as const, label: 'MCP servers', items: [{ name: 'a', status: 'pending', source: 'user' }, { name: 'b', status: 'connected' }] }] } as never
+  const live = (servers: { name: string; status: string; source: string; tools: number }[]) => ({ servers, settled: true, since: null, engine: 'claude' }) as never
+
+  it('reads each server from the live state and keeps one it does not name', () => {
+    const out = withLiveMcp(base, live([{ name: 'a', status: 'connected', source: 'user', tools: 3 }, { name: 'c', status: 'failed', source: '', tools: 0 }]))
+    const items = out.groups[0].items
+    expect(items.map(i => [i.name, i.status, i.detail])).toEqual([['a', 'connected', '3 tools'], ['c', 'failed', undefined], ['b', 'connected', undefined]])
+  })
+
+  it('is the payload itself when the live state has no servers', () => {
+    expect(withLiveMcp(base, live([]))).toBe(base)
+    expect(withLiveMcp(base, null)).toBe(base)
+  })
 })

@@ -29,6 +29,7 @@ import { themeStyle, type ThemeTokens } from '../theme'
 import type { ArtifactInfo, SessionMeta, Transport } from '../transport/types'
 import type { AgentEvent, ArtifactPayload, StatusPayload, UserMessagePayload } from '../types'
 import ArtifactViewer from './ArtifactViewer'
+import { loadDiffSummary } from '../model/artifactPreview'
 import WorkspaceFileViewer from './WorkspaceFileViewer'
 import Composer from './Composer'
 import { AskContext, type AskContextValue } from './askContext'
@@ -61,8 +62,8 @@ export interface ChatSlots {
 
 export interface ChatViewProps {
   session: string
-  /** A commit's web page (the checklist's commit chips link to it); null or absent: the chip copies
-   *  the sha. */
+  /** @deprecated Not used since 0.19.0: commit chips never link out of Blerg (they open the item's
+   *  diff at the commit, or copy the sha). Accepted so a host that passes it still compiles. */
   commitUrl?: (sha: string) => string | null | undefined
   transport: Transport
   cards?: CardRegistry
@@ -88,6 +89,8 @@ export interface ChatViewProps {
   noTurnCommands?: RegExp
   /** A file to open in the viewer as soon as the list is read (the runner's ?artifact= link). */
   linkedArtifact?: string | null
+  /** The commit a linked diff opens at (its section scrolled to and marked). */
+  linkedCommit?: string | null
   /** The linked file was opened or dismissed: the host may take it out of its address. */
   onLinkedArtifactConsumed?: () => void
   /** The session as the host knows it, when it has a live row (see useSession). */
@@ -208,6 +211,8 @@ export default function ChatView(props: ChatViewProps) {
   // The file open in the viewer (from a card or the panel), and the one a link names, which
   // opens as soon as the list is read.
   const [viewing, setViewing] = useState<ArtifactInfo | null>(null)
+  // The commit a diff opens at, for a file opened here (a linked one has the host's linkedCommit).
+  const [diffAnchor, setDiffAnchor] = useState<string | null>(null)
   const linkedProp = props.linkedArtifact ?? null
   const [linked, setLinked] = useState<string | null>(linkedProp)
   const [seenLink, setSeenLink] = useState(linkedProp)
@@ -255,14 +260,15 @@ export default function ChatView(props: ChatViewProps) {
   const chatContext = useMemo<ChatContextValue>(() => ({
     sessionId,
     sessionOver,
-    commitUrl: props.commitUrl,
-    // A checklist item's "View diff" opens the diff the CLI published of its commits, from the list.
+    // A checklist item's "View diff" (or one of its sha chips) opens the diff the CLI published of
+    // its commits, from the list, at the commit's section when a chip was clicked.
     viewDiff: (id: string) => {
       const a = files ? artifacts.items.find(x => x.id === id) : undefined
-      return a ? () => { setAutoplay(false); setViewing(a) } : null
+      return a ? (commit?: string) => { setAutoplay(false); setDiffAnchor(commit ?? null); setViewing(a) } : null
     },
+    diffSummary: files ? (id: string) => loadDiffSummary(sessionId, id, x => files.raw(sessionId, x)) : undefined,
     files,
-    view: (a: ArtifactInfo, opts?: { autoplay?: boolean }) => { setAutoplay(!!opts?.autoplay); setViewing(a) },
+    view: (a: ArtifactInfo, opts?: { autoplay?: boolean }) => { setAutoplay(!!opts?.autoplay); setDiffAnchor(null); setViewing(a) },
     openWorkspaceFile: canOpenWorkspace ? (path: string, line?: number) => setWorkspaceFile({ path, line }) : undefined,
     artifactLink: href => files ? resolveArtifactLink(href, publishedSessionUrl, artifacts.items) : null,
     latestVersion: (a: ArtifactPayload) => latestVersions.get(`${a.origin === 'user' ? 'user' : 'agent'}\0${a.name}`),
@@ -302,7 +308,7 @@ export default function ChatView(props: ChatViewProps) {
       const [person, agent] = await Promise.all([read('user'), read('agent')])
       return mergeReviews(person, agent)
     },
-  }), [sessionId, sessionOver, canOpenWorkspace, props.commitUrl, files, latestVersions, artifacts.items, send, refreshArtifacts, publishedSessionUrl])
+  }), [sessionId, sessionOver, canOpenWorkspace, files, latestVersions, artifacts.items, send, refreshArtifacts, publishedSessionUrl])
   const consumeLink = props.onLinkedArtifactConsumed
   function closeViewer() {
     setAutoplay(false)
@@ -603,7 +609,7 @@ export default function ChatView(props: ChatViewProps) {
           items={artifacts.items}
           status={artifacts.status}
           onClose={() => setShowFiles(false)}
-          onView={setViewing}
+          onView={a => { setDiffAnchor(null); setViewing(a) }}
           onChanged={artifacts.refresh}
           onAttach={() => { setShowFiles(false); attachInput.current?.click() }}
           publishHint={props.publishHint}
@@ -617,7 +623,8 @@ export default function ChatView(props: ChatViewProps) {
           artifact={openArtifact}
           latest={openLatest}
           autoplay={autoplay}
-          onOpen={a => { if (linked !== null) consumeLink?.(); setLinked(null); setAutoplay(false); setViewing(a) }}
+          commit={viewing ? diffAnchor : props.linkedCommit ?? null}
+          onOpen={a => { if (linked !== null) consumeLink?.(); setLinked(null); setAutoplay(false); setDiffAnchor(null); setViewing(a) }}
           onClose={closeViewer}
         />
       )}

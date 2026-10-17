@@ -29,7 +29,7 @@ export interface LiveSubagentReply {
   seq: number
 }
 
-export interface LiveTaskReply { task_id: string; call_id: string; kind: string; description: string; started_at: string; seq: number }
+export interface LiveTaskReply { task_id: string; call_id: string; kind: string; description: string; command?: string; started_at: string; seq: number }
 
 export interface LiveChecklistReply { items: ChecklistItem[]; event_id: string; updated_at: string; commit_urls?: Record<string, string> }
 export interface LivePlanReply { items: { text: string; status: PlanStatus; active?: string }[]; updated_at: string }
@@ -155,7 +155,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   }
   const tasks = new Map<string, BackgroundTask>()
   for (const t of reply.tasks ?? []) {
-    tasks.set(t.task_id, { taskId: t.task_id, callId: t.call_id, kind: t.kind, description: t.description, startedAt: parseTs(t.started_at), done: null })
+    tasks.set(t.task_id, { taskId: t.task_id, callId: t.call_id, kind: t.kind, description: t.description, command: t.command ?? '', startedAt: parseTs(t.started_at), done: null })
   }
   let checklist: ChecklistLive | null = reply.checklist && reply.checklist.items.length
     ? {
@@ -232,7 +232,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
       case 'background_task_started': {
         const id = str(p.task_id)
         if (!id || tasks.has(id)) break
-        tasks.set(id, { taskId: id, callId: str(p.call_id), kind: str(p.kind), description: str(p.description), startedAt: parseTs(str(p.started_at)) ?? at, done: null })
+        tasks.set(id, { taskId: id, callId: str(p.call_id), kind: str(p.kind), description: str(p.description), command: str(p.command), startedAt: parseTs(str(p.started_at)) ?? at, done: null })
         break
       }
       case 'turn_done':

@@ -122,37 +122,49 @@ describe('session panel: MCP servers, the held first message, checklist commits'
   const srv = (name: string, status: string, tools = 0, source = 'user') => ({ name, status, source, tools })
   const mcp = (servers: unknown[], settled: boolean, extra: object = {}) => ({ servers, settled, since: iso(-12_000), engine: 'claude', ...extra })
 
-  it('shows Connecting n of m while it connects, then the settled counts, opening to the list', async () => {
-    stubFetch(0, liveReply({ mcp: mcp([srv('jira', 'connected', 12), srv('docs', 'pending'), srv('db', 'failed')], false) }))
-    seedSession({ status: 'running' })
-    seedEvents(user())
-    await renderPage()
-    const sec = await screen.findByTestId('rail-mcp')
-    expect(within(sec).getByTestId('rail-mcp-summary')).toHaveTextContent('Connecting 2 of 3…')
-    expect(within(sec).queryByTestId('rail-mcp-list')).toBeNull()
-    fireEvent.click(within(sec).getByRole('button', { name: /Connecting 2 of 3/ }))
-    const rows = within(sec).getAllByTestId('rail-mcp-row').map(r => r.textContent)
-    expect(rows).toEqual(['jira · connected · user · 12 tools', 'docs · connecting · user', 'db · failed · user'])
+  const snapshot = () => ev('capabilities', {
+    engine: 'claude',
+    groups: [{ id: 'mcp', label: 'MCP servers', items: [{ name: 'jira', status: 'pending', source: 'user' }, { name: 'docs', status: 'connected' }] }],
   })
+  const openCaps = () => fireEvent.click(screen.getByRole('tab', { name: /Capabilities/ }))
 
-  it('a settled snapshot with a failure and a sign-in need says so in the warning colour, and why a hold ended', async () => {
-    stubFetch(0, liveReply({ mcp: mcp([srv('a', 'connected', 1), srv('b', 'connected', 2), srv('c', 'failed'), srv('d', 'needs-auth')], true, { released: 'timeout' }) }))
-    seedSession({ status: 'running' })
-    seedEvents(user())
-    await renderPage()
-    const sum = await screen.findByTestId('rail-mcp-summary')
-    expect(sum).toHaveTextContent('2 connected · 1 failed · 1 needs sign-in')
-    expect(sum.closest('[data-testid="rail-mcp"]')?.querySelector('.rail-mcp-warn')).not.toBeNull()
-    expect(screen.getByTestId('rail-mcp-released')).toHaveTextContent('Sent after the wait ran out')
-  })
-
-  it('nothing is shown when the session has no MCP servers or the server does not know them', async () => {
-    stubFetch(0, liveReply({ mcp: mcp([], true) }))
+  it('Live has no MCP servers section', async () => {
+    stubFetch(0, liveReply({ mcp: mcp([srv('jira', 'connected', 12), srv('docs', 'pending')], false) }))
     seedSession({ status: 'running' })
     seedEvents(user())
     await renderPage()
     await screen.findByTestId('session-rail')
     expect(screen.queryByTestId('rail-mcp')).toBeNull()
+    expect(screen.queryByText('MCP servers')).toBeNull()
+  })
+
+  it('Capabilities shows each server with its live status, over the start-up snapshot', async () => {
+    stubFetch(0, liveReply({ mcp: mcp([srv('jira', 'connected', 12), srv('docs', 'pending'), srv('db', 'failed'), srv('drive', 'needs-auth'), srv('old', 'disabled')], false, { released: 'timeout' }) }))
+    seedSession({ status: 'running' })
+    seedEvents(user(), snapshot())
+    await renderPage()
+    await screen.findByTestId('session-rail')
+    openCaps()
+    const group = await screen.findByTestId('caps-group-mcp')
+    expect(within(group).getByText('jira').closest('li')).toHaveTextContent('connected')
+    expect(within(group).getByText('docs').closest('li')).toHaveTextContent('connecting')
+    expect(within(group).getByText('docs').closest('li')?.querySelector('.status-pending')).not.toBeNull()
+    expect(within(group).getByText('db').closest('li')?.querySelector('.status-failed')).not.toBeNull()
+    expect(within(group).getByText('drive').closest('li')).toHaveTextContent('needs sign-in')
+    expect(within(group).getByText('old').closest('li')).toHaveTextContent('disabled')
+    expect(group).toHaveTextContent('sent after the wait ran out')
+  })
+
+  it('Capabilities falls back to the snapshot when the live state has no MCP servers', async () => {
+    stubFetch(0, liveReply({ mcp: mcp([], true) }))
+    seedSession({ status: 'running' })
+    seedEvents(user(), snapshot())
+    await renderPage()
+    await screen.findByTestId('session-rail')
+    openCaps()
+    const group = await screen.findByTestId('caps-group-mcp')
+    expect(within(group).getByText('jira').closest('li')).toHaveTextContent('connecting')
+    expect(within(group).getByText('docs').closest('li')).toHaveTextContent('connected')
     expect(screen.queryByTestId('mcp-hold')).toBeNull()
   })
 
@@ -178,7 +190,7 @@ describe('session panel: MCP servers, the held first message, checklist commits'
     expect(within(line).queryByRole('button')).toBeNull()
   })
 
-  it('an item of the checklist holds a commit chip, linked when the server knows the repository', async () => {
+  it('an item of the checklist shows its shas, never linked out of Blerg even when the server knows the repository', async () => {
     stubFetch(0, liveReply({
       checklist: {
         items: [{ text: 'Fix', done: true, commits: ['abcdef1234', '1234567'] }, { text: 'Ship', done: false }],
@@ -190,10 +202,10 @@ describe('session panel: MCP servers, the held first message, checklist commits'
     await renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: /Plan/ }))
     const sec = await screen.findByTestId('rail-checklist')
-    fireEvent.click(within(sec).getByRole('button', { name: '2 commits' }))
     const shas = within(sec).getAllByTestId('reel-commit')
-    expect(shas[0].tagName).toBe('BUTTON')
-    expect(shas[1]).toHaveAttribute('href', 'https://forge.example.test/c/1234567')
-    expect(within(sec).queryByRole('button', { name: 'View diff' })).toBeNull()
+    expect(shas.map(s => s.textContent)).toEqual(['abcdef1', '1234567'])
+    expect(shas.map(s => s.tagName)).toEqual(['BUTTON', 'BUTTON'])
+    expect(sec.querySelector('a')).toBeNull()
+    expect(within(sec).queryByRole('button', { name: /View diff/ })).toBeNull()
   })
 })

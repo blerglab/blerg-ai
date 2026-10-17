@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -14,64 +13,15 @@ import (
 
 	"github.com/blerglab/blerg-ai/core/internal/db"
 	"github.com/blerglab/blerg-ai/core/internal/signing"
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 )
 
 const testGHToken = "test-gh-token"
 
-// reconcileTestSchema is distinct from every other package's test schema
-// name (identity_test's "test_blerg_core_identity",
-// authprovider_test's "test_blerg_core_authprovider") so this internal
-// `package identity` test file's isolated schema never collides with
-// theirs, even though all three run against the same shared DATABASE_URL.
-const reconcileTestSchema = "test_blerg_core_identity_reconcile"
-
-// reconcilePool gives the caller a fresh, isolated schema (dropped and
-// recreated), migrated, exactly like accounts_test.go's testPool — required
-// because this package's tests otherwise share one live Postgres database
-// with no per-row cleanup. Duplicated here (rather than reused from
-// accounts_test.go) because that helper lives in the external
-// `identity_test` package and this file needs the internal `identity`
-// package to reach the unexported githubAPIBaseURL test seam.
+// reconcilePool provides a fresh database cloned from the migrated package template.
 func reconcilePool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-	ctx := context.Background()
-
-	setupPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", reconcileTestSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("drop schema: %v", err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA %s", reconcileTestSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("create schema: %v", err)
-	}
-	setupPool.Close()
-
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = reconcileTestSchema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		bg := context.Background()
-		pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", reconcileTestSchema))
-		pool.Close()
-	})
-	if err := db.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
-	return pool
+	return testsupport.Pool(t, db.Migrate)
 }
 
 // reconcileFixture builds a Service backed by an isolated schema, and

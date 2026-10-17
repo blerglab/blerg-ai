@@ -3,15 +3,16 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
-	"github.com/blerglab/blerg-ai/runner/internal/livestate"
-	"github.com/blerglab/blerg-ai/runner/internal/models"
-	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
+	"github.com/blerglab/blerg-ai/runner/internal/livestate"
+	"github.com/blerglab/blerg-ai/runner/internal/models"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 func TestCodexSettingsAcknowledged(t *testing.T) {
@@ -51,7 +52,8 @@ func TestCodexMidTurnSteering(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.EnqueueInput(agent.Input{Text: "start", ClientID: "first"})
 	waitUntil(t, "accepted first message", func() bool { return countKind(em, "user_message") == 1 })
 	d.EnqueueInput(agent.Input{Text: "change direction", ClientID: "steering"})
@@ -81,7 +83,8 @@ func TestCodexAppServerReconnectsSavedThread(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("first", "chat")
 	waitUntil(t, "reconnect with saved thread", func() bool { raw, _ := os.ReadFile(log); return strings.Contains(string(raw), "thread/resume") })
 	d.Enqueue("continue", "chat")
@@ -123,7 +126,8 @@ func TestCodexTurnUsageKeepsOriginalModel(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], Model: "gpt-5-codex", WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("start", "chat")
 	waitUntil(t, "first turn accepted", func() bool { return countKind(em, "user_message") == 1 })
 	d.SetModel("gpt-5.6-terra", "high", "ui")
@@ -149,7 +153,8 @@ func TestCodexSlashSkillUsesRuntimeNativeInput(t *testing.T) {
 	d.adoptionNote = "The host restarted."
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.EnqueueInput(agent.Input{Text: "/review inspect changes", ClientID: "skill"})
 	waitUntil(t, "native skill turn", func() bool { return countKind(em, "turn_done") == 1 })
 	raw, _ := os.ReadFile(log)
@@ -203,7 +208,8 @@ func TestCodexAdoptionQueuedContinueSupersededBeforeConsumption(t *testing.T) {
 	d.Enqueue("person says stop the old task", "chat")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	waitUntil(t, "person turn", func() bool { return countKind(em, "turn_done") == 1 })
 	em.mu.Lock()
 	defer em.mu.Unlock()
@@ -327,7 +333,8 @@ func TestCodexCapabilitiesUnavailableMCPIsNotEmptyInventory(t *testing.T) {
 			d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			go d.Run(ctx)
+			stopDriver := startTestCodexDriver(ctx, t, d)
+			defer stopDriver()
 			waitUntil(t, "capability inventory", func() bool { return countKind(em, "capabilities") > 0 })
 			em.mu.Lock()
 			defer em.mu.Unlock()
@@ -378,7 +385,8 @@ func TestCodexCapabilitiesRefreshWhenMCPChanges(t *testing.T) {
 			d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			go d.Run(ctx)
+			stopDriver := startTestCodexDriver(ctx, t, d)
+			defer stopDriver()
 			waitUntil(t, "MCP connection state refreshed", func() bool {
 				em.mu.Lock()
 				defer em.mu.Unlock()
@@ -409,7 +417,8 @@ func TestCodexNativeChildFollowupHasDistinctLifecycle(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("Run child tasks", "chat")
 	waitUntil(t, "main turn finished", func() bool { return countKind(em, "turn_done") == 1 })
 	waitUntil(t, "child follow-up runs finished", func() bool { return countKind(em, "subagent_done") == 2 })
@@ -444,7 +453,8 @@ func TestCodexNativeModelCatalogConstrainsNextTurn(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	waitUntil(t, "initialized runtime", func() bool { return countKind(em, "model_changed") > 0 })
 	d.SetModel("gpt-5-codex", "ultra", "ui")
 	d.SetModel("fixture-next", "", "ui")
@@ -478,7 +488,8 @@ func TestCodexSteeringCompletionRaceKeepsMessage(t *testing.T) {
 			d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			go d.Run(ctx)
+			stopDriver := startTestCodexDriver(ctx, t, d)
+			defer stopDriver()
 			d.EnqueueInput(agent.Input{Text: "First", ClientID: "first"})
 			waitUntil(t, "first accepted", func() bool { return countKind(em, "user_message") == 1 })
 			d.EnqueueInput(agent.Input{Text: "Queued follow-up", ClientID: "followup"})
@@ -532,7 +543,8 @@ func TestCodexStreamingBacklogDoesNotStarveSteering(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: codexSlowTextEmitter{em}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.EnqueueInput(agent.Input{Text: "Start streaming", ClientID: "first"})
 	waitUntil(t, "streamed output", func() bool { return countKind(em, "assistant_text") > 0 })
 	d.EnqueueInput(agent.Input{Text: "Change direction", ClientID: "steer"})
@@ -550,9 +562,11 @@ func TestCodexRejectedSteerSurvivesMissingCompletion(t *testing.T) {
 	t.Setenv("FAKE_CODEX_LOG", log)
 	em := &collectEmitter{}
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+	d.rejectedSteerWait = 100 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.EnqueueInput(agent.Input{Text: "First", ClientID: "first"})
 	waitUntil(t, "first accepted", func() bool { return countKind(em, "user_message") == 1 })
 	d.EnqueueInput(agent.Input{Text: "Preserve this input", ClientID: "followup"})
@@ -583,7 +597,8 @@ func TestCodexMCPAuthStatusUsesSharedContract(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	waitUntil(t, "capabilities", func() bool { return countKind(em, "capabilities") > 0 })
 	em.mu.Lock()
 	defer em.mu.Unlock()
@@ -612,7 +627,8 @@ func TestCodexMissingAcceptedTurnIdentityStopsUnguardedWork(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.EnqueueInput(agent.Input{Text: "Unconfirmed work", ClientID: "first"})
 	d.EnqueueInput(agent.Input{Text: "Next work", ClientID: "next"})
 	waitUntil(t, "both inputs settled", func() bool { return countKind(em, "error") >= 2 })

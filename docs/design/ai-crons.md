@@ -133,7 +133,7 @@ CREATE TABLE mcp_oauth_state (   -- single-use, server-side (4.3)
 Secrets are encrypted with the existing key backend, as engine credentials are. Limit:
 20 connections per account. Names `board`, `blerg` and `gateway` are reserved, and the
 name is also rejected if it collides with another after Claude Code's tool-prefix
-normalisation. Deleting an account cascades. Retention: `mcp_secret_access_log` rows
+normalization. Deleting an account cascades. Retention: `mcp_secret_access_log` rows
 older than 180 days are pruned by a daily job.
 
 ### 4.2 Static connections
@@ -215,7 +215,7 @@ The URL is user supplied and is fetched by core (discovery, OAuth) and by the ru
   connection, including IPv4-mapped IPv6, `0.0.0.0`, loopback, link-local, cloud
   metadata, private and carrier-grade NAT ranges. Private hosts are allowed only when
   listed (`BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS`, `BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS`).
-- No redirects are followed. No proxy environment variables are honoured.
+- No redirects are followed. No proxy environment variables are honored.
 - Response size and time limits on every call.
 
 The runner and core are separate processes with separate allow-lists. New variables are
@@ -298,7 +298,7 @@ id. A human-started session uses the starter's login session id, which is valid 
 login's lifetime (up to 30 days), not the 10 minute access token. If the login ends
 first, credential fetches fail with a clear "sign in again" error.
 
-### 5.4 Behaviour
+### 5.4 Behavior
 
 The gateway implements the MCP Streamable HTTP transport as a proxy and is a strict
 **allow-list of methods**:
@@ -308,7 +308,7 @@ The gateway implements the MCP Streamable HTTP transport as a proxy and is a str
   logging, tasks, roots, sampling, elicitation) is refused. JSON-RPC batch arrays are
   rejected.
 - `initialize` is answered by the gateway. The gateway keeps its own upstream MCP
-  session per (grant, connection), initialises it on first use and re-initialises it if
+  session per (grant, connection), initializes it on first use and re-initializes it if
   the upstream drops it.
 - Upstream replies as either JSON or an event stream are read until the response to the
   request arrives and returned to the session as one JSON reply. Server-initiated
@@ -444,14 +444,14 @@ cron sessions per account. Retention: `cron_runs` older than 90 days are pruned.
 ### 7.2 Schedule
 
 Standard five-field expressions plus an IANA time zone, with a picker for common shapes.
-A well-known cron library is added to the runner module and its behaviour is pinned by
+A well-known cron library is added to the runner module and its behavior is pinned by
 tests: a wall-clock slot that does not exist on a spring-forward day runs once, at the
 first valid time after it; on a fall-back day a slot fires once, at its first occurrence.
 Only plain five-field expressions are accepted: `@every`, other `@` descriptors and
 `CRON_TZ=`/`TZ=` prefixes are rejected, as is any expression with no next occurrence
 (for example 30 February). The 15 minute minimum is checked over a full year of
 occurrences (so a constraint like `*/5 * 1 * *` cannot slip through). If the chosen
-library does not give the DST behaviour above, the slot iterator is hand-written and
+library does not give the DST behavior above, the slot iterator is hand-written and
 tested.
 
 ### 7.3 The scheduler
@@ -596,7 +596,7 @@ feature, not optional hardening.
   tree), for Write and Edit (both fall under an Edit rule), through a symlink, through `..`, with
   `~`, and with a wildcarded directory name, while the session working directory stays usable. An
   absolute path in a rule needs the `//` prefix. Residual risk: enforcement is Claude Code's
-  permission engine (the version is pinned and the behaviour must be re-proved on an upgrade, see
+  permission engine (the version is pinned and the behavior must be re-proved on an upgrade, see
   the unit test of the rule list and `ccPathDenyRules`); the agent's own uid can still read these
   files, so a bug in that engine would expose them. Neither the mount of the claude login into a
   Docker sandbox (it must stay writable, the engine keeps its transcripts there) nor the uid can be
@@ -617,7 +617,7 @@ feature, not optional hardening.
   notifications), per-session read, patch and delete routes, agent events, capabilities,
   messages, screenshots and previews, board events and completion webhooks. A test
   enumerates every registered route that takes a session id. This lands before any grant
-  or cron session can exist. The runner's current behaviour, where every human on an
+  or cron session can exist. The runner's current behavior, where every human on an
   install can read every session, is unchanged for other sessions but is not acceptable
   for mail content.
 - **Daemons are not per-account.** The runner cannot bind a daemon to an account (the
@@ -648,7 +648,7 @@ CREATE TABLE mcp_proposals (
 ```
 
 The **frozen arguments are the authoritative record** and are what the UI displays; the
-agent's summary is shown separately and labelled as the agent's description.
+agent's summary is shown separately and labeled as the agent's description.
 
 - The agent's tool result contains the proposal id and its runner URL, generated by the
   gateway. The agent puts that link in a card. The runner never renders an
@@ -794,7 +794,7 @@ far behind phase 4.
 ## 15. Decisions taken on the requester's behalf
 
 - A gateway enforces tool modes, rather than client-side flags, keeping the same
-  user-visible behaviour (section 3).
+  user-visible behavior (section 3).
 - Approval executes the frozen call; no agent runs (section 9).
 - Crons and connections are human-only, and crons never run on a bare-host daemon.
 - Cron sessions are private to their owner and run without shell or web tools.

@@ -184,6 +184,12 @@ describe('createProxyTransport requests', () => {
     await expect(t2.loadOlder('s1', 5, 1)).rejects.toThrow('HTTP 500')
   })
 
+  it.each([true, false])('preserves declared steering support (%s)', async steering_supported => {
+    const { r, t } = make()
+    r.on(/\/sessions\/s1$/, () => json({ status: 'running', engine: 'future-engine', steering_supported }))
+    await expect(t.session('s1')).resolves.toMatchObject({ engine: 'future-engine', steering_supported })
+  })
+
   it('session maps SessionMeta as the proxy sends it, or from the runner status body', async () => {
     const { r, t } = make()
     r.on(/\/sessions\/s1$/, () => json({ status: 'waiting', engine: 'claude', model: 'm', effort: 'high', runtime: 'cluster', started_at: 'a', ended_at: null }))
@@ -217,6 +223,8 @@ describe('createProxyTransport requests', () => {
     r.on(/\/messages$/, () => new Response(ok ? '{}' : 'no', { status: ok ? 202 : 503 }))
     await expect(t.send('s1', 'hello')).resolves.toEqual({ queued: true })
     expect(r.calls[0]).toMatchObject({ method: 'POST', url: '/blerg/sessions/s1/messages', body: '{"text":"hello"}', headers: { 'Content-Type': 'application/json' } })
+    await expect(t.send('s1', 'stable', { clientId: 'stable-id' })).resolves.toEqual({ queued: true })
+    expect(JSON.parse(r.calls[1].body!)).toEqual({ text: 'stable', client_id: 'stable-id' })
     ok = false
     await expect(t.send('s1', 'again')).resolves.toEqual({ queued: false })
   })
@@ -247,14 +255,14 @@ describe('createProxyTransport requests', () => {
     await expect(t.interrupt!('s1')).rejects.toThrow('HTTP 500')
   })
 
-  it('setModel posts model and effort; an app without the route (501) is not an error', async () => {
+  it('setModel posts model and effort and reports unsupported controls', async () => {
     const { r, t } = make()
     let status = 204
     r.on(/\/model$/, () => new Response(null, { status }))
     await expect(t.setModel!('s1', 'm', 'low')).resolves.toBeUndefined()
     expect(r.calls[0]).toMatchObject({ method: 'POST', url: '/blerg/sessions/s1/model', body: '{"model":"m","effort":"low"}' })
     status = 501
-    await expect(t.setModel!('s1', 'm')).resolves.toBeUndefined()
+    await expect(t.setModel!('s1', 'm')).rejects.toThrow('HTTP 501')
     status = 400
     await expect(t.setModel!('s1', 'm')).rejects.toThrow('HTTP 400')
   })
@@ -277,5 +285,20 @@ describe('createProxyTransport requests', () => {
   it('connected() is false until a stream is open', () => {
     const { t } = make()
     expect(t.connected()).toBe(false)
+  })
+})
+
+describe('published artifact session URL', () => {
+  it('does not guess a runner identity from the embedder or proxy base URL', () => {
+    const t = createProxyTransport({ baseUrl: '/api/chat' })
+    expect(t.publishedSessionUrl).toBeUndefined()
+  })
+
+  it('uses the host mapping from app IDs to public runner session URLs', () => {
+    const t = createProxyTransport({ baseUrl: '/api/chat', publishedSessionUrl: id =>
+      id === 'board-row' ? 'https://runner.example.com/sessions/native-id' : null,
+    })
+    expect(t.publishedSessionUrl?.('board-row')).toBe('https://runner.example.com/sessions/native-id')
+    expect(t.publishedSessionUrl?.('unmapped')).toBeNull()
   })
 })

@@ -93,6 +93,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/boards", authed(a.handleListBoards))
 	mux.HandleFunc("POST /api/boards", authed(a.handleCreateBoard))
 	mux.HandleFunc("GET /api/boards/{id}", authed(a.handleGetBoard))
+	mux.HandleFunc("GET /api/boards/{id}/launch-options", authed(a.handleBoardLaunchOptions))
 	mux.HandleFunc("PATCH /api/boards/{id}", authed(a.handleUpdateBoard))
 	mux.HandleFunc("DELETE /api/boards/{id}", authed(a.handleDeleteBoard))
 

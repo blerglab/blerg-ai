@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/engines"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
@@ -308,7 +309,11 @@ func (j *JobManager) ActiveSessionJobs() (int, error) {
 // length. A missing Secret is reported as zero keys, not an error: an
 // operator who hasn't configured any engine yet is a valid, common state.
 func (j *JobManager) fetchSecretKeys(name string) (map[string]bool, error) {
-	resp, err := j.do(http.MethodGet, "/api/v1/namespaces/"+j.Namespace+"/secrets/"+name, nil)
+	return j.fetchSecretKeysContext(context.Background(), name)
+}
+
+func (j *JobManager) fetchSecretKeysContext(ctx context.Context, name string) (map[string]bool, error) {
+	resp, err := j.doWithContentType(ctx, http.MethodGet, "/api/v1/namespaces/"+j.Namespace+"/secrets/"+url.PathEscape(name), nil, "application/json")
 	if err != nil {
 		return nil, err
 	}
@@ -317,14 +322,14 @@ func (j *JobManager) fetchSecretKeys(name string) (map[string]bool, error) {
 		return map[string]bool{}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return nil, fmt.Errorf("get secret %s: %d: %s", name, resp.StatusCode, raw)
+		return nil, errors.New("engine credential availability could not be read")
 	}
 	var secret struct {
 		Data map[string]string `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
-		return nil, err
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
+	if err != nil || len(raw) > 2<<20 || json.Unmarshal(raw, &secret) != nil {
+		return nil, errors.New("engine credential availability response is invalid")
 	}
 	out := make(map[string]bool, len(secret.Data))
 	for k, v := range secret.Data {
@@ -367,14 +372,16 @@ func (j *JobManager) detectAvailableEngines() ([]string, bool) {
 		return false
 	}
 	var out []string
-	if has("ANTHROPIC_API_KEY") || has("CLAUDE_CODE_OAUTH_TOKEN") {
-		out = append(out, "claude")
-	}
-	if has("CODEX_AUTH_JSON") {
-		out = append(out, "codex")
-	}
-	if has("HERMES_ENV_CONTENTS") {
-		out = append(out, "hermes")
+	for _, descriptor := range engines.All() {
+		if !descriptor.SupportsRuntime("cluster") {
+			continue
+		}
+		for _, key := range descriptor.CredentialEnvKeys {
+			if has(key) {
+				out = append(out, descriptor.ID)
+				break
+			}
+		}
 	}
 	return out, has("BLERG_RUNNER_GIT_TOKEN")
 }
@@ -684,9 +691,12 @@ func urlHost(raw string) string {
 // credential. claude is deliberately absent: its credential can be either a
 // subscription OAuth token or an API key, and which env var it must land in is
 // decided from the fetched value — see claudeCredentialKey.
-var engineCredentialKey = map[string]string{
-	"codex":  "CODEX_AUTH_JSON",
-	"hermes": "HERMES_ENV_CONTENTS",
+func singleEngineCredentialKey(engine string) (string, bool) {
+	descriptor, ok := engines.Lookup(engine)
+	if !ok || len(descriptor.CredentialEnvKeys) != 1 {
+		return "", false
+	}
+	return descriptor.CredentialEnvKeys[0], true
 }
 
 // claudeOAuthPrefix marks a Claude subscription OAuth token. Anything else is
@@ -704,12 +714,22 @@ var claudeKeys = []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}
 // sessionCredentialKeys are the credential env vars every session pod is
 // wired with, each sourced from either the launcher's per-session Secret or
 // the shared operator Secret — see CreateSessionJob's provenance log.
-var sessionCredentialKeys = []string{
-	"ANTHROPIC_API_KEY",
-	"BLERG_RUNNER_GIT_TOKEN",
-	"CLAUDE_CODE_OAUTH_TOKEN",
-	"CODEX_AUTH_JSON",
-	"HERMES_ENV_CONTENTS",
+func sessionCredentialEnvKeys() []string {
+	keys := map[string]bool{gitTokenKey: true}
+	for _, descriptor := range engines.All() {
+		if !descriptor.SupportsRuntime("cluster") {
+			continue
+		}
+		for _, key := range descriptor.CredentialEnvKeys {
+			keys[key] = true
+		}
+	}
+	out := make([]string, 0, len(keys))
+	for key := range keys {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // claudeCredentialKey picks the env var a fetched personal Claude credential
@@ -1144,7 +1164,7 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 				}
 				sessionData[claudeCredentialKey(plaintext)] = plaintext
 			}
-		} else if credKey, ok := engineCredentialKey[effectiveEngine]; ok {
+		} else if credKey, ok := singleEngineCredentialKey(effectiveEngine); ok {
 			plaintext, found, err := j.fetchPersonalCredential(context.Background(), spec.SpawningAccountID, effectiveEngine, spec.proof())
 			if errors.Is(err, errCoreManagedCredential) {
 				for _, key := range []string{"CODEX_AUTH_JSON", "OPENAI_API_KEY", "CODEX_API_KEY"} {
@@ -1283,6 +1303,7 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 
 	// provenance records, per credential env var, where this session's value
 	// came from — see the log line after the loop. Keys only, never values.
+	sessionCredentialKeys := sessionCredentialEnvKeys()
 	provenance := make([]string, 0, len(sessionCredentialKeys))
 	// A pod receives provider authority only for its selected engine.
 	for _, key := range sessionCredentialKeys {
@@ -1324,7 +1345,7 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 		// Operator-synced credentials (rotation flows from the secrets operator): the
 		// oauth token, codex's auth.json contents, hermes's whole .env
 		// contents, and, when present there, the git token.
-		if (key == "CLAUDE_CODE_OAUTH_TOKEN" || key == "BLERG_RUNNER_GIT_TOKEN" || key == "CODEX_AUTH_JSON" || key == "HERMES_ENV_CONTENTS") && j.OAuthSecretName != "" {
+		if (key != "ANTHROPIC_API_KEY") && j.OAuthSecretName != "" {
 			secretName = j.OAuthSecretName
 		}
 		provenance = append(provenance, key+"=operator")
@@ -1602,7 +1623,14 @@ func resumeClusterSessionStrict(ctx context.Context, h *Hub, pool *pgxpool.Pool,
 	return resumeClusterSessionMode(ctx, h, pool, sessionID, text, accountID, authSessionID, true)
 }
 
-func resumeClusterSessionMode(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, requesterAccountID, requesterSessionID string, automatic bool, clientIDs ...string) error {
+// resumeInput identifies the exact durable input carried by a replacement pod.
+// Its source must match reconnect replay because native receipts hash the full input.
+type resumeInput struct {
+	ClientID, Source string
+	Proof            coreProof
+}
+
+func resumeClusterSessionMode(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, requesterAccountID, requesterSessionID string, automatic bool, inputs ...resumeInput) error {
 	jm := h.JobManager()
 	if jm == nil || pool == nil {
 		log.Printf("agent_user_message %s: no daemon and no cluster runtime — dropping", sessionID)
@@ -1616,6 +1644,12 @@ func resumeClusterSessionMode(ctx context.Context, h *Hub, pool *pgxpool.Pool, s
 	if row.Status != "disconnected" {
 		log.Printf("resume %s: status %q not resumable — dropping message", sessionID, row.Status)
 		return errors.New("cluster resume was not accepted")
+	}
+	if len(inputs) > 0 {
+		eligible, _, reason := sessionResumeEligibility(ctx, pool, jm, row, requesterAccountID, inputs[0].Proof)
+		if !eligible {
+			return errors.New(reason)
+		}
 	}
 	title := ""
 	if row.Title != nil {
@@ -1664,7 +1698,16 @@ func resumeClusterSessionMode(ctx context.Context, h *Hub, pool *pgxpool.Pool, s
 	// checks belongs to the launcher's account (they are the same person: equality above).
 	tokenID, authSessionID := "", ""
 	if spawningAccountID != "" {
-		if tokenID = derefOrEmpty(row.TokenID); tokenID == "" {
+		// An owner-authorized new request uses its exact live proof. Revoking
+		// the launch token must not strand a session after the owner remints it.
+		if len(inputs) > 0 {
+			if !inputs[0].Proof.valid() {
+				return errNoLivenessProof
+			}
+			tokenID, authSessionID = inputs[0].Proof.TokenID, inputs[0].Proof.SessionID
+		} else if tokenID = derefOrEmpty(row.TokenID); tokenID == "" {
+			// Compatibility for trusted internal callers predating resumeInput.
+			// Public REST/MCP/browser callers always provide their own proof.
 			authSessionID = requesterSessionID
 		}
 	}
@@ -1694,14 +1737,17 @@ func resumeClusterSessionMode(ctx context.Context, h *Hub, pool *pgxpool.Pool, s
 		SessionID: sessionID, Repo: row.Repo, Title: title, Model: model, Effort: effort, Engine: engine,
 		InitialPrompt: text, Resume: true,
 		InitialPromptClientID: func() string {
-			if len(clientIDs) > 0 {
-				return clientIDs[0]
+			if len(inputs) > 0 {
+				return inputs[0].ClientID
 			}
 			return ""
 		}(),
 		InitialPromptSource: func() string {
 			if automatic {
 				return limitResumeSource
+			}
+			if len(inputs) > 0 {
+				return inputs[0].Source
 			}
 			return ""
 		}(),
@@ -1797,5 +1843,13 @@ func nonNilStrings(s []string) []string {
 }
 
 func foreignEngineCredential(key, engine string) bool {
-	return ((key == "ANTHROPIC_API_KEY" || key == "CLAUDE_CODE_OAUTH_TOKEN") && engine != "claude") || (key == "CODEX_AUTH_JSON" && engine != "codex") || (key == "HERMES_ENV_CONTENTS" && engine != "hermes")
+	engine = engines.Normalize(engine)
+	for _, descriptor := range engines.All() {
+		for _, owned := range descriptor.CredentialEnvKeys {
+			if owned == key {
+				return descriptor.ID != engine
+			}
+		}
+	}
+	return false
 }

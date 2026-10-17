@@ -2,7 +2,7 @@
 // browser API and on the proxy contract (list, raw, download, delete, upload), only the prefix and
 // the authentication differ. Ported from the runner's lib/artifacts.ts, lib/attachments.ts and
 // apiFetch.ts; the pure helpers (grouping, versions, size text) live in the model, not here.
-import type { ArtifactInfo, TransportFiles, UploadedFile } from './types'
+import type { ArtifactInfo, TransportFiles, UploadedFile, WorkspaceFile } from './types'
 
 export interface FilesOptions {
   /** The session's route prefix, e.g. `/api/sessions/<id>` or `/blerg/sessions/<id>`. */
@@ -19,6 +19,8 @@ export interface FilesOptions {
   uploadHeaders?: () => Promise<Record<string, string>>
   /** Looks at the upload's response alone, for the same reason. */
   checkUpload?: (res: Response) => void
+  /** Offer `workspaceFile` (the runner's workspace-file route). Off for a proxy contract without it. */
+  workspace?: boolean
 }
 
 const enc = encodeURIComponent
@@ -104,6 +106,28 @@ async function readFailure(r: Response, other: string): Promise<Error> {
   return new FileRequestError(detail || other, r.status, errorId)
 }
 
+/** A read of the session's folder the server refused: the status is what the UI branches on. The
+ *  server's own text is kept for matching, never for showing. */
+export class WorkspaceFileError extends Error {
+  readonly status: number
+  readonly errorId?: string
+  readonly serverText: string
+  constructor(status: number, serverText: string, errorId?: string) {
+    super(`workspace file refused (HTTP ${status})`)
+    this.name = 'WorkspaceFileError'
+    this.status = status
+    this.serverText = serverText
+    if (errorId) this.errorId = errorId
+  }
+}
+
+function fromBase64(b64: string): Uint8Array<ArrayBuffer> {
+  const bin = atob(b64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
 /** The file name in a `Content-Disposition: attachment; filename*=UTF-8''...` header, with any
  *  folder dropped; null when there is none or it does not decode. */
 export function filenameFromDisposition(header: string | null): string | null {
@@ -181,7 +205,7 @@ export function uploadWithProgress(
     }
     xhr.onabort = () => {
       signal?.removeEventListener('abort', onAbort)
-      reject(new DOMException('The upload was cancelled.', 'AbortError'))
+      reject(new DOMException('The upload was canceled.', 'AbortError'))
     }
     if (signal?.aborted) {
       xhr.abort()
@@ -203,7 +227,27 @@ export function createFiles(opts: FilesOptions): TransportFiles {
     return res
   }
 
+  const workspaceFile = async (sessionId: string, path: string, signal?: AbortSignal): Promise<WorkspaceFile> => {
+    const r = await request(`${opts.base(sessionId)}/workspace-file?path=${enc(path)}`, { signal })
+    if (!r.ok) {
+      const { detail, errorId } = await replyDetail(r)
+      throw new WorkspaceFileError(r.status, detail, errorId)
+    }
+    const j = (await r.json().catch(() => null)) as Partial<WorkspaceFile> & { content_b64?: unknown } | null
+    if (!j || typeof j.content_b64 !== 'string' || typeof j.view !== 'string') throw new WorkspaceFileError(502, '')
+    const bytes = fromBase64(j.content_b64)
+    return {
+      path: typeof j.path === 'string' ? j.path : path,
+      size: bytes.length,
+      view: j.view,
+      content_type: typeof j.content_type === 'string' ? j.content_type : '',
+      mtime: typeof j.mtime === 'string' ? j.mtime : '',
+      blob: new Blob([bytes]),
+    }
+  }
+
   return {
+    ...(opts.workspace ? { workspaceFile } : {}),
     /** The session's artifacts, newest first. Throws when the list cannot be read. */
     async list(sessionId) {
       const r = await request(artifacts(sessionId))

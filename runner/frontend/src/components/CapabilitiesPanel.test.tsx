@@ -179,3 +179,15 @@ describe('CapabilitiesPanel', () => {
     expect(screen.getByTestId('caps-mcp-pending').textContent).toMatch(/1 tool change pending/)
   })
 })
+
+describe('tool schema refresh capability', () => {
+  it('uses adapter metadata even for an unfamiliar engine name', () => {
+    render(<CapabilitiesPanel report={{ ...report, payload: { ...report.payload, engine: 'fixture-engine', tool_schema_refresh: 'new_session' } }} onClose={() => {}} />)
+    expect(screen.getByTestId('tool-schema-guidance').textContent).toContain('Start a new session and select the current MCP connections and tools')
+  })
+
+  it('does not claim legacy reports can reload tools', () => {
+    render(<CapabilitiesPanel report={report} onClose={() => {}} />)
+    expect(screen.getByTestId('tool-schema-guidance').textContent).toContain("hasn't reported whether")
+  })
+})

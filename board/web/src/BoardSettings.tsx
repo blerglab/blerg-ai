@@ -2,16 +2,7 @@ import { FormEvent, Fragment, useEffect, useLayoutEffect, useRef, useState } fro
 import { api, ApiError, Board } from "./api";
 import { coreOrigin } from "./authClient";
 import { useMe } from "./me";
-
-const ENGINES = [
-  { id: "claude", label: "Claude" },
-  { id: "codex", label: "Codex" },
-  { id: "hermes", label: "Hermes" },
-] as const;
-
-function engineLabel(id: string): string {
-  return ENGINES.find((e) => e.id === id)?.label ?? id;
-}
+import { useBoardLaunchOptions } from "./launchOptions";
 
 // expiryNote: "expires in 12 days" / "expired" — the one thing a human needs
 // to know about a token they can never read back.
@@ -31,6 +22,10 @@ function expiryNote(iso: string | null): string {
 // server never sends it back, so this only ever shows whether one is set.
 function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () => void }) {
   const me = useMe();
+  const canEdit = !!me?.is_admin && !!me?.is_human;
+  const discovery = useBoardLaunchOptions(board.id, canEdit && board.automation_token_set);
+  const label = (id: string) => discovery.engines.find(e => e.id === id)?.name ?? id;
+
   const [token, setToken] = useState("");
   const [engine, setEngine] = useState(board.automation_engine || "claude");
   const [error, setError] = useState("");
@@ -43,7 +38,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
     setEngine(board.automation_engine || "claude");
   }
 
-  const canEdit = !!me?.is_admin && !!me?.is_human;
+  const selected = discovery.state === "known" ? (discovery.engines.find(e => e.id === engine)?.id ?? discovery.engines[0]?.id ?? "") : "";
   const expiry = expiryNote(board.automation_token_expires_at);
 
   const save = async (body: Record<string, string>) => {
@@ -52,6 +47,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
     try {
       await api(`/api/boards/${board.id}`, { method: "PATCH", json: body });
       setToken("");
+      if ("automation_token" in body) discovery.retry();
       onChanged?.();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "save failed");
@@ -61,7 +57,8 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
   };
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    const body: Record<string, string> = { automation_engine: engine };
+    const body: Record<string, string> = {};
+    if (selected && !token.trim()) body.automation_engine = selected;
     if (token.trim()) body.automation_token = token.trim();
     void save(body);
   };
@@ -87,7 +84,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
           {expiry && <span className={`inherit${expiry === "expired" ? " warn" : ""}`}> ({expiry})</span>}
         </dd>
         <dt title="the engine every session this board starts runs">engine</dt>
-        <dd><span className="mono">{engineLabel(board.automation_engine || "claude")}</span></dd>
+        <dd><span className="mono">{label(board.automation_engine || "claude")}</span></dd>
       </dl>
       <p className="pop-foot warn">
         Anyone who can write cards on this board can spend this credential and could get an
@@ -98,20 +95,27 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
         <form className="automation-form" onSubmit={submit}>
           <p className="pop-foot">
             Sessions this board starts run as the person whose token this is, on their
-            own {engineLabel(engine)} credential. To set it: in{" "}
+            own {label(selected || engine)} credential. To set it: in{" "}
             <a href={`${coreOrigin()}/settings`} target="_blank" rel="noopener noreferrer">
               blerg-core Settings → Agent tokens
             </a>
             , create a token with preset <code className="mono">run-sessions</code>, copy it
             and paste it here. It must be your own; it is never shown again. Make sure your{" "}
-            {engineLabel(engine)} credential is connected on the same Settings page.
+            {label(selected || engine)} credential is connected on the same Settings page.
           </p>
-          <label className="field">
-            Engine
-            <select value={engine} onChange={(e) => setEngine(e.target.value)} disabled={busy}>
-              {ENGINES.map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
-            </select>
-          </label>
+          {(discovery.state === "loading" || (discovery.refreshing && discovery.state !== "known")) && <p role="status">Loading available engines…</p>}
+          {discovery.error && <p role="alert">{discovery.error} <button type="button" onClick={discovery.retry}>Retry engine discovery</button></p>}
+          {board.automation_token_set && discovery.state === "known" && discovery.engines.length === 0 && <p role="status">No engines are available for this board's automation account and target.</p>}
+          {discovery.engines.length > 1 && (
+            <label className="field">Engine
+              <select value={selected} onChange={(e) => setEngine(e.target.value)} disabled={busy}>
+                {discovery.engines.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+              </select>
+            </label>
+          )}
+          {discovery.engines.length === 1 && <p>Available engine: {discovery.engines[0].name}</p>}
+          {selected && selected !== (board.automation_engine || "claude") && <p role="status">Save to use {label(selected)} for new sessions. Changing engines clears model and effort overrides for this board and its cards. Existing sessions keep their engine.</p>}
+          {token.trim() && <p>Save the token first, then choose from its available engines.</p>}
           <label className="field">
             Automation token {board.automation_token_set && "(leave empty to keep the current one)"}
             <input type="password" autoComplete="off" spellCheck={false} value={token}
@@ -119,7 +123,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
               onChange={(e) => setToken(e.target.value)} />
           </label>
           <div className="row">
-            <button className="btn small" type="submit" disabled={busy}>Save</button>
+            <button className="btn small" type="submit" disabled={busy || (!selected && !token.trim())}>Save</button>
             {board.automation_token_set && (
               <button className="btn ghost small" type="button" disabled={busy}
                 onClick={() => void save({ automation_token: "" })}>
@@ -145,14 +149,14 @@ function shortModel(m: string): string {
 // override > board.model > empty, which leaves the choice to the runner. An
 // empty role override is NOT "no model" — it means "inherit the board model",
 // so the panel resolves it rather than showing a blank.
-interface RoleModel { key: string; label: string; set: string; what: string }
+interface RoleModel { key: string; label: string; set: string; effort?: string; what: string }
 
 function roleModels(board: Board): RoleModel[] {
   return [
-    { key: "worker", label: "worker", set: board.model, what: "sessions that work a card" },
-    { key: "reviewer", label: "reviewer", set: board.reviewer_model, what: "adversarial review sessions" },
-    { key: "discuss", label: "discuss", set: board.discuss_model, what: "per-card discussion sessions" },
-    { key: "chat", label: "board chat", set: board.chat_model, what: "the board session in the header" },
+    { key: "worker", label: "worker", set: board.model, effort: board.effort, what: "sessions that work a card" },
+    { key: "reviewer", label: "reviewer", set: board.reviewer_model, effort: board.reviewer_effort || (board.reviewer_model ? "" : board.effort), what: "adversarial review sessions" },
+    { key: "discuss", label: "discuss", set: board.discuss_model, effort: board.discuss_effort || (board.discuss_model ? "" : board.effort), what: "per-card discussion sessions" },
+    { key: "chat", label: "board chat", set: board.chat_model, effort: board.chat_effort || (board.chat_model ? "" : board.effort), what: "the board session in the header" },
   ];
 }
 
@@ -233,7 +237,7 @@ export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: 
                   <dd>
                     <span className={`mono${effective ? "" : " unset"}`}
                       title={effective ? effective : "no model configured anywhere — the runner picks"}>
-                      {effective || "runner default"}
+                      {effective || "runner default"}{r.effort ? ` · ${r.effort}` : ""}
                     </span>
                     {!r.set && r.key !== "worker" && (
                       <span className="inherit"> (inherited)</span>

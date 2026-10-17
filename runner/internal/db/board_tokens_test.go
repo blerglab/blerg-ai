@@ -14,10 +14,6 @@ import (
 func TestBoardTokenMintValidate(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "10000000-0000-0000-0000-000000000001"
 	sessionID := "20000000-0000-0000-0000-000000000001"
@@ -80,10 +76,6 @@ func TestBoardTokenMintValidate(t *testing.T) {
 func TestBoardTokenTampered(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	// Totally unknown token — no rows in DB.
 	_, err := db.ValidateBoardToken(ctx, pool, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
@@ -131,10 +123,6 @@ func TestBoardTokenTampered(t *testing.T) {
 func TestBoardTokenExpired(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "10000000-0000-0000-0000-000000000003"
 	sessionID := "20000000-0000-0000-0000-000000000003"
@@ -167,10 +155,6 @@ func TestBoardTokenExpired(t *testing.T) {
 func TestBoardTokenExpirySlides(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "10000000-0000-0000-0000-000000000005"
 	sessionID := "20000000-0000-0000-0000-000000000005"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "token-daemon5", "local", "/repos"); err != nil {
@@ -224,10 +208,6 @@ func TestBoardTokenExpirySlides(t *testing.T) {
 func TestBoardTokenRevokeBySession(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "10000000-0000-0000-0000-000000000004"
 	sessionID := "20000000-0000-0000-0000-000000000004"
@@ -286,10 +266,6 @@ func TestBoardTokenRevokeBySession(t *testing.T) {
 func TestMintSessionTokenValidatesWithoutBoard(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	if err := db.UpsertDaemon(ctx, pool, "11111111-1111-4111-8111-111111111111", "laptop", "local", "/repos"); err != nil {
 		t.Fatal(err)
 	}

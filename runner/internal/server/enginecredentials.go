@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+
+	"github.com/blerglab/blerg-ai/contracts/engineaccess"
 )
 
 var errPersonalCredentialUnavailable = errors.New("the owner’s credential could not be verified; retry or reconnect in Settings")
@@ -18,14 +20,7 @@ var errPersonalCredentialUnavailable = errors.New("the owner’s credential coul
 var errManagedCredential = errors.New("the managed engine connection is unavailable; reconnect it in Settings")
 
 // managedAccess is access-only. Refresh authority stays encrypted in Core.
-type managedAccess struct {
-	Mode        string    `json:"mode"`
-	AccessToken string    `json:"access_token"`
-	AccountID   string    `json:"chatgpt_account_id"`
-	PlanType    string    `json:"plan_type,omitempty"`
-	Generation  string    `json:"generation"`
-	ExpiresAt   time.Time `json:"expires_at"`
-}
+type managedAccess = engineaccess.Access
 
 type managedAccessRequest struct {
 	AccountID          string `json:"account_id"`
@@ -74,8 +69,8 @@ func fetchManagedAccess(parent context.Context, client *http.Client, coreURL, ke
 	if resp.StatusCode != http.StatusOK {
 		return nil, false, errManagedCredential
 	}
-	var access managedAccess
-	if json.Unmarshal(raw, &access) != nil || access.Mode != "chatgptAuthTokens" || access.AccessToken == "" || len(access.AccessToken) > 24<<10 || access.AccountID == "" || len(access.AccountID) > 256 || access.Generation == "" || !access.ExpiresAt.After(time.Now()) {
+	access, err := engineaccess.DecodeForEngine(body.Engine, raw, time.Now())
+	if err != nil {
 		return nil, false, errManagedCredential
 	}
 	return &access, true, nil
@@ -156,17 +151,12 @@ var errCoreManagedCredential = errors.New("the engine credential requires manage
 
 const managedCredentialEnv = "BLERG_RUNNER_MANAGED_CREDENTIAL" //nolint:gosec // G101: environment variable name, never a credential.
 
-// Registry entries declare the native external-auth adapter supported by the
-// agent image. New engines opt in here; unsupported modes fail closed.
-var managedCredentialModes = map[string]string{"codex": "chatgptAuthTokens"}
-
 func (j *JobManager) bindManagedCredential(ctx context.Context, spec SessionJobSpec) error {
-	mode, ok := managedCredentialModes[spec.Engine]
-	if !ok || j.historyPool == nil {
+	if !engineaccess.SupportsEngine(spec.Engine) || j.historyPool == nil {
 		return errManagedCredential
 	}
-	access, found, err := fetchManagedAccess(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, managedAccessRequest{AccountID: spec.SpawningAccountID, Engine: spec.Engine, TokenID: spec.TokenID, SessionID: spec.AuthSessionID})
-	if err != nil || !found || access.Mode != mode {
+	_, found, err := fetchManagedAccess(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, managedAccessRequest{AccountID: spec.SpawningAccountID, Engine: spec.Engine, TokenID: spec.TokenID, SessionID: spec.AuthSessionID})
+	if err != nil || !found {
 		return errManagedCredential
 	}
 	// Bind the launch's runtime token, never the messaging token: only the

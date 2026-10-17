@@ -8,11 +8,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,66 +20,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// runnerContractPool gives one test its OWN schema, pinned on every connection
-// the pool opens (a RuntimeParam, not a `SET` that lands on whichever
-// connection ran it). Both halves matter here: these tests drive the API
-// through an httptest server, so handler goroutines open pool connections
-// concurrently with the test goroutine, and a per-test schema means no other
-// test's teardown can drop the tables out from under one of them.
+// runnerContractPool gives each test its own migrated database; handler
+// goroutines inherit the same schema and cannot collide with another teardown.
 func runnerContractPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database integration tests")
-	}
-	schema := contractTestSchemaName(t.Name())
-	ctx := context.Background()
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	for _, q := range []string{
-		fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema),
-		fmt.Sprintf("CREATE SCHEMA %s", schema),
-	} {
-		if _, err := pool.Exec(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(),
-			fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
-	})
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
-	return pool
-}
-
-// contractTestSchemaName turns a test name into a legal, unique schema
-// identifier (lowercase, no punctuation, within Postgres's 63-byte limit).
-func contractTestSchemaName(name string) string {
-	var b strings.Builder
-	b.WriteString("test_rc_")
-	for _, r := range strings.ToLower(name) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
-	}
-	s := b.String()
-	if len(s) > 60 {
-		s = s[:60]
-	}
-	return s
+	return connectSrvTestDB(t)
 }
 
 // clusterRunnerAPI is the cluster shape of the runner contract: a JobManager

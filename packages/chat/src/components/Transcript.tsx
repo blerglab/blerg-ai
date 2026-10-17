@@ -722,7 +722,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
             })}
         {streaming && (
           <div className="agent-card assistant streaming" data-testid="streaming">
-            <Markdown text={streaming} cards={cards} />
+            <Markdown text={streaming} cards={cards} workspaceLinks />
           </div>
         )}
         {resuming && startPanel}

@@ -25,6 +25,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 const (
@@ -65,23 +66,24 @@ func viewOfDefinition(d *db.ToolDefinition) *definitionView {
 }
 
 type toolChangeView struct {
-	ID             string          `json:"id"`
-	State          string          `json:"state"`
-	Kind           string          `json:"kind"`
-	ConnectionID   string          `json:"connection_id"`
-	ConnectionName string          `json:"connection_name"`
-	Tool           string          `json:"tool"`
-	OldHash        string          `json:"old_hash"`
-	NewHash        string          `json:"new_hash"`
-	Mode           string          `json:"mode"`
-	Muted          bool            `json:"muted"`
-	SessionID      string          `json:"session_id"`
-	CreatedAt      time.Time       `json:"created_at"`
-	ExpiresAt      time.Time       `json:"expires_at"`
-	DecidedAt      *time.Time      `json:"decided_at"`
-	DecidedBy      *string         `json:"decided_by"`
-	OldDefinition  *definitionView `json:"old_definition,omitempty"`
-	NewDefinition  *definitionView `json:"new_definition,omitempty"`
+	ToolSchemaRefresh string          `json:"tool_schema_refresh,omitempty"`
+	ID                string          `json:"id"`
+	State             string          `json:"state"`
+	Kind              string          `json:"kind"`
+	ConnectionID      string          `json:"connection_id"`
+	ConnectionName    string          `json:"connection_name"`
+	Tool              string          `json:"tool"`
+	OldHash           string          `json:"old_hash"`
+	NewHash           string          `json:"new_hash"`
+	Mode              string          `json:"mode"`
+	Muted             bool            `json:"muted"`
+	SessionID         string          `json:"session_id"`
+	CreatedAt         time.Time       `json:"created_at"`
+	ExpiresAt         time.Time       `json:"expires_at"`
+	DecidedAt         *time.Time      `json:"decided_at"`
+	DecidedBy         *string         `json:"decided_by"`
+	OldDefinition     *definitionView `json:"old_definition,omitempty"`
+	NewDefinition     *definitionView `json:"new_definition,omitempty"`
 }
 
 func viewOfToolChange(c *db.ToolChange) toolChangeView {
@@ -157,10 +159,7 @@ func (h *toolChangesHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not list tool changes")
 		return
 	}
-	out := make([]toolChangeView, 0, len(rows))
-	for i := range rows {
-		out = append(out, viewOfToolChange(&rows[i]))
-	}
+	out := h.views(r.Context(), rows)
 	writeJSON(w, http.StatusOK, map[string]any{"tool_changes": out, "decided_next": next, "pending_count": pending})
 }
 
@@ -173,7 +172,7 @@ func (h *toolChangesHandler) get(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	v := viewOfToolChange(c)
+	v := h.view(r.Context(), c)
 	if c.OldHash != "" {
 		if d, err := db.GetToolDefinition(r.Context(), h.p.api.dbPool, c.OldHash); err == nil {
 			v.OldDefinition = viewOfDefinition(d)
@@ -205,7 +204,7 @@ func (h *toolChangesHandler) decline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("tool changes: declined id=%s account=%s connection=%s tool=%q", c.ID, c.AccountID, c.ConnectionID, c.Tool)
-	writeJSON(w, http.StatusOK, viewOfToolChange(done))
+	writeJSON(w, http.StatusOK, h.view(r.Context(), done))
 }
 
 func transitionToolChangeError(w http.ResponseWriter, err error) {
@@ -239,7 +238,7 @@ func (h *toolChangesHandler) accept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c.State == db.ToolChangeAccepted {
-		writeJSON(w, http.StatusOK, viewOfToolChange(c)) // idempotent
+		writeJSON(w, http.StatusOK, h.view(r.Context(), c)) // idempotent
 		return
 	}
 	if c.State != db.ToolChangePending {
@@ -348,7 +347,7 @@ func (h *toolChangesHandler) accept(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, db.ErrToolChangeState) {
 		// A concurrent accept may have just closed the row: that is the idempotent answer.
 		if again, gerr := db.GetOwnedToolChange(ctx, h.p.api.dbPool, who.Account, c.ID); gerr == nil && again.State == db.ToolChangeAccepted {
-			writeJSON(w, http.StatusOK, viewOfToolChange(again))
+			writeJSON(w, http.StatusOK, h.view(r.Context(), again))
 			return
 		}
 	}
@@ -422,7 +421,7 @@ func (h *toolChangesHandler) accept(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("tool changes: accepted id=%s account=%s connection=%s tool=%q mode=%s", c.ID, c.AccountID, c.ConnectionID, c.Tool, body.Mode)
 	h.p.api.hub.RefreshSessionTools(c.SessionID)
-	writeJSON(w, http.StatusOK, viewOfToolChange(done))
+	writeJSON(w, http.StatusOK, h.view(r.Context(), done))
 }
 
 type pinEventView struct {
@@ -472,4 +471,48 @@ func (h *toolChangesHandler) connectionEvents(w http.ResponseWriter, r *http.Req
 	}
 	evs, err := db.ListPinEventsForConnection(r.Context(), h.p.api.dbPool, who.Account, r.PathValue("id"), 200)
 	writePinEvents(w, evs, err)
+}
+
+// views enriches only rows already selected under the requester's ownership.
+// Read one enum from one latest report per distinct session in a single bounded
+// indexed query. Missing/malformed reports and lookup failures stay unknown;
+// none of the report's inventory, private paths or provider data is returned.
+func (h *toolChangesHandler) views(ctx context.Context, changes []db.ToolChange) []toolChangeView {
+	out := make([]toolChangeView, 0, len(changes))
+	ids := make([]string, 0, len(changes))
+	for i := range changes {
+		out = append(out, viewOfToolChange(&changes[i]))
+		ids = append(ids, changes[i].SessionID)
+	}
+	if len(ids) == 0 || len(ids) > db.MaxOpenToolChangesListed || h.p.api.dbPool == nil {
+		return out
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	rows, err := h.p.api.dbPool.Query(ctx, `SELECT wanted.id::text,
+ coalesce((SELECT CASE WHEN payload->>'tool_schema_refresh' IN ('next_turn','new_session') THEN payload->>'tool_schema_refresh' ELSE '' END
+ FROM agent_events WHERE session_id=wanted.id AND kind='capabilities' ORDER BY seq DESC LIMIT 1),'')
+ FROM (SELECT DISTINCT unnest($1::uuid[]) AS id) wanted`, ids)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	policies := map[string]string{}
+	for rows.Next() {
+		var id, policy string
+		if rows.Scan(&id, &policy) != nil {
+			return out
+		}
+		policies[id] = protocol.SanitizeToolSchemaRefresh(policy)
+	}
+	if rows.Err() != nil {
+		return out
+	}
+	for i := range out {
+		out[i].ToolSchemaRefresh = policies[out[i].SessionID]
+	}
+	return out
+}
+func (h *toolChangesHandler) view(ctx context.Context, c *db.ToolChange) toolChangeView {
+	return h.views(ctx, []db.ToolChange{*c})[0]
 }

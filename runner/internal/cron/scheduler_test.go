@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -134,46 +134,18 @@ type env struct {
 	paused   chan string
 }
 
-// newEnv gives every test its own schema with all migrations applied, a fake
+// newEnv gives every test its own migrated database, a fake
 // clock at start0, a fake Starter and fake session dependency.
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database tests")
-	}
-	ctx := context.Background()
-	const schema = "t22_cron"
-	boot, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, q := range []string{
-		fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema),
-		fmt.Sprintf("CREATE SCHEMA %s", schema),
-	} {
-		if _, err := boot.Exec(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	base := testsupport.Open(t, "TEST_DATABASE_URL", "runner", db.RunMigrations)
+	cfg := base.Config()
 	cfg.MaxConns = 12
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("open isolated cron test pool")
 	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = boot.Exec(context.Background(), fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
-		boot.Close()
-	})
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
+	t.Cleanup(pool.Close)
 	return &env{
 		t: t, pool: pool, clock: &fakeClock{t: start0},
 		starter:  &fakeStarter{pool: pool, byRun: map[string]error{}},

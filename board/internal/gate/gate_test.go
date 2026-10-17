@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/blerglab/blerg-ai/board/internal/db"
 	"github.com/blerglab/blerg-ai/board/internal/gate"
+	"github.com/blerglab/blerg-ai/board/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -30,20 +30,7 @@ func (f *fake) Review(_ context.Context, _ gate.Input) (gate.Verdict, error) {
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	pool, err := db.Connect(context.Background(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	_, err = pool.Exec(context.Background(),
-		`TRUNCATE boards, tokens, admission_reviews RESTART IDENTITY CASCADE`)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pool := testsupport.Pool(t, db.RunMigrations)
 	return pool
 }
 

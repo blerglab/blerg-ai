@@ -95,6 +95,26 @@ markdown or PDF file: select a passage, ask for a change, edit the markdown your
 up** (an image: draw on it, drop numbered pins with notes). Both send one message the agent can
 act on line by line. See [Review and mark-up](artifacts.md#review-and-mark-up).
 
+## Files the agent mentions
+
+When the agent's text names a file in the session's folder that it did not publish, you can open it.
+A relative link (`[the readme](README.md)`, `[x](docs/a.md#L12)`) or inline code that looks like a
+path (`runner/internal/server/artifacts.go:120`, `README.md`, `./scripts/scrub.sh`, `/workspace/x`)
+is drawn with a dotted underline and the hint "Open from the session's folder". Only the agent's
+text is read this way, never your own messages, a code block, a URL or a host path such as
+`/home/...`. A bare `foo.bar` is not taken for a file unless its extension is a known one, and a name
+with a slash needs a file-like last part (`and/or` and `src/components` stay text).
+
+A click reads the file through the session (`GET /api/sessions/{id}/workspace-file?path=`, without any
+`:line`, `#L` or query part) and opens it in the same viewer as published files: markdown, text, JSON,
+CSV, images and PDF as usual; html in a sandboxed frame with no network, and svg only as an image.
+Code files show numbered, highlighted lines, scrolled to the line the text named. The header says
+"From the session's folder · as of now"; **Copy path**, **Download** and **Save a copy to Files** act
+on what was read (the copy is kept as your own file even after the folder changes). Only the session's
+owner sees these links, because the route refuses everyone else. A refusal is one plain sentence, not
+the server's text: not found, files that usually hold secrets, other paths Blerg won't open, a session
+that isn't running, a busy reader (try again), or a file too large. The board's chat does not open them.
+
 ## When the agent asks, updates or leaves a note
 
 An agent reaches you with `blerg-runner ask`, `blerg-runner update` and `blerg-runner note`, and
@@ -148,8 +168,19 @@ Text you did not type is not drawn as yours, and a failure is not drawn as the m
 - A message you sent that the session dropped (its queue was full) says it was not delivered, and
   its "Queued" bubble goes away; a delivered one never shows twice.
 
+Code and files are drawn to be read, not to fill the screen:
+
+- A code block is colored by its language once the agent has finished writing it (while it is still
+  streaming it is plain). A block over 25 lines shows its first 15 with **Show all N lines** and
+  **Open**, which shows it large with line numbers and a copy button; **Copy** on the block always
+  copies all of it. A `diff` block marks added and removed lines.
+- A message you paste that is over 25 lines is compacted the same way in your own bubble.
+- A file the agent publishes, or one you attach, shows a small preview in the chat: a markdown file
+  rendered, text, code and JSON as their first lines, a CSV as a few rows, a PDF as its first page.
+  Click it to open the file. Big files (over 256 KiB, or 5 MiB for a PDF) just show the file card.
+
 These come from the daemon, so on a machine still running an older daemon you keep the old
-behaviour until you reinstall it: the restart note and a command's output are missing or drawn as
+behavior until you reinstall it: the restart note and a command's output are missing or drawn as
 yours, an API failure reads as the agent's message, retries and compactions show as before, and a
 slash skill shows its instructions. Asks, updates and notes from `blerg-runner`, and an answer
 typed in the chat, work with any daemon.
@@ -157,6 +188,17 @@ typed in the chat, work with any daemon.
 If the browser falls behind a very busy session and the server has to drop live events for it, the
 chat is told and fetches them again; you may see the transcript fill in a moment later, not lose a
 line.
+
+## Copying and pasting
+
+The chat copies and pastes the way other products do. **Copy** on a message (hover, or keyboard focus;
+always shown on a phone) copies the message as Markdown, and as formatted text for an editor that
+takes it. Selecting part of the chat and copying keeps the structure (headings, lists, links, tables,
+code) without the timestamps and buttons; a selection inside one code block copies that code exactly.
+Pasting formatted text from a web page, Docs, Slack or GitHub into the message box inserts it as
+Markdown: images and scripts are dropped, a code block keeps its language. Plain text, code copied
+from an editor or terminal, and text that is already Markdown go in as they are. **Ctrl/Cmd+Shift+V**
+pastes plain text, and undo (Ctrl/Cmd+Z) takes a paste back in one step.
 
 ## Interrupting
 
@@ -190,7 +232,7 @@ Following starts again when you reach the end or send a message.
 
 When the model thinks before it answers, the transcript keeps that thinking as an ordinary message
 card in the same plain text, captioned "thinking" where a message shows its time. Untick "Show
-thinking" in the session panel's Settings ([below](#the-session-panel)) to leave it out (the choice is
+thinking" in Settings ([below](#settings)) to leave it out (the choice is
 kept in your browser). Thinking is never the agent's answer: the answer is the message under it.
 
 When a Claude Code agent hands part of the work to a subagent (its `Agent` tool), that subagent
@@ -222,9 +264,14 @@ the finished row.
 ## The session panel
 
 An agent session's page has a panel on its right with what is live in the session and what it has
-done. The panel has four tabs: **Live** (Needs you, Running now, Session and Settings, below),
-**History**, **Files** and **Capabilities** (below); the tab you chose is remembered per browser, and a new
-question shows Live without changing that choice. The chat's toolbar above the conversation keeps
+done. The panel has up to five tabs: **Live** (a one-line summary of the checklist, Needs you, Running now,
+MCP servers and Session, below), **Plan**, **History**, **Files** and **Capabilities** (below); the tab you chose is remembered per browser, and a new
+question shows Live without changing that choice. **Plan** holds the pinned tickets, the checklist (or the engine's own plan) and the diffs the session
+published, newest first; click a diff to open it in the viewer. It shows only when the session has one of
+them, and its label carries the progress ("Plan 18/23", or a count of tickets and diffs when there is
+no list). Live keeps one line at its top for the list ("Checklist · 18 of 23 · Next: ..."), with a thin
+bar under it; click it to go to Plan. A long checklist therefore never pushes Needs you and Running now
+off Live. The chat's toolbar above the conversation keeps
 the model and effort pickers, Rules and Stop; what belongs to the session as a whole is in the
 panel. On a wide
 screen (1024 px and up) it is a column beside the chat, and the chat makes room for it; on a narrower
@@ -237,17 +284,31 @@ Tool changes waiting on you do not reopen it: their count is read when the sessi
 when you open the panel or its Capabilities tab. The drawer opens only when you ask for it.
 Terminal sessions have no panel.
 
+- **Ticket**: the tickets the agent pinned, at the very top when there are any
+  ([tickets and checklists](#tickets-and-checklists), below): the current one with its key (a link
+  to the tracker), status and title, the others one line each. Clicking a title opens the whole
+  ticket over the page, with "Show in conversation" to its card.
+- **Checklist**: the agent's checklist, with "3 of 7 done" beside the title, a thin bar and the items
+  (ticked ones struck through; you cannot tick them, only the agent does). When the agent set none, a
+  Claude Code or Codex session shows the engine's own plan here instead, titled **Plan**, its header saying
+  what is in progress ("Writing tests · 3 of 7"). Hidden when there is neither. An item the agent
+  ticked with commits (`--commit`) shows a chip ("2 commits") that opens to the short shas: a link to
+  the commit when the session's repository is known, otherwise a button that copies the sha.
 - **Needs you**: the agent's open questions, each with how long it has been waiting and a box that
   answers it (the same answer as the ask card's), and the MCP tool changes waiting on your decision
   for this session, with a link to the Proposals page showing that session's proposals and tool
   changes (with a link back to all of them).
+- **MCP servers**: when the session's engine reported any, one quiet line: "Connecting 2 of 3…" with
+  a spinner while they connect, then "3 connected" (or "2 connected · 1 failed · 1 needs sign-in",
+  the failures in the warning color). It opens to each server's name, state, source and, when
+  connected, tool count. Hidden when the session has none, and on a daemon older than the report.
 - **Running now**: the subagents at work, each with its task, type, model, tokens, what it is doing
   and how long it has run; and the background tasks.
 - **Session**: where it runs, the engine and model, when it started and how long it has lived. The
-  session's Insights open from the Insights button in the session header.
-- **Settings**: two checkboxes for the chat, kept in your browser. **Show thinking** draws the
-  model's thinking in the transcript; **Compact tool calls** folds a run of tool calls into one
-  summary row. Both are on until you untick them.
+  session's Insights open from the Insights button in the session header. For an engine that can
+  continue after a usage limit, **Resume when limit resets** is here too: it belongs to this session
+  ([Usage limits](#resume-after-a-usage-limit)). Settings that apply to every session are not in the
+  panel; they are in the **Settings** dialog (below).
 - **History** is the panel's second tab: the pieces of work the agent marked, newest first
   ([History](#history), below).
 - **Files** lists every file the session holds, as the Files dialog over the chat used to: published
@@ -277,6 +338,51 @@ part of the conversation the chat has loaded, and Running now agrees with the si
 server is asked again when something starts, ends or asks (at most every five seconds), and what
 happens in between moves the list at once. A runner server older than this reads only what the chat
 has loaded, as before: the lists fill in as the history loads.
+
+### Tickets and checklists
+
+When the agent works on a ticket (a JIRA issue, a Bugzilla bug, a GitHub issue, a Blerg Board card,
+anything a tracker holds) it reads it with the tools it has and pins it with
+`blerg-runner pin <file.json>`: it maps what the tracker returned into one shape (`blerg-runner pin
+--help` shows it, with a JIRA and a Bugzilla example) and the session draws it the same way whatever
+the tracker. The chat shows a ticket card: the tracker's name, the key (a link when the address is
+http or https), status, type and priority, the people, labels, the description (long ones start
+collapsed, with Show all), extra fields, the acceptance criteria and the latest comments (collapsed).
+Pinning it again refreshes it, and the new card says "Ticket updated" and what changed (the status,
+a new title). At most five are pinned at once; the newest is the current one, and
+`blerg-runner unpin [<source>:<key>]` takes one off (a line in the chat says so). A Board card is
+pinned the same way (source `blerg-board`); nothing is pinned by itself.
+
+Pinning copies the ticket's text into the session: whoever can see the session can read it, as
+they can read the rest of it (a private session is yours alone). The text is drawn as plain text and
+markdown, never as a web page: no scripts, no images, no app cards, and a link only to http or https
+addresses. The tracker's name on the card is what the agent said; its tooltip says the agent pinned
+it.
+
+The agent keeps a checklist of the work with `blerg-runner checklist set "<item>" …`, then `tick`,
+`untick`, `add` and `clear` (`blerg-runner checklist --help`); `pin --checklist` sets it to the
+ticket's acceptance criteria. Each change is a compact row in the chat ("Checklist · 3 of 7 done ·
+ticked “Write tests”") that opens to the list; changes one after another with nothing between them
+are one row, the latest. The session guide asks the agent for both. A session reloaded later shows the
+same ticket and checklist: each event holds the whole state and what changed.
+
+Name the commits that finished an item with `blerg-runner checklist tick <n> --commit <sha>` (or
+`add … --commit`; repeat the flag or comma-separate the shas; 7 to 40 hex characters, at most 20 on one
+item, the same check as `topic --done --commit`). Ticking again adds more; a repeat is dropped. The
+item shows a commit chip in the panel and in the chat row. Run in the repository, the command also
+publishes the diff of those commits ([Diffs](artifacts.md#diffs)) and keeps its id on the item: the chip
+gets **View diff**, which opens it. When the diff cannot be made (the commits are not in that
+repository, or it is over the per-file limit) the command says so and the item keeps its commits
+without one.
+
+### The first message waits for MCP servers
+
+A new session holds its first message for up to 30 seconds while its MCP servers connect, so the
+agent starts with its tools (`BLERG_RUNNER_MCP_PROMPT_WAIT_S`, 0 turns the wait off). While it waits the
+chat shows, above the message box, "Waiting for MCP servers before sending your first message · 0:12 /
+0:30 · Send now". **Send now** (the session's owner only; others see the wait without the button)
+sends it at once. When it is let go, the panel's MCP line says why: the servers were ready, the wait
+ran out, or you chose to. Later messages never wait.
 
 ### History
 
@@ -345,6 +451,24 @@ knows only the ones in the part of the conversation you have loaded. The board's
 says what runs. A session that goes idle with tasks still running keeps its agent process alive for
 them, up to about an hour; after that the process is closed and the tasks are marked stopped.
 
+## Settings
+
+**Settings** is the entry under **Insights** in the left bar (a tab on a phone). It opens a dialog
+over the page you are on: you stay in your session, and **Esc**, the backdrop or **×** close it. On a
+phone it fills the screen. It holds what applies across all your sessions:
+
+- **Chat**: **Show thinking** draws the model's thinking in the transcript; **Compact tool calls**
+  folds a run of tool calls into one summary row. Both act at once, are on until you untick them, and
+  are kept in your browser.
+- **Code colors**: pick a theme for dark mode and one for light (Blerg, GitHub, One Dark, Dracula,
+  Monokai, Solarized, Nord, Gruvbox), change single colors under *Customize*, and watch real code
+  blocks (ts, go, python, json, a diff) change as you do. **Save colors** keeps the choice on your
+  account, so it follows you to every browser and to the board's chat; closing the dialog first throws
+  the draft away.
+
+Account, tokens and connections are in Blerg's main Settings, which the dialog links to. Per-session
+choices, such as Resume when limit resets, stay in the session panel.
+
 ## Engine notes and the kill switch
 
 This applies to Claude Code sessions. The other engines (Codex, Hermes) still take one message at a
@@ -360,7 +484,7 @@ input mode falls back to that by itself). The design is in
 ## Resume after a usage limit
 
 For a Claude or Codex agent session you launched, turn on **Resume when limit
-resets** in the session panel's Settings. The runner records an actual provider refusal and waits
+resets** in the session panel's Session section. The runner records an actual provider refusal and waits
 until one minute after the reported reset before sending a continuation. You can
 turn it on after a refusal too, provided that interrupted turn is still current.
 A usage meter reaching 100% does not by itself schedule work. If the provider does

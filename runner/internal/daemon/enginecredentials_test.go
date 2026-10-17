@@ -8,7 +8,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/blerglab/blerg-ai/contracts/engineaccess"
 )
+
+func TestManagedEngineCredentialSourceUsesRegisteredMode(t *testing.T) {
+	t.Cleanup(engineaccess.Register(engineaccess.TokenCodec("fixture-engine", "fixtureAccessTokens")))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(engineaccess.Access{Mode: "fixtureAccessTokens", AccessToken: "fixture-access", AccountID: "fixture-provider", Generation: "fixture-generation", ExpiresAt: time.Now().Add(time.Hour)})
+	}))
+	defer server.Close()
+	access, err := ManagedEngineCredentialSource(server.URL, "fixture-session", "fixture-engine")(t.Context(), false, "")
+	if err != nil || access.Mode != "fixtureAccessTokens" || access.AccountID != "fixture-provider" {
+		t.Fatal("second native engine mode was refused")
+	}
+}
 
 func fixtureEngineAccess() EngineCredentialAccess {
 	return EngineCredentialAccess{Mode: "chatgptAuthTokens", AccessToken: "fixture-private-access", AccountID: "fixture-provider-account", Generation: "fixture-generation", ExpiresAt: time.Now().Add(time.Hour)}
@@ -25,7 +39,7 @@ func TestManagedEngineCredentialSourceBindsRequest(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(fixtureEngineAccess())
 	}))
 	defer server.Close()
-	access, err := ManagedEngineCredentialSource(server.URL, "fixture-session")(context.Background(), true, "fixture-generation")
+	access, err := ManagedEngineCredentialSource(server.URL, "fixture-session", "codex")(context.Background(), true, "fixture-generation")
 	if err != nil || access.AccessToken != "fixture-private-access" {
 		t.Fatal("access delivery failed")
 	}
@@ -68,7 +82,7 @@ func TestManagedEngineCredentialSourceRejectsFailures(t *testing.T) {
 			defer server.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
-			access, err := ManagedEngineCredentialSource(server.URL, "fixture-session")(ctx, false, "")
+			access, err := ManagedEngineCredentialSource(server.URL, "fixture-session", "codex")(ctx, false, "")
 			if err == nil || access.AccessToken != "" || followed {
 				t.Fatal("unsafe credential response accepted")
 			}

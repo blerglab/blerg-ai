@@ -50,7 +50,7 @@ function Window({ provider, w, now, fetchedAt }: { provider: string; w: UsageWin
         data-testid="usage-window-capped"
         role="status"
         className="usage-meter usage-meter--danger usage-meter--capped"
-        title={when ? `${providerName(provider)} refused a call for its usage limit · resets ${when}` : `${providerName(provider)} spend limit reached`}
+        title={when ? `${providerName(provider)} refused a call for its usage limit · resets ${when}` : `${providerName(provider)} usage limit reached · reset time unknown`}
       >
         <span className="usage-meter__dot" />
         capped{w.resets_at ? ` · resets ${resetClock(w.resets_at, now)}` : ''}

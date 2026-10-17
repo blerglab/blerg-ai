@@ -15,11 +15,13 @@ import (
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 type codexQuestionStatus struct{ turn, status string }
 
 type codexRPC struct {
+	planEpoch      uint64 // native root-turn scope when a plan notification was read
 	questionStatus *codexQuestionStatus
 	childProof     *codexChildProof
 	ID             json.RawMessage `json:"id"`
@@ -53,6 +55,13 @@ type codexApp struct {
 	interruptedChildren map[string]string
 	done                chan struct{}
 	turn                string
+	planEpoch           uint64 // increments for each root turn/start attempt; protected by mu
+	planStarting        bool   // covers RPC response through accepted-turn binding; protected by mu
+
+	terminalPollInterval time.Duration // zero uses the production polling interval
+	// Protected by d.mu; native MCP inventory is available before thread setup.
+	mcpInitialized bool
+	mcpThreadReady bool
 }
 
 func (a *codexApp) write(v any) error {
@@ -173,6 +182,9 @@ func (a *codexApp) read(r io.Reader) {
 		if json.Unmarshal(sc.Bytes(), &v) != nil {
 			continue
 		}
+		if v.Method == "turn/plan/updated" && len(v.Params) > protocol.MaxPlanUpdatedBytes {
+			continue
+		}
 		if len(v.ID) > 0 && v.Method == "" {
 			var id int
 			if json.Unmarshal(v.ID, &id) == nil {
@@ -191,6 +203,9 @@ func (a *codexApp) read(r io.Reader) {
 			continue
 		}
 		a.mu.Lock()
+		if v.Method == "turn/plan/updated" && (a.turn != "" || a.starting || a.planStarting) {
+			v.planEpoch = a.planEpoch
+		}
 		if len(a.backlog) >= 4096 || a.backlogBytes+len(v.Params) > 64<<20 {
 			a.failure = "Codex event backlog exceeded its safety limit; resume the saved thread"
 			a.mu.Unlock()
@@ -284,6 +299,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	a.interruptRequested = d.interruptNext
 	d.interruptNext = false
 	d.app = a
+	d.mcpGeneration++
 	d.mu.Unlock()
 	defer func() {
 		_ = in.Close()
@@ -315,6 +331,9 @@ func (d *codexDriver) runApp(ctx context.Context) {
 		return
 	}
 	_ = a.writeContext(appCtx, map[string]any{"method": "initialized"})
+	d.mu.Lock()
+	a.mcpInitialized = true
+	d.mu.Unlock()
 	if err := a.loginManagedCredential(appCtx); err != nil {
 		d.emit("error", agent.ErrorPayload{Message: "Codex managed login is unavailable. Reconnect the credential in Settings and retry.", Retryable: true, Code: agent.ErrorCodeAPI})
 		return
@@ -323,6 +342,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	d.mu.Lock()
 	d.effort = d.reconcileEffortLocked(d.model, d.effort)
 	model, effort, thread := d.model, d.effort, d.threadID
+	settingsGeneration := d.settingsGeneration
 	d.mu.Unlock()
 	params := map[string]any{"cwd": d.runtimeWorkDir(), "approvalPolicy": "never", "sandbox": "danger-full-access"}
 	config := map[string]any{}
@@ -376,45 +396,70 @@ func (d *codexDriver) runApp(ctx context.Context) {
 		Thread struct {
 			ID string `json:"id"`
 		} `json:"thread"`
-		Model  string `json:"model"`
-		Effort string `json:"reasoningEffort"`
+		Model  string          `json:"model"`
+		Effort json.RawMessage `json:"reasoningEffort"`
 	}
 	if json.Unmarshal(raw, &response) != nil || !validCodexThreadID(response.Thread.ID) || (thread != "" && response.Thread.ID != thread) {
 		d.emit("error", agent.ErrorPayload{Message: "Codex returned an unexpected thread identity", Retryable: true})
 		return
 	}
-	if response.Effort == "" {
-		response.Effort = a.defaultEffort(response.Model)
+	reportedEffort := ""
+	if len(response.Effort) > 0 {
+		if string(response.Effort) != "null" && json.Unmarshal(response.Effort, &reportedEffort) != nil {
+			d.emit("error", agent.ErrorPayload{Message: "Codex returned invalid thread settings", Retryable: true})
+			return
+		}
+		if reportedEffort == "" {
+			reportedModel := response.Model
+			if reportedModel == "" {
+				reportedModel = model
+			}
+			reportedEffort = a.defaultEffort(reportedModel)
+		}
 	}
+	d.settingsMu.Lock()
 	d.mu.Lock()
 	d.threadID = response.Thread.ID
-	if d.model == model {
-		d.model = response.Model
-	}
-	if d.effort == effort {
-		d.effort = response.Effort
+	a.mcpThreadReady = true
+	if d.settingsGeneration == settingsGeneration {
+		if response.Model != "" {
+			d.model = response.Model
+		}
+		if len(response.Effort) > 0 {
+			d.effort = reportedEffort
+		} else {
+			d.effort = d.reconcileEffortLocked(d.model, d.effort)
+		}
 	}
 	thread = d.threadID
 	d.mu.Unlock()
+	d.settingsMu.Unlock()
 	if d.onThreadID != nil {
 		d.onThreadID(thread)
 	}
+	d.settingsMu.Lock()
 	d.mu.Lock()
 	effective := agent.ModelChangedPayload{Model: d.model, Effort: d.effort, Source: "start"}
+	publish := d.settingsGeneration == settingsGeneration
 	d.mu.Unlock()
-	d.emit("model_changed", effective)
-	if d.codexToolsRestricted() {
-		d.caps.emit(d.emitter, d.RestrictedRuntime.capabilities(response.Model))
-	} else {
+	if publish {
+		d.emit("model_changed", effective)
+		if d.codexToolsRestricted() {
+			d.caps.emit(d.emitter, d.RestrictedRuntime.capabilities(effective.Model))
+		}
+	}
+	d.settingsMu.Unlock()
+	if !d.codexToolsRestricted() {
 		a.requestCapabilities()
 		go a.backgroundTerminals()
 		go a.discoverOwnedChildren()
 	}
+	nativeSettings := codexSettingsFence{generation: settingsGeneration}
 	var active, turnModel string
 	var usage agent.Usage
-	var usageBase agent.Usage
-	usageSeen := false
+	var rootUsage *codexRootUsage
 	var retryDeadline <-chan time.Time
+	var heldInput chan queuedMsg
 	for {
 		input := (<-chan queuedMsg)(d.queue)
 		retrying := false
@@ -430,6 +475,10 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			first <- *retry
 			input = first
 			retrying = true
+		}
+		if heldInput != nil {
+			input = heldInput
+			retrying = false
 		}
 		select {
 		case <-retryDeadline:
@@ -450,7 +499,21 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			}
 			return
 		case msg := <-input:
-			if retrying {
+			passedGate := heldInput != nil
+			heldInput = nil
+			if passedGate {
+				// A native exit and gate release may be ready together. Keep the
+				// unaccepted input for the replacement process in either order.
+				if appCtx.Err() != nil {
+					return
+				}
+				select {
+				case <-a.done:
+					return
+				default:
+				}
+			}
+			if retrying || passedGate {
 				d.mu.Lock()
 				d.retryInput = nil
 				d.mu.Unlock()
@@ -460,6 +523,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			superseded := msg.adoptionContinue && d.heardFromPerson
 			valid := msg.ExpectedTurnID == "" || (msg.ExpectedTurnID == d.usageTurnID && active == "" && len(d.queue) == 0)
 			model, effort = d.model, d.effort
+			settingsGeneration = d.settingsGeneration
 			d.mu.Unlock()
 			if superseded {
 				continue
@@ -467,6 +531,30 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			if !valid {
 				d.emit("error", staleLimitResumeError())
 				continue
+			}
+			if active == "" && !passedGate {
+				d.mu.Lock()
+				gate := d.mcpInputGate
+				d.mu.Unlock()
+				if gate != nil {
+					d.mu.Lock()
+					d.retryInput = &msg // input is unaccepted; preserve it if this process dies during the hold.
+					d.mu.Unlock()
+					// Keep processing native requests/notifications while discovery
+					// holds input. RPC replies are delivered directly by a.read.
+					heldInput = make(chan queuedMsg, 1)
+					go func(ready chan<- queuedMsg) {
+						gate(appCtx)
+						if appCtx.Err() != nil {
+							return
+						}
+						select {
+						case ready <- msg:
+						case <-appCtx.Done():
+						}
+					}(heldInput)
+					continue
+				}
 			}
 			inputs := a.skillInput(msg.Text)
 			d.mu.Lock()
@@ -493,10 +581,17 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			}
 			a.mu.Lock()
 			a.starting = active == ""
+			a.planStarting = a.starting
+			if a.starting {
+				a.planEpoch++
+			}
 			a.mu.Unlock()
 			result, e := a.call(method, p)
 			a.mu.Lock()
 			a.starting = false
+			if e != nil {
+				a.planStarting = false
+			}
 			a.mu.Unlock()
 			if e != nil {
 				var rejected codexRPCRejected
@@ -505,7 +600,11 @@ func (d *codexDriver) runApp(ctx context.Context) {
 						d.mu.Lock()
 						d.retryInput = &msg
 						d.mu.Unlock()
-						retryDeadline = time.After(5 * time.Second)
+						wait := d.rejectedSteerWait
+						if wait <= 0 {
+							wait = 5 * time.Second
+						}
+						retryDeadline = time.After(wait)
 						continue
 					}
 					d.emit("error", agent.ErrorPayload{Message: "Codex did not accept message: " + e.Error(), Retryable: true, ClientID: msg.ClientID})
@@ -538,9 +637,9 @@ func (d *codexDriver) runApp(ctx context.Context) {
 					return
 				}
 				turnModel = model
+				nativeSettings = codexSettingsFence{generation: settingsGeneration}
 				usage = agent.Usage{}
-				usageBase = agent.Usage{}
-				usageSeen = false
+				rootUsage = newCodexRootUsage(model)
 				d.mu.Lock()
 				d.usageTurnID = ccUUID()
 				d.activeTurn = true
@@ -549,6 +648,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			}
 			a.mu.Lock()
 			a.turn = active
+			a.planStarting = false
 			interrupted := a.interruptRequested
 			a.mu.Unlock()
 			if interrupted {
@@ -622,16 +722,18 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			}
 			var n struct {
 				ThreadID  string          `json:"threadId"`
+				TurnID    string          `json:"turnId"`
 				RequestID json.RawMessage `json:"requestId"`
 				Thread    struct {
-					ID      string `json:"id"`
-					Parent  string `json:"parentThreadId"`
-					Model   string `json:"model"`
-					Preview string `json:"preview"`
+					ID      string          `json:"id"`
+					Parent  string          `json:"parentThreadId"`
+					Model   string          `json:"model"`
+					Preview string          `json:"preview"`
+					Effort  json.RawMessage `json:"reasoningEffort"`
 				} `json:"thread"`
 				ThreadSettings struct {
-					Model  string `json:"model"`
-					Effort string `json:"effort"`
+					Model  string          `json:"model"`
+					Effort json.RawMessage `json:"effort"`
 				} `json:"threadSettings"`
 				ToModel string          `json:"toModel"`
 				Delta   string          `json:"delta"`
@@ -662,7 +764,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 					a.deferChildEvent(appCtx, n.Thread.ID, ev)
 					continue
 				}
-				d.childStatus(n.Thread.ID, n.Thread.Model, n.Thread.Preview, "started")
+				d.childNativeStatus(n.Thread.ID, n.Thread.Model, n.Thread.Preview, "started", n.Thread.Effort)
 			}
 			parent := ""
 			if n.ThreadID != "" && n.ThreadID != thread {
@@ -673,6 +775,8 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				parent = n.ThreadID
 			}
 			switch ev.Method {
+			case "turn/plan/updated":
+				a.observePlan(ev.Params, ev.planEpoch)
 			case "serverRequest/resolved":
 				a.resolveQuestionRequest(n.ThreadID, n.RequestID)
 			case "turn/started":
@@ -682,28 +786,42 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				}
 			case "thread/settings/updated":
 				if parent != "" {
-					d.childStatus(parent, n.ThreadSettings.Model, "", "")
+					d.childNativeStatus(parent, n.ThreadSettings.Model, "", "", n.ThreadSettings.Effort)
 					continue
 				}
 				if n.ThreadSettings.Model != "" {
-					d.mu.Lock()
-					same := d.model == turnModel || active == ""
-					if same {
-						d.model = n.ThreadSettings.Model
-						if n.ThreadSettings.Effort != "" {
-							d.effort = n.ThreadSettings.Effort
-						}
+					// Native reports describe the active turn even when a person has
+					// already selected different settings for the next one.
+					turnModel = n.ThreadSettings.Model
+					if rootUsage != nil {
+						rootUsage.changeModel(turnModel)
 					}
-					p := agent.ModelChangedPayload{Model: d.model, Effort: d.effort, Source: "start"}
-					d.mu.Unlock()
-					if same {
-						turnModel = n.ThreadSettings.Model
-						d.emit("model_changed", p)
+					effort := ""
+					if len(n.ThreadSettings.Effort) > 0 {
+						_ = json.Unmarshal(n.ThreadSettings.Effort, &effort)
 					}
+					d.observeNativeSettings(&nativeSettings, n.ThreadSettings.Model, effort)
 				}
 			case "model/rerouted":
-				if parent == "" && n.ToModel != "" {
+				if n.TurnID != "" {
+					current := active
+					if parent != "" {
+						a.mu.Lock()
+						current = a.childTurns[parent]
+						a.mu.Unlock()
+					}
+					if n.TurnID != current {
+						continue
+					}
+				}
+				if parent != "" && n.ToModel != "" {
+					d.childStatus(parent, n.ToModel, "", "")
+				} else if n.ToModel != "" {
 					turnModel = n.ToModel
+					if rootUsage != nil {
+						rootUsage.changeModel(turnModel)
+					}
+					d.observeNativeSettings(&nativeSettings, n.ToModel, "")
 				}
 			case "skills/changed", "mcpServer/startupStatus/updated", "mcpServer/oauthLogin/completed":
 				if parent == "" && !d.codexToolsRestricted() {
@@ -721,6 +839,14 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			case "thread/tokenUsage/updated":
 				latest := n.TokenUsage.Last.usage()
 				if parent != "" {
+					if n.TurnID != "" {
+						a.mu.Lock()
+						current := a.childTurns[parent]
+						a.mu.Unlock()
+						if n.TurnID != current {
+							continue
+						}
+					}
 					if n.TokenUsage.Total != nil {
 						latest = n.TokenUsage.Total.usage()
 					}
@@ -730,16 +856,19 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				if active == "" {
 					continue
 				}
-				if n.TokenUsage.Total != nil {
-					total := n.TokenUsage.Total.usage()
-					if !usageSeen {
-						usageBase = subtractCodexUsage(total, latest)
-						usageSeen = true
-					}
-					usage = subtractCodexUsage(total, usageBase)
-				} else {
-					usage = latest
+				if n.TurnID != "" && n.TurnID != active {
+					continue
 				}
+				if rootUsage == nil {
+					rootUsage = newCodexRootUsage(turnModel)
+				}
+				var total *agent.Usage
+				if n.TokenUsage.Total != nil {
+					value := n.TokenUsage.Total.usage()
+					total = &value
+				}
+				rootUsage.observe(latest, total)
+				usage, _ = rootUsage.snapshot()
 
 			case "error":
 				if parent == "" {
@@ -793,7 +922,11 @@ func (d *codexDriver) runApp(ctx context.Context) {
 						d.emit("error", agent.ErrorPayload{Message: n.Turn.Error.Message, Retryable: true, Code: agent.ErrorCodeAPI})
 					}
 				}
-				d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: turnModel, Usage: usage})
+				var partition map[string]agent.Usage
+				if rootUsage != nil {
+					usage, partition = rootUsage.snapshot()
+				}
+				d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: turnModel, Usage: usage, UsageByModel: partition})
 				active = ""
 				a.mu.Lock()
 				a.turn = ""
@@ -906,7 +1039,9 @@ func (d *codexDriver) appItem(raw []byte, done bool, parent string) {
 		if done {
 			for id, state := range i.AgentsStates {
 				if d.childKnown(id) {
-					d.childStatus(id, i.Model, state.Message, state.Status)
+					// This tool's model argument is a launch request. Native
+					// thread/settings/reroute reports own the effective model.
+					d.childStatus(id, "", state.Message, state.Status)
 				}
 			}
 		}
@@ -967,9 +1102,6 @@ func (u codexTokenUsage) usage() agent.Usage {
 	// Codex inputTokens includes its cached subset. The shared usage contract
 	// follows Claude: input, cache reads, and cache writes are disjoint buckets.
 	return agent.Usage{InputTokens: max(0, u.Input-u.Cached), OutputTokens: u.Output, CacheReadTokens: u.Cached, CacheWriteTokens: u.Write}
-}
-func subtractCodexUsage(a, b agent.Usage) agent.Usage {
-	return agent.Usage{InputTokens: max(0, a.InputTokens-b.InputTokens), OutputTokens: max(0, a.OutputTokens-b.OutputTokens), CacheReadTokens: max(0, a.CacheReadTokens-b.CacheReadTokens), CacheWriteTokens: max(0, a.CacheWriteTokens-b.CacheWriteTokens)}
 }
 
 type codexRPCRejected struct {
@@ -1096,4 +1228,30 @@ func (a *codexApp) completionQueued(thread, turn string) bool {
 		}
 	}
 	return false
+}
+
+// codexSettingsFence binds native reports to the settings used by a request.
+// A generation preserves explicit same-value selections and A-to-C-to-A edits,
+// which comparisons against the effective rerouted model cannot distinguish.
+type codexSettingsFence struct{ generation uint64 }
+
+func (d *codexDriver) observeNativeSettings(fence *codexSettingsFence, model, effort string) {
+	d.settingsMu.Lock()
+	defer d.settingsMu.Unlock()
+	d.mu.Lock()
+	if d.settingsGeneration != fence.generation {
+		d.mu.Unlock()
+		return // a person's next-turn selection takes precedence over late reports
+	}
+	previousModel := d.model
+	d.model = model
+	if effort != "" {
+		d.effort = effort
+	} else if model != previousModel {
+		d.effort = d.reconcileEffortLocked(model, d.effort)
+	}
+	payload := agent.ModelChangedPayload{Model: d.model, Effort: d.effort, Source: "start"}
+	d.mu.Unlock()
+	d.emit("model_changed", payload)
+	d.emitRuntimeCapsLocked()
 }

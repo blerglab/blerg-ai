@@ -62,10 +62,10 @@ export function BoardChat({ boardId, onClosed }: { boardId: string; onClosed: ()
     return () => { stop = true; clearInterval(iv); };
   }, [sessionId, boardId]);
 
-  // a disconnected board session resumes with amnesia (the CLI transcript
-  // lives in the dead pod) — for a chat that's useless, so treat it as ended
+  // Recovery eligibility comes from the backend's current owner/history checks.
   const connected = session != null &&
-    !["stopped", "error", "disconnected"].includes(session.lifecycle);
+    !["stopped", "ended", "error"].includes(session.lifecycle) &&
+    (session.lifecycle !== "disconnected" || session.resumable);
 
   const close = async () => {
     if (session) await api(`/api/runner-sessions/${session.id}/close`, { method: "POST" }).catch(() => {});
@@ -88,7 +88,7 @@ export function BoardChat({ boardId, onClosed }: { boardId: string; onClosed: ()
         <span className="sign">Board session</span>
         {session && <span className={`convo-state ${session.lifecycle}`}>{session.lifecycle}</span>}
         {session?.model && (
-          <span className="mono" style={{ color: "var(--fog-dim)", fontSize: 11 }}>{session.model}</span>
+          <span className="mono" style={{ color: "var(--fog-dim)", fontSize: 11 }}>{session.model}{session.effort ? ` · ${session.effort}` : ""}</span>
         )}
         <span className="spacer" />
         <button className="btn ghost small" onClick={() => setMin(true)}
@@ -99,8 +99,11 @@ export function BoardChat({ boardId, onClosed }: { boardId: string; onClosed: ()
       {!session && !error && <div className="empty" style={{ padding: 12, fontSize: 13 }}>starting…</div>}
       {session?.lifecycle === "disconnected" && (
         <p className="adv-banner working" style={{ margin: 8 }}>
-          This session's pod is gone — its conversation can't continue.
-          Close and reopen to start a fresh board session.
+          {session.resumable
+            ? session.resume_mode === "transcript_replay"
+              ? "Send a message to resume using reconstructed transcript context."
+              : "Send a message to resume the retained conversation."
+            : session.resume_reason || "This conversation cannot currently resume. Check its automation access and retained history."}
         </p>
       )}
       {session?.lifecycle === "error" && (

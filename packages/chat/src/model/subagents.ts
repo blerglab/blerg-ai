@@ -153,7 +153,23 @@ export function subagentTitle(sub: SubagentEntry): string {
 
 /** The model it runs on: as its API calls report it, else as it was asked for. */
 export function subagentModel(sub: SubagentEntry): string {
+  if (typeof sub.model === 'string') return sub.model
   return payloadOf(sub.done).model || payloadOf(sub.update).model || sub.info.model || inputField(sub.call?.call.input, 'model')
+}
+
+/** Last child-reported configured effort, never the root setting or a requested tool input. */
+export function subagentEffort(sub: SubagentEntry): string {
+  if (typeof sub.effort === 'string') return sub.effort
+  let effort = '', model = ''
+  for (const p of [sub.info, payloadOf(sub.update), payloadOf(sub.done)]) {
+    if (p.model) {
+      if (p.model !== model) effort = ''
+      model = p.model
+    }
+    if (typeof p.effort === 'string') effort = p.effort
+    else if (p.effort === null) effort = ''
+  }
+  return effort
 }
 
 function usageTotal(u: TokenUsage | undefined): number | null {

@@ -85,7 +85,7 @@ describe('composeMarkupMessage', () => {
       'Marked up screenshot-3.png: 3 pins.',
       '',
       '1. (top left) the title is clipped',
-      '2. (centre) this button should be primary',
+      '2. (center) this button should be primary',
       '3. (bottom right) remove the footer here',
     ].join('\n'))
   })

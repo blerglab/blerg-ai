@@ -24,7 +24,7 @@ This design keeps the pin and adds three things:
    Accepting re-pins the session's grant; the agent is asked to re-list and gets the tool back at
    its next turn boundary. No relaunch.
 2. **A per-connection trust policy.** `strict` (default) is the above. `auto_accept` re-pins changed
-   tools and grants new ones by the session's recorded preset, so an organisation's own servers
+   tools and grants new ones by the session's recorded preset, so an organization's own servers
    never interrupt anyone. The connection's owner sets it; Blerg has no admin role.
 3. **Audit.** Every pin event — accepted by a person, auto-accepted, declined, expired — is a row
    the person can read on the session and on the connection; the call log's "changed" refusals get
@@ -40,7 +40,7 @@ This design keeps the pin and adds three things:
 - A tool with a pending change **stays off** until decided.
 - The change carries the **exact definition that was hashed**; the person judges the real text,
   never the agent's description of it, and never a truncated copy.
-- Out of scope: an organisation-wide admin role; diffs of annotations (not hashed, not served to
+- Out of scope: an organization-wide admin role; diffs of annotations (not hashed, not served to
   the agent); an account-level "keep this tool off on this connection" (noted for later).
 
 ### What the agent actually sees (verified)
@@ -110,7 +110,7 @@ core: mcp_connections.pin_policy (strict | auto_accept), set in Settings, return
 | Runner UI | `runner/frontend` | Proposals page section; badge; capabilities marker; picker sends the preset; hidden-character rendering |
 | Connection policy | `core/internal/mcpconn`, `core/internal/api`, `core/web` | `pin_policy` column, PATCH field, token response, Settings control, audit of flips |
 | Launch, resume, crons | `runner/internal/server/{mcpstart,cronstart}.go` | launch records preset + known tools and stores definitions; resume copies; cron fire re-pins under `auto_accept` |
-| Docs | `docs/mcp-connections.md`, `docs/proposals.md` | the behaviour in the user's words |
+| Docs | `docs/mcp-connections.md`, `docs/proposals.md` | the behavior in the user's words |
 
 ## 3. Data model
 
@@ -312,7 +312,7 @@ core) or an unknown value all mean `strict`. The policy is only consulted when d
 this costs nothing on the normal path, and a tightened policy bites within five minutes on every
 replica, with no dependency on crons or the scheduler lock. There is no policy column on the grant.
 
-## 4. Gateway behaviour
+## 4. Gateway behavior
 
 `listUpstream` returns, per tool, the definition and its hash, plus whether the listing was
 **complete** (today it knows but does not say); it writes `mcp_tool_definitions`. A name the upstream
@@ -424,13 +424,26 @@ drift under `auto_accept` (§4.1). A re-pin made on `tools/list` sends no refres
 re-pinned already carries the new text to the process that listed); a cron fire re-pins before the
 run's process exists, so it needs none either. The daemon's manager registers it beside
 `set_session_model`; `AgentHost.RefreshTools(sessionID)` looks the session up and type-asserts an
-optional `interface{ markStale() }` on its driver (the pattern `sandboxedDriver` uses), so only the
+optional `toolRefresher` (`refreshTools()`) interface on its driver (the pattern `sandboxedDriver` uses), so only the
 Claude Code driver acts: the process closes at its next idle point (no turn running, nothing
 queued; now, if idle) and the next message starts a `--resume` process that lists tools and reports
 capabilities afresh. With steering off every turn is a new process anyway. Other drivers, and an
-older daemon that does not know the message, ignore it. Best effort: no daemon found means the
-next resume covers it. The gateway's `listed` gate (§4.4) is what guarantees correctness; the
-refresh is what makes it prompt.
+older daemon that does not know the message, ignore it. A native resume can retain the old
+schema, so resuming is not a substitute for starting a new conversation when the adapter cannot
+reload definitions. The gateway's `listed` gate (§4.4) and current grants still govern calls.
+
+Each actual adapter reports `capabilities.tool_schema_refresh`: `next_turn` means an accepted
+definition reloads when idle or before the next turn; `new_session` means the person must start a
+separate session and select the current MCP connections and tools. Claude Code reports
+`next_turn`; the native API loop, Codex and other CLI adapters currently report `new_session`.
+Missing or malformed metadata means unknown, including older daemons. This is adapter metadata,
+not a browser engine-name heuristic or a promise that a running turn changes its schema.
+
+The tool-change list, detail and decision responses expose only that enum from the owned
+session's latest capabilities report. Listing uses one bounded batch lookup with a partial
+latest-capabilities index; lookup failure leaves the policy unknown. The UI distinguishes an
+updated grant from a loaded native schema, keeps the current conversation available, and never
+starts, ends or restarts a session automatically.
 
 ## 6. UI
 
@@ -462,7 +475,7 @@ In **Settings → MCP connections**, each connection gets a **Definition changes
 *Ask me* (strict) / *Accept automatically* (auto_accept), with: "Accept automatically trusts this
 server to change what an agent may do without asking you, and a changed description can steer the
 agent's use of your other connections and the session's own tools. Use it only for servers your
-organisation runs. Takes effect in running sessions within five minutes." Changing it writes
+organization runs. Takes effect in running sessions within five minutes." Changing it writes
 through the existing PATCH and is recorded in the connection's access log. The row links to the
 runner's pin-event history filtered by this connection (core never calls the runner).
 
@@ -613,7 +626,7 @@ Two adversarial reviews (security; feasibility against the code). Folded:
   new columns via `RETURNING` so resume cannot clobber an accept.
 - No definition cache exists; the old text would be missing most of the time → content-addressed
   `mcp_tool_definitions` written at every listing; accept recomputes the hash over the stored text.
-- Truncated/jsonb-normalised definitions let a person approve text they never saw → exact bytes as
+- Truncated/jsonb-normalized definitions let a person approve text they never saw → exact bytes as
   `text`, never truncated, `unsafe` marking (size, NUL, tag/bidi characters), no Accept for unsafe.
 - Agent does not re-list; same-request re-pin would forward arguments written for the old
   definition → re-pin only on `tools/list`, `listed:false` call gate, `refresh_session_tools` →

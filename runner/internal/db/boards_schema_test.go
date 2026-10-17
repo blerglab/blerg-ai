@@ -10,9 +10,8 @@ import (
 // TestMigration008Schema verifies that migration 008_boards.sql creates the
 // expected tables, columns, and FK/ON DELETE rules for the ticket-board feature.
 func TestMigration008Schema(t *testing.T) {
-	pool := connect(t)
+	pool := unmigratedPool(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
 
 	if err := db.RunMigrations(ctx, pool); err != nil {
 		t.Fatalf("RunMigrations: %v", err)

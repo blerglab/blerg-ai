@@ -194,12 +194,12 @@ export function applyHighlights(root: HTMLElement, requests: ReviewRequest[], fo
 
 // ─── places ───────────────────────────────────────────────────────────────────
 
-/** Where a rect's centre falls, in thirds: 'top left' … 'centre' … 'bottom right'. */
+/** Where a rect's center falls, in thirds: 'top left' … 'center' … 'bottom right'. */
 export function describePlace(rect: { x: number; y: number; w: number; h: number }): string {
   const cx = rect.x + rect.w / 2
   const cy = rect.y + rect.h / 2
   const col = cx < 1 / 3 ? 'left' : cx < 2 / 3 ? '' : 'right'
   const row = cy < 1 / 3 ? 'top' : cy < 2 / 3 ? '' : 'bottom'
   if (row && col) return `${row} ${col}`
-  return row || col || 'centre'
+  return row || col || 'center'
 }

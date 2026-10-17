@@ -1,11 +1,12 @@
-// The session panel's Files and Capabilities tabs and its Settings section, and the toolbar they leave
-// lean: the chat's toolbar keeps the model, effort, Rules and Stop; the Files and Skills & plugins
-// dialogs are gone; Show thinking and Compact tool calls are the panel's, kept per browser.
+// The session panel's Files and Capabilities tabs, and the toolbar they leave lean: the chat's toolbar
+// keeps the model, effort, Rules and Stop; the Files and Skills & plugins dialogs are gone. Show thinking
+// and Compact tool calls are the Settings dialog's (kept per browser); the panel has no Settings section.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { COMPACT_KEY, useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import SessionDetail from './SessionDetail'
+import SettingsDialog from './SettingsDialog'
 import { useSessionStore } from '../hooks/useSessionStore'
 import * as wsMock from '../test/wsMock'
 import { makeDaemon, makeSession } from '../test/fixtures'
@@ -76,7 +77,7 @@ const bashRun = () => [1, 2, 3].flatMap(i => [
 ])
 
 function seed(over: Partial<SessionInfo> = {}, ...events: AgentEvent[]) {
-  const session = makeSession({ kind: 'agent', status: 'idle', title: 'Ship it', runtime: 'docker', ...over })
+  const session = makeSession({ limit_resume_supported: true, kind: 'agent', status: 'idle', title: 'Ship it', runtime: 'docker', ...over })
   useSessionStore.setState({ daemons: [makeDaemon()], sessions: [session], statusChangedAt: { [session.id]: Date.now() }, serverVersion: 'test' })
   useTranscriptStore.setState({ sessions: {} })
   const s = useTranscriptStore.getState()
@@ -95,11 +96,17 @@ async function renderPage() {
   return r
 }
 
+// The page with the Settings dialog open over it, as the left bar's Settings entry leaves it.
+async function renderWithSettings() {
+  await renderPage()
+  render(<SettingsDialog onClose={() => {}} />)
+}
+
 const rail = () => screen.getByTestId('session-rail')
 const tab = (name: string) => within(rail()).getByRole('tab', { name: ['Live', 'Files', 'Capabilities'].includes(name) ? new RegExp(`^${name}`) : name })
 const toolbar = () => screen.getByTestId('agent-chat').querySelector('.agent-toolbar') as HTMLElement
 
-describe('the session panel: Files, Capabilities and Settings', () => {
+describe('the session panel: Files, Capabilities and the Settings dialog', () => {
   beforeEach(() => {
     seq = 0
     files = [report, notes]
@@ -135,21 +142,32 @@ describe('the session panel: Files, Capabilities and Settings', () => {
     expect(within(bar).queryByRole('checkbox', { name: 'Show thinking' })).toBeNull()
     expect(within(bar).queryByRole('checkbox', { name: 'Compact tool calls' })).toBeNull()
     expect(within(bar).queryByRole('checkbox', { name: 'Resume when limit resets' })).not.toBeInTheDocument()
-    expect(within(screen.getByTestId('rail-settings')).getByRole('checkbox', { name: 'Resume when limit resets' })).toBeInTheDocument()
+    expect(within(screen.getByTestId('rail-session')).getByRole('checkbox', { name: 'Resume when limit resets' })).toBeInTheDocument()
     // The header has no Skills & plugins button for an agent session either.
     expect(screen.queryByTestId('capabilities-toggle-terminal')).toBeNull()
   })
 
-  it('Settings closes the Live tab with Show thinking and Compact tool calls, kept per browser', async () => {
+  it('the Live tab has no Settings section: Resume when limit resets sits in Session, under the facts', async () => {
     seed({}, ...bashRun())
     await renderPage()
     const live = within(rail()).getByRole('tabpanel', { name: /^Live/ })
     const sections = Array.from(live.querySelectorAll('section')).map(s => s.dataset.testid)
-    expect(sections.at(-1)).toBe('rail-settings')
-    expect(sections.at(-2)).toBe('rail-session')
-    const settings = within(rail()).getByTestId('rail-settings')
-    const compact = within(settings).getByRole('checkbox', { name: 'Compact tool calls' })
-    const thinking = within(settings).getByRole('checkbox', { name: 'Show thinking' })
+    expect(sections).not.toContain('rail-settings')
+    expect(sections.at(-1)).toBe('rail-session')
+    expect(within(rail()).queryByRole('button', { name: /Code colou?rs/ })).toBeNull()
+    expect(within(rail()).queryByRole('checkbox', { name: 'Show thinking' })).toBeNull()
+    const session = within(rail()).getByTestId('rail-session')
+    const facts = session.querySelector('.rail-facts, dl, ul') as HTMLElement | null
+    const resume = within(session).getByRole('checkbox', { name: 'Resume when limit resets' })
+    if (facts) expect(facts.compareDocumentPosition(resume) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('the Settings dialog holds Show thinking and Compact tool calls, which act at once and keep their old keys', async () => {
+    seed({}, ...bashRun())
+    await renderWithSettings()
+    const dialog = screen.getByRole('dialog', { name: 'Settings' })
+    const compact = within(dialog).getByRole('checkbox', { name: 'Compact tool calls' })
+    const thinking = within(dialog).getByRole('checkbox', { name: 'Show thinking' })
     expect(compact).toBeChecked()
     expect(thinking).toBeChecked()
     expect(screen.getByTestId('tool-group')).toBeInTheDocument()
@@ -166,10 +184,10 @@ describe('the session panel: Files, Capabilities and Settings', () => {
     localStorage.setItem(COMPACT_KEY, '0')
     localStorage.setItem(THINKING_KEY, '0')
     seed({}, ...bashRun())
-    await renderPage()
-    const settings = within(rail()).getByTestId('rail-settings')
-    expect(within(settings).getByRole('checkbox', { name: 'Compact tool calls' })).not.toBeChecked()
-    expect(within(settings).getByRole('checkbox', { name: 'Show thinking' })).not.toBeChecked()
+    await renderWithSettings()
+    const dialog = screen.getByRole('dialog', { name: 'Settings' })
+    expect(within(dialog).getByRole('checkbox', { name: 'Compact tool calls' })).not.toBeChecked()
+    expect(within(dialog).getByRole('checkbox', { name: 'Show thinking' })).not.toBeChecked()
     expect(screen.queryByTestId('tool-group')).toBeNull()
   })
 

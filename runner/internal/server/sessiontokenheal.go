@@ -126,8 +126,7 @@ func healSessionTokens(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *Da
 		raw, err := json.Marshal(protocol.SessionToken{Type: "session_token", SessionID: id, Token: tok}) // the token travels only over the daemon's authenticated websocket; never logged
 		if err == nil {
 			h.tokenHeals.set(id, tok)
-			select {
-			case dc.send <- raw:
+			if h.trySendToDaemon(dc, raw) {
 				log.Printf("session %s: no valid messaging token — a fresh one sent to daemon %s", id, dc.ID)
 				time.AfterFunc(sessionTokenAckTimeout, func() {
 					if h.tokenHeals.takeIf(id, tok) {
@@ -136,7 +135,6 @@ func healSessionTokens(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *Da
 					}
 				})
 				continue
-			default:
 			}
 		}
 		// Not delivered: a live token nobody holds would also stop the next

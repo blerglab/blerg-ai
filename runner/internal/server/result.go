@@ -100,11 +100,13 @@ func runnerLifecycleTerminal(lifecycle string) bool {
 
 // runnerRuntimeAxis reports the hosting layer for a session: where it lives
 // right now, which is not the same question as what state it is in.
-func (a *API) runnerRuntimeAxis(sessionID string) string {
+func (a *API) runnerRuntimeAxis(sessionID, storedRuntime string) string {
 	jm := a.hub.JobManager()
 	switch {
 	case a.hub.FindDaemonForSession(sessionID) != nil:
 		return "daemon"
+	case storedRuntime != "" && storedRuntime != "cluster":
+		return "none"
 	case jm != nil && jm.jobFinished(sessionID):
 		return "job_finished"
 	case jm != nil:
@@ -126,7 +128,7 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string) (session
 	if row == nil {
 		return sessionResult{}, fmt.Errorf("session %s not found", sessionID)
 	}
-	runtime := a.runnerRuntimeAxis(sessionID) //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
+	runtime := a.runnerRuntimeAxis(sessionID, derefOrEmpty(row.Runtime)) //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
 	lifecycle := runnerLifecycle(row.Status, runtime == "job_finished")
 	res := sessionResult{
 		SessionID: row.ID,

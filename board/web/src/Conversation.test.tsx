@@ -127,7 +127,7 @@ describe("Conversation (a card's session)", () => {
     const sent = seen.find((c) => c.url.endsWith("/messages"))!;
     expect(sent.method).toBe("POST");
     expect(sent.url).toBe("/api/chat/sessions/rs1/messages");
-    expect(JSON.parse(sent.body!)).toEqual({ text: "ship it" });
+    expect(JSON.parse(sent.body!)).toEqual({ text: "ship it", client_id: expect.any(String) });
   });
 
   it("offers Run again on a session that is over, and Run this card on a discussion", async () => {
@@ -163,7 +163,7 @@ describe("BoardChat (the board session drawer)", () => {
     responses["/api/boards/b1/sessions"] = [session({ id: "bs1", role: "board", lifecycle: "disconnected" })];
     chatServer([userMsg(1, "earlier question", "human")], "disconnected");
     render(<BoardChat boardId="b1" onClosed={() => {}} />);
-    expect(await screen.findByText(/pod is gone/)).toBeInTheDocument();
+    expect(await screen.findByText(/cannot currently resume/)).toBeInTheDocument();
     expect(await screen.findByText("earlier question")).toBeInTheDocument();
     expect(screen.queryByRole("textbox")).toBeNull();
   });

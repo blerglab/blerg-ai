@@ -333,7 +333,11 @@ func (d Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		expiresAt, err := svc.SessionExpiresAt(r.Context(), newRefresh)
 		maxAge := d.sessionCookieMaxAge()
 		if err == nil {
-			if remaining := int(time.Until(expiresAt).Seconds()); remaining > 0 {
+			now := time.Now()
+			if d.CookieNow != nil {
+				now = d.CookieNow()
+			}
+			if remaining := int(expiresAt.Sub(now).Seconds()); remaining > 0 {
 				maxAge = remaining
 			} else {
 				maxAge = 1
@@ -357,6 +361,10 @@ func (d Deps) changePasswordURL(r *http.Request, returnTo string) string {
 	return base + "?return_to=" + url.QueryEscape(returnTo)
 }
 
+// silentRefreshPage is the static page board's, runner's and core's authClient.ts give
+// /auth/refresh as return_to when renewing in a hidden frame (SILENT_REFRESH_PAGE there).
+const silentRefreshPage = "/silent-refresh.html"
+
 // writeSignInRequired handles GET /auth/refresh's two recoverable failures — no refresh
 // cookie, and a cookie whose session was revoked/expired.
 //
@@ -375,7 +383,19 @@ func (d Deps) changePasswordURL(r *http.Request, returnTo string) string {
 // return_to is not an open-redirect vector in either branch: returnToAllowed has already
 // checked it against the allowlist, and Login.tsx only ever feeds it back into /auth/refresh,
 // which checks it again server-side.
+//
+// One return_to is answered differently: a page's hidden-frame renewal (authClient.ts) asks for
+// <its origin>/silent-refresh.html. A frame sent on to core's /login ends on a cross-origin page
+// the parent cannot read, which looks exactly like core not answering at all. So that frame is sent
+// back to the silent page with "#signin_error=<reason>": same-origin again, readable, and the page
+// knows the sign-in has ended (and stops retrying) rather than that core was unreachable.
 func writeSignInRequired(w http.ResponseWriter, r *http.Request, returnTo, reason, detail string) {
+	if u, err := url.Parse(returnTo); err == nil && u.Path == silentRefreshPage {
+		u.Fragment = ""
+		u.RawFragment = ""
+		http.Redirect(w, r, u.String()+"#signin_error="+url.QueryEscape(reason), http.StatusFound) //nolint:gosec // G710: returnTo already passed returnToAllowed; the reason is one of two fixed codes
+		return
+	}
 	loginURL := "/login"
 	sep := "?"
 	if returnTo != "" {

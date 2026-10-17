@@ -310,10 +310,6 @@ func TestStartSessionNoRepoOnDaemon(t *testing.T) {
 func TestSessionStartedRecordsTheScratchFolderActuallyCreated(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000c1"
 	sessionID := "00000000-0000-0000-0000-0000000000c2"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "laptop", "local", "/repos"); err != nil {
@@ -346,10 +342,6 @@ func TestSessionStartedRecordsTheScratchFolderActuallyCreated(t *testing.T) {
 func TestResumeNoRepoClusterSession(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000b1"
 	sessionID := "00000000-0000-0000-0000-0000000000b2"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "cluster", "runner", ""); err != nil {

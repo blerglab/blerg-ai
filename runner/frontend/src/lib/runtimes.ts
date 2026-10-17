@@ -1,4 +1,4 @@
-// Where and how a session runs: the closed sets the launch sheet offers, the
+// Where and how a session runs: runtime/kind choices and discovered engine IDs, the
 // copy that describes them, and the rules between them. Kept out of the
 // component file so both the sheet and its tests can reuse the rules without
 // importing a React component.
@@ -15,7 +15,7 @@ export interface RunDaemon {
 
 export type RunRuntime = 'cluster' | 'docker' | 'daemon'
 export type RunKind = 'agent' | 'tmux'
-export type RunEngine = 'claude' | 'codex' | 'hermes' | 'openclaw'
+export type RunEngine = string
 
 // ─── Copy (verbatim from the spec; exported so tests assert one source) ──────
 

@@ -85,7 +85,7 @@ describe('ToolChanges', () => {
     items = [change()]
     mount()
     const lead = (await screen.findByTestId('tool-change-lead')).textContent
-    expect(lead).toBe('calendar changed what read_events does after this session pinned it. The tool is off in the session until you decide: Accept turns it back on with the new definition below; Keep off leaves it off.')
+    expect(lead).toBe('calendar changed what read_events does after this session pinned it. Calls are blocked until you decide: Accept updates this session\'s grant to the new definition below; Keep off leaves it blocked.')
     const card = screen.getByTestId('tool-change-c1')
     expect(within(card).queryByText('changed', { selector: 'span' })).toBeNull()
   })
@@ -94,7 +94,7 @@ describe('ToolChanges', () => {
     items = [change({ old_definition: null })]
     mount()
     const lead = (await screen.findByTestId('tool-change-lead')).textContent
-    expect(lead).toContain('Accept turns it back on with the definition below (the previous text was not kept); Keep off leaves it off.')
+    expect(lead).toContain('Accept updates this session\'s grant to the definition below (the previous text was not kept); Keep off leaves it blocked.')
     expect(screen.getByTestId('tool-change-c1').textContent).not.toMatch(/previous text is not available/)
   })
 
@@ -102,7 +102,7 @@ describe('ToolChanges', () => {
     items = [change({ kind: 'new', old_hash: '', old_definition: null, tool: 'send_mail', new_definition: def('send_mail', 'Sends mail') })]
     mount()
     const lead = (await screen.findByTestId('tool-change-lead')).textContent
-    expect(lead).toBe('calendar now offers send_mail, which the session did not have when it started. It is off until you decide: Grant turns it on in the mode you choose; Keep off leaves it off.')
+    expect(lead).toBe('calendar now offers send_mail, which the session did not have when it started. It is off until you decide: Grant authorizes it in the mode you choose; Keep off leaves it off.')
     const card = screen.getByTestId('tool-change-c1')
     expect(within(card).getByText('Definition')).toBeTruthy()
     expect(within(card).queryByTestId('change-summary')).toBeNull()
@@ -190,7 +190,7 @@ describe('ToolChanges', () => {
     mount()
     const card = await screen.findByTestId('tool-change-c1')
     failNext = { status: 409, error: 'the tool changed again since this change was recorded; review the newer change' }
-    fireEvent.click(within(card).getByRole('button', { name: /accept and turn it back on/i }))
+    fireEvent.click(within(card).getByRole('button', { name: /accept updated grant/i }))
     await screen.findByTestId('tool-change-error-c1')
     expect(screen.getByTestId('tool-change-error-c1').textContent).toMatch(/changed again/)
     expect(calls.find(c => c.url.endsWith('/accept'))?.body).toEqual({ mode: 'allow' })
@@ -312,5 +312,31 @@ describe('ToolChanges', () => {
     mount()
     expect((await screen.findByRole('alert')).textContent).toMatch(/Could not load tool changes/)
     expect(screen.queryByTestId('tool-changes-empty')).toBeNull()
+  })
+})
+
+describe('tool schema refresh guidance', () => {
+  it('distinguishes accepted grants from native schemas and preserves the current conversation', async () => {
+    items = [change({ tool_schema_refresh: 'new_session' })]
+    mount()
+    const card = await screen.findByTestId('tool-change-c1')
+    expect(within(card).getByTestId('tool-schema-guidance').textContent).toContain('Start a new session and select the current MCP connections and tools')
+    expect(within(card).getByTestId('tool-schema-guidance').textContent).toContain('Keep this conversation')
+    fireEvent.click(within(card).getByRole('button', { name: 'Accept updated grant' }))
+    await waitFor(() => expect(within(card).getByTestId('tool-change-lead').textContent).toContain('grant now authorizes'))
+    expect(within(card).getByTestId('tool-change-lead').textContent).not.toContain('session uses the new definition')
+    expect(calls.filter(c => c.method === 'POST')).toHaveLength(1)
+  })
+
+  it.each(['next_turn', undefined] as const)('discloses %s reload behavior before and after accepting', async policy => {
+    items = [change({ tool_schema_refresh: policy })]
+    mount()
+    const card = await screen.findByTestId('tool-change-c1')
+    const expected = policy === 'next_turn' ? 'idle or before its next turn' : "hasn't reported whether"
+    expect(within(card).getByTestId('tool-schema-guidance').textContent).toContain(expected)
+    fireEvent.click(within(card).getByRole('button', { name: 'Accept updated grant' }))
+    await waitFor(() => expect(within(card).getByTestId('tool-change-lead').textContent).toContain('grant now authorizes'))
+    expect(within(card).getByTestId('tool-schema-guidance').textContent).toContain(expected)
+    expect(calls.filter(c => c.method === 'POST')).toHaveLength(1)
   })
 })

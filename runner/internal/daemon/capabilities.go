@@ -227,13 +227,14 @@ func claudeInitCapabilities(line []byte, known []skills.Skill, workDir, home str
 		return protocol.CapabilitiesPayload{}, false
 	}
 	p := protocol.CapabilitiesPayload{
-		Engine:         "claude",
-		EngineName:     "Claude Code",
-		Model:          rawStr(in.Model),
-		Version:        rawStr(in.Version),
-		Cwd:            displayPath(rawStr(in.Cwd), home),
-		PermissionMode: rawStr(in.PermissionMode),
-		Note:           "What Claude Code loaded when this session's latest turn started.",
+		Engine:            "claude",
+		EngineName:        "Claude Code",
+		ToolSchemaRefresh: protocol.ToolSchemaRefreshNextTurn,
+		Model:             rawStr(in.Model),
+		Version:           rawStr(in.Version),
+		Cwd:               displayPath(rawStr(in.Cwd), home),
+		PermissionMode:    rawStr(in.PermissionMode),
+		Note:              "What Claude Code loaded when this session's latest turn started.",
 	}
 	tools := strList(in.Tools)
 
@@ -344,7 +345,8 @@ func claudeInitCapabilities(line []byte, known []skills.Skill, workDir, home str
 // discovered, its subagent types and its tool registry.
 func nativeCapabilities(model string, skillList []skills.Skill, agentTypes []agent.AgentTypeDef, tools []agent.ToolDef, workDir, home string) protocol.CapabilitiesPayload {
 	p := protocol.CapabilitiesPayload{
-		Engine: "native", EngineName: "Blerg native loop", Model: model,
+		ToolSchemaRefresh: protocol.ToolSchemaRefreshNewSession,
+		Engine:            "native", EngineName: "Blerg native loop", Model: model,
 		Note: "What the session loaded when it started.",
 	}
 	sk := protocol.CapabilityGroup{ID: protocol.CapGroupSkills, Label: "Skills", Items: []protocol.CapabilityItem{}}
@@ -489,7 +491,8 @@ func engineCapabilities(spec EngineSpec, model string, c CapabilityContext) (pro
 		return protocol.CapabilitiesPayload{}, false
 	}
 	return protocol.CapabilitiesPayload{
-		Engine: spec.ID, EngineName: spec.DisplayName, Model: model, Groups: groups,
+		ToolSchemaRefresh: protocol.ToolSchemaRefreshNewSession,
+		Engine:            spec.ID, EngineName: spec.DisplayName, Model: model, Groups: groups,
 		Note: "Read by the runner from " + spec.DisplayName + "'s own directories when the session started; " + spec.DisplayName + " does not report what it loaded.",
 	}, true
 }

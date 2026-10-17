@@ -10,6 +10,8 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/db"
 	"github.com/blerglab/blerg-ai/core/internal/keybackend"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/blerglab/blerg-ai/contracts/engineaccess"
 )
 
 // NewServiceWithAdapters is an explicit startup registry seam. Production uses
@@ -24,7 +26,7 @@ func NewServiceWithAdapters(st db.Store, backend keybackend.Backend, adapters ..
 
 func (s *Service) adapter(engine, kind string) (Adapter, error) {
 	a := s.adapters[engine+"/"+kind]
-	if a == nil {
+	if a == nil || !engineaccess.SupportsMode(a.Engine(), a.AccessMode()) {
 		return nil, ErrNotManaged
 	}
 	return a, nil
@@ -32,7 +34,7 @@ func (s *Service) adapter(engine, kind string) (Adapter, error) {
 func (s *Service) deviceAdapter(engine string) (Adapter, error) {
 	var match Adapter
 	for _, a := range s.adapters {
-		if a.Engine() == engine {
+		if a.Engine() == engine && engineaccess.SupportsMode(a.Engine(), a.AccessMode()) {
 			if match != nil {
 				return nil, ErrNotManaged
 			}
@@ -498,6 +500,9 @@ type ManagedCapability struct {
 func (s *Service) ManagedCapabilities() []ManagedCapability {
 	out := make([]ManagedCapability, 0, len(s.adapters))
 	for _, a := range s.adapters {
+		if !engineaccess.SupportsMode(a.Engine(), a.AccessMode()) {
+			continue
+		}
 		out = append(out, ManagedCapability{Engine: a.Engine(), Kind: a.Kind(), Login: true, VerificationOrigin: a.VerificationOrigin()})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Engine+"/"+out[i].Kind < out[j].Engine+"/"+out[j].Kind })

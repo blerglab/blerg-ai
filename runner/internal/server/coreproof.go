@@ -26,7 +26,7 @@ func (p coreProof) valid() bool { return (p.TokenID != "") != (p.SessionID != ""
 // errNoLivenessProof is what a session start, a credential listing or a resume answers when the
 // caller's access token carries no session id. Those tokens live at most ten minutes (core's
 // access-token TTL), so the message points at the one thing that fixes it: a fresh token.
-var errNoLivenessProof = errors.New("your sign-in predates a blerg update and cannot authorise use of your " +
+var errNoLivenessProof = errors.New("your sign-in predates a blerg update and cannot authorize use of your " +
 	"personal credentials yet. Reload the page (or sign in again) to get a fresh session, then retry")
 
 // proofFromPrincipal is the proof for a session launched from a browser-authenticated request:
@@ -36,6 +36,12 @@ func proofFromPrincipal(p identity.Principal) coreProof {
 		return coreProof{TokenID: p.Sub}
 	}
 	return coreProof{SessionID: p.Sid}
+}
+
+// runnerPrincipalFromIdentity preserves account ownership and exact proof when
+// browser-authenticated endpoints also accept account-bound agent tokens.
+func runnerPrincipalFromIdentity(p identity.Principal) runnerPrincipal {
+	return runnerPrincipal{Kind: p.Kind, Sub: p.Sub, OnBehalfOf: p.OnBehalfOf, Aud: p.Aud, Caps: p.Caps, ExpiresAt: p.ExpiresAt, Sid: p.Sid}
 }
 
 type coreProofKey struct{}

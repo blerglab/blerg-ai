@@ -95,17 +95,17 @@ func TestWebhookDeliversSignedResultOnce(t *testing.T) {
 		gotBd []byte
 		gotHd http.Header
 	)
-	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		hits++
 		gotBd, gotHd = body, r.Header.Clone()
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 	defer recv.Close()
 
-	api, pool, sessionID := webhookSession(t, recv.URL+"/hook", secret)
+	api, pool, sessionID := webhookSession(t, callbackURL, secret)
 	api.deliverCompletion(context.Background(), sessionID)
 	// A second terminal transition for the same session must not re-deliver.
 	api.deliverCompletion(context.Background(), sessionID)
@@ -170,15 +170,15 @@ func TestWebhookWithoutSecretSendsNoSignature(t *testing.T) {
 		mu  sync.Mutex
 		hdr http.Header
 	)
-	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		hdr = r.Header.Clone()
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})
 	defer recv.Close()
 
-	api, _, sessionID := webhookSession(t, recv.URL+"/hook", "")
+	api, _, sessionID := webhookSession(t, callbackURL, "")
 	api.deliverCompletion(context.Background(), sessionID)
 
 	mu.Lock()
@@ -197,7 +197,7 @@ func TestWebhookRetriesOn5xxThenSucceeds(t *testing.T) {
 		mu   sync.Mutex
 		hits int
 	)
-	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		hits++
 		n := hits
@@ -207,10 +207,10 @@ func TestWebhookRetriesOn5xxThenSucceeds(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 	defer recv.Close()
 
-	api, pool, sessionID := webhookSession(t, recv.URL+"/hook", "")
+	api, pool, sessionID := webhookSession(t, callbackURL, "")
 	api.deliverCompletion(context.Background(), sessionID)
 
 	mu.Lock()
@@ -238,15 +238,15 @@ func TestWebhookGivesUpAfterRetries(t *testing.T) {
 		mu   sync.Mutex
 		hits int
 	)
-	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		hits++
 		mu.Unlock()
 		w.WriteHeader(http.StatusBadGateway)
-	}))
+	})
 	defer recv.Close()
 
-	api, pool, sessionID := webhookSession(t, recv.URL+"/hook", "")
+	api, pool, sessionID := webhookSession(t, callbackURL, "")
 	api.deliverCompletion(context.Background(), sessionID)
 
 	mu.Lock()
@@ -266,15 +266,15 @@ func TestWebhookStopsOn4xx(t *testing.T) {
 		mu   sync.Mutex
 		hits int
 	)
-	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		hits++
 		mu.Unlock()
 		w.WriteHeader(http.StatusBadRequest)
-	}))
+	})
 	defer recv.Close()
 
-	api, pool, sessionID := webhookSession(t, recv.URL+"/hook", "")
+	api, pool, sessionID := webhookSession(t, callbackURL, "")
 	api.deliverCompletion(context.Background(), sessionID)
 
 	mu.Lock()
@@ -351,8 +351,8 @@ func TestCompletionHooksFireOnEndNotOnDisconnect(t *testing.T) {
 		mu   sync.Mutex
 		hits int
 	)
-	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/hook" || r.Header.Get("X-Blerg-Session") != sessionID {
+	recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get("X-Blerg-Session") != sessionID {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -368,7 +368,7 @@ func TestCompletionHooksFireOnEndNotOnDisconnect(t *testing.T) {
 		hits++
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 	defer recv.Close()
 	hitCount := func() int {
 		mu.Lock()
@@ -388,14 +388,14 @@ func TestCompletionHooksFireOnEndNotOnDisconnect(t *testing.T) {
 	if err := db.InsertSession(ctx, pool, sessionID, dc.ID, "running", "/repos/org/proj", "org/proj", "T", ""); err != nil {
 		t.Fatal(err)
 	}
-	allowLoopbackDelivery(t, recv.URL+"/hook")
-	if err := db.SetSessionCallback(ctx, pool, sessionID, recv.URL+"/hook", ""); err != nil {
+	allowLoopbackDelivery(t, callbackURL)
+	if err := db.SetSessionCallback(ctx, pool, sessionID, callbackURL, ""); err != nil {
 		t.Fatal(err)
 	}
 	// A background client from an earlier fixture may reach a reused test port.
 	// Neither its unrelated GET nor another session's POST is this callback.
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		req, err := http.NewRequest(method, recv.URL+"/hook", strings.NewReader(`{"session_id":"unrelated-session"}`))
+		req, err := http.NewRequest(method, callbackURL, strings.NewReader(`{"session_id":"unrelated-session"}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -438,6 +438,7 @@ func TestCompletionHooksFireOnEndNotOnDisconnect(t *testing.T) {
 	if n := hitCount(); n != 1 {
 		t.Fatalf("session_ended delivered %d webhooks, want 1", n)
 	}
+	waitForWebhookRecorded(t, pool, sessionID)
 }
 
 // The SSRF guard: a callback that resolves into the runner's own network is
@@ -450,15 +451,15 @@ func TestWebhookRefusesPrivateAddress(t *testing.T) {
 		mu   sync.Mutex
 		hits int
 	)
-	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		hits++
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 	defer recv.Close()
 
-	api, pool, sessionID := webhookSession(t, "https://"+strings.TrimPrefix(recv.URL, "http://")+"/hook", "")
+	api, pool, sessionID := webhookSession(t, "https://"+strings.TrimPrefix(callbackURL, "http://"), "")
 	api.deliverCompletion(context.Background(), sessionID)
 
 	mu.Lock()
@@ -483,12 +484,12 @@ func TestWebhookRefusesPrivateAddress(t *testing.T) {
 // network error, which is precisely the evidence that the dial was allowed.)
 func TestWebhookAllowsPrivateAddressWithEnvOptIn(t *testing.T) {
 	t.Setenv("BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE", "true")
-	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 	defer recv.Close()
 
-	api, pool, sessionID := webhookSession(t, "https://"+strings.TrimPrefix(recv.URL, "http://")+"/hook", "")
+	api, pool, sessionID := webhookSession(t, "https://"+strings.TrimPrefix(callbackURL, "http://"), "")
 	api.deliverCompletion(context.Background(), sessionID)
 
 	events := webhookEvents(t, pool, sessionID)

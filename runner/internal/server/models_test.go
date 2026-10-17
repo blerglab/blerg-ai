@@ -251,9 +251,6 @@ func TestClusterCodexModelsReturnsSnapshotBeforeProbeCompletes(t *testing.T) {
 
 func TestClusterCodexModelsRestoredAtStartupWithoutProbe(t *testing.T) {
 	pool := connectSrvTestSchemaPool(t)
-	if err := db.RunMigrations(context.Background(), pool); err != nil {
-		t.Fatal(err)
-	}
 	now := time.Now().UTC()
 	stored := models.List{Models: []models.Model{{ID: "fixture-fast", Name: "Fast", Section: "main", Efforts: []string{"low"}, DefaultEffort: "low"}}, Source: models.SourceLive, FetchedAt: &now}
 	raw, err := json.Marshal(stored)

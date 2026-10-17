@@ -128,7 +128,7 @@ unless you ask it to. Values land in `blerg-secrets` (namespace `blerg`) or
 
 | Variable | Written to | Default when unset | Meaning |
 |---|---|---|---|
-| `SECRET_POSTGRES_PASSWORD` | `blerg-secrets`: `POSTGRES_PASSWORD` and the three DSNs `DATABASE_URL_CORE`, `DATABASE_URL_BOARD`, `BLERG_RUNNER_DATABASE_URL` | live value, else random | Postgres password. It is only applied when the data directory is first initialised — **never set a new one on an existing PVC**. |
+| `SECRET_POSTGRES_PASSWORD` | `blerg-secrets`: `POSTGRES_PASSWORD` and the three DSNs `DATABASE_URL_CORE`, `DATABASE_URL_BOARD`, `BLERG_RUNNER_DATABASE_URL` | live value, else random | Postgres password. It is only applied when the data directory is first initialized — **never set a new one on an existing PVC**. |
 | `SECRET_BLERG_CORE_REGISTER_KEY` | `blerg-secrets` | live, else random | Key board and runner present to register with core. |
 | `SECRET_BLERG_BOARD_SERVICE_KEY` | `blerg-secrets` | live, else random | Board's service key. |
 | `SECRET_BLERG_BOARD_SECRET_KEY` | `blerg-secrets` | live, else `openssl rand -base64 32` | AES-256 key (base64 of 32 bytes) that encrypts each board's automation token at rest. **Losing it makes stored automation tokens unreadable** (re-enter them in the board's settings); changing it does the same. |
@@ -290,7 +290,7 @@ only session attribution (`human_sessions.ip`, shown as "where you're logged
 in"), never authorization — without it every login would be recorded as the
 ingress pod's IP. If you front the ingress with another proxy or a
 controller that appends rather than replaces `X-Forwarded-For`, verify its
-behaviour before keeping this on; see `core/docs/CONFIG.md`.
+behavior before keeping this on; see `core/docs/CONFIG.md`.
 
 ### Re-running deploy.sh
 
@@ -454,7 +454,7 @@ requests all three names explicitly.
 
 **The refresh cookie is `Secure`.** Browsers only send a `Secure` cookie
 over HTTPS (with a narrow exception for `http://localhost` that Safari does
-not honour), so plain `SCHEME=http` only actually works when you're browsing
+not honor), so plain `SCHEME=http` only actually works when you're browsing
 at `localhost` — anywhere else, set up TLS (`CLUSTER_ISSUER` or an external
 terminator) or login/refresh will silently fail. See
 [`core/docs/CONFIG.md`](../../core/docs/CONFIG.md).

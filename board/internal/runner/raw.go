@@ -41,6 +41,11 @@ func streamTransport() http.RoundTripper {
 // messages and stops. It is never the start identity: nothing here starts a
 // session.
 func (k *BlergRunner) Raw(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
+	return k.RawAs(ctx, k.key, method, path, body, headers)
+}
+
+// RawAs carries the board's current verified automation identity for recovery.
+func (k *BlergRunner) RawAs(ctx context.Context, token, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, k.url+path, body)
 	if err != nil {
 		return nil, err
@@ -56,6 +61,10 @@ func (k *BlergRunner) Raw(ctx context.Context, method, path string, body io.Read
 		}
 		req.Header.Set(name, v)
 	}
-	req.Header.Set("Authorization", "Bearer "+k.key)
+	req.Header.Set("Authorization", "Bearer "+token)
 	return streamClient.Do(req)
+}
+
+type IdentityRawDoer interface {
+	RawAs(context.Context, string, string, string, io.Reader, map[string]string) (*http.Response, error)
 }

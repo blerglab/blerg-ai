@@ -7,6 +7,7 @@ import (
 )
 
 type codexChildMetadata struct {
+	ReasoningEffort                    *string `json:"reasoningEffort"`
 	ID, ParentThreadID, Model, Preview string
 	Source                             json.RawMessage
 }

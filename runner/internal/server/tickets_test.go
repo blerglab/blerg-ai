@@ -16,10 +16,6 @@ import (
 func TestTickets(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	api := NewAPI(NewHub(), pool, "tok", nil, "")
 
@@ -958,10 +954,6 @@ func TestTickets(t *testing.T) {
 func TestTicketGetEvents(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	api := NewAPI(NewHub(), pool, "tok", nil, "")
 
@@ -1177,10 +1169,6 @@ type wsEvent struct {
 func TestTicketWSEventEnrichment(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	hub := NewHub()
 	api := NewAPI(hub, pool, "tok", nil, "")

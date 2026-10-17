@@ -9,7 +9,7 @@ import { isShownUserMessage } from './userMessages'
 // subagent_update only feeds its subagent's card, background_task_* only the background strip.
 export const HIDDEN_KINDS = new Set([
   'provider_blocks', 'status_changed', 'start_stage', 'capabilities', 'subagent_update',
-  'background_task_started', 'background_task_done',
+  'background_task_started', 'background_task_done', 'mcp_status',
 ])
 
 // Kinds the timeline renders as a card of their own. Anything else renders
@@ -17,7 +17,7 @@ export const HIDDEN_KINDS = new Set([
 const CARD_KINDS = new Set([
   'user_message', 'assistant_text', 'assistant_thinking', 'check_in', 'ask', 'update', 'note',
   'model_changed', 'subagent_started', 'subagent_done', 'turn_done', 'error', 'compaction', 'artifact',
-  'topic',
+  'topic', 'checklist', 'ticket',
 ])
 
 // Tools whose result is a link or image worth seeing at once: they stay full
@@ -40,6 +40,10 @@ export interface SubagentEntry {
   anchor: AgentEvent
   /** Its subagent_started; absent while only later events are held (it started on an older page). */
   started?: AgentEvent
+  /** Latest nonempty native model, paired with the folded effort below. */
+  model?: string
+  /** Folded configured effort, including explicit unknown resets. */
+  effort?: string
   info: SubagentPayload
   /** The latest subagent_done: a background launch first, its real end later. */
   done?: AgentEvent
@@ -167,6 +171,8 @@ function indexSubagents(events: AgentEvent[]) {
 }
 
 interface Pending {
+  effort?: string
+  model?: string
   key: string
   anchor: AgentEvent
   started?: AgentEvent
@@ -257,6 +263,15 @@ function fold(
       const key = stringField(ev, 'child_id')
       if (keys.has(key)) {
         const card = place(key, ev)
+        if (isRecord(ev.payload)) {
+          const p = ev.payload
+          if (typeof p.model === 'string' && p.model) {
+            if (p.model !== card.model) card.effort = ''
+            card.model = p.model
+          }
+          if (typeof p.effort === 'string') card.effort = p.effort
+          else if (p.effort === null) card.effort = ''
+        }
         if (ev.kind === 'subagent_started') {
           if (!card.started) card.started = ev
         } else if (ev.kind === 'subagent_update') {
@@ -274,6 +289,13 @@ function fold(
     if (HIDDEN_KINDS.has(ev.kind) || !CARD_KINDS.has(ev.kind)) continue
     if (ev.kind === 'user_message' && !isShownUserMessage(ev.payload)) continue
     flush()
+    // Consecutive checklist changes with nothing drawn between them are one row: the latest (its
+    // payload holds the whole list).
+    const last = items[items.length - 1]
+    if (ev.kind === 'checklist' && last?.type === 'event' && last.ev.kind === 'checklist') {
+      items[items.length - 1] = { type: 'event', ev }
+      continue
+    }
     items.push({ type: 'event', ev })
   }
   flush()
@@ -301,7 +323,7 @@ function subagentEntry(
     if (k === 'tool_call' || k === 'assistant_text') latest = card.events[i]
   }
   if (old && children === old.children && old.anchor === card.anchor && old.started === card.started &&
-      old.done === card.done && old.update === card.update && old.latest === latest &&
+      old.done === card.done && old.update === card.update && old.latest === latest && old.effort === card.effort && old.model === card.model &&
       old.call?.ev === card.call?.ev && old.call?.result === card.call?.result &&
       old.ids.length === ids.length && old.background === card.background && old.launched === card.launched) {
     return old
@@ -312,6 +334,8 @@ function subagentEntry(
     anchor: card.anchor,
     started: card.started,
     info,
+    model: card.model,
+    effort: card.effort,
     done: card.done,
     update: card.update,
     call: card.call,

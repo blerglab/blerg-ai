@@ -161,6 +161,12 @@ describe('SessionInsights', () => {
     expect(screen.getByTestId('si-work-line')).toHaveTextContent('5 messages from you · 2 files published')
   })
 
+  it('shows reported child effort and unknown for legacy child metadata', async () => {
+    apiFetch.mockImplementation(() => json(fixture({ subagents: { count: 3, by_type: [], by_model: [], tool_calls: 0, by_effort: [{ key: 'high', count: 1 }, { key: 'unknown', count: 2 }] } })));
+    render(<SessionInsights sessionId="sess-a" title="Children" live={false} onClose={() => {}} />)
+    expect(await screen.findByTestId('si-sub-efforts')).toHaveTextContent('Configured effortCounthigh1unknown2')
+  })
+
   it('tabulates subagents by type and model, or says there were none', async () => {
     apiFetch.mockImplementation(() => json(fixture()))
     const { unmount } = render(<SessionInsights sessionId="sess-a" title="Fix the bug" live={false} onClose={() => {}} />)

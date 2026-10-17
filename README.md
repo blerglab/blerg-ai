@@ -77,17 +77,24 @@ attach its results to its card.
   carries the work to the end and finishes with a summary. [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md#interactive-and-unattended)
 - **Talk to a running agent:** send messages mid-turn, interrupt, pause a cluster session, and
   review a published file passage by passage. A panel beside the chat shows what needs you and
-  what is running (questions, subagents, background tasks), a History of the pieces of work the
+  what is running (questions, subagents, background tasks, MCP servers), the ticket the agent
+  pinned and its checklist or plan (Claude Code and Codex), a History of the pieces of work the
   agent marked with the files and commits each one produced, and the session's files and
-  capabilities (skills, plugins, MCP servers). A session you follow tells you when it needs you,
+  capabilities (skills, plugins, MCP servers). The first message waits briefly for MCP servers to
+  connect, and you can send it at once. A session you follow tells you when it needs you,
   and once when all of its work is done. An agent session on your machine's host that a daemon
   restart cut off carries on by itself unless it was waiting for you, and one stopped by a usage
   limit can resume when the limit resets.
   [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md)
 - **A board agents write to.** Cards are drafted by agents and curated by people; an admission
   step rejects duplicates and vague cards; a card can start a session. [`board/README.md`](board/README.md)
-- **Files in and out:** attach files to a message, have the agent publish results, preview HTML
-  live, review and mark up markdown, PDFs and images from the chat. [`docs/artifacts.md`](docs/artifacts.md)
+- **Files in and out:** attach files to a message, have the agent publish results (including a
+  diff of its changes, shown in a diff viewer), preview HTML live, review and mark up markdown,
+  PDFs and images from the chat. [`docs/artifacts.md`](docs/artifacts.md)
+- **Code you can read:** code blocks are highlighted (ten color themes, yours to pick), long ones
+  fold into a viewer, files get inline previews, and a file the agent names opens from the
+  session's folder. Copy and paste keep their structure: a copy button on every message, copied
+  selections and pasted web text as Markdown. [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md#copying-and-pasting)
 - **MCP connections:** give a session tools from a remote MCP server (static token or OAuth)
   through a gateway that never shows the agent your credential. [`docs/mcp-connections.md`](docs/mcp-connections.md)
 - **Crons:** scheduled, unattended runs with only the tools you chose. [`docs/crons.md`](docs/crons.md)

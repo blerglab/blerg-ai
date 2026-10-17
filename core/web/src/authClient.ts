@@ -81,6 +81,13 @@ export function redirectToRefresh(returnTo: string): void {
 // carried. When the frame gets no token (signed out, cookie not sent, core unreachable) the caller
 // falls back to the full-page redirect, exactly as before.
 //
+// What the frame can tell apart (renewSilently): "token"; "signed-out", when core answered that the
+// sign-in is gone (no refresh cookie, or its session expired or was revoked) — core sends the frame
+// back to the silent page with "#signin_error=<reason>" for exactly that; and "no-answer" for
+// everything else: core down or unreachable (the frame shows the browser's error page, which is
+// cross-origin and unreadable, or never loads), core's own page (a password change it insists on, an
+// error), or no load within SILENT_TIMEOUT_MS. Only the positive signal counts as signed out.
+//
 // Every refresh ROTATES the cookie, so the browser must end up holding the cookie core last issued.
 // Two rules keep it that way. One refresh at a time across the tabs of this origin: a Web Lock is
 // held for the frame's whole life, so a second tab waits instead of racing (core heals a race, but
@@ -114,44 +121,52 @@ function tokenExpiryMs(token: string): number | null {
   }
 }
 
+/** What one silent renewal came back with; see the block comment above. */
+export type SilentOutcome = "token" | "signed-out" | "no-answer";
+
 // silentFrame loads core's refresh in a hidden frame. `answered` settles when the frame has loaded
-// (true with a token stored, false otherwise); `done` settles when the frame is gone — after its
+// (with the outcome; a token is stored first); `done` settles when the frame is gone — after its
 // answer, or after SILENT_LINGER_MS if it never loads. A caller waits on `answered` for at most
 // SILENT_TIMEOUT_MS; the frame itself is never cut short, so a rotation core committed is not lost.
-function silentFrame(): { answered: Promise<boolean>; done: Promise<void> } {
-  let settle!: (ok: boolean) => void;
+function silentFrame(): { answered: Promise<SilentOutcome>; done: Promise<void> } {
+  let settle!: (o: SilentOutcome) => void;
   let gone!: () => void;
-  const answered = new Promise<boolean>((resolve) => { settle = resolve; });
+  const answered = new Promise<SilentOutcome>((resolve) => { settle = resolve; });
   const done = new Promise<void>((resolve) => { gone = resolve; });
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
   frame.tabIndex = -1;
   frame.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden";
   let settled = false;
-  const finish = (ok: boolean) => {
+  const finish = (o: SilentOutcome) => {
     if (settled) return;
     settled = true;
     clearTimeout(linger);
     frame.remove();
-    settle(ok);
+    settle(o);
     gone();
   };
-  const linger = setTimeout(() => finish(false), SILENT_LINGER_MS);
+  const linger = setTimeout(() => finish("no-answer"), SILENT_LINGER_MS);
   frame.addEventListener("load", () => {
     try {
       // Reading the frame's location throws while it is still on core's origin (core answered with
       // its sign-in page or an error): that is "no token", not a failure to report.
       const loc = frame.contentWindow!.location;
-      const match = loc.origin === location.origin ? loc.hash.match(/access_token=([^&]+)/) : null;
+      const sameOrigin = loc.origin === location.origin;
+      const match = sameOrigin ? loc.hash.match(/access_token=([^&]+)/) : null;
       if (match) {
         accessToken = decodeURIComponent(match[1]);
-        finish(true);
+        finish("token");
+        return;
+      }
+      if (sameOrigin && /(?:^#|&)signin_error=/.test(loc.hash)) {
+        finish("signed-out");
         return;
       }
     } catch {
       /* cross-origin: no token */
     }
-    finish(false);
+    finish("no-answer");
   });
   const returnTo = location.origin + SILENT_REFRESH_PAGE;
   frame.src = `${coreOrigin()}/auth/refresh?return_to=${encodeURIComponent(returnTo)}`;
@@ -169,35 +184,41 @@ function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
 
 // silentRefresh: one frame, the lock held until the frame is gone, and the caller's answer no later
 // than SILENT_TIMEOUT_MS.
-function silentRefresh(): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
+function silentRefresh(): Promise<SilentOutcome> {
+  return new Promise<SilentOutcome>((resolve) => {
     let resolved = false;
-    const report = (ok: boolean) => {
+    const report = (o: SilentOutcome) => {
       if (resolved) return;
       resolved = true;
-      resolve(ok);
+      resolve(o);
     };
     void withRefreshLock(async () => {
       const { answered, done } = silentFrame();
-      const timer = setTimeout(() => report(false), SILENT_TIMEOUT_MS);
-      answered.then(report, () => report(false)).finally(() => clearTimeout(timer));
+      const timer = setTimeout(() => report("no-answer"), SILENT_TIMEOUT_MS);
+      answered.then(report, () => report("no-answer")).finally(() => clearTimeout(timer));
       await done;
-    }).catch(() => report(false));
+    }).catch(() => report("no-answer"));
   });
 }
 
-let inflight: Promise<boolean> | null = null;
+let inflight: Promise<SilentOutcome> | null = null;
 
-/** ensureFreshToken gets a new access token without leaving the page. Resolves true when one was
- *  stored, false when the caller should fall back to redirectToRefresh. Concurrent calls in this
- *  tab share one frame; other tabs of this origin wait their turn on the refresh lock. */
-export function ensureFreshToken(): Promise<boolean> {
+/** renewSilently gets a new access token without leaving the page, with or without one held now,
+ *  and says what came back (SilentOutcome). Concurrent calls in this tab share one frame; other tabs
+ *  of this origin wait their turn on the refresh lock. */
+export function renewSilently(): Promise<SilentOutcome> {
   if (!inflight) {
     inflight = silentRefresh().finally(() => {
       inflight = null;
     });
   }
   return inflight;
+}
+
+/** ensureFreshToken is renewSilently as a yes or no: true when a token was stored, false when the
+ *  caller should fall back to redirectToRefresh. */
+export function ensureFreshToken(): Promise<boolean> {
+  return renewSilently().then((o) => o === "token");
 }
 
 let renewTimer: ReturnType<typeof setTimeout> | null = null;
@@ -223,11 +244,16 @@ async function renewNow(): Promise<void> {
   if (exp !== null && exp > Date.now()) scheduleRenewal(RENEW_RETRY_MS);
 }
 
+let renewalStarted = false;
+
 /** startTokenRenewal keeps the token fresh in the background: it renews shortly before expiry and
- *  again when a tab that was hidden is shown (timers in a hidden tab can be late). Call once, after
- *  consumeAccessTokenFromFragment. */
+ *  again when a tab that was hidden is shown (timers in a hidden tab can be late). Call after
+ *  consumeAccessTokenFromFragment, or once a token was first obtained some other way; a second call
+ *  only reschedules. */
 export function startTokenRenewal(): void {
   scheduleRenewal();
+  if (renewalStarted) return;
+  renewalStarted = true;
   document.addEventListener("visibilitychange", () => {
     if (document.hidden || !accessToken) return;
     const exp = tokenExpiryMs(accessToken);

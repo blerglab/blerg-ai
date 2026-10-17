@@ -10,12 +10,16 @@ import (
 // Native catalog acquisition is engine-specific; caching, persistence and HTTP
 // delivery are shared. A future engine registers its bounded probe here.
 type clusterModelProvider struct {
-	probe     func(context.Context, *JobManager, string, coreProof, bool) (models.List, error)
-	safeError func(error) string
+	probe         func(context.Context, *JobManager, string, coreProof, bool) (models.List, error)
+	probeOperator func(context.Context, *JobManager, bool) (models.List, error)
+	safeError     func(error) string
 }
 
 var clusterModelProviders = map[string]clusterModelProvider{
 	"codex": {
+		probeOperator: func(ctx context.Context, j *JobManager, force bool) (models.List, error) {
+			return j.codexOperatorModels(ctx, force)
+		},
 		probe: func(ctx context.Context, j *JobManager, account string, proof coreProof, force bool) (models.List, error) {
 			return j.codexModels(ctx, account, proof, force)
 		},

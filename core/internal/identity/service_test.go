@@ -5,72 +5,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	cid "github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/core/internal/db"
 	"github.com/blerglab/blerg-ai/core/internal/signing"
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 )
 
-// serviceTestSchema is distinct from every other package's (and this package's other test
-// files') test schema name — "test_blerg_core_identity" (accounts_test.go, identity_test),
-// "test_blerg_core_identity_reconcile" (reconcile_test.go, package identity) — so this file's
-// isolated schema never collides with theirs, even though all run against the same shared
-// DATABASE_URL. Before this (audit M-1), this file's tests ran directly against the shared
-// "public" schema with no isolation at all, making them order-dependent on whatever other
-// packages' tests had already left behind there (e.g. signing_keys rows).
-const serviceTestSchema = "test_blerg_core_identity_service"
-
-// openStore gives the caller a fresh, isolated, migrated schema (dropped and recreated, then
-// dropped again on cleanup) wrapped in a db.Store — the same pattern established in
-// reconcile_test.go's reconcilePool, duplicated here (rather than shared) because these test
-// files are independent and each keeps its own schema name.
+// openStore provides a fresh database cloned from the migrated package template.
 func openStore(t *testing.T) db.Store {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-	ctx := context.Background()
-
-	setupPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", serviceTestSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("drop schema: %v", err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA %s", serviceTestSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("create schema: %v", err)
-	}
-	setupPool.Close()
-
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = serviceTestSchema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		bg := context.Background()
-		pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", serviceTestSchema))
-		pool.Close()
-	})
-	if err := db.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	return db.NewPgStore(pool)
+	return db.NewPgStore(testsupport.Pool(t, db.Migrate))
 }
 
 // staticRev is an in-memory snapshot of the revocation table for a single Verify call.

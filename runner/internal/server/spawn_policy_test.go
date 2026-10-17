@@ -15,10 +15,6 @@ import (
 func spawnPolicyAPI(t *testing.T) (*API, *DaemonConn, func(...string) string) {
 	t.Helper()
 	pool := connectSrvTestDB(t)
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(context.Background(), pool); err != nil {
-		t.Fatal(err)
-	}
 	hub := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-00000000d001", Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
 	hub.Register(dc)

@@ -8,7 +8,7 @@ import { apiFetch } from '../apiFetch'
 import { listBoards } from '../lib/boardApi'
 import { buildExpression, describeSchedule, hasFiveFields, parseExpression, DAY_NAMES } from '../lib/cronSchedule'
 import type { PresetKind } from '../lib/cronSchedule'
-import { modelCatalogTarget, useEngineModels } from '../lib/engineModels'
+import { launchEngineModels, useLaunchOptions } from '../lib/launchOptions'
 import { FOCUS_BOARD_PROMPT } from '../lib/focusPrompt'
 import type { Board, CronInfo, CronRuntime, McpSelectionEntry } from '../types'
 import type { RunDaemon } from '../lib/runtimes'
@@ -95,7 +95,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
   const [dow, setDow] = useState(initial.dow)
   const [expr, setExpr] = useState(initial.expr)
   const [timezone, setTimezone] = useState(cron?.timezone ?? browserZone())
-  const [engine, setEngine] = useState(cron?.engine === 'codex' ? 'codex' : 'claude')
+  const [engine, setEngine] = useState(cron?.engine || 'claude')
   const [model, setModel] = useState(cron?.model ?? '')
   const [effort, setEffort] = useState(cron?.effort ?? '')
   const [runtime, setRuntime] = useState<CronRuntime>(cron?.runtime ?? 'auto')
@@ -112,7 +112,6 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
   const [saving, setSaving] = useState(false)
   const [confirmStarter, setConfirmStarter] = useState(false)
 
-  const [clusterConfigured, setClusterConfigured] = useState(false)
   const [daemons, setDaemons] = useState<RunDaemon[]>([])
   const [boards, setBoards] = useState<Board[] | null>(null)
   useEffect(() => {
@@ -121,18 +120,28 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
       .then(r => (r.ok ? r.json() : []))
       .then(d => { if (live && Array.isArray(d)) setDaemons(d as RunDaemon[]) })
       .catch(() => { /* the pin is optional */ })
-    apiFetch('/api/cluster/status')
-      .then(r => r.ok ? r.json() : null)
-      .then(status => { if (live) setClusterConfigured(status?.configured === true) })
-      .catch(() => {})
     listBoards()
       .then(b => { if (live) setBoards(b) })
       .catch(() => { if (live) setBoards(null) })
     return () => { live = false }
   }, [])
 
-  const catalogTarget = modelCatalogTarget(runtime === 'auto' && clusterConfigured ? 'cluster' : runtime, daemonId)
-  const engineModels = useEngineModels(engine, catalogTarget.daemonId, { runtime: catalogTarget.runtime })
+  const resolvedRuntime = runtime === 'auto' ? '' : runtime
+  const launchOptions = useLaunchOptions({ runtime: resolvedRuntime, daemonId, kind: 'agent', restricted: true, personalOnly: true })
+  const engineKnown = launchOptions.state === 'known' && launchOptions.engines.some(e => e.id === engine)
+  const targetKey = `${resolvedRuntime}\0${daemonId}`
+  const [previousTarget, setPreviousTarget] = useState(targetKey)
+  if (previousTarget !== targetKey) {
+    setPreviousTarget(targetKey)
+    setModel('')
+    setEffort('')
+  }
+  if (launchOptions.state === 'known' && launchOptions.engines.length > 0 && !launchOptions.engines.some(e => e.id === engine)) {
+    setEngine(launchOptions.engines[0].id)
+    setModel('')
+    setEffort('')
+  }
+  const engineModels = launchEngineModels(launchOptions.engines.find(choice => choice.id === engine), launchOptions.retry, launchOptions.error)
   const zones = useMemo(() => zoneList(timezone), [timezone])
 
   const built = kind === 'advanced' ? null : buildExpression({ kind, times, dow })
@@ -148,6 +157,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+    if (!engineKnown) return setError('Choose an available engine before saving.')
     if (!name.trim()) return setError('Give the cron a name.')
     if (!prompt.trim()) return setError('Write the prompt the agent should run.')
     if (scheduleProblem) return setError(scheduleProblem)
@@ -312,12 +322,19 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
       </div>
 
       <div style={field}>
-        <label style={label} htmlFor="cron-engine">Engine</label>
-        <select id="cron-engine" value={engine} onChange={e => { setEngine(e.target.value); setModel(''); setEffort('') }} style={control}>
-          <option value="claude">Claude</option>
-          <option value="codex">Codex</option>
-        </select>
+        {launchOptions.state === 'loading' ? <p role="status">Checking available engines…</p>
+          : launchOptions.state === 'unknown' ? <p role="status">{launchOptions.error ?? 'Engine availability is unknown.'}{' '}
+            <button type="button" onClick={launchOptions.retry}>Retry engines</button></p>
+          : launchOptions.engines.length === 0 ? <p role="status">No engines available for this runtime. Connect an engine in Settings or choose another runtime.</p>
+          : launchOptions.engines.length > 1 ? <>
+            <label style={label} htmlFor="cron-engine">Engine</label>
+            <select id="cron-engine" value={engine} onChange={e => { setEngine(e.target.value); setModel(''); setEffort('') }} style={control}>
+              {launchOptions.engines.map(choice => <option key={choice.id} value={choice.id}>{choice.name}</option>)}
+            </select>
+          </> : null}
       </div>
+
+      {engineKnown && <>
 
       <ModelCatalogNotice state={engineModels} />
       <ModelPicker
@@ -339,6 +356,8 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
           </button>
         </div>
       )}
+
+      </>}
 
       <div style={field}>
         <label style={label} htmlFor="cron-runtime">Where it runs</label>
@@ -426,7 +445,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
         <p role="alert" data-testid="cron-form-error" style={{ color: 'var(--danger)', fontSize: '0.85rem', margin: '0 0 12px' }}>{error}</p>
       )}
       <div style={{ display: 'flex', gap: 8 }}>
-        <button type="submit" disabled={saving} style={{ ...pill(true), padding: '8px 18px' }}>{cron ? 'Save changes' : 'Create cron'}</button>
+        <button type="submit" disabled={saving || !engineKnown} style={{ ...pill(true), padding: '8px 18px' }}>{cron ? 'Save changes' : 'Create cron'}</button>
         <button type="button" onClick={onCancel} style={{ ...pill(false), padding: '8px 18px' }}>Cancel</button>
       </div>
     </form>

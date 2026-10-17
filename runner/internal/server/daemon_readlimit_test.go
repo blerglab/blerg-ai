@@ -45,6 +45,11 @@ func TestDaemonReadLimitFitsWorstCaseHello(t *testing.T) {
 	}
 	raw, _ := json.Marshal(hello)
 	t.Logf("worst-case hello: %d bytes (limit %d)", len(raw), daemonHelloReadLimit)
+	// The optional inventory has its own encoded-size bound; even its largest
+	// valid representation must fit alongside this complete legacy hello.
+	if int64(len(raw)+protocol.MaxBackgroundInventoryBytes)+64 > daemonHelloReadLimit {
+		t.Errorf("worst-case hello plus background inventory exceeds the %d limit", daemonHelloReadLimit)
+	}
 	if int64(len(raw))*2 > daemonHelloReadLimit {
 		t.Errorf("worst-case hello %d bytes is not well under the %d limit", len(raw), daemonHelloReadLimit)
 	}

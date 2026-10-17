@@ -7,6 +7,7 @@
 // must find the chat's card, not this row.
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
 import {
+  CommitChips as SharedCommitChips,
   formatDuration,
   loadPreviewUrl,
   previewKind,
@@ -209,34 +210,10 @@ function Row({ sessionId, item, held, missing, onJump, onOpenArtifact }: {
   }
 }
 
-/** The commits a done names: seven characters each, the full sha on hover; a link to the commit's
- *  page when the server knows the repository, else a button that copies the sha. */
+/** The commits a done names: the chat's chips in the History classes (a link to the commit's page
+ *  when the server knows the repository, else a button that copies the sha). */
 function CommitChips({ commits }: { commits: TopicCommit[] }) {
-  const [copied, setCopied] = useState<string | null>(null)
-  useEffect(() => {
-    if (!copied) return
-    const t = setTimeout(() => setCopied(null), 2000)
-    return () => clearTimeout(t)
-  }, [copied])
-  const copy = (sha: string) => {
-    navigator.clipboard?.writeText(sha).then(() => setCopied(sha), () => { /* nothing to say: the sha is in the title */ })
-  }
-  return (
-    <div className="reel-chips">
-      {commits.map(c => (c.url
-        ? (
-          <a key={c.sha} className="reel-chip reel-commit" href={c.url} target="_blank" rel="noopener noreferrer"
-            title={c.sha} aria-label={`Commit ${c.sha}`} data-testid="reel-commit">{c.sha.slice(0, 7)}</a>
-        )
-        : (
-          <button key={c.sha} type="button" className={`reel-chip reel-commit${copied === c.sha ? ' copied' : ''}`}
-            title={`${c.sha} (click to copy)`} aria-label={`Copy commit ${c.sha}`} data-testid="reel-commit"
-            onClick={() => copy(c.sha)}>{c.sha.slice(0, 7)}</button>
-        )
-      ))}
-      {copied && <span className="reel-copied" role="status">Copied</span>}
-    </div>
-  )
+  return <SharedCommitChips commits={commits} variant="reel" />
 }
 
 /** where: the row's "Show in conversation" (none in the unmarked list); here: what a filled chip means. */

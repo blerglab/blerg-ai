@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/blerglab/blerg-ai/contracts/pluginspec"
+	"io"
 	"log"
 	"net/http"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/coreauth"
@@ -91,6 +93,7 @@ func validateRepoNames(repos []string) error {
 
 // API groups the dependencies shared by all REST handlers.
 type API struct {
+	launchReady launchReadinessCache
 	// beforeMarkPrivate is a test seam: it runs at the top of MarkPrivate, that is
 	// between a session's insert and its marking (privacy_atomic_test.go).
 	beforeMarkPrivate func(sessionID string)
@@ -101,11 +104,14 @@ type API struct {
 	userRepos         *UserRepoLister // per-caller repos from their own git tokens; nil without core
 	vapidPublicKey    string
 	waiters           *messageWaiters
-	embedder          Embedder
-	runnerKey         string
-	coreAuth          *coreauth.Client
-	cron              *CronService // the cron start path and lifecycle (cronstart.go); nil when crons are off
-	metrics           metricsState // GET /metrics: its bearer token and a short cache (metrics.go)
+	// answerHold overrides the polling cap for deterministic short test timers.
+	// Nonpositive uses maxAnswerHold; configure before serving requests.
+	answerHold time.Duration
+	embedder   Embedder
+	runnerKey  string
+	coreAuth   *coreauth.Client
+	cron       *CronService // the cron start path and lifecycle (cronstart.go); nil when crons are off
+	metrics    metricsState // GET /metrics: its bearer token and a short cache (metrics.go)
 
 	// coreURL/coreInternalKey address blerg-core's internal credential
 	// endpoints for browser-facing lookups (GET /api/me/credentials).
@@ -272,6 +278,7 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		hub.SetPrivacyPool(dbPool) // lets every broadcast withhold private sessions (privacy.go)
 		hub.SetCompletionNotifier(api.notifyCompletion)
 		hub.SetAutoStopper(api.autoStopOnTurnDone)
+		hub.setModelController(api.SetSessionModel)
 		hub.SetAskSignal(api.waiters.signal)
 	}
 	return api
@@ -296,14 +303,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // whether "you" ended the session, never whose account did.
 func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	info := protocol.SessionInfo{
-		ID:          row.ID,
-		DaemonID:    row.DaemonID,
-		Status:      row.Status,
-		ProjectPath: row.ProjectPath,
-		Repo:        row.Repo,
-		StartedAt:   row.StartedAt.UTC().Format(time.RFC3339),
-		Unread:      row.Unread,
-		Starred:     row.Starred,
+		SteeringSupported:    engineSteeringSupported(derefOrEmpty(row.Engine), row.Kind),
+		LimitResumeSupported: row.Kind == "agent" && engineLimitResumeSupported(derefOrEmpty(row.Engine)),
+		ID:                   row.ID,
+		DaemonID:             row.DaemonID,
+		Status:               row.Status,
+		ProjectPath:          row.ProjectPath,
+		Repo:                 row.Repo,
+		StartedAt:            row.StartedAt.UTC().Format(time.RFC3339),
+		Unread:               row.Unread,
+		Starred:              row.Starred,
 	}
 	if row.Title != nil {
 		info.Title = *row.Title
@@ -471,15 +480,16 @@ func (a *API) HandleGetMyCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	out := protocol.MyCredentials{Engines: []string{}, GitProviders: []string{}}
 	ctx := withCoreProof(r.Context(), proofFromPrincipal(principal))
+	account := runnerPrincipalFromIdentity(principal).spawningAccountID()
 	var kinds []string
 	var found, known bool
 	if a.userRepos != nil {
 		// The repository lister already asks core this, at most once a
 		// minute per account; the launch sheet asks both at once.
-		kinds, known = a.userRepos.Kinds(ctx, principal.Sub)
+		kinds, known = a.userRepos.Kinds(ctx, account)
 		found = known && len(kinds) > 0
 	} else {
-		kinds, found, known = a.listPersonalCredentialKinds(ctx, principal.Sub)
+		kinds, found, known = a.listPersonalCredentialKinds(ctx, account)
 	}
 	if !known {
 		out.Unavailable = true
@@ -537,8 +547,9 @@ func (a *API) listPersonalCredentialKinds(ctx context.Context, accountID string)
 	switch resp.StatusCode {
 	case http.StatusOK:
 		var body internalCredentialListResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			log.Printf("api me/credentials: decode response failed: %v", err)
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, (16<<10)+1))
+		if err != nil || len(raw) > 16<<10 || json.Unmarshal(raw, &body) != nil || body.Engines == nil {
+			log.Print("api me/credentials: invalid credential availability response")
 			return nil, false, false
 		}
 		return body.Engines, true, true

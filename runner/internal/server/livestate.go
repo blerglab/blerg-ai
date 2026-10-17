@@ -5,7 +5,8 @@ package server
 //
 //   GET /api/sessions/{id}/live — for a person who may see the session, as /topics. The ETag is four
 //     cheap reads (the newest seq, the session row, the viewer's pending tool changes on it, the
-//     session's ask rows), so an unchanged state answers 304 without reading the events.
+//     session's ask rows), so an unchanged state answers 304 without reading the events. Beside the
+//     lists it carries the session's checklist, the engine's plan and its pinned tickets (worklist.go).
 
 import (
 	"context"
@@ -37,8 +38,13 @@ type liveReply struct {
 	ThroughSeq  int64     `json:"through_seq"`
 	GeneratedAt time.Time `json:"generated_at"`
 	livestate.State
+	// The checklist, the engine's plan and the pinned tickets (worklist.go).
+	workState
 	ToolChanges int        `json:"tool_changes"`
 	Counts      liveCounts `json:"counts"`
+	// CanReleasePrompt says the viewer owns the session, so "Send now" on a held first prompt works
+	// for them (only the owner's release_held_prompt is acted on). Omitted when false.
+	CanReleasePrompt bool `json:"can_release_prompt,omitempty"`
 }
 
 // liveETag names a live state without building it: the newest event, the session's status (a
@@ -130,9 +136,16 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 		fail("ListSubagentTails", err)
 		return
 	}
+	ws, err := readWorkState(ctx, a.dbPool, sid, through)
+	if err != nil {
+		fail("readWorkState", err)
+		return
+	}
+	a.addChecklistCommitURLs(row, &ws)
 	writeJSON(w, http.StatusOK, liveReply{
-		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, ToolChanges: toolChanges,
-		Counts: liveCounts{NeedsYou: len(st.Asks) + toolChanges, Running: len(st.Subagents) + len(st.Tasks)},
+		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, workState: ws, ToolChanges: toolChanges,
+		Counts:           liveCounts{NeedsYou: len(st.Asks) + toolChanges, Running: len(st.Subagents) + len(st.Tasks)},
+		CanReleasePrompt: ownsSession(p.Sub, row),
 	})
 }
 

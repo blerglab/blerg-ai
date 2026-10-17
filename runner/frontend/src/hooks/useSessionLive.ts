@@ -54,6 +54,13 @@ export function useSessionLive(sessionId: string, enabled: boolean, refresh: unk
         clockOffset,
         // What "new since" is measured against: the reply's time (an ask folded in after it is new).
         heldUntil: Number.isFinite(generatedAt) ? generatedAt : null,
+        checklist: view.checklist,
+        plan: view.plan,
+        tickets: view.tickets,
+        ticket: view.ticket,
+        mcp: view.mcp,
+        mcpHold: view.mcpHold,
+        canReleasePrompt: view.canReleasePrompt,
       }
     : null), [view, report.answer, report.openFiles, report.filesKey, report.files, clockOffset, generatedAt])
   if (fromServer && view) return { live: fromServer, tasks: view.tasks, toolChanges: view.toolChanges, source: 'server' }

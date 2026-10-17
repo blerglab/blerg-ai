@@ -7,77 +7,26 @@ package mcp
 // hands.
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/server"
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const mcpTestKey = "runner-key-1234567890"
 
-// mcpTestPool gives one test its own schema, pinned on every connection the
-// pool opens, so concurrent handler goroutines and other tests' teardown
-// cannot collide.
+// mcpTestPool gives one test its own migrated database, so concurrent handler
+// goroutines and other tests' teardown cannot collide.
 func mcpTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database integration tests")
-	}
-	schema := mcpTestSchemaName(t.Name())
-	ctx := context.Background()
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	for _, q := range []string{
-		fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema),
-		fmt.Sprintf("CREATE SCHEMA %s", schema),
-	} {
-		if _, err := pool.Exec(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(),
-			fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
-	})
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
-	return pool
-}
 
-func mcpTestSchemaName(name string) string {
-	var b strings.Builder
-	b.WriteString("test_mcp_")
-	for _, r := range strings.ToLower(name) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
-	}
-	s := b.String()
-	if len(s) > 60 {
-		s = s[:60]
-	}
-	return s
+	return testsupport.Open(t, "TEST_DATABASE_URL", "runner", db.RunMigrations)
 }
 
 // fakeK8sHandler is the smallest k8s API a cluster start needs: no Secrets
@@ -273,13 +222,15 @@ func TestMCPToolsList(t *testing.T) {
 	}
 	tools, _ := res["tools"].([]any)
 	want := map[string][]string{
-		"start_session":     {"repo", "prompt", "title", "model", "effort", "engine", "runtime", "idempotency_key", "callback_url", "callback_secret", "git_url", "provider", "env", "auto_stop", "no_repo", "interaction"},
-		"get_session":       {"session_id"},
-		"send_message":      {"session_id", "text"},
-		"interrupt_session": {"session_id"},
-		"stop_session":      {"session_id"},
-		"get_events":        {"session_id", "after_seq", "limit"},
-		"get_result":        {"session_id"},
+		"discover_launch_options": {"runtime", "daemon_id", "repo", "restricted", "refresh"},
+		"start_session":           {"repo", "prompt", "title", "model", "effort", "engine", "runtime", "idempotency_key", "callback_url", "callback_secret", "git_url", "provider", "env", "auto_stop", "no_repo", "interaction"},
+		"get_session":             {"session_id"},
+		"send_message":            {"session_id", "text", "client_id"},
+		"set_session_model":       {"session_id", "model", "effort"},
+		"interrupt_session":       {"session_id"},
+		"stop_session":            {"session_id"},
+		"get_events":              {"session_id", "after_seq", "limit"},
+		"get_result":              {"session_id"},
 	}
 	if len(tools) != len(want) {
 		t.Fatalf("tools/list returned %d tools, want %d", len(tools), len(want))

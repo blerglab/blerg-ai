@@ -18,6 +18,7 @@ export interface ArtifactViewSpec {
 export const ARTIFACT_VIEWS: Record<string, ArtifactViewSpec> = {
   markdown: { label: 'Markdown', textual: true },
   text: { label: 'Text', textual: true },
+  diff: { label: 'Diff', textual: true },
   json: { label: 'JSON', textual: true },
   csv: { label: 'Table', textual: true },
   html: { label: 'HTML', textual: true },

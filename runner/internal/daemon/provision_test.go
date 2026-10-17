@@ -689,3 +689,39 @@ func TestManagedBlockNamesTopics(t *testing.T) {
 		t.Errorf("the topic bullet must say that without markers History is only a summary:\n%s", managedBlock)
 	}
 }
+
+// The session guide and the managed block carry the same checklist/pin line, the one the CLI's
+// help starts with (WORK_LINE in blerg-runner).
+func TestGuideNamesChecklistAndPin(t *testing.T) {
+	if !strings.Contains(ccSessionGuide, workGuideLine+" "+topicGuideLine) {
+		t.Errorf("the session guide must carry the work line before the topic line")
+	}
+	if !strings.Contains(managedBlock, "- `blerg-runner checklist` / `blerg-runner pin` — "+workGuideLine) {
+		t.Errorf("managed block lacks the checklist/pin bullet:\n%s", managedBlock)
+	}
+	cli, err := os.ReadFile("../../.claude/skills/session-messaging/blerg-runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(string(cli)), " "), workGuideLine) {
+		t.Errorf("the CLI's WORK_LINE differs from workGuideLine")
+	}
+}
+
+// The session guide and the managed block carry the diff line, the one `blerg-runner diff --help`
+// starts with (DIFF_LINE in blerg-runner).
+func TestGuideNamesDiff(t *testing.T) {
+	if !strings.Contains(ccSessionGuide, diffGuideLine+" "+workGuideLine) {
+		t.Errorf("the session guide must carry the diff line before the work line")
+	}
+	if !strings.Contains(managedBlock, "- `blerg-runner diff` — "+diffGuideLine) {
+		t.Errorf("managed block lacks the diff bullet:\n%s", managedBlock)
+	}
+	cli, err := os.ReadFile("../../.claude/skills/session-messaging/blerg-runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cli), `DIFF_LINE = "`+diffGuideLine+`"`) {
+		t.Errorf("the CLI's DIFF_LINE differs from diffGuideLine")
+	}
+}

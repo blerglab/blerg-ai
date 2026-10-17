@@ -5,6 +5,7 @@ import { createContext, useContext } from 'react'
 import type { ReviewFile } from '../model/review'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import type { ArtifactPayload } from '../types'
+import type { ArtifactLink } from '../model/artifactLinks'
 
 export interface ChatContextValue {
   sessionId: string
@@ -12,6 +13,7 @@ export interface ChatContextValue {
   files: TransportFiles | null
   /** Opens the file in the viewer; autoplay starts a video or audio file at once. */
   view: (a: ArtifactInfo, opts?: { autoplay?: boolean }) => void
+  artifactLink?: (href: string | undefined) => ArtifactLink | null
   /** The newest version number of the file a card's payload is a version of (from the list). */
   latestVersion: (a: ArtifactPayload) => number | undefined
   /** The newest version of a file the person attached, by name (for inline previews). */
@@ -24,6 +26,13 @@ export interface ChatContextValue {
   reviewFor: (name: string) => Promise<ReviewFile | null>
   /** The session is over (stopped, ended or failed): a run with no end recorded is not running. */
   sessionOver?: boolean
+  /** A commit's web page, when the host knows the repository (ChatView's `commitUrl`). */
+  commitUrl?: (sha: string) => string | null | undefined
+  /** Opens a file the agent's text names, from the session's folder; absent: such text stays text. */
+  openWorkspaceFile?: (path: string, line?: number) => void
+  /** Opens the diff a checklist item names (its artifact id) when the session's file list has it;
+   *  null when it does not (the item then shows no "View diff"). */
+  viewDiff?: (artifactId: string) => (() => void) | null
 }
 
 export const ChatContext = createContext<ChatContextValue | null>(null)

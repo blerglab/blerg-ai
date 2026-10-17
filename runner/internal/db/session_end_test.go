@@ -2,7 +2,6 @@ package db_test
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,29 +10,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// endTestPool is a single-connection pool on a fresh schema with every
-// migration applied twice (the second pass must be a no-op), so the
-// search_path setupSchema sets is the one every statement sees.
+// endTestPool opens a private migrated database and verifies repeat migrations are no-ops.
 func endTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database tests")
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.MaxConns = 1
-	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	setupSchema(t, pool)
-	ctx := context.Background()
+	pool := migratedPool(t, 1)
 	for i := 0; i < 2; i++ {
-		if err := db.RunMigrations(ctx, pool); err != nil {
+		if err := db.RunMigrations(context.Background(), pool); err != nil {
 			t.Fatalf("RunMigrations pass %d: %v", i+1, err)
 		}
 	}

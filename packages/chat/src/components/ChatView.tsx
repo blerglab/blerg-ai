@@ -1,6 +1,7 @@
 // ChatView: a whole chat with one session over a Transport — the toolbar, the transcript, the
 // composer, the Files panel and viewer. The host adds what is its own through slots (a model
 // picker, a rules panel) and themes it through the --chat-* tokens.
+import { handleChatCopy } from '../model/richCopy'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { CardRegistry } from '../cards/registry'
 import { useAttachments } from '../hooks/useAttachments'
@@ -9,6 +10,7 @@ import { useBackgroundLiveStore } from '../hooks/useBackgroundTasks'
 import { useChatReportStore, type ChatFiles } from '../hooks/useLiveState'
 import { useTicker } from '../hooks/useTicker'
 import { findLatest, groupArtifacts, fileCount } from '../model/artifacts'
+import { resolveArtifactLink } from '../model/artifactLinks'
 import { MAX_ATTACHMENT_BYTES } from '../model/attachments'
 import { backgroundTasks, runningTasks } from '../model/backgroundTasks'
 import { ClockOffsetContext } from '../model/clockOffset'
@@ -27,6 +29,7 @@ import { themeStyle, type ThemeTokens } from '../theme'
 import type { ArtifactInfo, SessionMeta, Transport } from '../transport/types'
 import type { AgentEvent, ArtifactPayload, StatusPayload, UserMessagePayload } from '../types'
 import ArtifactViewer from './ArtifactViewer'
+import WorkspaceFileViewer from './WorkspaceFileViewer'
 import Composer from './Composer'
 import { AskContext, type AskContextValue } from './askContext'
 import { ChatContext, type ChatContextValue } from './context'
@@ -52,10 +55,15 @@ export interface ChatSlots {
   messageFooter?: MessageFooter
   /** Heads a live transcript in place of the default "Session ready" card. */
   readyCard?: (meta: SessionMeta, readyAt: number) => ReactNode
+  /** Between the transcript and the composer (the runner's held-first-message line). */
+  aboveComposer?: ReactNode
 }
 
 export interface ChatViewProps {
   session: string
+  /** A commit's web page (the checklist's commit chips link to it); null or absent: the chip copies
+   *  the sha. */
+  commitUrl?: (sha: string) => string | null | undefined
   transport: Transport
   cards?: CardRegistry
   /** Token values set on the chat's root, over whatever the stylesheets say. */
@@ -98,6 +106,11 @@ export interface ChatViewProps {
   readOnly?: boolean
   /** The composer's placeholder for a session that can take a message, in place of the default. */
   placeholder?: string
+  /** The person may open a file the agent's text names (a relative link, a path in inline code)
+   *  from the session's folder, in a viewer: the host's say, true only for the session's owner
+   *  (the route refuses anyone else). Needs a transport with the read (the runner's). Absent or
+   *  false: nothing changes. */
+  canOpenWorkspaceFiles?: boolean
   /** Where the chat shows what the agent left running in the background: 'none' (the only
    *  choice) leaves the list to the host — a side panel reading useBackgroundTasks, say. The
    *  working line names running tasks either way. */
@@ -202,6 +215,7 @@ export default function ChatView(props: ChatViewProps) {
     setSeenLink(linkedProp)
     setLinked(linkedProp)
   }
+  const [workspaceFile, setWorkspaceFile] = useState<{ path: string; line?: number } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   // The host's choice when it holds one (props.compact), else the chat's own, from storage.
   const [ownCompact, setOwnCompact] = useState(() => loadCompact(storage))
@@ -236,11 +250,21 @@ export default function ChatView(props: ChatViewProps) {
   )
   const send = s.send
   const sessionOver = status === 'error' || status === 'stopped' || status === 'ended'
+  const publishedSessionUrl = props.transport.publishedSessionUrl?.(sessionId)
+  const canOpenWorkspace = props.canOpenWorkspaceFiles === true && !!files?.workspaceFile
   const chatContext = useMemo<ChatContextValue>(() => ({
     sessionId,
     sessionOver,
+    commitUrl: props.commitUrl,
+    // A checklist item's "View diff" opens the diff the CLI published of its commits, from the list.
+    viewDiff: (id: string) => {
+      const a = files ? artifacts.items.find(x => x.id === id) : undefined
+      return a ? () => { setAutoplay(false); setViewing(a) } : null
+    },
     files,
     view: (a: ArtifactInfo, opts?: { autoplay?: boolean }) => { setAutoplay(!!opts?.autoplay); setViewing(a) },
+    openWorkspaceFile: canOpenWorkspace ? (path: string, line?: number) => setWorkspaceFile({ path, line }) : undefined,
+    artifactLink: href => files ? resolveArtifactLink(href, publishedSessionUrl, artifacts.items) : null,
     latestVersion: (a: ArtifactPayload) => latestVersions.get(`${a.origin === 'user' ? 'user' : 'agent'}\0${a.name}`),
     byName: (name: string) => findLatest(artifacts.items, { name, origin: 'user' }),
     // The review and mark-up modes send the way the composer does: every file uploaded first, then
@@ -278,7 +302,7 @@ export default function ChatView(props: ChatViewProps) {
       const [person, agent] = await Promise.all([read('user'), read('agent')])
       return mergeReviews(person, agent)
     },
-  }), [sessionId, sessionOver, files, latestVersions, artifacts.items, send, refreshArtifacts])
+  }), [sessionId, sessionOver, canOpenWorkspace, props.commitUrl, files, latestVersions, artifacts.items, send, refreshArtifacts, publishedSessionUrl])
   const consumeLink = props.onLinkedArtifactConsumed
   function closeViewer() {
     setAutoplay(false)
@@ -404,9 +428,9 @@ export default function ChatView(props: ChatViewProps) {
       ? 'queued'
       : 'sending'
 
-  // The Claude Code, Codex and native engines take a message while a turn runs; the other engines hold it until
-  // the turn ends, and the wording says which.
-  const steers = !meta?.engine || meta.engine === 'claude' || meta.engine === 'codex'
+  // Prefer the session's declared capability. Older backends retain the
+  // established engine behavior until they report this field.
+  const steers = meta?.steering_supported ?? (!meta?.engine || meta.engine === 'claude' || meta.engine === 'codex')
   const loadingHistory = !s.replayDone || s.hasMore
   // The server holds older events than the transcript does (fetched as the reader scrolls up).
   const hasOlder = !loadingHistory && s.hasOlder
@@ -532,7 +556,7 @@ export default function ChatView(props: ChatViewProps) {
   return (
     <ClockOffsetContext.Provider value={clockOffset}>
     <ChatContext.Provider value={chatContext}>
-    <div className={`agent-chat${props.className ? ` ${props.className}` : ''}`} data-testid="agent-chat" style={props.theme ? themeStyle(props.theme) : undefined} {...dropProps}>
+    <div className={`agent-chat${props.className ? ` ${props.className}` : ''}`} data-testid="agent-chat" style={props.theme ? themeStyle(props.theme) : undefined} onCopy={e => handleChatCopy(e.nativeEvent, e.currentTarget)} {...dropProps}>
       {dragging && <div className="drop-zone" role="status" data-testid="drop-zone">Drop files to attach</div>}
       <div className="agent-toolbar">
         {slots.header}
@@ -595,6 +619,17 @@ export default function ChatView(props: ChatViewProps) {
           autoplay={autoplay}
           onOpen={a => { if (linked !== null) consumeLink?.(); setLinked(null); setAutoplay(false); setViewing(a) }}
           onClose={closeViewer}
+        />
+      )}
+      {workspaceFile && files && canOpenWorkspace && (
+        <WorkspaceFileViewer
+          key={`${workspaceFile.path}:${workspaceFile.line ?? ''}`}
+          sessionId={sessionId}
+          files={files}
+          path={workspaceFile.path}
+          line={workspaceFile.line}
+          onClose={() => setWorkspaceFile(null)}
+          onSaved={refreshArtifacts}
         />
       )}
       {linkMissing && (
@@ -670,6 +705,7 @@ export default function ChatView(props: ChatViewProps) {
           {steers ? 'Working — Enter sends it to the agent · Esc interrupts' : 'Working — Enter queues your message · Esc interrupts'}
         </div>
       )}
+      {slots.aboveComposer}
       {attachments.notice && <div className="agent-notice" role="status" data-testid="attach-notice">{attachments.notice}</div>}
       {files && !props.readOnly && (
         <input

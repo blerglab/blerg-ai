@@ -7,7 +7,6 @@ package db_test
 import (
 	"context"
 	"errors"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -16,15 +15,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// singleConnPool opens a second pool of ONE connection on the schema cronTestPool built.
-func singleConnPool(t *testing.T) *pgxpool.Pool {
+// singleConnPool opens a second pool of ONE connection on the private database cronTestPool built.
+func singleConnPool(t *testing.T, base *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
-	cfg, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := base.Config()
 	cfg.MaxConns = 1
-	cfg.ConnConfig.RuntimeParams["search_path"] = "t22_dbcrons"
 	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +36,7 @@ func TestInsertManualCronRunGuardedBusyRunsOnTheTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	one := singleConnPool(t)
+	one := singleConnPool(t, pool)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

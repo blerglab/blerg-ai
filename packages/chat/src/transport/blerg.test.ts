@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, type Mock } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { createBlergTransport, GAP_WAIT_MS, MAX_FORWARD_PAGES, type BlergSocket, type ChatBrowserMessage } from './blerg'
 import type { SubscribeHandlers } from './types'
-import { ArtifactGoneError, FileRequestError, fileErrorText, isArtifactGone, UPLOAD_CUT_OFF_MESSAGE } from './files'
+import { ArtifactGoneError, FileRequestError, WorkspaceFileError, fileErrorText, isArtifactGone, UPLOAD_CUT_OFF_MESSAGE } from './files'
 import type { AgentEvent } from '../types'
 import { useSession } from '../hooks/useSession'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
@@ -691,6 +691,12 @@ describe('createBlergTransport messages', () => {
     await expect(t.stop('s1')).rejects.toThrow('HTTP 500')
   })
 
+  it.each([true, false])('preserves declared session steering support (%s)', async steering_supported => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValue(new Response(JSON.stringify([{ id: 's1', status: 'running', engine: 'future-engine', steering_supported, started_at: '' }])))
+    await expect(t.session('s1')).resolves.toMatchObject({ steering_supported })
+  })
+
   it('session reads the session list and maps the one asked for', async () => {
     const { t, fetch } = make(fakeSocket(), { baseUrl: 'https://runner.example' })
     fetch.mockImplementation(async () => new Response(JSON.stringify([
@@ -725,6 +731,37 @@ describe('createBlergTransport files', () => {
     fetch.mockResolvedValueOnce(new Response(null, { status: 404 }))
     await expect(t.files!.remove('s1', 'a1')).resolves.toBeUndefined()
     expect(fetch.mock.calls[1]).toEqual(['/api/sessions/s1/artifacts/a1', expect.objectContaining({ method: 'DELETE' })])
+  })
+
+  it('workspaceFile sends the path encoded once and returns the decoded bytes', async () => {
+    const { t, fetch } = make()
+    const body = { path: 'docs/a b.md', size: 5, view: 'markdown', content_type: 'text/markdown; charset=utf-8', truncated: false, content_b64: btoa('hello'), mtime: '2026-10-17T00:00:00Z' }
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify(body)))
+    const f = await t.files!.workspaceFile!('s/1', 'docs/a b.md')
+    expect(fetch.mock.calls[0][0]).toBe('/api/sessions/s%2F1/workspace-file?path=docs%2Fa%20b.md')
+    expect(fetch.mock.calls[0][1]).toMatchObject({ headers: { Authorization: 'Bearer tok' } })
+    expect(f).toMatchObject({ path: 'docs/a b.md', view: 'markdown', size: 5, mtime: '2026-10-17T00:00:00Z' })
+    expect(await f.blob.text()).toBe('hello')
+  })
+
+  it('workspaceFile throws WorkspaceFileError with the status and the error id', async () => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'The workspace file was not found.', error_id: 'e-1' }), { status: 404 }))
+    const e = await t.files!.workspaceFile!('s1', 'x.md').catch((x: unknown) => x)
+    expect(e).toBeInstanceOf(WorkspaceFileError)
+    expect(e).toMatchObject({ status: 404, errorId: 'e-1', serverText: 'The workspace file was not found.' })
+  })
+
+  it('workspaceFile can be cancelled', async () => {
+    const { t, fetch } = make()
+    fetch.mockImplementation((_u: unknown, init?: RequestInit) => new Promise((_res, rej) => {
+      if (init?.signal?.aborted) rej(new DOMException('x', 'AbortError'))
+      init?.signal?.addEventListener('abort', () => rej(new DOMException('x', 'AbortError')))
+    }))
+    const ac = new AbortController()
+    const p = t.files!.workspaceFile!('s1', 'x.md', ac.signal)
+    ac.abort()
+    await expect(p).rejects.toMatchObject({ name: 'AbortError' })
   })
 
   it('a 410 (listed, bytes gone) is a distinct error on raw and download', async () => {
@@ -1004,5 +1041,17 @@ describe('createBlergTransport gaps', () => {
       socket.emit({ type: 'agent_events_replay_done', session_id: sid, last_seq: 4, has_more: false })
     })
     expect(result.current.events.map(x => x.seq)).toEqual([1, 2, 3, 4])
+  })
+})
+
+describe('published artifact session URL', () => {
+  it('uses the configured runner origin, encoding the native session ID', () => {
+    const t = createBlergTransport({ baseUrl: 'https://runner.example.com', getToken: async () => null, socket: fakeSocket() })
+    expect(t.publishedSessionUrl?.('native/session')).toBe('https://runner.example.com/sessions/native%2Fsession')
+  })
+
+  it('uses the current runner page origin when no base URL is configured', () => {
+    const t = createBlergTransport({ getToken: async () => null, socket: fakeSocket() })
+    expect(t.publishedSessionUrl?.('s1')).toBe(`${location.origin}/sessions/s1`)
   })
 })

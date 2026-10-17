@@ -271,6 +271,7 @@ func callDetail(input json.RawMessage) string {
 
 // OpenSubagent is a subagent that started and has not finished, as a record keeps it.
 type OpenSubagent struct {
+	Effort    string `json:"effort,omitempty"`
 	ChildID   string `json:"child_id"` // the Agent call that started it
 	AgentType string `json:"agent_type,omitempty"`
 	Model     string `json:"model,omitempty"`

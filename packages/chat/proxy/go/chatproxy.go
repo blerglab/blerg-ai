@@ -19,12 +19,17 @@
 //	POST   {prefix}/sessions/{id}/messages  {text}     -> POST   /api/runner/sessions/{id}/message  {text}
 //	POST   {prefix}/sessions/{id}/stop                 -> POST   /api/runner/sessions/{id}/stop
 //	POST   {prefix}/sessions/{id}/interrupt            -> POST   /api/runner/sessions/{id}/interrupt
-//	POST   {prefix}/sessions/{id}/model                -> 501 Not Implemented (reserved)
+//	POST   {prefix}/sessions/{id}/model                -> POST /api/runner/sessions/{id}/model
 //	GET    {prefix}/sessions/{id}/artifacts            -> GET    /api/runner/sessions/{id}/artifacts
 //	GET    {prefix}/sessions/{id}/artifacts/{aid}/raw  -> GET    /api/runner/sessions/{id}/artifacts/{aid}/raw
 //	GET    {prefix}/sessions/{id}/artifacts/{aid}/download -> GET /api/runner/sessions/{id}/artifacts/{aid}/download
 //	DELETE {prefix}/sessions/{id}/artifacts/{aid}      -> DELETE /api/runner/sessions/{id}/artifacts/{aid}
 //	POST   {prefix}/sessions/{id}/uploads              -> POST   /api/runner/sessions/{id}/uploads  (raw bytes, X-Artifact-Name)
+//	GET    {prefix}/preferences                        -> GET    /api/runner/preferences?account=<Options.Account>
+//
+// The last is the person's display preferences (today their code colours), read for the person signed in to the app:
+// Options.Account names them. It runs Authorize with an empty session id, and without an Account it
+// answers {} and the runner is never contacted. There is no way to change a preference through the proxy.
 //
 // Every route runs Authorize first: false is a 403 and the runner is never
 // contacted; an error is a 500. The runner's status code is returned as is,
@@ -83,6 +88,10 @@ type Options struct {
 	// sent through the proxy (for example "human", when the proxy's messages
 	// are typed by a signed-in person). Empty: the runner's default.
 	MessageSource string
+	// Account names the person signed in to the app, as the runner knows them
+	// (the blerg-core account id), for GET {prefix}/preferences. Nil, or an
+	// empty answer: the route answers {} without calling the runner.
+	Account func(r *http.Request) string
 }
 
 // Mount registers the proxy contract under prefix (e.g. "/blerg") on mux.
@@ -101,7 +110,7 @@ func MountWith(mux *http.ServeMux, prefix string, client RunnerClient, opts Opti
 	if prefix != "" && !strings.HasPrefix(prefix, "/") {
 		panic("chatproxy: prefix must start with /")
 	}
-	p := &proxy{client: client, authorize: opts.Authorize, resolve: opts.Resolve, messageSource: opts.MessageSource}
+	p := &proxy{client: client, authorize: opts.Authorize, resolve: opts.Resolve, messageSource: opts.MessageSource, account: opts.Account}
 	base := prefix + "/sessions/{id}"
 
 	mux.HandleFunc("GET "+base, p.session)
@@ -116,6 +125,30 @@ func MountWith(mux *http.ServeMux, prefix string, client RunnerClient, opts Opti
 	mux.HandleFunc("GET "+base+"/artifacts/{aid}/download", p.artifactDownload)
 	mux.HandleFunc("DELETE "+base+"/artifacts/{aid}", p.artifactDelete)
 	mux.HandleFunc("POST "+base+"/uploads", p.uploads)
+	mux.HandleFunc("GET "+prefix+"/preferences", p.preferences)
+}
+
+// preferences reads the signed-in person's display preferences from the runner.
+func (p *proxy) preferences(w http.ResponseWriter, r *http.Request) {
+	allowed, err := p.authorize(r, "")
+	if err != nil {
+		http.Error(w, "authorization failed", http.StatusInternalServerError)
+		return
+	}
+	if !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	account := ""
+	if p.account != nil {
+		account = p.account(r)
+	}
+	if account == "" {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{}")
+		return
+	}
+	p.forward(w, r, http.MethodGet, "/api/runner/preferences?account="+url.QueryEscape(account), nil, nil)
 }
 
 // maxMessageBytes bounds a {text} body read into memory before it is
@@ -132,6 +165,7 @@ type proxy struct {
 	messageSource string
 	client        RunnerClient
 	authorize     Authorize
+	account       func(r *http.Request) string
 }
 
 // gate runs Authorize for the request's session and reports whether the
@@ -298,7 +332,8 @@ func (p *proxy) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Text string `json:"text"`
+		Text     string `json:"text"`
+		ClientID string `json:"client_id,omitempty"`
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxMessageBytes+1))
 	if err != nil || len(raw) > maxMessageBytes {
@@ -309,7 +344,14 @@ func (p *proxy) messages(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `expected {"text": "..."}`, http.StatusBadRequest)
 		return
 	}
+	if len(in.ClientID) > 256 {
+		http.Error(w, "invalid message id", http.StatusBadRequest)
+		return
+	}
 	msg := map[string]string{"text": in.Text}
+	if in.ClientID != "" {
+		msg["client_id"] = in.ClientID
+	}
 	if p.messageSource != "" {
 		msg["source"] = p.messageSource
 	}
@@ -341,13 +383,28 @@ func (p *proxy) interrupt(w http.ResponseWriter, r *http.Request) {
 	p.forward(w, r, http.MethodPost, runnerPath(id, "/interrupt", nil), nil, nil)
 }
 
-// model is reserved: the runner's v1 contract has no model switch for agent
-// tokens yet. The package's transport treats 501 as "setModel unavailable".
+// model uses the same session authorization and ID mapping as messages.
 func (p *proxy) model(w http.ResponseWriter, r *http.Request) {
-	if _, ok := p.gate(w, r); !ok {
+	id, ok := p.gate(w, r)
+	if !ok {
 		return
 	}
-	http.Error(w, "model switch not available through the proxy", http.StatusNotImplemented)
+	var in struct {
+		Model  string `json:"model"`
+		Effort string `json:"effort"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil || decoder.Decode(&struct{}{}) != io.EOF || (in.Model == "" && in.Effort == "") {
+		http.Error(w, "expected model or effort", http.StatusBadRequest)
+		return
+	}
+	out, err := json.Marshal(map[string]string{"model": in.Model, "effort": in.Effort})
+	if err != nil {
+		http.Error(w, "encode failed", http.StatusInternalServerError)
+		return
+	}
+	p.forward(w, r, http.MethodPost, runnerPath(id, "/model", nil), bytes.NewReader(out), map[string]string{"Content-Type": "application/json"})
 }
 
 func (p *proxy) artifacts(w http.ResponseWriter, r *http.Request) {

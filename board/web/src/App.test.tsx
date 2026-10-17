@@ -1,14 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { api, ApiError } from "./api";
 import { Shell, Boards } from "./App";
 import { MeProvider } from "./me";
+import { markSignInStuck } from "./signIn";
 
 const responses: Record<string, unknown> = {};
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
   return { ...actual, api: vi.fn((path: string) => Promise.resolve(responses[path] ?? [])) };
+});
+
+const { renewSilently } = vi.hoisted(() => ({
+  renewSilently: vi.fn(() => Promise.resolve("token" as const)),
+}));
+vi.mock("./authClient", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./authClient")>();
+  return { ...actual, renewSilently, startTokenRenewal: vi.fn() };
 });
 
 // Shell renders ThemeToggle, which reads prefers-color-scheme via
@@ -51,6 +61,27 @@ describe("Shell nav", () => {
     expect(screen.queryByText("…")).toBeNull();
     expect(document.querySelector(".build-version")).toBeNull();
     mock.mockImplementation(impl);
+  });
+  it("reloads its data, without a page reload, when the sign-in banner's quiet retry gets a token", async () => {
+    responses["/api/me"] = { kind: "service", is_admin: false, is_human: true };
+    const mock = vi.mocked(api);
+    const Probe = () => {
+      useEffect(() => { void api("/api/probe"); }, []);
+      return <div>probe</div>;
+    };
+    render(<MemoryRouter><Shell><Probe /></Shell></MemoryRouter>);
+    await screen.findByText("probe");
+    const calls = (path: string) => mock.mock.calls.filter((c) => c[0] === path).length;
+    const before = { me: calls("/api/me"), probe: calls("/api/probe") };
+    act(() => markSignInStuck());
+    expect(screen.getByTestId("sign-in-banner")).toBeInTheDocument();
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(screen.queryByTestId("sign-in-banner")).toBeNull());
+    expect(renewSilently).toHaveBeenCalled();
+    await waitFor(() => expect(calls("/api/probe")).toBe(before.probe + 1));
+    expect(calls("/api/me")).toBe(before.me + 1);
   });
   it("shows the Tokens link to admins", async () => {
     responses["/api/me"] = { kind: "service", is_admin: true, is_human: true };

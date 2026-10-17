@@ -272,6 +272,9 @@ export function deleteColumn(columnId: string, opId?: string): Promise<void> {
 // ─── Assist endpoint ──────────────────────────────────────────────────────────
 
 export interface SpawnAssistParams {
+  engine?: string
+  model?: string
+  effort?: string
   ticketId?: string
   opId?: string
 }
@@ -281,9 +284,10 @@ export function spawnAssist(
   boardId: string,
   params: SpawnAssistParams = {},
 ): Promise<{ session_id: string }> {
-  const { ticketId, opId } = params
+  const { ticketId, opId, engine, model, effort } = params
   return boardFetch<{ session_id: string }>('POST', `/api/boards/${boardId}/assist`, {
     ticket_id: ticketId ?? '',
+    engine, model, effort,
     op_id: opId ?? newOpId(),
   })
 }

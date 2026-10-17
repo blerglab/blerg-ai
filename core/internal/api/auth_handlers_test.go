@@ -10,9 +10,9 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,59 +24,13 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/authprovider"
 	"github.com/blerglab/blerg-ai/core/internal/db"
 	"github.com/blerglab/blerg-ai/core/internal/identity"
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 )
 
-// testSchema is a fixed schema name reused (dropped+recreated) by every test in this package.
-// Tests here don't run in parallel with each other, so one name is enough — matching the
-// established pattern in core/internal/identity/accounts_test.go's testPool and
-// core/internal/authprovider/local_test.go's testPool. This package's tests share one live
-// Postgres database (DATABASE_URL) with no per-row cleanup, so schema isolation is required to
-// avoid order-dependent failures against other packages' tests hitting the same database.
-const testSchema = "test_blerg_core_api_auth"
-
-// testPool connects to DATABASE_URL and gives the caller a fresh, isolated schema: dropped
-// and recreated before the test runs, and dropped again on cleanup. A plain "SET search_path"
-// via pool.Exec is NOT enough (pgxpool can hand out any of several underlying connections);
-// instead the schema is baked into every connection the returned pool ever opens, via
-// ConnConfig.RuntimeParams.
+// testPool provides a fresh database cloned from the migrated package template.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-	ctx := context.Background()
-
-	setupPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", testSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("drop schema: %v", err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA %s", testSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("create schema: %v", err)
-	}
-	setupPool.Close()
-
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = testSchema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		bg := context.Background()
-		pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", testSchema))
-		pool.Close()
-	})
-
-	return pool
+	return testsupport.Pool(t, db.Migrate)
 }
 
 // newTestDeps migrates a fresh isolated-schema pool, wires up a real identity.Service and
@@ -85,9 +39,6 @@ func newTestDeps(t *testing.T, allowedOrigins []string, originAudiences map[stri
 	t.Helper()
 	pool := testPool(t)
 	ctx := context.Background()
-	if err := db.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 	st := db.NewPgStore(pool)
 	kp, err := identity.LoadOrGenerateSigningKey(ctx, st)
 	if err != nil {
@@ -373,8 +324,10 @@ func TestRefreshCookieMaxAgeTracksRemainingLifetime(t *testing.T) {
 	deps, pool := newTestDeps(t, []string{"http://board.example.com"}, nil)
 	insertLocalAccount(t, pool, "ttluser", "password-ttl-1")
 
-	// A short TTL keeps the test fast while still giving enough headroom to observe the
-	// Max-Age shrinking between two refreshes separated by a real sleep.
+	// Advance only the cookie clock between refreshes: the absolute DB expiry stays
+	// fixed, so Max-Age must shrink without waiting out a wall-clock interval.
+	var elapsed atomic.Int64
+	deps.CookieNow = func() time.Time { return time.Now().Add(time.Duration(elapsed.Load())) }
 	ttl := 10 * time.Second
 	idSvc := deps.Identity.(*identity.Service)
 	idSvc.SetSessionTTL(ttl)
@@ -405,6 +358,7 @@ func TestRefreshCookieMaxAgeTracksRemainingLifetime(t *testing.T) {
 	}
 	loginTime := time.Now()
 
+	var absoluteExpiry time.Time
 	cookieMaxAge := func() int {
 		t.Helper()
 		resp, err := client.Get(srv.URL + "/auth/refresh?return_to=" + url.QueryEscape("http://board.example.com/app"))
@@ -414,6 +368,14 @@ func TestRefreshCookieMaxAgeTracksRemainingLifetime(t *testing.T) {
 		defer resp.Body.Close()
 		for _, c := range resp.Cookies() {
 			if c.Name == "blerg_core_refresh" {
+				expiry, err := idSvc.SessionExpiresAt(context.Background(), c.Value)
+				if err != nil {
+					t.Fatalf("rotated session expiry: %v", err)
+				}
+				if !absoluteExpiry.IsZero() && !expiry.Equal(absoluteExpiry) {
+					t.Fatal("rotation reset the session's absolute database expiry")
+				}
+				absoluteExpiry = expiry
 				return c.MaxAge
 			}
 		}
@@ -427,7 +389,7 @@ func TestRefreshCookieMaxAgeTracksRemainingLifetime(t *testing.T) {
 		t.Fatalf("first refresh Max-Age = %d, want ~%d (±2s of expires_at - now)", maxAge1, wantMaxAge1)
 	}
 
-	time.Sleep(2 * time.Second)
+	elapsed.Store(int64(2 * time.Second))
 
 	maxAge2 := cookieMaxAge()
 	if maxAge2 >= maxAge1 {
@@ -900,5 +862,60 @@ func TestRefreshFailuresRedirectBrowserNavigationsToLogin(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("Accept: text/html status = %d, want 302", resp.StatusCode)
+	}
+}
+
+// TestRefreshFailuresTellTheSilentFrameTheSignInEnded: a page renewing its token in a hidden
+// frame (authClient.ts) sends return_to=<its origin>/silent-refresh.html. When the sign-in is gone
+// (no cookie, dead session), core sends the frame back to that same-origin page with
+// "#signin_error=<reason>" instead of to its own /login, so the page can tell "your sign-in has
+// ended" (stop retrying, say so) from "core did not answer" (keep retrying). A frame left on
+// core's /login is cross-origin and unreadable, which is indistinguishable from an outage. A
+// return_to that is any other page keeps the /login redirect.
+func TestRefreshFailuresTellTheSilentFrameTheSignInEnded(t *testing.T) {
+	deps, _ := newTestDeps(t, []string{"http://board.example.com"}, nil)
+	srv := httptest.NewServer(api.NewRouter(deps))
+	defer srv.Close()
+	client := srv.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	silent := "http://board.example.com/silent-refresh.html"
+	for _, tc := range []struct {
+		name       string
+		cookie     *http.Cookie
+		wantReason string
+	}{
+		{"no cookie at all", nil, "signed_out"},
+		{"cookie for a dead session", &http.Cookie{Name: refreshCookieNameForTest, Value: "long-gone"}, "expired"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet, srv.URL+"/auth/refresh?return_to="+url.QueryEscape(silent), nil)
+			req.Header.Set("Sec-Fetch-Mode", "navigate")
+			req.Header.Set("Sec-Fetch-Dest", "iframe")
+			if tc.cookie != nil {
+				req.AddCookie(tc.cookie)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusFound {
+				t.Fatalf("status = %d, want 302", resp.StatusCode)
+			}
+			if got, want := resp.Header.Get("Location"), silent+"#signin_error="+tc.wantReason; got != want {
+				t.Errorf("Location = %q, want %q", got, want)
+			}
+		})
+	}
+
+	// Without the cookie problem being the cause, an unallowed silent page is still a 400.
+	resp, err := client.Get(srv.URL + "/auth/refresh?return_to=" + url.QueryEscape("http://evil.example.com/silent-refresh.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unallowed silent return_to = %d, want 400", resp.StatusCode)
 	}
 }

@@ -66,9 +66,6 @@ func TestAccountRoleResolvesFromDB(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	st := db.NewPgStore(pool)
-	if err := db.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
 	var accountID string
 	// Use unique provider_subject to avoid duplicate key constraint violations on repeated runs.
 	uniqueSubject := fmt.Sprintf("u-%d", time.Now().UnixNano())

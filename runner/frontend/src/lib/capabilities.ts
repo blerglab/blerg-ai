@@ -59,6 +59,7 @@ export function normalizeCapabilities(raw: unknown): CapabilitiesPayload | null 
   }
   return {
     engine: str(o.engine) ?? '',
+    tool_schema_refresh: o.tool_schema_refresh === 'next_turn' || o.tool_schema_refresh === 'new_session' ? o.tool_schema_refresh : undefined,
     engine_name: str(o.engine_name),
     model: str(o.model),
     version: str(o.version),

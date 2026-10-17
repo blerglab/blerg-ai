@@ -13,7 +13,8 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/livestate"
 )
 
-// LiveKindsSQL is the kind list of agent_events_live_idx (migration 042); livestate.Kinds is the same list.
+// LiveKindsSQL is the kind list of agent_events_live_idx (migration 042).
+// livestate.Kinds additionally includes latest-only MCP snapshots from migration 056.
 const LiveKindsSQL = `('ask', 'user_message', 'turn_done', 'subagent_started', 'subagent_update', 'subagent_done', 'background_task_started', 'background_task_done')`
 
 // LiveEventsSQL reads a session's live events but subagent_update ($1 session, $2 through seq), in
@@ -23,6 +24,11 @@ const LiveEventsSQL = `SELECT session_id, seq, client_event_id, kind, payload::t
 	WHERE session_id = $1 AND seq <= $2
 	  AND kind IN ('ask', 'user_message', 'turn_done', 'subagent_started', 'subagent_done', 'background_task_started', 'background_task_done')
 	ORDER BY seq`
+
+// LatestMCPStatusSQL uses the dedicated snapshot index; a long session contributes one row.
+const LatestMCPStatusSQL = `SELECT session_id, seq, client_event_id, kind, payload::text, ts FROM agent_events
+ WHERE session_id = $1 AND seq <= $2 AND kind = 'mcp_status'
+ ORDER BY seq DESC LIMIT 1`
 
 func scanEventRows(ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) ([]AgentEventRow, error) {
 	rows, err := pool.Query(ctx, sql, args...)
@@ -41,9 +47,20 @@ func scanEventRows(ctx context.Context, pool *pgxpool.Pool, sql string, args ...
 	return out, rows.Err()
 }
 
-// ListLiveEvents returns a session's live events (LiveEventsSQL) with seq <= throughSeq, in seq order.
+// ListLiveEvents returns a session's live events plus its latest MCP snapshot with
+// seq <= throughSeq, in seq order. It never reads the history of MCP snapshots.
 func ListLiveEvents(ctx context.Context, pool *pgxpool.Pool, sessionID string, throughSeq int64) ([]AgentEventRow, error) {
-	return scanEventRows(ctx, pool, LiveEventsSQL, sessionID, throughSeq)
+	rows, err := scanEventRows(ctx, pool, LiveEventsSQL, sessionID, throughSeq)
+	if err != nil {
+		return nil, err
+	}
+	latest, err := scanEventRows(ctx, pool, LatestMCPStatusSQL, sessionID, throughSeq)
+	if err != nil {
+		return nil, err
+	}
+	rows = append(rows, latest...)
+	sortRowsBySeq(rows)
+	return rows, nil
 }
 
 // Each tail key's two newest subagent_update events after its seq, newest first (one index probe per key).

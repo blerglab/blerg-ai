@@ -10,8 +10,8 @@ const apiFetch = vi.fn()
 vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }))
 vi.mock('../ws', () => ({ send: vi.fn(), onMessage: vi.fn() }))
 vi.mock('@blerglab/chat', () => ({
-  ChatView: ({ slots, maxFileBytes }: { slots: { header: ReactNode }; maxFileBytes?: number }) => (
-    <div data-testid="chat" data-max-file-bytes={maxFileBytes ?? 'none'}>{slots.header}</div>
+  ChatView: ({ slots, maxFileBytes, canOpenWorkspaceFiles }: { slots: { header: ReactNode }; maxFileBytes?: number; canOpenWorkspaceFiles?: boolean }) => (
+    <div data-testid="chat" data-max-file-bytes={maxFileBytes ?? 'none'} data-workspace-files={String(canOpenWorkspaceFiles)}>{slots.header}</div>
   ),
   ReadyCard: () => null,
   createBlergTransport: () => ({}),
@@ -39,6 +39,18 @@ describe('AgentChatView file limit', () => {
     useSessionStore.setState({ maxFileBytes: null })
     render(<AgentChatView session={makeSession({ kind: 'agent' })} thinking={false} compact={false} />)
     expect(screen.getByTestId('chat')).toHaveAttribute('data-max-file-bytes', 'none')
+  })
+})
+
+describe('AgentChatView workspace files', () => {
+  it('lets only the session’s owner open the files the agent names', () => {
+    const session = makeSession({ kind: 'agent' })
+    const view = render(<AgentChatView session={session} thinking={false} compact={false} canReleasePrompt />)
+    expect(screen.getByTestId('chat')).toHaveAttribute('data-workspace-files', 'true')
+    view.rerender(<AgentChatView session={session} thinking={false} compact={false} canReleasePrompt={false} />)
+    expect(screen.getByTestId('chat')).toHaveAttribute('data-workspace-files', 'false')
+    view.rerender(<AgentChatView session={session} thinking={false} compact={false} />)
+    expect(screen.getByTestId('chat')).toHaveAttribute('data-workspace-files', 'false')
   })
 })
 

@@ -1,13 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 
-const { redirectToRefresh, getAccessToken, connected } = vi.hoisted(() => ({
+const { redirectToRefresh, getAccessToken, connected, renewSilently, startTokenRenewal } = vi.hoisted(() => ({
   redirectToRefresh: vi.fn(),
   getAccessToken: vi.fn<() => string | null>(),
   connected: vi.fn<() => boolean>(),
+  renewSilently: vi.fn<() => Promise<'token' | 'signed-out' | 'no-answer'>>(),
+  startTokenRenewal: vi.fn(),
 }))
 
-vi.mock('../authClient', () => ({ redirectToRefresh, getAccessToken }))
+vi.mock('../authClient', () => ({ redirectToRefresh, getAccessToken, renewSilently, startTokenRenewal }))
 vi.mock('../ws', () => ({ connected }))
 
 import SignInBanner from './SignInBanner'
@@ -19,11 +21,14 @@ describe('SignInBanner', () => {
     redirectToRefresh.mockClear()
     getAccessToken.mockReturnValue(null)
     connected.mockReturnValue(false)
+    renewSilently.mockReset()
+    renewSilently.mockResolvedValue('no-answer')
     sessionStorage.clear()
     act(() => clearSignInStuck())
   })
 
   afterEach(() => {
+    act(() => clearSignInStuck())
     vi.useRealTimers()
   })
 
@@ -80,5 +85,41 @@ describe('SignInBanner', () => {
     expect(screen.getByTestId('sign-in-banner')).toBeInTheDocument()
     act(() => clearSignInStuck())
     expect(screen.queryByTestId('sign-in-banner')).not.toBeInTheDocument()
+  })
+
+  it('goes away by itself when a quiet retry gets a token after the network comes back', async () => {
+    vi.useFakeTimers()
+    render(<SignInBanner />)
+    act(() => markSignInStuck())
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000) // the first timed attempt: still offline
+    })
+    expect(renewSilently).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('sign-in-banner')).toHaveTextContent("Couldn't sign you in")
+    renewSilently.mockResolvedValueOnce('token')
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(renewSilently).toHaveBeenCalledTimes(2)
+    expect(screen.queryByTestId('sign-in-banner')).not.toBeInTheDocument()
+    expect(redirectToRefresh).not.toHaveBeenCalled()
+  })
+
+  it('says the sign-in has ended, stops trying, and Sign in does the full redirect', async () => {
+    vi.useFakeTimers()
+    render(<SignInBanner />)
+    renewSilently.mockResolvedValueOnce('signed-out')
+    act(() => markSignInStuck())
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    expect(screen.getByTestId('sign-in-banner')).toHaveTextContent('Your sign-in has ended')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600_000)
+    })
+    expect(renewSilently).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(redirectToRefresh).toHaveBeenCalledWith(refreshReturnUrl())
   })
 })

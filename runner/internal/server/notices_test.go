@@ -37,10 +37,6 @@ func newNoticeFixture(t *testing.T) *noticeFixture {
 	t.Helper()
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000c1"
 	sid := "00000000-0000-0000-0000-0000000000c2"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "laptop", "daemon", ""); err != nil {

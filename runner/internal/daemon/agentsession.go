@@ -120,8 +120,13 @@ type AgentHost struct {
 }
 
 type agentSession struct {
-	loop   sessionDriver
-	cancel context.CancelFunc
+	// workspace is the host folder mounted at /workspace for sandbox sessions.
+	// It stays bound to this launch even if the daemon's repos root changes.
+	workspace     string
+	workspaceInfo os.FileInfo
+	workspaceCtx  context.Context
+	loop          sessionDriver
+	cancel        context.CancelFunc
 	// runDone closes only after the driver has finished subprocess and file cleanup.
 	runDone <-chan struct{}
 	emitter *wsEmitter
@@ -135,6 +140,7 @@ type agentSession struct {
 	// mcp is the session's MCP gateway config file (nil: no grant), removed
 	// when the session ends.
 	mcp             *mcpConfigFile
+	mcpState        atomic.Pointer[mcpTracker]
 	codexRestricted *codexRestrictedRuntime
 	// engine is the session's engine id ("" = Claude): the rules every
 	// in-session model/effort change is checked against (changeModel).
@@ -649,7 +655,8 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// before every spawn_session reaches here, so this only fires for callers
 	// that bypass it (recovery with a stale path). Name the repo, not just the
 	// path — this text becomes the session's error_reason.
-	if _, err := os.Stat(workDir); err != nil {
+	workspaceInfo, workspaceErr := os.Stat(workDir)
+	if workspaceErr != nil {
 		fail(fmt.Sprintf("workspace not found for repo %q: %s is missing — clone it under this daemon's repos root", msg.Repo, workDir))
 		return
 	}
@@ -727,7 +734,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		fail("the session's message receipt journal could not be opened")
 		return
 	}
-	sess := &agentSession{skills: skillList, engine: msg.Engine, inputs: inputs}
+	sess := &agentSession{skills: skillList, engine: msg.Engine, inputs: inputs, workspace: workDir, workspaceInfo: workspaceInfo}
 	// A new session is idle until its first turn starts (the driver says
 	// "running" then). Reporting "running" here made a session with no
 	// initial prompt look busy — spinner, working indicator — while it was
@@ -826,6 +833,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	sess.workspaceCtx = ctx
 
 	// The environment every subprocess of this session starts from — engine
 	// CLIs and the native loop's bash tool alike. It is built by the SAME
@@ -1209,6 +1217,20 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 	}
 	driver.Start()
+	if source, ok := driver.(mcpStatusSource); ok {
+		if gate, supported := driver.(interface{ SetMCPInputGate(func(context.Context)) }); supported {
+			engine := msg.Engine
+			if engine == "" {
+				engine = "claude"
+			}
+			tracker := newMCPTracker(ctx, engine, source, emitter, mcpTrackerOptions{
+				Wait:      parseMCPPromptWait(os.Getenv("BLERG_RUNNER_MCP_PROMPT_WAIT_S")),
+				FirstUsed: mcpFirstPromptUsed(restore, ad),
+			})
+			sess.mcpState.Store(tracker)
+			gate.SetMCPInputGate(tracker.beforeFirstPrompt)
+		}
+	}
 	nativeOwned = true
 	go func() {
 		defer close(runDone)
@@ -1357,6 +1379,15 @@ func (sess *agentSession) changeModel(model, effort, source string) {
 func (h *AgentHost) Has(sessionID string) bool { return h.get(sessionID) != nil }
 
 // Interrupt cancels the session's in-flight turn.
+// ReleaseHeldPrompt is idempotent and never creates or resumes a session.
+func (h *AgentHost) ReleaseHeldPrompt(sessionID string) {
+	if sess := h.get(sessionID); sess != nil {
+		if tracker := sess.mcpState.Load(); tracker != nil {
+			tracker.release()
+		}
+	}
+}
+
 func (h *AgentHost) Interrupt(sessionID string) {
 	if sess := h.get(sessionID); sess != nil {
 		sess.loop.Interrupt()

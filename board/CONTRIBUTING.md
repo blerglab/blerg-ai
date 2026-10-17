@@ -31,4 +31,6 @@ Run everything with `make lint` (from `board/`).
 ## Tests
 
 `make test` (unit) and `make test-db TEST_DATABASE_URL=...` (integration,
-needs Postgres; keep `-p 1` — packages share the database).
+needs Postgres and a user with CREATEDB). Fixtures clone isolated databases from
+a once-migrated private template, so packages run in parallel without `-p 1`.
+Use a dedicated test server; the configured administration database is left alone.

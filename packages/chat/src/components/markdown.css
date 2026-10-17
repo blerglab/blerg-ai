@@ -67,7 +67,8 @@
 .md-codeblock pre {
   margin: 0;
   padding: 8px 10px;
-  background: var(--chat-bg);
+  background: var(--chat-code-bg);
+  color: var(--chat-code-fg);
   border: 1px solid var(--chat-border);
   border-radius: 8px;
   overflow-x: auto;
@@ -80,6 +81,7 @@
 }
 
 .md-codeblock pre code {
+  color: inherit; /* the app's own `code` colour must not override the theme's text colour */
   background: none;
   padding: 0;
   font-size: inherit;
@@ -135,4 +137,84 @@
 
 .md-link-inert {
   text-decoration: underline dotted;
+}
+
+/* Code blocks: syntax colours (model/highlighter.ts classes), diff lines, and the line cap. */
+.md-codeblock pre .hljs-keyword,
+.md-codeblock pre .hljs-literal,
+.md-codeblock pre .hljs-selector-tag,
+.md-codeblock pre .hljs-doctag { color: var(--chat-code-keyword); }
+.md-codeblock pre .hljs-string,
+.md-codeblock pre .hljs-regexp,
+.md-codeblock pre .hljs-symbol,
+.md-codeblock pre .hljs-bullet,
+.md-codeblock pre .hljs-addition { color: var(--chat-code-string); }
+.md-codeblock pre .hljs-number { color: var(--chat-code-number); }
+.md-codeblock pre .hljs-meta,
+.md-codeblock pre .hljs-built_in { color: var(--chat-code-builtin); }
+.md-codeblock pre .hljs-variable,
+.md-codeblock pre .hljs-template-variable,
+.md-codeblock pre .hljs-attr,
+.md-codeblock pre .hljs-attribute,
+.md-codeblock pre .hljs-property { color: var(--chat-code-variable); }
+.md-codeblock pre .hljs-operator,
+.md-codeblock pre .hljs-punctuation { color: var(--chat-code-operator); }
+.md-codeblock pre .hljs-comment,
+.md-codeblock pre .hljs-quote { color: var(--chat-code-comment); font-style: italic; }
+.md-codeblock pre .hljs-title,
+.md-codeblock pre .hljs-section,
+.md-codeblock pre .hljs-name,
+.md-codeblock pre .hljs-selector-id,
+.md-codeblock pre .hljs-selector-class { color: var(--chat-code-title); }
+.md-codeblock pre .hljs-type,
+.md-codeblock pre .hljs-tag { color: var(--chat-code-type); }
+.md-codeblock pre .hljs-deletion { color: var(--chat-diff-del); }
+.md-codeblock pre .hljs-emphasis { font-style: italic; }
+.md-codeblock pre .hljs-strong { font-weight: 650; }
+
+.md-diff-add,
+.code-viewer-code .md-diff-add { color: var(--chat-diff-add); background: color-mix(in srgb, var(--chat-diff-add) 12%, transparent); }
+.md-diff-del,
+.code-viewer-code .md-diff-del { color: var(--chat-diff-del); background: color-mix(in srgb, var(--chat-diff-del) 12%, transparent); }
+.md-diff-hunk { color: var(--chat-code-type); }
+.md-diff-file { color: var(--chat-code-comment); font-weight: 650; }
+
+/* A block over the cap: its first lines fade out above the actions. */
+.md-codeblock.is-capped pre {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
+}
+.md-codeblock-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.md-codeblock-more {
+  background: none;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  color: var(--chat-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--chat-text-xs);
+  padding: 2px 10px;
+}
+.md-codeblock-more:hover,
+.md-codeblock-more:focus-visible {
+  border-color: color-mix(in srgb, var(--chat-accent) 55%, transparent);
+  color: var(--chat-fg);
+}
+
+/* The compacted pasted message and its actions (a message over the cap). */
+.md-capped { position: relative; }
+.md-capped.is-capped > .md {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
+}
+
+/* Apps may style a bare `code` as inline (the runner's index.css uses inline-flex); a code block's
+   and the code viewer's code element must stay a block, or its lines run together. */
+.md-codeblock pre code,
+.code-viewer-code code {
+  display: block;
 }

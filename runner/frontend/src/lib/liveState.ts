@@ -4,7 +4,11 @@
 // person's message or the turn's end ending a foreground one), a background task's start and end, an
 // ask and its answer. Anything else (a turn's end, a status
 // change) brings a new read. Pure.
-import { STALE_RUNNING_MS, parseTs, type AgentEvent, type AskLive, type BackgroundTask, type SubagentLive } from '@blerglab/chat'
+import {
+  STALE_RUNNING_MS, foldTicketEvent, parseTs, readChecklist, readMcp, readMcpHold,
+  type AgentEvent, type AskLive, type BackgroundTask, type ChecklistItem, type ChecklistLive, type PinnedLive, type McpHold, type McpLive, type PlanLive,
+  type PlanStatus, type SubagentLive, type Ticket, type TicketLive, type TicketSummaryLive,
+} from '@blerglab/chat'
 
 export interface LiveAskReply { event_id: string; message_id: string; question: string; asked_at: string; seq: number }
 
@@ -13,6 +17,7 @@ export interface LiveSubagentReply {
   title: string
   type: string
   model: string
+  effort?: string
   tokens: number | null
   doing: string
   started_at: string
@@ -26,6 +31,11 @@ export interface LiveSubagentReply {
 
 export interface LiveTaskReply { task_id: string; call_id: string; kind: string; description: string; started_at: string; seq: number }
 
+export interface LiveChecklistReply { items: ChecklistItem[]; event_id: string; updated_at: string; commit_urls?: Record<string, string> }
+export interface LivePlanReply { items: { text: string; status: PlanStatus; active?: string }[]; updated_at: string }
+export interface LiveTicketSummaryReply { source: string; key: string; title: string; status: string; url: string; event_id: string; seq: number; updated_at: string }
+export type LiveTicketReply = Ticket & { event_id: string; updated_at: string }
+
 export interface LiveReply {
   session_id: string
   through_seq: number
@@ -36,6 +46,16 @@ export interface LiveReply {
   tasks: LiveTaskReply[]
   tool_changes: number
   counts: { needs_you: number; running: number }
+  /** The checklist, the engine's plan and the pins (a server older than them leaves them out). */
+  checklist?: LiveChecklistReply | null
+  plan?: LivePlanReply | null
+  tickets?: LiveTicketSummaryReply[]
+  ticket?: LiveTicketReply | null
+  /** The session's MCP servers as the engine last reported them (mcp_status), and the held first
+   *  prompt while it waits for them; the viewer may release it when they own the session. */
+  mcp?: unknown
+  mcp_hold?: { since: string; until: string } | null
+  can_release_prompt?: boolean
 }
 
 /** The events that change the live state: each brings a new read (folded meanwhile when it can be).
@@ -43,7 +63,19 @@ export interface LiveReply {
  *  tokens and sign of life are folded, and the doing line it would refresh waits for the next read. */
 export const LIVE_TRIGGER_KINDS: ReadonlySet<string> = new Set([
   'ask', 'subagent_started', 'subagent_done', 'background_task_started', 'background_task_done', 'turn_done',
+  'checklist', 'ticket', 'mcp_status',
 ])
+
+/** The engine's task tools whose top-level calls change the plan (the server's livestate.PlanTools). */
+const PLAN_TOOLS: ReadonlySet<string> = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate'])
+
+/** isLiveTrigger: the event brings a new read — a trigger kind, or a main-agent call of a plan tool. */
+export function isLiveTrigger(ev: AgentEvent): boolean {
+  if (LIVE_TRIGGER_KINDS.has(ev.kind)) return true
+  if (ev.kind !== 'tool_call') return false
+  const p = rec(ev.payload)
+  return PLAN_TOOLS.has(str(p.tool)) && !str(p.parent_call_id)
+}
 
 /** The kinds foldLive reads: the triggers, a subagent's updates and a person's message (it can
  *  answer an ask, and it ends a foreground subagent). */
@@ -57,6 +89,19 @@ export interface LiveView {
   tasks: BackgroundTask[]
   toolChanges: number
   counts: { needsYou: number; running: number }
+  /** The agent's checklist; null when it has none. */
+  checklist: ChecklistLive | null
+  /** The engine's plan (only the server reads it); null when there is none. */
+  plan: PlanLive | null
+  /** The pins, the current one first, and the current one in full. */
+  tickets: TicketSummaryLive[]
+  ticket: TicketLive | null
+  /** The MCP servers; null when the session has none the engine reported. */
+  mcp: McpLive | null
+  /** The first prompt is held for the servers; null when it is not (or the wait is over). */
+  mcpHold: McpHold | null
+  /** The viewer may release the held prompt. */
+  canReleasePrompt: boolean
 }
 
 type Rec = Record<string, unknown>
@@ -103,7 +148,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   const subs = new Map<string, SubAcc>()
   for (const s of reply.subagents ?? []) {
     subs.set(s.key, {
-      key: s.key, title: s.title, type: s.type, model: s.model, tokens: s.tokens, doing: s.doing,
+      key: s.key, title: s.title, type: s.type, model: s.model, ...(typeof s.effort === 'string' ? { effort: s.effort } : {}), tokens: s.tokens, doing: s.doing,
       startedAt: parseTs(s.started_at), background: s.background, activeAt: parseTs(s.active_at),
       ...(s.resumed ? { resumed: true } : {}),
     })
@@ -112,6 +157,19 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   for (const t of reply.tasks ?? []) {
     tasks.set(t.task_id, { taskId: t.task_id, callId: t.call_id, kind: t.kind, description: t.description, startedAt: parseTs(t.started_at), done: null })
   }
+  let checklist: ChecklistLive | null = reply.checklist && reply.checklist.items.length
+    ? {
+        items: reply.checklist.items, eventId: reply.checklist.event_id, updatedAt: parseTs(reply.checklist.updated_at),
+        ...(reply.checklist.commit_urls ? { commitUrls: reply.checklist.commit_urls } : {}),
+      }
+    : null
+  let mcp: McpLive | null = readMcp(reply.mcp)
+  let mcpHold: McpHold | null = readMcpHold(reply.mcp_hold)
+  const plan: PlanLive | null = reply.plan && reply.plan.items.length ? { items: reply.plan.items, updatedAt: parseTs(reply.plan.updated_at) } : null
+  let pinned: PinnedLive = {
+    tickets: (reply.tickets ?? []).map(t => ({ source: t.source, key: t.key, title: t.title, status: t.status, url: t.url, eventId: t.event_id, updatedAt: parseTs(t.updated_at) })),
+    ticket: reply.ticket ? (({ event_id, updated_at, ...t }) => ({ ...t, eventId: event_id, updatedAt: parseTs(updated_at) }))(reply.ticket) : null,
+  }
   const asks: AskLive[] = (reply.asks ?? []).map(a => ({ eventId: a.event_id, messageId: a.message_id, question: a.question, askedAt: parseTs(a.asked_at) }))
 
   for (let i = firstAfter(events, reply.through_seq); i < events.length; i++) {
@@ -119,6 +177,25 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
     const p = rec(ev.payload)
     const at = parseTs(ev.ts)
     switch (ev.kind) {
+      case 'checklist': {
+        // Each event holds the whole list: the latest wins.
+        const c = readChecklist(ev.payload)
+        // The pages of the commits the reply knew stay; a newer commit has none until the next read.
+        if (c) checklist = c.items.length ? { items: c.items, eventId: ev.client_event_id, updatedAt: at, ...(checklist?.commitUrls ? { commitUrls: checklist.commitUrls } : {}) } : null
+        break
+      }
+      case 'mcp_status': {
+        // Each snapshot holds all the servers: the latest wins, and it ends the hold when it settles.
+        const m = readMcp(ev.payload)
+        if (m) {
+          mcp = m
+          mcpHold = m.settled || m.released ? null : readMcpHold(p.hold)
+        }
+        break
+      }
+      case 'ticket':
+        pinned = foldTicketEvent(pinned, ev)
+        break
       case 'subagent_started': {
         const key = str(p.child_id)
         if (!key || subs.has(key)) break
@@ -126,7 +203,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         // runs until its own end, in the background when its original did.
         const resumed = p.resumed === true
         subs.set(key, {
-          key, title: firstLine(str(p.summary)) || 'Subagent · started earlier', type: str(p.agent_type), model: str(p.model),
+          key, title: firstLine(str(p.summary)) || 'Subagent · started earlier', type: str(p.agent_type), model: str(p.model), ...(typeof p.effort === 'string' ? { effort: p.effort } : {}),
           tokens: null, doing: '', startedAt: at, background: resumed && p.background === true, activeAt: at,
           ...(resumed ? { resumed: true } : {}),
         })
@@ -141,7 +218,12 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
           break
         }
         if (ev.kind === 'subagent_done') s.background = true
-        if (str(p.model)) s.model = str(p.model)
+        if (str(p.model)) {
+          if (s.model !== str(p.model)) s.effort = ''
+          s.model = str(p.model)
+        }
+        if (typeof p.effort === 'string') s.effort = p.effort
+        else if (p.effort === null) s.effort = ''
         const tokens = usageTotal(p.usage)
         if (tokens !== null && !reply.tokens_hidden) s.tokens = tokens
         s.activeAt = at ?? s.activeAt
@@ -187,7 +269,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   for (const s of subs.values()) {
     if (stale(s.activeAt)) continue
     subagents.push({
-      key: s.key, title: s.title, type: s.type, model: s.model, tokens: s.tokens, doing: s.doing, startedAt: s.startedAt, background: s.background,
+      key: s.key, title: s.title, type: s.type, model: s.model, ...(typeof s.effort === 'string' ? { effort: s.effort } : {}), tokens: s.tokens, doing: s.doing, startedAt: s.startedAt, background: s.background,
       ...(s.resumed ? { resumed: true } : {}),
     })
   }
@@ -197,5 +279,9 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   return {
     asks, subagents, tasks: running, toolChanges,
     counts: { needsYou: asks.length + toolChanges, running: subagents.length + running.length },
+    checklist, plan, tickets: pinned.tickets, ticket: pinned.ticket,
+    mcp: mcp && mcp.servers.length ? mcp : null,
+    mcpHold: mcpHold && Number.isFinite(now) && mcpHold.until <= now ? null : mcpHold,
+    canReleasePrompt: reply.can_release_prompt === true,
   }
 }

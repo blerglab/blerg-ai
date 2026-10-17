@@ -95,6 +95,9 @@ func WithRuntimeLaunchFenceRetry(parent context.Context, main *pgxpool.Pool, ses
 	return err
 }
 
+// runtimeFenceTimeout bounds each fence attempt; tests can exercise retry without a real five-second wait.
+var runtimeFenceTimeout = 5 * time.Second
+
 // WithRuntimeLaunchFence linearizes an entire accepted runtime frame (or
 // handshake/disconnect) against launch rotation across Runner replicas. The
 // transaction owns only its advisory lock; application handlers keep using
@@ -103,7 +106,7 @@ func WithRuntimeLaunchFence(parent context.Context, main *pgxpool.Pool, session 
 	if main == nil {
 		return ErrTokenInvalid
 	}
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, runtimeFenceTimeout)
 	defer cancel()
 	pool, err := runtimeFencePool(ctx, main)
 	if err != nil {

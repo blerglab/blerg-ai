@@ -154,7 +154,7 @@ func (d Deps) handleInternalManagedAccess(w http.ResponseWriter, r *http.Request
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	if !validEngines[body.Engine] || (body.Force && !uuidShape.MatchString(body.PreviousGeneration)) || (body.PreviousGeneration != "" && !uuidShape.MatchString(body.PreviousGeneration)) {
+	if !validCredentialKind(body.Engine) || (body.Force && !uuidShape.MatchString(body.PreviousGeneration)) || (body.PreviousGeneration != "" && !uuidShape.MatchString(body.PreviousGeneration)) {
 		http.Error(w, "bad credential request", http.StatusBadRequest)
 		return
 	}

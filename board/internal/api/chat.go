@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/chatproxy"
@@ -33,6 +34,10 @@ import (
 // Authorize only checks that the mark is there, so a route reached any other
 // way is refused.
 type chatAllowed struct{}
+type chatOwnerProof struct{}
+
+// chatAccount carries the signed-in person's core account id to the proxy's Account option.
+type chatAccount struct{}
 
 func (a *API) chatRoutes(mux *http.ServeMux, authed func(func(http.ResponseWriter, *http.Request, auth.Principal)) http.HandlerFunc) {
 	inner := http.NewServeMux()
@@ -48,6 +53,7 @@ func (a *API) chatRoutes(mux *http.ServeMux, authed func(func(http.ResponseWrite
 			return ext, nil
 		},
 		MessageSource: "human",
+		Account:       func(r *http.Request) string { s, _ := r.Context().Value(chatAccount{}).(string); return s },
 	})
 	read := a.chatGate(inner, "card.read", false)
 	write := a.chatGate(inner, "card.write", false)
@@ -57,6 +63,7 @@ func (a *API) chatRoutes(mux *http.ServeMux, authed func(func(http.ResponseWrite
 	mux.HandleFunc("GET /api/chat/sessions/{id}/events/live", authed(read))
 	mux.HandleFunc("GET /api/chat/sessions/{id}/events", authed(read))
 	mux.HandleFunc("POST /api/chat/sessions/{id}/messages", authed(person))
+	mux.HandleFunc("POST /api/chat/sessions/{id}/model", authed(person))
 	mux.HandleFunc("POST /api/chat/sessions/{id}/stop", authed(write))
 	mux.HandleFunc("POST /api/chat/sessions/{id}/interrupt", authed(write))
 	mux.HandleFunc("GET /api/chat/sessions/{id}/artifacts", authed(read))
@@ -64,6 +71,16 @@ func (a *API) chatRoutes(mux *http.ServeMux, authed func(func(http.ResponseWrite
 	mux.HandleFunc("GET /api/chat/sessions/{id}/artifacts/{aid}/download", authed(read))
 	mux.HandleFunc("DELETE /api/chat/sessions/{id}/artifacts/{aid}", authed(write))
 	mux.HandleFunc("POST /api/chat/sessions/{id}/uploads", authed(person))
+	// The person's display preferences (their code colours in Blerg Runner), read so the chat shows
+	// code in them. No board is involved, so there is no capability to hold; only a signed-in person
+	// (a core human token) has an account to read, anything else gets the defaults ({}).
+	mux.HandleFunc("GET /api/chat/preferences", authed(func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+		ctx := context.WithValue(r.Context(), chatAllowed{}, true)
+		if p.FromCore && p.IsHuman() && p.Token != nil {
+			ctx = context.WithValue(ctx, chatAccount{}, strings.TrimPrefix(p.Token.ID, "core:"))
+		}
+		inner.ServeHTTP(w, r.WithContext(ctx))
+	}))
 }
 
 // chatGate is the board's decision in front of one proxied route: the session
@@ -84,7 +101,24 @@ func (a *API) chatGate(inner http.Handler, capability string, personOnly bool) f
 			writeError(w, http.StatusForbidden, "only a signed-in person sends through the chat; use POST /api/runner-sessions/{id}/message")
 			return
 		}
-		inner.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), chatAllowed{}, true)))
+		ctx := context.WithValue(r.Context(), chatAllowed{}, true)
+		// Reads use the board service identity; controls that may recover a
+		// conversation carry a fresh owner proof, never a stored launch token.
+		if r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/messages") || strings.HasSuffix(r.URL.Path, "/model")) {
+			if a.runner == nil {
+				writeError(w, http.StatusServiceUnavailable, "no runner configured")
+				return
+			}
+			if _, ok := a.runner.Driver.(runner.IdentityRawDoer); ok {
+				token, _, err := a.startIdentity(ctx, boardID)
+				if err != nil {
+					writeStartError(w, err)
+					return
+				}
+				ctx = context.WithValue(ctx, chatOwnerProof{}, token)
+			}
+		}
+		inner.ServeHTTP(w, r.WithContext(ctx))
 	}
 }
 
@@ -95,6 +129,13 @@ type chatRunner struct{ a *API }
 func (c chatRunner) Do(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
 	if c.a.runner == nil {
 		return nil, errors.New("no runner configured")
+	}
+	if token, ok := ctx.Value(chatOwnerProof{}).(string); ok {
+		raw, supported := c.a.runner.Driver.(runner.IdentityRawDoer)
+		if !supported {
+			return nil, errors.New("runner cannot carry recovery identity")
+		}
+		return raw.RawAs(ctx, token, method, path, body, headers)
 	}
 	raw, ok := c.a.runner.Driver.(runner.RawDoer)
 	if !ok {

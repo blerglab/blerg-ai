@@ -61,3 +61,12 @@ describe('capabilities', () => {
     expect(matchesQuery(it1, 'zzz')).toBe(false)
   })
 })
+
+it('keeps only declared adapter tool-schema refresh policies', () => {
+  for (const policy of ['new_session', 'next_turn']) {
+    expect(normalizeCapabilities({ groups: [], tool_schema_refresh: policy })?.tool_schema_refresh).toBe(policy)
+  }
+  for (const policy of ['immediate', 'NEXT_TURN', { secret: 'untrusted' }, null]) {
+    expect(normalizeCapabilities({ groups: [], tool_schema_refresh: policy })?.tool_schema_refresh).toBeUndefined()
+  }
+})

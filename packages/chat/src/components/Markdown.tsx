@@ -7,8 +7,11 @@
 //     the literal text it is, so `<script>` / `<img onerror>` never become
 //     elements, and a model talking *about* HTML outside backticks still reads.
 //   - Links: only http(s) and mailto survive (safeUrl); anything else —
-//     javascript:, data:, vbscript:, relative paths — renders as plain text.
-//     Kept links open in a new tab with rel="noopener noreferrer".
+//     javascript:, data:, vbscript:, unrecognized relative paths — renders as plain text.
+//     Known published artifact links open the chat viewer on a normal click; other kept
+//     links and modified clicks open a new tab with rel="noopener noreferrer".
+//   - A relative link or path-like inline code in AGENT text is a button that asks the host to open
+//     the file from the session's folder (workspaceLinks); no host, no change.
 //   - Images are never loaded (a model-chosen URL is a tracking pixel waiting
 //     to happen); they render as a link to the image instead.
 //
@@ -23,50 +26,17 @@
 // is, a body that is not a JSON object gets the raw block and a note, and a
 // fence that has not closed yet (still streaming) is a plain code block —
 // its JSON is never parsed, complete as it may look.
-import { createContext, isValidElement, memo, useContext, useState, type ReactNode } from 'react'
+import { createContext, isValidElement, memo, useContext, type ReactNode } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { safeUrl } from '../model/safeUrl'
+import { workspaceFromCode, workspaceFromHref } from '../model/workspacePaths'
 import { cardKind, parseCardFence } from '../cards/fence'
 import type { CardRegistry } from '../cards/registry'
+import { langFromInfo } from '../model/codeLang'
 import './markdown.css'
-
-function textOf(node: ReactNode): string {
-  if (node == null || typeof node === 'boolean') return ''
-  if (typeof node === 'string' || typeof node === 'number') return String(node)
-  if (Array.isArray(node)) return node.map(textOf).join('')
-  if (typeof node === 'object' && 'props' in node) {
-    return textOf((node as { props: { children?: ReactNode } }).props.children)
-  }
-  return ''
-}
-
-function CodeBlock({ children, note }: { children?: ReactNode; note?: string }) {
-  const [copied, setCopied] = useState(false)
-  const text = textOf(children).replace(/\n$/, '')
-  const canCopy = typeof navigator !== 'undefined' && !!navigator.clipboard
-  return (
-    <div className="md-codeblock">
-      {canCopy && (
-        <button
-          type="button"
-          className="md-copy"
-          aria-label="Copy code"
-          onClick={() => {
-            void navigator.clipboard.writeText(text).then(
-              () => { setCopied(true); setTimeout(() => setCopied(false), 1200) },
-              () => {},
-            )
-          }}
-        >
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      )}
-      <pre>{children}</pre>
-      {note && <p className="md-card-note">{note}</p>}
-    </div>
-  )
-}
+import CodeBlock, { textOf } from './CodeBlock'
+import { useChat } from './context'
 
 // What a fence needs from the surrounding render: the registry, and the source
 // text to tell a closed fence from one still streaming. A context rather than
@@ -75,6 +45,8 @@ function CodeBlock({ children, note }: { children?: ReactNode; note?: string }) 
 interface FenceContext {
   cards?: CardRegistry
   source: string
+  /** Agent text on a host that opens session files: paths in it are links. */
+  workspace?: boolean
 }
 const Fence = createContext<FenceContext>({ source: '' })
 
@@ -89,7 +61,7 @@ function codeOf(children: ReactNode): { className?: string; text: string } | nul
 // A fence is closed when the source it spans ends in its closing line. The
 // position is the block's own, so the closing line is the last one of the
 // span; an unclosed fence runs to the end of the text with no such line.
-type Position = { start: { offset?: number }; end: { offset?: number } }
+type Position = { start: { offset?: number; line?: number }; end: { offset?: number; line?: number } }
 
 function fenceClosed(source: string, position: Position | undefined): boolean {
   if (!position || position.start.offset === undefined || position.end.offset === undefined) return false
@@ -102,13 +74,16 @@ function fenceClosed(source: string, position: Position | undefined): boolean {
 // complete and well-formed, else the code block it is.
 function FencedBlock({ children, position }: { children?: ReactNode; position?: Position }) {
   const { cards, source } = useContext(Fence)
-  const code = cards ? codeOf(children) : null
-  const kind = code ? cardKind(code.className) : null
-  if (!code || kind === null || !fenceClosed(source, position)) return <CodeBlock>{children}</CodeBlock>
-  const def = cards?.get(kind)
-  if (!def) return <CodeBlock>{children}</CodeBlock>
+  const code = codeOf(children)
+  const closed = fenceClosed(source, position)
+  const lang = langFromInfo(code?.className)
+  const plain = <CodeBlock lang={lang} closed={closed}>{children}</CodeBlock>
+  const kind = cards && code ? cardKind(code.className) : null
+  if (!cards || !code || kind === null || !closed) return plain
+  const def = cards.get(kind)
+  if (!def) return plain
   const fence = parseCardFence(code.className, code.text.replace(/\n$/, ''))
-  if (!fence) return <CodeBlock note={`This ${kind} card did not parse: its body is not a JSON object.`}>{children}</CodeBlock>
+  if (!fence) return <CodeBlock lang={null} closed={closed} note={`This ${kind} card did not parse: its body is not a JSON object.`}>{children}</CodeBlock>
   const { Component } = def
   return (
     <div className="md-card" data-card-kind={fence.kind}>
@@ -117,18 +92,68 @@ function FencedBlock({ children, position }: { children?: ReactNode; position?: 
   )
 }
 
+const WS_TITLE = 'Open from the session’s folder'
+
+// Opens on Enter and Space like a button; stopPropagation as every link in a clickable card does.
+function wsProps(open: () => void) {
+  return {
+    role: 'button' as const,
+    tabIndex: 0,
+    title: WS_TITLE,
+    onClick: (e: React.MouseEvent) => { e.stopPropagation(); open() },
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); open() }
+    },
+  }
+}
+
+function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const chat = useChat()
+  const { workspace } = useContext(Fence)
+  const artifact = chat?.artifactLink?.(href)
+  const url = artifact?.href ?? safeUrl(href)
+  if (!url) {
+    const ref = workspace && chat?.openWorkspaceFile ? workspaceFromHref(href) : null
+    if (ref && chat?.openWorkspaceFile) {
+      const open = chat.openWorkspaceFile
+      return <span className="md-wsfile md-wslink" data-workspace-path={ref.path} {...wsProps(() => open(ref.path, ref.line))}>{children}</span>
+    }
+    return <span className="md-link-inert">{children}</span>
+  }
+  return (
+    // stopPropagation: chat cards are often clickable themselves, and
+    // following a link must not also navigate the card.
+    <a href={url} target="_blank" rel="noopener noreferrer" onClick={e => {
+      e.stopPropagation()
+      if (artifact && !e.defaultPrevented && e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault()
+        chat?.view(artifact.artifact)
+      }
+    }}>
+      {children}
+    </a>
+  )
+}
+
+// Inline code is a file link when it looks like a path, the host opens session files, and the
+// text is agent-authored. A code block's own code element has a language class or spans lines.
+function InlineCode({ className, children, node }: { className?: string; children?: ReactNode; node?: { position?: Position } }) {
+  const chat = useChat()
+  const { workspace } = useContext(Fence)
+  const pos = node?.position
+  const oneLine = !!pos && pos.start.line !== undefined && pos.start.line === pos.end.line
+  const text = typeof children === 'string' ? children : Array.isArray(children) && children.every(c => typeof c === 'string') ? children.join('') : null
+  const ref = workspace && chat?.openWorkspaceFile && !className && oneLine && text !== null ? workspaceFromCode(text) : null
+  if (ref && chat?.openWorkspaceFile) {
+    const open = chat.openWorkspaceFile
+    return <code className="md-wsfile" data-workspace-path={ref.path} {...wsProps(() => open(ref.path, ref.line))}>{children}</code>
+  }
+  return <code className={className}>{children}</code>
+}
+
 const components: Components = {
-  a({ href, children }) {
-    const url = safeUrl(href)
-    if (!url) return <span className="md-link-inert">{children}</span>
-    return (
-      // stopPropagation: chat cards are often clickable themselves, and
-      // following a link must not also navigate the card.
-      <a href={url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}>
-        {children}
-      </a>
-    )
-  },
+  a: MarkdownLink,
+  code: InlineCode,
   img({ src, alt }) {
     const url = safeUrl(typeof src === 'string' ? src : null)
     const label = alt || 'image'
@@ -160,12 +185,15 @@ export interface MarkdownProps {
   className?: string
   /** The app's cards; without one every card fence is a code block. */
   cards?: CardRegistry
+  /** Agent-authored text: relative links and path-like inline code open the file from the session's
+   *  folder, when the host offers it (ChatView's canOpenWorkspaceFiles). Never for a person's text. */
+  workspaceLinks?: boolean
 }
 
-function MarkdownImpl({ text, className, cards }: MarkdownProps) {
+function MarkdownImpl({ text, className, cards, workspaceLinks }: MarkdownProps) {
   return (
     <div className={`md${className ? ` ${className}` : ''}`}>
-      <Fence.Provider value={{ cards, source: text }}>
+      <Fence.Provider value={{ cards, source: text, workspace: workspaceLinks }}>
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={keepUrl}>
           {text}
         </ReactMarkdown>

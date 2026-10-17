@@ -1,0 +1,64 @@
+// Which language a code block or a file is in, for highlighting. Pure and tiny: the highlighter
+// itself (model/highlighter.ts) is a lazy chunk; this table is not.
+
+/** The grammars the highlighter registers (highlight.js names). */
+export type CodeLang =
+  | 'javascript' | 'typescript' | 'go' | 'python' | 'bash' | 'json' | 'yaml' | 'sql'
+  | 'xml' | 'css' | 'rust' | 'java' | 'c' | 'cpp' | 'markdown' | 'diff'
+
+const ALIASES: Record<string, CodeLang> = {
+  js: 'javascript', javascript: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  ts: 'typescript', typescript: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+  go: 'go', golang: 'go',
+  py: 'python', python: 'python', python3: 'python',
+  sh: 'bash', bash: 'bash', shell: 'bash', zsh: 'bash', console: 'bash',
+  json: 'json', jsonc: 'json', json5: 'json',
+  yaml: 'yaml', yml: 'yaml',
+  sql: 'sql',
+  html: 'xml', xml: 'xml', svg: 'xml', htm: 'xml', xhtml: 'xml',
+  css: 'css',
+  rs: 'rust', rust: 'rust',
+  java: 'java',
+  c: 'c', h: 'c',
+  cpp: 'cpp', 'c++': 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp',
+  md: 'markdown', markdown: 'markdown',
+  diff: 'diff', patch: 'diff',
+}
+
+/** The language of a fence's info string ("go", "language-ts title=x"), or null when unknown. */
+export function langFromInfo(info: string | undefined | null): CodeLang | null {
+  if (!info) return null
+  const first = info.trim().split(/\s+/)[0].replace(/^language-/, '').toLowerCase()
+  return Object.prototype.hasOwnProperty.call(ALIASES, first) ? ALIASES[first] : null
+}
+
+/** The language of a file by its extension (code files arrive as view "text"), or null. */
+export function langFromName(name: string): CodeLang | null {
+  const dot = name.lastIndexOf('.')
+  if (dot < 0) return null
+  const ext = name.slice(dot + 1).toLowerCase()
+  return Object.prototype.hasOwnProperty.call(ALIASES, ext) ? ALIASES[ext] : null
+}
+
+/** What the viewer header calls a language. */
+export function langLabel(lang: CodeLang | null): string {
+  switch (lang) {
+    case null: return 'Text'
+    case 'javascript': return 'JavaScript'
+    case 'typescript': return 'TypeScript'
+    case 'go': return 'Go'
+    case 'python': return 'Python'
+    case 'bash': return 'Shell'
+    case 'json': return 'JSON'
+    case 'yaml': return 'YAML'
+    case 'sql': return 'SQL'
+    case 'xml': return 'HTML/XML'
+    case 'css': return 'CSS'
+    case 'rust': return 'Rust'
+    case 'java': return 'Java'
+    case 'c': return 'C'
+    case 'cpp': return 'C++'
+    case 'markdown': return 'Markdown'
+    case 'diff': return 'Diff'
+  }
+}

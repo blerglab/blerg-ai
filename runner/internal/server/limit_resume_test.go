@@ -46,6 +46,8 @@ func TestLimitResumePayloadValidation(t *testing.T) {
 		{`{"provider":"claude","turn_id":"turn-1"}`, true},
 		{`{"provider":"codex","turn_id":"turn-1"}`, true},
 		{`{"provider":"other","turn_id":"turn-1"}`, false},
+		{`{"turn_id":"turn-1"}`, false},
+		{`{"provider":"","turn_id":"turn-1"}`, false},
 		{`{"provider":"claude"}`, false},
 		{`{"provider":"claude","turn_id":"turn-1","reset_at":"2099-01-01T00:00:00Z"}`, false},
 		{`broken`, false},

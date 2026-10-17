@@ -41,6 +41,12 @@ export type {
   SubscribeAgentEvents,
   ToolCallPayload,
   TopicPayload,
+  ChecklistItem,
+  ChecklistPayload,
+  Ticket,
+  TicketComment,
+  TicketField,
+  TicketPayload,
   TokenUsage,
   ToolResultPayload,
   TurnDonePayload,
@@ -75,13 +81,24 @@ export { NO_END_RECORDED, STALE_RUNNING_MS } from './model/stale'
 export type { BackgroundTask } from './model/backgroundTasks'
 export { isHarnessText } from './model/harnessText'
 export { topicDividerText } from './model/topicMarker'
+export {
+  checklistFromEvents, checklistRowText, doneCount, foldTicketEvent, pinnedFromEvents, planLabel, progressText,
+  readChecklist, readTicket, readTicketEvent, sourceLabel, ticketChanges, ticketHref,
+} from './model/worklist'
+export type { ChecklistLive, PinnedLive, PlanItemLive, PlanLive, PlanStatus, TicketLive, TicketSummaryLive } from './model/worklist'
+export { McpHoldLine } from './components/McpHoldLine'
+export { holdClock, mcpFromEvents, mcpSummary, readMcp, readMcpHold } from './model/mcp'
+export type { McpHold, McpLive, McpReleased, McpServer, McpServerStatus, McpSummary } from './model/mcp'
+export { CommitChips, type CommitRef } from './components/CommitChips'
+export { ChecklistItems, ChecklistRow, TicketCard } from './components/cards/WorkCards'
+export { SourceBadge, TicketChips, TicketDetails, TicketHead, TicketKey, TicketModal } from './components/TicketView'
 export { firstPersonMessage, isShownUserMessage, userMessageShape } from './model/userMessages'
 export type { UserMessageShape } from './model/userMessages'
 export { droppedMessageId, isRetryNotice, isTurnError } from './model/notices'
 export { askStates } from './model/asks'
 export { liveSubagents, openAsks } from './model/liveState'
 export type { AskLive, LiveReport, SubagentLive } from './model/liveState'
-export { doingLine, staleSubagent, subagentModel, subagentStatus, subagentTitle, subagentTokens, tokenLabel } from './model/subagents'
+export { doingLine, staleSubagent, subagentEffort, subagentModel, subagentStatus, subagentTitle, subagentTokens, tokenLabel } from './model/subagents'
 export type { SubagentStatus } from './model/subagents'
 export type { AskState, Asks } from './model/asks'
 export { MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_BYTES, attachmentNote, composeMessage, formatLimit, splitAttachmentNote } from './model/attachments'
@@ -128,6 +145,12 @@ export type { CardFence } from './cards/fence'
 // ─── Theme ──────────────────────────────────────────────────────────────────────────────────
 export { TOKEN_NAMES, themeStyle } from './theme'
 export type { ThemeTokenName, ThemeTokens } from './theme'
+export {
+  CODE_THEMES, CODE_THEME_IDS, CODE_TOKEN_KEYS, CODE_TOKEN_LABELS, CODE_TOKEN_NAMES, DEFAULT_CODE_COLOURS, applyCodeColours,
+  applyCodeTheme, codeColourVars, codeThemes, currentCodeMode, isHexColour, normaliseCodeColours, resolveCodeTokens,
+  validateCodeColours,
+} from './theme/codeThemes'
+export type { CodeColours, CodeMode, CodeTheme, CodeTokenKey, CodeTokens } from './theme/codeThemes'
 
 export { latestStartAttempt, placeholderAttempt, startPanelVisible, withSessionOutcome, STILL_STARTING_MS } from './model/startStages'
 export type { AttemptStage, StartAttempt, StartSession } from './model/startStages'
@@ -150,6 +173,10 @@ export type { DescribeUserMessage, MessageFooter, RenderOptions, UserMessageCont
 export { ToolGroup } from './components/ToolGroup'
 export { default as ArtifactCard, MediaPreview } from './components/ArtifactCard'
 export { default as ArtifactViewer } from './components/ArtifactViewer'
+export { default as DiffView, DIFF_FILE_LINES } from './components/DiffView'
+export { foldContext, parsePatch, patchSummary, splitRows, patchSummaryText, unquotePath } from './model/patch'
+export type { Patch, PatchCommit, PatchFile, PatchFileStatus, PatchHunk, PatchLine, PatchLineKind, PatchSummary, SplitRow, HunkPiece } from './model/patch'
+export { splitTokenLines, useHighlighterReady } from './model/highlight'
 export { default as FilesPanel } from './components/FilesPanel'
 export { default as FilesList } from './components/FilesList'
 export type { FilesListProps } from './components/FilesList'

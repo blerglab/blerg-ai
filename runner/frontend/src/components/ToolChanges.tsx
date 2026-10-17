@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
+import ToolSchemaGuidance from './ToolSchemaGuidance'
 import { MCP_ALLOW_WARNING } from '../lib/mcpSelection'
 import { PROPOSALS_POLL_MS, applyPendingChanges, beginChangesRequest } from '../lib/proposals'
 import {
@@ -65,11 +66,11 @@ function leadSentence(c: ToolChangeInfo, hasOld: boolean): ReactNode {
   switch (c.state) {
     case 'pending':
       if (c.kind === 'new') {
-        return <>{conn} now offers {tool}, which the session did not have when it started. It is off until you decide: Grant turns it on in the mode you choose; Keep off leaves it off.</>
+        return <>{conn} now offers {tool}, which the session did not have when it started. It is off until you decide: Grant authorizes it in the mode you choose; Keep off leaves it off.</>
       }
-      return <>{conn} changed what {tool} does after this session pinned it. The tool is off in the session until you decide: Accept turns it back on with {hasOld ? 'the new definition below' : 'the definition below (the previous text was not kept)'}; Keep off leaves it off.</>
+      return <>{conn} changed what {tool} does after this session pinned it. Calls are blocked until you decide: Accept updates this session's grant to {hasOld ? 'the new definition below' : 'the definition below (the previous text was not kept)'}; Keep off leaves it blocked.</>
     case 'accepted':
-      return <>You {c.kind === 'new' ? 'granted' : 'accepted'} this{when}; the session uses the new definition.</>
+      return <>You {c.kind === 'new' ? 'granted' : 'accepted'} this{when}; this session's grant now authorizes the current definition.</>
     case 'declined':
       return <>You kept this off{when}. Later changes to this tool in this session are listed without a badge.</>
     case 'expired':
@@ -120,6 +121,7 @@ function ToolChangeCard({ c, busy, error, onAccept, onDecline }: CardProps) {
       </div>
       {c.kind === 'removed' && <div style={muted}>The server no longer offers this tool. Nothing to accept; it is off in this session.</div>}
       {c.kind !== 'removed' && <div data-testid="tool-change-lead" style={leadStyle}>{lead}</div>}
+      {(c.state === 'pending' || c.state === 'accepted') && c.kind !== 'removed' && <ToolSchemaGuidance policy={c.tool_schema_refresh} />}
       {c.kind !== 'removed' && (
         <>
           <div style={heading}>{hasOld ? 'What changed' : 'Definition'}</div>
@@ -160,7 +162,7 @@ function ToolChangeCard({ c, busy, error, onAccept, onDecline }: CardProps) {
         <div style={{ display: 'flex', gap: 8 }}>
           {canAccept && (
             <button type="button" style={primary} disabled={busy} onClick={() => onAccept(mode)}>
-              {c.kind === 'new' ? 'Grant' : 'Accept and turn it back on'}
+              {c.kind === 'new' ? 'Grant' : 'Accept updated grant'}
             </button>
           )}
           <button type="button" style={button} disabled={busy} onClick={onDecline}>Keep off</button>

@@ -271,3 +271,22 @@ describe('RunColumn repos folder', () => {
     expect(screen.queryByTestId('repos-root')).not.toBeInTheDocument()
   })
 })
+
+describe('discovered engine choices', () => {
+  it('hides the engine selector when only Codex is available', () => {
+    renderColumn({ engine: 'codex', availableEnginesHere: ['codex'] })
+    expect(screen.queryByTestId('engine-claude')).toBeNull()
+    expect(screen.queryByTestId('engine-codex')).toBeNull()
+  })
+  it('offers only available engines without a fixed brand inventory', () => {
+    const props = renderColumn({ engine: 'codex', availableEnginesHere: ['codex', 'future-engine'] })
+    expect(screen.queryByTestId('engine-claude')).toBeNull()
+    fireEvent.click(screen.getByTestId('engine-future-engine'))
+    expect(props.onEngineChange).toHaveBeenCalledWith('future-engine')
+  })
+  it('offers no phantom engine buttons when availability is empty', () => {
+    renderColumn({ availableEnginesHere: [] })
+    expect(screen.queryByTestId('engine-claude')).toBeNull()
+    expect(screen.getByText(/No engines available/)).toBeInTheDocument()
+  })
+})

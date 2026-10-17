@@ -58,6 +58,22 @@ func (j *JobManager) codexModels(ctx context.Context, accountID string, proof co
 	if err != nil {
 		return models.List{}, err
 	}
+	return j.codexModelsWithCredential(ctx, accountID, proof, credential, force)
+}
+
+// Operator discovery never looks up or impersonates an account.
+func (j *JobManager) codexOperatorModels(ctx context.Context, force bool) (models.List, error) {
+	if j == nil || j.Image == "" {
+		return models.List{}, ErrClusterCodexCatalog
+	}
+	credential, err := j.codexOperatorCatalogCredential(ctx)
+	if err != nil {
+		return models.List{}, err
+	}
+	return j.codexModelsWithCredential(ctx, "operator", coreProof{}, credential, force)
+}
+
+func (j *JobManager) codexModelsWithCredential(ctx context.Context, accountID string, proof coreProof, credential []byte, force bool) (models.List, error) {
 	key := sha256.Sum256([]byte(accountID + "\x00" + proof.TokenID + "\x00" + proof.SessionID + "\x00" + j.Image + "\x00" + string(credential)))
 	c := &j.codexCatalog
 	for {
@@ -151,7 +167,7 @@ func (j *JobManager) codexCatalogCredential(ctx context.Context, accountID strin
 			return nil, ErrClusterCodexCatalogAuth
 		}
 		// The transient catalog job receives access only, never refresh authority.
-		return json.Marshal(access) //nolint:gosec // G117: access-only snapshot goes solely into the transient catalog Job Secret.
+		return json.Marshal(access)
 	}
 	if err != nil {
 		return nil, ErrClusterCodexCatalog
@@ -159,6 +175,10 @@ func (j *JobManager) codexCatalogCredential(ctx context.Context, accountID strin
 	if found {
 		return credential, nil
 	}
+	return j.codexOperatorCatalogCredential(ctx)
+}
+
+func (j *JobManager) codexOperatorCatalogCredential(ctx context.Context) ([]byte, error) {
 	name := j.SecretName
 	if j.OAuthSecretName != "" {
 		name = j.OAuthSecretName
@@ -180,7 +200,7 @@ func (j *JobManager) codexCatalogCredential(ctx context.Context, accountID strin
 	if json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&secret) != nil {
 		return nil, ErrClusterCodexCatalog
 	}
-	credential, err = base64.StdEncoding.DecodeString(secret.Data["CODEX_AUTH_JSON"])
+	credential, err := base64.StdEncoding.DecodeString(secret.Data["CODEX_AUTH_JSON"])
 	if err != nil || len(credential) == 0 {
 		return nil, ErrClusterCodexCatalogAuth
 	}
@@ -195,7 +215,7 @@ func codexProbeAuthSnapshot(raw []byte, now time.Time) ([]byte, error) {
 		if managed.AccessToken == "" || managed.AccountID == "" || !managed.ExpiresAt.After(now.Add(30*time.Second)) {
 			return nil, ErrClusterCodexCatalogAuth
 		}
-		return json.Marshal(managed) //nolint:gosec // G117: access-only snapshot goes solely into the transient catalog Job Secret.
+		return json.Marshal(managed)
 	}
 	var auth struct {
 		AuthMode    string    `json:"auth_mode"`

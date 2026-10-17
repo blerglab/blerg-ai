@@ -12,6 +12,7 @@ import type { CapabilityGroup, CapabilityItem } from '../types'
 import { CAPABILITY_GROUPS, capabilityCount, matchesQuery, type CapabilitiesReport } from '../lib/capabilities'
 import { useBackdropClose } from '@blerglab/chat'
 import './CapabilitiesPanel.css'
+import ToolSchemaGuidance from './ToolSchemaGuidance'
 
 // Groups longer than this start collapsed.
 const COLLAPSE_OVER = 15
@@ -211,6 +212,7 @@ export function CapabilitiesView({ report, unavailable, pendingToolChanges, sear
             {[payload.cwd, payload.permission_mode && `permissions: ${payload.permission_mode}`].filter(Boolean).join(' · ')}
           </p>
         )}
+        <ToolSchemaGuidance policy={payload.tool_schema_refresh} />
         <p className="caps-meta-dim">
           {payload.note ?? 'What the session reported it loaded.'} It reflects what was loaded at start;
           changes on disk since then aren’t shown until the engine reports again.

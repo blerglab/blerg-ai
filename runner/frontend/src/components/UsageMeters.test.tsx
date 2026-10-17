@@ -79,7 +79,7 @@ describe('UsageMeters', () => {
       ])
       const capped = screen.getByTestId('usage-window-capped')
       expect(capped).toHaveTextContent(/^capped$/)
-      expect(capped.title).toBe('Claude spend limit reached')
+      expect(capped.title).toBe('Claude usage limit reached · reset time unknown')
     })
 
     it('draws the daily and weekly spend limits after the month', () => {
@@ -100,6 +100,16 @@ describe('UsageMeters', () => {
     render(<UsageMeters daemons={[makeDaemon({ usage_limits: [codex] })]} now={NOW} />)
     expect(screen.getByTestId('usage-window-5h')).toHaveClass('usage-meter--quiet')
     expect(screen.getByTestId('usage-window-7d')).toHaveClass('usage-meter--danger')
+  })
+
+  it.each(['codex', 'fixture-engine'])('keeps a %s cap without a reset visible without inferring a spend limit', (provider) => {
+    render(<UsageMeters daemons={[makeDaemon({ usage_limits: [{ provider, windows: [{ id: 'capped', used_percent: 100 }] }] })]} now={NOW} />)
+    const capped = screen.getByTestId('usage-window-capped')
+    expect(capped).toBeVisible()
+    expect(capped).toHaveAttribute('role', 'status')
+    expect(capped).toHaveTextContent('capped')
+    expect(capped.title).toBe(`${provider === 'codex' ? 'Codex' : provider} usage limit reached · reset time unknown`)
+    expect(capped.title).not.toContain('spend')
   })
 
   it('says a capped provider is capped and when it resets, until then', () => {

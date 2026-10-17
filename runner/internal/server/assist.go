@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/engines"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/jackc/pgx/v5"
@@ -16,9 +18,12 @@ import (
 type assistRequest struct {
 	TicketID string `json:"ticket_id"`
 	OpID     string `json:"op_id"`
+	Engine   string `json:"engine,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
 }
 
-// HandlePostAssist spawns a board-scoped Assist Claude session.
+// HandlePostAssist spawns a board-scoped Assist coding session.
 //
 // Route: POST /api/boards/{id}/assist. Spawning a session is session.start:
 // the daemon token, a core token with session.start, or a board token scoped
@@ -44,12 +49,24 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req assistRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
 	ctx := r.Context()
+	descriptor, supported := engines.Lookup(req.Engine)
+	if !supported || !descriptor.Terminal || !descriptor.SupportsRuntime("daemon") {
+		writeError(w, http.StatusUnprocessableEntity, "engine does not support host terminal Assist sessions")
+		return
+	}
+	if problem := modelRuleProblem(req.Engine, req.Model, req.Effort); problem != "" {
+		writeError(w, http.StatusUnprocessableEntity, problem)
+		return
+	}
+	selection := HostSelection{Kind: "tmux", Engine: req.Engine, Runtime: "daemon"}
 
 	// 1. Load board → 404 if missing.
 	board, err := db.GetBoard(ctx, a.dbPool, boardID)
@@ -83,9 +100,17 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		daemon = a.hub.GetHostDaemon(*board.DefaultDaemonID)
+		if daemon == nil {
+			writeError(w, http.StatusServiceUnavailable, "the board's pinned daemon is not connected")
+			return
+		}
+	}
+	if daemon != nil && hostEngineState(daemon, selection) == "unavailable" {
+		writeError(w, http.StatusServiceUnavailable, "the board's pinned daemon cannot run the selected engine")
+		return
 	}
 	if daemon == nil {
-		daemon = a.hub.AnyDaemon()
+		daemon = a.hub.DaemonForScratch("daemon", selection)
 	}
 	if daemon == nil {
 		writeError(w, http.StatusServiceUnavailable, "no daemon available for this board's repos")
@@ -108,6 +133,10 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "ticket lookup failed")
 			return
 		}
+		if ticket.BoardID != boardID {
+			writeError(w, http.StatusNotFound, "ticket not found")
+			return
+		}
 		if len(ticket.Repos) > 0 {
 			repo = ticket.Repos[0]
 		}
@@ -116,12 +145,30 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 		ticketTitle = ticket.Title
 	}
 
+	if problem := a.modelEffortProblem(ctx, req.Engine, req.Model, req.Effort, daemon.ID); problem != "" {
+		writeError(w, http.StatusUnprocessableEntity, problem)
+		return
+	}
+
 	// 4. Pre-create session row before minting token or binding ticket.
 	sessionID := newUUID()
 	title := "Assist: " + board.Name
 	if err := db.CreateAssistSession(ctx, a.dbPool, sessionID, daemon.ID, boardID, ticketIDPtr, repo, title); err != nil {
 		log.Printf("HandlePostAssist CreateAssistSession %s: %v", sessionID, err)
 		writeError(w, http.StatusInternalServerError, "session creation failed")
+		return
+	}
+
+	// Save the launch selection before dispatch; native notifications subsequently
+	// replace it with the effective settings.
+	if err := db.SetSessionEngine(ctx, a.dbPool, sessionID, req.Engine); err != nil {
+		_ = db.DeleteSession(ctx, a.dbPool, sessionID)
+		writeError(w, http.StatusInternalServerError, "session settings failed")
+		return
+	}
+	if err := db.UpdateSessionModelEffort(ctx, a.dbPool, sessionID, req.Model, req.Effort); err != nil {
+		_ = db.DeleteSession(ctx, a.dbPool, sessionID)
+		writeError(w, http.StatusInternalServerError, "session settings failed")
 		return
 	}
 
@@ -144,7 +191,8 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Send SpawnSession to daemon.
 	spawnMsg := protocol.SpawnSession{
-		Type:          "spawn_session",
+		Type:   "spawn_session",
+		Engine: req.Engine, Model: req.Model, Effort: req.Effort,
 		SessionID:     sessionID,
 		Repo:          repo,
 		Title:         title,

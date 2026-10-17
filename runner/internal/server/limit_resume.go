@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/engines"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,7 +28,7 @@ type limitRefusal struct {
 
 func parseLimitRefusal(raw []byte, now time.Time) (limitRefusal, bool) {
 	var p limitRefusal
-	if json.Unmarshal(raw, &p) != nil || (p.Provider != "claude" && p.Provider != "codex") || p.TurnID == "" || len(p.TurnID) > 128 {
+	if json.Unmarshal(raw, &p) != nil || p.Provider == "" || !engineLimitResumeSupported(p.Provider) || p.TurnID == "" || len(p.TurnID) > 128 {
 		return p, false
 	}
 	if p.ResetAt != nil && (p.ResetAt.After(now.Add(8*24*time.Hour)) || p.ResetAt.Before(now.Add(-8*24*time.Hour))) {
@@ -57,8 +58,8 @@ func (a *API) HandleLimitResume(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if row.Kind != "agent" || (derefOrEmpty(row.Engine) != "claude" && derefOrEmpty(row.Engine) != "codex" && derefOrEmpty(row.Engine) != "") {
-		writeError(w, http.StatusConflict, "only Claude and Codex agent sessions support continuation")
+	if row.Kind != "agent" || !engineLimitResumeSupported(derefOrEmpty(row.Engine)) {
+		writeError(w, http.StatusConflict, "this engine does not support usage-limit continuation")
 		return
 	}
 	var body struct {
@@ -214,7 +215,7 @@ func withCancelledPendingLimitResume(ctx context.Context, pool *pgxpool.Pool, id
 			return err
 		}
 		if previous.State == "pending" || previous.State == "dispatched" {
-			limitResumeAudit(ctx, nil, pool, id, newUUID(), "Automatic continuation cancelled by manual intervention.")
+			limitResumeAudit(ctx, nil, pool, id, newUUID(), "Automatic continuation canceled by manual intervention.")
 		}
 		return fn()
 	})
@@ -233,7 +234,7 @@ func withCancelledLimitResume(ctx context.Context, pool *pgxpool.Pool, id string
 			return err
 		}
 		if previous.State == "pending" || previous.State == "dispatched" {
-			limitResumeAudit(ctx, nil, pool, id, newUUID(), "Automatic continuation cancelled by manual intervention.")
+			limitResumeAudit(ctx, nil, pool, id, newUUID(), "Automatic continuation canceled by manual intervention.")
 		}
 		return fn()
 	})
@@ -404,4 +405,9 @@ func limitResumeAudit(ctx context.Context, h *Hub, pool *pgxpool.Pool, id, event
 	if _, _, err := db.AppendAgentEventAt(ctx, pool, id, eventID, "note", string(raw), time.Now()); err != nil {
 		log.Printf("limit resume audit %s: %v", id, err)
 	}
+}
+
+func engineLimitResumeSupported(engine string) bool {
+	descriptor, ok := engines.Lookup(engine)
+	return ok && descriptor.LimitResume
 }

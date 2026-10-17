@@ -18,10 +18,6 @@ import (
 func TestBackgroundTasksCountedOnIngest(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000b1"
 	sessionID := "00000000-0000-0000-0000-0000000000b2"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "laptop", "daemon", ""); err != nil {
@@ -35,9 +31,13 @@ func TestBackgroundTasksCountedOnIngest(t *testing.T) {
 	hub.RegisterBrowser(browser)
 	dc := &DaemonConn{ID: daemonID, send: make(chan []byte, 16)}
 	ingest := func(id, kind string) {
+		taskID := "t"
+		if strings.HasSuffix(id, "000000000002") {
+			taskID = "second"
+		}
 		HandleAgentEvent(ctx, hub, pool, dc, protocol.AgentEvent{
 			Type: "agent_event", SessionID: sessionID, ClientEventID: id, Kind: kind,
-			Payload: json.RawMessage(`{"task_id":"t","call_id":"c","kind":"bash"}`),
+			Payload: json.RawMessage(`{"task_id":"` + taskID + `","call_id":"c","kind":"bash"}`),
 		})
 	}
 	count := func() int {
@@ -69,7 +69,7 @@ func TestBackgroundTasksCountedOnIngest(t *testing.T) {
 	}
 
 	ingest("00000000-0000-4000-8000-000000000001", "background_task_started")
-	ingest("00000000-0000-4000-8000-000000000002", "background_task_started")
+	ingest("00000000-0000-4000-8000-000000000002", "background_task_started") // a distinct second task
 	ingest("00000000-0000-4000-8000-000000000002", "background_task_started") // re-sent
 	ingest("00000000-0000-4000-8000-000000000003", "background_task_done")
 	if n := count(); n != 1 {
@@ -82,11 +82,11 @@ func TestBackgroundTasksCountedOnIngest(t *testing.T) {
 	if info := sessionRowToInfo(*row, ""); info.BackgroundTasks != 1 {
 		t.Fatalf("live session's info carries %d, want 1", info.BackgroundTasks)
 	}
-	// A done for nothing counted never goes below 0.
+	// Repeated completions of the first task leave the distinct second task running.
 	ingest("00000000-0000-4000-8000-000000000004", "background_task_done")
 	ingest("00000000-0000-4000-8000-000000000005", "background_task_done")
-	if n := count(); n != 0 {
-		t.Fatalf("count = %d, want 0", n)
+	if n := count(); n != 1 {
+		t.Fatalf("duplicate completion changed live second task: count = %d, want 1", n)
 	}
 
 	// An end clears it.

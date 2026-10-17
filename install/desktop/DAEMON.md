@@ -220,7 +220,7 @@ Only the command is matched, never the call's description. It errs towards pausi
 pauses too. Background tasks and subagents are not matched (their record keeps a description,
 not the command).
 
-The restart that installs a daemon with this behaviour over one without it still ends the agent
+The restart that installs a daemon with this behavior over one without it still ends the agent
 sessions running at that moment: the old daemon kept no records. Updating the daemon from inside
 one of its own agent sessions works from then on; the session's turn is cut off when the
 installer restarts the service, and, `install.sh` being on the list above, the session is

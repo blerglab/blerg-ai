@@ -35,40 +35,7 @@ func TestReelIndexMatchesTheKinds(t *testing.T) {
 
 func reelTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database tests")
-	}
-	ctx := context.Background()
-	const schema = "reel_dbreel"
-	boot, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, q := range []string{fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema), fmt.Sprintf("CREATE SCHEMA %s", schema)} {
-		if _, err := boot.Exec(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.MaxConns = 4
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = boot.Exec(context.Background(), fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
-		boot.Close()
-	})
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
-	return pool
+	return migratedPool(t, 4)
 }
 
 func reelSession(t *testing.T, pool *pgxpool.Pool) string {

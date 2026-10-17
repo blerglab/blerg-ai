@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +12,7 @@ import (
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
 	"github.com/blerglab/blerg-ai/board/internal/runner"
+	"github.com/blerglab/blerg-ai/board/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -156,19 +156,7 @@ func (f *specFakeRunner) Events(_ context.Context, _ string, _ int64, _ int) ([]
 // afterMove can be driven synchronously (production calls it in a goroutine).
 func specTestAPI(t *testing.T) (*API, *pgxpool.Pool, *specFakeRunner) {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	pool, err := db.Connect(context.Background(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(context.Background(),
-		`TRUNCATE boards, tokens, admission_reviews, runner_capacity RESTART IDENTITY CASCADE`); err != nil {
-		t.Fatal(err)
-	}
+	pool := testsupport.Pool(t, db.RunMigrations)
 	a := New(pool, auth.New(pool, "svc-key-123"), nil)
 	fake := &specFakeRunner{}
 	a.SetRunner(RunnerConfig{Driver: fake, PublicURL: "https://blerg-board.test", AgentURL: "http://blerg-board.svc"})

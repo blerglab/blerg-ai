@@ -34,6 +34,10 @@ type identityProvider interface {
 }
 
 type Deps struct {
+	// CookieNow supplies the refresh-cookie lifetime clock; nil uses real time.
+	// Tests can advance it without sleeping through a session lifetime.
+	CookieNow func() time.Time
+
 	Identity identityProvider
 	Projects *projects.Service
 	Registry *discovery.Registry
@@ -391,6 +395,7 @@ func NewRouter(deps Deps) http.Handler {
 	// "card.read" gates all three: it's the capability every normal role (member, admin) has
 	// and a password-change-only token (R7/I-7) deliberately lacks, so this is what actually
 	// stops such a token from touching the credential vault, not just the SPA's own routing.
+	mux.HandleFunc("GET /api/engines", requireHumanPrincipal(deps.handleEngineDescriptors, deps, "card.read"))
 	mux.HandleFunc("GET /api/credentials/managed/capabilities", requireHumanPrincipal(deps.handleManagedCapabilities, deps, "card.read"))
 	mux.HandleFunc("POST /api/credentials/{engine}/managed/login", requireHumanPrincipal(deps.handleManagedLoginStart, deps, "card.read"))
 	mux.HandleFunc("GET /api/credentials/{engine}/managed/login/{attempt}", requireHumanPrincipal(deps.handleManagedLoginPoll, deps, "card.read"))

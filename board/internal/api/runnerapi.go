@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,10 +78,14 @@ func (a *API) promptData() prompts.Data {
 // sessionURL builds a human-facing link to a runner session, or "" if no
 // UIBase is configured — callers must skip attaching the link in that case.
 func (a *API) sessionURL(extID string) string {
-	if a.runner.UIBase == "" {
+	if a.runner == nil {
 		return ""
 	}
-	return strings.TrimRight(a.runner.UIBase, "/") + "/" + extID
+	base, err := url.Parse(a.runner.UIBase)
+	if err != nil || base.Host == "" || (base.Scheme != "http" && base.Scheme != "https") || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return ""
+	}
+	return strings.TrimRight(base.String(), "/") + "/" + url.PathEscape(extID)
 }
 
 func (a *API) SetRunner(cfg RunnerConfig) { a.runner = &cfg }
@@ -95,6 +100,7 @@ func (a *API) runnerRoutes(mux *http.ServeMux, authed func(func(http.ResponseWri
 	// {id} accepts the literal "self": a running session re-models ITSELF
 	// without having to learn its own runner-session id.
 	mux.HandleFunc("POST /api/runner-sessions/{id}/model", authed(a.handleSetSessionModel))
+	mux.HandleFunc("GET /api/runner-sessions/{id}/launch-options", authed(a.handleSessionLaunchOptions))
 	mux.HandleFunc("POST /api/cards/{id}/accept", authed(a.handleAcceptCard))
 	mux.HandleFunc("POST /api/deployments", authed(a.handleRecordDeployment))
 	mux.HandleFunc("GET /api/boards/{id}/deployments", authed(a.handleBoardDeployments))
@@ -207,6 +213,27 @@ func boardRoleModel(board db.Board, role string) string {
 	return board.Model
 }
 
+// boardRoleEffort follows the role's model override. An override with no
+// effort uses that model's native default, rather than inheriting an unrelated
+// model's effort. A role effort may also override the board's model effort.
+func boardRoleEffort(board db.Board, role string) string {
+	switch role {
+	case "reviewer":
+		if board.ReviewerEffort != "" || board.ReviewerModel != "" {
+			return board.ReviewerEffort
+		}
+	case "discuss":
+		if board.DiscussEffort != "" || board.DiscussModel != "" {
+			return board.DiscussEffort
+		}
+	case "board":
+		if board.ChatEffort != "" || board.ChatModel != "" {
+			return board.ChatEffort
+		}
+	}
+	return board.Effort
+}
+
 // The two interaction modes of the runner contract (`interaction` on
 // POST /api/runner/start).
 const (
@@ -266,11 +293,19 @@ func (a *API) spawnSession(ctx context.Context, board db.Board, card db.Card, ro
 	case "discuss":
 		title = fmt.Sprintf("blerg-board #%d discussion: %s", card.Number, card.Title)
 	}
-	extID, err = a.startOnRunner(ctx, card.BoardID, runner.StartRequest{
+	effort := boardRoleEffort(board, role)
+	if card.Model != "" {
+		effort = card.Effort
+	} else if card.Effort != "" {
+		effort = card.Effort
+	}
+	var configured runner.StartRequest
+	extID, configured, err = a.startOnRunnerConfigured(ctx, card.BoardID, runner.StartRequest{
 		Repo:   card.Repos[0],
 		Title:  title,
 		Prompt: prompt,
 		Model:  model,
+		Effort: effort,
 		GitURL: boardGitURL(board, card.Repos[0]),
 		// By role: a discussion has its person in the chat, a run or a
 		// review does not.
@@ -305,9 +340,9 @@ func (a *API) spawnSession(ctx context.Context, board db.Board, card db.Card, ro
 
 	a.noteCapacityAvailable(ctx)
 	err = a.Pool.QueryRow(ctx, `
-		INSERT INTO runner_sessions (card_id, board_id, runner, external_session_id, lifecycle, role, model)
-		VALUES ($1,$2,$3,$4,'starting',$5,$6) RETURNING id`,
-		card.ID, card.BoardID, a.runner.Driver.Name(), extID, role, model).Scan(&rsID)
+		INSERT INTO runner_sessions (card_id, board_id, runner, external_session_id, lifecycle, role, model, engine, effort)
+		VALUES ($1,$2,$3,$4,'starting',$5,$6,$7,$8) RETURNING id`,
+		card.ID, card.BoardID, a.runner.Driver.Name(), extID, role, configured.Model, configured.Engine, configured.Effort).Scan(&rsID)
 	if err != nil {
 		return "", "", err
 	}
@@ -368,7 +403,7 @@ func (a *API) handleCardRunnerSessions(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 	rows, err := a.Pool.Query(r.Context(), `
-		SELECT id, runner, external_session_id, lifecycle, runtime, resumable, role, model,
+		SELECT id, runner, external_session_id, lifecycle, runtime, resumable, role, model, engine, effort, resume_mode, resume_reason, steering_supported,
 		       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 		FROM runner_sessions WHERE card_id = $1 ORDER BY created_at`, r.PathValue("id"))
 	if err != nil {
@@ -378,17 +413,22 @@ func (a *API) handleCardRunnerSessions(w http.ResponseWriter, r *http.Request, p
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, rn, ext, lc, rt, role, model, created string
+		var id, rn, ext, lc, rt, role, model, engine, effort, resumeMode, resumeReason, created string
 		var res bool
-		if err := rows.Scan(&id, &rn, &ext, &lc, &rt, &res, &role, &model, &created); err != nil {
+		var steering *bool
+		if err := rows.Scan(&id, &rn, &ext, &lc, &rt, &res, &role, &model, &engine, &effort, &resumeMode, &resumeReason, &steering, &created); err != nil {
 			writeDBError(w, err)
 			return
 		}
-		out = append(out, map[string]any{
+		entry := map[string]any{
 			"id": id, "runner": rn, "external_session_id": ext, "role": role,
 			"lifecycle": lc, "runtime": rt, "resumable": res, "created_at": created,
-			"model": model,
-		})
+			"model": model, "engine": engine, "effort": effort, "resume_mode": resumeMode, "resume_reason": resumeReason, "board_id": card.BoardID, "session_url": a.sessionURL(ext),
+		}
+		if steering != nil {
+			entry["steering_supported"] = *steering
+		}
+		out = append(out, entry)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -457,10 +497,15 @@ func (a *API) handleRunnerSessionMessage(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	var req struct {
-		Text string `json:"text"`
+		Text     string `json:"text"`
+		ClientID string `json:"client_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Text == "" {
 		writeError(w, http.StatusBadRequest, "text required")
+		return
+	}
+	if len(req.ClientID) > 256 {
+		writeError(w, http.StatusUnprocessableEntity, "client_id must be at most 256 bytes")
 		return
 	}
 	ext, err := a.runnerExternalID(r.Context(), r.PathValue("id"))
@@ -472,7 +517,7 @@ func (a *API) handleRunnerSessionMessage(w http.ResponseWriter, r *http.Request,
 	if p.IsHuman() {
 		source = "human"
 	}
-	if err := a.runner.Driver.Message(r.Context(), ext, req.Text, source); err != nil {
+	if err := a.messageOnRunner(r.Context(), boardID, ext, req.Text, source, req.ClientID); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -543,21 +588,25 @@ func (a *API) StartRunnerIngest(ctx context.Context) {
 
 func (a *API) ingestTick(ctx context.Context, includeIdle bool) {
 	rows, err := a.Pool.Query(ctx, `
-		SELECT id, board_id, card_id, external_session_id, lifecycle, last_seq
+		SELECT id, board_id, card_id, external_session_id, lifecycle, last_seq, runtime, resumable, resume_mode, resume_reason, engine, model, effort, steering_supported
 		FROM runner_sessions
 		WHERE lifecycle NOT IN ('stopped','error')`)
 	if err != nil {
 		return
 	}
 	type sess struct {
-		id, boardID, ext, lifecycle string
-		cardID                      *string
-		lastSeq                     int64
+		id, boardID, ext, lifecycle       string
+		cardID                            *string
+		lastSeq                           int64
+		runtime, resumeMode, resumeReason string
+		engine, model, effort             string
+		resumable                         bool
+		steering                          *bool
 	}
 	var sessions []sess
 	for rows.Next() {
 		var s sess
-		if err := rows.Scan(&s.id, &s.boardID, &s.cardID, &s.ext, &s.lifecycle, &s.lastSeq); err == nil {
+		if err := rows.Scan(&s.id, &s.boardID, &s.cardID, &s.ext, &s.lifecycle, &s.lastSeq, &s.runtime, &s.resumable, &s.resumeMode, &s.resumeReason, &s.engine, &s.model, &s.effort, &s.steering); err == nil {
 			sessions = append(sessions, s)
 		}
 	}
@@ -602,14 +651,17 @@ func (a *API) ingestTick(ctx context.Context, includeIdle bool) {
 				break
 			}
 		}
-		st, err := a.runner.Driver.Status(ctx, s.ext)
+		st, err := a.statusOnRunner(ctx, s.boardID, s.ext)
 		switch {
-		case err == nil && (st.Lifecycle != s.lifecycle || changed):
+		case err == nil && (st.Lifecycle != s.lifecycle || changed || st.Runtime != s.runtime || st.Resumable != s.resumable || st.ResumeMode != s.resumeMode || st.ResumeReason != s.resumeReason || (st.Engine != "" && st.Engine != s.engine) || (st.Model != "" && (st.Model != s.model || st.Effort != s.effort)) || (st.SteeringSupported != nil && !sameOptionalBool(st.SteeringSupported, s.steering))):
 			_, _ = a.Pool.Exec(ctx, `
 				UPDATE runner_sessions
 				SET lifecycle = $2, runtime = $3, resumable = $4, last_seq = $5,
+ resume_mode=$6, resume_reason=$7, engine=CASE WHEN $8<>'' THEN $8 ELSE engine END,
+ model=CASE WHEN $9<>'' THEN $9 ELSE model END,
+ effort=CASE WHEN $9<>'' THEN $10 ELSE effort END, steering_supported=coalesce($11,steering_supported),
 				    last_activity_at = now()
-				WHERE id = $1`, s.id, st.Lifecycle, st.Runtime, st.Resumable, s.lastSeq)
+				WHERE id = $1`, s.id, st.Lifecycle, st.Runtime, st.Resumable, s.lastSeq, st.ResumeMode, st.ResumeReason, st.Engine, st.Model, st.Effort, st.SteeringSupported)
 			changed = true
 			// A session that just died takes its reason with it: the runner's
 			// error broadcast is one-shot, and the card would otherwise show a
@@ -625,6 +677,13 @@ func (a *API) ingestTick(ctx context.Context, includeIdle bool) {
 			if runner.TerminalLifecycle(st.Lifecycle) {
 				a.revokeSessionToken(ctx, s.id)
 			}
+		case errors.Is(err, errRecoveryAuthorityUnavailable):
+			// A privacy404 under the service key does not prove that the owner's
+			// session is gone. Preserve its lifecycle, but stop advertising recovery.
+			if s.resumable || s.resumeReason != st.ResumeReason || changed {
+				_, _ = a.Pool.Exec(ctx, `UPDATE runner_sessions SET resumable=false,resume_mode='',resume_reason=$2,last_seq=$3 WHERE id=$1`, s.id, st.ResumeReason, s.lastSeq)
+				changed = true
+			}
 		case errors.Is(err, runner.ErrSessionGone):
 			// The runner has no record of this session — its Job finished and
 			// was reaped, or it never existed. Settle it locally so ingest
@@ -633,7 +692,7 @@ func (a *API) ingestTick(ctx context.Context, includeIdle bool) {
 			// as done.
 			_, _ = a.Pool.Exec(ctx, `
 				UPDATE runner_sessions
-				SET lifecycle = 'stopped', last_seq = $2, last_activity_at = now()
+				SET lifecycle = 'stopped', resumable=false, resume_mode='', resume_reason='The runner no longer has this session', last_seq = $2, last_activity_at = now()
 				WHERE id = $1`, s.id, s.lastSeq)
 			a.revokeSessionToken(ctx, s.id)
 			changed = true
@@ -726,4 +785,8 @@ func boardGitURL(board db.Board, repo string) string {
 		return ""
 	}
 	return runner.JoinRepoURL(strings.TrimRight(board.GitBase, "/"), repo)
+}
+
+func sameOptionalBool(a, b *bool) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
 }

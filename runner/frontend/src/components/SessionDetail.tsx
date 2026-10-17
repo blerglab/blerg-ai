@@ -21,7 +21,7 @@ import SessionInsights from './SessionInsights'
 import StatusPill from './StatusPill'
 import { backgroundCount, displayState } from '../lib/displayState'
 import SessionRail, { PanelIcon } from './SessionRail'
-import { readCompact, readRailPref, readThinking, writeCompact, writeRailPref, writeThinking } from '../lib/sessionRail'
+import { readRailPref, useCompact, useThinking, writeRailPref } from '../lib/sessionRail'
 import { isNoRepo, repoLabel } from '../lib/noRepo'
 
 // Below this width the side panel is a drawer over the chat rather than a column beside it.
@@ -129,15 +129,9 @@ export default function SessionDetail() {
   // Read again when the person opens the panel or its Capabilities tab comes on screen.
   const [toolsNonce, setToolsNonce] = useState(0)
   const toolsLook = useCallback(() => setToolsNonce(n => n + 1), [])
-  // The chat's settings, which the panel's Live tab holds; kept per browser.
-  const [showThinking, setShowThinking] = useState(readThinking)
-  const [compactTools, setCompactTools] = useState(readCompact)
-  const railSettings = useMemo(() => ({
-    thinking: showThinking,
-    onThinking: (on: boolean) => { setShowThinking(on); writeThinking(on) },
-    compact: compactTools,
-    onCompact: (on: boolean) => { setCompactTools(on); writeCompact(on) },
-  }), [showThinking, compactTools])
+  // The chat's settings (Settings, in the left bar); kept per browser.
+  const [showThinking] = useThinking()
+  const [compactTools] = useCompact()
   // Read from the server's whole log (useSessionLive), again when the session's status changes or
   // the person opens the panel or its Capabilities tab; from the chat's loaded events on an older server.
   // The session's asks the message store holds as closed: one closed elsewhere is read again.
@@ -695,7 +689,7 @@ export default function SessionDetail() {
         {isAgent
           // Keyed by id: draft, pending turn and notices belong to one
           // session and must not carry over when the route switches sessions.
-          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} />
+          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} mcpHold={liveState.mcpHold ?? null} canReleasePrompt={liveState.canReleasePrompt === true} commitUrls={liveState.checklist?.commitUrls} />
           : <TerminalDOMView sessionId={sessionId ?? ''} ref={termRef} />}
       </div>
 
@@ -781,7 +775,6 @@ export default function SessionDetail() {
           open={railOpen}
           onClose={closeRail}
           onCapabilitiesShown={toolsLook}
-          settings={railSettings}
           onOpenArtifact={openArtifact}
           // A drawer only ever opens from the toggle: it shows the tab the person chose.
           showLive={!narrow && liveAsk === session.id}

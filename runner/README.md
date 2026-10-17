@@ -30,7 +30,7 @@ There is no implicit fallback onto the least sandboxed one — running unsandbox
 choice someone made and acknowledged.
 
 The wire spelling is the `runtime` field on `POST /api/sessions`: `cluster` | `docker` | `daemon`,
-for both session kinds. Anything else is `422 invalid runtime` (an unrecognised value is refused
+for both session kinds. Anything else is `422 invalid runtime` (an unrecognized value is refused
 rather than defaulted, because defaulting would land the session on the *least* sandboxed
 runtime). An empty value means `daemon`, for callers older than the Run column. The value is
 recorded on the session row and returned, with `kind`, by `GET /api/sessions` — that is what the
@@ -69,7 +69,7 @@ The agent-facing contract, [`POST /api/runner/start`](#starting-a-session), take
 values and, with `runtime` omitted, the same defaults: cluster where one is configured, else the
 **Local sandbox** when the connected daemon chosen for the repo reports `sandbox_available`, else
 **This machine** — the daemon host, unsandboxed. So everything the Board launches on a desktop
-with the sandbox image built runs in the sandbox. An explicit value is honoured verbatim:
+with the sandbox image built runs in the sandbox. An explicit value is honored verbatim:
 `runtime: "daemon"` is the opt-out onto the host (the board sends it for every start when
 `BLERG_BOARD_RUNNER_RUNTIME=daemon`), and `runtime: "docker"` against a daemon without the image is
 refused by the daemon rather than demoted onto the host.
@@ -137,11 +137,13 @@ Paths are relative to the runner's `base_url`.
 | `GET` | `/agents` | manifest | public; `Accept: text/markdown` for the Markdown rendering |
 | `GET` | `/openapi.json` | OpenAPI 3.1 document | public |
 | `GET` | `/api/runner/me` | credential introspection | `404` when the contract is not configured |
+| `GET` | `/api/runner/launch-options` | available engines, models and efforts for this principal and target | cached snapshots; `runtime`, `daemon_id`, `repo`, `kind`, `restricted`, `personal_only` and `refresh` filters |
 | `GET` | `/api/daemon/whoami` | would `/ws/daemon` accept this **daemon** token? | takes the daemon token, not an agent credential; see [Checking a daemon token](#checking-a-daemon-token) |
 | `GET` | `/api/models/{engine}` | the models (and each one's effort levels) a session on that engine can use | see [Model lists](#model-lists); also readable with a browser session |
-| `POST` | `/api/runner/start` | start a session | `202 {session_id}`; honours `Idempotency-Key` |
+| `POST` | `/api/runner/start` | start a session | `202 {session_id}`; honors `Idempotency-Key` |
 | `GET` | `/api/runner/sessions/{id}` | status | `{lifecycle, runtime, resumable, auto_stop, interaction, error_reason, end_reason, ended_by, limits}`; `limits` is `{max_file_bytes, max_session_upload_bytes, max_session_artifact_bytes}`, what the session's files may weigh (absent before 0.2.1) |
-| `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?}` → `202`; resumes a disconnected cluster session |
+| `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?, client_id?}` → `202`; resumes a disconnected cluster session |
+| `POST` | `/api/runner/sessions/{id}/model` | select next-turn model/effort | `{model?, effort?}` → `202`; existing session engine remains authoritative |
 | `POST` | `/api/runner/sessions/{id}/interrupt` | cancel the in-flight turn | `202`; `409` when there is no live runtime |
 | `POST` | `/api/runner/sessions/{id}/stop` | end the session | `200 {"status":"stopped"}`; idempotent. Finished work **must** call this or cluster session slots leak |
 | `GET` | `/api/runner/sessions/{id}/events` | transcript window | `?after_seq=&limit=` → `{events, has_more}`; `?before_seq=&limit=` pages backwards → adds `has_older, first_seq, server_time` |
@@ -155,7 +157,7 @@ Paths are relative to the runner's `base_url`.
 | `POST` | `/api/runner/sessions/{id}/uploads` | attach a person's file | raw body + `X-Artifact-Name` → `201`; the app vouches for the person |
 | `GET` | `/packages/` | the UI packages this runner serves | public; see [UI package](#ui-package) |
 | `GET` | `/packages/{file}` | a package tarball | public, immutable |
-| `POST` | `/mcp` | MCP server (JSON-RPC 2.0) | the same seven operations as tools |
+| `POST` | `/mcp` | MCP server (JSON-RPC 2.0) | the REST session and discovery operations as tools |
 
 Every `/api/runner/sessions/{id}` route answers `404 session not found` for an id that does not
 exist — and for one the calling credential may not see (see
@@ -209,6 +211,49 @@ sessions) and retained for 24 h. Same key, same body → the original `202` is r
 reused with a different request`. A header that is present but empty, sent twice, or over 128
 characters is a `400` rather than a silently dropped guarantee. A start that fails releases its
 key, so a retry is a fresh start rather than a replay of a session that never existed.
+
+### Discovering launch choices and controlling a conversation
+
+Use `GET /api/runner/launch-options` (MCP `discover_launch_options`) before offering a
+launch picker. It returns registered engines that are available for the caller's
+credentials and selected execution target, with each engine's model catalog. Pass
+`runtime`, an optional host `daemon_id`, and `repo` when choosing a repository. The
+response's per-engine `runtime` and `daemon_id` identify its resolved target; pass
+both on start to preserve that placement. An explicit host pin requires `daemon`
+or `docker` and never falls back to another host. Without a pin, auto placement
+may resolve different engines to different hosts and runtimes.
+
+Render an engine selector only when several engines are available. A sole engine
+is selected automatically; an empty list offers no invented default. `state:
+unknown` distinguishes incomplete credential/host discovery from known absence.
+`refreshing` means acquisition is running in the background; poll with a bounded
+UI deadline and offer Retry. `refresh=1` requests one background refresh, rather
+than making the HTTP request wait for a CLI or pod. Native model catalogs retain
+the last successful snapshot on refresh failure. Availability is advisory:
+launch and resume always enforce current authorization again.
+
+Use `restricted=1` for confined file/MCP execution and `personal_only=1` when
+operator credentials are forbidden, as for Cluster crons. Operator runner keys
+see operator catalogs only; account-bound agent tokens resolve their owner and
+carry their own current token proof. A descriptor describes an implemented
+integration, not a claim that every target has that engine installed or logged in.
+
+For retry-safe chat delivery, send a stable `client_id` with `text` to the message
+endpoint (MCP `send_message`). Repeating identical content with that ID is accepted
+once; changed content returns `409`. Receipt-capable hosts retain accepted input
+until native consumption, including reconnect replay. Legacy hosts refuse IDs
+rather than promising durability they cannot provide. A successful response means
+accepted for delivery; native events report consumption and effective settings.
+
+`POST /api/runner/sessions/{id}/model` (MCP `set_session_model`) accepts a model,
+effort, or both for the existing agent session's next turn. It checks the stored
+engine and its model rules. It does not switch a native conversation between
+engines. An embedder that changes engines must explicitly launch a new native
+session and explain how prior context is carried forward. Model changes are
+acknowledged as dispatch; native `model_changed` events report effective values.
+Disconnected Cluster recovery reports `resumable`, `resume_mode`, and
+`resume_reason`; eligibility still requires successful current proof, placement,
+and retained-history checks when the next message arrives.
 
 ### One-shot sessions
 
@@ -277,7 +322,7 @@ SSE stream, and what fires the completion webhook. `runtime` is a separate axis 
 true only for a `disconnected` session on an install with a cluster runtime.
 
 A session whose cluster Job has finished while the session never got past `starting` reports
-`error`, not a `starting` that never converges. A status value this build does not recognise is
+`error`, not a `starting` that never converges. A status value this build does not recognize is
 reported as `running`: an unknown value is not evidence the work is over.
 
 A desktop daemon reports, in its hello and every heartbeat, the sessions it runs
@@ -480,6 +525,38 @@ see the session; `ETag`/`If-None-Match`) returns the session's topics as the His
 a done row's `commits` are `[{"sha", "url"}]`, `url` the commit's page when the session's repository
 is known (its clone URL, else its daemon's origin for the folder) and `null` otherwise.
 
+**Checklist.** `blerg-runner checklist` posts `POST /api/sessions/{id}/checklist` (the session's own
+token, as topics; at most 64 KiB): `{"op":"set","items":["…"]}`, `{"op":"add","item":"…"}`,
+`{"op":"tick"|"untick","index":N}` (1-based) or `{"op":"tick"|"untick","text":"…"}` (exact,
+case-sensitive; of several matches the first not yet in that state), `{"op":"clear"}`. At most 50
+items of 200 characters, cleaned of control characters. The read of the current list and the append
+run in one transaction under a per-session advisory lock. Recorded as an event of kind `checklist`
+holding the full list after the change: `{items:[{text, done}], op, changed?:{index, text, done}}`;
+the reply is that payload (`201`). A refusal is a `400` with a sentence, an ended session a `409`,
+the 501st checklist event of a session a `429`.
+
+**Pinned tickets.** `blerg-runner pin` / `unpin` post `POST /api/sessions/{id}/tickets` (the session's
+own token; at most 256 KiB): `{"action":"pin","ticket":{…}}` or `{"action":"unpin","source"?,"key"?}`
+(neither: the current pin; a key alone when one pin has it). The ticket is `{source, key, title, url?,
+status?, type?, priority?, assignee?, reporter?, labels?, description?, fields?:[{name, value}],
+comments?:[{author?, at?, body}], acceptance?}`: source, key and title are required; every string is
+cut (key 64, title 300, status/type/priority 64, people 120, labels 20 × 64, description 20 000,
+fields 30 × (80, 500), comments the last 5 × (120, 40, 2 000), acceptance 30 × 500) and cleaned of
+control characters; `url` must be an http(s) address; unknown fields are dropped; a value of the
+wrong type is a `400` naming it (`null` reads as absent). A pin is identified by `(source, key)`; at
+most 5 at once (`409`), at most 100 ticket events per session (`429`; an unpin is always allowed).
+Recorded as an event of kind `ticket`: `{ticket, action: "pin"|"update"|"unpin", previous?:{status,
+title}}` (an update is a re-pin of a ticket already pinned; an unpin's ticket holds only source, key,
+title, status and url). The reply is that payload with `pinned`, the summaries after it, current
+first. Neither route is in the `/api/runner` contract.
+
+**Diffs.** `blerg-runner diff` publishes a patch of the session's folder as a `.diff` artifact (view
+`diff`); `checklist tick|add --commit` publishes the diff of the item's commits and keeps its artifact
+id on the item (`diff`). See [Diffs](../docs/artifacts.md#diffs).
+
+**Code colors.** `GET`/`PUT /api/me/preferences` keep the person's chat code color choice
+(migration 057); an app's chat proxy reads it with `GET /api/runner/preferences?account=<id>`.
+
 **Live state.** `GET /api/sessions/{id}/live` (the same people as `/topics`; `ETag`/`If-None-Match`,
 `Cache-Control: private, no-store`) answers what the session panel's Live tab shows, read from the
 session's whole event log: `{session_id, through_seq, generated_at, tokens_hidden, asks:[{event_id,
@@ -491,7 +568,14 @@ until its final `subagent_done` (a foreground one only while its turn runs and n
 `background_task_done`; anything with no sign of life for 12 hours is left out. Tokens follow the
 Insights rule, and `tool_changes` is the caller's own pending tool changes on the session. The page
 folds the events after `through_seq` into the reply until its next read. Migration 042 adds the
-partial index the read uses (`agent_events_live_idx`).
+partial index the read uses (`agent_events_live_idx`). The reply also carries `checklist` (the newest
+list, `{items, event_id, updated_at}`, `null` when there is none or it was cleared), `plan` (the
+engine's own plan, `{items:[{text, status: pending|in_progress|completed, active?}], updated_at}` or
+`null`: Claude Code's top-level `TaskCreate`/`TaskUpdate` calls folded, a task's id read from its
+result, or the latest `TodoWrite` list, or Codex's latest native plan update; a subagent's calls are left out), `tickets` (the pins'
+summaries `{source, key, title, status, url, event_id, seq, updated_at}`, current first) and `ticket`
+(the current pin in full, with `event_id` and `updated_at`, or `null`); migration 055 indexes the three
+reads.
 
 **Background tasks.** When a Claude Code agent leaves something running (a `Bash` call with
 `run_in_background`, a `Monitor`, a background subagent), the runner records
@@ -668,6 +752,31 @@ field, and answers `404` on `/packages/`.
 
 ### MCP
 
+Native Claude Code and Codex sessions report `mcp_status` agent events without sending a model
+prompt. `GET /api/sessions/{id}/live` includes the latest `mcp` snapshot: `servers` (name,
+status, source and tool count only), `settled`, `since` and `engine`. Status is `pending`,
+`connected`, `failed`, `needs-auth`, `disabled` or `unknown`. Server endpoints and credentials
+are excluded. Restricted sessions report their own gateway inventory.
+
+The daemon polls native status at most once every two seconds, stops after all servers settle
+or 120 seconds, and starts tracking again after a native process replacement. At the deadline,
+`settled: true` means tracking has finished; unresolved servers keep their reported status.
+Claude Code uses its persistent stream-json `mcp_status` control request; Codex uses
+`mcpServerStatus/list` for the current thread. Older or legacy engines without that control
+channel do not claim live readiness. No prompt is sent to discover tools.
+
+A new session's first native input waits for known pending servers for at most 30 seconds.
+Initial inventory discovery is bounded to six seconds if no servers are known, within that
+same 30-second cap (or a smaller configured wait). Later inputs
+and restored conversations are not held. A held input remains in the driver's FIFO; native
+process cancellation retains it for retry. While held, `mcp.hold` and the live state's
+`mcp_hold` both contain `since` and `until` timestamps. Clients should expire a cached hold
+at `until`. Release clears both fields and reports `released: settled|timeout|person` in
+the status snapshot. Only the owner may send
+`{"type":"release_held_prompt","session_id":"…"}` on the browser socket. Repeated release
+is harmless and never starts an engine. Old daemons omit these fields; old servers accept
+the additive event without interpreting it.
+
 `POST <runner>/mcp` speaks JSON-RPC 2.0 over plain HTTP with the same bearer credential as the REST
 routes (`initialize` at protocol revision `2025-06-18`, `ping`, `tools/list`, `tools/call`;
 notifications get a bare `202`; anything else is `-32601`). `GET /mcp` is a `405`. Each tool is a
@@ -757,8 +866,9 @@ returns — an unparseable answer or an unreadable Hermes config) keeps the last
 definite "nothing" (the CLI is not installed or exits non-zero on its own, e.g. logged out; Hermes
 is not on a `custom` provider or has no config; the endpoint answers 401/403) reports an empty one.
 
-For Cluster Codex launches, the New session sheet requests
-`GET /api/models/codex?runtime=cluster` with the signed-in browser session. This probes the
+The New session sheet uses the target-scoped launch-options contract above. The compatibility
+`GET /api/models/codex?runtime=cluster` route also accepts a verified account-bound human or
+agent principal. This probes the
 configured agent image using that account's credential (or the operator credential when no
 personal one exists), in a bounded temporary Job, rather than using a workstation's catalog.
 A native app-server `model/list` request must create a fresh account catalog; bundled fallback
@@ -967,11 +1077,11 @@ message is dropped.
 **When nobody is watching.** A reconciler pass runs every **30 s** and closes out sessions whose
 end nobody reported, so a callback always arrives eventually: a cluster Job that succeeded, failed
 or vanished (after a **2 min** grace, since a Job that has not been created yet looks exactly like
-one that is gone) finalises the session; a `disconnected` session is left alone for **24 h** and
+one that is gone) finalizes the session; a `disconnected` session is left alone for **24 h** and
 only then declared `session expired without resume`. Native-backed unended sessions do not
 expire on this clock; their history is retained until a true ending and the configured retention
 period. A desktop session whose daemon dropped is
-finalised **30 min** after the disconnect with `daemon did not return`. These windows are fixed
+finalized **30 min** after the disconnect with `daemon did not return`. These windows are fixed
 constants, not environment variables. A status the session's own host reported always wins over the
 reconciler.
 
@@ -986,7 +1096,7 @@ The launch sheet's list is `GET /api/repos` (browser-authed), merged from three 
 
 1. **your own repositories** — for every git provider you have stored a personal token for in
    core's Settings (GitHub, GitLab), the repositories that token can see: GitHub's
-   `GET /user/repos` (owned, collaborator and organisation-member repos; a fine-grained token
+   `GET /user/repos` (owned, collaborator and organization-member repos; a fine-grained token
    lists only what it was granted), GitLab's `GET /api/v4/projects?membership=true` (needs the
    `read_api` scope). Most recently active first, at most 500 per provider. Only your own tokens
    are used and only you see the result. GitLab projects inside subgroups
@@ -1072,17 +1182,17 @@ selected. What happens:
 3. The pod gets `BLERG_RUNNER_NEW_REPO=1`. It retries the clone a few times (a repository created
    seconds ago may not be clonable yet). When the clone keeps failing it runs `git init` on the
    session's `wip/<id>` branch with `origin` set to the clone URL (the person's token included,
-   as in a normal clone), marks the `clone` stage as a warning ("Initialised an empty repository
+   as in a normal clone), marks the `clone` stage as a warning ("Initialized an empty repository
    — no remote yet"), prepends a note to the agent's first prompt saying the remote does not
    exist and must be created before pushing, and reports the first failed push as an `error`
    event in the transcript. `PushWip` keeps trying after every turn, so the work is pushed as
    soon as the remote exists.
 4. The row records `git_url` and `new_repo` (migration 035), so a resume clones from the same
-   place, or initialises again if it still does not exist. **A new-repository pod never
+   place, or initializes again if it still does not exist. **A new-repository pod never
    receives the operator's shared `BLERG_RUNNER_GIT_TOKEN`**: only the person's own token for
    the host, or none — so it can reach nothing the person cannot.
 
-Behaviour change: the cluster branch used to ignore `new_repo` (a caller sending it with an
+Behavior change: the cluster branch used to ignore `new_repo` (a caller sending it with an
 existing repository got a clone); it now answers 409. The v1 start contract
 (`POST /api/runner/start`) does not take `new_repo`.
 
@@ -1109,7 +1219,7 @@ repos root from what the daemon last reported. The rule is in `cloneFolderFor` a
 3. otherwise, when both hold something else, a `409` naming both folders.
 
 The daemon re-checks this on disk (`EnsureClonedTarget`). An existing folder whose origin is not
-this repository, including one with no recognisable origin, is refused rather than cloned into or
+this repository, including one with no recognizable origin, is refused rather than cloned into or
 over. A clone is written to a hidden sibling folder and renamed into place only when it finishes,
 so a failed clone leaves nothing behind. A daemon older than this feature doesn't advertise
 `clone_from` in its hello, and gets a `422` instead.
@@ -1166,7 +1276,7 @@ Everything provider-specific — remote-URL parsing, naming rules, the token clo
 token's repositories — lives in `internal/gitprovider`: a `Provider` interface and a `Registry`
 (`gitprovider.Default`) keyed by host and by credential kind. Nothing else names a provider.
 Every start path — `POST /api/sessions`, `POST /api/runner/start`, the MCP `start_session`
-tool — takes an optional `provider`. A named provider is honoured strictly on every runtime: a
+tool — takes an optional `provider`. A named provider is honored strictly on every runtime: a
 cluster clone comes from that provider's host, a daemon clones an absent folder from it (and
 refuses an existing folder whose origin is another provider's repository), and an `owner/name`
 that is not valid there is a `422`. A daemon too old to know providers is never sent a
@@ -1180,6 +1290,42 @@ and why, is at the top of `internal/server/repo_provider.go`.
 Adding one (Bitbucket, a self-managed GitLab via `NewGitLabAt`, GitHub Enterprise via
 `NewGitHubAt`) is an implementation plus a `Register` call, plus its id in core's
 `gitCredentialKinds` and a Settings entry so people can store a token for it.
+
+## Opening a session workspace file
+
+The browser viewer uses `GET /api/sessions/{id}/workspace-file?path=README.md` to read a file
+mentioned by an agent. This route requires a signed-in **human session owner** or a human
+administrator with `account.manage`. A private session is the owner's alone: to anyone else,
+administrators included, it answers `404 Session not found.`, as an unknown session does. Public
+transcript access does not grant filesystem access. Agent tokens, service credentials and the static runner key
+cannot use this route.
+
+The current session daemon reads the relative path from that session's workspace. Host sessions
+use their working folder; container sessions use its host bind mount; cluster sessions use their
+pod workspace. The daemon never executes a container command to read a file. Absolute paths,
+parent traversal, backslashes, secret-looking names, symlink escapes, nonregular files and hard
+links are refused. The launch folder's identity is captured before the session starts and checked
+against the pinned directory handle, preventing a replaced folder from changing the read scope.
+Paths are checked again against the opened file to prevent replacement races.
+
+A `200` JSON response contains `path`, `size`, `view`, `content_type`, `truncated: false`,
+`content_b64` and RFC3339 `mtime`. The viewer classification matches published artifacts.
+Responses are private and not cached; file contents never become transcript events.
+Refusals contain a safe `error` sentence and `error_id`: `403` for an unsafe path or filename,
+`404` for a missing file, `409` for a missing/stale/busy daemon or a timeout, and `413` for a file
+over its size cap. Older daemons return `409` after a ten-second daemon wait, with at most one additional second
+to write the small refusal response. No engine is launched or
+resumed by reading a file.
+
+`BLERG_RUNNER_WORKSPACE_TEXT_MAX_BYTES` defaults to 2 MiB and
+`BLERG_RUNNER_WORKSPACE_MEDIA_MAX_BYTES` to 25 MiB (image/PDF); both are clamped to an absolute
+25 MiB maximum; invalid or nonpositive values use the defaults. Oversized files are refused rather than truncated. The server limits reads to
+two globally and two per daemon through the complete HTTP response, with a ten-second deadline.
+The daemon logs the session, cleaned relative path, byte count and outcome, never file content.
+Secure opening supports Linux and macOS; other platforms refuse reads. Two daemon workers bound
+reads and sending replies. A stalled regular filesystem read may outlive the HTTP timeout, while
+the daemon remains responsive. File reply writes have a ten-second socket deadline.
+See the browser-only operation in [`openapi.json`](internal/server/openapi.json).
 
 ## Configuration (env)
 
@@ -1203,7 +1349,7 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_KEY` | no | — | board↔runner contract key (must match the board's `BLERG_RUNNER_KEY`) |
 | `BLERG_CORE_URL` / `BLERG_CORE_REGISTER_KEY` | no | — | register with, and validate tokens against, `blerg-core` (the runner works standalone with the static key if unset) |
 | `BLERG_RUNNER_CORE_INTERNAL_KEY` | no | — | must equal core's `BLERG_CORE_INTERNAL_KEY`. Together with `BLERG_CORE_URL`, enables the personal-credential-first session spawn path, the per-person part of `GET /api/repos` (see [Repository list](#repository-list)), and `GET /api/me/credentials` (browser-authed; reports which personal credentials the caller has as `{"engines":[…],"git":bool,"git_providers":["github","gitlab"]}`, presence only — never a value — and `"unavailable":true` when core can't be asked); either unset means runner always uses the shared operator Secret, lists no one's own repositories, and that endpoint always answers `unavailable` |
-| `BLERG_RUNNER_GITHUB_ORG` / `BLERG_RUNNER_GITHUB_TOKEN` | no | — | an optional shared GitHub organisation whose repositories everyone sees in the launch sheet, alongside their own (token optional for a public org). Also the default org a bare repo name resolves against for cluster clones |
+| `BLERG_RUNNER_GITHUB_ORG` / `BLERG_RUNNER_GITHUB_TOKEN` | no | — | an optional shared GitHub organization whose repositories everyone sees in the launch sheet, alongside their own (token optional for a public org). Also the default org a bare repo name resolves against for cluster clones |
 | `BLERG_RUNNER_SELF_URL` | no | — | the runner's own URL, advertised at registration. Also the base of the proposal links an agent is given when its write call is queued (`<this>/proposals?id=<id>`); without it the agent is given only the proposal id |
 | `VOYAGE_API_KEY` | no | — | enables semantic (embedding) search for the agent memory / knowledge store. **Privacy: when set, the name and content of each memory an agent saves (`POST /api/agent/memories`) and the query text of each knowledge search (`POST /api/agent/knowledge-search`) is sent to Voyage AI's API (`https://api.voyageai.com/v1/embeddings`), and the returned vector is stored beside the memory in your database. Unset by default; when unset, nothing is sent to Voyage and search uses plain keyword matching.** A failed Voyage call also falls back to keyword matching, and a memory is still saved without its vector |
 | `VOYAGE_MODEL` | no | `voyage-3-lite` | the Voyage embedding model to request; only read when `VOYAGE_API_KEY` is set |
@@ -1211,7 +1357,7 @@ requires reading Go source to discover.
 | `BLERG_CORE_PUBLIC_URL` | no | — | core's browser-facing origin; when set, `/healthz` allows that origin (the landing page's status tiles) cross-origin |
 | `BLERG_RUNNER_ALLOWED_ORIGINS` | no | — | comma-separated `scheme://host` origins allowed to open `/ws/browser` cross-origin. Same-origin requests and requests with no `Origin` header are always allowed, so this is only needed when the frontend is served from a different origin than runner's API |
 | `BLERG_RUNNER_MODEL_CATALOG_URL` | no | `https://downloads.claude.ai/model-catalog/v1/catalog.json` | where the Claude model list (`GET /api/models/claude`, the launch sheet's Model/Effort picker) comes from: the public Claude Code model catalog, fetched at startup and every 6 h (https only — plain http is accepted only for a loopback host — same-host redirects only, 5 s timeout, 1 MB cap; the last good copy is kept). Set it **empty** to disable fetching — air-gapped installs — and serve the list compiled into this build instead |
-| `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official` | comma-separated GitHub `owner/repo` marketplaces **always-on plugins** may come from (`*` = any valid `owner/repo`). When a cluster session starts for an account, the server reads that account's list from core (`POST /internal/plugins/list`, see `core/docs/CONFIG.md`), drops entries whose marketplace is not allowed here, and hands the rest to the pod as `BLERG_RUNNER_PLUGINS` (non-secret JSON) together with this allow-list, which the pod checks again before running `claude plugin marketplace add` / `claude plugin install <plugin>@<marketplace> --scope user` (no shell, 90 s per command, 4 min overall, one after another). If core cannot be reached the session still starts without plugins and its start panel says so. Claude and Codex agent sessions. Codex installs through its native `plugin marketplace add` / `plugin add` commands in a credential-free installer home, then loads copied plugin caches and frozen catalogues from a private session `CODEX_HOME`; its existing login/config/rollouts are linked, never copied. A Local sandbox or This machine session gets the same list through `SpawnSession.plugins`, sent only to a daemon whose hello advertised that engine in `plugin_engines` (legacy `plugins` permits Claude only); the daemon re-checks its own `BLERG_RUNNER_PLUGIN_MARKETPLACES`, installs into its plugin workshop under its state dir with `CLAUDE_CONFIG_DIR` (never the person's `~/.claude`) and starts Claude with one `--plugin-dir=` per plugin (`install/desktop/DAEMON.md`). Restricted sessions never load any. Keep equal to core's `BLERG_CORE_PLUGIN_MARKETPLACES` |
+| `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official` | comma-separated GitHub `owner/repo` marketplaces **always-on plugins** may come from (`*` = any valid `owner/repo`). When a cluster session starts for an account, the server reads that account's list from core (`POST /internal/plugins/list`, see `core/docs/CONFIG.md`), drops entries whose marketplace is not allowed here, and hands the rest to the pod as `BLERG_RUNNER_PLUGINS` (non-secret JSON) together with this allow-list, which the pod checks again before running `claude plugin marketplace add` / `claude plugin install <plugin>@<marketplace> --scope user` (no shell, 90 s per command, 4 min overall, one after another). If core cannot be reached the session still starts without plugins and its start panel says so. Claude and Codex agent sessions. Codex installs through its native `plugin marketplace add` / `plugin add` commands in a credential-free installer home, then loads copied plugin caches and frozen catalogs from a private session `CODEX_HOME`; its existing login/config/rollouts are linked, never copied. A Local sandbox or This machine session gets the same list through `SpawnSession.plugins`, sent only to a daemon whose hello advertised that engine in `plugin_engines` (legacy `plugins` permits Claude only); the daemon re-checks its own `BLERG_RUNNER_PLUGIN_MARKETPLACES`, installs into its plugin workshop under its state dir with `CLAUDE_CONFIG_DIR` (never the person's `~/.claude`) and starts Claude with one `--plugin-dir=` per plugin (`install/desktop/DAEMON.md`). Restricted sessions never load any. Keep equal to core's `BLERG_CORE_PLUGIN_MARKETPLACES` |
 
 | `BLERG_RUNNER_METRICS_TOKEN` | no | — (endpoint off) | the bearer token a Prometheus scraper presents to `GET /metrics`. Unset: the endpoint answers `404`. Set: a missing or wrong token is `401`. Metrics are aggregates only; no session, account or title appears in them. See [`docs/telemetry.md`](../docs/telemetry.md) |
 | `BLERG_RUNNER_MCP_GW_ADDR` | no | — (gateway off) | listen address of the **MCP gateway**, a second listener and `http.Server` separate from the main port (for example `:8090`). Unset disables the gateway, and with it every session with MCP connections and every cron that uses one. It also needs the database and core (`BLERG_CORE_URL` plus `BLERG_RUNNER_CORE_INTERNAL_KEY`). Never route it through a public ingress; see [`docs/mcp-connections.md`](../docs/mcp-connections.md) |
@@ -1233,7 +1379,7 @@ accepted from a request's `env`.
 
 Not environment variables, but worth knowing they exist: the session reconciler's windows are
 compile-time constants — it polls every 30 s, waits 2 min before reading a missing cluster Job as
-gone, leaves a `disconnected` session resumable for 24 h, and finalises a session whose daemon
+gone, leaves a `disconnected` session resumable for 24 h, and finalizes a session whose daemon
 dropped after 30 min. See ["When nobody is watching"](#what-runs-as-you-means) above.
 
 ### Desktop daemon (`cmd/daemon`)
@@ -1254,6 +1400,7 @@ dropped after 30 min. See ["When nobody is watching"](#what-runs-as-you-means) a
 | `BLERG_RUNNER_SANDBOX_IMAGE` | no | `blerg-runner-sandbox:latest` | Local Sandbox Docker image — pin a tag or point at a private registry |
 | `BLERG_RUNNER_PROVISION_CLAUDE_MD` | no | `false` | true = add/refresh the blerg-runner messaging block in ~/.claude/CLAUDE.md on every start |
 | `BLERG_RUNNER_CLAUDE_USAGE` | no | on | `0` (or `false`/`off`/`no`) = do not read Claude's usage meter from the account usage endpoint with the CLI's sign-in (see [Usage limits](#usage-limits)); Claude then shows only a reactive cap |
+| `BLERG_RUNNER_MCP_PROMPT_WAIT_S` | no | `30` | first-input wait for known pending native MCP servers; `0` disables holding, values over 30 are capped, invalid/negative values use 30. Read by the daemon or cluster pod process, not passed to the engine |
 | `BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE` | no | `false` | true = a This machine session may clone a private repository with the launching person's own git token, on the bare host (see [Launching on a repository by name](#launching-on-a-repository-by-name)). While it clones, any other unsandboxed session on this machine could read that token — **only set this on a daemon nobody else uses** |
 
 #### Checking a daemon token

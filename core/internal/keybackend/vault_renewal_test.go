@@ -127,12 +127,15 @@ func TestRenewalLoopRetriesLoginOnNextTickAfterReloginFailure(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	if got := v.currentToken(); got != "eventually-succeeded-token" {
-		t.Fatalf("expected the loop to keep retrying login on later ticks until one succeeds, got token %q (attempts=%d)", got, loginAttempts)
+		mu.Lock()
+		attempts := loginAttempts
+		mu.Unlock()
+		t.Fatalf("expected the loop to keep retrying login on later ticks until one succeeds, got token %q (attempts=%d)", got, attempts)
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if v.token == "initial-token" {
+	if v.currentToken() == "initial-token" {
 		t.Fatal("stale initial token should have been replaced once login eventually succeeded")
 	}
 }

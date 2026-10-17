@@ -1,13 +1,18 @@
 package mcp
 
-// toolDefs is the runner's MCP tool catalog — the seven session operations of
-// agent contract v1 (spec §4). Descriptions are prescriptive about WHEN to
+// toolDefs is the runner's MCP tool catalog for agent contract v1 (spec §4). Descriptions are prescriptive about WHEN to
 // call: an agent picks a tool from its description, not from a manual.
 
 var toolDefs = []map[string]any{
 	{
+		"name":        "discover_launch_options",
+		"description": "Discover engines actually available to your credential on a runtime and host, including their models and reasoning efforts. Catalogs return promptly while native refresh runs in background. Copy runtime and daemon_id from the selected engine option; automatic discovery can return different hosts for different engines. Never substitute a workstation catalog for Cluster.",
+		"inputSchema": obj(props{"session_id": str("existing session: resolve only its native engine and actual execution target"), "runtime": strEnum("execution runtime", "cluster", "docker", "daemon"), "daemon_id": str("connected host ID, not used for Cluster"), "repo": str("repository to resolve on a host"), "restricted": boolean("show only engines supporting restricted execution"), "personal_only": boolean("exclude operator credentials for account-only launches such as crons"), "refresh": boolean("request background catalog refresh")}, nil),
+	},
+	{
 		"name": "start_session",
 		"description": "Start an agent session on a repo and return its session_id. " +
+			"Use discover_launch_options for the intended runtime and host before choosing engine, model or effort; copy runtime and daemon_id from the selected engine option on start. " +
 			"The call returns as soon as the session is accepted — it does not wait for the work. " +
 			"Poll get_session, or pass callback_url to be told when it ends. " +
 			"For a one-shot task, pass auto_stop: the runner ends the session itself when the first turn is done, " +
@@ -19,9 +24,10 @@ var toolDefs = []map[string]any{
 			"no_repo":         boolean("true = a session tied to no repository; repo, git_url and provider must then be omitted. On the cluster it works in an empty throwaway directory; on a daemon (docker or daemon runtime) in a new scratch folder under the daemon's repos root. Without it, an empty repo is refused"),
 			"prompt":          str("the task for the agent — the first thing it is told"),
 			"title":           str("short human label for the session"),
-			"model":           str("model id to run on (empty = this install's default): an id from GET /api/models/{engine}, or for claude an alias like sonnet"),
-			"effort":          str("reasoning effort (empty = the model's default): one of the chosen model's efforts from GET /api/models/{engine} (claude: low, medium, high, xhigh, max; codex and hermes: none, minimal, low … ultra). An engine with no effort levels (openclaw) refuses any value"),
-			"engine":          str("coding engine (empty = claude)"),
+			"model":           str("model ID from the selected engine catalog in discover_launch_options for the same runtime/host; empty leaves the engine default"),
+			"effort":          str("effort from the selected model in target-scoped discover_launch_options; empty leaves the engine default. A known model with an empty efforts list takes no explicit effort"),
+			"daemon_id":       str("daemon_id from the selected engine option in discover_launch_options; omit for Cluster"),
+			"engine":          str("available engine ID from discover_launch_options for the selected runtime/host; omission retains the legacy claude default and does not select another available engine"),
 			"runtime":         strEnum(`where to run it: "cluster" (a cluster Job), "docker" (the local sandbox container on a connected daemon) or "daemon" (that daemon's bare host). Empty = cluster where one is configured, else docker when the daemon has the sandbox image, else daemon. The sandbox has no git credentials (its agent can commit but not push) — pass "daemon" for work that must push or needs the host`, "cluster", "docker", "daemon"),
 			"auto_stop":       boolean("one-shot: stop the session as soon as its first turn is done (default false, i.e. it stays up for more messages)"),
 			"interaction":     strEnum(`whether a person is reading the session's chat as it works: "unattended" (the default: the agent decides, notes its assumptions and ends with a summary that stands on its own) or "interactive" (a person is reading and answers in the chat, so the agent talks things through and asks before changing anything). Any other value is refused`, "interactive", "unattended"),
@@ -47,8 +53,18 @@ var toolDefs = []map[string]any{
 		"inputSchema": obj(props{
 			"session_id": str("session id"),
 			"text":       str("what to say to the agent"),
+			"client_id":  str("retry-safe message id (at most 256 bytes); reuse the same id and text on retries to avoid a second turn. Persisted until the engine acknowledges consumption"),
 			"source":     str(`who is speaking: "human" or an automation's name (empty = "runner")`),
 		}, req("session_id", "text")),
+	},
+	{
+		"name":        "set_session_model",
+		"description": "Set a running agent session's model or reasoning effort for its next turn. At least one is required. The session's engine cannot change. Success acknowledges dispatch; model_changed reports the effective setting.",
+		"inputSchema": obj(props{
+			"session_id": str("session id"),
+			"model":      str("model id supported by the session's existing engine"),
+			"effort":     str("supported effort for the model; omitted keeps the current setting"),
+		}, req("session_id")),
 	},
 	{
 		"name":        "interrupt_session",

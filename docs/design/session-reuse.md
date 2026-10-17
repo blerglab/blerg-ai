@@ -26,7 +26,7 @@ parts, and Blerg now has all three:
    that core, board and runner all apply. Other devices and the person's agent tokens are
    untouched. Account-wide sign-out stays for explicit actions: password change, admin disable,
    `POST /auth/logout-all`.
-2. **A lost rotation is recognised, not punished.** A successor row starts with no
+2. **A lost rotation is recognized, not punished.** A successor row starts with no
    `last_used_at`; it gets one when it is presented. A rotated-out token whose successor was
    never presented is a browser that never received the rotation, and the rotation is redone
    (the never-used successor is revoked `superseded`, a new one is issued). This replaces the

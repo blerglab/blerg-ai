@@ -132,6 +132,9 @@ function select(root: HTMLElement, n: number, text: string) {
 async function show(props: Partial<React.ComponentProps<typeof PdfPages>> = {}) {
   const r = render(<PdfPages blob={blob} requests={[]} onHover={onHover} onSelection={onSelection} {...props} />)
   await waitFor(() => expect(r.container.querySelectorAll('.pdf-page')).toHaveLength(3))
+  // The pages are laid out a render before the effect that starts watching them: wait for the
+  // observer too, or a test that fires it can run first (seen under load in CI).
+  await waitFor(() => expect(FakeIntersectionObserver.instances.at(-1)?.targets.size).toBe(3))
   return r
 }
 

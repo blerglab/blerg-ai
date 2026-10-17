@@ -1,0 +1,254 @@
+/* ── the diff viewer (view "diff") and the diff card ─────────────────────── */
+.artifact-viewer.is-diff {
+  width: min(1320px, 100%);
+}
+.diff-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 8px;
+}
+.diff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.diff-summary {
+  flex: 1;
+  color: var(--chat-muted);
+  font-size: var(--chat-text-sm);
+}
+.diff-modes { display: inline-flex; gap: 4px; }
+.diff-modes .artifact-btn[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--chat-accent) 16%, transparent);
+  border-color: var(--chat-accent);
+}
+.diff-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+}
+.diff-files {
+  flex: 0 0 240px;
+  overflow: auto;
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  font-size: var(--chat-text-xs);
+}
+.diff-files ul { list-style: none; margin: 0; padding: 4px 0; }
+.diff-files-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px;
+  border: 0;
+  background: none;
+  color: var(--chat-fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-files-item:hover { background: var(--chat-surface-2); }
+.diff-files-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-files-counts, .diff-file-counts { flex: none; font-family: var(--chat-font-mono); }
+.diff-plus { color: var(--chat-diff-add); }
+.diff-minus { color: var(--chat-diff-del); }
+.diff-status {
+  flex: none;
+  display: inline-block;
+  min-width: 1.4em;
+  text-align: center;
+  border-radius: 4px;
+  font-family: var(--chat-font-mono);
+  font-size: 0.85em;
+  font-weight: 650;
+  color: var(--chat-muted);
+  border: 1px solid var(--chat-border);
+}
+.diff-status-added { color: var(--chat-diff-add); }
+.diff-status-deleted { color: var(--chat-diff-del); }
+.diff-status-renamed, .diff-status-copied { color: var(--chat-code-type); }
+
+.diff-main {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.diff-commit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--chat-accent);
+  background: color-mix(in srgb, var(--chat-accent) 7%, transparent);
+  border-radius: 0 6px 6px 0;
+  font-size: var(--chat-text-sm);
+}
+.diff-commit-sha { font-family: var(--chat-font-mono); color: var(--chat-code-title); }
+.diff-commit-subject { font-weight: 600; }
+.diff-commit-meta { color: var(--chat-muted); font-size: var(--chat-text-xs); width: 100%; }
+.diff-file {
+  margin-bottom: 10px;
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  overflow: hidden;
+  scroll-margin-top: 4px;
+}
+.diff-file-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background: var(--chat-surface, var(--chat-bg));
+  border-bottom: 1px solid var(--chat-border);
+  font-size: var(--chat-text-sm);
+}
+.diff-file-toggle {
+  border: 0;
+  background: none;
+  color: var(--chat-muted);
+  cursor: pointer;
+  padding: 0 2px;
+  font: inherit;
+}
+.diff-file-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs);
+  overflow-wrap: anywhere;
+}
+.diff-meta, .diff-binary, .diff-more {
+  margin: 0;
+  padding: 6px 10px;
+  color: var(--chat-muted);
+  font-size: var(--chat-text-xs);
+}
+.diff-binary { font-family: var(--chat-font-mono); }
+.diff-table-wrap {
+  overflow-x: auto;
+  background: var(--chat-code-bg);
+  color: var(--chat-code-fg);
+}
+.diff-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs);
+  line-height: 1.5;
+  tab-size: 4;
+}
+.diff-split { table-layout: fixed; }
+.diff-split .diff-col-num { width: 4.2em; }
+.diff-unified .diff-num { width: 1%; }
+.diff-num {
+  padding: 0 6px;
+  text-align: right;
+  vertical-align: top;
+  color: var(--chat-code-linenum);
+  user-select: none;
+  white-space: nowrap;
+}
+.diff-code {
+  padding: 0 10px 0 4px;
+  white-space: pre;
+  vertical-align: top;
+}
+.diff-split .diff-code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-mark {
+  display: inline-block;
+  width: 1.2em;
+  color: var(--chat-code-linenum);
+  user-select: none;
+}
+.diff-row.diff-add, td.diff-add { background: color-mix(in srgb, var(--chat-diff-add) 13%, transparent); }
+.diff-row.diff-del, td.diff-del { background: color-mix(in srgb, var(--chat-diff-del) 13%, transparent); }
+.diff-row.diff-add .diff-mark, td.diff-add .diff-mark { color: var(--chat-diff-add); }
+.diff-row.diff-del .diff-mark, td.diff-del .diff-mark { color: var(--chat-diff-del); }
+td.diff-empty { background: color-mix(in srgb, var(--chat-fg) 4%, transparent); }
+.diff-hunk {
+  padding: 2px 10px;
+  color: var(--chat-code-type);
+  background: color-mix(in srgb, var(--chat-code-type) 8%, transparent);
+  white-space: pre;
+}
+.diff-note {
+  padding: 0 10px;
+  color: var(--chat-code-comment);
+  font-style: italic;
+}
+.diff-fold {
+  width: 100%;
+  border: 0;
+  padding: 1px 10px;
+  background: color-mix(in srgb, var(--chat-fg) 5%, transparent);
+  color: var(--chat-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-fold:hover { color: var(--chat-fg); }
+
+@media (max-width: 699px) {
+  .diff-layout { flex-direction: column; }
+  .diff-files { flex: none; max-height: 9.5em; }
+  .diff-main { overflow: visible; }
+  .diff-view { overflow: auto; }
+}
+
+/* read by a screen reader only: whether a line was added or deleted */
+.diff-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+/* the card of a published diff */
+.artifact-preview-diff {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: min(480px, 100%);
+  padding: 8px 10px;
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  background: var(--chat-code-bg);
+  color: var(--chat-code-fg);
+  font-size: var(--chat-text-sm);
+  text-align: left;
+  line-height: 1.45;
+  cursor: pointer;
+}
+.artifact-preview-diff-counts { font-family: var(--chat-font-mono); font-size: var(--chat-text-xs); }
+.artifact-preview-diff-files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs);
+  color: var(--chat-muted);
+}
+.artifact-preview-diff-files li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

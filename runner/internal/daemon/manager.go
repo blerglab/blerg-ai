@@ -294,12 +294,14 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	client.OnMessage("session_token", m.handleSessionToken)
 	client.OnMessage("resize_session", m.handleResizeSession)
 	client.OnMessage("request_scrollback", m.handleRequestScrollback)
+	client.OnMessage("read_workspace_file", m.handleReadWorkspaceFile)
 	client.OnMessage("inject_note_reply", m.handleInjectNoteReply)
 	client.OnMessage("agent_event_ack", m.handleAgentEventAck)
 	client.OnMessage("agent_user_message", m.handleAgentUserMessage)
 	client.OnMessage("set_session_model", m.handleSetSessionModel)
 	client.OnMessage("refresh_session_tools", m.handleRefreshSessionTools)
 	client.OnMessage("interrupt_session", m.handleInterruptSession)
+	client.OnMessage("release_held_prompt", m.handleReleaseHeldPrompt)
 	client.OnMessage("set_repos_root", m.handleSetReposRoot)
 	client.SetReposRoot(cfg.ReposRootSetting.Get)
 	return m
@@ -362,6 +364,14 @@ func (m *Manager) handleRefreshSessionTools(raw []byte) {
 		return
 	}
 	m.agents.RefreshTools(msg.SessionID)
+}
+
+func (m *Manager) handleReleaseHeldPrompt(raw []byte) {
+	var msg protocol.ReleaseHeldPrompt
+	if json.Unmarshal(raw, &msg) != nil || m.agents == nil || msg.SessionID == "" {
+		return
+	}
+	m.agents.ReleaseHeldPrompt(msg.SessionID)
 }
 
 func (m *Manager) handleInterruptSession(raw []byte) {
@@ -1599,6 +1609,16 @@ func (m *Manager) reattachSession(id string) {
 		log.Printf("manager: reattach session %s failed: %v", id, err)
 		return
 	}
+	// The attach client's cwd is the repos parent, not the engine's workspace.
+	// Only a trusted recovery record can bind file reads to the original folder.
+	sess.workspace, sess.workspaceInfo = "", nil
+	m.config.ReposRootSetting.WithRoot(func(root string) {
+		if rec, e := readSessionRecord(root, id); e == nil && rec.ProjectPath != "" {
+			if info, statErr := os.Stat(rec.ProjectPath); statErr == nil && info.IsDir() {
+				sess.workspace, sess.workspaceInfo = rec.ProjectPath, info
+			}
+		}
+	})
 
 	tracker := NewStateTracker(id, m.client)
 	metaParser := NewMetaParser(id, m.client)
@@ -1632,6 +1652,20 @@ func (m *Manager) recoverSession(rec SessionRecord) {
 			thread := codexTerminalThread(rec.CodexHome)
 			if rec.CodexHome == "" || thread == "" {
 				m.sendError(rec.SessionID, "The Codex terminal's saved conversation could not be identified. Its original prompt was not replayed.")
+				return
+			}
+
+			source := rec.CodexSourceHome
+			if source == "" {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					m.sendError(rec.SessionID, "Codex login home is unavailable")
+					return
+				}
+				source = engineHome(home, "CODEX_HOME", ".codex")
+			}
+			if err := prepareCodexTerminalGuide(rec.CodexHome, source); err != nil {
+				m.sendError(rec.SessionID, err.Error())
 				return
 			}
 			inner = append(inner, "--no-daemon", "resume", thread)

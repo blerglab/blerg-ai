@@ -313,7 +313,7 @@ func TestCreateCronValidationMatrix(t *testing.T) {
 		{"never occurs", func(m map[string]any) { m["schedule"] = "0 8 30 2 *" }, 400, ""},
 		{"bad timezone", func(m map[string]any) { m["timezone"] = "Mars/Olympus" }, 400, ""},
 		{"no timezone", func(m map[string]any) { m["timezone"] = "" }, 400, ""},
-		{"engine hermes", func(m map[string]any) { m["engine"] = "hermes" }, 400, "claude"},
+		{"engine hermes", func(m map[string]any) { m["engine"] = "hermes" }, 400, "restricted"},
 		{"bare host runtime", func(m map[string]any) { m["runtime"] = "daemon" }, 400, "runtime"},
 		{"bad daemon id", func(m map[string]any) { m["daemon_id"] = "laptop" }, 400, "daemon"},
 		{"grace too long", func(m map[string]any) { m["grace_seconds"] = 90000 }, 400, "grace"},

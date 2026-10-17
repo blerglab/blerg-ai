@@ -136,24 +136,26 @@ type MyCredentials struct {
 
 // SessionInfo describes a terminal or agent session.
 type SessionInfo struct {
-	ID              string  `json:"id"`
-	DaemonID        string  `json:"daemon_id"`
-	Status          string  `json:"status"`
-	ProjectPath     string  `json:"project_path"`
-	Repo            string  `json:"repo"`
-	Title           string  `json:"title"`
-	Model           string  `json:"model,omitempty"`
-	Engine          string  `json:"engine,omitempty"` // "" (claude) | "codex" | "hermes" | "openclaw"
-	Effort          string  `json:"effort,omitempty"`
-	StartedAt       string  `json:"started_at"`
-	EndedAt         *string `json:"ended_at,omitempty"`
-	Unread          bool    `json:"unread"`
-	Starred         bool    `json:"starred"`
-	Kind            string  `json:"kind,omitempty"` // "" | "tmux" | "agent"
-	ParentSessionID *string `json:"parent_session_id,omitempty"`
-	Runtime         string  `json:"runtime,omitempty"` // "daemon" | "docker" | "cluster"
-	SkipPermissions bool    `json:"skip_permissions"`
-	ErrorReason     string  `json:"error_reason,omitempty"` // filled by Task 6; declared here so the row/info shapes change once
+	SteeringSupported    bool    `json:"steering_supported"`
+	LimitResumeSupported bool    `json:"limit_resume_supported,omitempty"`
+	ID                   string  `json:"id"`
+	DaemonID             string  `json:"daemon_id"`
+	Status               string  `json:"status"`
+	ProjectPath          string  `json:"project_path"`
+	Repo                 string  `json:"repo"`
+	Title                string  `json:"title"`
+	Model                string  `json:"model,omitempty"`
+	Engine               string  `json:"engine,omitempty"` // "" (claude) | "codex" | "hermes" | "openclaw"
+	Effort               string  `json:"effort,omitempty"`
+	StartedAt            string  `json:"started_at"`
+	EndedAt              *string `json:"ended_at,omitempty"`
+	Unread               bool    `json:"unread"`
+	Starred              bool    `json:"starred"`
+	Kind                 string  `json:"kind,omitempty"` // "" | "tmux" | "agent"
+	ParentSessionID      *string `json:"parent_session_id,omitempty"`
+	Runtime              string  `json:"runtime,omitempty"` // "daemon" | "docker" | "cluster"
+	SkipPermissions      bool    `json:"skip_permissions"`
+	ErrorReason          string  `json:"error_reason,omitempty"` // filled by Task 6; declared here so the row/info shapes change once
 	// EndReason is why the session ended — a code from a fixed vocabulary
 	// (db/session_end.go) — and EndedBy the actor that ended it, when one did.
 	// Both absent for a live session and for rows ended before migration 018.
@@ -214,6 +216,9 @@ type DaemonHello struct {
 	ProtocolVersion string   `json:"protocol_version"`
 	Version         string   `json:"version"`
 	ActiveSessions  []string `json:"active_sessions"`
+	// BackgroundTasks is a complete snapshot for this daemon process lifetime.
+	// Absent on old/unknown peers; empty Sessions is authoritative, never partial.
+	BackgroundTasks *BackgroundTaskInventory `json:"background_task_inventory,omitempty"`
 	// QueuedSessions are spawns the daemon has received but not started yet
 	// (waiting in its queue, or preparing a clone or plugins): alive, so the
 	// server does not read them as lost. Absent from older daemons.
@@ -354,9 +359,10 @@ type RepoOrigin struct {
 // dropped session_state_changed event (a lost "idle" would otherwise leave the
 // session stuck on "running" forever).
 type DaemonHeartbeat struct {
-	Type           string            `json:"type"`                     // "daemon_heartbeat"
-	ActiveSessions []string          `json:"active_sessions"`          // IDs of currently live sessions
-	SessionStates  map[string]string `json:"session_states,omitempty"` // sessionID → "running"|"idle"|"waiting"
+	Type            string                   `json:"type"`            // "daemon_heartbeat"
+	ActiveSessions  []string                 `json:"active_sessions"` // IDs of currently live sessions
+	BackgroundTasks *BackgroundTaskInventory `json:"background_task_inventory,omitempty"`
+	SessionStates   map[string]string        `json:"session_states,omitempty"` // sessionID → "running"|"idle"|"waiting"
 	// QueuedSessions refreshes DaemonHello's field of the same name.
 	QueuedSessions []string `json:"queued_sessions,omitempty"`
 	// SandboxAvailable reports whether blerg-runner-sandbox:latest is present
@@ -1082,7 +1088,8 @@ type SetSessionModel struct {
 
 // RefreshSessionTools asks the daemon to have the agent list its MCP tools again (server →
 // daemon): a grant's tool definitions changed (docs/design/mcp-tool-changes.md §5.3). The Claude
-// Code driver recycles its long-lived process at the next idle point; other engines ignore it.
+// Code driver recycles its long-lived process at the next idle point. Other adapters
+// may require a new native session, reported as capabilities.tool_schema_refresh.
 type RefreshSessionTools struct {
 	Type      string `json:"type"` // "refresh_session_tools"
 	SessionID string `json:"session_id"`

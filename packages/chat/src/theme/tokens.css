@@ -42,4 +42,21 @@
   --chat-card-assistant-bg: var(--chat-surface);
   --chat-card-tool-bg: var(--chat-bg);
   --chat-card-system-bg: var(--chat-surface-2);
+
+  /* Code: muted syntax colours (works on both schemes through the app's values) and the
+     colours of a diff's added and removed lines. */
+  --chat-code-keyword: #b69cf0;
+  --chat-code-string: #8fc9a0;
+  --chat-code-number: #e0b36a;
+  --chat-code-comment: #7d8798;
+  --chat-code-title: #7fb2ee;
+  --chat-code-type: #6fc7c7;
+  --chat-code-fg: var(--chat-fg);
+  --chat-code-bg: var(--chat-bg);
+  --chat-code-linenum: var(--chat-muted-2);
+  --chat-code-variable: #e0b36a;
+  --chat-code-builtin: #6fc7c7;
+  --chat-code-operator: var(--chat-muted);
+  --chat-diff-add: #8ed6a6;
+  --chat-diff-del: #ff9d94;
 }

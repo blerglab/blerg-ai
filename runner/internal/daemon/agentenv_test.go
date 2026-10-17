@@ -8,7 +8,6 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,7 +20,7 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/server"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 )
 
 // fakeEngineDumpingEnv writes a `codex` stub that records its own environment
@@ -115,44 +114,8 @@ func TestAgentSessionEnvCarriesSessionIdentity(t *testing.T) {
 // messaging endpoint — the thing the per-session token exists for.
 // Requires TEST_DATABASE_URL; skips otherwise.
 func TestAgentSessionEnvLetsBlergRunnerPostAMessage(t *testing.T) {
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database integration test")
-	}
 	ctx := context.Background()
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse dsn: %v", err)
-	}
-	const schema = "test_blerg_runner_agentenv"
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	bootstrap, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	for _, q := range []string{
-		fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema),
-		fmt.Sprintf("CREATE SCHEMA %s", schema),
-	} {
-		if _, err := bootstrap.Exec(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
-	bootstrap.Close()
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect (schema): %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		if p, err := pgxpool.New(context.Background(), dsn); err == nil {
-			p.Exec(context.Background(), fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
-			p.Close()
-		}
-	})
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
+	pool := testsupport.Open(t, "TEST_DATABASE_URL", "runner", db.RunMigrations)
 
 	const daemonID = "0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0e"
 	const sessionID = "1e1e1e1e-1e1e-4e1e-8e1e-1e1e1e1e1e1e"

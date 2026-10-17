@@ -13,12 +13,12 @@ cli:
 
 # Unit tests (no database required).
 test:
-	$(GO) test -p 1 ./...
+	GOWORK=off $(GO) test -timeout 30m ./...
 
 # Integration tests against a real Postgres. Example:
 #   make test-db TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5544/blerg-board_test
 test-db:
-	TEST_DATABASE_URL=$(TEST_DATABASE_URL) $(GO) test -p 1 ./...
+	TEST_DATABASE_URL=$(TEST_DATABASE_URL) GOWORK=off $(GO) test -timeout 30m ./...
 
 web:
 	cd web && npm run build

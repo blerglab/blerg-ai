@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -293,44 +293,32 @@ func TestSessionRowToInfo_StarredMapped(t *testing.T) {
 //
 // These tests require a real Postgres database. Set TEST_DATABASE_URL to run.
 
-// connectSrvTestDB returns a pool connected to the test database, or skips the
-// test if TEST_DATABASE_URL is not set.
+// connectSrvTestDB returns a private copy of the once-migrated server template.
+// Its nonpublic schema is pinned on every connection, including handler goroutines.
+// The test is skipped if TEST_DATABASE_URL is not set.
 func connectSrvTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database integration tests")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect to postgres: %v", err)
-	}
-	t.Cleanup(func() { pool.Close() })
-	return pool
-}
-
-// setupSrvTestSchema creates an isolated schema for server integration tests and
-// sets the search_path so all unqualified table names resolve to it.
-func setupSrvTestSchema(t *testing.T, pool *pgxpool.Pool) {
-	t.Helper()
-	ctx := context.Background()
-	schema := "test_blerg_runner_srv"
-
-	for _, q := range []string{
-		fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema),
-		fmt.Sprintf("CREATE SCHEMA %s", schema),
-		fmt.Sprintf("SET search_path TO %s", schema),
-	} {
-		if _, err := pool.Exec(ctx, q); err != nil {
-			t.Fatalf("setupSrvTestSchema %q: %v", q, err)
+	base := testsupport.Open(t, "TEST_DATABASE_URL", "runner-server", func(ctx context.Context, base *pgxpool.Pool) error {
+		if _, err := base.Exec(ctx, "CREATE SCHEMA test_blerg_runner_srv"); err != nil {
+			return err
 		}
-	}
-
-	t.Cleanup(func() {
-		pool.Exec(context.Background(),
-			fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+		cfg := base.Config()
+		cfg.ConnConfig.RuntimeParams["search_path"] = "test_blerg_runner_srv"
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		return db.RunMigrations(ctx, pool)
 	})
+	cfg := base.Config()
+	cfg.ConnConfig.RuntimeParams["search_path"] = "test_blerg_runner_srv"
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal("open isolated server test database")
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 // TestHandleSessionStateChanged_SetsUnreadOnTransition verifies that:
@@ -340,10 +328,6 @@ func setupSrvTestSchema(t *testing.T, pool *pgxpool.Pool) {
 func TestHandleSessionStateChanged_SetsUnreadOnTransition(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000031"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "unread-test-daemon", "local", "/repos"); err != nil {
@@ -416,10 +400,6 @@ func TestHandleSessionStateChanged_SetsUnreadOnTransition(t *testing.T) {
 func TestHandleSessionStateChanged_BroadcastCarriesExistingUnread(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000041"
 	sessionID := "00000000-0000-0000-0000-000000000042"
@@ -478,10 +458,6 @@ func TestHandleSessionStateChanged_BroadcastCarriesExistingUnread(t *testing.T) 
 func TestHandleSessionEndedClosesOpenMessages(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000c1"
 	sessionID := "00000000-0000-0000-0000-0000000000c2"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "ended-daemon", "local", "/repos"); err != nil {
@@ -557,10 +533,6 @@ func TestMessageRowToInfo_MapsNullableAnswer(t *testing.T) {
 func TestErrorReasonIsPersistedAndOrphanDeletable(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
 	daemonID := "00000000-0000-4000-8000-00000000d006"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "err-daemon", "local", "/repos"); err != nil {
 		t.Fatal(err)
@@ -615,10 +587,6 @@ func TestErrorReasonIsPersistedAndOrphanDeletable(t *testing.T) {
 func TestErrorReasonClearedOnRevival(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
 	daemonID := "00000000-0000-4000-8000-00000000d008"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "revive-daemon", "local", "/repos"); err != nil {
 		t.Fatal(err)

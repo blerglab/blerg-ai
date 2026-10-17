@@ -341,3 +341,52 @@ func TestAcceptRefusesARemovedRow(t *testing.T) {
 		t.Fatalf("removed: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestToolChangeSchemaPolicyUsesOwnedLatestAdapterReport(t *testing.T) {
+	fx := newTCFx(t)
+	ctx := context.Background()
+	c := fx.drift("updated")
+	if err := db.InsertSession(ctx, fx.pool, fx.sessionID, fx.dc.ID, "idle", "/fixture", "fixture", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	report := func(raw string) {
+		t.Helper()
+		if _, _, err := db.AppendAgentEvent(ctx, fx.pool, fx.sessionID, newUUID(), "capabilities", raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report(`{"engine":"fixture-engine","tool_schema_refresh":"new_session","note":"private-not-returned","groups":[]}`)
+	check := func(method, path, token, body, want string) {
+		t.Helper()
+		rec := fx.req(method, path, token, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s %s HTTP%d: %s", method, path, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"tool_schema_refresh":"`+want+`"`) || strings.Contains(rec.Body.String(), "private-not-returned") {
+			t.Fatalf("incorrect policy metadata: %s", rec.Body.String())
+		}
+	}
+	owner := fx.human()
+	check("GET", "/api/tool-changes", owner, "", "new_session")
+	check("GET", "/api/tool-changes/"+c.ID, owner, "", "new_session")
+	check("POST", "/api/tool-changes/"+c.ID+"/accept", owner, `{"mode":"allow"}`, "new_session")
+	// Unauthorized callers never receive the session's adapter report.
+	if rec := fx.req("GET", "/api/tool-changes", fx.token("agent", ""), ""); rec.Code != 403 || strings.Contains(rec.Body.String(), "new_session") {
+		t.Fatal("denied list leaked policy")
+	}
+	if rec := fx.req("GET", "/api/tool-changes/"+c.ID, fx.otherHuman(), ""); rec.Code != 404 || strings.Contains(rec.Body.String(), "new_session") {
+		t.Fatal("foreign change leaked policy")
+	}
+	if rec := fx.req("GET", "/api/tool-changes?scope=decided", fx.otherHuman(), ""); rec.Code != 200 || strings.Contains(rec.Body.String(), "new_session") {
+		t.Fatal("foreign list leaked policy")
+	}
+	// Latest actual adapter metadata wins; a missing/malformed new value does
+	// not fall back to an older optimistic claim or an engine-name heuristic.
+	report(`{"engine":"fixture-engine","tool_schema_refresh":"next_turn","groups":[]}`)
+	check("GET", "/api/tool-changes/"+c.ID, owner, "", "next_turn")
+	report(`{"tool_schema_refresh":{"secret":"private-not-returned"},"groups":[]}`)
+	rec := fx.req("GET", "/api/tool-changes/"+c.ID, owner, "")
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), "tool_schema_refresh") || strings.Contains(rec.Body.String(), "private-not-returned") {
+		t.Fatalf("malformed policy did not stay unknown: %s", rec.Body.String())
+	}
+}

@@ -1,7 +1,7 @@
 # Crons
 
 A cron starts an agent session on a schedule, with nobody watching: "every weekday at 07:30, read
-my notes and summarise what needs attention". It is the runner's scheduler plus the
+my notes and summarize what needs attention". It is the runner's scheduler plus the
 [MCP connections](mcp-connections.md) that give the run something to act on.
 
 Crons live in the runner UI under **Crons**. Every cron belongs to one account, and every route is
@@ -139,7 +139,7 @@ your tools.
 
 An unattended run has no logged-in person, so creating a cron mints a **cron token** for your
 account. It is not a credential anyone can present: only its id and expiry are stored, and it only
-authorises the runner to check that you have not revoked it and to fetch your connection
+authorizes the runner to check that you have not revoked it and to fetch your connection
 credentials for this cron's runs.
 
 - Deleting or pausing a cron revokes its token.

@@ -64,11 +64,19 @@ claude_login_state() {
 # detect_ready_engines [ENV_FILE] sets ENGINES_READY (space separated ids,
 # claude first) and CLAUDE_STATE. Codex/hermes/openclaw mirror the daemon's
 # codexAlreadyLoggedIn / hermesAlreadyConfigured / openclawAlreadyConfigured.
+codex_login_home() {
+  # Match the daemon's engineHome: only an absolute override replaces HOME.
+  case "${CODEX_HOME:-}" in
+    /*) printf '%s\n' "$CODEX_HOME" ;;
+    *) printf '%s\n' "$HOME/.codex" ;;
+  esac
+}
+
 detect_ready_engines() {
   ENGINES_READY=""
   CLAUDE_STATE="$(claude_login_state "${1:-}")"
   [ "$CLAUDE_STATE" = ready ] && ENGINES_READY="claude"
-  if command -v codex >/dev/null 2>&1 && [ -s "$HOME/.codex/auth.json" ]; then
+  if command -v codex >/dev/null 2>&1 && [ -s "$(codex_login_home)/auth.json" ]; then
     ENGINES_READY="$ENGINES_READY codex"
   fi
   if command -v hermes >/dev/null 2>&1; then

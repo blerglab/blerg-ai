@@ -17,13 +17,11 @@ import (
 // 202 response, board_tokens row minted with board+message caps,
 // SpawnSession with Assist=true/BoardID/non-empty BoardToken sent to daemon,
 // and the session row written with assist=true and board_id.
-func TestAssistSpawn_ConnectedDaemon(t *testing.T) {
+func TestAssistSpawn_ConnectedDaemon(t *testing.T) { testAssistConnectedDaemon(t, "", "", "") }
+func TestAssistSpawn_Codex(t *testing.T)           { testAssistConnectedDaemon(t, "codex", "gpt-test", "high") }
+func testAssistConnectedDaemon(t *testing.T, engine, model, effort string) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000a01"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "assist-daemon-1", "local", "/repos"); err != nil {
@@ -41,11 +39,18 @@ func TestAssistSpawn_ConnectedDaemon(t *testing.T) {
 		Name: "assist-daemon-1",
 		send: make(chan []byte, 256),
 	}
+	if engine != "" {
+		dc.SetAvailableEngines([]string{engine})
+	}
 	hub.Register(dc)
 
 	api := NewAPI(hub, pool, "tok", nil, "")
 
-	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", bytes.NewBufferString(`{}`))
+	body, err := json.Marshal(assistRequest{Engine: engine, Model: model, Effort: effort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok")
 	req.SetPathValue("id", board.ID)
 	rec := httptest.NewRecorder()
@@ -71,6 +76,16 @@ func TestAssistSpawn_ConnectedDaemon(t *testing.T) {
 		var spawn protocol.SpawnSession
 		if err := json.Unmarshal(raw, &spawn); err != nil {
 			t.Fatalf("unmarshal SpawnSession: %v", err)
+		}
+		if spawn.Engine != engine || spawn.Model != model || spawn.Effort != effort {
+			t.Errorf("Assist engine/model/effort lost: %q %q %q", spawn.Engine, spawn.Model, spawn.Effort)
+		}
+		var storedEngine, storedModel, storedEffort string
+		if err := pool.QueryRow(ctx, `SELECT COALESCE(engine,''), COALESCE(model,''), COALESCE(effort,'') FROM sessions WHERE id=$1`, resp.SessionID).Scan(&storedEngine, &storedModel, &storedEffort); err != nil {
+			t.Fatal(err)
+		}
+		if storedEngine != engine || storedModel != model || storedEffort != effort {
+			t.Fatal("stored Assist settings differ from launch")
 		}
 		if !spawn.Assist {
 			t.Errorf("SpawnSession.Assist = false, want true")
@@ -132,10 +147,6 @@ func TestAssistSpawn_ConnectedDaemon(t *testing.T) {
 func TestAssistSpawn_TicketScoped(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000a02"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "assist-daemon-2", "local", "/repos"); err != nil {
@@ -216,10 +227,6 @@ func TestAssistSpawn_TicketScoped(t *testing.T) {
 func TestAssistSpawn_NoDaemon(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	board, err := db.CreateBoard(ctx, pool, "Gamma", nil, []string{"gamma-repo"}, nil)
 	if err != nil {
@@ -247,10 +254,6 @@ func TestAssistSpawn_NoDaemon(t *testing.T) {
 func TestAssistSessionEnded_RevokesToken(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000a04"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "assist-daemon-4", "local", "/repos"); err != nil {
@@ -322,10 +325,6 @@ func TestAssistSessionEnded_RevokesToken(t *testing.T) {
 func TestAssistSpawn_NoRepos(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000a06"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "assist-daemon-6", "local", "/repos"); err != nil {
@@ -363,10 +362,6 @@ func TestAssistSpawn_NoRepos(t *testing.T) {
 func TestAssistSpawn_SendFailureRollsBack(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000a07"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "assist-daemon-7", "local", "/repos"); err != nil {
@@ -442,5 +437,76 @@ func TestAssistSpawn_SendFailureRollsBack(t *testing.T) {
 	}
 	if ticketDetail.SessionID != nil {
 		t.Errorf("tickets.session_id = %q after send failure, want nil", *ticketDetail.SessionID)
+	}
+}
+
+func TestAssistSelectionFields(t *testing.T) {
+	var req assistRequest
+	if err := json.Unmarshal([]byte(`{"engine":"codex","model":"gpt-test","effort":"high"}`), &req); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]string
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"engine": "codex", "model": "gpt-test", "effort": "high"} {
+		if fields[key] != want {
+			t.Errorf("%s = %q, want %q", key, fields[key], want)
+		}
+	}
+}
+
+func TestAssistSpawnKeepsTicketWithinRequestedBoard(t *testing.T) {
+	pool := connectSrvTestDB(t)
+	ctx := t.Context()
+	daemonID := "00000000-0000-0000-0000-000000000a09"
+	if err := db.UpsertDaemon(ctx, pool, daemonID, "fixture-host", "local", "/repos"); err != nil {
+		t.Fatal(err)
+	}
+	board, err := db.CreateBoard(ctx, pool, "Fixture requested", nil, []string{"fixture-repo"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.CreateBoard(ctx, pool, "Fixture other", nil, []string{"fixture-other"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := db.CreateTicket(ctx, pool, db.TicketInput{BoardID: other.ID, Title: "Fixture ticket", Repos: []string{"fixture-other"}, Priority: "medium"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub()
+	dc := &DaemonConn{ID: daemonID, send: make(chan []byte, 8)}
+	hub.Register(dc)
+	api := NewAPI(hub, pool, "fixture-token", nil, "")
+	body, err := json.Marshal(assistRequest{TicketID: ticket.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", bytes.NewReader(body))
+	req.SetPathValue("id", board.ID)
+	req.Header.Set("Authorization", "Bearer fixture-token")
+	rec := httptest.NewRecorder()
+	api.HandlePostAssist(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-board Assist status=%d", rec.Code)
+	}
+	if len(dc.send) != 0 {
+		t.Fatal("cross-board Assist dispatched")
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE board_id=$1`, board.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("invalid request created a session")
+	}
+	detail, err := db.GetTicket(ctx, pool, ticket.ID)
+	if err != nil || detail.SessionID != nil {
+		t.Fatal("invalid request changed ticket binding")
 	}
 }

@@ -45,6 +45,7 @@ app cannot show is download only.
 |---|---|
 | Markdown (`.md`, `.markdown`) | Formatted text. Raw HTML in it is shown as text, never run. |
 | Plain text, logs and source code (`.txt .log .py .js .ts .tsx .go .rs .java .c .h .cpp .sh .yaml .yml .toml .ini .xml .sql .css .rb .php` and similar, and a file with an unknown extension whose bytes are text) | Monospace text. The first 200 KB, with **Show all**; over 2 MiB it is download only. |
+| Diffs and patches (`.diff`, `.patch`) | The diff viewer: see [Diffs](#diffs). Over 2 MiB, download only. |
 | JSON (`.json`) | Pretty-printed; the raw text if it does not parse. Same size rules as text. |
 | CSV and TSV | A scrollable table: the first 500 rows and 50 columns, with a note when there is more. |
 | Images: `.png .jpg .jpeg .gif .webp .svg` | The image. An SVG is shown only through `<img>`, where scripts in it never run. |
@@ -68,6 +69,42 @@ The guidance the agent reads:
 - Something you will edit in Office: DOCX or XLSX (download only).
 - An HTML file must be **one self-contained file**: inline CSS and JavaScript, images as `data:`
   URIs. It cannot load anything from the network.
+
+## Diffs
+
+To show you what it changed, the agent runs `blerg-runner diff`:
+
+```bash
+blerg-runner diff                         # everything not committed, new files included
+blerg-runner diff --staged
+blerg-runner diff main..HEAD --title "Retry the upload"
+blerg-runner diff 1a2b3c4 5d6e7f8         # commits, each with its own patch
+blerg-runner diff HEAD -- src/            # narrowed to paths
+```
+
+```
+Published diff Retry the upload · 3 files · +12 −4 — viewable in the app
+Link: /sessions/<session id>?artifact=<artifact id>
+```
+
+The command runs `git` in the session's folder itself, with a fixed command line and no shell:
+revisions are resolved to commits first (nothing that starts with `-` is taken for one), paths go
+after `--`, and nothing the repository's own settings name is run: hooks, the fsmonitor, filter
+drivers, external diff tools, text conversions, signature checks and pagers are all overridden, and
+git may not fetch. Binary files are named with their size (`binary, 5 -> 7 bytes`), never embedded;
+commit authors appear by name, without their email. The patch is published as `<title>.diff` (a file
+like any other: it counts against the limits below, and the command refuses one over the per-file
+limit, saying both sizes).
+
+In the chat its card says "3 files · +12 −4" and names the first files (a patch over 256 KiB keeps the
+plain card). **View** opens the diff viewer: the files with their +/− on the side (on top on a phone),
+the patch unified, or **Side by side** on a wide screen, hunk headers, line numbers on both sides,
+long unchanged stretches folded behind a click, each file colored by its extension with your
+[code colors](talking-to-an-agent.md), commit headers, **Copy patch** and **Download**. A file shows
+5 000 lines before **Show more**. Any `.diff` or `.patch` you publish or attach opens the same way.
+
+A checklist item ticked with `--commit` gets the diff of its commits the same way, opened from its
+**View diff** ([Tickets and checklists](talking-to-an-agent.md#tickets-and-checklists)).
 
 ## Versions
 
@@ -187,7 +224,7 @@ an atomic append) or its MCP tool `blerg_card_link`.
 
 ## Uploading files to a session
 
-The other direction works too: you can attach files (for example two PDFs to analyse) to a message
+The other direction works too: you can attach files (for example two PDFs to analyze) to a message
 from the chat box, and the session's agent fetches them into its working folder.
 
 - **Attach** with the paperclip next to the message box, by dragging files onto the chat, or by

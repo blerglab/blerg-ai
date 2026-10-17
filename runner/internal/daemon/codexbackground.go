@@ -11,7 +11,11 @@ type codexTerminal struct{ ItemID, ProcessID, Command string }
 // The runtime's terminal inventory is authoritative: a process id on a tool
 // item alone does not mean the process was left running in the background.
 func (a *codexApp) backgroundTerminals() {
-	ticker := time.NewTicker(2 * time.Second)
+	interval := a.terminalPollInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	known := map[string]codexTerminal{}
 	defer func() {
@@ -36,14 +40,16 @@ func (a *codexApp) backgroundTerminals() {
 				}
 				raw, err := a.call("thread/backgroundTerminals/list", params)
 				if err != nil {
-					return
+					// An unavailable inventory is not evidence that any process
+					// stopped. Keep the last complete snapshot and retry next tick.
+					break
 				}
 				var r struct {
 					Data       []codexTerminal
 					NextCursor string
 				}
-				if json.Unmarshal(raw, &r) != nil {
-					return
+				if json.Unmarshal(raw, &r) != nil || r.Data == nil {
+					break
 				}
 				for _, t := range r.Data {
 					if t.ProcessID != "" {

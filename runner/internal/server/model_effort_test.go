@@ -247,10 +247,6 @@ func TestRunnerStartCarriesEffortToDaemon(t *testing.T) {
 func TestResumeAfterBadInChatValueDropsIt(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000f1"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "cluster", "runner", ""); err != nil {
 		t.Fatalf("UpsertDaemon: %v", err)

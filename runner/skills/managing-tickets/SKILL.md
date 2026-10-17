@@ -88,7 +88,7 @@ blerg-runner column move "In Review" --after "In Progress"
 
 # Mark (or unmark) a column as terminal — tickets there count as "done"
 blerg-runner column set "Shipped" --terminal
-blerg-runner column set "Cancelled" --no-terminal
+blerg-runner column set "Canceled" --no-terminal
 
 # Remove an empty column
 blerg-runner column rm "Old Backlog"
@@ -126,7 +126,7 @@ blerg-runner ticket dep add ghi789 --on abc123
 # Remove a dependency
 blerg-runner ticket dep rm ghi789 --on abc123
 
-# Archive a completed or cancelled ticket
+# Archive a completed or canceled ticket
 blerg-runner ticket archive abc123
 ```
 

@@ -20,10 +20,6 @@ import (
 func TestMessagesAreRecordedInTheAgentTranscript(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000e1"
 	agentSess := "00000000-0000-0000-0000-0000000000e2"
 	termSess := "00000000-0000-0000-0000-0000000000e3"

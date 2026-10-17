@@ -324,6 +324,96 @@ func TestBlergRunnerEventsDropsUndrawnKinds(t *testing.T) {
 	}
 }
 
+func TestIdentityControlsUseFreshTokenAndPreserveSettings(t *testing.T) {
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer renewed-owner" {
+			t.Error("control did not use fresh owner authority")
+		}
+		var body map[string]any
+		if r.Method == "POST" {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+		got = append(got, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lifecycle":"disconnected","resumable":true,"resume_mode":"native"}`))
+	}))
+	defer srv.Close()
+	k := NewBlergRunner(srv.URL, "operator-key", "")
+	if err := k.MessageAs(context.Background(), "renewed-owner", "ext-1", "hello", "human", "stable-turn"); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetModelAs(context.Background(), "renewed-owner", "ext-1", "codex-model", "high"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := k.StatusAs(context.Background(), "renewed-owner", "ext-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Resumable || st.ResumeMode != "native" {
+		t.Fatalf("recovery metadata lost: %+v", st)
+	}
+	if got[0]["client_id"] != "stable-turn" || got[1]["effort"] != "high" {
+		t.Fatalf("control fields lost: %#v", got)
+	}
+}
+
+func TestDiscoveryUsesOwnerAndConfiguredTarget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer owner-proof" {
+			t.Error("discovery used shared authority")
+		}
+		if r.URL.Path != "/api/runner/launch-options" || r.URL.Query().Get("runtime") != "cluster" || r.URL.Query().Get("repo") != "app" || r.URL.Query().Get("kind") != "agent" {
+			t.Error("discovery target disagrees with launch")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"state":"known","runtime":"cluster","engines":[{"id":"codex","name":"Codex","models":{"models":[{"id":"runtime-model","efforts":["high"]}]}}],"token":"must-not-be-returned"}`))
+	}))
+	defer srv.Close()
+	k := NewBlergRunner(srv.URL, "operator", "")
+	k.SetRuntime("cluster")
+	opts, err := k.Discover(context.Background(), "owner-proof", "app", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts.Engines) != 1 || opts.Engines[0].Models.Models[0].ID != "runtime-model" {
+		t.Fatalf("wrong discovered models: %+v", opts)
+	}
+	raw, _ := json.Marshal(opts)
+	if strings.Contains(string(raw), "must-not-be-returned") {
+		t.Fatal("arbitrary upstream metadata escaped typed discovery")
+	}
+}
+
+func TestRunnerErrorsDoNotEchoOwnerProof(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(r.Header.Get("Authorization")))
+	}))
+	defer srv.Close()
+	err := NewBlergRunner(srv.URL, "operator", "").MessageAs(context.Background(), "private-proof", "ext", "hello", "human", "")
+	if err == nil || strings.Contains(err.Error(), "private-proof") {
+		t.Fatal("runner error echoed credential")
+	}
+}
+
+func TestSessionDiscoveryCannotDriftToBoardDefaultTarget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("session_id") != "ext-1" || q.Get("runtime") != "" || q.Get("repo") != "" || q.Get("daemon_id") != "" {
+			t.Errorf("session discovery overrides existing target: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"state":"known","engines":[]}`))
+	}))
+	defer srv.Close()
+	k := NewBlergRunner(srv.URL, "operator", "")
+	k.SetRuntime("cluster")
+	if _, err := k.DiscoverSession(context.Background(), "owner", "ext-1", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Raw sends an upload's declared size (the chat proxy's Content-Length header) as the request's
 // own length, so the runner can refuse a file over its limit before reading it; without one the
 // body goes chunked.

@@ -7,7 +7,9 @@ import { coreOrigin } from "./authClient";
 import { formatBuild, useBuildInfo } from "./buildInfo";
 import { MeProvider, useMe } from "./me";
 import ThemeToggle from "./ThemeToggle";
+import { useCodeColours } from "./codeColours";
 import SignInBanner from "./SignInBanner";
+import { useSignInEpoch } from "./signIn";
 import { BoardView } from "./BoardView";
 import { SearchModal } from "./SearchModal";
 import { TimeAgo } from "./TimeAgo";
@@ -288,14 +290,18 @@ function BoardRoute() {
 // it, including in the routed page components like Boards) and the shared
 // chrome. It is exported so tests can render it standalone.
 function Shell({ children }: { children: React.ReactNode }) {
+  // A token the sign-in banner's quiet retry obtained (signIn.ts) is a fresh start: everything under
+  // here mounts again and asks for its data, as a load with a token would, without reloading the page.
+  const signInEpoch = useSignInEpoch();
   return (
-    <MeProvider>
+    <MeProvider key={signInEpoch}>
       <ShellChrome>{children}</ShellChrome>
     </MeProvider>
   );
 }
 
 function ShellChrome({ children }: { children: React.ReactNode }) {
+  useCodeColours();
   const me = useMe();
   const stale = useNewVersion();
   const build = formatBuild(useBuildInfo());

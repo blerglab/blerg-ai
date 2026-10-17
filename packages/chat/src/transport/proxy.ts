@@ -7,7 +7,7 @@
 //   POST   {base}/sessions/{id}/messages                      {text}
 //   POST   {base}/sessions/{id}/stop
 //   POST   {base}/sessions/{id}/interrupt                     (optional: 404/501)
-//   POST   {base}/sessions/{id}/model                         {model, effort}   (optional: 501)
+//   POST   {base}/sessions/{id}/model                         {model, effort}
 //   GET    {base}/sessions/{id}/artifacts, /{aid}/raw, /{aid}/download, DELETE /{aid}
 //   POST   {base}/sessions/{id}/uploads                       raw bytes, X-Artifact-Name
 //
@@ -32,6 +32,10 @@ import { openSseStream, type SseStream } from './sse'
 import type { FileLimits, OlderPage, SessionMeta, SubscribeHandlers, SubscribeOptions, Transport } from './types'
 
 export interface ProxyTransportOptions {
+  /** The public runner session URL for this app session (including any ID mapping).
+   * No query/fragment. Omit when unknown; the embedder's own origin is not assumed to
+   * be the runner. Allows published artifact links to open the chat's file viewer. */
+  publishedSessionUrl?: (sessionId: string) => string | null
   /** The proxy's prefix on the app's origin, e.g. '/blerg' (no trailing slash needed). */
   baseUrl: string
   fetch?: typeof fetch
@@ -98,6 +102,7 @@ function toMeta(body: Record<string, unknown>): SessionMeta {
   return {
     status,
     engine: str('engine'),
+    steering_supported: typeof body.steering_supported === 'boolean' ? body.steering_supported : undefined,
     runtime: str('runtime'),
     model: str('model'),
     effort: str('effort'),
@@ -227,6 +232,7 @@ export function createProxyTransport(opts: ProxyTransportOptions): Transport {
 
   return {
     subscribe,
+    publishedSessionUrl: opts.publishedSessionUrl,
 
     async loadOlder(sessionId, beforeSeq, limit): Promise<OlderPage> {
       const r = await request(`${session(sessionId)}/events?before_seq=${beforeSeq}&limit=${limit}`)
@@ -249,8 +255,8 @@ export function createProxyTransport(opts: ProxyTransportOptions): Transport {
       return toMeta(body as Record<string, unknown>)
     },
 
-    async send(sessionId, text) {
-      const r = await post(`${session(sessionId)}/messages`, { text })
+    async send(sessionId, text, opts) {
+      const r = await post(`${session(sessionId)}/messages`, { text, ...(opts?.clientId ? { client_id: opts.clientId } : {}) })
       return { queued: r.ok }
     },
 
@@ -266,13 +272,13 @@ export function createProxyTransport(opts: ProxyTransportOptions): Transport {
       if (!r.ok && r.status !== 404 && r.status !== 501) throw new Error(`HTTP ${r.status}`)
     },
 
-    // Optional on the app's side: 501 means it offers no model switch, which is not an error.
+    // A rejected or unsupported setting must remain visible to the composer.
     async setModel(sessionId, model, effort) {
       const r = await post(`${session(sessionId)}/model`, {
         ...(model !== undefined ? { model } : {}),
         ...(effort !== undefined ? { effort } : {}),
       })
-      if (!r.ok && r.status !== 501) throw new Error(`HTTP ${r.status}`)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
     },
 
     /** Whether a live stream is open right now (false before subscribe, and between attempts). */

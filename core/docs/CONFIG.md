@@ -59,7 +59,7 @@ cannot use response status alone to enumerate which accounts are logged in or wh
 exist. Malformed `account_id`/`session_id`/`token_id` values (not UUID-shaped) and a missing or
 doubled liveness proof are rejected with `400` before any query runs.
 `POST /internal/credentials/list` and `POST /internal/plugins/list` apply the identical gates
-and the identical `404`. See [Internal endpoints: which live thing authorises the call](#internal-endpoints-which-live-thing-authorises-the-call).
+and the identical `404`. See [Internal endpoints: which live thing authorizes the call](#internal-endpoints-which-live-thing-authorizes-the-call).
 
 **Revocation cache.** `Deps.RevCache` memoizes the revocation snapshot for **2 seconds**
 (`revCacheTTL` in `internal/api/router.go`) so a burst of authenticated requests doesn't re-read
@@ -372,7 +372,7 @@ installs them into its throwaway HOME, and a workstation daemon installs them in
 plugin workshop (`~/.blerg-runner-daemon/plugins/claude`, never the person's `~/.claude`) and
 loads them for the session only with `--plugin-dir` — see `install/desktop/DAEMON.md`. Codex uses
 its native `plugin marketplace add` / `plugin add` commands in an isolated installer home, then
-copies only the selected plugins and their catalogues into a private session `CODEX_HOME`. Login,
+copies only the selected plugins and their catalogs into a private session `CODEX_HOME`. Login,
 settings and native rollouts remain linked to the existing account state; installs do not change
 that account's config or plugin cache. The same private paths are mounted into Local sandbox
 sessions. A daemon advertises supported plugin engines in `plugin_engines`; the older `plugins`
@@ -392,7 +392,7 @@ marketplace must be allowed by `BLERG_CORE_PLUGIN_MARKETPLACES`. The list is not
 - `POST /internal/plugins/list` (`X-Internal-Key`, same as the credential endpoints): the runner
   reads the list for a session it is starting. The body must carry `account_id`, `engine` and
   **exactly one** liveness proof, `token_id` or `session_id`, verified as described under
-  [Internal endpoints](#internal-endpoints-which-live-thing-authorises-the-call); neither, or
+  [Internal endpoints](#internal-endpoints-which-live-thing-authorizes-the-call); neither, or
   both, is `400`. (The old bare `human_session: true` claim is gone; it is now "neither".) A dead
   or foreign principal is the same anti-enumeration `404`. Returns `{"plugins":[…]}` only.
 
@@ -419,7 +419,7 @@ run act for them. Concepts and the security properties are in
   one connection's credential after writing an audit row (`mcp_secret_access_log`; a failed audit
   write aborts the call), `defaults` saves a connection's default tool selection and accepts a
   login-session proof only. All three take `account_id` plus a liveness proof as described under
-  [Internal endpoints](#internal-endpoints-which-live-thing-authorises-the-call), and every failure
+  [Internal endpoints](#internal-endpoints-which-live-thing-authorizes-the-call), and every failure
   past the shape checks is the same `404`.
 - `POST /internal/tokens/mint`, `.../revoke`, `.../status` (`X-Internal-Key`, the runner only): the
   cron token. `mint` needs a live login session as proof and returns only an id and an expiry; no
@@ -428,7 +428,7 @@ run act for them. Concepts and the security properties are in
   list you can copy from. `revoke` needs the owning `account_id`; "log out everywhere" and
   revoking the token in Settings make `status` answer not live.
 
-### Internal endpoints: which live thing authorises the call
+### Internal endpoints: which live thing authorizes the call
 
 `POST /internal/credentials/fetch`, `POST /internal/credentials/list` and
 `POST /internal/plugins/list` all take `account_id` plus **exactly one** of two proofs naming the
@@ -457,7 +457,7 @@ session: the runner **fails closed** for those (a session start answers `401` wi
 page (or sign in again) to get a fresh session", credential listing answers "unavailable"), and
 there is no "any live session of the account" fallback. A page reload mints a fresh token.
 
-Successful fetches are audited in `credential_access_log` with the principal that authorised
+Successful fetches are audited in `credential_access_log` with the principal that authorized
 them: `fetched_by_session_id` (the live session row) or `fetched_by_token_id`, the other left
 NULL, so an auditor can always tell which kind of principal performed the fetch. A refused
 request writes no row, and no row ever holds a credential value.
@@ -649,7 +649,7 @@ browser-facing), and gated exactly like `/internal/credentials/fetch`: the
 `BLERG_CORE_INTERNAL_KEY` shared secret via `Authorization: Bearer <key>` or
 `X-Internal-Key`, **plus** the independent requirement of exactly one named live
 proof (`session_id` or `token_id`) belonging to `account_id` — see [Internal
-endpoints](#internal-endpoints-which-live-thing-authorises-the-call). Unconfigured
+endpoints](#internal-endpoints-which-live-thing-authorizes-the-call). Unconfigured
 key → `503`; wrong or missing key → `401`; non-UUID `account_id`, or no/both
 proofs → `400`; a proof that is not live or not this account's → `404 not found`,
 the same anti-enumeration shape as fetch's answer. That `404` means **"the

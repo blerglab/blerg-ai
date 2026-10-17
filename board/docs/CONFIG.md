@@ -214,7 +214,7 @@ Each start also says whether a person is in the chat (`interaction` on
 `POST /api/runner/start`). **Discuss** and the board session are started
 `interactive`: the agent talks things over and waits for answers. Everything
 else — a card's **Run**, reviewers, standing agents, anything the dispatcher
-starts — is `unattended`: the agent decides, finishes and summarises.
+starts — is `unattended`: the agent decides, finishes and summarizes.
 
 - Only a signed-in person can set the token, and only their own — board
   checks it is a live `run-sessions` token whose owner is the person saving
@@ -269,7 +269,7 @@ A runner that does not implement it needs to do nothing: an HTML/SPA
 fallback, 405 or 501 is read as "unsupported" and blerg-board answers its own
 callers with 501 rather than pretending the change happened. A 404 on that
 route is read as "no such session", so don't 404 a route you haven't built.
-Runners that report their own model changes (a human re-modelling a session
+Runners that report their own model changes (a human re-modeling a session
 in the runner's UI) should emit a `model_changed` event carrying `model` —
 blerg-board follows it so the model it reports stays the model that is running.
 

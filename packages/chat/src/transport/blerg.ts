@@ -79,6 +79,7 @@ function toMeta(s: SessionInfo): SessionMeta {
   return {
     status: s.status,
     engine: s.engine,
+    steering_supported: typeof s.steering_supported === 'boolean' ? s.steering_supported : undefined,
     runtime: s.runtime,
     model: s.model,
     effort: s.effort,
@@ -404,6 +405,13 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
   return {
     subscribe,
     loadOlder,
+    publishedSessionUrl(sessionId) {
+      try {
+        return new URL(`${baseUrl}/sessions/${enc(sessionId)}`, globalThis.location?.href).href
+      } catch {
+        return null
+      }
+    },
 
     // The browser API lists sessions; there is no route for one, so the list is read and the
     // session picked out of it.
@@ -456,6 +464,7 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       fetch: fetchImpl,
       headers: bearer,
       check,
+      workspace: true,
     }),
   }
 }

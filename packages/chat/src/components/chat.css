@@ -2462,3 +2462,260 @@
   color: var(--chat-muted);
   font-size: var(--chat-text-sm);
 }
+
+/* ── code viewer: a block of code in hand, with line numbers ─────────────── */
+.code-viewer-scroll {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--chat-code-bg);
+  color: var(--chat-code-fg);
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs);
+  line-height: 1.5;
+}
+.code-viewer-gutter,
+.code-viewer-code {
+  margin: 0;
+  padding: 10px 12px;
+  font: inherit;
+}
+.code-viewer-gutter {
+  position: sticky;
+  left: 0;
+  flex: none;
+  text-align: right;
+  color: var(--chat-code-linenum);
+  background: var(--chat-code-bg);
+  border-right: 1px solid var(--chat-border);
+  user-select: none;
+}
+.code-viewer-code {
+  flex: 1 0 auto;
+  white-space: pre;
+}
+.code-viewer-code code { color: inherit; }
+.code-viewer-code .hljs-keyword,
+.diff-code .hljs-keyword,
+.code-viewer-code .hljs-literal,
+.diff-code .hljs-literal,
+.code-viewer-code .hljs-selector-tag,
+.diff-code .hljs-selector-tag { color: var(--chat-code-keyword); }
+.code-viewer-code .hljs-string,
+.diff-code .hljs-string,
+.code-viewer-code .hljs-regexp,
+.diff-code .hljs-regexp,
+.code-viewer-code .hljs-symbol,
+.diff-code .hljs-symbol,
+.code-viewer-code .hljs-bullet,
+.diff-code .hljs-bullet,
+.code-viewer-code .hljs-addition,
+.diff-code .hljs-addition { color: var(--chat-code-string); }
+.code-viewer-code .hljs-number,
+.diff-code .hljs-number { color: var(--chat-code-number); }
+.code-viewer-code .hljs-meta,
+.diff-code .hljs-meta,
+.code-viewer-code .hljs-built_in,
+.diff-code .hljs-built_in { color: var(--chat-code-builtin); }
+.code-viewer-code .hljs-variable,
+.diff-code .hljs-variable,
+.code-viewer-code .hljs-template-variable,
+.diff-code .hljs-template-variable,
+.code-viewer-code .hljs-attr,
+.diff-code .hljs-attr,
+.code-viewer-code .hljs-attribute,
+.diff-code .hljs-attribute,
+.code-viewer-code .hljs-property,
+.diff-code .hljs-property { color: var(--chat-code-variable); }
+.code-viewer-code .hljs-operator,
+.diff-code .hljs-operator,
+.code-viewer-code .hljs-punctuation,
+.diff-code .hljs-punctuation { color: var(--chat-code-operator); }
+.code-viewer-code .hljs-comment,
+.diff-code .hljs-comment,
+.code-viewer-code .hljs-quote,
+.diff-code .hljs-quote { color: var(--chat-code-comment); font-style: italic; }
+.code-viewer-code .hljs-title,
+.diff-code .hljs-title,
+.code-viewer-code .hljs-section,
+.diff-code .hljs-section,
+.code-viewer-code .hljs-name,
+.diff-code .hljs-name { color: var(--chat-code-title); }
+.code-viewer-code .hljs-type,
+.diff-code .hljs-type,
+.code-viewer-code .hljs-tag,
+.diff-code .hljs-tag { color: var(--chat-code-type); }
+.code-viewer-code .hljs-deletion,
+.diff-code .hljs-deletion { color: var(--chat-diff-del); }
+
+/* ── inline previews of text-like files and PDFs ─────────────────────────── */
+.artifact-preview-excerpt {
+  position: relative;
+  width: min(480px, 100%);
+  max-height: 11.5em;
+  line-height: 1.45;
+  font-size: var(--chat-text-xs);
+  cursor: pointer;
+}
+.artifact-preview-excerpt.has-more {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 2.6em), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 2.6em), transparent);
+}
+.artifact-preview-excerpt > *:not(.artifact-preview-cover) {
+  pointer-events: none;
+}
+.artifact-preview-excerpt .md-codeblock pre {
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+}
+.artifact-preview-md {
+  padding: 8px 10px;
+  font-size: var(--chat-text-sm);
+}
+.artifact-preview-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--chat-text-xs);
+}
+.artifact-preview-table th,
+.artifact-preview-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--chat-border);
+  text-align: left;
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-preview-table th {
+  color: var(--chat-muted);
+  font-weight: 600;
+}
+.artifact-preview-pdf img {
+  max-height: 320px;
+  width: 100%;
+  object-fit: cover;
+  object-position: top;
+}
+
+/* The held first prompt (McpHoldLine): the composer hint's look, a spinner glyph, a quiet link. */
+.mcp-hold {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+.mcp-send-now {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--chat-muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.mcp-send-now:hover,
+.mcp-send-now:focus-visible {
+  color: var(--chat-fg);
+}
+
+/* ── a file read from the session's folder ────────────────────────────────── */
+.workspace-code { position: relative; }
+.workspace-line-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(10px + (var(--chat-ws-line) - 1) * 1.5em);
+  height: 1.5em;
+  background: color-mix(in srgb, var(--chat-accent, #6d8cff) 22%, transparent);
+  border-left: 3px solid var(--chat-accent, #6d8cff);
+  pointer-events: none;
+}
+.workspace-spinner {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  margin-right: 0.4em;
+  vertical-align: -0.1em;
+  border: 2px solid var(--chat-border);
+  border-top-color: var(--chat-muted, currentColor);
+  border-radius: 50%;
+  animation: workspace-spin 0.8s linear infinite;
+}
+@keyframes workspace-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .workspace-spinner { animation: none; } }
+
+/* A path in an agent's text that opens from the session's folder: the code style, a dotted underline. */
+.md .md-wsfile {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2em;
+  background: color-mix(in srgb, var(--chat-border) 45%, transparent);
+  border: none;
+  color: inherit;
+}
+.md .md-wsfile:hover, .md .md-wsfile:focus-visible { text-decoration-style: solid; }
+
+/* Copy on a message (CopyMessage): top right of the card, shown on hover or focus, always on touch. */
+.agent-card.user,
+.agent-card.assistant { position: relative; }
+.msg-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 4px;
+  background: var(--chat-surface-2);
+  color: var(--chat-muted);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.agent-card:hover > .msg-copy,
+.msg-copy:focus-visible,
+.msg-copy.is-copied,
+.msg-copy.is-failed { opacity: 1; }
+.msg-copy.is-copied { color: var(--chat-accent); }
+.msg-copy-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@media (hover: none) {
+  .msg-copy { opacity: 0.7; }
+  /* The button is always there on a touch screen: keep text out from under it. */
+  .agent-card.user,
+  .agent-card.assistant { padding-right: 36px; }
+}
+/* The icon is drawn in CSS: a transcript holds hundreds of these, and an inline SVG each is dear. */
+.msg-copy-icon { position: relative; flex: none; width: 14px; height: 14px; }
+.msg-copy-icon::before,
+.msg-copy-icon::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border: 1.4px solid currentColor;
+  border-radius: 2px;
+}
+.msg-copy-icon::before { left: 0; top: 0; border-right-color: transparent; border-bottom-color: transparent; }
+.msg-copy-icon::after { right: 0; bottom: 0; background: var(--chat-surface-2); }
+.msg-copy-icon.done::before { display: none; }
+.msg-copy-icon.done::after {
+  width: 4px;
+  height: 8px;
+  right: 3px;
+  bottom: 1px;
+  border-width: 0 1.6px 1.6px 0;
+  border-radius: 0;
+  background: none;
+  transform: rotate(40deg);
+}

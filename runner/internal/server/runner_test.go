@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -15,18 +14,7 @@ import (
 
 func runnerTestAPI(t *testing.T) (*API, *pgxpool.Pool) {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	pool, err := pgxpool.New(context.Background(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	if err := db.RunMigrations(context.Background(), pool); err != nil {
-		t.Fatal(err)
-	}
+	pool := connectSrvTestDB(t)
 	hub := NewHub()
 	api := NewAPI(hub, pool, "daemon-token", nil, "")
 	return api, pool

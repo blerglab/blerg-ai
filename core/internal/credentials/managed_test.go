@@ -15,6 +15,8 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/db"
 	"github.com/blerglab/blerg-ai/core/internal/keybackend"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/blerglab/blerg-ai/contracts/engineaccess"
 )
 
 const fixtureSID = "11111111-1111-4111-8111-111111111111"
@@ -59,9 +61,6 @@ func fixtureManagedToken() credentials.ManagedToken {
 func setupManaged(t *testing.T, a credentials.Adapter) (*credentials.Service, *credentials.Service, *pgxpool.Pool, string) {
 	t.Helper()
 	pool := testPool(t)
-	if err := db.Migrate(context.Background(), pool); err != nil {
-		t.Fatal(err)
-	}
 	backend, err := keybackend.NewLocal(testLocalKey)
 	if err != nil {
 		t.Fatal(err)
@@ -415,14 +414,17 @@ func (*alternateManagedAdapter) Kind() string       { return "fixture_oauth" }
 func (*alternateManagedAdapter) AccessMode() string { return "fixtureAccessTokens" }
 
 func TestManagedAccessModeBelongsToSelectedAdapter(t *testing.T) {
+	t.Cleanup(engineaccess.Register(engineaccess.TokenCodec("fixture_engine", "fixtureAccessTokens")))
 	for _, engine := range []string{"codex", "fixture_engine"} {
 		t.Run(engine, func(t *testing.T) {
 			base := &managedFixtureAdapter{}
 			var adapter credentials.Adapter = base
 			wantMode := "chatgptAuthTokens"
+			accountField := "chatgpt_account_id"
 			if engine != "codex" {
 				adapter = &alternateManagedAdapter{base}
 				wantMode = "fixtureAccessTokens"
+				accountField = "account_id"
 			}
 			s, _, _, account := setupManaged(t, adapter)
 			ctx := context.Background()
@@ -460,13 +462,13 @@ func TestManagedAccessModeBelongsToSelectedAdapter(t *testing.T) {
 				if access.Mode != wantMode {
 					t.Errorf("mode=%q, want selected adapter mode %q", access.Mode, wantMode)
 				}
-				if access.AccountID != "provider-account" || string(wire["chatgpt_account_id"]) != `"provider-account"` {
+				if access.AccountID != "provider-account" || string(wire[accountField]) != `"provider-account"` {
 					t.Fatal("compatible provider account field lost")
 				}
 				if len(wire) != 5 {
 					t.Errorf("unexpected access wire fields: %d", len(wire))
 				}
-				for _, key := range []string{"mode", "access_token", "chatgpt_account_id", "generation", "expires_at"} {
+				for _, key := range []string{"mode", "access_token", accountField, "generation", "expires_at"} {
 					if _, ok := wire[key]; !ok {
 						t.Errorf("missing wire field %s", key)
 					}
@@ -476,6 +478,18 @@ func TestManagedAccessModeBelongsToSelectedAdapter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestUnregisteredManagedModeFailsBeforeProvider(t *testing.T) {
+	base := &managedFixtureAdapter{}
+	s := credentials.NewServiceWithAdapters(nil, nil, &alternateManagedAdapter{base})
+	if len(s.ManagedCapabilities()) != 0 {
+		t.Fatal("unregistered protocol advertised login")
+	}
+	_, err := s.StartLogin(t.Context(), "fixture-account", "fixture_engine", fixtureSID)
+	if !errors.Is(err, credentials.ErrNotManaged) {
+		t.Fatal("unregistered consumer mode reached provider or persistence")
 	}
 }
 

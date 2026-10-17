@@ -1,6 +1,6 @@
 {
   "name": "@blerglab/chat",
-  "version": "0.11.0",
+  "version": "0.17.1",
   "description": "The chat surface for apps built on Blerg sessions: transcript, composer, files, cards and a token theme, over a pluggable transport.",
   "license": "Apache-2.0",
   "type": "module",
@@ -35,6 +35,8 @@
     "react-dom": "^19.0.0"
   },
   "dependencies": {
+    "highlight.js": "^11.12.0",
+    "lowlight": "^3.3.0",
     "pdfjs-dist": "^6.4.299",
     "react-markdown": "10.1.0",
     "remark-gfm": "4.0.1",

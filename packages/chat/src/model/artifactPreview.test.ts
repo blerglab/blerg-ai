@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { INLINE_IMAGE_MAX, clearPreviewCache, loadPreviewUrl, previewKind } from './artifactPreview'
+import { INLINE_IMAGE_MAX, clearPreviewCache, loadPreviewExcerpt, loadPreviewText, previewKind, loadPreviewUrl } from './artifactPreview'
 
 const png = { id: 'a1', view: 'image', content_type: 'image/png' }
 
@@ -9,7 +9,14 @@ describe('previewKind', () => {
     expect(previewKind('image', INLINE_IMAGE_MAX + 1)).toBeNull()
     expect(previewKind('video', 500 * 1024 * 1024)).toBe('media')
     expect(previewKind('audio', 1)).toBe('media')
-    expect(previewKind('pdf', 1)).toBeNull()
+    expect(previewKind('pdf', 1)).toBe('pdf')
+    expect(previewKind('pdf', 5 * 1024 * 1024 + 1)).toBeNull()
+    expect(previewKind('markdown', 1024)).toBe('markdown')
+    expect(previewKind('text', 1024)).toBe('text')
+    expect(previewKind('json', 1024)).toBe('text')
+    expect(previewKind('csv', 1024)).toBe('csv')
+    expect(previewKind('text', 256 * 1024 + 1)).toBeNull()
+    expect(previewKind('csv', 256 * 1024 + 1)).toBeNull()
     expect(previewKind('none', 1)).toBeNull()
   })
 })
@@ -54,5 +61,34 @@ describe('loadPreviewUrl', () => {
     clearPreviewCache()
     await Promise.resolve()
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:p1')
+  })
+})
+
+describe('loadPreviewExcerpt', () => {
+  afterEach(() => clearPreviewCache())
+  const md = { id: 'm1', name: 'r.md', view: 'markdown', content_type: 'text/markdown' }
+
+  it('fetches once per session and file and keeps the excerpt', async () => {
+    const raw = vi.fn(async () => new Blob(['# hi']))
+    const a = await loadPreviewExcerpt('s1', md, raw)
+    await loadPreviewExcerpt('s1', md, raw)
+    expect(a).toMatchObject({ kind: 'markdown', text: '# hi' })
+    expect(raw).toHaveBeenCalledTimes(1)
+  })
+
+  it('forgets a failed fetch so a retry can work', async () => {
+    const raw = vi.fn().mockRejectedValueOnce(new Error('x')).mockResolvedValueOnce(new Blob(['ok']))
+    await expect(loadPreviewExcerpt('s1', md, raw)).rejects.toThrow()
+    await expect(loadPreviewExcerpt('s1', md, raw)).resolves.toMatchObject({ text: 'ok' })
+  })
+
+  it('keeps at most 50 entries, the oldest going first', async () => {
+    const raw = vi.fn(async () => new Blob(['t']))
+    for (let i = 0; i < 51; i++) await loadPreviewText('s', `f${i}`, raw)
+    expect(raw).toHaveBeenCalledTimes(51)
+    await loadPreviewText('s', 'f50', raw) // still cached
+    expect(raw).toHaveBeenCalledTimes(51)
+    await loadPreviewText('s', 'f0', raw) // evicted
+    expect(raw).toHaveBeenCalledTimes(52)
   })
 })

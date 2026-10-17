@@ -7,6 +7,7 @@ import (
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
+	"github.com/blerglab/blerg-ai/runner/internal/models"
 )
 
 const codexMaxKnownChildren = 512
@@ -48,7 +49,11 @@ func (d *codexDriver) seedKnownChildren(children []OpenSubagent) {
 		if child.CumulativeUsage != nil {
 			total = *child.CumulativeUsage
 		}
-		d.children[child.AgentID] = &codexChild{callID: id, model: cutRunes(child.Model, 128), summary: cutRunes(strings.TrimSpace(child.Summary), 200), done: true, started: time.Now(), lastTotal: total}
+		effort := child.Effort
+		if !models.ValidEffortFor("codex", effort) {
+			effort = ""
+		}
+		d.children[child.AgentID] = &codexChild{callID: id, effort: effort, model: cutRunes(child.Model, 128), summary: cutRunes(strings.TrimSpace(child.Summary), 200), done: true, started: time.Now(), lastTotal: total}
 	}
 }
 
@@ -116,7 +121,11 @@ func (a *codexApp) discoverOwnedChildren() {
 			}
 			owned[id] = true
 			changed = true
-			additions = append(additions, OpenSubagent{AgentID: id, AgentType: "Codex", Model: child.Model, Summary: child.Preview})
+			effort := ""
+			if child.ReasoningEffort != nil {
+				effort = *child.ReasoningEffort
+			}
+			additions = append(additions, OpenSubagent{Effort: effort, AgentID: id, AgentType: "Codex", Model: child.Model, Summary: child.Preview})
 			if len(additions) >= codexMaxKnownChildren {
 				break
 			}

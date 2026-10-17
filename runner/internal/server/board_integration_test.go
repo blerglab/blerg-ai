@@ -31,10 +31,6 @@ import (
 func TestBoardCLIIntegration(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	// ── Seed board ────────────────────────────────────────────────────────────
 

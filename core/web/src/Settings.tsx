@@ -4,6 +4,7 @@ import { apiFetch } from "./apiFetch";
 import { getAccessToken } from "./authClient";
 import { mustChangePassword } from "./claims";
 import PluginsSection from "./PluginsSection";
+import { useEngineDescriptors } from "./engineDescriptors";
 import ManagedCredentials, { type ManagedCredentialSummary } from "./ManagedCredentials";
 import McpConnectionsSection from "./McpConnectionsSection";
 import Shell, { useSite, type Site } from "./Shell";
@@ -16,35 +17,11 @@ import Shell, { useSite, type Site } from "./Shell";
 // successful save, and there is no code path anywhere here that reads a stored credential's
 // value back from the server.
 //
-// Two groups: the engines actually wired into cluster runtime (see runner/frontend's
-// LaunchSheet, whose engine picker recognizes "claude", "codex", "hermes" — OpenClaw is
-// listed there too, but explicitly noted as not wired into either sandbox, so it has no slot
-// here), and git access, where a personal GitHub or GitLab token lets cluster sessions clone
-// and push as the launching user instead of as a shared operator identity, and lets the runner's
-// launch sheet list that user's own repositories.
-//
-// The API field is still named "engine" for compatibility; the UI calls them credentials.
-//
-// The git kinds are the git providers the runner registers (runner/internal/gitprovider) and
-// core accepts (core/internal/api/credential_handlers.go gitCredentialKinds): a new provider is
-// one more entry in KINDS, KIND_LABELS, GIT_KINDS and KIND_HELP.
-const KINDS = ["claude", "codex", "hermes", "github", "gitlab"] as const;
-type Kind = (typeof KINDS)[number];
-
-const KIND_LABELS: Record<Kind, string> = {
-  claude: "Claude",
-  codex: "Codex",
-  hermes: "Hermes",
-  github: "GitHub",
-  gitlab: "GitLab",
-};
-
-const GIT_KINDS: readonly Kind[] = ["github", "gitlab"];
-
-const GROUPS: { eyebrow: string; kinds: readonly Kind[] }[] = [
-  { eyebrow: "Engines", kinds: ["claude", "codex", "hermes"] },
-  { eyebrow: "Git", kinds: GIT_KINDS },
-];
+// Engine import controls come from Core's registered metadata. Git providers are
+// separate credential kinds and remain usable during engine discovery failures.
+type Kind = string;
+const KIND_LABELS: Record<string, string> = { claude: "Claude", codex: "Codex", hermes: "Hermes", github: "GitHub", gitlab: "GitLab" };
+const GIT_KINDS = ["github", "gitlab"];
 
 const ANTHROPIC_KEYS_URL = "https://console.anthropic.com/settings/keys";
 const GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new";
@@ -60,7 +37,7 @@ const KIND_HELP: Record<Kind, React.ReactNode> = {
       <a href={ANTHROPIC_KEYS_URL} target="_blank" rel="noopener noreferrer">
         Anthropic console
       </a>{" "}
-      (starts with <code className="mono">sk-ant-api</code>) to bill an organisation instead.
+      (starts with <code className="mono">sk-ant-api</code>) to bill an organization instead.
     </>
   ),
   codex: (
@@ -81,7 +58,7 @@ const KIND_HELP: Record<Kind, React.ReactNode> = {
       <a href={GITHUB_TOKEN_URL} target="_blank" rel="noopener noreferrer">
         {GITHUB_TOKEN_URL}
       </a>
-      . Resource owner: your account or an organisation you own; repository access: the repos
+      . Resource owner: your account or an organization you own; repository access: the repos
       sessions may work on; permissions: Contents read and write, Metadata read. The launch sheet
       lists the repos it can see, and it clones private ones for you. Cluster sessions also push
       with it; a desktop session never does — a Local sandbox session can commit but not push
@@ -497,7 +474,7 @@ function AgentTokens({ site }: { site: Site | null }) {
         </div>
       )}
 
-      {loading && <p className="muted">Loading…</p>}
+        {loading && <p className="muted">Loading…</p>}
       {/* "No tokens yet" is a claim about the account, so only say it when the list actually
           loaded — a failed load has no idea how many tokens exist. */}
       {!loading && !error && tokens.length === 0 && <p className="muted">No agent tokens yet.</p>}
@@ -755,7 +732,7 @@ function AccountSection() {
 }
 
 const emptyDrafts = (): Record<Kind, string> =>
-  Object.fromEntries(KINDS.map((k) => [k, ""])) as Record<Kind, string>;
+  ({});
 
 // loadCredentials fetches which credentials are configured. Exactly one of the fields is set.
 async function loadCredentials(): Promise<{ configured?: Set<string>; summaries?: CredentialSummary[]; error?: string }> {
@@ -791,6 +768,9 @@ export default function Settings() {
 }
 
 function SettingsScreen() {
+ const discovery = useEngineDescriptors();
+ const labels = { ...KIND_LABELS, ...Object.fromEntries((discovery.metadata?.engines ?? []).map(e => [e.id, KIND_LABELS[e.id] ?? e.name])) };
+ const groups = [{ eyebrow: "Engines", kinds: (discovery.metadata?.engines ?? []).filter(e => e.credential_import === true).map(e => e.id) }, { eyebrow: "Git", kinds: GIT_KINDS }];
 
   const [configured, setConfigured] = useState<Set<string>>(new Set());
   const [summaries, setSummaries] = useState<CredentialSummary[]>([]);
@@ -828,7 +808,7 @@ function SettingsScreen() {
 
   const submit = async (kind: Kind, e: React.FormEvent) => {
     e.preventDefault();
-    const credential = drafts[kind].trim();
+    const credential = (drafts[kind] ?? "").trim();
     if (!credential) return;
     setSubmitting(kind);
     setError(null);
@@ -840,7 +820,7 @@ function SettingsScreen() {
         body: JSON.stringify({ engine: kind, credential }),
       });
       if (!res.ok) {
-        setError(`Failed to save ${KIND_LABELS[kind]} credential (${res.status}).`);
+        setError(`Failed to save ${labels[kind]} credential (${res.status}).`);
         return;
       }
       // Clear the draft immediately — the pasted value never lingers in state once saved.
@@ -859,7 +839,7 @@ function SettingsScreen() {
     try {
       const res = await apiFetch(`/api/credentials/${kind}`, { method: "DELETE" });
       if (!res.ok) {
-        setError(`Failed to remove ${KIND_LABELS[kind]} credential (${res.status}).`);
+        setError(`Failed to remove ${labels[kind]} credential (${res.status}).`);
         return;
       }
       await refresh();
@@ -879,10 +859,12 @@ function SettingsScreen() {
         <p className="section-help">
           Used by cluster-runtime sessions, which run as you. Desktop sessions use them differently by kind: the engine credentials aren't needed there, because a desktop session uses the engine login already on your machine; the GitHub and GitLab tokens are, because the launch sheet lists your repositories with them and clones a private one with them (always in a Local sandbox session; on This machine only if the daemon's owner allowed it).
         </p>
+        {!discovery.metadata && !discovery.error && <p className="muted">Loading engine integrations…</p>}
+        {discovery.error && <p role="alert">{discovery.error} <button type="button" onClick={discovery.retry}>Retry engine discovery</button></p>}
         {loading && <p className="muted">Loading…</p>}
         {error && <p className="field-error" role="alert">{error}</p>}
-        <ManagedCredentials summaries={summaries} labels={KIND_LABELS} onConnected={async () => { if (!await refresh()) throw new Error("Credential status unavailable"); }} />
-        {GROUPS.map((group) => (
+        <ManagedCredentials summaries={summaries} labels={labels} onConnected={async () => { if (!await refresh()) throw new Error("Credential status unavailable"); }} />
+        {groups.map((group) => (
           <div className="group" key={group.eyebrow}>
             <p className="eyebrow">{group.eyebrow}</p>
             <ul className="card-list">
@@ -891,27 +873,27 @@ function SettingsScreen() {
                 return (
                   <li key={kind} className="card">
                     <div className="card-head">
-                      <h3 className="card-title">{KIND_LABELS[kind]}</h3>
+                      <h3 className="card-title">{labels[kind]}</h3>
                       <span className={isConfigured ? "chip up" : "chip idle"}>
                         <span className="dot" aria-hidden="true" />
                         <span className="label">{isConfigured ? "Configured" : "Not configured"}</span>
                       </span>
                     </div>
-                    <p className="card-help">{KIND_HELP[kind]}</p>
+                    <p className="card-help">{KIND_HELP[kind] ?? "Import the credential format documented by this engine’s integration. Only add credentials for accounts you control."}</p>
                     <form onSubmit={(e) => submit(kind, e)} className="card-form">
                       <label className="field" htmlFor={`credential-${kind}`}>
-                        <span className="field-label">{KIND_LABELS[kind]} credential</span>
+                        <span className="field-label">{labels[kind]} credential</span>
                       </label>
                       <textarea
                         id={`credential-${kind}`}
-                        value={drafts[kind]}
+                        value={drafts[kind] ?? ""}
                         onChange={(e) =>
                           setDrafts((d) => ({ ...d, [kind]: e.target.value }))
                         }
                         placeholder="Paste credential…"
                       />
                       <div className="card-actions">
-                        <button type="submit" className="btn btn-primary" disabled={submitting === kind || drafts[kind].trim() === ""}>
+                        <button type="submit" className="btn btn-primary" disabled={submitting === kind || (drafts[kind] ?? "").trim() === ""}>
                           {submitting === kind
                             ? "Saving…"
                             : isConfigured
@@ -937,7 +919,7 @@ function SettingsScreen() {
           </div>
         ))}
       </section>
-      <PluginsSection />
+      <PluginsSection metadata={discovery.metadata} discoveryError={discovery.error} retryDiscovery={discovery.retry} />
       <McpConnectionsSection site={site} />
       <AgentTokens site={site} />
     </Shell>

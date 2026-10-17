@@ -97,11 +97,12 @@ func (a *API) handleSpawnBoardSession(w http.ResponseWriter, r *http.Request, p 
 		title = fmt.Sprintf("blerg-board bootstrap: %s", board.Name)
 	}
 	model := boardRoleModel(board, "board")
-	extID, err := a.startOnRunner(r.Context(), boardID, runner.StartRequest{
+	extID, configured, err := a.startOnRunnerConfigured(r.Context(), boardID, runner.StartRequest{
 		Repo:   repo,
 		Title:  title,
 		Prompt: prompt,
 		Model:  model,
+		Effort: boardRoleEffort(board, "board"),
 		GitURL: gitURL,
 		// The person who opened the drawer is in the chat.
 		Interaction: interactionForRole("board"),
@@ -118,9 +119,9 @@ func (a *API) handleSpawnBoardSession(w http.ResponseWriter, r *http.Request, p 
 	}
 	var rsID string
 	err = a.Pool.QueryRow(r.Context(), `
-		INSERT INTO runner_sessions (card_id, board_id, runner, external_session_id, lifecycle, role, model)
-		VALUES (NULL,$1,$2,$3,'starting','board',$4) RETURNING id`,
-		boardID, a.runner.Driver.Name(), extID, model).Scan(&rsID)
+		INSERT INTO runner_sessions (card_id, board_id, runner, external_session_id, lifecycle, role, model, engine, effort)
+		VALUES (NULL,$1,$2,$3,'starting','board',$4,$5,$6) RETURNING id`,
+		boardID, a.runner.Driver.Name(), extID, configured.Model, configured.Engine, configured.Effort).Scan(&rsID)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -139,7 +140,7 @@ func (a *API) handleListBoardSessions(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	rows, err := a.Pool.Query(r.Context(), `
-		SELECT id, runner, external_session_id, lifecycle, role, model,
+		SELECT id, runner, external_session_id, lifecycle, role, model, engine, effort, runtime, resumable, resume_mode, resume_reason, steering_supported,
 		       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 		FROM runner_sessions
 		WHERE board_id = $1 AND card_id IS NULL AND role = 'board'
@@ -152,13 +153,19 @@ func (a *API) handleListBoardSessions(w http.ResponseWriter, r *http.Request, p 
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, rn, ext, lc, role, model, created string
-		if rows.Scan(&id, &rn, &ext, &lc, &role, &model, &created) == nil {
-			out = append(out, map[string]any{
+		var id, rn, ext, lc, role, model, engine, effort, runtime, resumeMode, resumeReason, created string
+		var resumable bool
+		var steering *bool
+		if rows.Scan(&id, &rn, &ext, &lc, &role, &model, &engine, &effort, &runtime, &resumable, &resumeMode, &resumeReason, &steering, &created) == nil {
+			entry := map[string]any{
 				"id": id, "runner": rn, "external_session_id": ext,
-				"lifecycle": lc, "role": role, "resumable": false, "created_at": created,
-				"model": model,
-			})
+				"lifecycle": lc, "role": role, "resumable": resumable, "created_at": created,
+				"model": model, "engine": engine, "effort": effort, "runtime": runtime, "resume_mode": resumeMode, "resume_reason": resumeReason, "board_id": boardID, "session_url": a.sessionURL(ext),
+			}
+			if steering != nil {
+				entry["steering_supported"] = *steering
+			}
+			out = append(out, entry)
 		}
 	}
 	writeJSON(w, http.StatusOK, out)

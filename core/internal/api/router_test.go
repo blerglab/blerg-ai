@@ -20,63 +20,15 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/identity"
 	"github.com/blerglab/blerg-ai/core/internal/projects"
 	"github.com/blerglab/blerg-ai/core/internal/signing"
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 )
 
 func farFuture() int64 { return time.Now().Add(time.Hour).Unix() }
 
-// routerTestSchema is distinct from every other package's test schema name so this package's
-// isolated schema never collides with theirs, even though all run against the same shared
-// DATABASE_URL (audit M-1: this package used to run its tests directly against the shared
-// "public" schema with no isolation, which made it order-dependent on whatever other packages'
-// tests had left behind — e.g. component rows visible to Aggregate).
-const routerTestSchema = "test_blerg_core_api_router"
-
-// routerTestPool connects to DATABASE_URL and gives the caller a fresh, isolated, migrated
-// schema: dropped and recreated before the test runs, and dropped again on cleanup. A plain
-// "SET search_path" via pool.Exec is NOT enough (pgxpool can hand out any of several underlying
-// connections); instead the schema is baked into every connection the returned pool ever opens,
-// via ConnConfig.RuntimeParams — the same pattern established in auth_handlers_test.go's
-// testPool and identity/accounts_test.go's testPool.
+// routerTestPool provides a fresh database cloned from the migrated package template.
 func routerTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-	ctx := context.Background()
-
-	setupPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", routerTestSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("drop schema: %v", err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA %s", routerTestSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("create schema: %v", err)
-	}
-	setupPool.Close()
-
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = routerTestSchema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		bg := context.Background()
-		pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", routerTestSchema))
-		pool.Close()
-	})
-	if err := db.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return pool
+	return testsupport.Pool(t, db.Migrate)
 }
 
 // testDeps wires real Deps against an isolated, migrated schema, registering kp's public key
@@ -460,10 +412,7 @@ func TestMembershipWriteAllowsSameProjectKnownRole(t *testing.T) {
 // without needing to actually take Postgres down.
 func brokenStore(t *testing.T) db.Store {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := routerTestPool(t).Config().ConnString()
 	st, err := db.Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open store: %v", err)

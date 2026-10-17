@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getAccessToken, consumeAccessTokenFromFragment, coreOrigin, ensureFreshToken, startTokenRenewal, SILENT_REFRESH_PAGE, REFRESH_LOCK } from "./authClient";
+import { getAccessToken, consumeAccessTokenFromFragment, coreOrigin, ensureFreshToken, renewSilently, startTokenRenewal, SILENT_REFRESH_PAGE, REFRESH_LOCK } from "./authClient";
 
 describe("authClient", () => {
   beforeEach(() => {
@@ -193,6 +193,52 @@ describe("silent renewal", () => {
     });
     frames[0].dispatchEvent(new Event("load"));
     await expect(p).resolves.toBe(false);
+  });
+
+  // What the frame can tell apart (renewSilently): a token; core saying the sign-in has ended (it
+  // sends the frame back to this origin's silent page with #signin_error=..., see core's
+  // writeSignInRequired); and everything else — core's own page, an error page for an unreachable
+  // host, no load at all — which a page cannot read and so cannot tell from an outage.
+  it("renews with no token held at all (a fresh load), and says so", async () => {
+    const p = renewSilently();
+    expect(frames).toHaveLength(1);
+    expect(new URL(frames[0].src).pathname).toBe("/auth/refresh");
+    answerWithToken(frames[0], "from-nothing");
+    await expect(p).resolves.toBe("token");
+    expect(getAccessToken()).toBe("from-nothing");
+  });
+
+  it("says the sign-in has ended when core sends the frame back with signin_error", async () => {
+    for (const reason of ["signed_out", "expired"]) {
+      const p = renewSilently();
+      const f = frames[frames.length - 1];
+      Object.defineProperty(f, "contentWindow", {
+        configurable: true,
+        value: { location: { origin: location.origin, hash: `#signin_error=${reason}` } },
+      });
+      f.dispatchEvent(new Event("load"));
+      await expect(p).resolves.toBe("signed-out");
+    }
+    // and for the callers that only want a yes or no, it is a no
+    const q = ensureFreshToken();
+    const f = frames[frames.length - 1];
+    Object.defineProperty(f, "contentWindow", {
+      configurable: true,
+      value: { location: { origin: location.origin, hash: "#signin_error=expired" } },
+    });
+    f.dispatchEvent(new Event("load"));
+    await expect(q).resolves.toBe(false);
+  });
+
+  it("cannot tell core's own page, or no answer at all, from an outage", async () => {
+    const a = renewSilently();
+    answerCrossOrigin(frames[0]);
+    await expect(a).resolves.toBe("no-answer");
+    const b = renewSilently();
+    await vi.advanceTimersByTimeAsync(15_001);
+    await expect(b).resolves.toBe("no-answer");
+    answerCrossOrigin(frames[1]);
+    await vi.advanceTimersByTimeAsync(0);
   });
 
   it("gives up waiting on a slow frame, but leaves the frame to finish so a late answer still lands", async () => {

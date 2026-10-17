@@ -1,18 +1,43 @@
 // The transcript card for a published file: an inline preview when the file is an image (the
-// picture itself), a video or audio file (a play tile) or an HTML page (the page, small), then
-// 📎 name · v3 · size · [Download] [View]. The version shows from v2 on, and on a v1 whose file
-// has later versions; a lone v1 has none. Clicking the preview opens the viewer; a video or audio
+// picture itself), a video or audio file (a play tile), an HTML page (the page, small), markdown,
+// text, code, JSON or a table (a short excerpt), a PDF (its first page) or a diff (its files and
+// +/−), then 📎 name · v3 · size · [Download] [View]. The version shows from v2 on, and on a v1
+// whose file has later versions; a lone v1 has none. Clicking the preview opens the viewer; a video or audio
 // file then plays at once, and an HTML page becomes usable.
 import { useEffect, useRef, useState } from 'react'
 import { useChat } from './context'
 import { formatSize, withCsp } from '../model/artifacts'
-import { HTML_PREVIEW_PAGE, loadPreviewText, loadPreviewUrl, previewKind } from '../model/artifactPreview'
+import { EXCERPT_KINDS, HTML_PREVIEW_PAGE, loadDiffSummary, loadPdfThumb, loadPreviewExcerpt, loadPreviewText, loadPreviewUrl, previewKind } from '../model/artifactPreview'
+import type { Excerpt } from '../model/previewExcerpt'
+import { patchSummaryText, type PatchSummary } from '../model/patch'
+import { useHighlight } from '../model/highlight'
 import { isViewable } from '../model/artifactViews'
 import { fileErrorText } from '../transport/files'
 import type { TransportFiles } from '../transport/types'
 import type { ArtifactPayload } from '../types'
+import CodeText from './CodeText'
 import ErrorId from './ErrorId'
+import Markdown from './Markdown'
 import { TimeLabel } from './TimeLabel'
+import './diff.css'
+
+/** True once `ref` has come near the viewport (at once where IntersectionObserver is missing).
+ *  One-shot: a preview is fetched when its card scrolls into view and never un-fetched. */
+function useNear(ref: { current: Element | null }, enabled: boolean): boolean {
+  const [near, setNear] = useState(() => typeof IntersectionObserver === 'undefined')
+  useEffect(() => {
+    if (!enabled || near || !ref.current || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(entries => {
+      if (entries.some(e => e.isIntersecting)) {
+        setNear(true)
+        io.disconnect()
+      }
+    }, { rootMargin: '200px' })
+    io.observe(ref.current)
+    return () => io.disconnect()
+  }, [ref, enabled, near])
+  return near
+}
 
 /** The inline preview of a file: the image, or a play tile for video and audio. The image is
  *  fetched when the card scrolls into view (at once where IntersectionObserver is missing). */
@@ -51,6 +76,9 @@ export function MediaPreview({ sessionId, files, artifact, onOpen }: {
   }, [kind, near, sessionId, artifact, files])
 
   if (!kind || failed) return null
+  if (kind && EXCERPT_KINDS.has(kind)) return <ExcerptPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
+  if (kind === 'diff') return <DiffPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
+  if (kind === 'pdf') return <PdfPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
   if (kind === 'html') return <HtmlPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
   if (kind === 'media') {
     return (
@@ -64,6 +92,136 @@ export function MediaPreview({ sessionId, files, artifact, onOpen }: {
   return (
     <button ref={ref} type="button" className="artifact-preview" data-testid="artifact-preview" onClick={() => onOpen(false)} aria-label={`View ${artifact.name}`}>
       {url ? <img src={url} alt={artifact.name} /> : <span className="artifact-preview-loading" />}
+    </button>
+  )
+}
+
+/** A short excerpt of a markdown, text, code, JSON or table file: the first lines, faded at the
+ *  end when there is more. Read from the transport when the card nears the viewport; a failed
+ *  fetch draws nothing (the plain card). A cover button on top opens the viewer; the excerpt
+ *  itself takes no pointer events, so its links are not followed from a preview. */
+function ExcerptPreview({ sessionId, files, artifact, onOpen }: {
+  sessionId: string
+  files: TransportFiles
+  artifact: ArtifactPayload
+  onOpen: () => void
+}) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const near = useNear(ref, true)
+  const [excerpt, setExcerpt] = useState<Excerpt | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (!near) return
+    let live = true
+    loadPreviewExcerpt(sessionId, artifact, id => files.raw(sessionId, id)).then(
+      e => { if (live) setExcerpt(e) },
+      () => { if (live) setFailed(true) },
+    )
+    return () => { live = false }
+  }, [near, sessionId, artifact, files])
+
+  const code = excerpt?.kind === 'text' ? excerpt : null
+  const highlighted = useHighlight(code?.lang ?? null, code?.text ?? '', true)
+  if (failed) return null
+  return (
+    <div ref={ref} className={`artifact-preview artifact-preview-excerpt${excerpt?.more ? ' has-more' : ''}`} data-testid="artifact-preview-excerpt">
+      {excerpt?.kind === 'markdown' && <Markdown text={excerpt.text} className="artifact-preview-md" />}
+      {code && (
+        <div className="md-codeblock">
+          <pre><code><CodeText text={code.text} highlighted={highlighted} /></code></pre>
+        </div>
+      )}
+      {excerpt?.kind === 'csv' && (
+        excerpt.rows.length === 0
+          ? <p className="artifact-status">This file is empty.</p>
+          : (
+            <table className="artifact-preview-table" data-testid="artifact-preview-table">
+              <thead>
+                <tr>{excerpt.rows[0].map((c, i) => <th key={i} scope="col">{c}</th>)}</tr>
+              </thead>
+              <tbody>
+                {excerpt.rows.slice(1).map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j}>{c}</td>)}</tr>)}
+              </tbody>
+            </table>
+          )
+      )}
+      {!excerpt && <span className="artifact-preview-loading" />}
+      <button type="button" className="artifact-preview-cover" onClick={onOpen} aria-label={`Open ${artifact.name}`} />
+    </div>
+  )
+}
+
+/** A published diff: "3 files · +12 −4" and the first file names, read when the card nears the
+ *  viewport. The whole tile opens the diff viewer. A failed read draws nothing (the plain card). */
+function DiffPreview({ sessionId, files, artifact, onOpen }: {
+  sessionId: string
+  files: TransportFiles
+  artifact: ArtifactPayload
+  onOpen: () => void
+}) {
+  const ref = useRef<HTMLButtonElement | null>(null)
+  const near = useNear(ref, true)
+  const [summary, setSummary] = useState<PatchSummary | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (!near) return
+    let live = true
+    loadDiffSummary(sessionId, artifact.id, id => files.raw(sessionId, id)).then(
+      s => { if (live) setSummary(s) },
+      () => { if (live) setFailed(true) },
+    )
+    return () => { live = false }
+  }, [near, sessionId, artifact.id, files])
+
+  if (failed || (summary && summary.files === 0)) return null
+  return (
+    <button ref={ref} type="button" className="artifact-preview artifact-preview-diff" data-testid="artifact-preview-diff" onClick={onOpen} aria-label={`View the diff ${artifact.name}`}>
+      {summary
+        ? (
+            <>
+              <span className="artifact-preview-diff-counts" data-testid="artifact-preview-diff-counts">
+                {patchSummaryText(summary).split(' · ')[0]} · <span className="diff-plus">+{summary.adds}</span> <span className="diff-minus">−{summary.dels}</span>
+              </span>
+              <ul className="artifact-preview-diff-files">
+                {summary.names.map(n => <li key={n}>{n}</li>)}
+                {summary.files > summary.names.length && <li>and {summary.files - summary.names.length} more</li>}
+              </ul>
+            </>
+          )
+        : <span className="artifact-preview-loading" />}
+    </button>
+  )
+}
+
+/** The first page of a PDF, drawn small (pdf/thumb.ts) when the card nears the viewport. A
+ *  failure (a damaged file, no canvas) draws nothing. */
+function PdfPreview({ sessionId, files, artifact, onOpen }: {
+  sessionId: string
+  files: TransportFiles
+  artifact: ArtifactPayload
+  onOpen: () => void
+}) {
+  const ref = useRef<HTMLButtonElement | null>(null)
+  const near = useNear(ref, true)
+  const [url, setUrl] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (!near) return
+    let live = true
+    loadPdfThumb(sessionId, artifact.id, id => files.raw(sessionId, id)).then(
+      u => { if (live) setUrl(u) },
+      () => { if (live) setFailed(true) },
+    )
+    return () => { live = false }
+  }, [near, sessionId, artifact.id, files])
+
+  if (failed) return null
+  return (
+    <button ref={ref} type="button" className="artifact-preview artifact-preview-pdf" data-testid="artifact-preview-pdf" onClick={onOpen} aria-label={`View ${artifact.name}`}>
+      {url ? <img src={url} alt={`First page of ${artifact.name}`} /> : <span className="artifact-preview-loading" />}
     </button>
   )
 }

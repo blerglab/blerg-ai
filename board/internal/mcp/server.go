@@ -263,6 +263,20 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		}
 		return toolText(b), nil
 
+	case "blerg_board_launch_options":
+		var a struct {
+			BoardID string `json:"board_id"`
+			Refresh bool   `json:"refresh"`
+		}
+		if err := json.Unmarshal(args, &a); err != nil || a.BoardID == "" {
+			return nil, fmt.Errorf("board_id required")
+		}
+		options, err := s.api.BoardLaunchOptions(ctx, p, a.BoardID, a.Refresh)
+		if err != nil {
+			return nil, err
+		}
+		return toolText(options), nil
+
 	case "blerg_board_create":
 		if err := p.RequireAdmin(""); err != nil {
 			return nil, err
@@ -578,6 +592,7 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 	case "blerg_session_set_model":
 		var a struct {
 			Model           string `json:"model"`
+			Effort          string `json:"effort"`
 			Reason          string `json:"reason"`
 			RunnerSessionID string `json:"runner_session_id"`
 		}
@@ -586,7 +601,7 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		}
 		// Empty session id means "self" — resolved from the caller's own
 		// session token, so an agent never has to know its session id.
-		change, err := s.api.SetSessionModel(ctx, p, a.RunnerSessionID, a.Model, a.Reason)
+		change, err := s.api.SetSessionModel(ctx, p, a.RunnerSessionID, a.Model, a.Reason, a.Effort)
 		if err != nil {
 			return nil, err
 		}

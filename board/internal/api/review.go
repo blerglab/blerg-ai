@@ -624,11 +624,11 @@ func (a *API) maybeRelayFindings(ctx context.Context, card db.Card) {
 			"(including the Checks block), and move the card back to review."
 	case role == "discuss":
 		todo = "Address the findings by revising the card body (PATCH /api/cards/{id}), post a comment " +
-			"summarising what you changed and why, and tell the human the spec is ready for re-review — " +
+			"summarizing what you changed and why, and tell the human the spec is ready for re-review — " +
 			"they move the card back to the review column, you don't."
 	default: // a worker session that produced a spec rather than a PR
 		todo = "Address the findings by revising the card body (PATCH /api/cards/{id}), post a comment " +
-			"summarising what you changed and why, and move the card back to review."
+			"summarizing what you changed and why, and move the card back to review."
 	}
 	msg := "Adversarial review requested changes on card #" + fmt.Sprint(card.Number) + ":\n\n" + findings +
 		"\n\n" + todo

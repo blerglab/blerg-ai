@@ -7,6 +7,7 @@ import { ChatView, createProxyTransport, type DescribeUserMessage, type SessionM
 import "@blerglab/chat/blerg.css";
 import { ensureFreshToken, getAccessToken } from "./authClient";
 import { bounceToRefresh } from "./signIn";
+import { SessionModelControls } from "./SessionModelControls";
 
 /** The session as the board's own API lists it. */
 export interface RunnerSession {
@@ -18,6 +19,13 @@ export interface RunnerSession {
   resumable: boolean;
   created_at: string;
   model?: string;
+  steering_supported?: boolean;
+  engine?: string;
+  effort?: string;
+  board_id?: string;
+  resume_mode?: string;
+  resume_reason?: string;
+  session_url?: string;
 }
 
 // A cheap, UNVERIFIED read of the token's exp claim: only to decide whether to renew before use.
@@ -73,8 +81,8 @@ export const describeUserMessage: DescribeUserMessage = (_ev, p, ctx) => {
  *  board started it and on which model. Everything else, the runner's advertised file `limits`
  *  among it (the chat refuses an attachment over `limits.max_file_bytes` before sending it), is
  *  the runner's. */
-export function boardMeta(m: SessionMeta, row: Pick<RunnerSession, "created_at" | "model">): SessionMeta {
-  return { ...m, started_at: m.started_at || row.created_at, model: m.model ?? (row.model || undefined) };
+export function boardMeta(m: SessionMeta, row: Pick<RunnerSession, "created_at" | "model" | "effort" | "engine" | "steering_supported">): SessionMeta {
+  return { ...m, started_at: m.started_at || row.created_at, model: m.model ?? (row.model || undefined), effort: m.effort ?? row.effort, engine: m.engine ?? row.engine, steering_supported: m.steering_supported ?? row.steering_supported };
 }
 
 export function SessionChat({ session, placeholder, readOnly }: {
@@ -83,16 +91,17 @@ export function SessionChat({ session, placeholder, readOnly }: {
   /** No composer: a session the board will not let the person message. */
   readOnly?: boolean;
 }) {
-  const { created_at, model } = session;
+  const { created_at, model, effort, engine, steering_supported, session_url, id: sessionId } = session;
   // The runner's status says how the session is, not when the board started it or on which
   // model; the board's own row does.
   const transport = useMemo<Transport>(() => {
     const base = boardTransport();
     return {
       ...base,
-      session: async (id) => boardMeta(await base.session(id), { created_at, model }),
+      publishedSessionUrl: (id) => id === sessionId ? session_url ?? null : null,
+      session: async (id) => boardMeta(await base.session(id), { created_at, model, effort, engine, steering_supported }),
     };
-  }, [created_at, model]);
+  }, [created_at, model, effort, engine, steering_supported, session_url, sessionId]);
   return (
     <div className="session-chat">
       <ChatView
@@ -101,6 +110,7 @@ export function SessionChat({ session, placeholder, readOnly }: {
         session={session.id}
         transport={transport}
         describeUserMessage={describeUserMessage}
+        slots={{ header: readOnly ? undefined : <SessionModelControls session={session} /> }}
         placeholder={placeholder}
         readOnly={readOnly}
       />

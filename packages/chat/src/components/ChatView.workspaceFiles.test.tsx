@@ -1,0 +1,132 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import ChatView from './ChatView'
+import { createFakeTransport } from '../test/fakeTransport'
+import { ev, meta, resetChatState, seed, SESSION } from '../test/chat'
+import { WorkspaceFileError } from '../transport/files'
+import type { WorkspaceFile } from '../transport/types'
+
+beforeEach(resetChatState)
+
+const file = (over: Partial<WorkspaceFile> & { body?: string } = {}): WorkspaceFile => {
+  const { body = '# Hello', ...rest } = over
+  const blob = new Blob([body])
+  return { path: 'README.md', size: blob.size, view: 'markdown', content_type: 'text/markdown; charset=utf-8', mtime: '2026-10-17T00:00:00Z', blob, ...rest }
+}
+
+interface Opts { can?: boolean; reply?: (path: string, signal?: AbortSignal) => Promise<WorkspaceFile> }
+
+function mount(text: string, opts: Opts = {}) {
+  seed(ev({ kind: 'assistant_text', payload: { text }, seq: 1 }))
+  const t = createFakeTransport()
+  const read = vi.fn(async (_s: string, path: string, signal?: AbortSignal) => (opts.reply ? opts.reply(path, signal) : file({ path })))
+  Object.assign(t.files!, { workspaceFile: read })
+  render(<ChatView session={SESSION} transport={t.transport} meta={meta()} canOpenWorkspaceFiles={opts.can ?? true} />)
+  return { ...t, read }
+}
+
+describe('files the agent names', () => {
+  it('turns relative links and path-like inline code into buttons, and nothing else', async () => {
+    mount('See [the readme](README.md#L3), `src/a.go:12`, `fmt.Println`, `1.2.3`, [web](https://x.io/a.md), ```` and\n\n```\nsrc/b.go\n```\n')
+    const found = await screen.findAllByTitle('Open from the session’s folder')
+    expect(found.map(e => e.getAttribute('data-workspace-path'))).toEqual(['README.md', 'src/a.go'])
+    expect(screen.getByText('fmt.Println').closest('[data-workspace-path]')).toBeNull()
+    expect(screen.getByText('src/b.go').closest('[data-workspace-path]')).toBeNull()
+    expect(screen.getByRole('link', { name: 'web' })).toBeInTheDocument()
+  })
+
+  it('does nothing without the host opting in (and never for the owner-less)', async () => {
+    mount('`README.md` and [x](docs/a.md)', { can: false })
+    await screen.findByText('README.md')
+    expect(document.querySelector('[data-workspace-path]')).toBeNull()
+    expect(screen.queryByTitle('Open from the session’s folder')).toBeNull()
+  })
+
+  it('leaves the person’s own messages alone', async () => {
+    seed(ev({ kind: 'user_message', payload: { text: 'look at `README.md` and [x](a.md)', source: 'user' }, seq: 1 }))
+    const t = createFakeTransport()
+    Object.assign(t.files!, { workspaceFile: vi.fn() })
+    render(<ChatView session={SESSION} transport={t.transport} meta={meta()} canOpenWorkspaceFiles />)
+    await screen.findByText(/look at/)
+    expect(document.querySelector('[data-workspace-path]')).toBeNull()
+  })
+
+  it('opens the stripped path in the viewer, with its header and actions', async () => {
+    const { read } = mount('`./docs/a.md:7`')
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    const dialog = await screen.findByRole('dialog', { name: 'docs/a.md' })
+    expect(read).toHaveBeenCalledWith('s1', 'docs/a.md', expect.anything())
+    expect(within(dialog).getByText(/From the session’s folder · as of now/)).toBeInTheDocument()
+    expect(await within(dialog).findByRole('heading', { level: 1, name: 'Hello' })).toBeInTheDocument()
+    for (const b of ['Copy path', 'Download', 'Save a copy to Files']) expect(within(dialog).getByRole('button', { name: b })).toBeInTheDocument()
+  })
+
+  it('shows a code file as numbered lines and marks the line it was sent to', async () => {
+    mount('`a.go:3`', { reply: async path => file({ path, view: 'text', body: 'package a\n\nfunc f() {}\nvar x = 1\n' }) })
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    const code = await screen.findByTestId('workspace-code')
+    expect(code.querySelector('.code-viewer-gutter')?.textContent).toMatch(/^1\n2\n3\n4/)
+    expect(await screen.findByTestId('workspace-line')).toBeInTheDocument()
+  })
+
+  it('draws html in a frame with no same-origin and no network, never in the page', async () => {
+    mount('`page.html`', { reply: async path => file({ path, view: 'html', body: '<script>window.top.x=1</script><p id="p">hi</p>' }) })
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    const frame = await waitFor(() => {
+      const f = document.querySelector('iframe.artifact-html')
+      expect(f).not.toBeNull()
+      return f as HTMLIFrameElement
+    })
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts')
+    expect(frame.getAttribute('srcdoc')).toMatch(/Content-Security-Policy/)
+    expect(document.getElementById('p')).toBeNull()
+  })
+
+  it('draws svg only through <img> on a blob URL', async () => {
+    const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x')
+    mount('`logo.svg`', { reply: async path => file({ path, view: 'image', content_type: 'image/svg+xml', body: '<svg onload="x()"></svg>' }) })
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    const img = await screen.findByRole('img', { name: 'logo.svg' })
+    expect(img.getAttribute('src')).toBe('blob:x')
+    expect(document.querySelector('svg[onload]')).toBeNull()
+    expect((create.mock.calls[0][0] as Blob).type).toBe('image/svg+xml')
+    create.mockRestore()
+  })
+
+  it.each([
+    [404, 'The workspace file was not found.', 'Not found in the session’s folder'],
+    [403, 'Blerg doesn\'t open files that usually hold secrets (restricted filename).', 'Blerg doesn’t open files that usually hold secrets'],
+    [403, 'Blerg could not safely open that workspace file.', 'Blerg can’t open that path'],
+    [409, 'The session has no live workspace daemon.', 'The session isn’t running, so its files can’t be read'],
+    [409, 'The workspace file reader is busy.', 'busy'],
+    [413, 'The workspace file is larger than its configured size limit.', 'Too large to open here'],
+  ])('maps %i to a sentence of its own, with the error id and not the raw text', async (status, text, want) => {
+    mount('`README.md`', { reply: async () => { throw new WorkspaceFileError(status, text, 'err-77') } })
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    const box = await screen.findByTestId('workspace-error')
+    expect(box.textContent).toContain(want)
+    expect(box.textContent).toContain('error id err-77')
+    expect(box.textContent).not.toContain(text)
+  })
+
+  it('shows a spinner with Cancel while it waits', async () => {
+    let seen: AbortSignal | undefined
+    mount('`README.md`', { reply: (_p, signal) => { seen = signal; return new Promise(() => {}) } })
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    const spin = await screen.findByTestId('workspace-loading')
+    fireEvent.click(within(spin).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(seen?.aborted).toBe(true)
+  })
+
+  it('saves a copy to Files as the person’s own upload', async () => {
+    const { files } = mount('`notes/a.txt`', { reply: async path => file({ path, view: 'text', body: 'kept' }) })
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Save a copy to Files' }))
+    expect(await within(dialog).findByText('Saved a copy to Files.')).toBeInTheDocument()
+    expect(files!.uploads).toHaveLength(1)
+    expect(files!.uploads[0].file.name).toBe('a.txt')
+    expect(await files!.uploads[0].file.text()).toBe('kept')
+  })
+})

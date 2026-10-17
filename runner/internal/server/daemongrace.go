@@ -20,12 +20,18 @@ package server
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // daemonLostGrace is how long a desktop daemon may be away before its sessions are marked lost.
-// A var so tests can run the disconnect synchronously (0) or shrink the wait.
-var daemonLostGrace = 20 * time.Second
+// Stored as atomic nanoseconds because tests override it while WebSocket
+// cleanup goroutines may still be finishing the previous connection.
+var daemonLostGrace = func() *atomic.Int64 {
+	grace := new(atomic.Int64)
+	grace.Store(int64(20 * time.Second))
+	return grace
+}()
 
 // maxHeldPerSession bounds the messages kept for one session of a daemon that is away.
 const maxHeldPerSession = 32

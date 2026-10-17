@@ -43,6 +43,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/blerglab/blerg-ai/contracts/engines"
 	"io"
 	"log"
 	"net/http"
@@ -127,8 +128,8 @@ func cronStartProblem(req runnerStartRequest) string {
 	switch {
 	case req.Runtime != runnerRuntimeCluster && req.Runtime != runnerRuntimeDocker:
 		return "a cron session runs in a cluster pod or the Docker sandbox, never on the host"
-	case req.Engine != "claude" && req.Engine != "codex":
-		return "a cron session uses the claude or codex engine"
+	case req.Engine == "" || !restrictedEngineSupported(req.Engine):
+		return "a cron session requires an engine with restricted-tool support"
 	case !req.NoRepo || !req.AutoStop:
 		return "a cron session has no repository and runs a single turn"
 	case !req.NoOperatorFallback:
@@ -1168,4 +1169,9 @@ func StartCrons(ctx context.Context, api *API, coreURL, coreInternalKey string) 
 	go svc.Run(ctx)
 	log.Println("crons enabled")
 	return true
+}
+
+func restrictedEngineSupported(engine string) bool {
+	descriptor, ok := engines.Lookup(engine)
+	return ok && descriptor.Restricted
 }

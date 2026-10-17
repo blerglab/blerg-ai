@@ -132,7 +132,7 @@ and relays the findings to the session that authored it.
 
 **Hard dependencies gate dispatch.** ` + "`POST /api/cards/{id}/dependencies`" + `
 records "this card cannot start until that one lands". The board dispatcher
-honours it: a card with a blocker that has not reached a done column is skipped
+honors it: a card with a blocker that has not reached a done column is skipped
 over — the next dispatchable card is taken instead, so one blocked card never
 halts the queue. Consequences worth knowing before you add an edge:
 

@@ -256,7 +256,7 @@ build_sandbox_image_if_missing() {
 daemon isn't being installed or started until this builds cleanly --
 otherwise the first session launch would fail on a broken default.
 
-Fix whatever stopped it (network, disk space, or you cancelled it),
+Fix whatever stopped it (network, disk space, or you canceled it),
 then re-run. Or build it by hand first to see the full error:
 
   docker build --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest $RUNNER_DIR/sandbox
@@ -599,7 +599,7 @@ claude_already_logged_in() {
 
 codex_already_logged_in() {
   command -v codex >/dev/null 2>&1 || return 1
-  [ -s "$HOME/.codex/auth.json" ]
+  [ -s "$(codex_login_home)/auth.json" ]
 }
 
 hermes_already_configured() {

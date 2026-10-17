@@ -5,7 +5,7 @@
    refusal error events and explicit reset timestamps/text; unknown times remain
    unknown. Add sanitized fixtures and failing tests before implementation.
 2. Add a durable per-session continuation table: enabled, owner browser-session
-   proof, current/cancelled turn, reset, state/reason, attempts and attempt ID.
+   proof, current/canceled turn, reset, state/reason, attempts and attempt ID.
    The owner-only authenticated GET/PUT endpoint enables, disables and reads it;
    UI controls poll this endpoint and display unknown/blocked/pending states.
 3. Consume persisted user-message and usage-limit events idempotently. Store turn

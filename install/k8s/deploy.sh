@@ -68,7 +68,7 @@ AGENT_NAMESPACE=blerg-runner-sessions
 RUNNER_DATA_SIZE="${RUNNER_DATA_SIZE:-10Gi}"
 RUNNER_DATA_STORAGE_CLASS="${RUNNER_DATA_STORAGE_CLASS:-}"
 
-# Normalise both switches to a single canonical value each, so an operator
+# Normalize both switches to a single canonical value each, so an operator
 # writing off/false/0/no (or 1/true/yes) gets what they obviously meant. The
 # "external" switch in particular must fail CLOSED on an unrecognized value:
 # anything we don't recognize means deploy.sh manages the Secret, which is the

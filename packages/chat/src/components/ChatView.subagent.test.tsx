@@ -135,7 +135,7 @@ describe('subagent card', () => {
     expect(card().dataset.status).toBe('stopped')
     expect(statusOf()).toBe('no result')
     expect(within(card()).getByTestId('subagent-status')).toHaveTextContent(/^…$/)
-    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · no result · no end recorded')
+    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · configured effort: unknown · no result · no end recorded')
     // The row says no more; opened, the card says why.
     expect(within(card()).queryByTestId('subagent-line')).toBeNull()
     expect(row()).toHaveAttribute('aria-expanded', 'false')
@@ -193,8 +193,8 @@ describe('subagent card', () => {
     expect(within(card()).queryByTestId('subagent-line')).toBeNull()
     expect(within(card()).queryByTestId('subagent-report')).toBeNull()
     // What the row leaves out is its tooltip and its accessible name.
-    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · done')
-    expect(screen.getByRole('button', { name: 'Survey the repo · Explore · done' })).toBe(row())
+    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · configured effort: unknown · done')
+    expect(screen.getByRole('button', { name: 'Survey the repo · Explore · configured effort: unknown · done' })).toBe(row())
     expect(row()).toHaveAttribute('aria-expanded', 'false')
     // Nothing the subagent did is drawn, and the Agent call is not a tool row of its own.
     expect(screen.queryByText('Listing the directories.')).not.toBeInTheDocument()
@@ -258,20 +258,24 @@ describe('subagent card', () => {
 
   it('names the model and tokens of its latest update in the row\'s tooltip, and the final totals once done', () => {
     seed(ev('user_message', { text: 'go', source: 'chat' }), agentCall('A'), started('A'), childCall('s1', 'A'),
-      update('A', { model: 'claude-haiku-5', usage: { input_tokens: 1000, output_tokens: 200, cache_read_tokens: 0, cache_write_tokens: 0 } }))
+      update('A', { model: 'claude-haiku-5', effort: 'low', usage: { input_tokens: 1000, output_tokens: 200, cache_read_tokens: 0, cache_write_tokens: 0 } }))
     const { t } = mount('running')
-    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · claude-haiku-5 · 1.2k tokens · running')
-    expect(row()).toHaveAccessibleName('Survey the repo · Explore · claude-haiku-5 · 1.2k tokens · running')
+    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · claude-haiku-5 · configured effort: low · 1.2k tokens · running')
+    expect(row()).toHaveAccessibleName('Survey the repo · Explore · claude-haiku-5 · configured effort: low · 1.2k tokens · running')
     // No chips in the row.
     expect(card()).not.toHaveTextContent('claude-haiku-5')
     expect(card()).not.toHaveTextContent('tokens')
+    expand()
+    expect(within(card()).getByTestId('subagent-settings')).toHaveTextContent('Configured effort: low')
+    expand()
     act(() => {
-      t.emit(ev('subagent_done', { child_id: 'A', agent_type: 'Explore', model: 'claude-haiku-5', summary: 'found it',
+      t.emit(ev('subagent_done', { child_id: 'A', agent_type: 'Explore', model: 'claude-haiku-5', effort: '', summary: 'found it',
         usage: { input_tokens: 20000, output_tokens: 3000, cache_read_tokens: 0, cache_write_tokens: 0 }, tool_uses: 1, duration_ms: 64000 }))
     })
-    expect(row()).toHaveAccessibleName('Survey the repo · Explore · claude-haiku-5 · 23k tokens · done')
+    expect(row()).toHaveAccessibleName('Survey the repo · Explore · claude-haiku-5 · configured effort: unknown · 23k tokens · done')
     expand()
     expect(within(card()).getByTestId('subagent-line')).toHaveTextContent('done · 1 tool call · 0 messages · 23k tokens · 1m 4s')
+    expect(within(card()).getByTestId('subagent-settings')).toHaveTextContent('Model: claude-haiku-5 · Configured effort: unknown')
   })
 
   it('a background subagent runs in the background until its real end', () => {
@@ -322,8 +326,8 @@ describe('subagent card', () => {
       ev('tool_result', { call_id: 'A', output: 'The build crashed.\nstack…', is_error: true, duration_ms: 0 }))
     mount()
     expect(statusOf()).toBe('error')
-    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · error · The build crashed.')
-    expect(row()).toHaveAccessibleName('Survey the repo · Explore · error · The build crashed.')
+    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · configured effort: unknown · error · The build crashed.')
+    expect(row()).toHaveAccessibleName('Survey the repo · Explore · configured effort: unknown · error · The build crashed.')
     // No second visible line.
     expect(card()).toHaveTextContent(/^↳ Survey the repo✗▸$/)
   })
@@ -331,7 +335,7 @@ describe('subagent card', () => {
   it('names a native subagent\'s error from its summary in the tooltip', () => {
     seed(ev('user_message', { text: 'go', source: 'chat' }), started('n1'), done('n1', 'error: budget spent\nmore'))
     mount()
-    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · error · budget spent')
+    expect(row()).toHaveAttribute('title', 'Survey the repo · Explore · configured effort: unknown · error · budget spent')
   })
 
   it('a report that begins "error:" is not a failure when the call succeeded', () => {

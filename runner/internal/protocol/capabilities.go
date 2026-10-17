@@ -14,6 +14,20 @@ import (
 // describes the session; an engine re-emits it when what it loaded changes.
 const CapabilitiesKind = "capabilities"
 
+// Tool-schema refresh is reported by the actual session adapter, not inferred
+// from its engine name. Empty means an older or unknown adapter.
+const (
+	ToolSchemaRefreshNextTurn   = "next_turn"
+	ToolSchemaRefreshNewSession = "new_session"
+)
+
+func SanitizeToolSchemaRefresh(policy string) string {
+	if policy == ToolSchemaRefreshNextTurn || policy == ToolSchemaRefreshNewSession {
+		return policy
+	}
+	return ""
+}
+
 // Capability group ids. The set is closed: a group with any other id is
 // dropped by SanitizeCapabilities, so a viewer can rely on it.
 const (
@@ -66,10 +80,11 @@ type CapabilityGroup struct {
 // engine does not report are absent (a viewer says "not reported"), which is
 // different from a group that is present with no items (reported: none).
 type CapabilitiesPayload struct {
-	Engine     string `json:"engine"`
-	EngineName string `json:"engine_name,omitempty"`
-	Model      string `json:"model,omitempty"`
-	Version    string `json:"version,omitempty"`
+	ToolSchemaRefresh string `json:"tool_schema_refresh,omitempty"`
+	Engine            string `json:"engine"`
+	EngineName        string `json:"engine_name,omitempty"`
+	Model             string `json:"model,omitempty"`
+	Version           string `json:"version,omitempty"`
 	// Cwd is a short display form of the engine's working directory
 	// ("~/…" or its last components) — never a full host path.
 	Cwd            string            `json:"cwd,omitempty"`
@@ -134,14 +149,15 @@ func capToken(s string) string {
 // the other end.
 func SanitizeCapabilities(p CapabilitiesPayload) CapabilitiesPayload {
 	out := CapabilitiesPayload{
-		Engine:         capToken(p.Engine),
-		EngineName:     capClean(p.EngineName, CapMaxLabel),
-		Model:          capToken(p.Model),
-		Version:        capToken(p.Version),
-		Cwd:            capClean(p.Cwd, CapMaxDetail),
-		PermissionMode: capToken(p.PermissionMode),
-		Note:           capClean(p.Note, CapMaxNote),
-		Groups:         []CapabilityGroup{},
+		ToolSchemaRefresh: SanitizeToolSchemaRefresh(p.ToolSchemaRefresh),
+		Engine:            capToken(p.Engine),
+		EngineName:        capClean(p.EngineName, CapMaxLabel),
+		Model:             capToken(p.Model),
+		Version:           capToken(p.Version),
+		Cwd:               capClean(p.Cwd, CapMaxDetail),
+		PermissionMode:    capToken(p.PermissionMode),
+		Note:              capClean(p.Note, CapMaxNote),
+		Groups:            []CapabilityGroup{},
 	}
 	byID := map[string]CapabilityGroup{}
 	for _, g := range p.Groups {

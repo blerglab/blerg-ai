@@ -4,39 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/blerglab/blerg-ai/board/internal/db"
+	"github.com/blerglab/blerg-ai/board/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// testPool connects to TEST_DATABASE_URL, runs migrations, and truncates all
-// tables so each test starts clean. Tests are skipped without the env var
-// (same pattern as blerg-runner).
+// testPool copies a migrated template into an isolated database for each test.
+// Tests are skipped without TEST_DATABASE_URL.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping DB integration test")
-	}
-	ctx := context.Background()
-	pool, err := db.Connect(ctx, url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	pool := testsupport.Pool(t, db.RunMigrations)
 	// Automation tokens are sealed at rest; a test key is the default, and the
 	// tests about a missing key remove it themselves.
 	if err := db.SetAutomationKey(testAutomationKey); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.SetAutomationKey(nil) })
-	_, err = pool.Exec(ctx, `TRUNCATE boards, tokens, admission_reviews RESTART IDENTITY CASCADE`)
-	if err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
 	return pool
 }
 
@@ -601,5 +587,123 @@ func TestUpdateCardEventNamesTheChangedFields(t *testing.T) {
 	}
 	if !hasKey {
 		t.Error("a no-op update wrote an event with no 'fields' key — indistinguishable from a legacy event")
+	}
+}
+
+func TestEngineEffortSettingsPersist(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	b := mkBoard(t, pool, db.BoardParams{Name: "engine settings", Effort: strp("high"), ReviewerEffort: strp("xhigh"), DiscussEffort: strp("medium"), ChatEffort: strp("low")})
+	if b.Effort != "high" || b.ReviewerEffort != "xhigh" || b.DiscussEffort != "medium" || b.ChatEffort != "low" {
+		t.Fatalf("lost board effort: %+v", b)
+	}
+	b, err := db.UpdateBoard(ctx, pool, b.ID, db.BoardParams{Effort: strp(""), ChatEffort: strp("high")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Effort != "" || b.ChatEffort != "high" {
+		t.Fatalf("lost effort update: %+v", b)
+	}
+	res, err := db.CreateCard(ctx, pool, b.ID, db.CardParams{Title: strp("effort"), Effort: strp("medium")}, db.EventMeta{Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Card.Effort != "medium" {
+		t.Fatal("card effort lost")
+	}
+}
+
+func TestEngineChangeInvalidatesFutureSettingsSymmetrically(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	b := mkBoard(t, pool, db.BoardParams{Name: "engine switch", Model: strp("claude-old"), ReviewerModel: strp("claude-review"), Effort: strp("high"), ChatEffort: strp("medium")})
+	card, err := db.CreateCard(ctx, pool, b.ID, db.CardParams{Title: strp("card"), Model: strp("card-old"), Effort: strp("low")}, db.EventMeta{Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var existingID string
+	if err := pool.QueryRow(ctx, `INSERT INTO runner_sessions(board_id,card_id,runner,external_session_id,role,engine,model,effort) VALUES($1,$2,'test','existing','worker','claude','original-model','original-effort') RETURNING id`, b.ID, card.Card.ID).Scan(&existingID); err != nil {
+		t.Fatal(err)
+	}
+	for _, engine := range []string{"codex", "claude"} {
+		b, err = db.UpdateBoard(ctx, pool, b.ID, db.BoardParams{AutomationEngine: strp(engine)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Model != "" || b.ReviewerModel != "" || b.Effort != "" || b.ChatEffort != "" {
+			t.Fatalf("engine %s retained stale settings", engine)
+		}
+		c, err := db.GetCard(ctx, pool, card.Card.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Model != "" || c.Effort != "" {
+			t.Fatalf("engine %s retained stale card settings", engine)
+		}
+		// Saving the same engine preserves settings chosen for that engine.
+		_, err = db.UpdateBoard(ctx, pool, b.ID, db.BoardParams{Model: strp("native-model"), Effort: strp("high")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err = db.UpdateBoard(ctx, pool, b.ID, db.BoardParams{AutomationEngine: strp(engine)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Model != "native-model" || b.Effort != "high" {
+			t.Fatal("same engine save erased settings")
+		}
+		var storedEngine, storedModel, storedEffort string
+		if err := pool.QueryRow(ctx, `SELECT engine,model,effort FROM runner_sessions WHERE id=$1`, existingID).Scan(&storedEngine, &storedModel, &storedEffort); err != nil {
+			t.Fatal(err)
+		}
+		if storedEngine != "claude" || storedModel != "original-model" || storedEffort != "original-effort" {
+			t.Fatal("engine switch mutated an existing native conversation")
+		}
+
+	}
+}
+
+func TestModelChangeClearsOnlyImplicitPairedEffort(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	b := mkBoard(t, pool, db.BoardParams{Name: "paired effort", Model: strp("model-a"), Effort: strp("high"), ReviewerModel: strp("review-a"), ReviewerEffort: strp("high"), DiscussModel: strp("discuss-a"), DiscussEffort: strp("high"), ChatModel: strp("chat-a"), ChatEffort: strp("high")})
+	b, err := db.UpdateBoard(ctx, pool, b.ID, db.BoardParams{Model: strp("model-b"), ReviewerModel: strp("review-b"), DiscussModel: strp("discuss-b"), ChatModel: strp("chat-b"), ChatEffort: strp("low")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Effort != "" || b.ReviewerEffort != "" || b.DiscussEffort != "" || b.ChatEffort != "low" {
+		t.Fatal("model switch preserved implicit effort or lost explicit effort")
+	}
+	b, err = db.UpdateBoard(ctx, pool, b.ID, db.BoardParams{ChatModel: strp("chat-b")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.ChatEffort != "low" {
+		t.Fatal("same-model save erased effort")
+	}
+	res, err := db.CreateCard(ctx, pool, b.ID, db.CardParams{Title: strp("card"), Model: strp("a"), Effort: strp("high")}, db.EventMeta{Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := db.UpdateCard(ctx, pool, res.Card.ID, db.CardParams{Model: strp("b")}, db.EventMeta{Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Effort != "" {
+		t.Fatal("card model-only switch retained prior effort")
+	}
+	c, err = db.UpdateCard(ctx, pool, c.ID, db.CardParams{Model: strp("c"), Effort: strp("low")}, db.EventMeta{Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Effort != "low" {
+		t.Fatal("card lost explicit effort")
+	}
+	c, err = db.UpdateCard(ctx, pool, c.ID, db.CardParams{Model: strp("")}, db.EventMeta{Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Effort != "" {
+		t.Fatal("card model removal retained stale effort")
 	}
 }

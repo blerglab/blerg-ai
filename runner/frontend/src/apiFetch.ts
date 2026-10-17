@@ -84,7 +84,7 @@ export function apiUpload(
     }
     xhr.onabort = () => {
       init.signal?.removeEventListener('abort', onAbort)
-      reject(new DOMException('The upload was cancelled.', 'AbortError'))
+      reject(new DOMException('The upload was canceled.', 'AbortError'))
     }
     if (init.signal?.aborted) {
       xhr.abort()

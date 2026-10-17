@@ -17,6 +17,7 @@ const AUTO_NAME = 'Granite'
 function buildFetchMock(
   captureBody: { value?: Record<string, unknown> },
   opts?: {
+    launchOptions?: Record<string, unknown>
     daemon?: Record<string, unknown>
     clusterStatus?: Record<string, unknown>
     // daemons: [] models "no workstation daemon connected at all".
@@ -44,6 +45,17 @@ function buildFetchMock(
   },
 ) {
   return vi.fn((url: string, init?: RequestInit) => {
+    if (url.startsWith('/api/runner/launch-options?')) {
+      if (opts?.launchOptions) return Promise.resolve({ ok: true, json: async () => opts.launchOptions })
+      const target = new URL(url, 'https://example.com').searchParams
+      const runtime = target.get('runtime')
+      const selected = (opts?.daemons ?? [{ id: 'd1', ...opts?.daemon }]).find(d => d.id === target.get('daemon_id'))
+      let ids = runtime === 'cluster'
+        ? [...new Set([...(opts?.clusterStatus?.available_engines as string[] ?? ['claude', 'codex', 'hermes']), ...(opts?.myCreds !== 'fail' ? opts?.myCreds?.engines as string[] ?? [] : [])])]
+        : selected?.available_engines as string[] ?? ['claude', 'codex', 'hermes', 'openclaw']
+      if (runtime === 'docker' && target.get('kind') === 'agent' && selected?.sandbox_claude_credential !== undefined) ids = selected.sandbox_claude_credential ? [...new Set(['claude', ...ids])] : ids.filter(id => id !== 'claude')
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ runtime, state: 'known', engines: ids.map(id => ({ id, name: { claude: 'Claude', codex: 'Codex', hermes: 'Hermes', openclaw: 'OpenClaw' }[id] ?? id, restricted: id === 'claude' || id === 'codex' && (runtime === 'cluster' || selected?.codex_restricted === true) })) }) })
+    }
     if (url === '/api/mcp/connections') {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ connections: opts?.mcpConnections ?? [] }) })
     }
@@ -173,6 +185,7 @@ describe('LaunchSheet', () => {
     )
     // Wait for repos/daemons/cluster status to land.
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
   }
 
   async function selectRepoAndSubmit(typedName?: string) {
@@ -181,8 +194,38 @@ describe('LaunchSheet', () => {
       const nameInput = screen.getByPlaceholderText(AUTO_NAME)
       fireEvent.change(nameInput, { target: { value: typedName } })
     }
+    await waitFor(() => expect(screen.getByText('Launch Session')).not.toBeDisabled())
     fireEvent.click(screen.getByText('Launch Session'))
   }
+
+  it('uses the sole discovered Codex engine without exposing an engine selector', async () => {
+    vi.stubGlobal('fetch', buildFetchMock(captureBody, { launchOptions: { state: 'known', engines: [{ id: 'codex', name: 'Codex', restricted: true }] } }))
+    await renderAndWaitForLoad()
+    expect(screen.queryByTestId('engine-claude')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('engine-codex')).not.toBeInTheDocument()
+    await selectRepoAndSubmit()
+    await waitFor(() => expect(captureBody.value?.engine).toBe('codex'))
+  })
+
+  it('offers a newly registered engine using its discovered label', async () => {
+    vi.stubGlobal('fetch', buildFetchMock(captureBody, { launchOptions: { state: 'known', engines: [
+      { id: 'codex', name: 'Codex', restricted: true }, { id: 'fixture-engine', name: 'Future Engine', restricted: true },
+    ] } }))
+    await renderAndWaitForLoad()
+    expect(screen.queryByTestId('engine-claude')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Future Engine' }))
+    await selectRepoAndSubmit()
+    await waitFor(() => expect(captureBody.value?.engine).toBe('fixture-engine'))
+  })
+
+  it('blocks unknown discovery with an explicit retry instead of offering default engines', async () => {
+    vi.stubGlobal('fetch', buildFetchMock(captureBody, { launchOptions: { state: 'unknown', engines: [], error: 'Credential service unavailable' } }))
+    await renderAndWaitForLoad()
+    expect(screen.getByText('Credential service unavailable')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry engines' })).toBeInTheDocument()
+    expect(screen.queryByTestId('engine-claude')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Launch/ })).toBeDisabled()
+  })
 
   it('renders a session name input with autoName as placeholder', async () => {
     await renderAndWaitForLoad()
@@ -227,6 +270,7 @@ describe('LaunchSheet', () => {
               }),
           })
         }
+        if (url.startsWith('/api/runner/launch-options?')) return Promise.resolve({ ok: true, json: async () => ({ state: 'known', engines: [{ id: 'claude', name: 'Claude', restricted: true }] }) })
         if (url === '/api/daemons') {
           return Promise.resolve({
             ok: true,
@@ -258,7 +302,9 @@ describe('LaunchSheet', () => {
     )
 
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText('Launch Session')).not.toBeDisabled())
     fireEvent.click(screen.getByText('Launch Session'))
 
     await waitFor(() => expect(screen.getByText(/Failed to launch session/)).toBeInTheDocument())
@@ -268,7 +314,7 @@ describe('LaunchSheet', () => {
 
   it('remembers the picked engine across launches (localStorage)', async () => {
     await renderAndWaitForLoad()
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     await selectRepoAndSubmit()
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.engine).toBe('codex')
@@ -306,11 +352,13 @@ describe('LaunchSheet', () => {
     )
 
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText('Launch Session')).not.toBeDisabled())
     fireEvent.click(screen.getByText('Launch Session'))
 
     await waitFor(() => expect(mockAddPendingSession).toHaveBeenCalledWith('new-sess'))
-    expect(screen.getByTestId('session-page')).toBeInTheDocument()
+    expect(await screen.findByTestId('session-page')).toBeInTheDocument()
     expect(mockOnClose).toHaveBeenCalled()
   })
 })
@@ -338,6 +386,7 @@ describe('LaunchSheet — Run column defaults', () => {
       </MemoryRouter>,
     )
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
   }
 
   it('defaults to the cluster pod and an agent session when cluster is configured, even with a daemon connected', async () => {
@@ -363,7 +412,7 @@ describe('LaunchSheet — Run column defaults', () => {
     expect(screen.getByLabelText(ACK_AGENT)).toBeInTheDocument()
     expect(screen.getByText(/Launch/).closest('button')).toBeDisabled()
     fireEvent.click(screen.getByTestId('agent-ack'))
-    expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled()
+    await waitFor(() => expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled())
   })
 
   it('keeps a runtime the user picked when kind and engine change around it', async () => {
@@ -371,7 +420,7 @@ describe('LaunchSheet — Run column defaults', () => {
     fireEvent.click(screen.getByTestId('runtime-daemon'))
     fireEvent.click(screen.getByTestId('kind-tmux'))
     fireEvent.click(screen.getByTestId('kind-agent'))
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     expect(screen.getByTestId('runtime-daemon')).toHaveAttribute('aria-checked', 'true')
   })
 
@@ -483,11 +532,13 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
       </MemoryRouter>,
     )
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
   }
 
   it('sends cluster + agent', async () => {
     await renderSheet({ clusterStatus: CLUSTER_ON, myCreds: { engines: ['claude'], git: true } })
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.runtime).toBe('cluster')
@@ -497,6 +548,7 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
   it('sends docker + agent', async () => {
     await renderSheet()
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.runtime).toBe('docker')
@@ -507,6 +559,7 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     await renderSheet()
     fireEvent.click(screen.getByTestId('kind-tmux'))
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.runtime).toBe('docker')
@@ -521,26 +574,21 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     expect(screen.getByText(/Launch/)).toBeDisabled()
     expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('ANTHROPIC_API_KEY')
     // Another engine on the same machine is fine.
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     expect(screen.queryByTestId('launch-blocked-reason')).not.toBeInTheDocument()
   })
 
-  it('warns before Launch when the daemon has no Claude credential for the Local sandbox, without blocking', async () => {
+  it('does not offer an unavailable engine or allow an empty-target launch', async () => {
     await renderSheet({ daemon: { available_engines: [], sandbox_claude_credential: false } })
-    expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'true')
-    expect(screen.getByTestId('sandbox-claude-missing')).toHaveTextContent('no Claude login or API key')
+    expect(screen.getByText(/No engines available/)).toBeInTheDocument()
+    expect(screen.queryByTestId('engine-claude')).not.toBeInTheDocument()
     fireEvent.click(screen.getByText('myrepo'))
-    // An advisory: the server is the real gate.
-    expect(screen.getByText(/Launch/)).not.toBeDisabled()
-    // Another engine takes the specific note away.
-    fireEvent.click(screen.getByTestId('engine-codex'))
-    expect(screen.queryByTestId('sandbox-claude-missing')).not.toBeInTheDocument()
+    expect(screen.getByText(/Launch/)).toBeDisabled()
   })
 
-  it('reads a missing available_engines as none (not unknown) on a daemon that reports the sandbox credential', async () => {
-    // Go sends an empty engine list as null.
-    await renderSheet({ daemon: { available_engines: null, sandbox_claude_credential: false } })
-    expect(screen.getByTestId('sandbox-claude-missing')).toBeInTheDocument()
+  it('uses known empty discovery when no sandbox credential is available', async () => {
+    await renderSheet({ daemon: { available_engines: [], sandbox_claude_credential: false } })
+    expect(screen.getByText(/No engines available/)).toBeInTheDocument()
   })
 
   it('does not turn a missing engine list into a Claude warning on This machine', async () => {
@@ -603,7 +651,7 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     fireEvent.click(screen.getByText('myrepo'))
     fireEvent.click(screen.getByTestId('agent-ack'))
     expect(screen.queryByTestId('launch-blocked-reason')).not.toBeInTheDocument()
-    expect(screen.getByText(/Launch/)).not.toBeDisabled()
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
   })
 
   it('sends daemon + agent once acknowledged', async () => {
@@ -611,6 +659,7 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     fireEvent.click(screen.getByTestId('runtime-daemon'))
     fireEvent.click(screen.getByText('myrepo'))
     fireEvent.click(screen.getByTestId('agent-ack'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.runtime).toBe('daemon')
@@ -623,6 +672,7 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     fireEvent.click(screen.getByTestId('kind-tmux'))
     fireEvent.click(screen.getByText('myrepo'))
     fireEvent.click(screen.getByLabelText(ACK_TERMINAL))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.runtime).toBe('daemon')
@@ -653,6 +703,7 @@ describe('LaunchSheet — Run column rules', () => {
       </MemoryRouter>,
     )
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
   }
 
   it('disables Terminal on the cluster pod, with the reason', async () => {
@@ -698,6 +749,7 @@ describe('LaunchSheet — Run column rules', () => {
     expect(screen.getByTestId('launch-unattended')).toHaveTextContent(
       'Nobody is watching: the agent decides and finishes on its own instead of discussing and waiting for you.',
     )
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.interaction).toBe('interactive')
@@ -707,6 +759,7 @@ describe('LaunchSheet — Run column rules', () => {
     await renderSheet()
     fireEvent.click(screen.getByTestId('unattended-toggle'))
     expect(screen.getByTestId('unattended-toggle')).toBeChecked()
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.interaction).toBe('unattended')
@@ -717,6 +770,7 @@ describe('LaunchSheet — Run column rules', () => {
     fireEvent.click(screen.getByTestId('unattended-toggle'))
     fireEvent.click(screen.getByTestId('kind-tmux'))
     expect(screen.queryByTestId('unattended-toggle')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.kind).toBe('tmux')
@@ -741,6 +795,7 @@ describe('LaunchSheet — Run column rules', () => {
 
     fireEvent.click(screen.getByText('myrepo'))
     fireEvent.click(screen.getByLabelText(ACK_TERMINAL))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.dangerously_skip_permissions).toBe(false)
@@ -773,9 +828,11 @@ describe('LaunchSheet — Run column rules', () => {
     expect(captureBody.value).toBeUndefined()
   })
 
-  it('picking OpenClaw forces this machine and closes off the sandboxed runtimes', async () => {
+  it('offers OpenClaw on its host target and closes off sandboxed runtimes', async () => {
     await renderSheet({ clusterStatus: CLUSTER_ON })
-    fireEvent.click(screen.getByTestId('engine-openclaw'))
+    expect(screen.queryByTestId('engine-openclaw')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('runtime-daemon'))
+    fireEvent.click(await screen.findByTestId('engine-openclaw'))
     expect(screen.getByTestId('runtime-daemon')).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByTestId('runtime-docker')).toBeDisabled()
     expect(screen.getByTestId('runtime-cluster')).toBeDisabled()
@@ -783,6 +840,7 @@ describe('LaunchSheet — Run column rules', () => {
 
     fireEvent.click(screen.getByText('myrepo'))
     fireEvent.click(screen.getByTestId('agent-ack'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.engine).toBe('openclaw')
@@ -799,15 +857,15 @@ describe('LaunchSheet — Run column rules', () => {
     expect(screen.getByLabelText(ACK_TERMINAL)).toBeInTheDocument()
   })
 
-  it('warns when the picked engine has no credentials on cluster runtime', async () => {
+  it('hides engines unavailable on the cluster', async () => {
     await renderSheet({ clusterStatus: { configured: true, available_engines: ['claude'] } })
-    fireEvent.click(screen.getByTestId('engine-codex'))
-    expect(screen.getByText(/Cluster runtime has no credentials configured for codex/)).toBeInTheDocument()
+    expect(screen.queryByTestId('engine-codex')).not.toBeInTheDocument()
+    expect(screen.queryByText('Engine', { exact: true })).not.toBeInTheDocument()
   })
 
   it('shows no warning when the picked engine is available on cluster runtime', async () => {
     await renderSheet({ clusterStatus: { configured: true, available_engines: ['claude', 'codex'] } })
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     expect(screen.queryByText(/has no credentials configured/)).not.toBeInTheDocument()
   })
 })
@@ -835,27 +893,16 @@ describe('LaunchSheet — cluster credential preflight', () => {
       </MemoryRouter>,
     )
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
     // Cluster is the default wherever it is configured — assert that rather
     // than clicking, so the preflight cases also cover the default path.
     expect(screen.getByTestId('runtime-cluster')).toHaveAttribute('aria-checked', 'true')
   }
 
-  it('blocks launch and links to Settings when the engine has no credential anywhere', async () => {
-    await renderClusterAgent({
-      daemons: [],
-      clusterStatus: CLUSTER_ON,
-      myCreds: { engines: ['claude'], git: true },
-    })
-    fireEvent.click(screen.getByTestId('engine-codex'))
-    fireEvent.click(screen.getByText('myrepo'))
-
-    const msg = screen.getByTestId('cluster-engine-block')
-    expect(msg).toHaveTextContent('Add a Codex credential in Settings before launching a cluster session.')
-    const link = within(msg).getByRole('link', { name: 'Settings' })
-    expect(link).toHaveAttribute('href', `${coreOrigin()}/settings`)
-    expect(link).toHaveAttribute('target', '_blank')
-    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
-    expect(screen.getByText(/Launch/).closest('button')).toBeDisabled()
+  it('does not offer an engine absent from caller-scoped cluster discovery', async () => {
+    await renderClusterAgent({ daemons: [], clusterStatus: CLUSTER_ON, myCreds: { engines: ['claude'], git: true } })
+    expect(screen.queryByTestId('engine-codex')).not.toBeInTheDocument()
+    expect(screen.queryByText('Engine', { exact: true })).not.toBeInTheDocument()
   })
 
   it('does not block when the engine comes from the user\'s own credentials', async () => {
@@ -864,22 +911,19 @@ describe('LaunchSheet — cluster credential preflight', () => {
       clusterStatus: CLUSTER_ON,
       myCreds: { engines: ['claude', 'codex'], git: true },
     })
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     fireEvent.click(screen.getByText('myrepo'))
 
     expect(screen.queryByTestId('cluster-engine-block')).not.toBeInTheDocument()
     expect(screen.queryByText(/has no credentials configured/)).not.toBeInTheDocument()
-    expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled()
+    await waitFor(() => expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled())
   })
 
-  it('keeps the softer warning and does not block when personal credentials are unknown', async () => {
+  it('uses scoped discovery rather than unknown legacy credential metadata', async () => {
     await renderClusterAgent({ daemons: [], clusterStatus: CLUSTER_ON, myCreds: 'fail' })
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    expect(screen.queryByTestId('engine-codex')).not.toBeInTheDocument()
     fireEvent.click(screen.getByText('myrepo'))
-
-    expect(screen.getByText(/Cluster runtime has no credentials configured for codex/)).toBeInTheDocument()
-    expect(screen.queryByTestId('cluster-engine-block')).not.toBeInTheDocument()
-    expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled()
+    await waitFor(() => expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled())
   })
 
   it('warns (without blocking) when neither the user nor the operator has a GitHub credential', async () => {
@@ -895,7 +939,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
       'No GitHub credential — this session can only clone public repositories and cannot push. Add one in Settings.',
     )
     expect(within(warning).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', `${coreOrigin()}/settings`)
-    expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled()
+    await waitFor(() => expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled())
   })
 
   it('shows no git warning when the user has their own GitHub credential', async () => {
@@ -930,6 +974,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     const repoInput = screen.getByPlaceholderText('org/name')
     fireEvent.change(repoInput, { target: { value: 'acme/widget' } })
     fireEvent.click(screen.getByText('Use acme/widget'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
 
     await waitFor(() => expect(captureBody.value).toBeDefined())
@@ -948,6 +993,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
       myCreds: { engines: ['claude'], git: true },
     })
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
 
     await waitFor(() => expect(captureBody.value).toBeDefined())
@@ -975,6 +1021,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     expect(screen.getByTestId('repo-remote')).toHaveTextContent('example-org/example-repo')
     fireEvent.click(screen.getByText('entertainment'))
     expect(screen.queryByTestId('cluster-repo-unresolved')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
 
     await waitFor(() => expect(captureBody.value).toBeDefined())
@@ -992,6 +1039,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     })
     expect(screen.getByTestId('repo-provider')).toHaveTextContent('GitLab')
     fireEvent.click(screen.getByText('lab-tool'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.repo).toBe('example-group/lab-tool')
@@ -1019,6 +1067,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     fireEvent.change(screen.getByPlaceholderText('org/name'), { target: { value: 'example-org/scratchpad' } })
     fireEvent.click(screen.getByText('Use example-org/scratchpad'))
     expect(screen.queryByTestId('cluster-repo-unresolved')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.repo).toBe('example-org/scratchpad')
@@ -1033,6 +1082,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     fireEvent.click(screen.getByTestId('runtime-docker'))
     fireEvent.click(screen.getByText('scratchpad'))
     expect(screen.queryByTestId('cluster-repo-unresolved')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.repo).toBe('scratchpad')
@@ -1051,6 +1101,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     })
     fireEvent.click(screen.getByTestId('runtime-docker'))
     fireEvent.click(screen.getByText('lab-tool'))
+    await waitFor(() => expect(screen.getByText(/Clone & Launch|Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Clone & Launch|Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.repo).toBe('example-group/lab-tool')
@@ -1061,6 +1112,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     await renderClusterAgent({ clusterStatus: CLUSTER_ON, myCreds: { engines: ['claude'], git: true } })
     fireEvent.click(screen.getByTestId('runtime-docker'))
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.repo).toBe('myrepo')
@@ -1104,7 +1156,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     fireEvent.click(screen.getByTestId('new-repo-provider-gitlab'))
     expect(screen.getByText('Create "grp/tool" on GitLab')).toBeInTheDocument()
     expect(screen.getByTestId('new-repo-token-note')).toHaveTextContent('No GitLab token in Settings')
-    expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled()
+    await waitFor(() => expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled())
     fireEvent.click(screen.getByText('Create & Launch →'))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value).toMatchObject({ repo: 'grp/tool', provider: 'gitlab', new_repo: true, visibility: 'private' })
@@ -1158,10 +1210,12 @@ describe('LaunchSheet — Claude model and effort', () => {
       </MemoryRouter>,
     )
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
   }
 
   async function launch() {
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     return captureBody.value!
@@ -1271,7 +1325,7 @@ describe('LaunchSheet — Claude model and effort', () => {
         ] },
       },
     })
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     await screen.findByTestId('model-gpt-9-codex')
     expect(screen.queryByTestId('model-claude-opus-9')).not.toBeInTheDocument()
     expect(screen.getByTestId('effort-ultra')).toHaveAttribute('aria-checked', 'true')
@@ -1287,7 +1341,7 @@ describe('LaunchSheet — Claude model and effort', () => {
 
   it('sends neither model nor effort for another engine', async () => {
     await renderSheet({ models: LIVE, daemon: { available_engines: ['claude', 'codex'] } })
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     expect(screen.queryByTestId('effort-row')).not.toBeInTheDocument()
     const body = await launch()
     expect(body).not.toHaveProperty('model')
@@ -1335,10 +1389,12 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
       </MemoryRouter>,
     )
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
   }
 
   async function launch() {
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     return captureBody.value!
@@ -1353,9 +1409,8 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
       },
       modelRequests: asked,
     })
-    fireEvent.click(screen.getByTestId('engine-codex'))
     await screen.findByTestId('model-gpt-6-astra')
-    expect(asked).toContain('codex?runtime=cluster')
+    await waitFor(() => expect(asked).toContain('codex?runtime=cluster'))
     expect(screen.getByTestId('effort-low')).toHaveAttribute('aria-checked', 'true')
     fireEvent.click(screen.getByTestId('effort-ultra'))
     fireEvent.click(screen.getByTestId('model-gpt-5.5'))
@@ -1366,12 +1421,12 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
   })
 
   it('preserves a model typed while the first cluster catalog request is pending', async () => {
-    await renderSheet({ clusterStatus: { configured: true, available_engines: ['codex'], git_configured: true } })
+    await renderSheet({ clusterStatus: { configured: true, available_engines: ['claude', 'codex'], git_configured: true } })
     const baseFetch = globalThis.fetch
     let answer!: (response: unknown) => void
     vi.stubGlobal('fetch', (url: string, init?: RequestInit) => url === '/api/models/codex?runtime=cluster'
       ? new Promise(resolve => { answer = resolve }) : baseFetch(url, init))
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     fireEvent.change(screen.getByTestId('model-free-text-input'), { target: { value: 'custom-model' } })
     await act(async () => answer({ ok: true, json: async () => ({ ...CODEX_D1, source: 'live' }) }))
     expect(screen.getByTestId('model-free-text-input')).toHaveValue('custom-model')
@@ -1382,7 +1437,7 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
   it("asks the selected daemon for Codex's list and sends its model and effort", async () => {
     const asked: string[] = []
     await renderSheet({ modelsByEngine: { 'codex?daemon_id=d1': CODEX_D1 }, modelRequests: asked })
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     await screen.findByTestId('model-gpt-6-astra')
     expect(asked).toContain('codex?daemon_id=d1')
     expect(screen.getByTestId('model-gpt-6-astra')).toHaveAttribute('aria-pressed', 'true')
@@ -1400,7 +1455,7 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
 
   it('offers Hermes an Auto effort, preselected, that sends no effort', async () => {
     await renderSheet({ modelsByEngine: { 'hermes?daemon_id=d1': HERMES_D1 } })
-    fireEvent.click(screen.getByTestId('engine-hermes'))
+    fireEvent.click(await screen.findByTestId('engine-hermes'))
     await screen.findByTestId('model-qwen3-30b')
     expect(screen.getByTestId('effort-auto')).toHaveAttribute('aria-checked', 'true')
     for (const e of HERMES_EFFORTS) expect(screen.getByTestId(`effort-${e}`)).toHaveAttribute('aria-checked', 'false')
@@ -1416,7 +1471,7 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
 
   it('sends an explicit Hermes reasoning level', async () => {
     await renderSheet({ modelsByEngine: { 'hermes?daemon_id=d1': HERMES_D1 } })
-    fireEvent.click(screen.getByTestId('engine-hermes'))
+    fireEvent.click(await screen.findByTestId('engine-hermes'))
     fireEvent.click(await screen.findByTestId('effort-none'))
     const body = await launch()
     expect(body.effort).toBe('none')
@@ -1424,7 +1479,7 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
 
   it('with no list reported, offers a free-text model name — sent only when valid — with an Auto-first effort', async () => {
     await renderSheet({ modelsByEngine: { codex: { ...NONE, engine_efforts: CODEX_EFFORTS } } })
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     const input = await screen.findByTestId('model-free-text-input')
     expect(screen.queryByTestId('model-picker')).not.toBeInTheDocument()
     // The engine's allowlist, Auto preselected.
@@ -1439,6 +1494,7 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
     fireEvent.change(input, { target: { value: 'gpt-5.5' } })
     expect(screen.queryByTestId('model-free-text-invalid')).not.toBeInTheDocument()
     fireEvent.click(screen.getByTestId('effort-minimal'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.model).toBe('gpt-5.5')
@@ -1447,7 +1503,7 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
 
   it('with no list and nothing typed, sends no model and (Auto) no effort', async () => {
     await renderSheet({ modelsByEngine: { hermes: { ...NONE, engine_efforts: HERMES_EFFORTS } } })
-    fireEvent.click(screen.getByTestId('engine-hermes'))
+    fireEvent.click(await screen.findByTestId('engine-hermes'))
     await screen.findByTestId('model-free-text-input')
     expect(screen.getByTestId('effort-auto')).toHaveAttribute('aria-checked', 'true')
     const body = await launch()
@@ -1475,7 +1531,7 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
     })
     // On the daemon first: its list shows (so the negative check below can fail).
     fireEvent.click(screen.getByTestId('runtime-docker'))
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     fireEvent.click(await screen.findByTestId('model-gpt-5.5'))
     // Then the cluster: no daemon, so no daemon's list — the free-text box,
     // empty (the list pick is not carried into it).
@@ -1484,7 +1540,7 @@ describe('LaunchSheet — daemon-reported model lists (Codex, Hermes)', () => {
     expect(screen.queryByTestId('model-gpt-6-astra')).not.toBeInTheDocument()
     expect(screen.queryByTestId('model-gpt-5.5')).not.toBeInTheDocument()
     expect((input as HTMLInputElement).value).toBe('')
-    expect(asked).toContain('codex?runtime=cluster')
+    await waitFor(() => expect(asked).toContain('codex?runtime=cluster'))
     // Typed on the cluster, then back to the daemon and back again: cleared.
     fireEvent.change(input, { target: { value: 'gpt-typed' } })
     fireEvent.click(screen.getByTestId('runtime-docker'))
@@ -1522,6 +1578,7 @@ describe('LaunchSheet — clone a named repository onto a daemon', () => {
       </MemoryRouter>,
     )
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
     expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'true')
   }
 
@@ -1530,6 +1587,7 @@ describe('LaunchSheet — clone a named repository onto a daemon', () => {
   }
 
   async function launch() {
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     return captureBody.value!
@@ -1589,7 +1647,7 @@ describe('LaunchSheet — clone a named repository onto a daemon', () => {
     fireEvent.click(screen.getByTestId('free-text-repo'))
     expect(screen.getByTestId('clone-git-advisory')).toHaveTextContent('You have no GitLab token')
     expect(screen.getByTestId('clone-git-advisory').querySelector('a')).toHaveAttribute('href', `${coreOrigin()}/settings`)
-    expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled()
+    await waitFor(() => expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled())
     expect((await launch()).git_url).toBe('https://gitlab.com/grp/private-tool')
   })
 
@@ -1674,7 +1732,7 @@ describe('LaunchSheet — clone a named repository onto a daemon', () => {
     expect(screen.getByTestId('clone-host-token-note')).toHaveTextContent('pick Local sandbox')
     // Advisory, not a block: a public repository still clones there.
     fireEvent.click(screen.getByTestId('agent-ack'))
-    expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled()
+    await waitFor(() => expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled())
   })
 
   it('says nothing about the host token on a daemon whose owner allows it', async () => {
@@ -1726,6 +1784,7 @@ describe('LaunchSheet — No repository', () => {
       </MemoryRouter>,
     )
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
   }
 
   async function launch() {
@@ -1872,10 +1931,12 @@ describe('LaunchSheet MCP servers', () => {
       </MemoryRouter>,
     )
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
   }
 
   async function launch() {
     fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     return captureBody.value!
@@ -1892,7 +1953,7 @@ describe('LaunchSheet MCP servers', () => {
   it('offers Codex connections on an updated sandbox daemon', async () => {
     await renderSheet({ daemon: { codex_restricted: true } })
     fireEvent.click(screen.getByTestId('runtime-docker'))
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     expect(await screen.findByTestId('mcp-picker')).toBeInTheDocument()
   })
 
@@ -1921,12 +1982,12 @@ describe('LaunchSheet MCP servers', () => {
     await renderSheet({ clusterStatus: CLUSTER_ON, myCreds: { engines: ['claude'], git: true } })
     expect(await screen.findByTestId('mcp-picker')).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('runtime-docker'))
-    expect(screen.getByTestId('mcp-picker')).toBeInTheDocument()
+    expect(await screen.findByTestId('mcp-picker')).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('runtime-daemon'))
     expect(screen.queryByTestId('mcp-picker')).toBeNull()
     expect(screen.getByTestId('launch-mcp-unavailable')).toHaveTextContent(/not on this machine unsandboxed/)
     fireEvent.click(screen.getByTestId('runtime-docker'))
-    fireEvent.click(screen.getByTestId('engine-codex'))
+    fireEvent.click(await screen.findByTestId('engine-codex'))
     expect(screen.queryByTestId('mcp-picker')).toBeNull()
     expect(screen.getByTestId('launch-mcp-unavailable')).toBeInTheDocument()
   })
@@ -2028,11 +2089,12 @@ describe('LaunchSheet — opens from what it last knew', () => {
     renderSheet()
     expect(screen.getByText('Loading...')).toBeInTheDocument()
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
     expect(screen.getAllByTestId('repos-skeleton')).toHaveLength(3)
     expect(screen.queryByText('myrepo')).not.toBeInTheDocument()
     expect(screen.queryByTestId('repos-empty-hint')).not.toBeInTheDocument()
     // Nothing waits on the list: No repository launches right away.
-    expect(launchButton()).toBeEnabled()
+    await waitFor(() => expect(launchButton()).toBeEnabled())
 
     release('/api/repos')
     await screen.findByText('myrepo')
@@ -2075,10 +2137,10 @@ describe('LaunchSheet — opens from what it last knew', () => {
     // Picking one that is still there clears it.
     fireEvent.click(screen.getByTestId('daemon-d1'))
     expect(screen.queryByTestId('launch-blocked-reason')).not.toBeInTheDocument()
-    expect(launchButton()).toBeEnabled()
+    await waitFor(() => expect(launchButton()).toBeEnabled())
   })
 
-  it('treats a cached missing engine credential as advice until fresh answers confirm it', async () => {
+  it('uses scoped engine availability rather than stale credential metadata', async () => {
     const CREDS = { engines: [], git: true, git_providers: ['github'] }
     const CLUSTER_CODEX_ONLY = { configured: true, available_engines: ['codex'], git_configured: false }
     await prime({ clusterStatus: CLUSTER_CODEX_ONLY, myCreds: CREDS })
@@ -2086,9 +2148,9 @@ describe('LaunchSheet — opens from what it last knew', () => {
     renderSheet()
     await waitFor(() => expect(screen.queryByTestId('launch-refreshing')).toHaveTextContent('credentials'))
     expect(screen.getByTestId('runtime-cluster')).toHaveAttribute('aria-checked', 'true')
-    expect(launchButton()).toBeEnabled()
+    await waitFor(() => expect(launchButton()).toBeEnabled())
     release('/api/me/credentials')
-    await waitFor(() => expect(launchButton()).toBeDisabled())
+    await waitFor(() => expect(launchButton()).toBeEnabled())
   })
 
   it("does not let the first repository answer, landing late, undo a repos-folder change", async () => {
@@ -2105,6 +2167,7 @@ describe('LaunchSheet — opens from what it last knew', () => {
     }))
     renderSheet()
     await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
     fireEvent.click(screen.getByTestId('repos-root-edit'))
     fireEvent.change(screen.getByTestId('repos-root-input'), { target: { value: '/elsewhere' } })
     fireEvent.click(screen.getByTestId('repos-root-save'))
@@ -2137,7 +2200,7 @@ describe('LaunchSheet — opens from what it last knew', () => {
     launchClock.now = (() => { const later = Date.now() + 60_000; return () => later })()
     const second = holdFetch(['/api/mcp/connections'], MCP)
     renderSheet()
-    fireEvent.click(screen.getByRole('checkbox', { name: 'calendar' }))
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
     await screen.findByTestId('mcp-presets-calendar')
     expect(toolCalls(second.fn)).toBe(1)
   })

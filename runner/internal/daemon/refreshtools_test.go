@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"sync/atomic"
 	"testing"
 
@@ -48,5 +49,26 @@ func TestClaudeDriverRefreshToolsMarksStale(t *testing.T) {
 	d.sm.Unlock()
 	if after != before+1 {
 		t.Fatalf("cfgGen %d -> %d, want +1", before, after)
+	}
+}
+
+func TestActualAdaptersReportToolSchemaReloadPolicy(t *testing.T) {
+	claude, ok := claudeInitCapabilities([]byte(`{"tools":["Read"]}`), nil, t.TempDir(), t.TempDir())
+	if !ok || claude.ToolSchemaRefresh != protocol.ToolSchemaRefreshNextTurn {
+		t.Fatal("Claude CLI must report its idle/next-turn refresh")
+	}
+	native := nativeCapabilities("fixture", nil, nil, nil, t.TempDir(), t.TempDir())
+	if native.ToolSchemaRefresh != protocol.ToolSchemaRefreshNewSession {
+		t.Fatal("native API loop cannot promise reload just because its provider is Claude")
+	}
+	codex := (&codexRestrictedRuntime{}).capabilities("fixture")
+	if codex.ToolSchemaRefresh != protocol.ToolSchemaRefreshNewSession {
+		t.Fatal("Codex native schema requires a fresh conversation")
+	}
+	generic, ok := engineCapabilities(EngineSpec{ID: "fixture-engine", DisplayName: "Fixture", Capabilities: func(CapabilityContext) []protocol.CapabilityGroup {
+		return []protocol.CapabilityGroup{{ID: protocol.CapGroupTools, Items: []protocol.CapabilityItem{{Name: "fixture"}}}}
+	}}, "fixture", CapabilityContext{})
+	if !ok || generic.ToolSchemaRefresh != protocol.ToolSchemaRefreshNewSession {
+		t.Fatal("generic CLI must not promise an unsupported refresh")
 	}
 }

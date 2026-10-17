@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -15,31 +16,23 @@ import (
 // idempotently; the older ones predate the rule.
 func TestMigrationsCanBeReapplied(t *testing.T) {
 	ctx := context.Background()
-	const schema = "test_blerg_core_db_reapply"
-	setup, err := pgxpool.New(ctx, testDSN(t))
+	// Preserve migration coverage outside public, independently of fixture cloning.
+	cfg := testsupport.Empty(t)
+	setup, err := pgxpool.NewWithConfig(ctx, cfg.Copy())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := setup.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setup.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+	if _, err := setup.Exec(ctx, "CREATE SCHEMA migration_fixture"); err != nil {
+		setup.Close()
 		t.Fatal(err)
 	}
 	setup.Close()
-	cfg, err := pgxpool.ParseConfig(testDSN(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	cfg.ConnConfig.RuntimeParams["search_path"] = "migration_fixture"
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
-		pool.Close()
-	})
+	t.Cleanup(pool.Close)
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

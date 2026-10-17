@@ -119,7 +119,7 @@ def make_stub_server(message_id="msg-123", answer_text="yes go ahead",
     return server
 
 
-def run_blerg_runner(args, env_override=None, timeout=10):
+def run_blerg_runner(args, env_override=None, timeout=10, cwd=None):
     """Run the blerg-runner script with given args and optional env overrides."""
     # Tests must never inherit the running agent's live token or token-file path.
     env = {k: v for k, v in os.environ.items() if not k.startswith("BLERG_")}
@@ -135,6 +135,7 @@ def run_blerg_runner(args, env_override=None, timeout=10):
         text=True,
         timeout=timeout,
         env=env,
+        cwd=cwd,
     )
     return result
 
@@ -1063,7 +1064,8 @@ class TestPublishHelp(unittest.TestCase):
         for needle in (
             "Shown in the app (viewable): markdown, plain text and source code, json, csv/tsv (as a table), "
             "images png/jpg/gif/webp/svg, pdf, audio/video, html (single self-contained file, "
-            "runs in a sandbox with scripts but NO network).",
+            "runs in a sandbox with scripts but NO network), a diff or patch (.diff/.patch, in a diff viewer; "
+            "`blerg-runner diff` makes one from git).",
             "Download only (no preview): docx, xlsx, pptx, zip and other binaries.",
             "to read/review => markdown, html or pdf",
             "data => csv or json",
@@ -1848,6 +1850,193 @@ class TestTopic(unittest.TestCase):
             self.assertIn(" ".join(TOPIC_LINE.split()), " ".join(result.stdout.split()), args)
 
 
+# ── checklist, pin, unpin ─────────────────────────────────────────────────────
+
+WORK_LINE = ('When you work on a ticket, read it with the tools you have, then `blerg-runner pin` it '
+             '(`blerg-runner pin --help` shows the shape); keep a checklist with `blerg-runner checklist` '
+             'and tick items as you finish them.')
+
+
+class TestWork(unittest.TestCase):
+    def _run(self, args, server, requests=1, stdin=None):
+        env = {
+            "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}",
+            "BLERG_RUNNER_SESSION_ID": "sess-w",
+            "BLERG_RUNNER_SESSION_TOKEN": "sess-tok",
+            "BLERG_RUNNER_DAEMON_TOKEN": None,
+            "BLERG_RUNNER_BOARD_TOKEN": None,
+        }
+
+        def serve():
+            for _ in range(requests):
+                server.handle_request()
+        t = threading.Thread(target=serve)
+        t.start()
+        if stdin is None:
+            result = run_blerg_runner(args, env_override=env)
+        else:
+            full = os.environ.copy()
+            for k, v in env.items():
+                if v is None:
+                    full.pop(k, None)
+                else:
+                    full[k] = v
+            result = subprocess.run([sys.executable, SCRIPT] + args, input=stdin, capture_output=True, text=True, env=full, timeout=30)
+        while t.is_alive():
+            try:
+                socket.create_connection(server.server_address, timeout=2).close()
+            except OSError:
+                break
+            t.join(timeout=1)
+        server.server_close()
+        return result
+
+    LIST = {"items": [{"text": "Read", "done": True}, {"text": "Write tests", "done": False}], "op": "tick",
+            "changed": {"index": 1, "text": "Read", "done": True}}
+
+    def test_set_sends_the_items_and_prints_the_list(self):
+        server = make_topic_server(reply=self.LIST)
+        result = self._run(["checklist", "set", "Read", "Write tests"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        req = server.recorded[0]
+        self.assertEqual(req["path"], "/api/sessions/sess-w/checklist")
+        self.assertEqual(req["auth"], "Bearer sess-tok")
+        self.assertEqual(req["body"], {"op": "set", "items": ["Read", "Write tests"]})
+        self.assertEqual(result.stdout.splitlines(), ["Checklist · 1 of 2 done", "  ☑ 1. Read", "  ☐ 2. Write tests"])
+
+    def test_tick_by_number_by_text_and_forced_text(self):
+        for args, want in ((["2"], {"op": "tick", "index": 2}), (["Write tests"], {"op": "tick", "text": "Write tests"}),
+                           (["--text", "2"], {"op": "tick", "text": "2"})):
+            server = make_topic_server(reply=self.LIST)
+            result = self._run(["checklist", "tick"] + args, server)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(server.recorded[0]["body"], want, args)
+
+    def test_add_untick_clear(self):
+        for args, want in ((["add", "Docs"], {"op": "add", "item": "Docs"}), (["untick", "1"], {"op": "untick", "index": 1}),
+                           (["clear"], {"op": "clear"})):
+            server = make_topic_server(reply={"items": [], "op": want["op"]})
+            result = self._run(["checklist"] + args, server)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(server.recorded[0]["body"], want)
+        self.assertEqual(result.stdout.strip(), "Checklist: empty")
+
+    def test_commits_ride_on_tick_and_add(self):
+        for args, want in (
+            (["tick", "2", "--commit", "abcdef1", "--commit", "1234567,fedcba9"],
+             {"op": "tick", "index": 2, "commits": ["abcdef1", "1234567", "fedcba9"]}),
+            (["add", "Docs", "--commit", "abcdef1"], {"op": "add", "item": "Docs", "commits": ["abcdef1"]}),
+        ):
+            server = make_topic_server(reply=self.LIST)
+            result = self._run(["checklist"] + args, server)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(server.recorded[0]["body"], want)
+
+    def test_bad_commits_are_refused_before_sending(self):
+        for args in (["tick", "1", "--commit", "xyz"], ["tick", "1", "--commit", ""], ["untick", "1", "--commit", "abcdef1"],
+                     ["set", "a", "--commit", "abcdef1"], ["clear", "--commit", "abcdef1"],
+                     ["tick", "1", "--commit", ",".join(["abcdef%d" % i for i in range(10)] * 3)]):
+            server = make_topic_server()
+            result = self._run(["checklist"] + args, server)
+            self.assertEqual(result.returncode, 1, args)
+            self.assertEqual(server.recorded, [], args)
+            self.assertIn("blerg-runner checklist:", result.stderr)
+
+    def test_bad_checklist_calls_are_refused_before_sending(self):
+        for args in (["set"], ["set", "  "], ["add"], ["tick"], ["tick", "1", "2"], ["clear", "x"], ["set"] + ["x"] * 51):
+            server = make_topic_server()
+            result = self._run(["checklist"] + args, server)
+            self.assertEqual(result.returncode, 1, args)
+            self.assertEqual(server.recorded, [], args)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_refusal_is_one_line(self):
+        server = make_topic_server(status=400, reply={"error": "there is no item 9; the checklist has 2"})
+        result = self._run(["checklist", "tick", "9"], server)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blerg-runner checklist: there is no item 9; the checklist has 2 (HTTP 400", result.stderr)
+
+    def test_an_older_server_says_so_without_a_traceback(self):
+        cases = ((200, "text/html", b"<!doctype html><title>app</title>"), (404, "text/plain", b"404 page not found"),
+                 (405, "text/plain", b"Method Not Allowed"), (200, "application/json", b"not json"))
+        for status, ctype, raw in cases:
+            for args in (["checklist", "clear"], ["unpin"]):
+                server = make_topic_server(status=status, ctype=ctype, raw=raw)
+                result = self._run(args, server)
+                self.assertEqual(result.returncode, 1, (status, args))
+                self.assertIn("this runner server is older than", result.stderr, (status, args))
+                self.assertIn("nothing was recorded", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_session_not_found_404_is_the_servers_sentence(self):
+        server = make_topic_server(status=404, reply={"error": "session not found"})
+        result = self._run(["checklist", "clear"], server)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("session not found", result.stderr)
+
+    TICKET = {"source": "jira", "key": "ABC-1", "title": "Crash on save", "status": "In Progress", "acceptance": ["Saves", "No crash"]}
+
+    def test_pin_reads_a_file_and_says_what_is_pinned(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(self.TICKET, fh)
+        try:
+            server = make_topic_server(reply={"action": "update", "ticket": self.TICKET, "previous": {"status": "Open", "title": "Crash on save"},
+                                              "pinned": [{"source": "jira", "key": "ABC-1"}]})
+            result = self._run(["pin", fh.name], server)
+        finally:
+            os.unlink(fh.name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["path"], "/api/sessions/sess-w/tickets")
+        self.assertEqual(server.recorded[0]["body"], {"action": "pin", "ticket": self.TICKET})
+        self.assertEqual(result.stdout.splitlines(), ["Updated jira:ABC-1 · Crash on save (status Open → In Progress)",
+                                                      "Pinned now: jira:ABC-1 (the first is current)"])
+
+    def test_pin_from_stdin_with_checklist_sets_the_acceptance(self):
+        server = make_topic_server(reply={"action": "pin", "ticket": self.TICKET, "pinned": [], "items": [], "op": "set"})
+        result = self._run(["pin", "-", "--checklist"], server, requests=2, stdin=json.dumps(self.TICKET))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([r["path"] for r in server.recorded], ["/api/sessions/sess-w/tickets", "/api/sessions/sess-w/checklist"])
+        self.assertEqual(server.recorded[1]["body"], {"op": "set", "items": ["Saves", "No crash"]})
+
+    def test_pin_refuses_what_is_not_a_json_object(self):
+        for raw in ("not json", "[1, 2]", '"x"'):
+            server = make_topic_server()
+            result = self._run(["pin", "-"], server, stdin=raw)
+            self.assertEqual(result.returncode, 1, raw)
+            self.assertEqual(server.recorded, [], raw)
+            self.assertNotIn("Traceback", result.stderr)
+        server = make_topic_server()
+        result = self._run(["pin", "/nonexistent/ticket.json"], server)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot read", result.stderr)
+
+    def test_unpin_by_source_and_key_or_the_current(self):
+        for args, want in (([], {"action": "unpin"}), (["jira:ABC-1"], {"action": "unpin", "source": "jira", "key": "ABC-1"}),
+                           (["77"], {"action": "unpin", "key": "77"})):
+            server = make_topic_server(reply={"action": "unpin", "ticket": {"source": "jira", "key": "ABC-1", "title": "T"}, "pinned": []})
+            result = self._run(["unpin"] + args, server)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(server.recorded[0]["body"], want)
+        self.assertEqual(result.stdout.splitlines(), ["Unpinned jira:ABC-1 · T", "Nothing is pinned now."])
+
+    def test_help_carries_the_line_and_the_mappings(self):
+        for args in (["checklist", "--help"], ["pin", "--help"], ["--help"]):
+            result = run_blerg_runner(args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(" ".join(WORK_LINE.split()), " ".join(result.stdout.split()), args)
+        out = run_blerg_runner(["pin", "--help"]).stdout
+        for needle in ("A JIRA issue", "A Bugzilla bug", "show_bug.cgi", "fields.summary", "copies the ticket's text"):
+            self.assertIn(needle, out)
+
+    def test_noop_when_not_under_blerg(self):
+        env = {k: None for k in ("BLERG_RUNNER_SESSION_ID", "BLERG_RUNNER_SERVER_HTTP",
+                                  "BLERG_RUNNER_SESSION_TOKEN", "BLERG_RUNNER_DAEMON_TOKEN", "BLERG_RUNNER_BOARD_TOKEN")}
+        for args in (["checklist", "clear"], ["unpin"]):
+            result = run_blerg_runner(args, env_override=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class ProxyStubHandler(http.server.BaseHTTPRequestHandler):
     """Stands in for an HTTP proxy: records the absolute URL it was asked for and answers 201."""
 
@@ -2207,6 +2396,323 @@ class TestSessionTokenFile(unittest.TestCase):
         result = self._update(env, server)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("revoked", result.stderr)
+
+
+# ── diff ───────────────────────────────────────────────────────────────────────
+
+GIT_ID = ["-c", "user.email=t@example.test", "-c", "user.name=Tester", "-c", "commit.gpgsign=false"]
+
+
+class TestDiff(unittest.TestCase):
+    """blerg-runner diff runs git in the working folder and publishes the patch as <slug>.diff."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = os.path.join(self.tmp.name, "repo")
+        os.mkdir(self.repo)
+        self.git("init", "-q")
+        self.write("f.txt", "one\n")
+        self.commit("first")
+
+    def git(self, *args):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["HOME"] = self.tmp.name
+        out = subprocess.run(["git", *GIT_ID, *args], cwd=self.repo, capture_output=True, env=env)
+        if out.returncode != 0:
+            raise AssertionError(f"git {args}: {out.stderr.decode()}")
+        return out.stdout.decode().strip()
+
+    def write(self, name, data):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data.encode() if isinstance(data, str) else data)
+
+    def commit(self, msg):
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", msg)
+        return self.git("rev-parse", "HEAD")
+
+    def run_diff(self, args, view="diff", limits=None, reply=None, cwd=None, cmd="diff", every=False):
+        server = make_artifact_server(view=view, limits=limits, reply=reply or {
+            "id": "d" * 32, "name": None, "view": view, "url": "/sessions/sess-diff?artifact=" + "d" * 32,
+        })
+        stop = serve(server)
+        env = {
+            "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}",
+            "BLERG_RUNNER_SESSION_ID": "sess-diff",
+            "BLERG_RUNNER_SESSION_TOKEN": "sess-tok",
+            "BLERG_RUNNER_DAEMON_TOKEN": None,
+            "BLERG_RUNNER_BOARD_TOKEN": None,
+            "HOME": self.tmp.name,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        try:
+            result = run_blerg_runner([cmd] + args, env_override=env, cwd=cwd or self.repo, timeout=30)
+        finally:
+            stop()
+        if every:
+            return result, server.recorded
+        posted = server.recorded[0] if server.recorded else None
+        return result, posted
+
+    def test_a_range_is_published_as_a_diff_file(self):
+        self.write("f.txt", "one\ntwo\n")
+        self.commit("second")
+        result, posted = self.run_diff(["HEAD~1..HEAD"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(posted["path"], "/api/sessions/sess-diff/artifacts")
+        self.assertEqual(posted["name"], "head-1-head.diff")
+        body = posted["body"].decode()
+        self.assertIn("diff --git a/f.txt b/f.txt", body)
+        self.assertIn("\n+two\n", body)
+        self.assertIn("Published diff HEAD~1..HEAD · 1 file · +1 −0 — viewable in the app", result.stdout)
+        self.assertIn("Link: /sessions/sess-diff?artifact=", result.stdout)
+
+    def test_several_shas_are_their_patches_in_the_order_given(self):
+        self.write("a.txt", "a\n")
+        first = self.commit("add a")
+        self.write("b.txt", "b\n")
+        second = self.commit("add b")
+        result, posted = self.run_diff([second[:9], first, "--title", "Two commits"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = posted["body"].decode()
+        self.assertEqual(posted["name"], "two-commits.diff")
+        i, j = body.index(f"commit {second}"), body.index(f"commit {first}")
+        self.assertLess(i, j)
+        self.assertLess(body.index("diff --git a/b.txt"), j)
+        self.assertGreater(body.index("diff --git a/a.txt"), j)
+        self.assertIn("    add b", body)
+        self.assertNotIn("t@example.test", body)  # no author email in the published patch
+        self.assertIn("Published diff Two commits · 2 files · +2 −0", result.stdout)
+
+    def test_a_merge_commit_is_its_diff_against_the_first_parent(self):
+        base = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "side")
+        self.write("side.txt", "s\n")
+        self.commit("side")
+        self.git("checkout", "-q", base)
+        self.git("checkout", "-q", "-b", "main2")
+        self.git("merge", "-q", "--no-ff", "-m", "merge side", "side")
+        result, posted = self.run_diff(["HEAD"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = posted["body"].decode()
+        self.assertIn("diff --git a/side.txt b/side.txt", body)
+        self.assertNotIn("diff --cc", body)
+
+    def test_staged_is_the_index_only(self):
+        self.write("f.txt", "one\nstaged\n")
+        self.git("add", "f.txt")
+        self.write("f.txt", "one\nstaged\nunstaged\n")
+        result, posted = self.run_diff(["--staged"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = posted["body"].decode()
+        self.assertIn("+staged", body)
+        self.assertNotIn("+unstaged", body)
+        self.assertEqual(posted["name"], "staged-changes.diff")
+
+    def test_worktree_is_every_uncommitted_change_with_new_files(self):
+        self.write("f.txt", "one\nstaged\n")
+        self.git("add", "f.txt")
+        self.write("f.txt", "one\nstaged\nunstaged\n")
+        self.write("dir/new file.txt", "fresh\n")
+        self.write(".gitignore", "ignored.log\n")
+        self.write("ignored.log", "noise\n")
+        for args in (["--worktree"], []):
+            result, posted = self.run_diff(args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            body = posted["body"].decode()
+            self.assertIn("+staged", body)
+            self.assertIn("+unstaged", body)
+            self.assertIn("+fresh", body)
+            self.assertIn("b/dir/new file.txt", body)
+            self.assertNotIn("noise", body)
+            self.assertEqual(posted["name"], "uncommitted-changes.diff")
+            self.assertIn("3 files", result.stdout)
+
+    def test_worktree_in_a_repository_with_no_commits(self):
+        os.mkdir(os.path.join(self.tmp.name, "fresh"))
+        subprocess.run(["git", "init", "-q"], cwd=os.path.join(self.tmp.name, "fresh"), check=True)
+        with open(os.path.join(self.tmp.name, "fresh", "a.txt"), "w") as f:
+            f.write("hello\n")
+        result, posted = self.run_diff(["--worktree"], cwd=os.path.join(self.tmp.name, "fresh"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("+hello", posted["body"].decode())
+
+    def test_runs_from_a_subfolder_and_paths_limit_the_diff(self):
+        self.write("sub/x.txt", "x\n")
+        self.write("-rf.txt", "dash\n")
+        self.write("--output=pwned", "opt\n")
+        self.commit("files")
+        self.write("sub/x.txt", "x\ny\n")
+        self.write("-rf.txt", "dash\nmore\n")
+        self.write("--output=pwned", "opt\nmore\n")
+        self.write("f.txt", "one\nother\n")
+        result, posted = self.run_diff(["--worktree", "--", "-rf.txt", "--output=pwned"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = posted["body"].decode()
+        self.assertIn("a/-rf.txt", body)
+        self.assertIn("a/--output=pwned", body)
+        self.assertNotIn("f.txt b/f.txt", body)
+        self.assertNotIn("x.txt", body)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "pwned")))
+        self.write("--output=fresh", "untracked\n")
+        result, posted = self.run_diff(["--", "--output=fresh"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("+untracked", posted["body"].decode())
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "fresh")))
+        result, posted = self.run_diff(["HEAD", "--", "x.txt"], cwd=os.path.join(self.repo, "sub"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("a/sub/x.txt", posted["body"].decode())
+
+    def test_an_option_is_never_taken_for_a_revision(self):
+        out = os.path.join(self.tmp.name, "written")
+        for bad in ([f"--output={out}"], ["--", f"--output={out}"], ["-p"]):
+            result, posted = self.run_diff(bad)
+            self.assertNotEqual(result.returncode, 0, bad)
+            self.assertIsNone(posted, bad)
+        self.assertFalse(os.path.exists(out))
+        result, posted = self.run_diff(["--end-of-options"])
+        self.assertNotEqual(result.returncode, 0)
+        result, posted = self.run_diff([f"HEAD..--output={out}"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(posted)
+        self.assertFalse(os.path.exists(out))
+
+    def test_an_unknown_revision_is_refused_in_words(self):
+        result, posted = self.run_diff(["nosuchref"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIsNone(posted)
+        self.assertIn("not a commit", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_binary_files_are_reported_by_size_not_embedded(self):
+        self.write("img.bin", b"\x00\x01\x02\x03\x04")
+        self.commit("bin")
+        self.write("img.bin", b"\x00\x01\x02\x03\x04\x05\xff")
+        self.write("new.bin", b"\x00" * 10)
+        result, posted = self.run_diff(["--worktree"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = posted["body"]
+        self.assertNotIn(b"\x00", body)
+        self.assertNotIn(b"GIT binary patch", body)
+        self.assertIn(b"Binary files a/img.bin and b/img.bin differ (binary, 5 -> 7 bytes)", body)
+        self.assertIn(b"Binary files /dev/null and b/new.bin differ (binary, 10 bytes)", body)
+        result, posted = self.run_diff(["HEAD"])
+        self.assertIn(b"Binary files /dev/null and b/img.bin differ (binary, 5 bytes)", posted["body"])
+
+    def test_nothing_the_repository_names_is_run(self):
+        marks = os.path.join(self.tmp.name, "marks")
+        os.mkdir(marks)
+        hooks = os.path.join(self.tmp.name, "hooks")
+        os.mkdir(hooks)
+        tool = os.path.join(self.tmp.name, "tool.sh")
+        with open(tool, "w") as f:
+            f.write(f'#!/bin/sh\ntouch "{marks}/$(basename "$0")-$$"\ncat\n')
+        os.chmod(tool, 0o755)
+        for hook in ("post-index-change", "pre-commit", "post-checkout", "reference-transaction", "fsmonitor-watchman"):
+            os.symlink(tool, os.path.join(hooks, hook))
+        self.write(".gitattributes", "*.txt filter=evil diff=evil\n")
+        self.commit("attrs")
+        for key, val in (("core.hooksPath", hooks), ("core.fsmonitor", tool),
+                         ("filter.evil.clean", tool), ("filter.evil.smudge", tool), ("filter.evil.required", "true"),
+                         ("diff.evil.textconv", tool), ("diff.evil.command", tool), ("diff.external", tool),
+                         ("log.showSignature", "true"), ("gpg.program", tool), ("core.pager", tool),
+                         ("pager.diff", tool), ("pager.show", tool), ("diff.noprefix", "true"), ("color.ui", "always"),
+                         ("diff.relative", "true")):
+            self.git("config", key, val)
+        # A commit carrying a signature: showing it with log.showSignature would run gpg.program.
+        raw = self.git("cat-file", "commit", "HEAD")
+        head, _, msg = raw.partition("\n\n")
+        signed = head + "\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n -----END PGP SIGNATURE-----\n\n" + msg + "\n"
+        sig_path = os.path.join(self.tmp.name, "signed")
+        with open(sig_path, "w") as f:
+            f.write(signed)
+        signed_sha = self.git("hash-object", "-t", "commit", "-w", sig_path)
+        # The index learns about the fsmonitor (git status writes it); later reads would ask it.
+        self.git("status")
+        self.write("f.txt", "one\nchanged\n")
+        for m in os.listdir(marks):
+            os.unlink(os.path.join(marks, m))
+        for args in (["--worktree"], ["HEAD"], ["HEAD~1..HEAD"], [signed_sha], ["--staged"]):
+            if args == ["--staged"]:
+                self.git("-c", "filter.evil.clean=cat", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                         "add", "f.txt")
+            result, posted = self.run_diff(args)
+            self.assertEqual(result.returncode, 0, (args, result.stderr))
+            self.assertEqual(os.listdir(marks), [], args)
+            body = posted["body"].decode()
+            self.assertNotIn("\x1b[", body)
+            self.assertIn("diff --git a/", body)
+        self.assertEqual(os.listdir(marks), [])
+
+    def test_over_the_per_file_limit_is_refused_with_both_sizes(self):
+        self.write("big.txt", "".join(f"line {i}\n" for i in range(2000)))
+        result, posted = self.run_diff(["--worktree"], limits={"max_file_bytes": 4096})
+        self.assertEqual(result.returncode, 1)
+        self.assertIsNone(posted)
+        self.assertIn("4.0 KB", result.stderr)
+        self.assertIn("the diff is", result.stderr)
+
+    def test_an_older_server_still_publishes_it_as_text(self):
+        self.write("f.txt", "one\ntwo\n")
+        result, posted = self.run_diff([], view="text")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(posted)
+        self.assertIn("viewable in the app", result.stdout)
+
+    def test_nothing_to_show_publishes_nothing(self):
+        result, posted = self.run_diff([])
+        self.assertEqual(result.returncode, 1)
+        self.assertIsNone(posted)
+        self.assertIn("no changes", result.stderr)
+
+    def test_outside_a_repository_says_so(self):
+        elsewhere = os.path.join(self.tmp.name, "plain")
+        os.mkdir(elsewhere)
+        result, posted = self.run_diff([], cwd=elsewhere)
+        self.assertEqual(result.returncode, 1)
+        self.assertIsNone(posted)
+        self.assertIn("not inside a git repository", result.stderr)
+
+    def test_staged_and_revisions_do_not_mix(self):
+        result, posted = self.run_diff(["--staged", "HEAD"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(posted)
+
+    def test_checklist_commits_publish_their_diff_and_the_item_keeps_its_id(self):
+        self.write("f.txt", "one\ntwo\n")
+        sha = self.commit("second")
+        result, posts = self.run_diff(["tick", "1", "--commit", sha[:8]], cmd="checklist", every=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([p["path"] for p in posts], ["/api/sessions/sess-diff/artifacts", "/api/sessions/sess-diff/checklist"])
+        self.assertTrue(posts[0]["name"].endswith(".diff"), posts[0]["name"])
+        self.assertIn(f"commit {sha}", posts[0]["body"].decode())
+        body = json.loads(posts[1]["body"])
+        self.assertEqual(body, {"op": "tick", "index": 1, "commits": [sha[:8]], "diff": "d" * 32})
+        self.assertIn("Diff of the commits published", result.stdout)
+
+    def test_checklist_commits_without_a_diff_keep_their_commits(self):
+        self.write("f.txt", "".join(f"line {i}\n" for i in range(3000)))
+        sha = self.commit("big")
+        for args, limits in ((["add", "Docs", "--commit", sha], {"max_file_bytes": 2048}),
+                             (["tick", "1", "--commit", "abcdef1"], None)):  # not a commit here
+            result, posts = self.run_diff(args, limits=limits, cmd="checklist", every=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([p["path"] for p in posts], ["/api/sessions/sess-diff/checklist"], args)
+            body = json.loads(posts[0]["body"])
+            self.assertNotIn("diff", body)
+            self.assertIn("commits", body)
+            self.assertIn("No diff of the commits", result.stdout)
+
+    def test_help_has_the_guide(self):
+        result = run_blerg_runner(["diff", "--help"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--staged", result.stdout)
+        self.assertIn("--worktree", result.stdout)
 
 
 if __name__ == "__main__":

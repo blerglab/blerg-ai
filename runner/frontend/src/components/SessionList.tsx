@@ -12,6 +12,7 @@ import { ProposalsBadge } from './Proposals'
 import { OpenSessionContext } from '../lib/openSession'
 import { prefetchLaunchData } from '../lib/launchCache'
 import { formatBuild } from '../lib/buildInfo'
+import { setSettingsOpen } from '../lib/settingsDialog'
 import UsageMeters from './UsageMeters'
 import { displayState, waitingBannerText } from '../lib/displayState'
 
@@ -733,6 +734,36 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
             <span style={{ fontSize: '1rem' }}>◔</span>
             <span>Insights</span>
           </div>
+        )}
+
+        {/* Settings (sidebar only): opens the Settings dialog over the page, no route of its own */}
+        {isSidebar && (
+          <button
+            type="button"
+            data-testid="settings-nav"
+            onClick={() => setSettingsOpen(true)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              width: '100%',
+              padding: '10px 14px',
+              marginTop: 4,
+              borderRadius: 8,
+              cursor: 'pointer',
+              background: 'transparent',
+              border: '1px solid transparent',
+              color: 'var(--fog)',
+              fontFamily: 'inherit',
+              fontSize: '0.9rem',
+              fontWeight: 500,
+              letterSpacing: '0.05em',
+              textAlign: 'left',
+            }}
+          >
+            <span style={{ fontSize: '1rem' }}>⚙</span>
+            <span>Settings</span>
+          </button>
         )}
       </div>
 

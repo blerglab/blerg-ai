@@ -57,7 +57,7 @@ error event, as a failed turn does today.
   process's writer goroutine**. One writer goroutine per process owns stdin (a blocked pipe never blocks
   `Run`, `Interrupt` or the mutex). A failed write removes the entry and counts as a process failure.
 * **When the driver is idle at write time it emits `status_changed running (reason "turn")` immediately**
-  (today's behaviour at dequeue), so the UI/server show busy during the 1–1.7 s write→replay gap and Esc is
+  (today's behavior at dequeue), so the UI/server show busy during the 1–1.7 s write→replay gap and Esc is
   meaningful.
 * The reader matches a replay by **uuid**, never by position or text. On a match: pop the entry and emit
   `user_message{text: stored text, source: stored source}`. A replay with no entry (resume replay, hook
@@ -145,7 +145,7 @@ one turn), and a mid-turn `user_message` must not reset live tool calls (`liveCa
 |---|---|
 | Turn accounting with turns the driver did not start | status from events + awaiting count; autonomous-turn rule; settle timer |
 | Message lost / mis-attributed | uuid correlation; never drop silently; requeue-once |
-| Interrupt not honoured / races | control request first, tagged 5 s kill fallback, single turn_done |
+| Interrupt not honored / races | control request first, tagged 5 s kill fallback, single turn_done |
 | Stale timers | every timer tagged (gen, turn), checked under the mutex |
 | Session fork | never two live processes for one session; wait for `done` |
 | Stale flags after model change | restart at the next idle point |
@@ -156,7 +156,7 @@ one turn), and a mid-turn `user_message` must not reset live tool calls (`liveCa
 
 * Messages and control requests share ONE ordered channel to the process, pushed under the state lock, so an
   interrupt can never overtake the message it was sent for. (v2 had a separate priority channel.)
-* An acknowledged interrupt (`control_response`) swaps the 5 s "not honoured" timer for a 30 s "result
+* An acknowledged interrupt (`control_response`) swaps the 5 s "not honored" timer for a 30 s "result
   overdue" timer, and a timer only kills a process that is really inside a turn; every `init` bumps the turn
   counter so timers armed for an earlier turn are stale.
 * Output of a process being killed is ignored; the kill is SIGKILL (inside the container too), and a process
@@ -176,7 +176,7 @@ one turn), and a mid-turn `user_message` must not reset live tool calls (`liveCa
 ## Test plan
 
 A fake `claude` (Go test helper re-exec'd through a PATH shim) speaking the protocol: reads user lines,
-echoes replays with the supplied uuid (after a configurable delay), init/assistant/result, honours
+echoes replays with the supplied uuid (after a configurable delay), init/assistant/result, honors
 `control_request`, scripted slow tools, slash commands without replay, crash/exit/unknown-option modes,
 autonomous turns. Tests (run with `-race`): decode of a string-content replay; two turns one process; mid-turn
 fold with one `result`; message in the write→replay gap; interrupt (no error card, `interrupted`, queued

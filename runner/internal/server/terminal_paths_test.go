@@ -45,10 +45,10 @@ func TestDaemonReportedTerminalStatusFinality(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hits := make(chan struct{}, 4)
-			recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, _ *http.Request) {
 				hits <- struct{}{}
 				w.WriteHeader(http.StatusOK)
-			}))
+			})
 			defer recv.Close()
 
 			api, hub, pool := clusterRunnerAPI(t, &fakeK8s{})
@@ -64,8 +64,8 @@ func TestDaemonReportedTerminalStatusFinality(t *testing.T) {
 				"/repos/org/proj", "org/proj", "T", ""); err != nil {
 				t.Fatal(err)
 			}
-			allowLoopbackDelivery(t, recv.URL+"/hook")
-			if err := db.SetSessionCallback(ctx, pool, sessionID, recv.URL+"/hook", ""); err != nil {
+			allowLoopbackDelivery(t, callbackURL)
+			if err := db.SetSessionCallback(ctx, pool, sessionID, callbackURL, ""); err != nil {
 				t.Fatal(err)
 			}
 			board, err := db.CreateBoard(ctx, pool, "T", nil, nil, nil)
@@ -90,6 +90,9 @@ func TestDaemonReportedTerminalStatusFinality(t *testing.T) {
 			}
 			if delivered != tc.wantDelivery {
 				t.Errorf("webhook delivered = %v, want %v", delivered, tc.wantDelivery)
+			}
+			if delivered {
+				waitForWebhookRecorded(t, pool, sessionID)
 			}
 			if got := liveBoardTokens(t, pool, sessionID); got != tc.wantLive {
 				t.Errorf("live session tokens = %d, want %d", got, tc.wantLive)

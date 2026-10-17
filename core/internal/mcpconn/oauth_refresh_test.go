@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -96,13 +95,17 @@ func TestOAuthRefreshResponseClasses(t *testing.T) {
 func TestOAuthExpiredTokenTransientClassesAreUnavailable(t *testing.T) {
 	for _, st := range []int{429, 408, 403} {
 		t.Run(fmt.Sprint(st), func(t *testing.T) {
-			e := newOAuthEnv(t)
-			e.as.SetAccessTTL(1)
+			e := newOAuthEnvAt(t, time.Unix(1800000000, 0).UTC())
+			e.as.SetAccessTTL(30)
 			conn := e.connect(t, "notes")
-			time.Sleep(1200 * time.Millisecond)
 			e.as.Lock()
 			e.as.RefreshStatus, e.as.RefreshError = st, "access_denied"
 			e.as.Unlock()
+			before, err := e.fetch(t, conn.ID)
+			if err != nil || !strings.HasPrefix(before.Value, "Bearer at-") || before.ExpiresAt == nil || !before.ExpiresAt.Equal(e.clock.Now().Add(30*time.Second)) {
+				t.Fatalf("token not usable before expiry: %v", err)
+			}
+			e.clock.Advance(30 * time.Second)
 			if _, err := e.fetch(t, conn.ID); !errors.Is(err, mcpconn.ErrUnavailable) {
 				t.Fatalf("err = %v, want ErrUnavailable", err)
 			}
@@ -115,13 +118,12 @@ func TestOAuthExpiredTokenTransientClassesAreUnavailable(t *testing.T) {
 
 // smallPoolSvc is a Service on its OWN pool of exactly one connection, in the same schema, so a
 // held connection is observable as a stall of every other query on that pool.
-func smallPoolSvc(t *testing.T) (*mcpconn.Service, *pgxpool.Pool) {
+func smallPoolSvc(t *testing.T, original *pgxpool.Pool) (*mcpconn.Service, *pgxpool.Pool) {
 	t.Helper()
-	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
+	cfg, err := pgxpool.ParseConfig(original.Config().ConnString())
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = testSchema
 	cfg.MaxConns = 1
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
@@ -169,7 +171,7 @@ func TestOAuthSlowRefreshDoesNotHoldADatabaseConnection(t *testing.T) {
 	e.as.Lock()
 	e.as.RefreshDelay = 800 * time.Millisecond
 	e.as.Unlock()
-	small, pool := smallPoolSvc(t)
+	small, pool := smallPoolSvc(t, e.pool)
 
 	done := make(chan error, 1)
 	go func() {
@@ -195,7 +197,7 @@ func TestOAuthSlowRevocationOnDeleteDoesNotHoldADatabaseConnection(t *testing.T)
 	e.as.Lock()
 	e.as.RevokeDelay = 800 * time.Millisecond
 	e.as.Unlock()
-	small, pool := smallPoolSvc(t)
+	small, pool := smallPoolSvc(t, e.pool)
 
 	done := make(chan error, 1)
 	go func() { done <- small.Delete(context.Background(), e.acct, conn.ID) }()

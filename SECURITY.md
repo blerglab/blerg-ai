@@ -21,7 +21,7 @@ Never include a real credential, token or private key in a report. If the issue 
 that one is exposed, say where, not what it is.
 
 You can expect an acknowledgement within a week. Blerg is maintained on a best-effort
-basis, so fixes are prioritised by severity; we will keep you informed and credit you
+basis, so fixes are prioritized by severity; we will keep you informed and credit you
 in the fix unless you ask us not to.
 
 ## Supported versions
@@ -59,7 +59,7 @@ deploy, but they are not bugs:
   automation token, and could get an agent to reveal it.
 - The Local sandbox mounts your engine logins so the engine can use them; it does not
   protect those credentials from the code the agent runs. A sandbox cron on a desktop
-  therefore runs on the host developer's Claude login and on any connected daemon.
+  therefore runs on the host developer's selected-engine login and on a connected compatible daemon.
 - **A hostile message can still steer an unattended agent.** A cron, or a board-started session
   with MCP connections, reads whatever its allowed tools return (mail, tickets, web pages), and that text
   can carry instructions, including a forged card or a proposal worded to look routine. The controls are containment, not detection: no shell or web tools,
@@ -69,19 +69,21 @@ deploy, but they are not bugs:
   through an allowed tool, or write misleading content (a card, a file, an outgoing request) with
   a tool that can write, or queue a proposal a hurried approver might accept. Read the frozen
   arguments before approving. Give a run only the tools its job needs, and prefer read-only ones.
-- **Known limits of the containment.** The agent's file tools run as the same user as the runner.
-  A restricted session adds path deny rules (`/proc`, `/etc`, the gateway config directory, the
-  engine login under `~/.claude`, common credential dotfiles) that Claude Code enforces even with
-  its permission prompts off (proven on the pinned version); an engine upgrade must re-prove them.
-  A cluster session pod still holds the shared daemon token in its environment (the server has no
-  narrower pod credential yet); the rules above keep the file tools away from it, but a bug in the
-  engine's permission checks would not. Restricted pods carry no codex or hermes secrets.
+- **Known limits of the containment.** Restricted execution is an engine-specific
+  capability, tested against pinned native versions. Claude uses native tool and path-deny
+  policy; Codex uses its verified restricted runtime and a rooted file/MCP bridge, with native
+  shell, network tools and ambient customization disabled. An engine upgrade must re-prove
+  containment. Session pods receive only the selected engine's credential material and
+  current-launch runtime/messaging tokens. Those tokens are scoped to the session and its
+  repository; replacement revokes the old pair and WebSocket authority. Pods never receive
+  the operator daemon master key. Engine credentials remain sensitive inside the execution
+  environment; confinement must prevent allowed tools from reading them.
 - **A session you launch yourself with MCP connections is not restricted**
   ([design note](docs/design/interactive-mcp-sessions.md)): it keeps the shell, web and your
   plugins, and only the connection side is bounded by what you allowed or set to propose. Through
   the shell it can read its own gateway token — valid for that session and connection only, with
   the same tool list and budgets, never the upstream credential — and, like every interactive
-  session, the pod's own environment including the shared daemon token. What the shell adds over
+  session, the pod's own selected-engine credentials and current-launch tokens. What the shell adds over
   a restricted session is a way out for data an allowed tool returned; the person watching is the
   control. Unattended runs stay restricted.
 - **The repository the agent works in.** A restricted session's file tools are denied the checkout's
@@ -157,7 +159,7 @@ deploy, but they are not bugs:
 - **Proposals** ([`docs/proposals.md`](docs/proposals.md)). A write tool you set to "propose" is never
   forwarded to the server when the agent calls it: the call is frozen and queued, and only a
   signed-in human, the owner of the session, can approve it. What runs is exactly the frozen
-  arguments, which the page shows; the agent's own summary is displayed separately and labelled as
+  arguments, which the page shows; the agent's own summary is displayed separately and labeled as
   the agent's. An approval is refused if the connection's URL or the tool's definition changed since
   the call. Pending proposals expire after seven days, and an approval whose outcome is unclear is
   never retried automatically.

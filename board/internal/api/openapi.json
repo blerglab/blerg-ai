@@ -149,6 +149,105 @@
         }
       }
     },
+    "/api/boards/{id}/launch-options": {
+      "get": {
+        "operationId": "discover_board_launch_options",
+        "tags": [
+          "boards"
+        ],
+        "summary": "Discover engines, models and efforts available to this board's automation identity and execution target.",
+        "description": "Uses the board's stored automation token. Credentials are never returned. Availability/catalog refreshes are asynchronous; unknown or refreshing states are explicit.",
+        "security": [
+          {
+            "agentToken": [
+              "card.write"
+            ]
+          },
+          {
+            "boardToken": [
+              "card.write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BoardId"
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scoped launch choices.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "type": "string"
+                    },
+                    "refreshing": {
+                      "type": "boolean"
+                    },
+                    "runtime": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "string"
+                    },
+                    "engines": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "runtime": {
+                            "type": "string"
+                          },
+                          "models": {
+                            "type": "object",
+                            "description": "Dynamic models, effort levels and defaults for this engine and target."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "502": {
+            "description": "Runner discovery temporarily unavailable."
+          }
+        }
+      }
+    },
     "/api/boards/{id}/schema": {
       "get": {
         "operationId": "get_schema",
@@ -569,6 +668,14 @@
         "type": "object",
         "required": ["id", "name"],
         "properties": {
+          "model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
+          "reviewer_model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "reviewer_effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
+          "discuss_model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "discuss_effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
+          "chat_model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "chat_effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
           "id": { "type": "string", "format": "uuid" },
           "name": { "type": "string" },
           "description": { "type": ["string", "null"] },
@@ -578,7 +685,7 @@
           "field_schema": { "type": "array", "items": { "$ref": "#/components/schemas/FieldDef" } },
           "concurrency": { "type": "integer", "description": "How many cards a board run works at once." },
           "deploy_url": { "type": ["string", "null"] },
-          "automation_engine": { "type": "string", "enum": ["claude", "codex", "hermes"], "description": "Engine every session this board starts runs." },
+          "automation_engine": { "type": "string", "description": "Implemented engine for future sessions. Discover current availability first. Changing it clears board and card model/effort overrides; existing sessions keep their engine." },
           "automation_token_set": { "type": "boolean", "description": "Whether an automation token is configured. The token itself is write-only and never returned." },
           "automation_token_expires_at": { "type": ["string", "null"], "format": "date-time", "description": "When the configured automation token expires." },
           "automation_account_id": { "type": ["string", "null"], "description": "The blerg-core account the automation token acts for: whose engine credential every session this board starts spends." }
@@ -587,6 +694,14 @@
       "BoardInput": {
         "type": "object",
         "properties": {
+          "model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
+          "reviewer_model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "reviewer_effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
+          "discuss_model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "discuss_effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
+          "chat_model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "chat_effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
           "name": { "type": "string" },
           "description": { "type": "string" },
           "repos": { "type": "array", "items": { "type": "string" } },
@@ -596,7 +711,7 @@
           "require_repo": { "type": "boolean" },
           "concurrency": { "type": "integer" },
           "deploy_url": { "type": "string" },
-          "automation_engine": { "type": "string", "enum": ["claude", "codex", "hermes"] },
+          "automation_engine": { "type": "string" },
           "automation_token": { "type": "string", "writeOnly": true, "description": "PATCH only, and only by a signed-in person: a blerg-core agent token (preset run-sessions) they minted for themselves. Every session the board starts runs as that person, on their own engine credential. Empty string clears it. Never returned." }
         }
       },
@@ -628,6 +743,8 @@
         "type": "object",
         "required": ["id", "board_id", "title", "version"],
         "properties": {
+          "model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
           "id": { "type": "string", "format": "uuid" },
           "board_id": { "type": "string", "format": "uuid" },
           "column_id": { "type": "string", "format": "uuid" },
@@ -650,6 +767,8 @@
         "type": "object",
         "required": ["title"],
         "properties": {
+          "model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
           "title": { "type": "string", "description": "What the card is — specific, not vague." },
           "body": { "type": "string", "description": "Details, evidence, acceptance criteria." },
           "type": { "type": "string", "description": "feature, bug, task, chore, incident, … (lowercased)." },
@@ -667,6 +786,8 @@
       "CardPatch": {
         "type": "object",
         "properties": {
+          "model": { "type": "string", "description": "Opaque model ID for the configured engine." },
+          "effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
           "title": { "type": "string" },
           "body": { "type": "string" },
           "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },

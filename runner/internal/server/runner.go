@@ -38,8 +38,10 @@ import (
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/scratch"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // coreAuthAudience is the audience blerg-core mints runner-facing tokens
@@ -235,6 +237,9 @@ type runnerStartRequest struct {
 	// the daemon host — see resolveDaemonRuntime).
 	Engine  string `json:"engine"`
 	Runtime string `json:"runtime"`
+	// TargetDaemonID pins a discovered host target. Unlike the internal cron
+	// pin, its presence is part of the caller's idempotency hash.
+	TargetDaemonID string `json:"daemon_id,omitempty"`
 	// AutoStop makes this a one-shot session: the runner stops it itself once
 	// the first turn after the initial prompt is done, so a fire-and-forget
 	// caller gets a terminal result and its callback without having to stop
@@ -532,6 +537,15 @@ type StartResponse struct {
 // it from the Idempotency-Key header, MCP from the tool's idempotency_key
 // argument.
 func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req RunnerStartRequest, idemKey string) (StartResponse, *APIError) {
+	if req.TargetDaemonID != "" {
+		if req.Runtime != runnerRuntimeDaemon && req.Runtime != runnerRuntimeDocker {
+			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "daemon_id requires an explicit daemon or docker runtime")
+		}
+		if req.DaemonID != "" && req.DaemonID != req.TargetDaemonID {
+			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "conflicting execution target")
+		}
+		req.DaemonID = req.TargetDaemonID
+	}
 	if len(idemKey) > maxIdempotencyKeyLen {
 		return StartResponse{}, apiErrorf(http.StatusBadRequest, "%s", idempotencyKeyMessage)
 	}
@@ -824,12 +838,39 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 // req.GitURL is ignored here: unlike a cluster Job, which clones into a fresh
 // workspace, the daemon works from its own repos root.
 func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequest, principal runnerPrincipal, sessionID string) *APIError {
+	if req.Grant != nil && req.Runtime == runnerRuntimeDaemon {
+		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPRuntime)
+	}
 	if req.DaemonID != "" && a.hub.GetHostDaemon(req.DaemonID) == nil {
 		return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the pinned daemon is not a connected host execution target")
 	}
 
+	// If every connected candidate is too old for confinement, preserve the
+	// actionable compatibility diagnostic without selecting it for execution.
+	placementFailure := func() *APIError {
+		if req.Grant == nil && req.CronID == "" {
+			return nil
+		}
+		selection := HostSelection{Engine: req.Engine, Runtime: req.Runtime}
+		var candidate *DaemonConn
+		if req.NoRepo {
+			candidate = a.hub.DaemonForScratch(req.Runtime, selection)
+		} else {
+			candidate = a.hub.DaemonForRepo(req.Repo, selection)
+		}
+		if candidate == nil {
+			return nil
+		}
+		runtime := resolveDaemonRuntime(req.Runtime, candidate.SandboxAvailable())
+		if req.Grant != nil {
+			return a.checkGrantTarget(grantTarget{Runtime: runtime, Engine: req.Engine, Kind: "agent", Daemon: candidate})
+		}
+		return checkRestrictTarget(runtime, candidate, req.Engine)
+	}
+
 	var dc *DaemonConn
-	if req.NoRepo {
+	switch {
+	case req.NoRepo:
 		// No folder to look for: any connected daemon will do. The session
 		// gets a new scratch folder there, created (never cloned) by the
 		// daemon exactly like a new folder.
@@ -839,19 +880,34 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 				return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the pinned daemon is not connected")
 			}
 		} else {
-			dc = a.hub.DaemonForScratch(req.Runtime)
+			dc = a.hub.DaemonForScratch(req.Runtime, HostSelection{Engine: req.Engine, Runtime: req.Runtime, Restricted: req.Grant != nil || req.CronID != ""})
 		}
 		if dc == nil {
+			if problem := placementFailure(); problem != nil {
+				return problem
+			}
 			return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "no daemon connected — connect one, or use the cluster runtime")
 		}
 		req.Repo = scratch.NewName()
-	} else {
-		dc = a.hub.DaemonForRepo(req.Repo)
+	case req.DaemonID != "":
+		dc = a.hub.GetHostDaemon(req.DaemonID)
+	default:
+		dc = a.hub.DaemonForRepo(req.Repo, HostSelection{Engine: req.Engine, Runtime: req.Runtime, Restricted: req.Grant != nil || req.CronID != ""})
 	}
 	if dc == nil {
+		if problem := placementFailure(); problem != nil {
+			return problem
+		}
 		return apiErrorf(http.StatusServiceUnavailable,
 			"no connected daemon has repo %q — check it out under the daemon's repos root, or connect a daemon", req.Repo)
 	}
+	if !hostMatchesSelection(dc, []HostSelection{{Engine: req.Engine, Runtime: req.Runtime, Restricted: req.Grant != nil || req.CronID != ""}}) {
+		return apiErrorf(http.StatusUnprocessableEntity, "the selected host cannot run the requested engine or runtime")
+	}
+	if problem := a.modelEffortProblem(ctx, req.Engine, req.Model, req.Effort, dc.ID); problem != "" {
+		return apiErrorf(http.StatusUnprocessableEntity, "%s", problem)
+	}
+
 	runtime := resolveDaemonRuntime(req.Runtime, dc.SandboxAvailable())
 	// A grant is attached or the start is refused, before anything is recorded: never on the
 	// bare host, and only on a daemon that reports mcp_gateway (mcpstart.go).
@@ -1034,7 +1090,7 @@ func (a *API) SessionStatus(ctx context.Context, principal RunnerPrincipal, sess
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	runtime := a.runnerRuntimeAxis(sessionID) //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
+	runtime := a.runnerRuntimeAxis(sessionID, derefOrEmpty(row.Runtime)) //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
 	// The documented five-value enum, not the raw column: runnerLifecycle
 	// (result.go) is shared with the result endpoint so the two can never
 	// disagree about what state a session is in. It also carries the rule that
@@ -1053,10 +1109,17 @@ func (a *API) SessionStatus(ctx context.Context, principal RunnerPrincipal, sess
 	// Why it ended and what kind of actor ended it — never which account:
 	// the contract answers brokers, not people.
 	endReason, endedBy := endAttribution(row, "")
+	resumable, resumeMode, resumeReason := sessionResumeEligibility(ctx, a.dbPool, a.hub.JobManager(), row, principal.spawningAccountID(), principal.proof())
 	return map[string]any{
-		"lifecycle": lifecycle,
-		"runtime":   runtime,
-		"resumable": lifecycle == "disconnected" && a.hub.JobManager() != nil,
+		"lifecycle":          lifecycle,
+		"runtime":            runtime,
+		"resumable":          resumable,
+		"resume_mode":        resumeMode,
+		"resume_reason":      resumeReason,
+		"engine":             models.NormalizeEngine(derefOrEmpty(row.Engine)),
+		"steering_supported": engineSteeringSupported(derefOrEmpty(row.Engine), row.Kind),
+		"model":              derefOrEmpty(row.Model),
+		"effort":             derefOrEmpty(row.Effort),
 		// Which mode this session is in, so a caller polling a one-shot
 		// session knows the runner will end it rather than waiting for a stop
 		// that is never coming.
@@ -1078,14 +1141,15 @@ func (a *API) HandleRunnerMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Text   string `json:"text"`
-		Source string `json:"source"` // "human" (composer) | "blerg-board" (automation); default "runner"
+		ClientID string `json:"client_id,omitempty"`
+		Text     string `json:"text"`
+		Source   string `json:"source"` // "human" (composer) | "blerg-board" (automation); default "runner"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "text required")
 		return
 	}
-	body, apiErr := a.SendMessage(r.Context(), principal, r.PathValue("id"), req.Text, req.Source)
+	body, apiErr := a.SendMessage(r.Context(), principal, r.PathValue("id"), req.Text, req.Source, req.ClientID)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
@@ -1102,7 +1166,7 @@ func (a *API) HandleRunnerMessage(w http.ResponseWriter, r *http.Request) {
 // chat does: the engine is blocked inside the ask and would read the message only once the ask
 // timed out. The reply then carries "answered_ask": true. A board's automation (blerg-board) never
 // answers an ask.
-func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string) (map[string]any, *APIError) {
+func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) (map[string]any, *APIError) {
 	if text == "" {
 		return nil, apiErrorf(http.StatusBadRequest, "text required")
 	}
@@ -1111,17 +1175,39 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	}
 	var body map[string]any
 	var problem *APIError
-	err := withCancelledPendingLimitResume(ctx, a.dbPool, sessionID, func() error {
-		body, problem = a.sendMessage(ctx, principal, sessionID, text, source)
+	run := func(conn *pgxpool.Conn) error {
+		cancelPending := func() error {
+			if conn == nil {
+				return nil
+			}
+			previous, err := db.GetLimitResume(ctx, conn, sessionID)
+			if err != nil {
+				return err
+			}
+			if err := db.CancelPendingLimitResume(ctx, conn, sessionID); err != nil {
+				return err
+			}
+			if previous.State == "pending" || previous.State == "dispatched" {
+				limitResumeAudit(ctx, nil, a.dbPool, sessionID, newUUID(), "Automatic continuation canceled by manual intervention.")
+			}
+			return nil
+		}
+		body, problem = a.sendMessage(ctx, principal, sessionID, text, source, cancelPending, clientIDs...)
 		return nil
-	})
+	}
+	var err error
+	if a.dbPool == nil {
+		err = run(nil)
+	} else {
+		err = withLimitResumeActionLock(ctx, a.dbPool, sessionID, run)
+	}
 	if err != nil {
 		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry shortly")
 	}
 	return body, problem
 }
 
-func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string) (map[string]any, *APIError) {
+func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, cancelPending func() error, clientIDs ...string) (map[string]any, *APIError) {
 	if text == "" {
 		return nil, apiErrorf(http.StatusBadRequest, "text required")
 	}
@@ -1132,28 +1218,97 @@ func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	if apiErr != nil {
 		return nil, apiErr
 	}
+	clientID := ""
+	if len(clientIDs) > 0 {
+		clientID = clientIDs[0]
+	}
+	if len(clientIDs) > 1 || len(clientID) > db.SessionInputMaxClientIDBytes {
+		return nil, apiErrorf(http.StatusUnprocessableEntity, "message id is invalid")
+	}
 	// Only while the session's daemon is connected: with it away (a restart) the `ask` that would
 	// read the answer is dead, and the message must reach the session instead.
 	dc := a.hub.FindDaemonForSession(sessionID)
-	if dc != nil && answersAsk(source) && answerAskFromChat(ctx, a.hub, a.dbPool, sessionID, text, "", "") {
-		return map[string]any{"ok": true, "answered_ask": true}, nil
+	if clientID != "" {
+		if row.Kind != "agent" {
+			return nil, apiErrorf(http.StatusConflict, "durable messages require an agent session")
+		}
+		if dc == nil && row.Status == "error" {
+			awaited, err := db.SessionAwaitsDaemon(ctx, a.dbPool, sessionID)
+			if err != nil {
+				return nil, apiErrorf(http.StatusServiceUnavailable, "session state unavailable; retry shortly")
+			}
+			if !awaited {
+				return nil, apiErrorf(http.StatusConflict, "session has ended")
+			}
+		}
+		if harnessCommand(text) {
+			return nil, apiErrorf(http.StatusUnprocessableEntity, "use the model endpoint for retry-safe model or effort controls")
+		}
+		if a.dbPool == nil {
+			return nil, apiErrorf(http.StatusServiceUnavailable, "durable messages require a database")
+		}
+		if dc != nil && !dc.CanInputReceipts() {
+			return nil, apiErrorf(http.StatusUnprocessableEntity, "the session's host must be updated to support message receipts")
+		}
+		if row.EndedAt != nil || row.Status == "ended" || row.Status == "stopped" {
+			return nil, apiErrorf(http.StatusConflict, "session has ended")
+		}
+		fresh, err := acceptSessionInput(ctx, a.hub, a.dbPool, protocol.AgentUserMessage{Type: "agent_user_message", SessionID: sessionID, Text: text, Source: source, ClientID: clientID})
+		if err != nil {
+			return nil, sessionInputAPIError(err)
+		}
+		if !fresh {
+			// A duplicate live dispatch is retried by the durable outbox on the
+			// next heartbeat. Disconnected Cluster launches may need an explicit
+			// retry after a failed replacement; consumed inputs never relaunch.
+			pending, err := db.PendingSessionInputs(ctx, a.dbPool, sessionID)
+			if err != nil {
+				return nil, apiErrorf(http.StatusServiceUnavailable, "message state unavailable; retry shortly")
+			}
+			stillPending := false
+			for _, input := range pending {
+				var frame protocol.AgentUserMessage
+				if json.Unmarshal([]byte(input.Frame), &frame) == nil && frame.ClientID == clientID {
+					stillPending = true
+					break
+				}
+			}
+			if dc != nil || !stillPending || row.Runtime == nil || *row.Runtime != runnerRuntimeCluster {
+				if stillPending {
+					if err := cancelPending(); err != nil {
+						return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry shortly")
+					}
+				}
+				return map[string]any{"ok": true, "client_id": clientID, "idempotent_replayed": true}, nil
+			}
+		}
+	}
+	// Validation and completed idempotent replays must not change a later
+	// continuation. A newly accepted or still-pending manual input cancels it.
+	if err := cancelPending(); err != nil {
+		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry shortly")
+	}
+	if dc != nil && answersAsk(source) && answerAskFromChat(ctx, a.hub, a.dbPool, sessionID, text, clientID, "") {
+		return map[string]any{"ok": true, "answered_ask": true, "client_id": clientID}, nil
 	}
 	if dc != nil {
 		raw, err := json.Marshal(protocol.AgentUserMessage{
-			Type: "agent_user_message", SessionID: sessionID, Text: text, Source: source,
+			Type: "agent_user_message", SessionID: sessionID, Text: text, Source: source, ClientID: clientID,
 		})
 		if err != nil {
 			return nil, apiErrorf(http.StatusInternalServerError, "marshal error")
 		}
-		select {
-		case dc.send <- raw:
+		if a.hub.trySendToDaemon(dc, raw) {
 			clearPausedOnMessage(ctx, a.hub, a.dbPool, sessionID)
-			return map[string]any{"ok": true}, nil
-		default:
-			// Unlike the WS path, the runner caller gets a real error instead
-			// of a silent drop.
-			return nil, apiErrorf(http.StatusServiceUnavailable, "daemon send buffer full — retry")
+			return map[string]any{"ok": true, "client_id": clientID}, nil
 		}
+		if clientID != "" {
+			return map[string]any{"ok": true, "client_id": clientID, "queued": true}, nil
+		}
+		return nil, apiErrorf(http.StatusServiceUnavailable, "daemon send buffer full — retry")
+	}
+	if clientID != "" && (row.Runtime == nil || *row.Runtime != runnerRuntimeCluster) {
+		return map[string]any{"ok": true, "client_id": clientID, "queued": true}, nil
 	}
 	// No daemon is connected for this session. Only a disconnected cluster session can be
 	// resumed by a message; for anything else the message has nowhere to go, and answering
@@ -1178,8 +1333,10 @@ func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 		principal.spawningAccountID(), principal.proof().SessionID); problem != nil {
 		return nil, problem
 	}
-	resumeClusterSession(ctx, a.hub, a.dbPool, sessionID, text, principal.spawningAccountID(), principal.proof().SessionID)
-	return map[string]any{"ok": true, "resumed": true}, nil
+	if err := resumeClusterSessionMode(ctx, a.hub, a.dbPool, sessionID, text, principal.spawningAccountID(), principal.proof().SessionID, false, resumeInput{ClientID: clientID, Source: source, Proof: principal.proof()}); err != nil {
+		return nil, apiErrorf(http.StatusServiceUnavailable, "session could not resume; retry shortly")
+	}
+	return map[string]any{"ok": true, "resumed": true, "client_id": clientID}, nil
 }
 
 // undeliverable is why a message cannot reach a session no daemon is connected for, or nil when

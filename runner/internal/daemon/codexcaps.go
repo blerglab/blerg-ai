@@ -43,7 +43,7 @@ func (a *codexApp) requestCapabilities() {
 // Inventory endpoints return much more than display data. Decode only the
 // whitelisted metadata below; never include config, paths, headers or URLs.
 func (a *codexApp) capabilities(model string) {
-	p := protocol.CapabilitiesPayload{Engine: "codex", EngineName: "Codex", Model: model, PermissionMode: "never", Note: "Reported by the running Codex app-server. Skill and plugin inventory shows availability; tools appear as they are used."}
+	p := protocol.CapabilitiesPayload{ToolSchemaRefresh: protocol.ToolSchemaRefreshNewSession, Engine: "codex", EngineName: "Codex", Model: model, PermissionMode: "never", Note: "Reported by the running Codex app-server. Skill and plugin inventory shows availability; tools appear as they are used."}
 	if raw, err := a.call("skills/list", map[string]any{"cwds": []string{a.d.runtimeWorkDir()}}); err == nil {
 		var r struct {
 			Data []struct {
@@ -178,12 +178,27 @@ func (d *codexDriver) observeTool(name string) {
 	}
 }
 func (d *codexDriver) emitRuntimeCaps() {
+	d.settingsMu.Lock()
+	defer d.settingsMu.Unlock()
+	d.emitRuntimeCapsLocked()
+}
+
+// emitRuntimeCapsLocked publishes a snapshot while settingsMu prevents a newer
+// settings mutation/publication from overtaking it. Driver mu is released before Emit.
+func (d *codexDriver) emitRuntimeCapsLocked() {
 	d.mu.Lock()
+	if d.codexToolsRestricted() {
+		p := d.RestrictedRuntime.capabilities(d.model)
+		d.mu.Unlock()
+		d.caps.emit(d.emitter, p)
+		return
+	}
 	if d.runtimeCaps == nil {
 		d.mu.Unlock()
 		return
 	}
 	p := *d.runtimeCaps
+	p.Model = d.model
 	p.Groups = append([]protocol.CapabilityGroup(nil), p.Groups...)
 	g := protocol.CapabilityGroup{ID: protocol.CapGroupTools, Label: "Tools", Items: []protocol.CapabilityItem{}, Note: "Tools observed in this session; the app-server does not enumerate all built-in tools."}
 	for name := range d.observedTools {

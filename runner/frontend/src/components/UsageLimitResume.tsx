@@ -85,10 +85,10 @@ export default function UsageLimitResume({ sessionId }: { sessionId: string }) {
     if (value.reason) status = status ? `${status} ${value.reason}` : value.reason
   }
   return <span className="usage-limit-resume">
-    <label title="Allow this session to continue automatically after a provider usage limit resets.">
+    <label className="rail-check" title="Allow this session to continue automatically after a provider usage limit resets.">
       <input type="checkbox" checked={value.enabled} disabled={saving}
         onChange={event => { void toggle(event.target.checked) }} />
-      Resume when limit resets
+      <span>Resume when limit resets</span>
     </label>
     {status && <span role="status">{status}</span>}
     {error && <span role="alert">{error}</span>}

@@ -26,7 +26,7 @@ type ConnectionList = { connections: Connection[]; max: number };
 type ConnEvent = { id: number; action: string; from_value: string; to_value: string; created_at: string };
 const POLICY_LABEL: Record<string, string> = { strict: "Ask me", auto_accept: "Accept automatically" };
 const POLICY_HELP =
-  "Accept automatically trusts this server to change what an agent may do without asking you, and a changed description can steer the agent's use of your other connections and the session's own tools. Use it only for servers your organisation runs. Takes effect in running sessions within five minutes.";
+  "Accept automatically trusts this server to change what an agent may do without asking you, and a changed description can steer the agent's use of your other connections and the session's own tools. Use it only for servers your organization runs. Takes effect in running sessions within five minutes.";
 type AuthKind = "static" | "oauth" | "none";
 type Editing = { id: string; mode: "rename" | "secret" | "remove" };
 

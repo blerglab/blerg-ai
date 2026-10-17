@@ -137,14 +137,14 @@ Every command's failure line says what the server said and where: its sentence, 
 failure is the runner's own (its disk or its database): whoever runs Blerg finds the same id in
 the runner's log. A connection error names the address, the reason and which proxy variables are
 set (by name only). Requests to a local server (`localhost`, a loopback address, a one-word name
-such as `blerg-runner`) never go through a proxy; any other address honours the environment's.
+such as `blerg-runner`) never go through a proxy; any other address honors the environment's.
 
 **Choose the format for how the user will consume it.** `blerg-runner publish --help` has the
 same guide:
 
 | Shown in the app (viewable) | Download only (no preview) |
 |---|---|
-| markdown, plain text and source code, json, csv/tsv (as a table), images png/jpg/gif/webp/svg, pdf, audio/video, html | docx, xlsx, pptx, zip and other binaries |
+| markdown, plain text and source code, json, csv/tsv (as a table), images png/jpg/gif/webp/svg, pdf, audio/video, html, a diff or patch (.diff/.patch) | docx, xlsx, pptx, zip and other binaries |
 
 - To read/review => markdown, html or pdf.
 - Data => csv or json.
@@ -155,6 +155,16 @@ same guide:
 - Limits: by default 100 MiB per file and 1 GiB in total per session (the command asks the runner
   for its limits and refuses a file over either before sending it; a runner older than 0.2.1 takes
   25 MiB per file), and 50 files per session. A directory is zipped (skipping `.git`, `node_modules` and symlinks).
+
+### `blerg-runner diff [<range> | <commit>... | --staged | --worktree] [--title T] [-- <path>...]`
+
+To show the person what you changed, `blerg-runner diff <range>` posts a diff they can open. It runs
+git in the current folder and publishes the patch as `<title>.diff`, which the app opens in its diff
+viewer. No argument: everything not committed (staged, unstaged and new files); `--staged`: the index;
+`A..B`: a range's net change; one or more commits: each with its own patch, in the order given; paths
+after `--` narrow any of them. The output reads `Published diff <title> · 3 files · +12 −4 — viewable in
+the app`. Binary files are listed with their size. A diff over the per-file limit is refused with both
+sizes. `blerg-runner checklist tick <n> --commit <sha>` publishes the diff of those commits too.
 
 ### `blerg-runner files` / `blerg-runner unpublish <name|id> [--version N | --all-versions]`
 
@@ -177,7 +187,7 @@ Starting a topic ends the open one; the person's History tab lists each topic wi
 
 ### `blerg-runner fetch [<id>|<name> ...|--all|--all-versions] [--out DIR] [--list]`
 
-The user can **attach files** to a message in the chat box (for example two PDFs to analyse).
+The user can **attach files** to a message in the chat box (for example two PDFs to analyze).
 The message you receive ends with a line like
 `Attached files (fetch them with: blerg-runner fetch --all): a.pdf (1.2 MB), b.pdf (800 KB)`.
 The files are not in your working folder until you fetch them:

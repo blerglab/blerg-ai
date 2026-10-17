@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { fireEvent, render } from '@testing-library/react'
 import Composer, { type ComposerProps } from './Composer'
 
 const attachments = {
@@ -54,5 +54,71 @@ describe('Composer focus', () => {
   it('can be told not to', () => {
     const { container } = render(<Composer {...props({ autoFocus: false })} />)
     expect(document.activeElement).not.toBe(container.querySelector('textarea'))
+  })
+})
+
+describe('Composer paste', () => {
+  const html = '<h2>Plan</h2><p>See <a href="https://e.test/x">the doc</a></p>'
+  const data = (over: Record<string, string> = {}, files: File[] = []) => ({
+    getData: (t: string) => ({ 'text/html': html, 'text/plain': 'Plan\nSee the doc', ...over })[t] ?? '',
+    files,
+  })
+  const setup = (over: Partial<ComposerProps> = {}) => {
+    const onDraft = vi.fn()
+    const { container } = render(<Composer {...props({ onDraft, ...over })} />)
+    return { box: container.querySelector('textarea')!, onDraft }
+  }
+
+  it('inserts rich HTML as Markdown at the caret', () => {
+    const { box, onDraft } = setup()
+    fireEvent.paste(box, { clipboardData: data() })
+    expect(onDraft).toHaveBeenCalledWith('## Plan\n\nSee [the doc](https://e.test/x)')
+  })
+
+  it('goes through the editing command, so undo is one step', () => {
+    const exec = vi.fn(() => true)
+    document.execCommand = exec as unknown as typeof document.execCommand
+    const { box, onDraft } = setup()
+    fireEvent.paste(box, { clipboardData: data() })
+    expect(exec).toHaveBeenCalledWith('insertText', false, '## Plan\n\nSee [the doc](https://e.test/x)')
+    expect(onDraft).not.toHaveBeenCalled()
+    delete (document as { execCommand?: unknown }).execCommand
+  })
+
+  it('leaves Ctrl+Shift+V alone, once', () => {
+    const { box, onDraft } = setup()
+    fireEvent.keyDown(box, { key: 'V', ctrlKey: true, shiftKey: true })
+    fireEvent.paste(box, { clipboardData: data() })
+    expect(onDraft).not.toHaveBeenCalled()
+    fireEvent.paste(box, { clipboardData: data() })
+    expect(onDraft).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves plain text, or HTML that is only spans, to the browser', () => {
+    const { box, onDraft } = setup()
+    fireEvent.paste(box, { clipboardData: data({ 'text/html': '' }) })
+    fireEvent.paste(box, { clipboardData: data({ 'text/html': '<div><span>a</span></div>', 'text/plain': 'a' }) })
+    fireEvent.paste(box, { clipboardData: data({ 'text/plain': '# Plan\n\n```x\ny\n```' }) })
+    expect(onDraft).not.toHaveBeenCalled()
+  })
+
+  it('still attaches a pasted file', () => {
+    const addFiles = vi.fn()
+    const file = new File(['x'], 'a.png', { type: 'image/png' })
+    const { box, onDraft } = setup({ onAttach: () => {}, attachments: { ...attachments, addFiles } as unknown as ComposerProps['attachments'] })
+    fireEvent.paste(box, { clipboardData: data({ 'text/html': '', 'text/plain': '' }, [file]) })
+    expect(addFiles).toHaveBeenCalledWith([file])
+    expect(onDraft).not.toHaveBeenCalled()
+  })
+})
+
+describe('Composer plain paste on another layout', () => {
+  it('recognises Cmd+Shift+V by its physical key', () => {
+    const onDraft = vi.fn()
+    const { container } = render(<Composer {...props({ onDraft })} />)
+    const box = container.querySelector('textarea')!
+    fireEvent.keyDown(box, { key: 'м', code: 'KeyV', metaKey: true, shiftKey: true })
+    fireEvent.paste(box, { clipboardData: { getData: (t: string) => (t === 'text/html' ? '<h2>x</h2>' : 'x'), files: [] } })
+    expect(onDraft).not.toHaveBeenCalled()
   })
 })

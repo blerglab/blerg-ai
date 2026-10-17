@@ -8,18 +8,13 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/blerglab/blerg-ai/contracts/engineaccess"
 )
 
 // EngineCredentialAccess contains short-lived inference authority only. Sources
 // never return a refresh token; callers must not persist or emit these values.
-type EngineCredentialAccess struct {
-	Mode        string    `json:"mode"`
-	AccessToken string    `json:"access_token"`
-	AccountID   string    `json:"chatgpt_account_id"`
-	PlanType    string    `json:"plan_type,omitempty"`
-	Generation  string    `json:"generation"`
-	ExpiresAt   time.Time `json:"expires_at"`
-}
+type EngineCredentialAccess = engineaccess.Access
 type EngineCredentialSource func(context.Context, bool, string) (EngineCredentialAccess, error)
 
 var errEngineCredential = errors.New("the managed engine connection is unavailable; reconnect it in Settings")
@@ -28,11 +23,12 @@ var errEngineCredential = errors.New("the managed engine connection is unavailab
 // at launch. The token is the pod's per-launch runtime token: it authenticates
 // this launch only, is never the operator's daemon master, and is stripped from
 // every agent process's environment (the server refuses the messaging token).
-func ManagedEngineCredentialSource(base, token string) EngineCredentialSource {
+// The selected engine binds each response to its registered access-only codec.
+func ManagedEngineCredentialSource(base, token, engine string) EngineCredentialSource {
 	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	return func(parent context.Context, force bool, previous string) (EngineCredentialAccess, error) {
 		var access EngineCredentialAccess
-		if base == "" || token == "" {
+		if base == "" || token == "" || !engineaccess.SupportsEngine(engine) {
 			return access, errEngineCredential
 		}
 		ctx, cancel := context.WithTimeout(parent, 8*time.Second)
@@ -53,7 +49,11 @@ func ManagedEngineCredentialSource(base, token string) EngineCredentialSource {
 		}
 		defer func() { _ = resp.Body.Close() }()
 		raw, err = io.ReadAll(io.LimitReader(resp.Body, 32<<10+1))
-		if err != nil || len(raw) > 32<<10 || resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &access) != nil || access.Mode != "chatgptAuthTokens" || access.AccessToken == "" || len(access.AccessToken) > 24<<10 || access.AccountID == "" || len(access.AccountID) > 256 || access.Generation == "" || !access.ExpiresAt.After(time.Now()) {
+		if err != nil || len(raw) > 32<<10 || resp.StatusCode != http.StatusOK {
+			return EngineCredentialAccess{}, errEngineCredential
+		}
+		access, err = engineaccess.DecodeForEngine(engine, raw, time.Now())
+		if err != nil {
 			return EngineCredentialAccess{}, errEngineCredential
 		}
 		return access, nil

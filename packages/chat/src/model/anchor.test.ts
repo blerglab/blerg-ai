@@ -155,7 +155,7 @@ describe('describePlace', () => {
     expect(at(0.5, 0.1)).toBe('top')
     expect(at(0.9, 0.1)).toBe('top right')
     expect(at(0.1, 0.5)).toBe('left')
-    expect(at(0.5, 0.5)).toBe('centre')
+    expect(at(0.5, 0.5)).toBe('center')
     expect(at(0.9, 0.5)).toBe('right')
     expect(at(0.1, 0.9)).toBe('bottom left')
     expect(at(0.5, 0.9)).toBe('bottom')
@@ -163,7 +163,7 @@ describe('describePlace', () => {
   })
 
   it('uses the centre of a box, not its corner', () => {
-    expect(describePlace({ x: 0.3, y: 0.3, w: 0.6, h: 0.6 })).toBe('centre')
+    expect(describePlace({ x: 0.3, y: 0.3, w: 0.6, h: 0.6 })).toBe('center')
     expect(describePlace({ x: 0.2, y: 0, w: 0.6, h: 0.2 })).toBe('top')
   })
 })

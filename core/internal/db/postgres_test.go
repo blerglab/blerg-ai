@@ -2,21 +2,20 @@ package db
 
 import (
 	"context"
-	"os"
 	"testing"
+
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 )
 
 func testDSN(t *testing.T) string {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set; run `make db-up` and export it")
-	}
-	return dsn
+	t.Helper()
+	return testsupport.Empty(t).ConnString()
 }
 
 func TestOpenRunsMigrationsAndPings(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, testDSN(t))
+	dsn := testDSN(t)
+	st, err := Open(ctx, dsn)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -26,7 +25,7 @@ func TestOpenRunsMigrationsAndPings(t *testing.T) {
 		t.Fatalf("Ping: %v", err)
 	}
 	// Migrations are idempotent: a second Open must not error.
-	st2, err := Open(ctx, testDSN(t))
+	st2, err := Open(ctx, dsn)
 	if err != nil {
 		t.Fatalf("second Open (idempotent migrate): %v", err)
 	}

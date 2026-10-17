@@ -71,3 +71,16 @@ func TestSanitizeCapabilitiesCaps(t *testing.T) {
 		t.Errorf("description runes = %d, want %d", n, CapMaxDescription)
 	}
 }
+
+func TestToolSchemaRefreshPolicyIsAnAllowlistedCapability(t *testing.T) {
+	for _, policy := range []string{ToolSchemaRefreshNextTurn, ToolSchemaRefreshNewSession} {
+		if got := SanitizeCapabilities(CapabilitiesPayload{ToolSchemaRefresh: policy}).ToolSchemaRefresh; got != policy {
+			t.Fatalf("lost adapter policy %q", policy)
+		}
+	}
+	for _, policy := range []string{"", "automatic", "NEXT_TURN", "new_session\x00", "https://credential@invalid"} {
+		if got := SanitizeCapabilities(CapabilitiesPayload{ToolSchemaRefresh: policy}).ToolSchemaRefresh; got != "" {
+			t.Fatalf("untrusted refresh policy retained: %q", got)
+		}
+	}
+}

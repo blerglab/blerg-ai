@@ -174,14 +174,21 @@ type ModelChangedPayload struct {
 // the launch of a background subagent (its call returned at once), and a later subagent_done for
 // the same ChildID, without Background, is its real end.
 type SubagentPayload struct {
-	ChildID    string `json:"child_id"`
-	AgentType  string `json:"agent_type"`
-	Model      string `json:"model"`
-	Summary    string `json:"summary"`
-	Usage      *Usage `json:"usage,omitempty"`
-	ToolUses   int    `json:"tool_uses,omitempty"`
-	DurationMs int64  `json:"duration_ms,omitempty"`
-	Background bool   `json:"background,omitempty"`
+	// Effort is the child-reported configured effort, not inferred from its parent.
+	// Empty means unknown/unset; emitted explicitly to clear stale observations.
+	Effort    string `json:"effort"`
+	ChildID   string `json:"child_id"`
+	AgentType string `json:"agent_type"`
+	Model     string `json:"model"`
+	Summary   string `json:"summary"`
+	Usage     *Usage `json:"usage,omitempty"`
+	// UsageByModel partitions Usage for a run that changes models. Consumers
+	// use this partition instead of also counting the aggregate Usage. An empty
+	// model key means attribution is unknown; older producers omit the field.
+	UsageByModel map[string]Usage `json:"usage_by_model,omitempty"`
+	ToolUses     int              `json:"tool_uses,omitempty"`
+	DurationMs   int64            `json:"duration_ms,omitempty"`
+	Background   bool             `json:"background,omitempty"`
 	// IsError: the subagent failed — its Agent call's result was an error, or its background
 	// notice's status was "failed" (killed and stopped mean a person stopped it). Absent from a
 	// daemon older than the field (a reader then falls back to an "error:" summary).
@@ -245,6 +252,9 @@ type TurnDonePayload struct {
 	Model          string `json:"model"`
 	Usage          Usage  `json:"usage"`
 	CheckInMissing bool   `json:"check_in_missing,omitempty"`
+	// UsageByModel partitions Usage; consumers replace the aggregate with this
+	// map, never add both. An empty model key explicitly means unknown.
+	UsageByModel map[string]Usage `json:"usage_by_model,omitempty"`
 }
 
 // ErrorPayload — kind "error".

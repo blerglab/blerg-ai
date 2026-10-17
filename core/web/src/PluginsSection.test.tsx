@@ -3,6 +3,8 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import PluginsSection, { PLUGIN_ENGINES } from "./PluginsSection";
 import Settings from "./Settings";
 import * as authClient from "./authClient";
+const ENGINE_METADATA = { engines: [{id:"claude",name:"Claude Code",credential_import:true,plugins:true},{id:"codex",name:"Codex",credential_import:true,plugins:true},{id:"hermes",name:"Hermes",credential_import:true,plugins:false}], plugin_engines:["claude","codex"] };
+
 
 type Entry = { marketplace: string; plugin: string };
 const OFFICIAL = "anthropics/claude-plugins-official";
@@ -19,6 +21,7 @@ function fakeCore(initial: Entry[] = []) {
     max: 20,
   });
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+ if (url === "/api/engines") return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(ENGINE_METADATA)});
     if (url === "/api/plugins/codex" && (init?.method ?? "GET") === "GET") {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ...body(), engine: "codex", plugins: [] }) });
     }
@@ -65,7 +68,7 @@ describe("Always-on plugins", () => {
     render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     await screen.findByText("No always-on plugins yet.");
     const help = document.querySelector(".section-help")!.textContent ?? "";
-    expect(help).toMatch(/your Claude and Codex agent sessions/);
+    expect(help).toMatch(/your supported agent sessions/);
     expect(help).toMatch(/automation token/);
     expect(help).toMatch(/do not change your engine settings on your own machine/);
     expect(help).toMatch(/run code in your sessions, so only add ones you trust/);
@@ -154,7 +157,7 @@ describe("Always-on plugins", () => {
   it("provides a separate Codex list with the same operator allow-list", async () => {
     setup();
     render(<PluginsSection />);
-    const card = screen.getByText("Codex").closest("li")!;
+    const card = (await screen.findByText("Codex")).closest("li")!;
     expect(await within(card).findByText("No always-on plugins yet.")).toBeInTheDocument();
     expect(within(card).getByText(/This install accepts these marketplaces/)).toHaveTextContent(OFFICIAL);
     expect(core.fetchMock).toHaveBeenCalledWith("/api/plugins/codex", expect.anything());

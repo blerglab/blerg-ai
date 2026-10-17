@@ -28,6 +28,20 @@
   --chat-card-assistant-bg: var(--scree, #161c26);
   --chat-card-tool-bg: var(--basalt, #0d1117);
   --chat-card-system-bg: var(--scree-2, #1e2633);
+  --chat-code-keyword: #b69cf0;
+  --chat-code-string: #8fc9a0;
+  --chat-code-number: #e0b36a;
+  --chat-code-comment: #7d8798;
+  --chat-code-title: #7fb2ee;
+  --chat-code-type: #6fc7c7;
+  --chat-diff-add: var(--diff-add, #8ed6a6);
+  --chat-diff-del: var(--diff-del, #ff9d94);
+  --chat-code-fg: var(--chalk, #f2f6fa);
+  --chat-code-bg: var(--basalt, #0d1117);
+  --chat-code-linenum: var(--fog-dim, #8b97a7);
+  --chat-code-variable: #e0b36a;
+  --chat-code-builtin: #6fc7c7;
+  --chat-code-operator: var(--fog, #c2ccd8);
 }
 
 /* Deep Slate — LIGHT, and the explicit data-theme overrides, as index.css has them. Only the
@@ -57,6 +71,20 @@
     --chat-card-assistant-bg: var(--scree, #f7f9fc);
     --chat-card-tool-bg: var(--basalt, #eef1f6);
     --chat-card-system-bg: var(--scree-2, #ffffff);
+    --chat-code-keyword: #7a52c7;
+    --chat-code-string: #2f7a4a;
+    --chat-code-number: #a15f0d;
+    --chat-code-comment: #6b7684;
+    --chat-code-title: #2f62b8;
+    --chat-code-type: #1f7f7f;
+    --chat-diff-add: var(--diff-add, #2f8a52);
+    --chat-diff-del: var(--diff-del, #cf4b4b);
+    --chat-code-fg: var(--chalk, #131820);
+    --chat-code-bg: var(--basalt, #eef1f6);
+    --chat-code-linenum: var(--fog-dim, #6b7684);
+    --chat-code-variable: #a15f0d;
+    --chat-code-builtin: #1f7f7f;
+    --chat-code-operator: var(--fog, #48525f);
   }
 }
 :root[data-theme="light"] {
@@ -77,6 +105,20 @@
   --chat-card-assistant-bg: var(--scree, #f7f9fc);
   --chat-card-tool-bg: var(--basalt, #eef1f6);
   --chat-card-system-bg: var(--scree-2, #ffffff);
+  --chat-code-keyword: #7a52c7;
+  --chat-code-string: #2f7a4a;
+  --chat-code-number: #a15f0d;
+  --chat-code-comment: #6b7684;
+  --chat-code-title: #2f62b8;
+  --chat-code-type: #1f7f7f;
+  --chat-diff-add: var(--diff-add, #2f8a52);
+  --chat-diff-del: var(--diff-del, #cf4b4b);
+  --chat-code-fg: var(--chalk, #131820);
+  --chat-code-bg: var(--basalt, #eef1f6);
+  --chat-code-linenum: var(--fog-dim, #6b7684);
+  --chat-code-variable: #a15f0d;
+  --chat-code-builtin: #1f7f7f;
+  --chat-code-operator: var(--fog, #48525f);
 }
 :root[data-theme="dark"] {
   --chat-bg: var(--basalt, #0d1117);
@@ -96,4 +138,18 @@
   --chat-card-assistant-bg: var(--scree, #161c26);
   --chat-card-tool-bg: var(--basalt, #0d1117);
   --chat-card-system-bg: var(--scree-2, #1e2633);
+  --chat-code-keyword: #b69cf0;
+  --chat-code-string: #8fc9a0;
+  --chat-code-number: #e0b36a;
+  --chat-code-comment: #7d8798;
+  --chat-code-title: #7fb2ee;
+  --chat-code-type: #6fc7c7;
+  --chat-diff-add: var(--diff-add, #8ed6a6);
+  --chat-diff-del: var(--diff-del, #ff9d94);
+  --chat-code-fg: var(--chalk, #f2f6fa);
+  --chat-code-bg: var(--basalt, #0d1117);
+  --chat-code-linenum: var(--fog-dim, #8b97a7);
+  --chat-code-variable: #e0b36a;
+  --chat-code-builtin: #6fc7c7;
+  --chat-code-operator: var(--fog, #c2ccd8);
 }

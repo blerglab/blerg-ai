@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,7 +18,7 @@ import (
 	"time"
 )
 
-// Config-bundle limits: pods have no ~/.claude or ~/.hermes, so the daemon
+// Config-bundle limits: pods have no local engine customization, so the daemon
 // ships a synced copy of the user's agent config (CLAUDE.md, skills, agent
 // defs, one version per cached plugin, hermes's model/provider choice).
 // Oversized files are skipped, the whole bundle is capped.
@@ -32,19 +33,8 @@ const (
 // quiet would hold the daemon's sync, or a pod's startup, for ever.
 const bundleTransferTimeout = 5 * time.Minute
 
-// bundleRoots are the ~/.claude entries included in the bundle (relative to
-// homeDir). plugins/cache is handled specially (one version per plugin).
-var bundleRoots = []string{
-	".claude/CLAUDE.md",
-	".claude/skills",
-	".claude/agents",
-	".claude/personas",
-	// Hermes's persistent model/provider selection — not a secret (that's
-	// .env, delivered separately via HERMES_ENV_CONTENTS for k8s pods, see
-	// k8sjobs.go), just "which model" the operator picked with `hermes
-	// model`/`hermes setup`.
-	".hermes/config.yaml",
-}
+// Shared skill conventions are independent of the engine-specific roots.
+var bundleRoots = []string{".agents/skills"}
 
 // BuildConfigBundle tars the user's agent config for shipping to runner pods.
 func BuildConfigBundle(homeDir string) ([]byte, error) {
@@ -59,14 +49,14 @@ func BuildConfigBundle(homeDir string) ([]byte, error) {
 	total := int64(0)
 	entries := 0
 
-	addFile := func(rel string, info os.FileInfo) error {
-		if !bundleRegularFile(info) || info.Size() > bundleFileCap || !bundlePathWithoutLinks(homeRoot, rel) {
+	addFile := func(source *os.Root, rel, target string, info os.FileInfo) error {
+		if !bundleRegularFile(info) || info.Size() > bundleFileCap || !bundlePathWithoutLinks(source, rel) {
 			return nil // skip oversized files
 		}
 		if total+info.Size() > bundleTotalCap {
 			return fmt.Errorf("config bundle exceeds %d bytes", bundleTotalCap)
 		}
-		f, err := openBundleFile(homeRoot, rel)
+		f, err := openBundleFile(source, rel)
 		if err != nil {
 			return nil //nolint:nilerr // an unreadable file is left out of the bundle, the rest still ships
 		}
@@ -87,7 +77,7 @@ func BuildConfigBundle(homeDir string) ([]byte, error) {
 		if entries > bundleEntryCap {
 			return errors.New("config bundle has too many files")
 		}
-		hdr := &tar.Header{Name: rel, Mode: int64(info.Mode().Perm()), Size: int64(len(data))}
+		hdr := &tar.Header{Name: filepath.ToSlash(target), Mode: int64(info.Mode().Perm()), Size: int64(len(data))}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
@@ -98,33 +88,48 @@ func BuildConfigBundle(homeDir string) ([]byte, error) {
 		return nil
 	}
 
-	addTree := func(root string) error {
-		if !bundlePathWithoutLinks(homeRoot, root) {
+	addTree := func(source *os.Root, root, target string) error {
+		if !bundlePathWithoutLinks(source, root) {
 			return nil
 		}
-		abs := filepath.Join(homeDir, root)
-		info, err := homeRoot.Lstat(root)
+		info, err := source.Lstat(root)
 		if err != nil {
 			return nil //nolint:nilerr // a bundle root that does not exist is simply not bundled
 		}
 		if !info.IsDir() {
-			return addFile(root, info)
+			return addFile(source, root, target, info)
 		}
-		return filepath.Walk(abs, func(p string, fi os.FileInfo, err error) error {
-			if err != nil || !fi.Mode().IsRegular() {
+		return fs.WalkDir(source.FS(), filepath.ToSlash(root), func(p string, entry fs.DirEntry, err error) error {
+			if err != nil || !entry.Type().IsRegular() {
 				return nil //nolint:nilerr // unreadable entries, dirs, symlinks and sockets are skipped; symlinks would
 				// bypass the per-file size cap (lstat size ≠ target size)
 			}
-			rel, err := filepath.Rel(homeDir, p)
+			fi, err := entry.Info()
+			if err != nil {
+				return nil //nolint:nilerr // An unreadable entry is omitted while other safe configuration still exports.
+			}
+			rel, err := filepath.Rel(root, p)
 			if err != nil {
 				return nil //nolint:nilerr // a path that cannot be made relative to home is left out of the bundle
 			}
-			return addFile(filepath.ToSlash(rel), fi)
+			return addFile(source, p, filepath.Join(target, rel), fi)
 		})
 	}
 
 	for _, root := range bundleRoots {
-		if err := addTree(root); err != nil {
+		if err := addTree(homeRoot, root, root); err != nil {
+			return nil, err
+		}
+	}
+	specs := []EngineSpec{claudeEngineSpec}
+	for _, id := range engineOrder {
+		specs = append(specs, engineRegistry[id])
+	}
+	for _, spec := range specs {
+		if spec.ConfigBundle == nil {
+			continue
+		}
+		if err := addEngineConfigBundle(homeRoot, spec.ConfigBundle, addTree); err != nil {
 			return nil, err
 		}
 	}
@@ -160,7 +165,7 @@ func BuildConfigBundle(homeDir string) ([]byte, error) {
 				sort.Slice(names, func(i, j int) bool { return compareVersionStrings(names[i], names[j]) < 0 })
 				best := names[len(names)-1]
 				rel := filepath.Join(".claude/plugins/cache", m.Name(), p.Name(), best)
-				if err := addTree(rel); err != nil {
+				if err := addTree(homeRoot, rel, rel); err != nil {
 					return nil, err
 				}
 			}
@@ -174,6 +179,27 @@ func BuildConfigBundle(homeDir string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func addEngineConfigBundle(homeRoot *os.Root, cfg *EngineConfigBundle, addTree func(*os.Root, string, string) error) error {
+	source, prefix := homeRoot, cfg.Directory
+	if custom := os.Getenv(cfg.HomeEnv); cfg.HomeEnv != "" && filepath.IsAbs(custom) {
+		var err error
+		source, err = os.OpenRoot(custom)
+		if err != nil {
+			// An unavailable explicit home is omitted, never replaced with
+			// another login's configuration.
+			return nil
+		}
+		defer func() { _ = source.Close() }()
+		prefix = ""
+	}
+	for _, root := range cfg.Roots {
+		if err := addTree(source, filepath.Join(prefix, root), filepath.Join(cfg.Directory, root)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func bundleRegularFile(info os.FileInfo) bool {

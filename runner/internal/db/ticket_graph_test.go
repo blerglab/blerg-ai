@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 
@@ -13,26 +12,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// connectWithSchema creates a pool that bakes the given schema into every
-// connection via RuntimeParams, ensuring concurrent goroutines all operate in
-// the same schema even when the pool creates fresh connections.
-func connectWithSchema(t *testing.T, schema string) *pgxpool.Pool {
+// connectWithSchema opens another pool on the test's isolated database, so
+// concurrent goroutines use the same data even when new connections open.
+func connectWithSchema(t *testing.T, base *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database tests")
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
+	pool, err := pgxpool.NewWithConfig(context.Background(), base.Config())
 	if err != nil {
-		t.Fatalf("connectWithSchema parse config: %v", err)
+		t.Fatal("open second isolated test pool")
 	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	ctx := context.Background()
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connectWithSchema new pool: %v", err)
-	}
-	t.Cleanup(func() { pool.Close() })
+	t.Cleanup(pool.Close)
 	return pool
 }
 
@@ -42,20 +30,11 @@ func connectWithSchema(t *testing.T, schema string) *pgxpool.Pool {
 //	export TEST_DATABASE_URL="postgres://postgres:test@localhost:5544/blerg-runner_test"
 //	$HOME/go/bin/go test ./internal/db/ -run TestTicketGraph -v
 func TestTicketGraph(t *testing.T) {
-	// Phase 1: use the shared base pool to drop/create the test schema and run
-	// migrations. setupSchema sets search_path for the base pool, which is fine
-	// for sequential schema-management operations.
+	// Both pools address this test's isolated database, including connections
+	// opened for the concurrent operations below.
 	basePool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, basePool)
-	if err := db.RunMigrations(ctx, basePool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
-
-	// Phase 2: use a schema-aware pool for all actual test operations. Every
-	// connection this pool creates (including those spawned for concurrent
-	// goroutines) has search_path=test_blerg_runner baked in via RuntimeParams.
-	pool := connectWithSchema(t, "test_blerg_runner")
+	pool := connectWithSchema(t, basePool)
 
 	board, err := db.CreateBoard(ctx, pool, "Test Board", nil, []string{"repo-a", "repo-b"}, nil)
 	if err != nil {

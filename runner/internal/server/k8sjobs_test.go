@@ -1007,10 +1007,6 @@ func TestResumeClusterSessionPassesSpawningAccountID(t *testing.T) {
 	}
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-0000000000f1"
 	sessionID := "00000000-0000-0000-0000-0000000000f2"
@@ -1135,10 +1131,6 @@ func TestResumeClusterSessionDoesNotReMintAnotherUsersCredentials(t *testing.T) 
 	}
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-0000000000e1"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "cluster", "runner", ""); err != nil {

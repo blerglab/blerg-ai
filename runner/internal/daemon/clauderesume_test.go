@@ -130,7 +130,7 @@ func TestClaudeResumedSubagents(t *testing.T) {
 
 func TestResumedPayloadJSON(t *testing.T) {
 	raw, _ := json.Marshal(agent.SubagentPayload{ChildID: "s", AgentType: "Explore", Summary: "t", Background: true, Resumed: true, ResumedFrom: "a"})
-	if string(raw) != `{"child_id":"s","agent_type":"Explore","model":"","summary":"t","background":true,"resumed":true,"resumed_from":"a"}` {
+	if string(raw) != `{"effort":"","child_id":"s","agent_type":"Explore","model":"","summary":"t","background":true,"resumed":true,"resumed_from":"a"}` {
 		t.Fatalf("payload = %s", raw)
 	}
 }

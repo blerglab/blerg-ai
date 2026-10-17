@@ -10,6 +10,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/robfig/cron/v3 v3.0.1
+	golang.org/x/sys v0.47.0
 )
 
 replace github.com/blerglab/blerg-ai/contracts => ../contracts

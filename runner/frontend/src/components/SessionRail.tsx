@@ -1,7 +1,7 @@
 // SessionRail: the session page's side panel, in four tabs. Live: what needs the person (the agent's
 // open questions, with a box that answers each; tool changes waiting on a decision), what is running
 // (subagents and background tasks, each with a way to its place in the conversation), the session's
-// facts, and the chat's settings (Show thinking, Compact tool calls). History (HistoryTab.tsx): the pieces of work the session did. Files
+// facts (with Resume when limit resets). History (HistoryTab.tsx): the pieces of work the session did. Files
 // (FilesTab.tsx): the session's files. Capabilities (CapabilitiesTab.tsx): what it loaded. A tab other than Live
 // reads the server only while it is on screen. The tab chosen is kept per browser. On a wide screen it is a panel beside the chat; on a narrow one a drawer over it (modal:
 // Esc and the backdrop close it, focus stays inside, the page does not scroll behind it).
@@ -14,7 +14,16 @@ import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import {
   AskReply,
+  ChecklistItems,
   KindIcon,
+  SourceBadge,
+  TicketChips,
+  TicketKey,
+  TicketModal,
+  doneCount,
+  planLabel,
+  mcpSummary,
+  progressText,
   StatusGlyph,
   elapsedOf,
   scrollToCall,
@@ -28,12 +37,19 @@ import {
   useTicker,
   clockLabel,
   fileCount,
+  type ArtifactInfo,
   type AskLive,
   type BackgroundTask,
   type LiveState,
+  type McpLive,
+  type McpServer,
+  type PlanLive,
   type SubagentLive,
+  type Ticket,
+  type TicketSummaryLive,
 } from '@blerglab/chat'
 import { ENGINE_LABELS, RUNTIME_LABELS } from '../lib/runtimes'
+import { diffArtifacts, hasPlanTab, planList, planSummary, planTabLabel, type PlanList } from '../lib/railPlan'
 import { RAIL_TABS, lifetimeLabel, readRailTab, waitLabel, writeRailTab, type RailTab } from '../lib/sessionRail'
 import FilesTab from './FilesTab'
 import HistoryTab from './HistoryTab'
@@ -75,21 +91,12 @@ export interface SessionRailProps {
   onClose: () => void
   /** The Capabilities tab came on screen: the page reads the tool changes again. */
   onCapabilitiesShown?: () => void
-  /** The chat's settings, held by the page (the chat draws what they say) and kept per browser. */
-  settings: RailSettings
   /** Opens a file in the chat's viewer (History's version chips). */
   onOpenArtifact: (id: string) => void
   /** The panel opened by itself for a question: show Live (not saved as the choice), then say so. */
   showLive?: boolean
   /** Called once Live was shown for showLive; the page clears its request. */
   onLiveShown?: () => void
-}
-
-export interface RailSettings {
-  thinking: boolean
-  onThinking: (on: boolean) => void
-  compact: boolean
-  onCompact: (on: boolean) => void
 }
 
 const NO_EVENTS: never[] = []
@@ -129,7 +136,7 @@ export default function SessionRail(props: SessionRailProps) {
   }
 
   // Live (what needs the person, what runs, the session) or History; the person's choice is kept.
-  const [tab, setTab] = useState<RailTab>(readRailTab)
+  const [chosen, setTab] = useState<RailTab>(readRailTab)
   // Opened by itself for a question: show it, without making Live the person's choice; then tell
   // the page, which clears the request, so the next one is taken again.
   const wantLive = props.showLive ?? false
@@ -142,10 +149,22 @@ export default function SessionRail(props: SessionRailProps) {
   }
   const { onLiveShown } = props
   useEffect(() => { if (liveTaken) onLiveShown?.() }, [liveTaken, onLiveShown])
+  // Plan is there only when the session has a ticket, a list or a diff: otherwise a saved Plan shows Live.
+  const tickets = live.tickets ?? []
+  const diffs = useMemo(() => diffArtifacts(live.files?.items), [live.files?.items])
+  const list = planList(live.checklist, live.plan)
+  const planShown = hasPlanTab(list, tickets.length, diffs.length)
+  const tab: RailTab = chosen === 'plan' && !planShown ? 'live' : chosen
   const pick = (t: RailTab) => {
     setTab(t)
     writeRailTab(t)
   }
+  // The summary line on Live: to the Plan tab, with the focus on its tab.
+  const goPlan = () => {
+    pick('plan')
+    document.getElementById(`${props.id}-tab-plan`)?.focus()
+  }
+
   const capabilitiesShown = open && tab === 'capabilities'
   const { onCapabilitiesShown } = props
   // Only a switch to Capabilities while the panel is open: opening the panel (on Capabilities, or on mount)
@@ -172,8 +191,6 @@ export default function SessionRail(props: SessionRailProps) {
     if (mode === 'drawer') onClose()
     attach()
   } : undefined
-  const { settings } = props
-
   // What was typed in an ask's box, by ask: it outlives the drawer closing (the box goes with it).
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const draftFor = (eventId: string) => ({
@@ -184,8 +201,47 @@ export default function SessionRail(props: SessionRailProps) {
   const needsCount = live.openAsks.length + (toolChanges > 0 ? 1 : 0)
   const runningCount = live.subagents.length + runningTasks
 
+  // A pinned ticket opened over the page (the current one in full, another by its summary).
+  const [ticketOpen, setTicketOpen] = useState<{ ticket: Ticket; eventId: string } | null>(null)
+  const openTicket = (t: TicketSummaryLive) => {
+    const full = live.ticket && live.ticket.source === t.source && live.ticket.key === t.key ? live.ticket : null
+    setTicketOpen({ ticket: full ?? { source: t.source, key: t.key, title: t.title, ...(t.status ? { status: t.status } : {}), ...(t.url ? { url: t.url } : {}) }, eventId: t.eventId })
+  }
+  const planBody = (
+    <>
+      {tickets.length > 0 && (
+        <Section title={tickets.length === 1 ? 'Ticket' : 'Tickets'} testId="rail-ticket">
+          <ul className="rail-list">
+            {tickets.map((t, i) => (
+              <TicketRow key={`${t.source}:${t.key}`} t={t} current={i === 0} onOpen={() => openTicket(t)} />
+            ))}
+          </ul>
+        </Section>
+      )}
+
+      {live.checklist
+        ? (
+            <Section title="Checklist" testId="rail-checklist" meta={progressText(doneCount(live.checklist.items), live.checklist.items.length)}>
+              <Progress done={doneCount(live.checklist.items)} total={live.checklist.items.length} />
+              {/* "View diff" opens the diff the CLI published of an item's commits, in the chat's viewer. */}
+              <ChecklistItems items={live.checklist.items} commitUrls={live.checklist.commitUrls ?? {}} onViewDiff={openFile} />
+            </Section>
+          )
+        : live.plan && (
+            <Section title="Plan" testId="rail-plan" meta={planLabel(live.plan)}>
+              <Progress done={doneCount(live.plan.items)} total={live.plan.items.length} />
+              <PlanItems plan={live.plan} />
+            </Section>
+          )}
+
+      <DiffsSection diffs={diffs} onOpen={openFile} />
+    </>
+  )
+
   const liveBody = (
     <>
+      {list && <PlanSummary list={list} ticket={tickets[0]} onOpen={() => goPlan()} />}
+
       <Section title="Needs you" count={live.openAsks.length + toolChanges} tone="attention" testId="rail-needs" empty="Nothing needs you.">
         {needsCount > 0 && (
           <ul className="rail-list">
@@ -241,33 +297,27 @@ export default function SessionRail(props: SessionRailProps) {
         )}
       </Section>
 
+      {live.mcp && <McpSection mcp={live.mcp} />}
+
       <Section title="Session" testId="rail-session">
         <SessionFacts session={session} machine={props.machine} now={minute} liveRunning={props.liveRunning ?? null} />
-      </Section>
-
-      <Section title="Settings" testId="rail-settings">
-        <div className="rail-settings">
-          <label className="rail-check" title="Show the model's thinking in the transcript">
-            <input type="checkbox" checked={settings.thinking} onChange={e => settings.onThinking(e.target.checked)} />
-            <span>Show thinking</span>
-          </label>
-          <label className="rail-check" title="Fold runs of tool calls into one summary row">
-            <input type="checkbox" checked={settings.compact} onChange={e => settings.onCompact(e.target.checked)} />
-            <span>Compact tool calls</span>
-          </label>
-          {(!session.engine || session.engine === 'claude' || session.engine === 'codex') &&
-            <UsageLimitResume key={session.id} sessionId={session.id} />}
-        </div>
+        {session.limit_resume_supported === true &&
+          <div className="rail-settings"><UsageLimitResume key={session.id} sessionId={session.id} /></div>}
       </Section>
     </>
   )
 
   const body = (
     <>
-      <RailTabs idBase={props.id} tab={tab} onPick={pick} needs={live.openAsks.length + toolChanges} files={live.files ? fileCount(live.files.items) : 0} enabled={enabled} />
+      <RailTabs idBase={props.id} tab={tab} onPick={pick} plan={planShown ? (planTabLabel(list, tickets.length, diffs.length) ?? '') : null} needs={live.openAsks.length + toolChanges} files={live.files ? fileCount(live.files.items) : 0} enabled={enabled} />
       <div className="rail-tabpanel" role="tabpanel" id={`${props.id}-panel-live`} aria-labelledby={`${props.id}-tab-live`} hidden={tab !== 'live'}>
         {liveBody}
       </div>
+      {planShown && (
+        <div className="rail-tabpanel" role="tabpanel" id={`${props.id}-panel-plan`} aria-labelledby={`${props.id}-tab-plan`} hidden={tab !== 'plan'}>
+          {planBody}
+        </div>
+      )}
       {/* Kept mounted while Live shows, so its list, opened cards and read state survive a switch;
           it reads the server and moves its clock only while on screen. */}
       <div className="rail-tabpanel" role="tabpanel" id={`${props.id}-panel-history`} aria-labelledby={`${props.id}-tab-history`} hidden={tab !== 'history'}>
@@ -283,7 +333,19 @@ export default function SessionRail(props: SessionRailProps) {
     </>
   )
 
-  if (mode === 'drawer') return open ? <Drawer id={props.id} onClose={onClose}>{body}</Drawer> : null
+  const ticketModal = ticketOpen && (
+    <TicketModal
+      ticket={ticketOpen.ticket}
+      onClose={() => setTicketOpen(null)}
+      onShow={() => jump(ticketOpen.eventId, () => {
+        const found = scrollToEvent(ticketOpen.eventId)
+        if (found) setTicketOpen(null)
+        return found
+      })}
+    />
+  )
+
+  if (mode === 'drawer') return open ? <Drawer id={props.id} onClose={onClose}>{body}{ticketModal}</Drawer> : null
   return (
     <aside id={props.id} className="session-rail panel" aria-label="Session panel" data-testid="session-rail" hidden={!open}>
       {/* No close button of its own: the header's panel toggle, right above, opens and closes it. */}
@@ -291,6 +353,7 @@ export default function SessionRail(props: SessionRailProps) {
         <h2 className="rail-heading">Session panel</h2>
       </header>
       <div className="rail-body">{body}</div>
+      {ticketModal}
     </aside>
   )
 }
@@ -362,11 +425,12 @@ function Drawer({ id, onClose, children }: { id: string; onClose: () => void; ch
   )
 }
 
-const TABS = RAIL_TABS
-const TAB_LABEL: Record<RailTab, string> = { live: 'Live', history: 'History', files: 'Files', capabilities: 'Capabilities' }
+const ALL_TABS = RAIL_TABS
+const TAB_LABEL: Record<RailTab, string> = { live: 'Live', plan: 'Plan', history: 'History', files: 'Files', capabilities: 'Capabilities' }
 
-/** Live · History · Files · Capabilities, with the arrow keys, Home and End moving between them (the tabs pattern). */
-function RailTabs({ idBase, tab, onPick, needs, files, enabled }: { idBase: string; tab: RailTab; onPick: (t: RailTab) => void; needs: number; files: number; enabled: number }) {
+/** Live · Plan · History · Files · Capabilities (Plan only when there is one), with the arrow keys, Home and End moving between them (the tabs pattern). */
+function RailTabs({ idBase, tab, onPick, plan, needs, files, enabled }: { idBase: string; tab: RailTab; onPick: (t: RailTab) => void; plan: string | null; needs: number; files: number; enabled: number }) {
+  const TABS = ALL_TABS.filter(t => t !== 'plan' || plan !== null)
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
     const at = TABS.indexOf(tab)
     const to: Record<string, number> = { ArrowRight: (at + 1) % TABS.length, ArrowLeft: (at + TABS.length - 1) % TABS.length, Home: 0, End: TABS.length - 1 }
@@ -398,6 +462,13 @@ function RailTabs({ idBase, tab, onPick, needs, files, enabled }: { idBase: stri
               <span className="rail-sr">, {needs} {needs === 1 ? 'needs' : 'need'} you</span>
             </>
           )}
+          {/* Done of total (or a count of tickets and diffs), on Plan. */}
+          {t === 'plan' && plan && (
+            <>
+              <span className="rail-count rail-tab-count" aria-hidden="true" data-testid="rail-plan-tab-count">{plan}</span>
+              <span className="rail-sr">, {plan}</span>
+            </>
+          )}
           {/* How many files the session holds (names, not versions), on Files, to draw the eye there. */}
           {t === 'files' && files > 0 && (
             <>
@@ -418,9 +489,11 @@ function RailTabs({ idBase, tab, onPick, needs, files, enabled }: { idBase: stri
   )
 }
 
-function Section({ title, count, tone, testId, empty, children }: {
+function Section({ title, count, meta, tone, testId, empty, children }: {
   title: string
   count?: number
+  /** Words beside the title in place of a count ("3 of 7 done"). */
+  meta?: string
   /** How a count above zero is coloured: something waits on the person, or something runs. */
   tone?: 'attention' | 'running'
   testId: string
@@ -434,9 +507,134 @@ function Section({ title, count, tone, testId, empty, children }: {
       <h3 className="rail-section-head" id={headId}>
         <span>{title}</span>
         {count !== undefined && <span className={`rail-count${count > 0 && tone ? ` ${tone}` : ''}`} data-testid={`${testId}-count`}>{count}</span>}
+        {meta && <span className="rail-section-meta" data-testid={`${testId}-meta`}>{meta}</span>}
       </h3>
       {hasContent ? children : empty && <p className="rail-empty">{empty}</p>}
     </section>
+  )
+}
+
+const MCP_STATUS_WORDS: Record<string, string> = { pending: 'connecting', 'needs-auth': 'needs sign-in' }
+const MCP_RELEASED_WORDS: Record<string, string> = {
+  settled: 'Sent once the servers were ready',
+  timeout: 'Sent after the wait ran out',
+  person: 'Sent when you chose Send now',
+}
+
+function mcpRowText(s: McpServer): string {
+  const parts = [s.name, MCP_STATUS_WORDS[s.status] ?? s.status]
+  if (s.source) parts.push(s.source)
+  if (s.status === 'connected' && s.tools > 0) parts.push(`${s.tools} ${s.tools === 1 ? 'tool' : 'tools'}`)
+  return parts.join(' · ')
+}
+
+/** The session's MCP servers: one quiet line ("Connecting 2 of 3…", "2 connected · 1 failed"), opening
+ *  to each server's name, state, source and tool count. A failure or a sign-in need is in the warning
+ *  colour. Not drawn when the session has none. */
+function McpSection({ mcp }: { mcp: McpLive }) {
+  const [open, setOpen] = useState(false)
+  const listId = useId()
+  const sum = mcpSummary(mcp)
+  if (!sum) return null
+  return (
+    <Section title="MCP servers" testId="rail-mcp">
+      <button type="button" className={`rail-mcp-toggle${sum.warn ? ' rail-mcp-warn' : ''}`} aria-expanded={open} aria-controls={listId} onClick={() => setOpen(o => !o)}>
+        {sum.connecting
+          ? <span className="queue-spinner" aria-hidden="true" />
+          : <span aria-hidden="true">{open ? '▾' : '▸'}</span>}
+        <span data-testid="rail-mcp-summary">{sum.text}</span>
+      </button>
+      {mcp.released && <p className="rail-mcp-released" data-testid="rail-mcp-released">{MCP_RELEASED_WORDS[mcp.released]}</p>}
+      {open && (
+        <ul className="rail-mcp-list" id={listId} data-testid="rail-mcp-list">
+          {mcp.servers.map(sv => (
+            <li key={sv.name} data-testid="rail-mcp-row" className={sv.status === 'failed' || sv.status === 'needs-auth' ? 'rail-mcp-warn' : undefined}>{mcpRowText(sv)}</li>
+          ))}
+        </ul>
+      )}
+    </Section>
+  )
+}
+
+/** Live's one line about the plan: the list's progress and its next item, a bar under it; it opens the Plan tab. */
+function PlanSummary({ list, ticket, onOpen }: { list: PlanList; ticket?: TicketSummaryLive; onOpen: () => void }) {
+  return (
+    <button type="button" className="rail-plan-summary" data-testid="rail-plan-summary" onClick={onOpen} title={planSummary(list)}>
+      <span className="rail-plan-summary-line">
+        {ticket && (
+          <span className="rail-plan-summary-ticket">
+            <span className="ticket-key">{ticket.key}</span>
+            {ticket.status && <span className="ticket-chip status">{ticket.status}</span>}
+          </span>
+        )}
+        <span className="rail-plan-summary-text" data-testid="rail-plan-summary-text">{planSummary(list)}</span>
+      </span>
+      <Progress done={list.done} total={list.total} />
+    </button>
+  )
+}
+
+/** The diffs the session published, newest first: a row each, opening the viewer. */
+function DiffsSection({ diffs, onOpen }: { diffs: ArtifactInfo[]; onOpen: (id: string) => void }) {
+  if (diffs.length === 0) return null
+  return (
+    <Section title="Diffs" count={diffs.length} testId="rail-diffs">
+      <ul className="rail-list">
+        {diffs.map(d => {
+          const at = d.created_at ? new Date(d.created_at) : null
+          return (
+            <li key={d.id} className="rail-item rail-diff" data-testid="rail-diff-row">
+              <button type="button" className="rail-link rail-diff-open" onClick={() => onOpen(d.id)}>{d.name}</button>
+              {at && !Number.isNaN(at.getTime()) && (
+                <time className="rail-diff-time" dateTime={at.toISOString()}>{at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</time>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+    </Section>
+  )
+}
+
+/** A thin bar: how much of the list is done. */
+function Progress({ done, total }: { done: number; total: number }) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  return (
+    <div className="rail-progress" role="progressbar" aria-label={progressText(done, total)} aria-valuemin={0} aria-valuemax={total} aria-valuenow={done}>
+      <div className="rail-progress-fill" style={{ width: `${pct}%` }} />
+    </div>
+  )
+}
+
+const PLAN_GLYPH = { completed: '☑', in_progress: '◐', pending: '☐' } as const
+
+/** The engine's plan: its items with their state (read-only). */
+function PlanItems({ plan }: { plan: PlanLive }) {
+  return (
+    <ul className="checklist-items rail-plan-items">
+      {plan.items.map((it, i) => (
+        <li key={i} className={it.status === 'completed' ? 'done' : it.status === 'in_progress' ? 'now' : undefined}>
+          <span className="checklist-box" aria-hidden="true">{PLAN_GLYPH[it.status] ?? '☐'}</span>
+          <span className="checklist-text">{it.status === 'in_progress' && it.active ? it.active : it.text}</span>
+          <span className="rail-sr">{it.status === 'completed' ? ' (done)' : it.status === 'in_progress' ? ' (in progress)' : ' (to do)'}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** One pinned ticket: the current one with its title on a line of its own, the others in one line. */
+function TicketRow({ t, current, onOpen }: { t: TicketSummaryLive; current: boolean; onOpen: () => void }) {
+  return (
+    <li className={`rail-item rail-ticket${current ? ' current' : ''}`} data-testid="rail-ticket-row" data-ticket-key={t.key}>
+      <div className="rail-item-head">
+        <SourceBadge source={t.source} />
+        <TicketKey ticket={t} />
+        {current && <TicketChips ticket={t} />}
+        {!current && <button type="button" className="rail-ticket-title rail-link" onClick={onOpen}>{t.title}</button>}
+      </div>
+      {current && <button type="button" className="rail-ticket-title rail-link" onClick={onOpen} data-testid="rail-ticket-open">{t.title}</button>}
+    </li>
   )
 }
 
@@ -479,6 +677,7 @@ function SubagentRow({ sub, now, missing, onShow }: { sub: SubagentLive; now: nu
         {sub.resumed && <span className="rail-chip" data-testid="rail-sub-resumed">resumed</span>}
         {sub.type && <span className="rail-chip" data-testid="rail-sub-type">{sub.type}</span>}
         {model && <span className="rail-chip" data-testid="rail-sub-model">{model}</span>}
+        <span className="rail-chip" data-testid="rail-sub-effort" title="Child-reported configured effort; unknown when not reported">effort: {sub.effort || 'unknown'}</span>
         {sub.tokens !== null && sub.tokens > 0 && <span className="rail-chip" data-testid="rail-sub-tokens">{tokenLabel(sub.tokens)}</span>}
       </div>
       {sub.doing && <div className="rail-item-line doing" data-testid="rail-sub-doing">{sub.doing}</div>}

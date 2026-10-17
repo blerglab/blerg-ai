@@ -682,7 +682,7 @@ func (s *Service) tokenRequest(ctx context.Context, b tokenBundle, form url.Valu
 	if secs, ok := parseExpiresIn(body.ExpiresIn); ok {
 		ttl = min(time.Duration(secs*float64(time.Second)), maxAccessTTL)
 	}
-	return tokenResult{accessToken: body.AccessToken, refreshToken: body.RefreshToken, expiresAt: time.Now().Add(ttl)}, nil
+	return tokenResult{accessToken: body.AccessToken, refreshToken: body.RefreshToken, expiresAt: s.oauthTime().Add(ttl)}, nil
 }
 
 // parseExpiresIn reads expires_in as a JSON number or a numeric string (some providers send

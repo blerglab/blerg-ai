@@ -160,8 +160,10 @@ func types2str(e ast.Expr) string {
 // scopeRegistry has one zero value of every protocol struct that names a
 // session. TestScopeRegistryIsComplete fails when a new one is missing.
 var scopeRegistry = map[string]any{
-	"SessionStarted": protocol.SessionStarted{},
-	"SessionOutput":  protocol.SessionOutput{}, "SessionStateChanged": protocol.SessionStateChanged{},
+	"ReadWorkspaceFile":   protocol.ReadWorkspaceFile{},
+	"WorkspaceFileResult": protocol.WorkspaceFileResult{},
+	"SessionStarted":      protocol.SessionStarted{},
+	"SessionOutput":       protocol.SessionOutput{}, "SessionStateChanged": protocol.SessionStateChanged{},
 	"SessionMetaChanged": protocol.SessionMetaChanged{}, "SessionBackgroundChanged": protocol.SessionBackgroundChanged{},
 	"SessionTitleChanged": protocol.SessionTitleChanged{},
 	"SessionEnded":        protocol.SessionEnded{}, "SpawnSession": protocol.SpawnSession{},
@@ -178,7 +180,8 @@ var scopeRegistry = map[string]any{
 	"SessionStarChanged": protocol.SessionStarChanged{}, "MessageInfo": protocol.MessageInfo{},
 	"AgentEvent": protocol.AgentEvent{}, "AgentEventAck": protocol.AgentEventAck{},
 	"AgentUserMessage": protocol.AgentUserMessage{}, "SetSessionModel": protocol.SetSessionModel{},
-	"InterruptSession": protocol.InterruptSession{}, "SubscribeAgentEvents": protocol.SubscribeAgentEvents{},
+	"ReleaseHeldPrompt": protocol.ReleaseHeldPrompt{},
+	"InterruptSession":  protocol.InterruptSession{}, "SubscribeAgentEvents": protocol.SubscribeAgentEvents{},
 	"AgentEventsReplayDone": protocol.AgentEventsReplayDone{}, "MessageCreated": protocol.MessageCreated{},
 	"MessageAnswered":      protocol.MessageAnswered{},
 	"RefreshSessionTools":  protocol.RefreshSessionTools{},

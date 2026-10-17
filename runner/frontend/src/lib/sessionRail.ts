@@ -1,6 +1,7 @@
 // The session page's side panel (SessionRail): the person's open/closed choice for it and its tab,
 // kept per browser, the chat settings its Live tab holds, and the words it uses for how long
 // something has waited or run.
+import { useSyncExternalStore } from 'react'
 import { loadCompact, localStorageChatStorage, saveCompact } from '@blerglab/chat'
 
 export const RAIL_PREF_KEY = 'blerg-runner.sessionRail.open'
@@ -25,8 +26,8 @@ export function writeRailPref(open: boolean) {
 
 export const RAIL_TAB_KEY = 'blerg-runner.sessionRail.tab'
 
-/** The panel's tabs, in order: what is live, the work done, the session's files, what it loaded. */
-export const RAIL_TABS = ['live', 'history', 'files', 'capabilities'] as const
+/** The panel's tabs, in order: what is live, the plan (tickets, checklist, diffs), the work done, the session's files, what it loaded. */
+export const RAIL_TABS = ['live', 'plan', 'history', 'files', 'capabilities'] as const
 
 export type RailTab = typeof RAIL_TABS[number]
 
@@ -89,6 +90,7 @@ export function writeThinking(on: boolean) {
   } catch {
     // Private mode or a full store: the choice lasts for this page only.
   }
+  announceChatSettings()
 }
 
 /** Compact tool calls: on unless the person turned them off, under the chat's own key (the choice
@@ -99,4 +101,30 @@ export function readCompact(): boolean {
 
 export function writeCompact(on: boolean) {
   saveCompact(localStorageChatStorage, on)
+  announceChatSettings()
+}
+
+// The Settings dialog and the open session page are different components: a change made in the dialog
+// reaches the chat through this event (and another tab's, through the storage event).
+const CHAT_SETTINGS_EVENT = 'blerg-runner:chat-settings'
+function announceChatSettings() {
+  window.dispatchEvent(new Event(CHAT_SETTINGS_EVENT))
+}
+function subscribeChatSettings(cb: () => void) {
+  window.addEventListener(CHAT_SETTINGS_EVENT, cb)
+  window.addEventListener('storage', cb)
+  return () => {
+    window.removeEventListener(CHAT_SETTINGS_EVENT, cb)
+    window.removeEventListener('storage', cb)
+  }
+}
+
+/** Show thinking, kept per browser and shared by everything that shows or sets it. */
+export function useThinking(): [boolean, (on: boolean) => void] {
+  return [useSyncExternalStore(subscribeChatSettings, readThinking), writeThinking]
+}
+
+/** Compact tool calls, likewise. */
+export function useCompact(): [boolean, (on: boolean) => void] {
+  return [useSyncExternalStore(subscribeChatSettings, readCompact), writeCompact]
 }

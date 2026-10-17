@@ -72,6 +72,10 @@ export interface Board {
   reviewer_model: string;
   discuss_model: string;
   chat_model: string;
+  effort?: string;
+  reviewer_effort?: string;
+  discuss_effort?: string;
+  chat_effort?: string;
   field_schema: FieldDef[];
   require_repo: boolean;
   gate_enabled: boolean;
@@ -127,6 +131,7 @@ export interface Card {
   body: string | null;
   priority: string;
   size: string | null;
+  effort?: string;
   model: string; // "" = this card's sessions use the board's model
   fields: Record<string, unknown>;
   dedup_key: string | null;

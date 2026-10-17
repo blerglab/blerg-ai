@@ -201,12 +201,12 @@ describe('the session panel on a desktop (1280 px)', () => {
     expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('0')
   })
 
-  it('Capabilities fills the panel’s column, its filter and groups inside it; Settings sits at the end of Live', async () => {
+  it('Capabilities fills the panel’s column, its filter and groups inside it; Session closes Live', async () => {
     renderPage()
     const rail = screen.getByTestId('session-rail')
     await waitFor(() => expect(rail.getBoundingClientRect().width).toBeGreaterThan(0))
     const r = rail.getBoundingClientRect()
-    const settings = screen.getByTestId('rail-settings')
+    const settings = screen.getByTestId('rail-session')
     expect(settings.getBoundingClientRect().right).toBeLessThanOrEqual(r.right)
     await userEvent.click(screen.getByRole('tab', { name: /^Capabilities/ }))
     await screen.findByText('release-notes')

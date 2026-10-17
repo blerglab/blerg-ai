@@ -57,7 +57,7 @@ describe('resumed subagent', () => {
     // One row: the title, the small "resumed" marker and the state glyph; the tooltip says it too.
     const row = cards[1].querySelector('[data-testid="subagent-row"]')!
     expect(row.textContent).toBe(`↳ ${TITLE}resumed▸`)
-    expect(row.getAttribute('title')).toBe(`${TITLE} · resumed · general-purpose · running`)
+    expect(row.getAttribute('title')).toBe(`${TITLE} · resumed · general-purpose · configured effort: unknown · running`)
     expect(row.getAttribute('aria-label')).toBe(row.getAttribute('title'))
     // the acknowledgement is not shown as its report
     expect(cards[1].textContent).not.toContain('resumedAgentId')

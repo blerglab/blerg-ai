@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
 
 func TestCodexOwnedChildQuestionUsesPrivateCallback(t *testing.T) {
@@ -21,7 +22,8 @@ func TestCodexOwnedChildQuestionUsesPrivateCallback(t *testing.T) {
 	d.AskUser = func(_ context.Context, body string) (string, error) { bodies <- body; return "Blue", nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("Run child question", "chat")
 	waitUntil(t, "question resolved", func() bool { return countKind(em, "turn_done") == 1 })
 	select {
@@ -46,7 +48,8 @@ func TestCodexForeignAndStaleChildQuestionsAreRefused(t *testing.T) {
 			d.AskUser = func(context.Context, string) (string, error) { called <- true; return "Blue", nil }
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			go d.Run(ctx)
+			stopDriver := startTestCodexDriver(ctx, t, d)
+			defer stopDriver()
 			d.Enqueue("Run child question", "chat")
 			waitUntil(t, "rejected child question", func() bool { return countKind(em, "turn_done") == 1 })
 			select {
@@ -73,7 +76,8 @@ func TestCodexRootInterruptCancelsChildQuestion(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("Run child question", "chat")
 	select {
 	case <-started:
@@ -179,7 +183,8 @@ func TestCodexNativeChildQuestionProofPreservesTurnOrder(t *testing.T) {
 			d.AskUser = func(context.Context, string) (string, error) { called <- true; return "Blue", nil }
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			go d.Run(ctx)
+			stopDriver := startTestCodexDriver(ctx, t, d)
+			defer stopDriver()
 			d.Enqueue("Run native child question", "chat")
 			waitUntil(t, "native child question settled", func() bool { return countKind(em, "turn_done") == 1 })
 			got := false
@@ -226,7 +231,8 @@ func TestCodexOptionalQuestionDoesNotBlockEventLoop(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("Ask optional question", "chat")
 	select {
 	case <-started:

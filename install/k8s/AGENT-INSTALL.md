@@ -447,7 +447,7 @@ Blerg is installed on <cluster context> and all checks passed.
 **A failed step during a first install.** Nothing needs undoing to retry:
 fix the cause and re-run `./deploy.sh`; it reuses the Secrets it already
 created. Do not delete `blerg-secrets` to "start clean" — Postgres keeps the
-password from its first initialisation.
+password from its first initialization.
 
 **Rolling back an upgrade.** Use what you recorded at the
 [upgrade gate](#upgrade-gate-upgrades-only). Database migrations only run

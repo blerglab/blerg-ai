@@ -14,6 +14,9 @@ export type { ArtifactInfo, UploadedFile }
  *  what runs it, and when it began and ended. */
 export interface SessionMeta {
   status: SessionStatus
+  /** Whether this native session can receive a message during active work.
+   * Absent on older backends: ChatView retains its legacy engine fallback. */
+  steering_supported?: boolean
   engine?: string // '' / absent = claude
   runtime?: string
   model?: string
@@ -91,7 +94,24 @@ export interface OlderPage {
   serverTime?: string
 }
 
+/** A file read from the session's folder (not a published artifact): its bytes and what the
+ *  server says it is. */
+export interface WorkspaceFile {
+  /** The cleaned relative path the server read. */
+  path: string
+  size: number
+  /** The server's view string, as an artifact's (markdown, text, image, html, ...). */
+  view: string
+  content_type: string
+  /** When the file was last changed, RFC 3339. */
+  mtime: string
+  blob: Blob
+}
+
 export interface TransportFiles {
+  /** Reads a file by its path in the session's folder (owner only; absent on a transport without
+   *  the route). Throws WorkspaceFileError for a refusal; honours `signal`. */
+  workspaceFile?(sessionId: string, path: string, signal?: AbortSignal): Promise<WorkspaceFile>
   list(sessionId: string): Promise<ArtifactInfo[]>
   /** The bytes through the authenticated route, never a bare URL. */
   raw(sessionId: string, id: string): Promise<Blob>
@@ -116,6 +136,10 @@ export interface SendOptions {
 }
 
 export interface Transport {
+  /** Canonical public runner session URL, with no query/fragment. Used only to recognize
+   * published artifact links. Proxy transports must map the app's ID to the runner's ID;
+   * absent means links keep their normal navigation behavior. */
+  publishedSessionUrl?(sessionId: string): string | null
   /** Replay then live. tail=true asks for the newest page first (how the runner opens a long
    *  transcript); onReplayDone carries hasMore/hasOlder/firstSeq/lastSeq/serverTime. Returns the
    *  unsubscribe. */

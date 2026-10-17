@@ -27,9 +27,10 @@ import (
 )
 
 type sessionSubagents struct {
-	Count   int        `json:"count"`
-	ByType  []countRow `json:"by_type"`
-	ByModel []countRow `json:"by_model"`
+	ByEffort []countRow `json:"by_effort"`
+	Count    int        `json:"count"`
+	ByType   []countRow `json:"by_type"`
+	ByModel  []countRow `json:"by_model"`
 	// ToolCalls is the tool calls the subagents made (events with a parent_call_id); the session's
 	// tool_calls leave them out.
 	ToolCalls int `json:"tool_calls"`
@@ -217,16 +218,17 @@ func (a *API) buildSessionInsights(ctx context.Context, row *db.SessionRow, now 
 // subagent_done) by type and model. A later event's non-empty type or model wins: subagent_done carries
 // the model the API reported, where subagent_started may carry the alias that was asked for.
 func summariseSubagents(events []db.InsightEvent) sessionSubagents {
-	type child struct{ agentType, model string }
+	type child struct{ agentType, model, effort string }
 	children := map[string]*child{}
 	for _, e := range events {
-		if e.Kind != "subagent_started" && e.Kind != "subagent_done" {
+		if e.Kind != "subagent_started" && e.Kind != "subagent_update" && e.Kind != "subagent_done" {
 			continue
 		}
 		var p struct {
-			ChildID   string `json:"child_id"`
-			AgentType string `json:"agent_type"`
-			Model     string `json:"model"`
+			Effort    json.RawMessage `json:"effort"`
+			ChildID   string          `json:"child_id"`
+			AgentType string          `json:"agent_type"`
+			Model     string          `json:"model"`
 		}
 		if json.Unmarshal([]byte(e.Payload), &p) != nil || p.ChildID == "" {
 			continue
@@ -240,15 +242,23 @@ func summariseSubagents(events []db.InsightEvent) sessionSubagents {
 			c.agentType = p.AgentType
 		}
 		if p.Model != "" {
+			if c.model != p.Model {
+				c.effort = ""
+			}
 			c.model = p.Model
 		}
+		if len(p.Effort) > 0 {
+			c.effort = ""
+			_ = json.Unmarshal(p.Effort, &c.effort)
+		}
 	}
-	types, models := map[string]int{}, map[string]int{}
+	types, models, efforts := map[string]int{}, map[string]int{}, map[string]int{}
 	for _, c := range children {
+		efforts[orUnknown(c.effort)]++
 		types[orUnknown(c.agentType)]++
 		models[orUnknown(c.model)]++
 	}
-	return sessionSubagents{Count: len(children), ByType: sortedCounts(types), ByModel: sortedCounts(models)}
+	return sessionSubagents{Count: len(children), ByType: sortedCounts(types), ByModel: sortedCounts(models), ByEffort: sortedCounts(efforts)}
 }
 
 // summariseSessionTokens is summariseTokens for one session (totals, by model, cache hit rate, unpriced

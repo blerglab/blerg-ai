@@ -1,0 +1,52 @@
+/* Commit chips (CommitChips.tsx): muted, small, wrapping. The runner's History tab uses its own
+   .reel-chip classes instead (variant="reel"). */
+.commit-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.commit-one {
+  display: inline-flex;
+  gap: 2px;
+  align-items: baseline;
+}
+
+.commit-chip,
+.commit-diff {
+  font: inherit;
+  font-size: var(--chat-text-xs, 0.75em);
+  color: var(--chat-muted, inherit);
+  background: none;
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  padding: 0 6px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.commit-chip {
+  font-family: var(--chat-font-mono, ui-monospace, monospace);
+}
+
+.commit-diff {
+  border-style: dashed;
+}
+
+.commit-chip:hover,
+.commit-diff:hover,
+.commit-chip:focus-visible,
+.commit-diff:focus-visible {
+  color: var(--chat-fg, inherit);
+}
+
+.commit-chip.copied {
+  color: var(--chat-fg, inherit);
+}
+
+.commit-copied {
+  font-size: var(--chat-text-xs, 0.75em);
+  color: var(--chat-muted, inherit);
+}

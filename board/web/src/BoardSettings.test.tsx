@@ -4,12 +4,13 @@ import { BoardSettings } from "./BoardSettings";
 import { MeProvider } from "./me";
 import { api, Board } from "./api";
 
+let catalog: unknown = { state: "known", engines: [] };
 let me: unknown = { kind: "service", is_admin: true, is_human: true };
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
   return {
     ...actual,
-    api: vi.fn((path: string) => Promise.resolve(path === "/api/me" ? me : {})),
+    api: vi.fn((path: string) => Promise.resolve(path === "/api/me" ? me : path.includes("/launch-options") ? catalog : {})),
   };
 });
 
@@ -35,7 +36,39 @@ function open(b: Board, onChanged = vi.fn()) {
 describe("BoardSettings automation", () => {
   beforeEach(() => {
     vi.mocked(api).mockClear();
+    catalog = { state: "known", engines: ["claude", "codex", "hermes"].map(id => ({ id, name: id === "claude" ? "Claude" : id, models: { models: [] } })) };
     me = { kind: "service", is_admin: true, is_human: true };
+  });
+
+  it("automatically selects a sole discovered engine and hides the engine dropdown", async () => {
+    catalog = { state: "known", engines: [{ id: "codex", name: "Codex", models: { models: [] } }] };
+    open(board({ automation_token_set: true }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/boards/b1/launch-options", expect.anything()));
+    await waitFor(() => expect(screen.queryByRole("combobox")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/boards/b1", { method: "PATCH", json: { automation_engine: "codex" } }));
+  });
+
+  it("discovers future engines without a hardcoded option list", async () => {
+    catalog = { state: "known", engines: [{ id: "codex", name: "Codex", models: { models: [] } }, { id: "fixture-engine", name: "Future Engine", models: { models: [] } }] };
+    open(board({ automation_token_set: true }));
+    expect(await screen.findByRole("option", { name: "Future Engine" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Claude" })).toBeNull();
+  });
+
+  it("saves a first token without inventing an engine before scoped discovery", async () => {
+    const onChanged = open(board());
+    fireEvent.change(await screen.findByPlaceholderText("paste a run-sessions agent token"), { target: { value: "fixture-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(api).toHaveBeenCalledWith("/api/boards/b1", { method: "PATCH", json: { automation_token: "fixture-token" } });
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("does not display inherited effort for an explicit role model", () => {
+    open(board({ model: "gpt-worker", effort: "high", reviewer_model: "gpt-review", reviewer_effort: "" }));
+    expect(screen.getByText(/^gpt-review/).closest("dd")).not.toHaveTextContent("high");
+    expect(screen.getAllByText(/^gpt-worker · high/)).toHaveLength(3);
   });
 
   it("says plainly when the board has no automation token", async () => {
@@ -51,15 +84,15 @@ describe("BoardSettings automation", () => {
     expect(screen.getByText("run-sessions")).toBeInTheDocument();
   });
 
-  it("saves the token and engine, then clears the field", async () => {
-    const onChanged = open(board());
+  it("saves a replacement token first, then refreshes scoped engine choices", async () => {
+    const onChanged = open(board({ automation_token_set: true }));
     const input = await screen.findByPlaceholderText("paste a run-sessions agent token");
     fireEvent.change(input, { target: { value: "  tok.en.value  " } });
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "hermes" } });
+    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "hermes" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
     expect(api).toHaveBeenCalledWith("/api/boards/b1", {
-      method: "PATCH", json: { automation_engine: "hermes", automation_token: "tok.en.value" },
+      method: "PATCH", json: { automation_token: "tok.en.value" },
     });
     expect((input as HTMLInputElement).value).toBe("");
     expect((input as HTMLInputElement).type).toBe("password");

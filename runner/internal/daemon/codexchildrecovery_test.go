@@ -47,7 +47,8 @@ func TestCodexNativeChildDiscoveryRequiresRootedAncestry(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	waitUntil(t, "owned child discovery", func() bool { return d.childKnown("historical-child") && d.childKnown("grandchild") })
 	if d.childKnown("foreign-child") || d.childKnown("cycle-one") || d.childKnown("cycle-two") {
 		t.Fatal("unrooted history authorized as owned")

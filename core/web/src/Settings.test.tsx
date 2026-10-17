@@ -2,9 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import Settings from "./Settings";
 import * as authClient from "./authClient";
+const ENGINE_METADATA = { engines: [{id:"claude",name:"Claude Code",credential_import:true,plugins:true},{id:"codex",name:"Codex",credential_import:true,plugins:true},{id:"hermes",name:"Hermes",credential_import:true,plugins:false}], plugin_engines:["claude","codex"] };
+
 
 function buildFetchMock(store: { engines: string[] }, captureBody: { value?: Record<string, unknown> }) {
   return vi.fn((url: string, init?: RequestInit) => {
+ if (url === "/api/engines") return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(ENGINE_METADATA)});
     if (url === "/api/credentials" && (!init || init.method === undefined)) {
       return Promise.resolve({
         ok: true,
@@ -72,6 +75,7 @@ function buildTokenFetchMock(
   captured: { post?: Record<string, unknown>; postHeaders?: Record<string, string> },
 ) {
   return vi.fn((url: string, init?: RequestInit) => {
+ if (url === "/api/engines") return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(ENGINE_METADATA)});
     const method = init?.method ?? "GET";
     if (url === "/api/site") {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SITE) });
@@ -396,6 +400,7 @@ describe("Settings — agent tokens", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((url: string, init?: RequestInit) => {
+ if (url === "/api/engines") return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(ENGINE_METADATA)});
         if (url === "/api/tokens" && init?.method === "POST") {
           return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({}) });
         }
@@ -415,6 +420,7 @@ describe("Settings — agent tokens", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((url: string, init?: RequestInit) => {
+ if (url === "/api/engines") return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(ENGINE_METADATA)});
         if (url === "/api/tokens" && init?.method === "POST") {
           return Promise.resolve({
             ok: false,
@@ -438,6 +444,7 @@ describe("Settings — agent tokens", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((url: string, init?: RequestInit) => {
+ if (url === "/api/engines") return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(ENGINE_METADATA)});
         if (url === "/api/tokens" && init?.method === "POST") {
           return Promise.resolve({
             ok: false,
@@ -472,6 +479,23 @@ describe("Settings", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("discovers synthetic engine imports and plugins without a frontend engine entry", async () => {
+    const fallback = buildFetchMock(store, captureBody);
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url === "/api/engines") return Promise.resolve({ok:true,status:200,json:async()=>({engines:[{id:"fixture",name:"Fixture Engine",credential_import:true,plugins:true}],plugin_engines:["fixture"]})});
+      return fallback(url, init);
+    }));
+    render(<Settings />);
+    const input = await screen.findByLabelText("Fixture Engine credential");
+    expect(screen.queryByLabelText("Claude credential")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Codex credential")).not.toBeInTheDocument();
+    expect(screen.getByText(/Import the credential format documented by this engine/)).toBeInTheDocument();
+    fireEvent.change(input, {target:{value:"fixture-secret"}});
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(()=>expect(captureBody.value?.engine).toBe("fixture"));
+    await waitFor(()=>expect(fallback.mock.calls.some(call=>call[0]==="/api/plugins/fixture")).toBe(true));
   });
 
   it.each(["request", "body"])("bounds a hung credential metadata %s", async stage => {
@@ -688,6 +712,7 @@ function buildAccountFetchMock(
   captured: { post?: Record<string, unknown> },
 ) {
   return vi.fn((url: string, init?: RequestInit) => {
+ if (url === "/api/engines") return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(ENGINE_METADATA)});
     const method = init?.method ?? "GET";
     if (url === "/api/me") {
       return Promise.resolve({

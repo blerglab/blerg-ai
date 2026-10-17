@@ -6,7 +6,6 @@ package cron
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -72,12 +71,8 @@ func TestReaperCapsRedrivesOfAStartThatNeverFinishes(t *testing.T) {
 func TestRunNowOnASingleConnectionPool(t *testing.T) {
 	e := newEnv(t)
 	c := e.addCron("0 * * * *", "UTC")
-	cfg, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := e.pool.Config()
 	cfg.MaxConns = 1
-	cfg.ConnConfig.RuntimeParams["search_path"] = "t22_cron"
 	one, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)

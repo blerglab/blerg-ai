@@ -267,3 +267,84 @@ func TestChatProxyWithoutAPassThroughDriver(t *testing.T) {
 		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 }
+
+func TestChatModelAndDurableInputControls(t *testing.T) {
+	call, _, id, fake := chatFixture(t)
+	person := memberToken(t)
+	for _, body := range []map[string]string{{"model": "codex-model", "effort": "high"}, {"text": "hello", "client_id": "stable-turn"}} {
+		suffix := "/model"
+		if body["text"] != "" {
+			suffix = "/messages"
+		}
+		resp := call("POST", "/api/chat/sessions/"+id+suffix, person, body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("control HTTP %d", resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+	calls := fake.seen()
+	if len(calls) != 2 || !strings.Contains(calls[0].Body, `"effort":"high"`) || !strings.Contains(calls[1].Body, `"client_id":"stable-turn"`) {
+		t.Fatalf("lost control settings: %+v", calls)
+	}
+	// An agent with board write authority must still use the self-scoped model
+	// API rather than bypassing its neighbour restriction through chat.
+	resp := call("POST", "/api/chat/sessions/"+id+"/model", "svc-key-123", map[string]string{"model": "other"})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("nonhuman model proxy HTTP %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+}
+
+func TestChatControlWithNoRunnerIsUnavailable(t *testing.T) {
+	srv, pool := testServer(t)
+	ctx := context.Background()
+	person := humanToken(t, srv)
+	b, err := db.CreateBoard(ctx, pool, db.BoardParams{Name: "no runner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err := pool.QueryRow(ctx, `INSERT INTO runner_sessions(board_id,runner,external_session_id,role) VALUES($1,'test','ext','board') RETURNING id`, b.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	resp := request(t, srv, "POST", "/api/chat/sessions/"+id+"/messages", person, nil, map[string]string{"text": "hello"})
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured runner HTTP %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+}
+
+// The person's code colours come from the runner through the chat proxy: read-only, for the account
+// of the signed-in person, and never for anything else.
+func TestChatProxyReadsThePersonsPreferences(t *testing.T) {
+	call, _, _, fake := chatFixture(t)
+	fake.respond = func(c rawCall) (int, string, string) {
+		return 200, "application/json", `{"code_colours":{"dark":"nord","light":"blerg","overrides":{"dark":{},"light":{}}}}`
+	}
+	before := len(fake.seen())
+	resp := call("GET", "/api/chat/preferences", memberToken(t), nil)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(body), `"dark":"nord"`) {
+		t.Fatalf("preferences = %d %s", resp.StatusCode, body)
+	}
+	seen := fake.seen()
+	if len(seen) != before+1 || seen[len(seen)-1].Method != "GET" || seen[len(seen)-1].Path != "/api/runner/preferences?account=test-human" {
+		t.Fatalf("runner saw %+v", seen[before:])
+	}
+	if resp := call("GET", "/api/chat/preferences", "", nil); resp.StatusCode != 401 {
+		t.Fatalf("anonymous = %d", resp.StatusCode)
+	}
+	if resp := call("PUT", "/api/chat/preferences", memberToken(t), map[string]any{}); resp.StatusCode == 200 {
+		t.Fatal("the board's chat can change preferences")
+	}
+	// An agent (a service, not a person) is given the defaults; the runner is not asked.
+	n := len(fake.seen())
+	svc := testCoreToken(t, "service", []string{"card.read"})
+	resp = call("GET", "/api/chat/preferences", svc, nil)
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 || strings.TrimSpace(string(body)) != "{}" || len(fake.seen()) != n {
+		t.Fatalf("service = %d %s (runner calls %d -> %d)", resp.StatusCode, body, n, len(fake.seen()))
+	}
+}

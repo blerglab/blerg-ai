@@ -22,6 +22,7 @@ const json = (body: unknown) =>
 
 function okFetch(url: string) {
   if (url === '/api/repos') return json({ repos: [{ name: 'myrepo', full_name: 'org/myrepo', checked_out: ['ws'] }] })
+  if (url.startsWith('/api/runner/launch-options?')) return json({ state: 'known', engines: [{ id: 'claude', name: 'Claude', restricted: true }] })
   if (url === '/api/daemons') return json([{ id: 'd1', name: 'ws', mode: 'local', repos_root: '/r', status: 'connected', sandbox_available: true, available_engines: ['claude'] }])
   if (url === '/api/cluster/status') return json({ configured: false })
   if (url === '/api/me/credentials') return json({ unavailable: true })

@@ -22,6 +22,7 @@ type StartRequest struct {
 	Title  string
 	Prompt string
 	Model  string
+	Effort string
 	GitURL string // full clone URL; overrides the driver's default git base
 	Env    map[string]string
 	// Engine is the coding engine the session runs ("" = the runner's
@@ -61,9 +62,15 @@ var ErrNoStartIdentity = errors.New("runner: no start identity (automation token
 var ErrStartUnauthorized = errors.New("runner refused the start credential (the board's automation token is expired, revoked, or not a run-sessions token)")
 
 type Status struct {
-	Lifecycle string `json:"lifecycle"`
-	Runtime   string `json:"runtime"`
-	Resumable bool   `json:"resumable"`
+	SteeringSupported *bool  `json:"steering_supported,omitempty"`
+	Lifecycle         string `json:"lifecycle"`
+	Runtime           string `json:"runtime"`
+	Resumable         bool   `json:"resumable"`
+	ResumeMode        string `json:"resume_mode,omitempty"`
+	ResumeReason      string `json:"resume_reason,omitempty"`
+	Engine            string `json:"engine,omitempty"`
+	Model             string `json:"model,omitempty"`
+	Effort            string `json:"effort,omitempty"`
 	// ErrorReason is why the session failed, as the runner recorded it (a
 	// missing engine login, an uncloned repo, a sandbox image that isn't
 	// there). The runner's one-shot error broadcast is long gone by the time
@@ -205,7 +212,11 @@ func (k *BlergRunner) doAs(ctx context.Context, bearer, method, path string, bod
 	meta.Status, meta.ContentType = resp.StatusCode, resp.Header.Get("Content-Type")
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode >= 400 {
-		httpErr := fmt.Errorf("blerg-runner %s %s: HTTP %d: %.200s", method, path, resp.StatusCode, raw)
+		safeBody := string(raw)
+		if bearer != "" {
+			safeBody = strings.ReplaceAll(safeBody, bearer, "[redacted]")
+		}
+		httpErr := fmt.Errorf("blerg-runner %s %s: HTTP %d: %.200s", method, path, resp.StatusCode, safeBody)
 		if resp.StatusCode == http.StatusNotFound {
 			httpErr = fmt.Errorf("%w: %w", ErrSessionGone, httpErr)
 		}
@@ -231,6 +242,9 @@ func (k *BlergRunner) Start(ctx context.Context, r StartRequest) (string, error)
 		"repo": r.Repo, "title": r.Title, "prompt": r.Prompt,
 		"model": r.Model, "env": r.Env,
 	}
+	if r.Effort != "" {
+		body["effort"] = r.Effort
+	}
 	if r.Engine != "" {
 		body["engine"] = r.Engine
 	}
@@ -255,14 +269,29 @@ func (k *BlergRunner) Start(ctx context.Context, r StartRequest) (string, error)
 // Status returns ErrSessionGone (wrapped) when blerg-runner 404s the session —
 // its Job finished and was reaped, or it never existed.
 func (k *BlergRunner) Status(ctx context.Context, id string) (Status, error) {
+	return k.StatusAs(ctx, k.key, id)
+}
+
+func (k *BlergRunner) StatusAs(ctx context.Context, token, id string) (Status, error) {
 	var s Status
-	err := k.req(ctx, "GET", "/api/runner/sessions/"+id, nil, &s)
+	meta, err := k.doAs(ctx, token, "GET", "/api/runner/sessions/"+id, nil, &s)
+	if err != nil && (meta.Status == http.StatusUnauthorized || meta.Status == http.StatusForbidden) {
+		return s, fmt.Errorf("%w: runner refused control authority", ErrControlUnauthorized)
+	}
 	return s, err
 }
 
 func (k *BlergRunner) Message(ctx context.Context, id, text, source string) error {
-	return k.req(ctx, "POST", "/api/runner/sessions/"+id+"/message",
-		map[string]string{"text": text, "source": source}, nil)
+	return k.MessageAs(ctx, k.key, id, text, source, "")
+}
+
+func (k *BlergRunner) MessageAs(ctx context.Context, token, id, text, source, clientID string) error {
+	body := map[string]string{"text": text, "source": source}
+	if clientID != "" {
+		body["client_id"] = clientID
+	}
+	_, err := k.doAs(ctx, token, "POST", "/api/runner/sessions/"+id+"/message", body, nil)
+	return err
 }
 
 func (k *BlergRunner) Interrupt(ctx context.Context, id string) error {
@@ -288,8 +317,15 @@ func (k *BlergRunner) Stop(ctx context.Context, id string) error {
 // meaning of "no such session". 405/501 are treated as unsupported too, for
 // runners that route more strictly.
 func (k *BlergRunner) SetModel(ctx context.Context, id, model string) error {
-	meta, err := k.do(ctx, "POST", "/api/runner/sessions/"+id+"/model",
-		map[string]string{"model": model}, nil)
+	return k.SetModelAs(ctx, k.key, id, model, "")
+}
+
+func (k *BlergRunner) SetModelAs(ctx context.Context, token, id, model, effort string) error {
+	body := map[string]string{"model": model}
+	if effort != "" {
+		body["effort"] = effort
+	}
+	meta, err := k.doAs(ctx, token, "POST", "/api/runner/sessions/"+id+"/model", body, nil)
 	if err != nil {
 		if meta.Status == http.StatusMethodNotAllowed || meta.Status == http.StatusNotImplemented {
 			return fmt.Errorf("%w: %w", ErrUnsupported, err)
@@ -358,3 +394,13 @@ func (k *BlergRunner) Events(ctx context.Context, id string, afterSeq int64, lim
 	}
 	return mapped, out.HasMore, nil
 }
+
+// IdentityController keeps a current owner proof on controls that can recover
+// a disconnected native session. Implementations never borrow launch-time proof.
+type IdentityController interface {
+	StatusAs(context.Context, string, string) (Status, error)
+	MessageAs(context.Context, string, string, string, string, string) error
+	SetModelAs(context.Context, string, string, string, string) error
+}
+
+var ErrControlUnauthorized = errors.New("runner refused the control credential")

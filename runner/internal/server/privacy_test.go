@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -60,45 +59,10 @@ func (f *privFixture) tok(t *testing.T, kind, acct string, caps ...string) strin
 	return mintRunnerToken(t, f.priv, "core-1", c)
 }
 
-// privPool is a pool whose EVERY connection resolves tables in its own schema.
-// The package's setupSrvTestSchema sets search_path on one pooled connection,
-// which is enough for sequential tests but not for the concurrent handlers a
-// WebSocket test runs.
+// privPool gives concurrent privacy handlers a private migrated database.
 func privPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database integration tests")
-	}
-	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const schema = "test_blerg_runner_privacy"
-	for _, q := range []string{"DROP SCHEMA IF EXISTS " + schema + " CASCADE", "CREATE SCHEMA " + schema} {
-		if _, err := admin.Exec(ctx, q); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
-		admin.Close()
-	})
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
-	return pool
+	return connectSrvTestDB(t)
 }
 
 func newPrivFixture(t *testing.T) *privFixture {
@@ -754,7 +718,7 @@ func TestPrivacyLoadedAtStartupAndFailsClosed(t *testing.T) {
 
 	// A database that cannot be read: nothing naming a session may go out.
 	blind := NewHub()
-	dead, err := pgxpool.New(context.Background(), os.Getenv("TEST_DATABASE_URL"))
+	dead, err := pgxpool.NewWithConfig(context.Background(), f.pool.Config())
 	if err != nil {
 		t.Fatal(err)
 	}

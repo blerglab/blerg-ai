@@ -23,10 +23,6 @@ const runnerTestKey = "runner-key-1234567890"
 func desktopRunnerAPI(t *testing.T) (*API, *Hub) {
 	t.Helper()
 	pool := connectSrvTestDB(t)
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(context.Background(), pool); err != nil {
-		t.Fatal(err)
-	}
 	hub := NewHub() // no JobManager: desktop shape
 	api := NewAPI(hub, pool, "daemon-tok-1234567890", nil, "")
 	api.SetRunnerKey(runnerTestKey)
@@ -160,8 +156,8 @@ func TestRunnerStartSpawnsOnDaemonWithRepo(t *testing.T) {
 // the default wherever the daemon can run it: with runtime omitted, a
 // sandbox-capable daemon runs the session in the container and one without
 // the image runs it on the host. An explicit choice is honoured verbatim
-// either way — "daemon" is the opt-out, and "docker" against a daemon without
-// the image is left for the daemon to refuse rather than silently demoted.
+// when supported — "daemon" is the opt-out. A known missing sandbox is
+// refused before launch rather than silently demoting onto the host.
 func TestRunnerStartSandboxRuntime(t *testing.T) {
 	api, hub := desktopRunnerAPI(t)
 	dc := registerDaemon(t, api, hub, "00000000-0000-4000-8000-0000000000c1", "laptop", "app")
@@ -229,12 +225,16 @@ func TestRunnerStartSandboxRuntime(t *testing.T) {
 		t.Fatalf("default without the image: Sandbox=%v runtime=%q, want false/daemon", spawn.Sandbox, runtimeOf(t, row))
 	}
 
-	// ...but an explicit runtime:"docker" is honoured verbatim even there: the
-	// daemon reports the missing image itself rather than the server demoting
-	// the caller onto the bare host without saying so.
-	spawn, row = start(t, map[string]any{"repo": "app", "prompt": "do it", "runtime": "docker"})
-	if !spawn.Sandbox || runtimeOf(t, row) != "docker" {
-		t.Fatalf(`runtime="docker" without the image: Sandbox=%v runtime=%q, want true/docker`, spawn.Sandbox, runtimeOf(t, row))
+	// Explicit sandbox selection is refused when the target reports no image.
+	// Never silently run it on the host or enqueue a knowingly unusable spawn.
+	rec := runnerReq(t, api, http.MethodPost, "/api/runner/start", map[string]any{"repo": "app", "prompt": "do it", "runtime": "docker"})
+	if rec.Code == http.StatusAccepted {
+		t.Fatal("accepted unavailable sandbox")
+	}
+	select {
+	case <-dc.send:
+		t.Fatal("dispatched unavailable sandbox or demoted to host")
+	default:
 	}
 }
 

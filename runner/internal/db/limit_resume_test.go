@@ -126,9 +126,22 @@ func TestLimitResumeClaimIsSingleAndRejectsEndedSession(t *testing.T) {
 
 func TestLimitResumeLockDoesNotReserveMainPool(t *testing.T) {
 	p := endTestPool(t)
+	// Keep the search-path propagation regression meaningful even though the
+	// shared fixture now isolates whole databases instead of fixed schemas.
+	if _, err := p.Exec(context.Background(), `CREATE SCHEMA lock_fixture; ALTER TABLE session_limit_resume SET SCHEMA lock_fixture`); err != nil {
+		t.Fatal(err)
+	}
+	cfg := p.Config()
+	cfg.ConnConfig.RuntimeParams["search_path"] = "lock_fixture,test_blerg_runner"
+	isolated, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal("open schema-scoped pool")
+	}
+	t.Cleanup(isolated.Close)
+	p = isolated
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := db.WithLimitResumeLock(ctx, p, "session-lock", func(conn *pgxpool.Conn) error {
+	err = db.WithLimitResumeLock(ctx, p, "session-lock", func(conn *pgxpool.Conn) error {
 		var one int
 		if err := p.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil {
 			return err

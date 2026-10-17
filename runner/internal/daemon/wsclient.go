@@ -94,6 +94,7 @@ type WSClient struct {
 	mu            sync.Mutex // guards conn and handlers
 	writeMu       sync.Mutex // guards WriteMessage calls (at most one concurrent writer)
 	conn          *websocket.Conn
+	background    *backgroundTaskTracker // guarded by mu; process lifetime and replay-safe live IDs
 	handlers      map[string]func([]byte)
 	onConnect     func()
 	sessionStates func() map[string]string
@@ -180,10 +181,11 @@ func NewWSClient(cfg Config) *WSClient {
 		cfg.ConnectionFile = ""
 	}
 	return &WSClient{
-		config:   cfg,
-		handlers: make(map[string]func([]byte)),
-		hbKick:   make(chan struct{}, 1),
-		status:   newConnReporter(cfg.ConnectionFile, cfg.ServerURL),
+		background: newBackgroundTaskTracker(),
+		config:     cfg,
+		handlers:   make(map[string]func([]byte)),
+		hbKick:     make(chan struct{}, 1),
+		status:     newConnReporter(cfg.ConnectionFile, cfg.ServerURL),
 		sleep: func(ctx context.Context, d time.Duration) bool {
 			select {
 			case <-ctx.Done():
@@ -210,6 +212,7 @@ func (c *WSClient) Send(msg any) error {
 	if err != nil {
 		return err
 	}
+	c.observeBackgroundTasks(raw)
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
@@ -415,6 +418,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	hello.SessionTokenFile = true // SessionToken → SessionTokenResult (sessiontoken.go)
 	hello.Welcome = true          // DaemonWelcome (linkWatch): "connected" only once the server says so
 	hello.QueuedSessions = c.queued()
+	hello.BackgroundTasks = c.backgroundTaskInventory()
 	// sentModelsGen is the generation of the model lists this connection
 	// has reported; only the heartbeat goroutine touches it after the hello.
 	var sentModelsGen uint64
@@ -491,6 +495,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 				ActiveSessions:     sessions,
 				SessionStates:      states,
 				QueuedSessions:     c.queued(),
+				BackgroundTasks:    c.backgroundTaskInventory(),
 				SandboxAvailable:   sandboxImageAvailable(),
 				CheckedOutRepos:    repos,
 				AvailableEngines:   availableEngines(),

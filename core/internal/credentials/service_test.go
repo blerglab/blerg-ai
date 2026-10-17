@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"sync/atomic"
 	"testing"
 
@@ -13,60 +12,18 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/credentials"
 	"github.com/blerglab/blerg-ai/core/internal/db"
 	"github.com/blerglab/blerg-ai/core/internal/keybackend"
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 )
-
-// testSchema is a fixed schema name reused (dropped+recreated) by every test in this package —
-// matching the established pattern in core/internal/keybackend/local_test.go's testPool.
-const testSchema = "test_blerg_core_credentials"
 
 // testLocalKey is a fixed 32-byte AES key used by every test in this package — the local
 // keybackend no longer reads its key from the database (BLERG_CORE_LOCAL_KEY), so tests supply
 // one directly.
 var testLocalKey = bytes.Repeat([]byte{7}, 32)
 
-// testPool connects to DATABASE_URL and gives the caller a fresh, isolated schema: dropped and
-// recreated before the test runs, and dropped again on cleanup. A plain "SET search_path" via
-// pool.Exec is NOT enough (pgxpool can hand out any of several underlying connections); instead
-// the schema is baked into every connection the returned pool ever opens, via
-// ConnConfig.RuntimeParams.
+// testPool provides a fresh database cloned from the migrated package template.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-	ctx := context.Background()
-
-	setupPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", testSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("drop schema: %v", err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA %s", testSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("create schema: %v", err)
-	}
-	setupPool.Close()
-
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = testSchema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		bg := context.Background()
-		pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", testSchema))
-		pool.Close()
-	})
-
-	return pool
+	return testsupport.Pool(t, db.Migrate)
 }
 
 var testAccountSeq int64

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 )
 
 // The driver tests written before mid-turn steering drive the per-turn engine with a stub `claude` that
@@ -17,5 +19,5 @@ func TestMain(m *testing.M) {
 	ccHelpText = func(context.Context, sandboxExec, string, []string) ([]byte, error) {
 		return nil, errors.New("no --help probe in tests")
 	}
-	os.Exit(m.Run())
+	os.Exit(testsupport.Run(m))
 }

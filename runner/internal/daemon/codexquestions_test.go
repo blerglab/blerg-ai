@@ -20,7 +20,8 @@ func TestCodexNativeUserQuestionUsesCallback(t *testing.T) {
 	d.AskUser = func(_ context.Context, body string) (string, error) { bodies <- body; return "Blue", nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("ask me", "chat")
 	waitUntil(t, "question turn completes", func() bool { return countKind(em, "turn_done") == 1 })
 	select {
@@ -43,7 +44,8 @@ func TestCodexSecretQuestionNeverReachesChat(t *testing.T) {
 	d.AskUser = func(context.Context, string) (string, error) { called <- struct{}{}; return "", nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("ask", "chat")
 	waitUntil(t, "secret request refused", func() bool { return countKind(em, "turn_done") == 1 })
 	select {
@@ -67,7 +69,8 @@ func TestCodexInterruptCancelsNativeQuestion(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("ask", "chat")
 	select {
 	case <-started:

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -323,11 +324,11 @@ func TestExecuteApprovedTimeoutAfterSendingIsUnknownAndNotRetried(t *testing.T) 
 
 func TestExecuteApprovedConnectionDroppedAfterSendingIsUnknown(t *testing.T) {
 	h := newHarness(t, nil)
-	var delivered int
+	var delivered atomic.Int32
 	wrapper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if bytes.Contains(body, []byte(`"tools/call"`)) {
-			delivered++
+			delivered.Add(1)
 			conn, _, err := w.(http.Hijacker).Hijack()
 			if err == nil {
 				_ = conn.Close()
@@ -345,8 +346,8 @@ func TestExecuteApprovedConnectionDroppedAfterSendingIsUnknown(t *testing.T) {
 	if !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("err = %v, want ErrOutcomeUnknown", err)
 	}
-	if delivered != 1 {
-		t.Errorf("delivered %d times, want exactly 1", delivered)
+	if got := delivered.Load(); got != 1 {
+		t.Errorf("delivered %d times, want exactly 1", got)
 	}
 }
 

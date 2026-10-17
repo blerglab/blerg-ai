@@ -163,9 +163,10 @@ func validatePinPolicy(p string) error {
 
 // Service owns the mcp_connections lifecycle.
 type Service struct {
-	st      db.Store
-	backend keybackend.Backend
-	policy  netguard.Policy
+	oauthNow func() time.Time // immutable after construction; access-token expiry only
+	st       db.Store
+	backend  keybackend.Backend
+	policy   netguard.Policy
 	// httpc makes every outbound OAuth request (discovery, registration, token, revocation): the
 	// netguard client, so the policy, no-redirect, no-proxy, size and time limits always apply.
 	httpc   *http.Client
@@ -176,15 +177,41 @@ type Service struct {
 	flights  map[string]*refreshFlight
 }
 
-// NewService wires a Service against st, backend (the same envelope encryption the credential
-// vault uses) and the operator's outbound URL policy.
-func NewService(st db.Store, backend keybackend.Backend, policy netguard.Policy) *Service {
-	return &Service{
+// Option sets immutable service dependencies before the service is used.
+type Option func(*Service)
+
+// WithOAuthClock supplies the access-token clock, set once before the service is
+// used. The callback must be safe for concurrent callers. Database-controlled
+// OAuth state and client-secret security expiries retain their existing clocks.
+func WithOAuthClock(now func() time.Time) Option {
+	return func(s *Service) {
+		if now != nil {
+			s.oauthNow = now
+		}
+	}
+}
+
+func (s *Service) oauthTime() time.Time {
+	if s.oauthNow != nil {
+		return s.oauthNow()
+	}
+	return time.Now()
+}
+
+// NewService wires the store, envelope encryption and outbound URL policy.
+func NewService(st db.Store, backend keybackend.Backend, policy netguard.Policy, opts ...Option) *Service {
+	s := &Service{
 		st: st, backend: backend, policy: policy,
 		httpc:   policy.Client(oauthHTTPTimeout, oauthMaxBody),
 		limiter: &startLimiter{max: defaultStartLimit, window: defaultStartWindow, hits: map[string][]time.Time{}},
 		flights: map[string]*refreshFlight{},
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 const cols = `id::text, name, url, auth_kind, coalesce(header_name,''), secret_ciphertext IS NOT NULL,

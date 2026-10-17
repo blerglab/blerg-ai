@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -134,12 +133,12 @@ func TestTurnDoneEndsAutoStopSessionOnce(t *testing.T) {
 	// A real receiver, so "the webhook follows" is observed end to end rather
 	// than asserted about an internal call.
 	delivered := make(chan string, 4)
-	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	receiver, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
 		delivered <- r.Header.Get("X-Blerg-Session")
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 	t.Cleanup(receiver.Close)
-	allowLoopbackDelivery(t, receiver.URL)
+	allowLoopbackDelivery(t, callbackURL)
 
 	ctx := context.Background()
 	resp, apiErr := api.StartSession(ctx, runnerPrincipal{Kind: runnerKeyPrincipalKind},
@@ -151,7 +150,7 @@ func TestTurnDoneEndsAutoStopSessionOnce(t *testing.T) {
 	if err := db.UpdateSessionStatus(ctx, pool, sessionID, "running", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetSessionCallback(ctx, pool, sessionID, receiver.URL, ""); err != nil {
+	if err := db.SetSessionCallback(ctx, pool, sessionID, callbackURL, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -178,6 +177,7 @@ func TestTurnDoneEndsAutoStopSessionOnce(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no completion webhook was delivered for the auto-stopped session")
 	}
+	waitForWebhookRecorded(t, pool, sessionID)
 	deleted := deletedJobNames(f)
 	if len(deleted) != 1 {
 		t.Errorf("job deletes = %v, want exactly one", deleted)

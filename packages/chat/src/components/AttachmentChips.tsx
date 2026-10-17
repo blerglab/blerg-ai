@@ -1,6 +1,9 @@
 // The pieces of the chat's file attachments: the chips under the composer (upload state, remove),
 // and a message's text with its attachment note drawn as file chips.
+import { useState } from 'react'
 import { useChat } from './context'
+import { CAP_SHOW, countLines, firstLines, messageNeedsCap } from '../model/lineCap'
+import CodeViewer from './CodeViewer'
 import { formatSize } from '../model/artifacts'
 import { previewKind } from '../model/artifactPreview'
 import { splitAttachmentNote } from '../model/attachments'
@@ -60,18 +63,41 @@ export function ComposerChips({ items, onRemove }: { items: AttachmentItem[]; on
   )
 }
 
+/** A person's message as Markdown; one over the line cap (a pasted log, a file) shows its first
+ *  lines with "Show all N lines" and "Open". Short messages are untouched. (A message that
+ *  renders as the collapsed session brief never comes through here.) */
+function CappedMarkdown({ text, cards }: { text: string; cards?: CardRegistry }) {
+  const [expanded, setExpanded] = useState(false)
+  const [open, setOpen] = useState(false)
+  if (!messageNeedsCap(text)) return <Markdown text={text} cards={cards} />
+  const collapsed = !expanded
+  const total = countLines(text)
+  return (
+    <div className={`md-capped${collapsed ? ' is-capped' : ''}`} data-testid="message-capped">
+      <Markdown text={collapsed ? firstLines(text, CAP_SHOW) : text} cards={cards} />
+      <div className="md-codeblock-actions">
+        <button type="button" className="md-codeblock-more" aria-expanded={!collapsed} onClick={() => setExpanded(!expanded)}>
+          {collapsed ? `Show all ${total} lines` : 'Show less'}
+        </button>
+        <button type="button" className="md-codeblock-more" onClick={() => setOpen(true)}>Open</button>
+      </div>
+      {open && <CodeViewer text={text} lang={null} title="Message" onClose={() => setOpen(false)} />}
+    </div>
+  )
+}
+
 /** A message's text, with a trailing attachment note shown as chips instead of raw text, and an
  *  inline preview for each attached image, video or audio file the session's Files list knows. */
 export function MessageText({ text, cards }: { text: string; cards?: CardRegistry }) {
   const chat = useChat()
   const { body, files } = splitAttachmentNote(text)
-  if (files.length === 0) return <Markdown text={text} cards={cards} />
+  if (files.length === 0) return <CappedMarkdown text={text} cards={cards} />
   const previews = chat?.files
     ? files.map(f => chat.byName(f.name)).filter((a): a is NonNullable<typeof a> => !!a && previewKind(a.view, a.size) !== null)
     : []
   return (
     <>
-      {body && <Markdown text={body} cards={cards} />}
+      {body && <CappedMarkdown text={body} cards={cards} />}
       {previews.length > 0 && chat?.files && (
         <div className="attach-previews" data-testid="message-attachment-previews">
           {previews.map(a => (

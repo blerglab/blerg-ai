@@ -147,22 +147,55 @@ type TokenRow struct {
 // carry usage.
 const (
 	usageSums = `
-		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'input_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'input_tokens')::bigint END), 0),
-		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'output_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'output_tokens')::bigint END), 0),
-		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'cache_read_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'cache_read_tokens')::bigint END), 0),
-		       COALESCE(sum(CASE WHEN e.payload->'usage'->>'cache_write_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'cache_write_tokens')::bigint END), 0)`
-	usageEvents = `(e.kind = 'turn_done' OR (e.kind = 'subagent_done' AND e.payload ? 'usage'))`
+		       COALESCE(sum(CASE WHEN u.usage->>'input_tokens' ~ '^[0-9]{1,15}$' THEN (u.usage->>'input_tokens')::bigint END), 0),
+		       COALESCE(sum(CASE WHEN u.usage->>'output_tokens' ~ '^[0-9]{1,15}$' THEN (u.usage->>'output_tokens')::bigint END), 0),
+		       COALESCE(sum(CASE WHEN u.usage->>'cache_read_tokens' ~ '^[0-9]{1,15}$' THEN (u.usage->>'cache_read_tokens')::bigint END), 0),
+		       COALESCE(sum(CASE WHEN u.usage->>'cache_write_tokens' ~ '^[0-9]{1,15}$' THEN (u.usage->>'cache_write_tokens')::bigint END), 0)`
+	usageEvents = `(e.kind = 'turn_done' OR (e.kind = 'subagent_done' AND (e.payload ? 'usage' OR e.payload ? 'usage_by_model')))`
+	// A complete, bounded per-model partition replaces its aggregate. Stored
+	// agent payloads are untrusted: malformed/inconsistent maps retain only
+	// the legacy aggregate, explicitly under an unknown model. The single
+	// turn_marker allocates a logical turn to one model row for accounting;
+	// it does not claim one complete provider request for each model.
+	usageRows = ` CROSS JOIN LATERAL (
+ WITH candidate AS (
+   SELECT CASE WHEN jsonb_typeof(e.payload->'usage_by_model')='object'
+     AND octet_length((e.payload->'usage_by_model')::text)<=16384
+     THEN e.payload->'usage_by_model' ELSE '{}'::jsonb END AS parts
+ ), entries AS (
+   SELECT item.key AS model,item.value AS usage,
+     (item.key='' OR item.key ~ '^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}$')
+     AND jsonb_typeof(item.value)='object' AND (NOT (item.value ? 'input_tokens') OR (jsonb_typeof(item.value->'input_tokens')='number' AND item.value->>'input_tokens' ~ '^[0-9]{1,15}$')) AND (NOT (item.value ? 'output_tokens') OR (jsonb_typeof(item.value->'output_tokens')='number' AND item.value->>'output_tokens' ~ '^[0-9]{1,15}$')) AND (NOT (item.value ? 'cache_read_tokens') OR (jsonb_typeof(item.value->'cache_read_tokens')='number' AND item.value->>'cache_read_tokens' ~ '^[0-9]{1,15}$')) AND (NOT (item.value ? 'cache_write_tokens') OR (jsonb_typeof(item.value->'cache_write_tokens')='number' AND item.value->>'cache_write_tokens' ~ '^[0-9]{1,15}$')) AS valid,
+     CASE WHEN item.value->>'input_tokens' ~ '^[0-9]{1,15}$' THEN (item.value->>'input_tokens')::bigint ELSE 0 END AS n0,
+     CASE WHEN item.value->>'output_tokens' ~ '^[0-9]{1,15}$' THEN (item.value->>'output_tokens')::bigint ELSE 0 END AS n1,
+     CASE WHEN item.value->>'cache_read_tokens' ~ '^[0-9]{1,15}$' THEN (item.value->>'cache_read_tokens')::bigint ELSE 0 END AS n2,
+     CASE WHEN item.value->>'cache_write_tokens' ~ '^[0-9]{1,15}$' THEN (item.value->>'cache_write_tokens')::bigint ELSE 0 END AS n3
+   FROM candidate CROSS JOIN LATERAL jsonb_each(candidate.parts) item
+ ), verdict AS (
+   SELECT count(*) BETWEEN 1 AND 32 AND bool_and(COALESCE(valid,false))
+     AND COALESCE(sum(n0),0)=(CASE WHEN e.payload->'usage'->>'input_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'input_tokens')::bigint ELSE 0 END) AND COALESCE(sum(n1),0)=(CASE WHEN e.payload->'usage'->>'output_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'output_tokens')::bigint ELSE 0 END) AND COALESCE(sum(n2),0)=(CASE WHEN e.payload->'usage'->>'cache_read_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'cache_read_tokens')::bigint ELSE 0 END) AND COALESCE(sum(n3),0)=(CASE WHEN e.payload->'usage'->>'cache_write_tokens' ~ '^[0-9]{1,15}$' THEN (e.payload->'usage'->>'cache_write_tokens')::bigint ELSE 0 END) AS good FROM entries
+ ), resolved AS (
+   SELECT COALESCE(good,false) AS good FROM verdict
+ )
+ SELECT item.model,item.usage,
+   item.model=CASE WHEN EXISTS(SELECT 1 FROM entries WHERE model=COALESCE(e.payload->>'model',''))
+     THEN COALESCE(e.payload->>'model','') ELSE (SELECT min(model) FROM entries) END AS turn_marker
+ FROM entries item CROSS JOIN resolved WHERE resolved.good
+ UNION ALL
+ SELECT CASE WHEN e.payload ? 'usage_by_model' THEN '' ELSE COALESCE(e.payload->>'model','') END,
+   e.payload->'usage',true FROM resolved WHERE NOT resolved.good
+ ) u `
 )
 
 // ListTokenUsage sums turn_done and subagent_done usage per session, model and UTC day in
 // [from, to). A subagent_done without usage (a background launch, the native loop's) adds nothing.
 func ListTokenUsage(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string) ([]TokenRow, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT e.session_id::text, COALESCE(e.payload->>'model', ''),
+		SELECT e.session_id::text, u.model,
 		       date_trunc('day', e.ts AT TIME ZONE 'UTC'),
-		       count(*) FILTER (WHERE e.kind = 'turn_done'), `+usageSums+`
+		       count(*) FILTER (WHERE e.kind = 'turn_done' AND u.turn_marker), `+usageSums+`
 		  FROM agent_events e
-		  JOIN sessions s ON s.id = e.session_id
+		  JOIN sessions s ON s.id = e.session_id `+usageRows+`
 		 WHERE `+usageEvents+`
 		   AND e.ts >= $1 AND e.ts < $2
 		   AND ($3 = '' OR s.spawning_account_id = $3)
@@ -204,9 +237,9 @@ type SessionTokenRow struct {
 // same rules as ListTokenUsage.
 func ListSessionTokenUsage(ctx context.Context, pool *pgxpool.Pool, sessionID string) ([]SessionTokenRow, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT e.kind = 'subagent_done', COALESCE(e.payload->>'model', ''),
-		       count(*) FILTER (WHERE e.kind = 'turn_done'), `+usageSums+`
-		  FROM agent_events e
+		SELECT e.kind = 'subagent_done', u.model,
+		       count(*) FILTER (WHERE e.kind = 'turn_done' AND u.turn_marker), `+usageSums+`
+		  FROM agent_events e `+usageRows+`
 		 WHERE e.session_id = $1 AND `+usageEvents+`
 		 GROUP BY 1, 2`, sessionID)
 	if err != nil {
@@ -275,7 +308,7 @@ func ListSessionTimeline(ctx context.Context, pool *pgxpool.Pool, sessionID stri
 	rows, err := pool.Query(ctx, `
 		SELECT e.session_id::text, e.seq, e.kind, e.ts, e.payload::text
 		  FROM agent_events e
-		 WHERE e.session_id = $1 AND e.kind IN ('status_changed', 'subagent_started', 'subagent_done')
+		 WHERE e.session_id = $1 AND e.kind IN ('status_changed', 'subagent_started', 'subagent_update', 'subagent_done')
 		 ORDER BY e.seq`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session timeline: %w", err)

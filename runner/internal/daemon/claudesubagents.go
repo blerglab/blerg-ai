@@ -334,13 +334,16 @@ func (d *claudeCodeDriver) closeBackgroundSubagent(n ccNotice) {
 		}
 	}
 	d.forgetRunLocked(id, s)
+	var closeProc *ccProc
+	if s.resumed && d.backgroundRunningLocked() == 0 {
+		closeProc = d.backgroundIdleLocked()
+	}
 	d.reportOpenWorkLocked()
 	p := s.payload()
 	p.DurationMs = d.clock().Sub(s.started).Milliseconds()
-	idle := s.resumed && d.backgroundRunningLocked() == 0
 	d.subMu.Unlock()
-	if idle {
-		defer d.backgroundIdle() // a resumed run was what kept an idle process; after its end is told
+	if closeProc != nil {
+		defer d.finishStdinClose(closeProc)
 	}
 
 	if p.Usage == nil && n.tokens > 0 && !s.resumed {

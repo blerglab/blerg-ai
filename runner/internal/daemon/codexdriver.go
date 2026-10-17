@@ -29,6 +29,8 @@ type codexDriver struct {
 	queue      chan queuedMsg
 	retryInput *queuedMsg // explicitly rejected steer, retained ahead of later input across app restart
 
+	rejectedSteerWait time.Duration // zero uses the production completion wait
+
 	mu              sync.Mutex
 	onThreadID      func(string)
 	onEngine        func(int, bool)
@@ -57,6 +59,11 @@ type codexDriver struct {
 	DeveloperInstructions string
 	app                   *codexApp
 	cmd                   *exec.Cmd // persistent app-server, for process ownership.
+	mcpGeneration         uint64
+	mcpInputGate          func(context.Context)
+
+	settingsMu         sync.Mutex // serialize settings mutation and publication; acquire before mu
+	settingsGeneration uint64     // successful manual settings controls, including same-value selections
 }
 
 // newCodexDriver: env is the environment for every `codex` subprocess; nil
@@ -118,21 +125,32 @@ func (d *codexDriver) EnqueueInput(in agent.Input) {
 // values are refused (engineModel.set) — AgentHost checks the same rules
 // first; this is the driver not trusting its caller.
 func (d *codexDriver) SetModel(model, effort, source string) {
+	d.settingsMu.Lock()
+	defer d.settingsMu.Unlock()
 	d.mu.Lock()
 	target := model
 	if target == "" {
 		target = d.model
 	}
 	known, reported := d.modelCatalog[target]
-	validEffort := !reported || len(known.Efforts) == 0 || effort == "" || slices.Contains(known.Efforts, effort)
+	validEffort := !reported || effort == "" || slices.Contains(known.Efforts, effort)
 	if model != "" && effort == "" {
 		effort = d.reconcileEffortLocked(model, d.effort)
 	}
 	ok := validEffort && d.set(model, effort)
+	if ok && model != "" {
+		// A model-only change can reconcile to no effort. The shared setter
+		// treats empty as unchanged, so apply this model's resolved value here.
+		d.effort = effort
+	}
+	if ok {
+		d.settingsGeneration++
+	}
 	p := agent.ModelChangedPayload{Model: d.model, Effort: d.effort, Source: source}
 	d.mu.Unlock()
 	if ok {
 		d.emit("model_changed", p)
+		d.emitRuntimeCapsLocked()
 	}
 	if !ok {
 		d.emit("error", agent.ErrorPayload{Message: fmt.Sprintf("ignored invalid model %q / effort %q", model, effort), Retryable: true})

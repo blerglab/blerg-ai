@@ -51,6 +51,9 @@ func prepareCodexTerminalHome(state, id, source string) (string, error) {
 			return "", errors.New("codex terminal configuration could not be linked")
 		}
 	}
+	if err := prepareCodexTerminalGuide(home, source); err != nil {
+		return "", err
+	}
 	return home, nil
 }
 

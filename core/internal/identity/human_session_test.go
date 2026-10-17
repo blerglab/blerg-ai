@@ -34,9 +34,6 @@ func newTestService(t *testing.T) (*identity.Service, db.Store) {
 	t.Helper()
 	pool := testPool(t)
 	ctx := context.Background()
-	if err := db.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
 	st := db.NewPgStore(pool)
 	kp, err := identity.LoadOrGenerateSigningKey(ctx, st)
 	if err != nil {

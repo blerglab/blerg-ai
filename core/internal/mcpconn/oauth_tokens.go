@@ -72,11 +72,11 @@ func (s *Service) oauthAccessToken(ctx context.Context, accountID, id string) (S
 	if err != nil {
 		return SecretResult{}, err
 	}
-	if time.Until(row.bundle.ExpiresAt) > refreshWindow {
+	if row.bundle.ExpiresAt.Sub(s.oauthTime()) > refreshWindow {
 		return row.result(row.bundle), nil
 	}
 	if row.bundle.RefreshToken == "" {
-		if time.Until(row.bundle.ExpiresAt) > 0 {
+		if row.bundle.ExpiresAt.Sub(s.oauthTime()) > 0 {
 			return row.result(row.bundle), nil
 		}
 		return s.markNeedsAuth(ctx, id, row.ct)
@@ -121,11 +121,11 @@ func (s *Service) doRefresh(ctx context.Context, accountID, id string) (SecretRe
 		return SecretResult{}, err
 	}
 	b := row.bundle
-	if time.Until(b.ExpiresAt) > refreshWindow {
+	if b.ExpiresAt.Sub(s.oauthTime()) > refreshWindow {
 		return row.result(b), nil
 	}
 	if b.RefreshToken == "" {
-		if time.Until(b.ExpiresAt) > 0 {
+		if b.ExpiresAt.Sub(s.oauthTime()) > 0 {
 			return row.result(b), nil
 		}
 		return s.markNeedsAuth(ctx, id, row.ct)
@@ -140,7 +140,7 @@ func (s *Service) doRefresh(ctx context.Context, accountID, id string) (SecretRe
 			return s.markNeedsAuth(ctx, id, row.ct)
 		}
 		log.Printf("mcpconn: oauth refresh failed for connection %s: provider unreachable or erroring (transient)", id)
-		if time.Until(b.ExpiresAt) > 0 {
+		if b.ExpiresAt.Sub(s.oauthTime()) > 0 {
 			return row.result(b), nil
 		}
 		return SecretResult{}, ErrUnavailable
@@ -168,7 +168,7 @@ func (s *Service) doRefresh(ctx context.Context, accountID, id string) (SecretRe
 	if err != nil {
 		return SecretResult{}, err
 	}
-	if time.Until(cur.bundle.ExpiresAt) > 0 {
+	if cur.bundle.ExpiresAt.Sub(s.oauthTime()) > 0 {
 		return cur.result(cur.bundle), nil
 	}
 	return SecretResult{}, ErrUnavailable

@@ -18,52 +18,19 @@ import (
 
 	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
-	"github.com/jackc/pgx/v5"
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// testPool connects to TEST_DATABASE_URL in a private schema (set on every pooled
-// connection) and applies the real migrations. A missing variable is a failure, not a skip:
+// testPool gives each test a private copy of the once-migrated database.
+// A missing variable is a failure, not a skip:
 // these tests exist to exercise the database.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
+	if os.Getenv("TEST_DATABASE_URL") == "" {
 		t.Fatal("TEST_DATABASE_URL must be set: the gateway tests need a real database")
 	}
-	ctx := context.Background()
-	schema := "test_mcpgw"
-	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admin.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
-		_, err := c.Exec(ctx, "SET search_path TO "+schema)
-		return err
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
-		admin.Close()
-	})
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
-	return pool
+	return testsupport.Open(t, "TEST_DATABASE_URL", "runner", db.RunMigrations)
 }
 
 func newUUID(t *testing.T) string {

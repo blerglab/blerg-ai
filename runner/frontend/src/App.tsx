@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from
 import SessionList from './components/SessionList'
 import UpdateBanner from './components/UpdateBanner'
 import SignInBanner from './components/SignInBanner'
+import { useSignInEpoch } from './signIn'
 import SessionsHome from './components/SessionsHome'
 import SessionDetail from './components/SessionDetail'
 import LaunchSheet from './components/LaunchSheet'
@@ -17,7 +18,10 @@ import TicketDetail from './components/TicketDetail'
 import ArchiveView from './components/ArchiveView'
 import ToastContainer from './components/ToastContainer'
 import ThemeToggle from './components/ThemeToggle'
+import { useCodeColoursSync } from './lib/codeColours'
 import { useIsMobile } from './hooks/useIsMobile'
+import SettingsDialog from './components/SettingsDialog'
+import { setSettingsOpen, useSettingsOpen } from './lib/settingsDialog'
 import { useLaunchSheetOpen } from './hooks/useLaunchSheetOpen'
 import { prefetchLaunchData } from './lib/launchCache'
 import { startActivityTracking } from './activity'
@@ -214,6 +218,24 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
       >
         Insights
       </button>
+      <button
+        onClick={() => setSettingsOpen(true)}
+        data-testid="settings-tab"
+        style={{
+          flex: 1,
+          padding: '12px',
+          textAlign: 'center',
+          color: 'var(--fog-dim)',
+          fontSize: '14px',
+          cursor: 'pointer',
+          background: 'none',
+          border: 'none',
+          fontFamily: 'inherit',
+          letterSpacing: '0.05em',
+        }}
+      >
+        Settings
+      </button>
       {clusterConfigured && (
         <button
           onClick={() => navigate('/cluster')}
@@ -246,13 +268,15 @@ function Layout() {
   // configured (install/k8s) — on a desktop-only install /api/cluster/status
   // reports configured:false and the tab would just lead to a dead end.
   const [clusterConfigured, setClusterConfigured] = useState(false)
+  // Asked again when the sign-in banner's quiet retry got a token (the first ask was refused).
+  const signInEpoch = useSignInEpoch()
 
   useEffect(() => {
     apiFetch('/api/cluster/status')
       .then(r => r.json())
       .then(data => setClusterConfigured(Boolean(data?.configured)))
       .catch(() => setClusterConfigured(false))
-  }, [])
+  }, [signInEpoch])
 
   // Once the app has settled, warm what the New session sheet opens on, so
   // even the first "+ New" of this tab opens at once (lib/launchCache). Only
@@ -265,6 +289,9 @@ function Layout() {
     const t = setTimeout(prefetchLaunchData, 2000)
     return () => clearTimeout(t)
   }, [])
+
+  const settingsOpen = useSettingsOpen()
+  const settingsDialog = settingsOpen ? <SettingsDialog onClose={() => setSettingsOpen(false)} /> : null
 
   const routes = (
     <Routes>
@@ -305,6 +332,7 @@ function Layout() {
         {routes}
         <TabBar clusterConfigured={clusterConfigured} />
         <LaunchSheet key={launchOpen ? 'open' : 'closed'} open={launchOpen} onClose={() => setLaunchOpen(false)} />
+        {settingsDialog}
         <ToastContainer />
       </div>
     )
@@ -331,6 +359,7 @@ function Layout() {
         </div>
       </div>
       <LaunchSheet key={launchOpen ? 'open' : 'closed'} open={launchOpen} onClose={() => setLaunchOpen(false)} />
+      {settingsDialog}
       <ToastContainer />
     </div>
   )
@@ -385,6 +414,7 @@ export function NotificationsButton() {
 }
 
 function App() {
+  useCodeColoursSync()
   useEffect(() => {
     startActivityTracking()
   }, [])

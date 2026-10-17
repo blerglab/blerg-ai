@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
@@ -85,15 +87,14 @@ func replayPendingSessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool,
 				if json.Unmarshal([]byte(input.Frame), &msg) != nil {
 					continue
 				}
-				if (msg.Source == "" || msg.Source == "chat" || msg.AnswerMessageID != "") && answerAskFromChat(ctx, h, pool, id, msg.Text, msg.ClientID, msg.AnswerMessageID) {
+				if (msg.Source == "" || answersAsk(msg.Source) || msg.AnswerMessageID != "") && answerAskFromChat(ctx, h, pool, id, msg.Text, msg.ClientID, msg.AnswerMessageID) {
 					continue
 				}
-				select {
-				case dc.send <- []byte(input.Frame):
-				case <-ctx.Done():
-					return ctx.Err()
-				default:
-					return nil // retried on the next heartbeat
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if !h.trySendToDaemon(dc, []byte(input.Frame)) {
+					return nil // disconnected, replaced, or busy: retried on the next heartbeat
 				}
 			}
 			return nil
@@ -160,4 +161,19 @@ func (dc *DaemonConn) SetInputReceipts(v bool) {
 	dc.liveMu.Lock()
 	dc.inputReceipts = v
 	dc.liveMu.Unlock()
+}
+
+// sessionInputAPIError preserves retry/validation semantics without exposing
+// database details or conversational content.
+func sessionInputAPIError(err error) *APIError {
+	status := http.StatusServiceUnavailable
+	switch {
+	case errors.Is(err, db.ErrSessionInputConflict), errors.Is(err, db.ErrSessionInputEnded):
+		status = http.StatusConflict
+	case errors.Is(err, db.ErrSessionInputID), errors.Is(err, db.ErrSessionInputTooLarge):
+		status = http.StatusUnprocessableEntity
+	case errors.Is(err, db.ErrSessionInputQueue):
+		status = http.StatusTooManyRequests
+	}
+	return apiErrorf(status, "%s", sessionInputError(err))
 }

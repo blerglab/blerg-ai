@@ -28,8 +28,10 @@ import ArtifactCard from '../ArtifactCard'
 import AskReply from '../AskReply'
 import { useAsks } from '../askContext'
 import { MessageText } from '../AttachmentChips'
+import CopyMessage from '../CopyMessage'
 import Markdown from '../Markdown'
 import { TimeLabel } from '../TimeLabel'
+import { ChecklistRow, TicketCard } from './WorkCards'
 
 /** What the host may add under a user or assistant card (ChatView's `slots.messageFooter`). */
 export type MessageFooter = (ev: AgentEvent) => ReactNode
@@ -254,6 +256,7 @@ export function renderEvent(
         <div key={key} className={`agent-card user source-${p.source}${look?.author ? ' other-author' : ''}`} data-event-id={key}>
           <span className="card-author">{look?.author ?? 'You'}{answer && <span className="card-author-note"> · answer</span>}</span>
           <MessageText text={p.text} cards={options.cards} />
+          <CopyMessage text={p.text} />
           <div className="card-foot"><TimeLabel ts={ev.ts} /></div>
           {options.messageFooter?.(ev)}
         </div>
@@ -263,7 +266,8 @@ export function renderEvent(
       const p = ev.payload as AssistantTextPayload
       return (
         <div key={key} className="agent-card assistant">
-          <Markdown text={p.text} cards={options.cards} />
+          <Markdown text={p.text} cards={options.cards} workspaceLinks />
+          <CopyMessage text={p.text} />
           <div className="card-foot"><TimeLabel ts={ev.ts} /></div>
           {footer && <div className="turn-foot" data-testid="turn-done">{turnDoneText(footer, footerStart)}</div>}
           {options.messageFooter?.(ev)}
@@ -298,7 +302,7 @@ export function renderEvent(
       return (
         <div key={key} className={`agent-card message kind-${ev.kind}`} data-testid={`message-${ev.kind}`}>
           <span className="message-kind">{ev.kind}</span>
-          <Markdown text={typeof p?.body === 'string' ? p.body : ''} className="message-body" cards={options.cards} />
+          <Markdown text={typeof p?.body === 'string' ? p.body : ''} className="message-body" cards={options.cards} workspaceLinks />
           <TimeLabel ts={ev.ts} className="card-time-end" />
         </div>
       )
@@ -370,6 +374,10 @@ export function renderEvent(
           {topicDividerText(ev.payload as TopicPayload)}
         </div>
       )
+    case 'checklist':
+      return <ChecklistRow key={key} ev={ev} />
+    case 'ticket':
+      return <TicketCard key={key} ev={ev} />
     default: {
       const s = ev.payload as StatusPayload
       void s

@@ -92,7 +92,7 @@ A draw-over sends:
 Marked up screenshot-3.png: 3 pins.
 
 1. (top left) the title is clipped
-2. (centre) this button should be primary
+2. (center) this button should be primary
 3. (bottom right) remove the footer here
 
 Attached files (fetch them with: blerg-runner fetch --all): screenshot-3.annotated.png (140 KB)
@@ -128,7 +128,7 @@ against the published text (deletions struck, insertions marked). Selecting text
 right and pressing **N** (or the Request button) opens a one-line note box anchored to the
 selection: the quote, the nearest heading above it, the occurrence of that quote in the
 document, and a best-effort source line. Requests list in a margin on the right, newest first,
-each with a highlight of its quote in the page (amber open, green done, grey declined); hovering
+each with a highlight of its quote in the page (amber open, green done, gray declined); hovering
 one lights the other. Submit: upload the edited source as a new version of the file (user
 origin), upload `<file>.review.json`, send the message, clear the local edit.
 

@@ -8,6 +8,8 @@
 // loads and miss what started before it. The runner's side panel reads the server's whole-log answer
 // (GET /api/sessions/{id}/live) and uses this hook only as the fallback for an older runner server; the
 // board and other hosts without that route keep using it as their reading.
+import { mcpFromEvents, type McpHold, type McpLive } from '../model/mcp'
+import { checklistFromEvents, pinnedFromEvents, type ChecklistLive, type PlanLive, type TicketLive, type TicketSummaryLive } from '../model/worklist'
 import { useMemo } from 'react'
 import { create } from 'zustand'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
@@ -98,6 +100,22 @@ export interface LiveState {
   /** Server-time ms of the newest event held, or null while none is: what "new since" is measured
    *  against without reading a clock. */
   heldUntil: number | null
+  /** The agent's checklist (`blerg-runner checklist`); null when it has none. Absent from a reading
+   *  that does not know it. */
+  checklist?: ChecklistLive | null
+  /** The engine's own plan (Claude Code's task list): only the server reads it; shown when there is
+   *  no checklist. */
+  plan?: PlanLive | null
+  /** The tickets pinned (`blerg-runner pin`), the current one first. */
+  tickets?: TicketSummaryLive[]
+  /** The current pin in full; null when nothing is pinned. */
+  ticket?: TicketLive | null
+  /** The session's MCP servers as the engine last reported them; null when it has none. */
+  mcp?: McpLive | null
+  /** The first prompt is held while the servers connect (until a release or the wait's end). */
+  mcpHold?: McpHold | null
+  /** The viewer may release a held prompt (the session's owner). */
+  canReleasePrompt?: boolean
 }
 
 const NO_EVENTS: never[] = []
@@ -126,5 +144,12 @@ export function useLiveState(sessionId: string): LiveState {
   }, [events, live, subagents, now])
   const last = events[events.length - 1]
   const heldUntil = last ? parseTs(last.ts) : null
-  return { settled, subagents, openAsks: asks, backgroundRunning, answer, openFiles, filesKey, files, clockOffset, heldUntil }
+  // What the events held say of the checklist and the pins (the server's live state reads the whole log).
+  const checklist = useMemo(() => checklistFromEvents(events), [events])
+  const pinned = useMemo(() => pinnedFromEvents(events), [events])
+  const mcpRead = useMemo(() => mcpFromEvents(events), [events])
+  return {
+    settled, subagents, openAsks: asks, backgroundRunning, answer, openFiles, filesKey, files, clockOffset, heldUntil,
+    checklist, tickets: pinned.tickets, ticket: pinned.ticket, mcp: mcpRead.mcp, mcpHold: mcpRead.hold,
+  }
 }

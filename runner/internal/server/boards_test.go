@@ -16,10 +16,6 @@ import (
 func TestBoards(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	api := NewAPI(NewHub(), pool, "tok", nil, "")
 
@@ -566,10 +562,6 @@ func TestBoards(t *testing.T) {
 func TestBoardArchive(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	api := NewAPI(NewHub(), pool, "tok", nil, "")
 

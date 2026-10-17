@@ -231,14 +231,7 @@ func (a *API) HandleGetMessageAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hold := maxAnswerHold
-	if q := r.URL.Query().Get("wait"); q != "" {
-		if n, err := strconv.Atoi(q); err == nil && n > 0 {
-			if d := time.Duration(n) * time.Second; d < hold {
-				hold = d
-			}
-		}
-	}
+	hold := a.messageAnswerHold(r)
 	ch := a.waiters.channel(id)
 	timer := time.NewTimer(hold)
 	defer timer.Stop()
@@ -257,6 +250,21 @@ func (a *API) HandleGetMessageAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, answerResponse{Answered: false})
+}
+
+func (a *API) messageAnswerHold(r *http.Request) time.Duration {
+	hold := a.answerHold
+	if hold <= 0 {
+		hold = maxAnswerHold
+	}
+	if q := r.URL.Query().Get("wait"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 {
+			if d := time.Duration(n) * time.Second; d < hold {
+				hold = d
+			}
+		}
+	}
+	return hold
 }
 
 // answeredNow reads the message; returns done=true with a response when the message

@@ -4,6 +4,7 @@ import ChatView from './ChatView'
 import { buildTimeline, isVisibleEvent } from '../model/toolGroups'
 import { useChatReportStore } from '../hooks/useLiveState'
 import { createFakeTransport, type FakeTransport } from '../test/fakeTransport'
+import { installIntersectionObserver, intersect } from '../test/intersection'
 import { COMPACT, SESSION, file, meta, resetChatState, seed } from '../test/chat'
 import type { ArtifactInfo } from '../transport/types'
 import type { AgentEvent } from '../types'
@@ -20,9 +21,9 @@ function artifactEvent(payload: ArtifactInfo, seq: number): AgentEvent {
   }
 }
 
-function mount(opts: { listed?: ArtifactInfo[]; linked?: string | null; onConsumed?: () => void; files?: false } = {}) {
+function mount(opts: { listed?: ArtifactInfo[]; linked?: string | null; onConsumed?: () => void; files?: false; body?: string; status?: number } = {}) {
   const t = createFakeTransport({ files: opts.files === false ? false : { items: opts.listed ?? [] } })
-  t.files?.serve('# Report\n\nall good')
+  t.files?.serve(opts.body ?? '# Report\n\nall good', opts.status)
   const view = (linked: string | null | undefined) => (
     <ChatView session={SESSION} transport={t.transport} meta={session} linkedArtifact={linked} onLinkedArtifactConsumed={opts.onConsumed} />
   )
@@ -74,7 +75,8 @@ describe('artifact cards in the chat', () => {
     fireEvent.click(within(card).getByRole('button', { name: 'View' }))
     const dialog = await screen.findByRole('dialog', { name: /report\.md/ })
     expect(await within(dialog).findByRole('heading', { name: 'Report' })).toBeInTheDocument()
-    expect(files.rawCalls).toEqual(['a1'])
+    // the card's own excerpt preview read it once, the viewer once more
+    expect(files.rawCalls).toEqual(['a1', 'a1'])
   })
 
   it('Download goes through the transport', async () => {
@@ -366,6 +368,98 @@ describe('inline previews', () => {
     mount({ files: false })
     expect(await screen.findByTestId('message-attachments')).toHaveTextContent('shot.png')
     expect(screen.queryByTestId('message-attachment-previews')).toBeNull()
+  })
+})
+
+describe('inline previews of text-like files', () => {
+  const mk = (id: string, name: string, view: string, size = 2048): ArtifactInfo => ({ id, name, size, content_type: 'text/plain', view })
+
+  it('draws the first lines of a markdown file, rendered, and opens the viewer on click', async () => {
+    seed(artifactEvent(report, 1))
+    const { files } = mount()
+    const box = await screen.findByTestId('artifact-preview-excerpt')
+    expect(await within(box).findByRole('heading', { name: 'Report' })).toBeInTheDocument()
+    expect(files.rawCalls).toEqual(['a1'])
+    fireEvent.click(within(box).getByRole('button', { name: 'Open report.md' }))
+    expect(await screen.findByRole('dialog', { name: /report\.md/ })).toBeInTheDocument()
+  })
+
+  it('highlights a code file by its extension and shows only the first 12 lines', async () => {
+    seed(artifactEvent(mk('c1', 'main.go', 'text'), 1))
+    mount({ body: Array.from({ length: 30 }, (_, i) => `func f${i}() {}`).join('\n') })
+    const box = await screen.findByTestId('artifact-preview-excerpt')
+    await waitFor(() => expect(box.querySelector('.hljs-keyword')).not.toBeNull())
+    expect(box.textContent).toContain('f11')
+    expect(box.textContent).not.toContain('f12()')
+    expect(box.classList.contains('has-more')).toBe(true)
+  })
+
+  it('pretty-prints JSON', async () => {
+    seed(artifactEvent(mk('j1', 'a.json', 'json'), 1))
+    mount({ body: '{"a":1}' })
+    const box = await screen.findByTestId('artifact-preview-excerpt')
+    await waitFor(() => expect(box.textContent).toContain('"a": 1'))
+  })
+
+  it('draws a table preview of a CSV', async () => {
+    seed(artifactEvent(mk('t1', 'rows.csv', 'csv'), 1))
+    mount({ body: 'name,qty\nbolt,3' })
+    const table = await screen.findByTestId('artifact-preview-table')
+    expect(within(table).getByRole('columnheader', { name: 'name' })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: 'bolt' })).toBeInTheDocument()
+  })
+
+  it('fetches only when the card scrolls into view', async () => {
+    installIntersectionObserver()
+    try {
+      seed(artifactEvent(report, 1))
+      const { files } = mount()
+      await screen.findByTestId('artifact-preview-excerpt')
+      expect(files.rawCalls).toHaveLength(0)
+      act(() => intersect())
+      await waitFor(() => expect(files.rawCalls).toEqual(['a1']))
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('keeps the plain card, fetching nothing, over the size caps', async () => {
+    seed(artifactEvent(mk('b1', 'big.txt', 'text', 256 * 1024 + 1), 1), artifactEvent(mk('b2', 'big.pdf', 'pdf', 5 * 1024 * 1024 + 1), 2))
+    const { files } = mount()
+    expect(await screen.findAllByTestId('artifact-card')).toHaveLength(2)
+    expect(screen.queryByTestId('artifact-preview-excerpt')).toBeNull()
+    expect(screen.queryByTestId('artifact-preview-pdf')).toBeNull()
+    expect(files.rawCalls).toHaveLength(0)
+  })
+
+  it('a failed fetch shows the plain card', async () => {
+    seed(artifactEvent(report, 1))
+    const t = mount({ body: 'gone', status: 404 })
+    const card = await screen.findByTestId('artifact-card')
+    await waitFor(() => expect(t.files.rawCalls).toEqual(['a1']))
+    await waitFor(() => expect(within(card).queryByTestId('artifact-preview-excerpt')).toBeNull())
+    expect(within(card).getByRole('button', { name: 'View' })).toBeInTheDocument()
+  })
+
+  it('draws a small first-page picture of a PDF and releases the document', async () => {
+    const thumb = await import('../pdf/thumb')
+    const spy = vi.spyOn(thumb, 'renderPdfThumb').mockResolvedValue('data:image/jpeg;base64,AAAA')
+    seed(artifactEvent(mk('d1', 'paper.pdf', 'pdf', 1000), 1))
+    const { files } = mount()
+    const box = await screen.findByTestId('artifact-preview-pdf')
+    expect(await within(box).findByRole('img', { name: 'First page of paper.pdf' })).toHaveAttribute('src', 'data:image/jpeg;base64,AAAA')
+    expect(files.rawCalls).toEqual(['d1'])
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('an attachment of the person gets the same preview', async () => {
+    seed({
+      type: 'agent_event', session_id: SESSION, client_event_id: 'e1', seq: 1, ts: '2026-07-26T00:00:00Z',
+      kind: 'user_message', payload: { text: 'see\n\nAttached files (fetch them with: blerg-runner fetch --all): notes.md (2.0 KB)', source: 'human' },
+    })
+    mount({ listed: [{ ...report, id: 'u9', name: 'notes.md', origin: 'user' }] })
+    const previews = await screen.findByTestId('message-attachment-previews')
+    expect(await within(previews).findByRole('heading', { name: 'Report' })).toBeInTheDocument()
   })
 })
 

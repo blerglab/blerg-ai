@@ -345,6 +345,20 @@
         ]
       }
     },
+    "/api/engines": {
+      "get": {
+        "operationId": "engine_descriptors",
+        "tags": ["discovery"],
+        "summary": "Registered engine integration metadata for Settings.",
+        "description": "Human-only. Lists implemented credential import and plugin integrations. Registration does not imply installation, login, target availability or authorization. Private adapter wiring and all credential values are omitted.",
+        "security": [{ "humanSession": ["card.read"] }],
+        "responses": {
+          "200": { "description": "Registered descriptors plus plugin_engines supported by Core's actual validators.", "content": { "application/json": { "schema": { "type": "object", "required": ["engines", "plugin_engines"], "properties": { "engines": { "type": "array", "items": { "type": "object" } }, "plugin_engines": { "type": "array", "items": { "type": "string" } } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
     "/api/credentials": {
       "get": {
         "operationId": "list_credentials",

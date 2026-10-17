@@ -10,7 +10,7 @@ A desktop agent session lives in the daemon's memory: the Claude Code session id
 with, its options, its queue. Nothing is written to disk. When the daemon process restarts (an
 update through `install.sh install`, a crash, a reboot) the engine children die with it, the new
 daemon does not know the session existed, and the server leaves the row in `error` until it
-finalises it as `daemon_lost` thirty minutes later. The session cannot be continued. A message
+finalizes it as `daemon_lost` thirty minutes later. The session cannot be continued. A message
 sent to it meanwhile is dropped, and the contract's `send_message` answers `{"ok": true}`.
 
 Terminal (tmux) sessions have an on-disk record and a recovery pass. Cluster pods are resumed by
@@ -236,7 +236,7 @@ The reconcile path sets it without an unread badge or a push.
 - **A message typed in the browser during the grace period is kept** and handed to the daemon
   when it registers again. If the daemon does not come back, it is dropped and the chat shows
   it against the session's `error` status, as before.
-- **A stop made while the daemon was away is honoured.** Today a hello that lists a session
+- **A stop made while the daemon was away is honored.** Today a hello that lists a session
   revives its row whatever ended it. A row that is terminal with an end reason of
   `stopped_by_user`, `stopped_by_agent` or `auto_stopped` (or `stopped` after `daemon_lost`:
   cleared from the app after the sweep had ended it) is no longer revived: the server sends
@@ -308,7 +308,7 @@ so the sessions running at that moment end as they do today.
   minutes to reinstall answers nothing until they have (its messages wait).
 - The per-turn engine (`BLERG_CLAUDE_STEERING=0`, or an old CLI) has no fallback for a resume
   the CLI refuses; adoption only presets an id whose transcript exists.
-- A daemon away for more than 30 minutes returns to a row already finalised: it is revived, as
+- A daemon away for more than 30 minutes returns to a row already finalized: it is revived, as
   today, but its session token has been revoked.
 - A downgrade leaves `agents/*.json`, with session tokens, in the state directory.
 - `open_asks` is best effort: it is sent after the hello's database round trips, dropped (and

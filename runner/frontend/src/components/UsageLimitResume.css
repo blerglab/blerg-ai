@@ -1,3 +1,6 @@
-.usage-limit-resume { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem; font-size: .8rem; }
-.usage-limit-resume label { display: inline-flex; align-items: center; gap: .3rem; cursor: pointer; }
-.usage-limit-resume [role="status"] { opacity: .8; }
+/* The checkbox itself is a .rail-check (SessionRail.css), like Show thinking and Compact tool calls;
+   only the status line under it is styled here. */
+.usage-limit-resume { display: flex; flex-direction: column; gap: 4px; }
+.usage-limit-resume [role="status"],
+.usage-limit-resume [role="alert"] { font-size: var(--text-xs); color: var(--fog-dim); padding-left: 21px; }
+.usage-limit-resume [role="alert"] { color: var(--danger); }

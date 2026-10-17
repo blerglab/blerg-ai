@@ -5,11 +5,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
+
+// startTestCodexDriver owns the runtime until it has stopped, including runApp's
+// deferred process/PID cleanup. Callers defer the returned stop function so it
+// runs before any t.Cleanup restores environment or sandbox globals; Cleanup is
+// also registered as a fallback. A completed model turn is not a stopped runtime.
+func startTestCodexDriver(parent context.Context, t *testing.T, driver *codexDriver) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-done:
+			case <-timer.C:
+				t.Error("Codex fixture runtime did not stop after cancellation")
+			}
+		})
+	}
+	t.Cleanup(stop)
+	go func() { defer close(done); driver.Run(ctx) }()
+	return stop
+}
 
 // fakeCodex implements the installed Codex app-server RPC shapes without
 // requiring a login or running a model.
@@ -56,7 +83,7 @@ for line in sys.stdin:
   continue
  if method=="thread/read" and not os.environ.get("FAKE_CODEX_CHILD_READ"):
   child_id=r.get("params",{}).get("threadId")
-  if (child_id=="owned-child" and os.environ.get("FAKE_CODEX_CHILD_QUESTION") in ("owned","stale")) or (child_id=="child-thread" and os.environ.get("FAKE_CODEX_CHILD_FOLLOWUP")):
+  if (child_id=="owned-child" and os.environ.get("FAKE_CODEX_CHILD_QUESTION") in ("owned","stale")) or (child_id=="child-thread" and (os.environ.get("FAKE_CODEX_CHILD_FOLLOWUP") or os.environ.get("FAKE_CODEX_CHILD_REROUTE"))):
    result={"thread":{"id":child_id,"parentThreadId":"cx-thread-1"}}
  if method=="thread/read" and os.environ.get("FAKE_CODEX_CHILD_READ"):
   time.sleep(0.03)
@@ -65,6 +92,8 @@ for line in sys.stdin:
  if method=="model/list": result=json.loads(os.environ.get("FAKE_CODEX_MODELS",'{"data":[],"nextCursor":null}'))
  if method=="config/read": result={"config":json.loads(os.environ.get("FAKE_CODEX_CONFIG","{}"))}
  if method in ("thread/start", "thread/resume"): result={"thread":{"id":"cx-thread-1"},"model":"gpt-5-codex","reasoningEffort":"high"}
+ if method in ("thread/start", "thread/resume") and os.environ.get("FAKE_CODEX_OMIT_INITIAL_SETTINGS"):
+  result={"thread":{"id":"cx-thread-1"}}
  if method=="skills/list" and os.environ.get("FAKE_CODEX_SKILL"): result={"data":[{"skills":[{"name":"review","path":"/opt/skills/review/SKILL.md","description":"Review code","scope":"project","enabled":True}]}]}
  if method=="turn/start":
   turn_starts += 1
@@ -80,6 +109,13 @@ for line in sys.stdin:
    send(completion)
   continue
  send({"id":ident,"result":result})
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_ROOT_USAGE_EVENTS"):
+  gate=os.environ.get("FAKE_CODEX_ROOT_USAGE_GATE")
+  if gate:
+   send({"method":"item/agentMessage/delta","params":{"threadId":"cx-thread-1","delta":"Fixture awaiting usage"}})
+   while not os.path.exists(gate): time.sleep(0.005)
+  for notification in json.loads(os.environ["FAKE_CODEX_ROOT_USAGE_EVENTS"]): send(notification)
+  continue
  if method=="turn/start" and os.environ.get("FAKE_CODEX_CHILD_FOLLOWUP"):
   send({"method":"thread/started","params":{"thread":{"id":"child-thread","parentThreadId":"cx-thread-1","model":"fixture-child-model","preview":"First task"}}})
   send({"method":"turn/started","params":{"threadId":"child-thread","turn":{"id":"child-turn-1","status":"inProgress"}}})
@@ -87,6 +123,28 @@ for line in sys.stdin:
   send({"method":"turn/started","params":{"threadId":"child-thread","turn":{"id":"child-turn-2","status":"inProgress"}}})
   send({"method":"item/completed","params":{"threadId":"child-thread","item":{"id":"child-message-2","type":"agentMessage","text":"Follow-up result"}}})
   send({"method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn-2","status":"completed"}}})
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_ROOT_REROUTE"):
+  gate=os.environ.get("FAKE_CODEX_ROOT_REROUTE_GATE")
+  if gate:
+   send({"method":"item/agentMessage/delta","params":{"threadId":"cx-thread-1","delta":"Fixture waiting before reroute"}})
+   until=time.monotonic()+5
+   while not os.path.exists(gate) and time.monotonic()<until: time.sleep(0.005)
+  send({"method":"model/rerouted","params":{"threadId":"cx-thread-1","toModel":"fixture-root-rerouted"}})
+  if os.environ["FAKE_CODEX_ROOT_REROUTE"]=="settings":
+   send({"method":"thread/settings/updated","params":{"threadId":"cx-thread-1","threadSettings":{"model":"fixture-root-settings","effort":"low"}}})
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_CHILD_REROUTE"):
+  send({"method":"thread/started","params":{"thread":{"id":"child-thread","parentThreadId":"cx-thread-1","model":"fixture-original","preview":"Review"}}})
+  send({"method":"turn/started","params":{"threadId":"child-thread","turn":{"id":"child-turn","status":"inProgress"}}})
+  if os.environ.get("FAKE_CODEX_CHILD_EFFORT"):
+   send({"method":"thread/settings/updated","params":{"threadId":"child-thread","threadSettings":{"model":"fixture-original","effort":"high"}}})
+   send({"method":"thread/settings/updated","params":{"threadId":"child-thread","threadSettings":{"model":"fixture-original"}}})
+   send({"method":"thread/started","params":{"thread":{"id":"child-thread","parentThreadId":"cx-thread-1","model":"fixture-original","preview":"Review"}}})
+   send({"method":"thread/settings/updated","params":{"threadId":"child-thread","threadSettings":{"model":"fixture-original","effort":None}}})
+  send({"method":"thread/tokenUsage/updated","params":{"threadId":"child-thread","tokenUsage":{"total":{"inputTokens":20,"cachedInputTokens":5,"outputTokens":3}}}})
+  send({"method":"thread/tokenUsage/updated","params":{"threadId":"child-thread","turnId":"old-child-turn","tokenUsage":{"total":{"inputTokens":9999,"outputTokens":9999}}}})
+  send({"method":"model/rerouted","params":{"threadId":"child-thread","toModel":"fixture-rerouted"}})
+  send({"method":"thread/tokenUsage/updated","params":{"threadId":"child-thread","tokenUsage":{"total":{"inputTokens":50,"cachedInputTokens":15,"outputTokens":10}}}})
+  send({"method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn","status":"completed"}}})
  if method=="turn/start" and os.environ.get("FAKE_CODEX_AUTH_DIAGNOSTIC"):
   sys.stderr.write("Third-party tool secret: sample-private-value\n")
   sys.stderr.write("auth: Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again.\n")
@@ -150,7 +208,8 @@ func TestCodexDriverTurn(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Model: "gpt-5-codex", Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 
 	d.Enqueue("work the card", "chat")
 
@@ -207,7 +266,8 @@ func TestCodexDriverFailedCommandMarksToolResultError(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("do the thing", "chat")
 
 	deadline := time.After(5 * time.Second)
@@ -247,7 +307,8 @@ func TestCodexDriverReportsExpiredAuthWithoutForwardingStderr(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("work", "chat")
 	deadline := time.Now().Add(5 * time.Second)
 	for !contains(em.kinds(), "turn_done") && time.Now().Before(deadline) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/blerglab/blerg-ai/contracts/engineaccess"
 )
 
 var (
@@ -45,14 +47,7 @@ type Adapter interface {
 }
 
 // Access is the only managed secret a consumer can obtain. No refresh authority leaves Core.
-type Access struct {
-	Mode        string    `json:"mode"`
-	AccessToken string    `json:"access_token"`
-	AccountID   string    `json:"chatgpt_account_id"`
-	PlanType    string    `json:"plan_type,omitempty"`
-	Generation  string    `json:"generation"`
-	ExpiresAt   time.Time `json:"expires_at"`
-}
+type Access = engineaccess.Access
 
 // LoginStatus is safe browser metadata, bound to the initiating browser session.
 type LoginStatus struct {

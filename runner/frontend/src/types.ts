@@ -83,6 +83,8 @@ export interface UsageLimits {
 }
 
 export interface SessionInfo {
+  steering_supported?: boolean;
+  limit_resume_supported?: boolean;
   id: string;
   daemon_id: string;
   status: SessionStatus;
@@ -190,7 +192,10 @@ export type AgentEventKind =
   | 'start_stage'
   | 'capabilities'
   | 'artifact'
-  | 'topic';
+  | 'topic'
+  | 'checklist'
+  | 'ticket'
+  | 'mcp_status';
 
 export interface AgentEvent {
   type: 'agent_event';
@@ -213,7 +218,7 @@ export interface StatusPayload { status: string; reason: string }
 export interface CheckInPayload { phase: string; summary: string }
 export interface MessagingPayload { body: string }
 export interface ModelChangedPayload { model: string; effort: string; source: string }
-export interface SubagentPayload { child_id: string; agent_type: string; model: string; summary: string }
+export interface SubagentPayload { child_id: string; agent_type: string; model: string; effort?: string; summary: string }
 export interface TurnDonePayload {
   stop_reason: string;
   model: string;
@@ -269,7 +274,10 @@ export interface CapabilityGroup {
   total?: number // count before the server's per-group cap
   items: CapabilityItem[]
 }
+export type ToolSchemaRefresh = 'next_turn' | 'new_session'
+
 export interface CapabilitiesPayload {
+  tool_schema_refresh?: ToolSchemaRefresh
   engine: string
   engine_name?: string
   model?: string
@@ -632,6 +640,13 @@ export interface SetSessionModel {
   effort?: string;
 }
 
+// Lets go of a first message held while the session's MCP servers connect ("Send now"). Only the
+// session's owner's is acted on; a refused one gets no reply.
+export interface ReleaseHeldPrompt {
+  type: "release_held_prompt";
+  session_id: string;
+}
+
 export interface InterruptSession {
   type: "interrupt_session";
   session_id: string;
@@ -716,7 +731,8 @@ export type BrowserMessage =
   | SubscribeAgentEvents
   | AgentUserMessage
   | SetSessionModel
-  | InterruptSession;
+  | InterruptSession
+  | ReleaseHeldPrompt;
 
 // ─── Crons (runner /api/crons, spec 7.7) ──────────────────────────────────────
 
@@ -794,5 +810,5 @@ export interface ProposalInfo {
 export type ToolChangeKind = 'changed' | 'new' | 'removed'
 export type ToolChangeState = 'pending' | 'accepted' | 'declined' | 'superseded' | 'expired'
 export interface ToolDefinitionInfo { hash: string; name: string; description: string; input_schema: unknown; canonical: string; unsafe?: string }
-export interface ToolChangeInfo { id: string; state: ToolChangeState; kind: ToolChangeKind; connection_id: string; connection_name: string; tool: string; old_hash: string; new_hash: string; mode: 'allow' | 'propose'; muted: boolean; session_id: string; created_at: string; expires_at: string; decided_at: string | null; decided_by: string | null; old_definition?: ToolDefinitionInfo | null; new_definition?: ToolDefinitionInfo | null }
+export interface ToolChangeInfo { tool_schema_refresh?: ToolSchemaRefresh; id: string; state: ToolChangeState; kind: ToolChangeKind; connection_id: string; connection_name: string; tool: string; old_hash: string; new_hash: string; mode: 'allow' | 'propose'; muted: boolean; session_id: string; created_at: string; expires_at: string; decided_at: string | null; decided_by: string | null; old_definition?: ToolDefinitionInfo | null; new_definition?: ToolDefinitionInfo | null }
 export interface PinEventInfo { id: number; session_id: string; connection_id: string; connection_name: string; tool: string; action: string; old_hash: string; new_hash: string; mode: string; actor: string; created_at: string }

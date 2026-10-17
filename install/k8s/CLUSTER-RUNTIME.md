@@ -158,7 +158,7 @@ on that page explains how to produce the value:
 
 | Kind | What to paste |
 |---|---|
-| `claude` | The token printed by `claude setup-token` on a machine where they're logged in (starts with `sk-ant-oat`), or an Anthropic console API key to bill an organisation instead |
+| `claude` | The token printed by `claude setup-token` on a machine where they're logged in (starts with `sk-ant-oat`), or an Anthropic console API key to bill an organization instead |
 | `codex` | Prefer Settings → Managed connections and complete the dedicated device login. Pasting `~/.codex/auth.json` remains a snapshot import with no coordinated refresh. |
 | `hermes` | The contents of `~/.hermes/.env` from a machine where Hermes is set up |
 | `github` | A fine-grained personal access token with Contents read+write and Metadata read on the repos sessions may touch — sessions clone and push as that user |
@@ -219,13 +219,13 @@ With **Cluster pod** selected, the launch sheet's **New repository** item create
 the person's git host and starts the session in it: type `owner/name`, pick GitHub or GitLab and
 Private or Public, and launch (**Create & Launch →**). The runner uses the person's own `github` /
 `gitlab` token from Settings to create it — under their account when `owner` is their login,
-otherwise under that organisation or group — with an initial commit, and the pod clones it like
+otherwise under that organization or group — with an initial commit, and the pod clones it like
 any other repository. The default branch is the provider's; the agent works on `wip/<session>`.
 
 An existing repository is refused (409): launch it as an existing one instead. When the
 repository cannot be created — no token in Settings, a token without permission to create
 repositories under that owner (a fine-grained GitHub token needs **Administration: write**, a
-GitLab token `api`), a provider error — the session still starts: the pod initialises an empty
+GitLab token `api`), a provider error — the session still starts: the pod initializes an empty
 repository whose `origin` is where the repository would be, the start panel's first stage says
 why creation did not happen, and the agent's first prompt tells it the remote does not exist yet.
 Work is committed locally; the first push fails visibly in the transcript, and pushes succeed as

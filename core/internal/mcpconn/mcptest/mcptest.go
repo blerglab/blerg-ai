@@ -39,7 +39,7 @@ type Server struct {
 	// Confidential makes dynamic registration hand out a client secret (client_secret_basic).
 	Confidential bool
 	// AccessTTL is expires_in of issued access tokens (seconds; default 3600).
-	AccessTTL int
+	AccessTTL float64
 	// RefreshDelay widens the window in which two concurrent refreshes could both spend a token.
 	RefreshDelay time.Duration
 	// RefreshStatus, when non-zero, is the HTTP status the token endpoint answers a refresh with
@@ -169,8 +169,9 @@ func (s *Server) AddClient(id string) {
 	s.clients[id] = client{}
 }
 
-// SetAccessTTL changes expires_in of tokens issued from now on.
-func (s *Server) SetAccessTTL(sec int) {
+// SetAccessTTL changes expires_in of tokens issued from now on. Fractional seconds
+// let expiration tests exercise real expiry without waiting a whole second.
+func (s *Server) SetAccessTTL(sec float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.AccessTTL = sec

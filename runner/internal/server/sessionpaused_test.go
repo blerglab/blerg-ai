@@ -20,10 +20,6 @@ import (
 func TestSessionPausedByARestart(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000c1"
 	otherID := "00000000-0000-0000-0000-0000000000c9"
 	sessionID := "00000000-0000-0000-0000-0000000000c2"

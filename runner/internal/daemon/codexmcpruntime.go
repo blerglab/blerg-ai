@@ -159,7 +159,7 @@ func (r *codexRestrictedRuntime) capabilities(model string) protocol.Capabilitie
 		description, _ := spec["description"].(string)
 		group.Items = append(group.Items, protocol.CapabilityItem{Name: name, Description: description})
 	}
-	caps := protocol.CapabilitiesPayload{Engine: "codex", EngineName: "Codex", Model: model, PermissionMode: "restricted", Groups: []protocol.CapabilityGroup{group}, Note: "Workspace file access and granted MCP calls use these tools. Confined JavaScript orchestration and clock/resource helpers may also be available; native writes are blocked. No shell, web, subagents, plugins, hooks or ambient MCP connections."}
+	caps := protocol.CapabilitiesPayload{ToolSchemaRefresh: protocol.ToolSchemaRefreshNewSession, Engine: "codex", EngineName: "Codex", Model: model, PermissionMode: "restricted", Groups: []protocol.CapabilityGroup{group}, Note: "Workspace file access and granted MCP calls use these tools. Confined JavaScript orchestration and clock/resource helpers may also be available; native writes are blocked. No shell, web, subagents, plugins, hooks or ambient MCP connections."}
 	if r.nativeSchemaChanged {
 		caps.Note += " This native conversation retains earlier tool definitions. Start a new session for updated definitions; current Blerg grants still apply."
 	}

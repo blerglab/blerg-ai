@@ -129,7 +129,7 @@ fi
 
 read -r -p "  Apply this? [Y/n] " CONFIRM
 if [ "$CONFIRM" = "n" ] || [ "$CONFIRM" = "N" ]; then
-  blerg_step "Cancelled — nothing changed."
+  blerg_step "Canceled — nothing changed."
   exit 0
 fi
 

@@ -93,6 +93,10 @@ export interface RunColumnProps {
   // Engine availability, already resolved for the chosen runtime by the sheet
   // (cluster credentials + personal credentials, or the daemon's own list).
   availableEnginesHere: string[] | null
+  engineChoices?: { id: string; name: string }[]
+  engineDiscoveryState?: 'loading' | 'known' | 'unknown'
+  engineDiscoveryError?: string
+  onEngineDiscoveryRetry?: () => void
 
   // Preflight, computed by the sheet and rendered here under Where it runs.
   clusterEngineBlocked: boolean
@@ -300,28 +304,33 @@ export default function RunColumn(props: RunColumnProps) {
         )}
       </div>
 
-      {/* 3. Engine — buttons for an engine this runtime can't run stay
-          clickable (the server is the real gate) but get a dimmed, dashed
-          treatment plus the warning below. */}
+      {/* Only target-available engines are actionable; a sole engine needs no selector. */}
       <div style={{ marginBottom: 20 }}>
-        <span style={sectionLabel}>Engine</span>
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {(['claude', 'codex', 'hermes', 'openclaw'] as const).map(k => {
-            const unavailable = availableEnginesHere !== null && !availableEnginesHere.includes(k)
-            return (
-              <button
-                key={k}
-                type="button"
-                data-testid={`engine-${k}`}
-                aria-pressed={engine === k}
-                onClick={() => onEngineChange(k)}
-                style={pillStyle(engine === k, unavailable)}
-              >
-                {ENGINE_LABELS[k]}
-              </button>
-            )
-          })}
-        </div>
+        {props.engineDiscoveryState === 'loading' || (availableEnginesHere === null && props.engineDiscoveryState !== 'unknown') ? (
+          <p role="status" style={noteStyle}>Checking available engines…</p>
+        ) : props.engineDiscoveryState === 'unknown' ? (
+          <p role="status" style={warnStyle}>{props.engineDiscoveryError ?? 'Engine availability is unknown.'}{' '}
+            {props.onEngineDiscoveryRetry && <button type="button" onClick={props.onEngineDiscoveryRetry}>Retry engines</button>}
+          </p>
+        ) : (availableEnginesHere ?? []).length === 0 ? (
+          <p role="status" style={warnStyle}>No engines available for this runtime. Connect an engine in Settings or choose another runtime.</p>
+        ) : (availableEnginesHere ?? []).length > 1 ? (
+          <>
+            <span style={sectionLabel}>Engine</span>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {(props.engineChoices ?? (availableEnginesHere ?? []).map(id => ({ id, name: ENGINE_LABELS[id] ?? id }))).map(choice => (
+                <button key={choice.id} type="button" data-testid={`engine-${choice.id}`} aria-pressed={engine === choice.id}
+                  onClick={() => onEngineChange(choice.id)} style={pillStyle(engine === choice.id)}>
+                  {choice.name}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : null}
+        {props.engineDiscoveryState === 'known' && props.engineDiscoveryError && <p role="status" style={noteStyle}>
+          {props.engineDiscoveryError}{' '}
+          {props.onEngineDiscoveryRetry && <button type="button" onClick={props.onEngineDiscoveryRetry}>Retry engines</button>}
+        </p>}
         {/* OpenClaw pins the session to the daemon host — with no daemon
             connected that leaves all three cards greyed out and no
             explanation of the dead end, so say it once, here. */}
@@ -345,10 +354,11 @@ export default function RunColumn(props: RunColumnProps) {
           (GET /api/models/{engine}); an engine with no list shows nothing —
           or, when the sheet passes modelFreeText, an optional model name box
           — and uses its own configured default. */}
+      {(props.engineDiscoveryState === undefined || props.engineDiscoveryState === 'known' && !engineMissingHere) && <>
       {modelsLoading && models.length === 0 && (
-        <p role="status" style={noteStyle}>Loading {ENGINE_LABELS[engine]} models…</p>
+        <p role="status" style={noteStyle}>Loading {props.engineChoices?.find(e => e.id === engine)?.name ?? ENGINE_LABELS[engine] ?? engine} models…</p>
       )}
-      {modelsRefreshing && <p role="status" style={noteStyle}>Refreshing {ENGINE_LABELS[engine]} models… You can launch with the default model.</p>}
+      {modelsRefreshing && <p role="status" style={noteStyle}>Refreshing {props.engineChoices?.find(e => e.id === engine)?.name ?? ENGINE_LABELS[engine] ?? engine} models… You can launch with the default model.</p>}
       {modelsError && <p role="status" data-testid="models-error" style={noteStyle}>
         {modelsError}{' '}
         {onModelsRetry && <button type="button" onClick={onModelsRetry}>Retry</button>}
@@ -366,6 +376,8 @@ export default function RunColumn(props: RunColumnProps) {
         noteStyle={noteStyle}
         pillStyle={s => pillStyle(s)}
       />
+
+      </>}
 
       {/* 5. Permissions */}
       <div style={{ marginBottom: 20 }}>

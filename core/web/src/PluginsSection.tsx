@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "./apiFetch";
+import { useEngineDescriptors, type EngineMetadata } from "./engineDescriptors";
 
 // Always-on plugins: GET/PUT /api/plugins/{engine} (core/internal/api/plugin_handlers.go), the
 // ordered list of engine plugins installed into every cluster session started as this account.
@@ -8,8 +9,7 @@ import { apiFetch } from "./apiFetch";
 // reason (bad name, "marketplace not allowed by this install", too many), shown as text — capped,
 // never as markup.
 //
-// Data-driven like the credential kinds in Settings.tsx: an engine that later registers plugins
-// in core is one more entry in PLUGIN_ENGINES (suggestions included), not new JSX.
+// Availability comes from Core metadata. Local entries below are presentation hints only.
 
 type PluginEntry = { marketplace: string; plugin: string };
 type PluginList = {
@@ -258,18 +258,27 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
   );
 }
 
-export default function PluginsSection({ engines = PLUGIN_ENGINES }: { engines?: readonly PluginEngine[] } = {}) {
+export default function PluginsSection({ engines: explicitEngines, metadata: suppliedMetadata, discoveryError, retryDiscovery }: { engines?: readonly PluginEngine[]; metadata?: EngineMetadata | null; discoveryError?: string | null; retryDiscovery?: () => void } = {}) {
+  const discovery = useEngineDescriptors(explicitEngines === undefined && suppliedMetadata === undefined);
+  const metadata = suppliedMetadata ?? discovery.metadata;
+  const error = discoveryError ?? discovery.error;
+  const engines = explicitEngines ?? (metadata?.plugin_engines ?? []).map(id => {
+    const hints = PLUGIN_ENGINES.find(e => e.engine === id);
+    return { engine: id, label: metadata!.engines.find(e => e.id === id)?.name ?? id, defaultMarketplace: hints?.defaultMarketplace ?? "", suggestions: hints?.suggestions ?? [] };
+  });
   return (
     <section className="section">
       <p className="eyebrow">Sessions</p>
       <h2 className="section-title">Always-on plugins</h2>
       <p className="section-help">
-        These plugins are loaded into your Claude and Codex agent sessions — on the
+        These plugins are loaded into your supported agent sessions — on the
         cluster and on your own workstation daemon (Local sandbox or This machine) — including
         sessions your boards start with your automation token. They do not change your engine settings
         on your own machine: a daemon keeps them in its own folder and loads them for the
         session only. Plugins run code in your sessions, so only add ones you trust.
       </p>
+      {!explicitEngines && !metadata && !error && <p className="muted">Loading plugin integrations…</p>}
+      {error && <p role="alert">{error} <button type="button" onClick={retryDiscovery ?? discovery.retry}>Retry plugin discovery</button></p>}
       <ul className="card-list">
         {engines.map((e) => (
           <PluginEngineCard key={e.engine} {...e} />

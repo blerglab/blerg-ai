@@ -40,7 +40,7 @@ mkbin "$tmp/bin-claude" claude
 mkbin "$tmp/bin-codex" codex
 run_pf() { # PATH-dir HOME [env...] ; prints preflight output
   local p="$1" h="$2"; shift 2
-  ( export PATH="$p" HOME="$h"; unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY; for kv in "$@"; do export "$kv"; done
+  ( export PATH="$p" HOME="$h"; unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY CODEX_HOME; for kv in "$@"; do export "$kv"; done
     engine_preflight "$h/.env" )
 }
 mkdir -p "$tmp/h0"
@@ -69,6 +69,9 @@ rm -f "$tmp/h0/.env"
 mkdir -p "$tmp/h2/.codex"; echo '{}' > "$tmp/h2/.codex/auth.json"
 [ -z "$(run_pf "$tmp/bin-codex" "$tmp/h2")" ] || t "codex logged in: expected silence"
 [ -n "$(run_pf "$tmp/bin-none" "$tmp/h2")" ] || t "codex auth without binary should not count"
+mkdir -p "$tmp/custom-codex"; echo '{}' > "$tmp/custom-codex/auth.json"
+[ -z "$(run_pf "$tmp/bin-codex" "$tmp/h0" CODEX_HOME="$tmp/custom-codex")" ] || t "custom Codex home was not discovered"
+[ -n "$(run_pf "$tmp/bin-codex" "$tmp/h2" CODEX_HOME="$tmp/missing-codex")" ] || t "custom empty Codex home borrowed default credentials"
 
 # macOS keychain: claude on PATH, no credentials file -> "could not verify", never "missing".
 mkbin "$tmp/bin-mac" claude uname

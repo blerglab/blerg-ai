@@ -76,8 +76,27 @@ cd runner/frontend && npm test -- --project unit src/components/AgentChatView.te
 
 **With a database (needs Postgres 16, for example from Docker).** The variables are
 `DATABASE_URL` for `contracts/` and `core/`, and `TEST_DATABASE_URL` for `runner/` and
-`board/`. Give each module its own empty database, because runner and board tests share
-theirs (`-p 1` runs packages one at a time for that reason).
+`board/`. The configured URL selects an administration database and a user with **CREATEDB**.
+Fixtures migrate a private template once per package process, then create and drop
+a separate database for each test. The administration database is never migrated
+or truncated. Packages can run in parallel without sharing fixture tables; no
+`-p 1` is needed. Templates are removed when the test process exits normally.
+On startup, each helper sweeps only its explicitly marked abandoned databases in
+the same administration/owner scope, older than 60 minutes and without a live run
+lease or database connections. `BLERG_TEST_DB_MAX_AGE_MINUTES` accepts whole minutes
+from 1 to 10080; invalid values disable automatic sweeping. A normal drop never
+forces connections closed. Legacy or unmarked `cx_` databases are left alone;
+remove those manually only after confirming no test process still uses them.
+Use a dedicated test server, never a production database.
+
+New database fixtures should use the module's `internal/testsupport` helper and
+wrap `TestMain` with its `Run` cleanup, rather than opening the administration URL
+directly or rebuilding a fixed schema. Migration tests use the helper's empty
+database path to retain first-migration coverage. Pools that reconnect must copy
+the fixture's configuration, including its private database identity. Keep tests
+that change environment variables or package globals serial, and wait for test
+goroutines before restoring those globals.
+
 `make db-up` starts Postgres on `localhost:5432` (user and password `blerg`, database
 `blerg_core`); create the other two by hand:
 
@@ -88,13 +107,13 @@ docker compose exec postgres createdb -U blerg blerg_board_test
 
 export DATABASE_URL='postgres://blerg:blerg@localhost:5432/blerg_core?sslmode=disable'
 go test ./contracts/... ./core/...
-cd runner && GOWORK=off TEST_DATABASE_URL='postgres://blerg:blerg@localhost:5432/blerg_runner_test?sslmode=disable' go test -p 1 ./...
-cd board  && GOWORK=off TEST_DATABASE_URL='postgres://blerg:blerg@localhost:5432/blerg_board_test?sslmode=disable'  go test -p 1 ./...
+cd runner && GOWORK=off TEST_DATABASE_URL='postgres://blerg:blerg@localhost:5432/blerg_runner_test?sslmode=disable' go test -timeout 30m ./...
+cd board  && GOWORK=off TEST_DATABASE_URL='postgres://blerg:blerg@localhost:5432/blerg_board_test?sslmode=disable'  go test -timeout 30m ./...
 ```
 
 With `DATABASE_URL` exported, `make test` runs the core database tests too. Set
-`TEST_DATABASE_URL` per module, as above, not for `make test`, so runner and board do not
-share a database.
+`TEST_DATABASE_URL` per module, as above, or use a dedicated administration database
+for `make test`. Fixtures from different modules do not share tables.
 
 Known caveat: three tests in `core/internal/identity` (`TestRevokeAccountEverywhereKillsAgentTokens`,
 `TestRevokeAccountEverywhereMarksAgentTokenRowsRevoked`,
@@ -175,7 +194,7 @@ cd runner/frontend && npm ci && npm run dev
 - **Extend by registering, not by branching.** Engines, git providers and model
   sources each have a registry. A new one should be a new entry, not a new `if`.
 - **Match the code around you**: naming, comment density and idiom.
-- **Update the docs in the same change** when you change behaviour, a flag or an
+- **Update the docs in the same change** when you change behavior, a flag or an
   environment variable.
 
 ## Commits and pull requests
@@ -236,8 +255,8 @@ so set `TAG` to the release version (for example `v0.1.0`) to have the cluster r
 desktop stack passes `BLERG_VERSION` from your environment and otherwise builds with `dev`; and
 the workstation daemon that `daemon/install.sh` builds is stamped `dev` today.
 
-## Licence
+## License
 
 Blerg is licensed under the [Apache License 2.0](LICENSE). By submitting a
 contribution you agree that it is licensed under the same terms, as set out in
-section 5 of the licence.
+section 5 of the license.

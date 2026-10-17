@@ -77,6 +77,24 @@ Every env var the server and CLI read — gate backends, the runner, deploy
 URLs, defaults — is documented in [`docs/CONFIG.md`](docs/CONFIG.md).
 Nothing beyond `DATABASE_URL` is required to start.
 
+Board automation discovers engines, models and efforts through
+`GET /api/boards/{id}/launch-options` (MCP: `blerg_board_launch_options`), using
+that board's stored automation identity and configured runner target. A current
+session's chat uses `GET /api/runner-sessions/{id}/launch-options` to discover
+choices for its existing engine and host. Credentials stay on the backend.
+Board defaults and the review, discussion and board-chat roles have paired
+model/effort settings; cards can override them. Changing engines clears future
+board/card overrides while existing sessions keep their engine. A model-only
+settings change clears its previous effort; an explicitly supplied effort wins.
+
+Session controls carry the board's current automation identity, including after
+a token is renewed. A disconnected Cluster session is offered recovery only
+when the runner reports an eligible recovery attempt under that authority;
+missing native history is a visible failure. Optional message `client_id` values
+survive proxying for durable input receipts; retry an ambiguous send with the
+same ID and content. Live model/effort updates apply to the next turn and never
+change the session's engine.
+
 ## License
 
 Apache License 2.0 — see [`LICENSE`](../LICENSE).

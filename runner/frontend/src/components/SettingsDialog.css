@@ -1,0 +1,63 @@
+/* The Settings dialog: the Skills & plugins dialog shell (CapabilitiesPanel.css), a pair of theme
+   pickers, a preview that wears the draft, and the per-colour overrides tucked under "Customize". */
+.cc-dialog { width: min(760px, 100%); }
+.st-section { display: flex; flex-direction: column; gap: 4px; }
+.st-heading { margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--chalk); }
+.st-check { display: flex; align-items: center; gap: 8px; font-size: var(--text-sm); color: var(--chalk); cursor: pointer; margin-top: 4px; }
+.st-check input { margin: 0; accent-color: var(--accent); }
+.st-hint { margin: 0 0 0 24px; font-size: var(--text-xs); color: var(--fog-dim); }
+.st-account { margin-left: 0; }
+.st-account a { color: var(--accent); }
+.cc-body { display: flex; flex-direction: column; gap: 14px; padding: 4px 16px 16px; }
+.cc-pickers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.cc-field { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-xs); color: var(--fog); }
+.cc-field select,
+.cc-btn {
+  padding: 6px 8px;
+  background: var(--scree-2);
+  color: var(--chalk);
+  border: 1px solid var(--stone);
+  border-radius: 8px;
+  font: inherit;
+  font-size: var(--text-sm);
+}
+.cc-btn { cursor: pointer; }
+.cc-btn:hover:not(:disabled),
+.cc-btn:focus-visible,
+.cc-field select:focus-visible { border-color: var(--accent-border); }
+.cc-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg, #fff); }
+.cc-btn:disabled { opacity: 0.5; cursor: default; }
+
+.cc-previewbar { display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--fog); }
+.cc-previewbar-label { margin-right: 4px; }
+.cc-seg {
+  padding: 2px 10px;
+  background: none;
+  color: var(--fog);
+  border: 1px solid var(--stone);
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+}
+.cc-seg.on { color: var(--chalk); border-color: var(--accent-border); background: var(--scree-2); }
+
+.cc-preview { display: flex; flex-direction: column; gap: 8px; min-width: 0; font-size: var(--text-sm); }
+.cc-preview .md { margin: 0; }
+
+.cc-custom summary { cursor: pointer; font-size: var(--text-sm); color: var(--fog); }
+.cc-hint { margin: 8px 0; font-size: var(--text-xs); color: var(--fog-dim); }
+.cc-tokens { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; }
+.cc-token { display: flex; align-items: center; gap: 8px; font-size: var(--text-xs); min-width: 0; }
+.cc-token input[type='color'] { width: 28px; height: 22px; padding: 0; border: 1px solid var(--stone); border-radius: 4px; background: none; flex: none; }
+.cc-token-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-reset { margin-left: auto; background: none; border: none; color: var(--accent); font: inherit; cursor: pointer; padding: 0; }
+.cc-reset:hover, .cc-reset:focus-visible { text-decoration: underline; }
+.cc-error { color: var(--danger); font-size: var(--text-xs); }
+.cc-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--scree-2); }
+
+@media (max-width: 640px) {
+  .cc-pickers,
+  .cc-tokens { grid-template-columns: 1fr; }
+  .cc-footer { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .cc-footer .cc-btn { flex: 1; min-height: 40px; }
+}

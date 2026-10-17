@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -355,5 +356,59 @@ func TestCredentialsRejectNonHumanToken(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("GET /api/credentials with agent token = %d, want 403", resp.StatusCode)
+	}
+}
+
+// Deleting old vault material is independent of whether its importer remains
+// registered. The owner may remove it, without granting a storage sink or a way
+// to discover/delete another person's entries.
+func TestDeleteLegacyCredentialRemainsOwnerScoped(t *testing.T) {
+	deps, pool, idSvc := newCredentialsTestDeps(t)
+	owner := insertCredAccount(t, pool, "legacy-owner")
+	other := insertCredAccount(t, pool, "legacy-other")
+	token, err := idSvc.MintHumanAccessToken(t.Context(), owner, "blerg-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := api.NewRouter(deps)
+	for _, engine := range []string{"openclaw", "removed-engine"} {
+		for _, account := range []string{owner, other} {
+			if err := deps.Credentials.Store(t.Context(), account, engine, []byte("fixture-private")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		req := httptest.NewRequest(http.MethodDelete, "/api/credentials/"+engine, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("legacy deletion %s: status %d", engine, rec.Code)
+		}
+		if _, err := deps.Credentials.Fetch(t.Context(), owner, engine); !errors.Is(err, credentials.ErrNotFound) {
+			t.Fatal("owner legacy entry survived")
+		}
+		if _, err := deps.Credentials.Fetch(t.Context(), other, engine); err != nil {
+			t.Fatal("other owner's entry was altered")
+		}
+		raw, _ := json.Marshal(map[string]string{"engine": engine, "credential": "fixture-private"})
+		req = httptest.NewRequest(http.MethodPost, "/api/credentials", bytes.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatal("deletion compatibility widened unsupported imports")
+		}
+	}
+	if err := deps.Credentials.Store(t.Context(), other, "unregistered", []byte("fixture-private")); err != nil {
+		t.Fatal(err)
+	}
+	for _, engine := range []string{"unregistered", "BAD-ID"} {
+		req := httptest.NewRequest(http.MethodDelete, "/api/credentials/"+engine, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatal("unknown or malformed deletion accepted without an owner entry")
+		}
 	}
 }

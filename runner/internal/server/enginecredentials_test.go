@@ -10,8 +10,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/engineaccess"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
+
+func TestFetchManagedAccessUsesRegisteredEngineMode(t *testing.T) {
+	t.Cleanup(engineaccess.Register(engineaccess.TokenCodec("fixture-engine", "fixtureAccessTokens")))
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(engineaccess.Access{Mode: "fixtureAccessTokens", AccessToken: "fixture-private-access", AccountID: "fixture-provider", Generation: "fixture-generation", ExpiresAt: time.Now().Add(time.Hour)})
+	}))
+	defer core.Close()
+	access, found, err := fetchManagedAccess(t.Context(), nil, core.URL, "fixture-key", managedAccessRequest{AccountID: "owner", Engine: "fixture-engine", SessionID: "proof"})
+	if err != nil || !found || access.AccountID != "fixture-provider" {
+		t.Fatal("registered second mode was rejected")
+	}
+	if _, found, err = fetchManagedAccess(t.Context(), nil, core.URL, "fixture-key", managedAccessRequest{AccountID: "owner", Engine: "codex", SessionID: "proof"}); err == nil || found {
+		t.Fatal("foreign access mode crossed engine binding")
+	}
+}
 
 func managedAccessFixture() managedAccess {
 	return managedAccess{Mode: "chatgptAuthTokens", AccessToken: "fixture-access-private", AccountID: "fixture-provider-account", Generation: "00000000-0000-4000-8000-000000000011", ExpiresAt: time.Now().Add(time.Hour)}

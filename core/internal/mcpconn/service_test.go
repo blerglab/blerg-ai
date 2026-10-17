@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,51 +17,16 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/db"
 	"github.com/blerglab/blerg-ai/core/internal/keybackend"
 	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 )
 
-const testSchema = "test_blerg_core_mcpconn"
-
 const goodURL = "https://mcp.example.com/mcp"
-
 const sessA = "00000000-0000-4000-8000-000000000001"
 
+// testPool provides a fresh database cloned from the migrated package template.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	setup, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setup.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", testSchema)); err != nil {
-		setup.Close()
-		t.Fatalf("drop schema: %v", err)
-	}
-	if _, err := setup.Exec(ctx, fmt.Sprintf("CREATE SCHEMA %s", testSchema)); err != nil {
-		setup.Close()
-		t.Fatalf("create schema: %v", err)
-	}
-	setup.Close()
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = testSchema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", testSchema))
-		pool.Close()
-	})
-	if err := db.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return pool
+	return testsupport.Pool(t, db.Migrate)
 }
 
 var acctSeq int64

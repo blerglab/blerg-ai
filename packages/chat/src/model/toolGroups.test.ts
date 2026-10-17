@@ -208,3 +208,21 @@ describe('sharedTimeline', () => {
     expect(g2.entries).toBe(g1.entries)
   })
 })
+
+
+it('retains child configured effort across same-model partial updates and clears on reroute', () => {
+  const events = [ev('subagent_started', { child_id: 'effort', model: 'a', effort: 'low' }),
+    ev('subagent_update', { child_id: 'effort', model: 'a', effort: 'high' }),
+    ev('subagent_update', { child_id: 'effort', model: 'a' })]
+  const child = buildTimeline(events).find(i => i.type === 'subagent')
+  expect(child?.type === 'subagent' && child.sub.effort).toBe('high')
+  const rerouted = buildTimeline([...events, ev('subagent_update', { child_id: 'effort', model: 'b' })]).find(i => i.type === 'subagent')
+  expect(rerouted?.type === 'subagent' && rerouted.sub.effort).toBe('')
+})
+
+it('clears known configured effort on an explicit null observation', () => {
+  const items = buildTimeline([ev('subagent_started', { child_id: 'effort', model: 'a', effort: 'high' }),
+    ev('subagent_update', { child_id: 'effort', model: 'a', effort: null })])
+  const child = items.find(i => i.type === 'subagent')
+  expect(child?.type === 'subagent' && child.sub.effort).toBe('')
+})

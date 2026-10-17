@@ -70,6 +70,7 @@ const (
 // and the runner/session-driving routes are board's own UI and control plane,
 // not the card-writing contract an agent is pointed at.
 var boardOperations = []agentsmanifest.Operation{
+	{Name: "discover_board_launch_options", Method: "GET", Path: "/api/boards/{id}/launch-options", Cap: capCardWrite, Idempotent: true, Summary: "Discover available engines, models and efforts for this board under its stored automation identity."},
 	// /onboard is board's conventions document (what a good card looks like,
 	// how the admission gate answers). It is listed because an agent is
 	// expected to read it BEFORE its first write, and it needs no credential.

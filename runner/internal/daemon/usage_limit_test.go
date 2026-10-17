@@ -129,7 +129,8 @@ func TestCodexDriverCorrelatesUsageRefusal(t *testing.T) {
 	d := newCodexDriver(AgentDriverOpts{Emitter: em, WorkDir: dir})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Run(ctx)
+	stopDriver := startTestCodexDriver(ctx, t, d)
+	defer stopDriver()
 	d.Enqueue("continue", "chat")
 	deadline := time.Now().Add(5 * time.Second)
 	for !contains(em.kinds(), "turn_done") {

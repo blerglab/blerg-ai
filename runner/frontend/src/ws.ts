@@ -5,7 +5,7 @@ import {
   getAccessToken,
 } from './authClient'
 import { refreshAlreadyAttempted, clearRefreshAttempted } from './refreshGuard'
-import { bounceToRefresh, clearSignInStuck, markSignInStuck } from './signIn'
+import { bounceToRefresh, clearSignInStuck, markSignInStuck, onSignInRecovered } from './signIn'
 import { tokenExpired } from './claims'
 
 let socket: WebSocket | null = null
@@ -204,6 +204,13 @@ if (typeof document !== 'undefined') {
     connect()
   })
 }
+
+// The sign-in banner's quiet retry (signIn.ts) got a token: connect with it now rather than at the
+// next online/visibility event. No page reload; the open handlers re-establish everything.
+onSignInRecovered(() => {
+  backoff = 2000
+  connect()
+})
 
 // Start connecting immediately on module load.
 //

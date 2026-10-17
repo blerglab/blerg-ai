@@ -36,7 +36,9 @@ var (
 // vocabulary, and boards already store them free-form), so this only rejects
 // what could not be a name — empty, oversized, or carrying whitespace and
 // control characters into the runner's argv.
-var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,63}$`)
+var effortNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@\-\[\]]{0,127}$`)
 
 // uuidRe recognises a runner session id — used both to reject ids Postgres
 // would choke on and to keep a stray `[rs:…]` in free-text label from passing
@@ -51,15 +53,23 @@ type SessionModelChange struct {
 	From            string `json:"from"` // empty when the session's model was never recorded
 	To              string `json:"to"`
 	AppliesTo       string `json:"applies_to"`
+	Effort          string `json:"effort,omitempty"`
 }
 
 // SetSessionModel changes the model a running session uses from its next turn
 // on. sessionID may be "self", which resolves to the session the calling
 // agent token was minted for.
-func (a *API) SetSessionModel(ctx context.Context, p auth.Principal, sessionID, model, reason string) (SessionModelChange, error) {
+func (a *API) SetSessionModel(ctx context.Context, p auth.Principal, sessionID, model, reason string, efforts ...string) (SessionModelChange, error) {
 	var out SessionModelChange
 	if a.runner == nil {
 		return out, fmt.Errorf("%w: no runner configured", runner.ErrUnsupported)
+	}
+	effort := ""
+	if len(efforts) > 0 {
+		effort = strings.TrimSpace(efforts[0])
+	}
+	if effort != "" && !effortNameRe.MatchString(effort) {
+		return out, fmt.Errorf("%w: invalid effort", errModelBadRequest)
 	}
 	model = strings.TrimSpace(model)
 	if !modelNameRe.MatchString(model) {
@@ -75,12 +85,12 @@ func (a *API) SetSessionModel(ctx context.Context, p auth.Principal, sessionID, 
 		return out, db.ErrNotFound
 	}
 
-	var boardID, ext, role, lifecycle, current string
+	var boardID, ext, role, lifecycle, current, currentEffort string
 	var cardID *string
 	err = a.Pool.QueryRow(ctx, `
-		SELECT board_id, card_id, external_session_id, role, lifecycle, model
+		SELECT board_id, card_id, external_session_id, role, lifecycle, model, effort
 		FROM runner_sessions WHERE id = $1`, sessionID).
-		Scan(&boardID, &cardID, &ext, &role, &lifecycle, &current)
+		Scan(&boardID, &cardID, &ext, &role, &lifecycle, &current, &currentEffort)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return out, db.ErrNotFound
@@ -103,20 +113,33 @@ func (a *API) SetSessionModel(ctx context.Context, p auth.Principal, sessionID, 
 	if runner.TerminalLifecycle(lifecycle) {
 		return out, fmt.Errorf("%w: session is %s — nothing left to re-model", errModelBadRequest, lifecycle)
 	}
-	if model == current {
+	if model == current && (effort == "" || effort == currentEffort) {
 		// Nothing to do, and saying so beats a no-op round trip to the runner.
 		return SessionModelChange{RunnerSessionID: sessionID, Role: role, From: current, To: model,
 			AppliesTo: "unchanged"}, nil
 	}
 
-	if err := a.runner.Driver.SetModel(ctx, ext, model); err != nil {
-		return out, err
+	if c, ok := a.runner.Driver.(runner.IdentityController); ok {
+		token, _, err := a.startIdentity(ctx, boardID)
+		if err != nil {
+			return out, err
+		}
+		if err := c.SetModelAs(ctx, token, ext, model, effort); err != nil {
+			return out, err
+		}
+	} else {
+		if effort != "" {
+			return out, fmt.Errorf("%w: model effort", runner.ErrUnsupported)
+		}
+		if err := a.runner.Driver.SetModel(ctx, ext, model); err != nil {
+			return out, err
+		}
 	}
 	// model_set_at stamps OUR write, so a runner-reported change that predates
 	// it (an event still sitting in the ingest backlog) can't undo it.
 	if _, err := a.Pool.Exec(ctx,
-		`UPDATE runner_sessions SET model = $2, model_set_at = now() WHERE id = $1`,
-		sessionID, model); err != nil {
+		`UPDATE runner_sessions SET model = $2, effort = CASE WHEN $3 <> '' THEN $3 WHEN model <> $2 THEN '' ELSE effort END, model_set_at = now() WHERE id = $1`,
+		sessionID, model, effort); err != nil {
 		return out, err
 	}
 
@@ -141,7 +164,7 @@ func (a *API) SetSessionModel(ctx context.Context, p auth.Principal, sessionID, 
 	}
 	a.Hub.Broadcast(boardID, "runner_changed")
 	return SessionModelChange{RunnerSessionID: sessionID, Role: role, From: current, To: model,
-		AppliesTo: "next turn"}, nil
+		AppliesTo: "next turn", Effort: effort}, nil
 }
 
 // resolveSessionID maps "self" (or an empty id) to the runner session the
@@ -190,13 +213,14 @@ func (a *API) handleSetSessionModel(w http.ResponseWriter, r *http.Request, p au
 	}
 	req, err := decode[struct {
 		Model  string `json:"model"`
+		Effort string `json:"effort"`
 		Reason string `json:"reason"`
 	}](r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "model required")
 		return
 	}
-	change, err := a.SetSessionModel(r.Context(), p, r.PathValue("id"), req.Model, req.Reason)
+	change, err := a.SetSessionModel(r.Context(), p, r.PathValue("id"), req.Model, req.Reason, req.Effort)
 	if err != nil {
 		writeError(w, sessionModelStatus(err), err.Error())
 		return
@@ -209,6 +233,8 @@ func (a *API) handleSetSessionModel(w http.ResponseWriter, r *http.Request, p au
 // deployment fact the caller can act on, not a blerg-board bug.
 func sessionModelStatus(err error) int {
 	switch {
+	case isAutomationErr(err):
+		return http.StatusUnprocessableEntity
 	case errors.Is(err, errModelBadRequest):
 		return http.StatusUnprocessableEntity
 	case errors.Is(err, errModelForbidden):

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useNavigate } from 'react-router-dom'
 import SessionDetail from './SessionDetail'
+import SettingsDialog from './SettingsDialog'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { useToastStore } from '../hooks/useToastStore'
 import { useMessageStore } from '../hooks/useMessageStore'
@@ -531,10 +532,11 @@ describe('SessionDetail', () => {
     expect(screen.queryByTestId('detail-unattended')).not.toBeInTheDocument()
   })
 
-  it('has a Show thinking checkbox that is on by default, toggles and persists', () => {
+  it('Settings has a Show thinking checkbox that is on by default, toggles and persists', () => {
     localStorage.removeItem('blerg-runner.chat.thinking')
     seedSession({ kind: 'agent', status: 'idle' })
     renderDetail()
+    render(<SettingsDialog onClose={() => {}} />)
     const box = screen.getByRole('checkbox', { name: 'Show thinking' })
     expect(box).toBeChecked()
     fireEvent.click(box)
@@ -552,6 +554,7 @@ describe('SessionDetail', () => {
       session_id: 'sess-a', client_event_id: 'th1', seq: 1, ts: '2026-06-23T10:00:00Z', kind: 'assistant_thinking', payload: { text: 'pondering' },
     } as AgentEvent)
     renderDetail()
+    render(<SettingsDialog onClose={() => {}} />)
     expect(screen.queryByTestId('thinking')).not.toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: 'Show thinking' })).not.toBeChecked()
     fireEvent.click(screen.getByRole('checkbox', { name: 'Show thinking' }))

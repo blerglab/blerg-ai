@@ -1,23 +1,27 @@
 import { useEffect } from 'react'
 import { getAccessToken } from '../authClient'
 import { connected } from '../ws'
-import { SIGN_IN_GRACE_MS, markSignInStuck, retrySignIn, useSignInStuck } from '../signIn'
+import { SIGN_IN_GRACE_MS, markSignInStuck, retrySignIn, useSignInState } from '../signIn'
 
 /**
  * SignInBanner — one line at the top of the runner when no token can be obtained: the refresh
  * bounce was already spent (signIn.ts), or ten seconds after load there is still no token and no
- * socket. Without it the runner showed no sessions and no daemons and said nothing. Retry starts
- * the refresh guard over and goes for a token again. The board's twin is board/web/src/SignInBanner.tsx.
+ * socket. Without it the runner showed no sessions and no daemons and said nothing. While it shows,
+ * signIn.ts keeps trying quietly and takes it down when a token arrives; Retry starts the refresh
+ * guard over and goes for a token at once. When core says the sign-in itself has ended it reads
+ * "Your sign-in has ended · Sign in" and stops trying; the click is the same full redirect, which
+ * lands on the login form. The board's twin is board/web/src/SignInBanner.tsx.
  */
 export default function SignInBanner() {
-  const stuck = useSignInStuck()
+  const state = useSignInState()
   useEffect(() => {
     const t = setTimeout(() => {
       if (!connected() && !getAccessToken()) markSignInStuck()
     }, SIGN_IN_GRACE_MS)
     return () => clearTimeout(t)
   }, [])
-  if (!stuck) return null
+  if (state === 'ok') return null
+  const ended = state === 'ended'
   return (
     <div
       role="alert"
@@ -35,7 +39,7 @@ export default function SignInBanner() {
         flexShrink: 0,
       }}
     >
-      <span>Couldn't sign you in</span>
+      <span>{ended ? 'Your sign-in has ended' : "Couldn't sign you in"}</span>
       <span aria-hidden="true">·</span>
       <button
         type="button"
@@ -52,7 +56,7 @@ export default function SignInBanner() {
           textDecoration: 'underline',
         }}
       >
-        Retry
+        {ended ? 'Sign in' : 'Retry'}
       </button>
     </div>
   )

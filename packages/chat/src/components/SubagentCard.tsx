@@ -10,7 +10,7 @@ import { useChat } from './context'
 import { NO_END_RECORDED } from '../model/stale'
 import type { SubagentEntry, TimelineItem } from '../model/toolGroups'
 import {
-  doingLine, endLine, handBackReport, inputField, payloadOf, resumeAck, resumedSubagent, staleSubagent, subagentModel, subagentStatus, subagentTitle,
+  doingLine, endLine, handBackReport, inputField, payloadOf, resumeAck, resumedSubagent, staleSubagent, subagentEffort, subagentModel, subagentStatus, subagentTitle,
   subagentTokens, tokenLabel, type SubagentStatus,
 } from '../model/subagents'
 import { EventRow, ToolCard, type RenderOptions } from './cards/EventCards'
@@ -121,6 +121,7 @@ export const SubagentCard = memo(function SubagentCard({ sub, live, options }: {
     resumed ? 'resumed' : '',
     type,
     model,
+    `configured effort: ${subagentEffort(sub) || 'unknown'}`,
     tokens !== null && tokens > 0 ? tokenLabel(tokens) : '',
     STATUS_LABEL[status],
     why,
@@ -138,6 +139,7 @@ export const SubagentCard = memo(function SubagentCard({ sub, live, options }: {
         <div className="subagent-body" data-testid="subagent-body">
           {line && <div className={`subagent-line${!over && !stale ? ' doing' : ''}`} data-testid="subagent-line">{line}</div>}
           {gist && <div className="subagent-line subagent-gist" data-testid="subagent-gist">↲ {gist}</div>}
+          <div className="subagent-line" data-testid="subagent-settings">Model: {model || 'unknown'} · Configured effort: {subagentEffort(sub) || 'unknown'}</div>
           {prompt && (
             <details className="subagent-detail">
               <summary>{resumed ? 'Message' : 'Prompt'}</summary>

@@ -9,11 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/engines"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Board struct {
+	ChatEffort        string          `json:"chat_effort"`
+	DiscussEffort     string          `json:"discuss_effort"`
+	ReviewerEffort    string          `json:"reviewer_effort"`
+	Effort            string          `json:"effort"`
 	ID                string          `json:"id"`
 	Name              string          `json:"name"`
 	Description       *string         `json:"description"`
@@ -91,7 +96,7 @@ func TerminalColumnSQL(alias string) string {
 	return `coalesce(` + alias + `.is_terminal OR lower(` + alias + `.name) LIKE '%done%', false)`
 }
 
-const boardCols = `id, name, description, default_runner, deploy_url, git_base, model, reviewer_model,
+const boardCols = `effort, reviewer_effort, discuss_effort, chat_effort, id, name, description, default_runner, deploy_url, git_base, model, reviewer_model,
 	discuss_model, chat_model, field_schema, require_repo,
 	gate_enabled, gate_on_unavailable, gate_on_dispute, driven_by, concurrency, ci_policy,
 	automation_engine, automation_token <> '', automation_token_expires_at, automation_account_id,
@@ -99,7 +104,7 @@ const boardCols = `id, name, description, default_runner, deploy_url, git_base, 
 
 func scanBoard(row pgx.Row) (Board, error) {
 	var b Board
-	err := row.Scan(&b.ID, &b.Name, &b.Description, &b.DefaultRunner, &b.DeployURL, &b.GitBase, &b.Model, &b.ReviewerModel,
+	err := row.Scan(&b.Effort, &b.ReviewerEffort, &b.DiscussEffort, &b.ChatEffort, &b.ID, &b.Name, &b.Description, &b.DefaultRunner, &b.DeployURL, &b.GitBase, &b.Model, &b.ReviewerModel,
 		&b.DiscussModel, &b.ChatModel, &b.FieldSchema,
 		&b.RequireRepo, &b.GateEnabled, &b.GateOnUnavailable, &b.GateOnDispute, &b.DrivenBy, &b.Concurrency,
 		&b.CIPolicy, &b.AutomationEngine, &b.AutomationTokenSet, &b.AutomationTokenExpiresAt, &b.AutomationAccountID,
@@ -111,6 +116,10 @@ func scanBoard(row pgx.Row) (Board, error) {
 }
 
 type BoardParams struct {
+	ChatEffort        *string         `json:"chat_effort"`
+	DiscussEffort     *string         `json:"discuss_effort"`
+	ReviewerEffort    *string         `json:"reviewer_effort"`
+	Effort            *string         `json:"effort"`
 	Name              string          `json:"name"`
 	Description       *string         `json:"description"`
 	DefaultRunner     *string         `json:"default_runner"`
@@ -180,16 +189,18 @@ func checkCIPolicy(p *string) error {
 }
 
 // Automation engines: the engines a board may start its sessions on. The
-// column's CHECK is the backstop; checkAutomationEngine is the 422.
+// shared registry is the source of truth; checkAutomationEngine is the 422.
 const (
 	EngineClaude = "claude"
 	EngineCodex  = "codex"
 	EngineHermes = "hermes"
 )
 
-// ValidAutomationEngine reports whether e is one of the fixed engine values.
+// ValidAutomationEngine reports whether this build implements the engine.
+// Availability and credentials remain scoped runner discovery decisions.
 func ValidAutomationEngine(e string) bool {
-	return e == EngineClaude || e == EngineCodex || e == EngineHermes
+	_, ok := engines.Lookup(e)
+	return e != "" && ok
 }
 
 func checkAutomationEngine(p *string) error {
@@ -198,7 +209,7 @@ func checkAutomationEngine(p *string) error {
 	}
 	return &FieldError{
 		Key: "automation_engine",
-		Msg: fmt.Sprintf("must be %q, %q or %q", EngineClaude, EngineCodex, EngineHermes),
+		Msg: "must name an implemented coding engine",
 	}
 }
 
@@ -286,6 +297,9 @@ func CreateBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams) (Board,
 	if _, err := ParseFieldSchema(schema); err != nil {
 		return Board{}, err
 	}
+	if err := checkBoardEfforts(&p); err != nil {
+		return Board{}, err
+	}
 	if err := checkConcurrency(p.Concurrency); err != nil {
 		return Board{}, err
 	}
@@ -344,12 +358,12 @@ func CreateBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams) (Board,
 		INSERT INTO boards (name, description, default_runner, deploy_url, git_base, model, reviewer_model,
 			discuss_model, chat_model,
 			field_schema, require_repo, gate_enabled, gate_on_unavailable, gate_on_dispute, driven_by,
-			concurrency, ci_policy, automation_engine)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+			concurrency, ci_policy, automation_engine, effort, reviewer_effort, discuss_effort, chat_effort)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
 		RETURNING `+boardCols,
 		p.Name, p.Description, p.DefaultRunner, p.DeployURL, gitBase, deref(p.Model), deref(p.ReviewerModel),
 		deref(p.DiscussModel), deref(p.ChatModel), schema,
-		requireRepo, gateEnabled, onUnavail, onDispute, p.DrivenBy, concurrency, ciPolicy, engine))
+		requireRepo, gateEnabled, onUnavail, onDispute, p.DrivenBy, concurrency, ciPolicy, engine, deref(p.Effort), deref(p.ReviewerEffort), deref(p.DiscussEffort), deref(p.ChatEffort)))
 	if err != nil {
 		return Board{}, fmt.Errorf("insert board: %w", err)
 	}
@@ -436,6 +450,9 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 			return Board{}, err
 		}
 	}
+	if err := checkBoardEfforts(&p); err != nil {
+		return Board{}, err
+	}
 	if err := checkConcurrency(p.Concurrency); err != nil {
 		return Board{}, err
 	}
@@ -464,6 +481,45 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 	if err := lockBoard(ctx, tx, id); err != nil {
 		return Board{}, err
 	}
+	var previousEngine, previousModel, previousReviewer, previousDiscuss, previousChat string
+	if err := tx.QueryRow(ctx, `SELECT automation_engine,model,reviewer_model,discuss_model,chat_model FROM boards WHERE id=$1`, id).Scan(&previousEngine, &previousModel, &previousReviewer, &previousDiscuss, &previousChat); err != nil {
+		return Board{}, err
+	}
+	// An effort is a setting of its model. A model-only change starts at the
+	// replacement model's native policy, while an explicit paired effort wins.
+	emptyEffort := ""
+	if p.Model != nil && *p.Model != previousModel && p.Effort == nil {
+		p.Effort = &emptyEffort
+	}
+	if p.ReviewerModel != nil && *p.ReviewerModel != previousReviewer && p.ReviewerEffort == nil {
+		p.ReviewerEffort = &emptyEffort
+	}
+	if p.DiscussModel != nil && *p.DiscussModel != previousDiscuss && p.DiscussEffort == nil {
+		p.DiscussEffort = &emptyEffort
+	}
+	if p.ChatModel != nil && *p.ChatModel != previousChat && p.ChatEffort == nil {
+		p.ChatEffort = &emptyEffort
+	}
+	// Changing engines invalidates every future-launch model/effort override in
+	// this board. Model IDs are opaque: no prefix heuristic can prove that a
+	// setting belongs to the replacement engine. Existing session records are
+	// immutable here; their live engine and native conversation stay unchanged.
+	if p.AutomationEngine != nil {
+		if previousEngine != *p.AutomationEngine {
+			empty := ""
+			p.Model = &empty
+			p.ReviewerModel = &empty
+			p.DiscussModel = &empty
+			p.ChatModel = &empty
+			p.Effort = &empty
+			p.ReviewerEffort = &empty
+			p.DiscussEffort = &empty
+			p.ChatEffort = &empty
+			if _, err := tx.Exec(ctx, `UPDATE cards SET model='',effort='',version=version+1,updated_at=now() WHERE board_id=$1 AND (model<>'' OR effort<>'')`, id); err != nil {
+				return Board{}, err
+			}
+		}
+	}
 
 	set, args := []string{"updated_at = now()"}, []any{}
 	add := func(col string, v any) {
@@ -488,6 +544,19 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 	if p.Model != nil {
 		add("model", *p.Model)
 	}
+	if p.Effort != nil {
+		add("effort", *p.Effort)
+	}
+	if p.ReviewerEffort != nil {
+		add("reviewer_effort", *p.ReviewerEffort)
+	}
+	if p.DiscussEffort != nil {
+		add("discuss_effort", *p.DiscussEffort)
+	}
+	if p.ChatEffort != nil {
+		add("chat_effort", *p.ChatEffort)
+	}
+
 	if p.ReviewerModel != nil {
 		add("reviewer_model", *p.ReviewerModel)
 	}

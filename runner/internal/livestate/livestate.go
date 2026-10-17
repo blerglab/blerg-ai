@@ -14,6 +14,7 @@ import (
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/topics"
 )
 
@@ -24,10 +25,10 @@ type Event = topics.Event
 // running (the chat's STALE_RUNNING_MS): a daemon restart can cut one off before it says so.
 const StaleRunning = 12 * time.Hour
 
-// Kinds are the event kinds the live state reads: the kinds of the partial index
-// agent_events_live_idx (migration 042), in its order. A subagent's own rows (tool_call and
-// assistant_text with its parent_call_id) are read per subagent, only for the ones still running.
-var Kinds = []string{"ask", "user_message", "turn_done", "subagent_started", "subagent_update", "subagent_done", "background_task_started", "background_task_done"}
+// Kinds are the event kinds the live state reads. The first eight match migration 042
+// in index order; MCP status is a latest-only snapshot with its own partial index (056).
+// A subagent's own rows are read separately, only for the ones still running.
+var Kinds = []string{"ask", "user_message", "turn_done", "subagent_started", "subagent_update", "subagent_done", "background_task_started", "background_task_done", protocol.MCPStatusKind}
 
 // Options: Now is server time now; Status the session row's status; Closed the message ids of asks
 // whose messages row is no longer open (answered, closed, expired); ServerAsk says whether an ask
@@ -43,10 +44,12 @@ type Options struct {
 
 // State is GET /api/sessions/{id}/live's lists. Each is oldest first.
 type State struct {
-	Asks         []Ask      `json:"asks"`
-	Subagents    []Subagent `json:"subagents"`
-	Tasks        []Task     `json:"tasks"`
-	TokensHidden bool       `json:"tokens_hidden"`
+	MCP          *protocol.MCPStatusPayload `json:"mcp,omitempty"`
+	MCPHold      *protocol.MCPHold          `json:"mcp_hold,omitempty"`
+	Asks         []Ask                      `json:"asks"`
+	Subagents    []Subagent                 `json:"subagents"`
+	Tasks        []Task                     `json:"tasks"`
+	TokensHidden bool                       `json:"tokens_hidden"`
 }
 
 // Ask is one of the agent's questions still waiting on an answer.
@@ -63,6 +66,7 @@ type Ask struct {
 // StaleRunning after that). Resumed: a finished subagent the main agent resumed, running until its
 // own end whatever the turn does; Background then says how its original ran.
 type Subagent struct {
+	Effort     string    `json:"effort"`
 	Key        string    `json:"key"`
 	Title      string    `json:"title"`
 	Type       string    `json:"type"`
@@ -106,16 +110,17 @@ func sorted(events []Event) []Event {
 }
 
 type subAcc struct {
-	key        string
-	first      Event
-	started    *agent.SubagentPayload
-	update     *agent.SubagentPayload
-	done       *agent.SubagentPayload // the latest subagent_done: a background launch, then its end
-	background bool
-	resumed    bool // its start is a resumed run's: not tied to a call in flight
-	final      bool // a subagent_done without Background: its end
-	row        *Event
-	active     time.Time
+	effort, model string
+	key           string
+	first         Event
+	started       *agent.SubagentPayload
+	update        *agent.SubagentPayload
+	done          *agent.SubagentPayload // the latest subagent_done: a background launch, then its end
+	background    bool
+	resumed       bool // its start is a resumed run's: not tied to a call in flight
+	final         bool // a subagent_done without Background: its end
+	row           *Event
+	active        time.Time
 }
 
 func (a *subAcc) touch(ts time.Time) {
@@ -154,6 +159,33 @@ func readSubagents(events []Event) (order []*subAcc, lastTurnDone int64) {
 				continue
 			}
 			a := get(p.ChildID, ev)
+			// Reusing a child ID starts a new incarnation. A server recovery completion
+			// may end only the exact start it targeted, never this newer run.
+			if ev.Kind == "subagent_started" {
+				*a = subAcc{key: p.ChildID, first: ev}
+			}
+			if ev.Kind == "subagent_done" {
+				var target struct {
+					StartEventID string `json:"start_event_id"`
+				}
+				if json.Unmarshal(ev.Payload, &target) != nil || (target.StartEventID != "" && target.StartEventID != a.first.ID) {
+					continue
+				}
+			}
+			if p.Model != "" {
+				if p.Model != a.model {
+					a.effort = ""
+				}
+				a.model = p.Model
+			}
+			var observation struct {
+				Effort json.RawMessage `json:"effort"`
+			}
+			_ = json.Unmarshal(ev.Payload, &observation)
+			if len(observation.Effort) > 0 {
+				a.effort = ""
+				_ = json.Unmarshal(observation.Effort, &a.effort)
+			}
 			a.touch(ev.Ts)
 			switch ev.Kind {
 			case "subagent_started":
@@ -250,6 +282,33 @@ func Build(events []Event, opt Options) State {
 			st.Tasks = append(st.Tasks, t)
 		}
 	}
+	for _, e := range events {
+		if e.Kind != protocol.MCPStatusKind {
+			continue
+		}
+		var payload protocol.MCPStatusPayload
+		if json.Unmarshal(e.Payload, &payload) != nil {
+			continue
+		}
+		clean := protocol.SanitizeMCPStatus(payload)
+		if clean.Engine == "" || clean.Since == "" {
+			continue
+		}
+		st.MCP = &clean
+	}
+	if st.MCP != nil {
+		st.MCPHold = st.MCP.Hold
+		if ended(opt.Status) || opt.Status == "disconnected" {
+			st.MCPHold = nil
+		}
+		if st.MCPHold != nil {
+			until, _ := time.Parse(time.RFC3339Nano, st.MCPHold.Until)
+			if !opt.Now.Before(until) {
+				st.MCPHold = nil
+			}
+		}
+		st.MCP.Hold = st.MCPHold
+	}
 	return st
 }
 
@@ -266,10 +325,11 @@ func (a *subAcc) view(showTokens bool) Subagent {
 	}
 	s := Subagent{
 		Key: a.key, Title: titleOf(started.Summary), Type: started.AgentType,
-		Model:     firstOf(done.Model, update.Model, started.Model),
+		Model:     a.model,
 		StartedAt: a.first.Ts, ActiveAt: a.active, Background: a.background || a.resumed && started.Background,
 		Resumed: a.resumed, Seq: a.first.Seq,
 	}
+	s.Effort = a.effort
 	if showTokens {
 		if n := usageTotal(done.Usage); n != nil {
 			s.Tokens = n
@@ -283,15 +343,6 @@ func (a *subAcc) view(showTokens bool) Subagent {
 	return s
 }
 
-func firstOf(vs ...string) string {
-	for _, v := range vs {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
 func usageTotal(u *agent.Usage) *int64 {
 	if u == nil {
 		return nil
@@ -302,38 +353,11 @@ func usageTotal(u *agent.Usage) *int64 {
 
 // runningTasks: the background tasks started and not ended, started within StaleRunning of now.
 func runningTasks(events []Event, now time.Time) []Task {
-	byID := map[string]*Task{}
-	doneIDs := map[string]bool{}
-	var order []string // task ids, by their first start
-	for _, ev := range events {
-		switch ev.Kind {
-		case "background_task_started":
-			var p agent.BackgroundTaskStartedPayload
-			if json.Unmarshal(ev.Payload, &p) != nil || p.TaskID == "" {
-				continue
-			}
-			at := ev.Ts
-			if t, err := time.Parse(time.RFC3339Nano, p.StartedAt); err == nil {
-				at = t
-			}
-			if byID[p.TaskID] == nil {
-				order = append(order, p.TaskID)
-			}
-			byID[p.TaskID] = &Task{TaskID: p.TaskID, CallID: p.CallID, Kind: p.Kind, Description: p.Description, StartedAt: at, Seq: ev.Seq}
-		case "background_task_done":
-			var p agent.BackgroundTaskDonePayload
-			if json.Unmarshal(ev.Payload, &p) == nil && p.TaskID != "" {
-				doneIDs[p.TaskID] = true
-			}
-		}
-	}
 	var out []Task
-	for _, id := range order {
-		t := byID[id]
-		if doneIDs[id] || now.Sub(t.StartedAt) > StaleRunning {
-			continue
+	for _, state := range OpenBackgroundTasks(events) {
+		if now.Sub(state.Task.StartedAt) <= StaleRunning {
+			out = append(out, state.Task)
 		}
-		out = append(out, *t)
 	}
 	return out
 }

@@ -148,8 +148,11 @@ func (d *claudeCodeDriver) closeBackgroundTask(n ccNotice) {
 		return // an event of a monitor that is still watching
 	}
 	delete(d.bgTasks, t.p.TaskID)
+	var closeProc *ccProc
+	if d.backgroundRunningLocked() == 0 {
+		closeProc = d.backgroundIdleLocked()
+	}
 	d.reportOpenWorkLocked()
-	last := d.backgroundRunningLocked() == 0
 	d.subMu.Unlock()
 	summary := n.summary
 	if summary == "" {
@@ -162,8 +165,8 @@ func (d *claudeCodeDriver) closeBackgroundTask(n ccNotice) {
 		TaskID: t.p.TaskID, CallID: t.p.CallID, Kind: t.p.Kind, Status: status,
 		Summary: cutRunes(strings.TrimSpace(summary), 120), Description: t.p.Description,
 	})
-	if last {
-		d.backgroundIdle() // nothing keeps an idle process any more: the ordinary idle shutdown again
+	if closeProc != nil {
+		d.finishStdinClose(closeProc)
 	}
 }
 

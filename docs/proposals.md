@@ -18,7 +18,7 @@ board workflow the agent typically puts that link in a card so you can find it.
 ## What you approve
 
 The page shows the **frozen arguments**: that is what will run, not the agent's description of it.
-The agent's own summary is shown beside it, labelled as the agent's words. Read the arguments. If
+The agent's own summary is shown beside it, labeled as the agent's words. Read the arguments. If
 they do not match the summary, reject.
 
 - **Approve** runs the stored call, exactly as frozen, with your credentials and no agent involved.

@@ -96,6 +96,15 @@ type EngineSpec struct {
 	Capabilities func(c CapabilityContext) []protocol.CapabilityGroup
 	// SandboxLoginPaths are engine-relative credential paths under the host home.
 	SandboxLoginPaths []string
+	// ConfigBundle declares non-secret customization to sync to Cluster.
+	// Runtime config, logins and conversation state must never be included.
+	ConfigBundle *EngineConfigBundle
+}
+
+type EngineConfigBundle struct {
+	Directory string   // canonical directory under HOME, including its leading dot
+	HomeEnv   string   // optional absolute engine-home override
+	Roots     []string // selected paths relative to that engine directory
 }
 
 // AgentDriverOpts is what an agent-kind driver is built from.
@@ -141,7 +150,8 @@ var engineRegistry = map[string]EngineSpec{
 	// after spawn either way.
 	"codex": {
 		ID: "codex", DisplayName: "Codex", SandboxLoginPaths: []string{".codex"},
-		Binary: "codex", ModelFlag: "--model", SkipPermsFlag: "--dangerously-bypass-approvals-and-sandbox",
+		ConfigBundle: &EngineConfigBundle{Directory: ".codex", HomeEnv: "CODEX_HOME", Roots: []string{"AGENTS.md", "AGENTS.override.md", "skills"}},
+		Binary:       "codex", ModelFlag: "--model", SkipPermsFlag: "--dangerously-bypass-approvals-and-sandbox",
 		// A config override: the value is TOML-parsed, and a bare level
 		// (already one of the rules table's tokens) parses as that string.
 		EffortArgs:      func(effort string) []string { return []string{"-c", "model_reasoning_effort=" + effort} },
@@ -158,7 +168,8 @@ var engineRegistry = map[string]EngineSpec{
 	// hermes session (including post-crash recovery) starts fresh too.
 	"hermes": {
 		ID: "hermes", DisplayName: "Hermes", SandboxLoginPaths: []string{".hermes/config.yaml", ".hermes/.env"},
-		Binary: "hermes", ModelFlag: "-m", SkipPermsFlag: "--yolo",
+		ConfigBundle: &EngineConfigBundle{Directory: ".hermes", Roots: []string{"config.yaml"}},
+		Binary:       "hermes", ModelFlag: "-m", SkipPermsFlag: "--yolo",
 		EffortArgs:      func(effort string) []string { return []string{"--reasoning", effort} },
 		ListModels:      probeHermesModels,
 		NewAgentDriver:  func(o AgentDriverOpts) sessionDriver { return newHermesDriver(o) },
@@ -195,7 +206,8 @@ var engineRegistry = map[string]EngineSpec{
 // and built by the same modelEffortArgs.
 var claudeEngineSpec = EngineSpec{
 	ID: "claude", DisplayName: "Claude", Binary: "claude", SandboxLoginPaths: []string{".claude", ".claude.json"},
-	ModelFlag: "--model", SkipPermsFlag: "--dangerously-skip-permissions",
+	ConfigBundle: &EngineConfigBundle{Directory: ".claude", Roots: []string{"CLAUDE.md", "skills", "agents", "personas"}},
+	ModelFlag:    "--model", SkipPermsFlag: "--dangerously-skip-permissions",
 	EffortArgs: func(effort string) []string { return []string{"--effort", effort} },
 }
 
@@ -369,7 +381,7 @@ func codexAlreadyLoggedIn() bool {
 	if home == "" {
 		return false
 	}
-	return nonEmptyFile(filepath.Join(home, ".codex", "auth.json"))
+	return nonEmptyFile(filepath.Join(engineHome(home, "CODEX_HOME", ".codex"), "auth.json"))
 }
 
 // hermesAlreadyConfigured mirrors install.sh's hermes_already_configured:

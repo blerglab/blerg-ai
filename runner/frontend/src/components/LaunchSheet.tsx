@@ -10,6 +10,7 @@ import type { McpSelectionEntry } from '../types'
 import { useBackdropClose } from '@blerglab/chat'
 import { defaultRuntime, runtimeDisabledReason, ACK_AGENT, ACK_TERMINAL } from '../lib/runtimes'
 import type { RunRuntime, RunKind, RunEngine } from '../lib/runtimes'
+import { useLaunchOptions } from '../lib/launchOptions'
 import { useEngineModels, modelCatalogTarget, defaultModel, effectiveEffort, isModelIdFor, isEffortToken, FREE_TEXT_MODEL_ENGINES } from '../lib/engineModels'
 import { parseRepoInput, predictCloneFolder, fullName, providerLabel, PROVIDER_LABELS } from '../lib/repoRef'
 import type { RepoRef } from '../lib/repoRef'
@@ -103,51 +104,12 @@ function loadStored(key: string, valid: (v: unknown) => v is string): string | n
   }
 }
 
-function loadDefault<T extends string>(key: string, valid: readonly T[], fallback: T): T {
-  try {
-    const v = localStorage.getItem(key)
-    return v && (valid as readonly string[]).includes(v) ? (v as T) : fallback
-  } catch {
-    return fallback
-  }
-}
-
 function saveDefault(key: string, value: string) {
   try {
     localStorage.setItem(key, value)
   } catch {
     // ignore — best-effort convenience only
   }
-}
-
-// hasStoredPreference distinguishes "never picked one" from "picked, but the
-// stored value happened to be invalid" — loadDefault's fallback covers both,
-// but only the former should be overridden by a daemon-suggested default.
-// What the selected daemon can run on a daemon runtime, for the Engine
-// picker's warning state; null = unknown (don't warn). In the Local sandbox,
-// a daemon that reports sandbox_claude_credential answers for Claude outright
-// (a host login is mounted; a token or API key in the daemon's environment is
-// passed in), so there a missing available_engines — Go's empty list is null —
-// reads as "no other engines". On This machine the list stays as reported:
-// its Claude entry only means "a credentials file exists", and a keychain
-// login or a CLAUDE_CODE_OAUTH_TOKEN in the service environment (the macOS
-// install's usual setup) works there without one, so a null list must not
-// turn into a warning.
-function daemonEnginesHere(
-  d: Pick<DaemonApiInfo, 'available_engines' | 'sandbox_claude_credential'> | null,
-  runtime: RunRuntime,
-  kind: RunKind,
-): string[] | null {
-  if (!d) return null
-  // The credential-aware override only makes sense for an agent-kind
-  // session: a Terminal session in the sandbox gets no Claude credential
-  // either way (sandbox.go passes it none), so overriding on kind==='tmux'
-  // would hide a real "claude isn't configured here" warning for it.
-  if (runtime !== 'docker' || kind !== 'agent' || d.sandbox_claude_credential === undefined) {
-    return d.available_engines ?? null
-  }
-  const others = (d.available_engines ?? []).filter(e => e !== 'claude')
-  return d.sandbox_claude_credential ? ['claude', ...others] : others
 }
 
 function hasStoredPreference(key: string): boolean {
@@ -158,13 +120,10 @@ function hasStoredPreference(key: string): boolean {
   }
 }
 
-// engineOrder mirrors the daemon's own display order (see engines.go's
-// engineOrder + the Claude-first convention) — used to pick the best engine
-// out of a daemon's reported available_engines when suggesting a default.
-const engineOrder = ['claude', 'codex', 'hermes', 'openclaw'] as const
-
-// The engine ids this sheet will accept out of localStorage.
-const ENGINE_IDS = engineOrder
+// A remembered ID is provisional until launch-context discovery confirms it.
+function rememberedEngine(): string {
+  return loadStored(LAST_ENGINE_KEY, (value): value is string => typeof value === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(value)) ?? 'claude'
+}
 
 // The daemon to pre-select so the Run column can speak concretely about it
 // (sandbox image, engine availability) before a repo is chosen — and when the
@@ -187,10 +146,10 @@ function preferredDaemon(list: DaemonApiInfo[], runtime: RunRuntime | null): Dae
 // on a card the sheet then disables — pickEngine does the same when the
 // choice is made here instead of remembered.
 function pickDefaults(daemonList: DaemonApiInfo[], clusterConfigured: boolean): { engine: RunEngine; runtime: RunRuntime; daemon: DaemonApiInfo | null } {
-  let engine: RunEngine = loadDefault(LAST_ENGINE_KEY, ENGINE_IDS, 'claude')
+  let engine: RunEngine = rememberedEngine()
   if (!hasStoredPreference(LAST_ENGINE_KEY)) {
     const available: string[] = daemonList[0]?.available_engines ?? []
-    const suggestion = engineOrder.find(id => available.includes(id))
+    const suggestion = available[0]
     if (suggestion) engine = suggestion
   }
   const runtime = engine === 'openclaw' ? 'daemon' : defaultRuntime(daemonList, clusterConfigured)
@@ -271,7 +230,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [kind, setKind] = useState<RunKind>('agent')
   // Which CLI actually drives the session. Orthogonal to kind/runtime — either
   // engine can run as a terminal or agent session, on any runtime below.
-  const [engine, setEngine] = useState<RunEngine>(() => boot.defaults?.engine ?? loadDefault(LAST_ENGINE_KEY, ENGINE_IDS, 'claude'))
+  const [engine, setEngine] = useState<RunEngine>(() => boot.defaults?.engine ?? rememberedEngine())
   // Model + effort, for whichever engine is picked (the list itself is read
   // below, once the runtime and daemon are known). pickedModels[engine] is
   // what the person chose from that engine's list (else what was
@@ -284,9 +243,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // Seeded once, at mount, from what each engine remembered — localStorage is
   // read here and nowhere else during render.
   const [pickedModels, setPickedModels] = useState<Record<string, string | null>>(() =>
-    Object.fromEntries(ENGINE_IDS.map(e => [e, loadStored(perEngineKey(LAST_MODEL_KEY, e), v => isModelIdFor(e, v))])))
+    Object.fromEntries([rememberedEngine()].map(e => [e, loadStored(perEngineKey(LAST_MODEL_KEY, e), v => isModelIdFor(e, v))])))
   const [explicitEfforts, setExplicitEfforts] = useState<Record<string, string | null>>(() =>
-    Object.fromEntries(ENGINE_IDS.map(e => [e, loadStored(perEngineKey(LAST_EFFORT_KEY, e), isEffortToken)])))
+    Object.fromEntries([rememberedEngine()].map(e => [e, loadStored(perEngineKey(LAST_EFFORT_KEY, e), isEffortToken)])))
   const pickedModel = pickedModels[engine] ?? null
   const explicitEffort = explicitEfforts[engine] ?? null
   // Where a session actually runs, for both kinds (spec §2). Without cached
@@ -306,7 +265,23 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // Asked at once — of the cached daemon, when the sheet opened from cache —
   // and each answer is kept per engine and daemon for the next open.
   const catalogTarget = modelCatalogTarget(runtime, listDaemonId)
-  const engineModels = useEngineModels(engine, catalogTarget.daemonId, { enabled: open && (onCluster || !!selectedDaemon), cache: launchModelsCache, runtime: catalogTarget.runtime })
+  const launchOptions = useLaunchOptions({ runtime, daemonId: listDaemonId, kind, enabled: open && (onCluster || !!selectedDaemon) })
+  const engineKnown = launchOptions.state === 'known' && launchOptions.engines.some(e => e.id === engine)
+  const targetKey = `${runtime}\0${listDaemonId ?? ''}\0${kind}`
+  const [previousTarget, setPreviousTarget] = useState<string | null>(() => onCluster || selectedDaemon ? targetKey : null)
+  if ((onCluster || selectedDaemon) && previousTarget !== targetKey) {
+    setPreviousTarget(targetKey)
+    if (previousTarget !== null) {
+      setPickedModels({})
+      setExplicitEfforts({})
+    }
+  }
+  if (launchOptions.state === 'known' && launchOptions.engines.length > 0 && !launchOptions.engines.some(e => e.id === engine)) {
+    setEngine(launchOptions.engines[0].id)
+    setPickedModels({})
+    setExplicitEfforts({})
+  }
+  const engineModels = useEngineModels(engine, catalogTarget.daemonId, { enabled: open && engineKnown, cache: launchModelsCache, runtime: catalogTarget.runtime })
   const listModels = engineModels.models
   const selectedModel = listModels.find(m => m.id === pickedModel) ?? defaultModel(engine, listModels)
   // No list for an engine whose CLI takes a model name (an older daemon, a
@@ -525,23 +500,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // "New folder" isn't offered on cluster runtime, so a
   // selection made before the switch must not survive it invisibly.
 
-  // Engine availability for the picker's warning state: on the desktop
-  // daemon, whatever the selected daemon reported; on cluster runtime,
-  // whatever GET /api/cluster/status reported (OpenClaw never appears there
-  // — it isn't wired into cluster sessions at all, see CLUSTER-RUNTIME.md).
-  // null means "unknown" (still loading, or the source reported nothing) —
-  // treated as "don't warn" rather than "unavailable", since a false warning
-  // is worse than a missed one.
-  // On cluster runtime an engine is runnable if EITHER the operator Secret
-  // carries its credential (available_engines) OR this person has their own
-  // (myCreds.engines) — a cluster session runs with the launching user's
-  // credential when there is one.
-  const availableEnginesHere: string[] | null =
-    runtime === 'cluster'
-      ? (clusterStatus
-          ? Array.from(new Set([...(clusterStatus.available_engines ?? []), ...(myCreds?.engines ?? [])]))
-          : null)
-      : daemonEnginesHere(selectedDaemon, runtime, kind)
+  // The authenticated launch-context snapshot is authoritative for this target;
+  // legacy operator/personal metadata is still used for clone hints, not engine choices.
+  const availableEnginesHere: string[] | null = launchOptions.state === 'known' ? launchOptions.engines.map(e => e.id) : null
 
   const engineMissingHere = availableEnginesHere !== null && !availableEnginesHere.includes(engine)
   // A hard block is only honest when we actually know what this person has —
@@ -739,12 +700,12 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           : `Checking that ${selectedDaemon.name} is still connected…`
   const blockedReason = runtimeBlockedReason ?? hostClaudeBlockedReason ?? cloneByNameUnsupported ?? clonePlanProblem ?? scratchNameProblem ?? daemonUnconfirmedReason
 
-  const canSubmit = hasRepoChoice &&
+  const canSubmit = engineKnown && hasRepoChoice &&
     (!needsDaemon || selectedDaemon !== null) && !submitting &&
     (runtime !== 'daemon' || agentAck) && !clusterEngineBlocked && blockedReason === null &&
     !clusterRepoUnresolved && !freeTextModelInvalid
 
-  const mcpEngineAvailable = engine === 'claude' || (engine === 'codex' && (runtime === 'cluster' || selectedDaemon?.codex_restricted === true))
+  const mcpEngineAvailable = launchOptions.engines.find(e => e.id === engine)?.restricted === true
   const mcpAvailable = (runtime === 'cluster' || runtime === 'docker') && mcpEngineAvailable && kind === 'agent'
 
   // ── Run column handlers ────────────────────────────────────────────────────
@@ -1377,6 +1338,10 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             onReposRootChanged={applyReposRoot}
             clusterConfigured={!!clusterStatus?.configured}
             availableEnginesHere={availableEnginesHere}
+            engineChoices={launchOptions.engines}
+            engineDiscoveryState={launchOptions.state}
+            engineDiscoveryError={launchOptions.error}
+            onEngineDiscoveryRetry={launchOptions.retry}
             clusterEngineBlocked={clusterEngineBlocked}
             clusterGitMissing={clusterGitMissing}
             settingsLink={settingsLink}

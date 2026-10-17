@@ -31,12 +31,24 @@ Subcommands
   review reply <id> done|declined "<line>"
                                 Answer one request; publishes <file>.review.json.
                                 `review --help` explains the loop.
+  diff [<range> | <commit> ... | --staged | --worktree] [--title T] [-- <path> ...]
+                                Show the user what you changed: runs git here and publishes the
+                                patch as <title>.diff, which the app opens in its diff viewer.
+                                `diff --help` has examples.
   topic "<title>"               Mark the start of a piece of work the user asked for (it ends the
                                 open one); the session page's History tab lists each topic with its
                                 files, subagents and outcome. `topic --help` says when.
   topic --done ["<outcome>"] [--commit <sha> ...]
                                 Close the open topic, with a one-line outcome and the
                                 commits the work landed.
+  checklist set|add|tick|untick|clear ...
+                                Keep the session's checklist (the person's session panel shows it);
+                                `checklist --help` says how.
+  pin <file.json|->  [--checklist]
+                                Pin a tracker's ticket (JIRA, Bugzilla, GitHub, ...) into the
+                                session: a card in the chat and the panel's Ticket section.
+                                `pin --help` shows the shape, with a JIRA and a Bugzilla mapping.
+  unpin [<source>:<key>]        Unpin a ticket (no argument: the current one).
 
 Environment (injected by the Blerg Runner daemon):
   BLERG_RUNNER_SERVER_HTTP    e.g. http://runner.example.test
@@ -48,7 +60,7 @@ Environment (injected by the Blerg Runner daemon):
                               /session-tokens/<session id>, and is used first.
   BLERG_RUNNER_BOARD_TOKEN    Bearer token with "message" cap (Assist sessions)
   BLERG_RUNNER_DAEMON_TOKEN   Legacy: the daemon master token. No longer injected
-                              into any session; honoured only if present.
+                              into any session; honored only if present.
 
 Any one of the tokens is sufficient (session token preferred). If none of the
 required env vars are present the CLI prints a one-line notice and exits 0
@@ -64,6 +76,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -192,7 +205,7 @@ TOKEN_REVOKED_HINT = "token revoked or expired — restart the session or wait f
 # The Blerg server and board are usually on this machine or the compose network (http://localhost:…,
 # http://blerg-runner:8080): those are dialled directly, never through a proxy, because a corporate
 # proxy Docker or the shell put in the environment cannot reach them. Any other host (a remote
-# cluster) keeps honouring the environment's proxy variables. A failure is reported by
+# cluster) keeps honoring the environment's proxy variables. A failure is reported by
 # _http_failure / _conn_failure: the status, the server's sentence and error id, the address
 # (without any user:password), and for a connection error which proxy variables are set, by NAME
 # only (a value can hold a password).
@@ -533,7 +546,8 @@ PUBLISH_GUIDE = """\
 What the app can show:
   Shown in the app (viewable): markdown, plain text and source code, json, csv/tsv (as a table),
     images png/jpg/gif/webp/svg, pdf, audio/video, html (single self-contained file, runs in a
-    sandbox with scripts but NO network).
+    sandbox with scripts but NO network), a diff or patch (.diff/.patch, in a diff viewer;
+    `blerg-runner diff` makes one from git).
   Download only (no preview): docx, xlsx, pptx, zip and other binaries.
 
 Choose for how the user will consume it:
@@ -680,6 +694,34 @@ def _attach_to_card(card, out, shown):
     print(f"Attached to card {card} as '{label}'")
 
 
+def _upload_artifact(src, name, size, limit, fail):
+    """POST the file at src (size bytes) as the session artifact `name`; the server's reply.
+    fail(msg) is called (and must exit) on a refusal or a connection failure."""
+    url = f"{SERVER_HTTP}/api/sessions/{urllib.parse.quote(SESSION_ID, safe='')}/artifacts"
+    headers = _headers()
+    headers["Content-Type"] = "application/octet-stream"
+    headers["X-Artifact-Name"] = urllib.parse.quote(name, safe="")
+    # Streamed from the file, with its size declared: a large file is not held in memory, and
+    # the runner can refuse one over its limit before reading it.
+    headers["Content-Length"] = str(size)
+    with open(src, "rb") as body:
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with _open(req, timeout=120) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            fail(_publish_error_message(exc.code, exc.read(), url, limit))
+        except _NET_ERRORS as exc:
+            msg = _conn_failure(url, exc)
+            if size > 256 * 1024 and isinstance(getattr(exc, "reason", exc), (ConnectionResetError, BrokenPipeError)):
+                # A server that refuses a body without reading it closes the connection mid-upload.
+                msg += f"; the runner may have refused the file's size ({_fmt_size(size)})"
+            fail(msg)
+        except ValueError:
+            fail(f"unexpected reply from the server (not JSON, from {_safe_url(url)})")
+    return {}
+
+
 def cmd_publish(path, name=None, card=None):
     """Upload a file (or a zipped directory) as a session artifact and print where it went.
     card: None = do not attach; "" = attach to this session's own card; an id = attach to that card."""
@@ -713,28 +755,7 @@ def cmd_publish(path, name=None, card=None):
                           f"{_fmt_limit(total)} total ({_fmt_size(used)} used); delete one first "
                           "(blerg-runner files lists them; blerg-runner unpublish <name> frees a slot)")
 
-        url = f"{SERVER_HTTP}/api/sessions/{urllib.parse.quote(SESSION_ID, safe='')}/artifacts"
-        headers = _headers()
-        headers["Content-Type"] = "application/octet-stream"
-        headers["X-Artifact-Name"] = urllib.parse.quote(name, safe="")
-        # Streamed from the file, with its size declared: a large file is not held in memory, and
-        # the runner can refuse one over its limit before reading it.
-        headers["Content-Length"] = str(size)
-        with open(src, "rb") as body:
-            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-            try:
-                with _open(req, timeout=120) as resp:
-                    out = json.loads(resp.read())
-            except urllib.error.HTTPError as exc:
-                _publish_fail(_publish_error_message(exc.code, exc.read(), url, limit))
-            except _NET_ERRORS as exc:
-                msg = _conn_failure(url, exc)
-                if size > 256 * 1024 and isinstance(getattr(exc, "reason", exc), (ConnectionResetError, BrokenPipeError)):
-                    # A server that refuses a body without reading it closes the connection mid-upload.
-                    msg += f"; the runner may have refused the file's size ({_fmt_size(size)})"
-                _publish_fail(msg)
-            except ValueError:
-                _publish_fail(f"unexpected reply from the server (not JSON, from {_safe_url(url)})")
+        out = _upload_artifact(src, name, size, limit, _publish_fail)
     finally:
         if tmp_zip and os.path.exists(tmp_zip):
             os.unlink(tmp_zip)
@@ -759,6 +780,446 @@ def cmd_publish(path, name=None, card=None):
         _attach_to_card(card, out, shown)
 
 
+# ── diff (show the person what changed) ──────────────────────────────────────
+
+# The agent reads this (diff --help and the top-level usage). Its first line is the line the session
+# guide and the managed CLAUDE.md block carry (daemon/claudecode.go diffGuideLine).
+DIFF_LINE = "To show the person what you changed, `blerg-runner diff <range>` posts a diff they can open."
+
+DIFF_GUIDE = DIFF_LINE + """
+
+  blerg-runner diff                      everything not committed: staged, unstaged and new files
+  blerg-runner diff --staged             what is staged for the next commit
+  blerg-runner diff main..HEAD           a range (A..B or A...B): its net change
+  blerg-runner diff 1a2b3c4 5d6e7f8      commits, each with its own patch, in the order given
+  blerg-runner diff HEAD -- src/ docs/   any of these, limited to paths (after --)
+  blerg-runner diff main..HEAD --title "Retry the upload"
+
+It runs git in the current folder and publishes the patch as <title>.diff: a card in the chat that
+opens the app's diff viewer (file list, unified or side by side). The default title says what was
+compared; the same title again makes a new version. Binary files are listed with their size, never
+embedded. Nothing the repository's own settings name is run (no hooks, external diff tools, text
+conversions or filters). The patch counts against the per-file limit like any published file; a
+diff over it is refused, with both sizes: narrow it with paths, or a shorter range.
+"""
+
+DIFF_MAX_COMMITS = 50
+DIFF_MAX_NEW_FILES = 200
+DIFF_GIT_TIMEOUT = 120
+# The app's diff viewer shows a patch up to this size; a larger one is a download.
+DIFF_VIEW_MAX = 2 * MIB
+# Settings that make git run something, or change what the patch looks like, overridden on every
+# call (the command line beats the repository's config). Filters are blanked per driver, below.
+_GIT_SAFE_CONFIG = (
+    ("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false"), ("credential.helper", ""),
+    ("protocol.allow", "never"), ("protocol.ext.allow", "never"), ("log.showSignature", "false"),
+    ("core.pager", "cat"), ("color.ui", "false"), ("core.quotePath", "false"),
+)
+_GIT_DIFF_FLAGS = (
+    "--no-ext-diff", "--no-textconv", "--no-color", "-U3", "--src-prefix=a/", "--dst-prefix=b/",
+    "--no-relative", "--full-index", "--submodule=short", "-O/dev/null",
+)
+# git's own environment that may stay: where the repository is. The rest (GIT_EXTERNAL_DIFF,
+# GIT_CONFIG_PARAMETERS, GIT_EXEC_PATH, GIT_PAGER, ...) is dropped.
+_GIT_KEEP_ENV = {
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+}
+_HUNK_RE = re.compile(rb"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+_ZERO_ID_RE = re.compile(r"0+")
+
+
+class _DiffError(Exception):
+    """A diff that cannot be made, in words."""
+
+
+class _Git:
+    """git, run without a shell in one folder, with nothing the repository names executed."""
+
+    def __init__(self, cwd):
+        self.cwd = cwd
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") or k in _GIT_KEEP_ENV}
+        self.env.update(GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1", GIT_OPTIONAL_LOCKS="0",
+                        GIT_PAGER="cat", PAGER="cat", LC_ALL="C")
+        self.config = list(_GIT_SAFE_CONFIG)
+
+    def argv(self, args):
+        out = ["git", "--no-pager"]
+        for key, value in self.config:
+            out += ["-c", f"{key}={value}"]
+        return out + list(args)
+
+    def run(self, args, ok=(0,), stdin=None, cwd=None):
+        """(exit code, stdout bytes) of a short git call; _DiffError with git's words otherwise."""
+        try:
+            proc = subprocess.run(self.argv(args), cwd=cwd or self.cwd, env=self.env, input=stdin,
+                                  stdin=None if stdin is not None else subprocess.DEVNULL,
+                                  capture_output=True, timeout=DIFF_GIT_TIMEOUT)
+        except FileNotFoundError:
+            raise _DiffError("git is not installed here")
+        except subprocess.TimeoutExpired:
+            raise _DiffError(f"git took longer than {DIFF_GIT_TIMEOUT} s")
+        if proc.returncode not in ok:
+            raise _DiffError(_git_words(proc.stderr) or f"git exited {proc.returncode}")
+        return proc.returncode, proc.stdout
+
+    def stream(self, args, patch, ok=(0,), cwd=None):
+        """Run git and add its output to patch (which keeps at most its limit, counting the rest)."""
+        with tempfile.TemporaryFile() as err:
+            try:
+                proc = subprocess.Popen(self.argv(args), cwd=cwd or self.cwd, env=self.env,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err)
+            except FileNotFoundError:
+                raise _DiffError("git is not installed here")
+            timer = threading.Timer(max(1.0, patch.deadline - time.monotonic()), proc.kill)
+            timer.start()
+            try:
+                while True:
+                    chunk = proc.stdout.read(1 << 16)
+                    if not chunk:
+                        break
+                    patch.add(chunk)
+                code = proc.wait()
+            finally:
+                timer.cancel()
+                proc.stdout.close()
+            if time.monotonic() >= patch.deadline:
+                raise _DiffError(f"git took longer than {DIFF_GIT_TIMEOUT} s; narrow the diff with paths")
+            if code not in ok:
+                err.seek(0)
+                raise _DiffError(_git_words(err.read(4096)) or f"git exited {code}")
+
+    def neutralise_filters(self):
+        """Blank every filter driver the config names: git would run its clean command on a
+        working-tree file it compares."""
+        code, out = self.run(["config", "-z", "--name-only", "--get-regexp", r"^filter\."], ok=(0, 1))
+        names = set()
+        for key in out.decode("utf-8", "surrogateescape").split("\0"):
+            if key.count(".") >= 2:
+                names.add(key[len("filter."):key.rindex(".")])
+        for name in sorted(names):
+            if "=" in name or "\n" in name:
+                raise _DiffError(f"the repository names a filter driver git cannot be told to skip ({name!r})")
+            self.config += [(f"filter.{name}.{k}", v) for k, v in
+                            (("clean", ""), ("smudge", ""), ("process", ""), ("required", "false"))]
+
+
+def _git_words(stderr):
+    lines = [ln.strip() for ln in stderr.decode("utf-8", "replace").splitlines() if ln.strip()]
+    lines = [ln[len("fatal: "):] if ln.startswith("fatal: ") else ln for ln in lines]
+    return _cut(_redact("; ".join(lines[:3])), 300)
+
+
+class _Patch:
+    """The bytes of the patch, kept up to limit; past it only counted."""
+
+    def __init__(self, limit):
+        self.limit = limit
+        self.data = bytearray()
+        self.size = 0
+        self.deadline = time.monotonic() + DIFF_GIT_TIMEOUT
+
+    def add(self, chunk):
+        self.size += len(chunk)
+        if self.size <= self.limit:
+            self.data += chunk
+
+    def separate(self):
+        """End the output so far with a newline before the next git output (a commit) follows."""
+        if self.data and not self.over and not self.data.endswith(b"\n"):
+            self.add(b"\n")
+
+    @property
+    def over(self):
+        return self.size > self.limit
+
+
+def _unquote_git_path(s):
+    """A path as git prints it: C-quoted ("a/x\\ty") or plain."""
+    if not (s.startswith('"') and s.endswith('"') and len(s) >= 2):
+        return s
+    raw = s[1:-1]
+    out = bytearray()
+    i = 0
+    simple = {"n": 10, "t": 9, '"': 34, "\\": 92, "a": 7, "b": 8, "f": 12, "r": 13, "v": 11}
+    while i < len(raw):
+        c = raw[i]
+        if c == "\\" and i + 1 < len(raw):
+            n = raw[i + 1]
+            if n in simple:
+                out.append(simple[n])
+                i += 2
+                continue
+            if re.fullmatch(r"[0-7]{3}", raw[i + 1:i + 4]):
+                out.append(int(raw[i + 1:i + 4], 8))
+                i += 4
+                continue
+        out += c.encode("utf-8", "surrogateescape")
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
+def _header_path(rest):
+    """The new-side path of `diff --git <rest>`: b/<p> of `a/<p> b/<p>` (both plain or quoted)."""
+    if rest.startswith('"'):
+        m = re.match(r'"(?:[^"\\]|\\.)*"', rest)
+        if m:
+            tail = rest[m.end():].lstrip(" ")
+            p = _unquote_git_path(tail) if tail.startswith('"') else tail
+            return p[2:] if p.startswith("b/") else p
+    n = len(rest)
+    if n % 2 == 1 and rest.startswith("a/"):
+        half = (n - 1) // 2
+        a, b = rest[:half], rest[half + 1:]
+        if b.startswith("b/") and a[2:] == b[2:]:
+            return b[2:]
+    i = rest.rfind(" b/")
+    return rest[i + 3:] if i >= 0 else rest
+
+
+def _diff_stats(data):
+    """(paths in order, unique; lines added; lines deleted) of a unified patch."""
+    paths, seen = [], set()
+    adds = dels = 0
+    old = new = 0
+    for line in bytes(data).split(b"\n"):
+        if old > 0 or new > 0:
+            if line.startswith(b"+"):
+                adds += 1
+                new -= 1
+            elif line.startswith(b"-"):
+                dels += 1
+                old -= 1
+            elif line.startswith(b" ") or line == b"":
+                old -= 1
+                new -= 1
+            elif line.startswith(b"\\"):
+                pass
+            else:
+                old = new = 0
+            continue
+        if line.startswith(b"diff --git "):
+            p = _header_path(line[len(b"diff --git "):].decode("utf-8", "replace"))
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
+            continue
+        m = _HUNK_RE.match(line)
+        if m:
+            old = int(m.group(1)) if m.group(1) is not None else 1
+            new = int(m.group(2)) if m.group(2) is not None else 1
+    return paths, adds, dels
+
+
+def _note_binary_sizes(git, data, top):
+    """The patch with each `Binary files ... differ` line followed by its sizes:
+    `(binary, 5 -> 7 bytes)`, `(binary, 10 bytes)` for an added or deleted file. A size comes from
+    the object (the --full-index ids), else, for a working-tree file, from the file itself."""
+    lines = bytes(data).split(b"\n")
+    pending = []  # (line index, old id, new id, path)
+    ids = {}
+    path, old_id, new_id = None, None, None
+    for i, line in enumerate(lines):
+        if line.startswith(b"diff --git "):
+            path = _header_path(line[len(b"diff --git "):].decode("utf-8", "replace"))
+            old_id = new_id = None
+        elif line.startswith(b"rename to ") or line.startswith(b"copy to "):
+            path = _unquote_git_path(line.split(b" to ", 1)[1].decode("utf-8", "replace"))
+        elif line.startswith(b"index ") and b".." in line:
+            ab = line[len(b"index "):].split(b" ", 1)[0].decode("ascii", "replace")
+            old_id, _, new_id = ab.partition("..")
+        elif line.startswith(b"Binary files ") and line.endswith(b" differ") and path is not None:
+            pending.append((i, old_id, new_id, path))
+            for oid in (old_id, new_id):
+                if oid and not _ZERO_ID_RE.fullmatch(oid):
+                    ids[oid] = None
+    if not pending:
+        return data
+    if ids:
+        try:
+            _, out = git.run(["cat-file", "--batch-check=%(objectname) %(objectsize)"],
+                             stdin=("\n".join(ids) + "\n").encode())
+            for row in out.decode("ascii", "replace").splitlines():
+                parts = row.split()
+                if len(parts) == 2 and parts[1].isdigit():
+                    ids[parts[0]] = int(parts[1])
+        except _DiffError:
+            pass
+
+    def size_of(oid, worktree_path=None):
+        if not oid or _ZERO_ID_RE.fullmatch(oid):
+            return None
+        if ids.get(oid) is not None:
+            return ids[oid]
+        if worktree_path is not None:
+            try:
+                return os.lstat(os.path.join(top, worktree_path)).st_size
+            except OSError:
+                return None
+        return None
+
+    for i, old_id, new_id, p in pending:
+        added = old_id is not None and _ZERO_ID_RE.fullmatch(old_id or "x") is not None
+        deleted = new_id is not None and _ZERO_ID_RE.fullmatch(new_id or "x") is not None
+        before = None if added else size_of(old_id)
+        after = None if deleted else size_of(new_id, p)
+        if before is not None and after is not None:
+            note = f"(binary, {before} -> {after} bytes)"
+        elif after is not None or before is not None:
+            note = f"(binary, {after if after is not None else before} bytes)"
+        else:
+            continue
+        lines[i] = lines[i] + b" " + note.encode()
+    return b"\n".join(lines)
+
+
+def _resolve_commit(git, rev):
+    if not rev or rev.startswith("-"):
+        raise _DiffError(f"{rev!r} is not a commit (a revision cannot start with '-')")
+    try:
+        _, out = git.run(["rev-parse", "--verify", "--quiet", "--end-of-options", rev + "^{commit}"])
+    except _DiffError:
+        raise _DiffError(f"{rev!r} is not a commit in this repository")
+    sha = out.decode().strip()
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        raise _DiffError(f"{rev!r} is not a commit in this repository")
+    return sha
+
+
+def _diff_slug(title):
+    slug = re.sub(r"[\W_]+", "-", title.lower()).strip("-")
+    return slug[:60].strip("-") or "changes"
+
+
+def _make_diff(git, revs, staged, worktree, paths, limit):
+    """(patch bytes or None when over the limit, its full size, default title, notes)."""
+    try:
+        _, top = git.run(["rev-parse", "--show-toplevel"])
+    except _DiffError as exc:
+        if "not a git repository" in str(exc):
+            raise _DiffError("not inside a git repository (run it in the repository's folder)")
+        raise
+    top = top.decode("utf-8", "surrogateescape").strip()
+    git.neutralise_filters()
+    patch = _Patch(limit)
+    notes = []
+    tail = ["--", *paths] if paths else []
+    flags = list(_GIT_DIFF_FLAGS)
+    ranges = [r for r in revs if ".." in r]
+    if staged:
+        title = "Staged changes"
+        git.stream(["diff", "--cached", *flags, *tail], patch)
+    elif ranges:
+        if len(revs) != 1:
+            raise _DiffError("give one range (A..B), or commits, not both")
+        rng = revs[0]
+        sep = "..." if "..." in rng else ".."
+        left, _, right = rng.partition(sep)
+        if sep in right:
+            raise _DiffError(f"{rng!r} is not a range (A..B or A...B)")
+        a = _resolve_commit(git, left or "HEAD")
+        b = _resolve_commit(git, right or "HEAD")
+        title = rng
+        git.stream(["diff", *flags, "--end-of-options", f"{a}{sep}{b}", *tail], patch)
+    elif revs:
+        if len(revs) > DIFF_MAX_COMMITS:
+            raise _DiffError(f"at most {DIFF_MAX_COMMITS} commits at once, got {len(revs)}")
+        shas = [_resolve_commit(git, r) for r in revs]
+        title = " ".join(revs) if len(revs) <= 3 else f"{revs[0]} and {len(revs) - 1} more"
+        fmt = "--format=commit %H%nAuthor: %an%nDate:   %aI%n%n%w(0,4,4)%B"
+        for sha in shas:
+            patch.separate()
+            git.stream(["show", fmt, *flags, "--diff-merges=first-parent", "--no-show-signature",
+                        "--end-of-options", sha, *tail], patch)
+    else:
+        title = "Uncommitted changes"
+        code, _ = git.run(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], ok=(0, 1))
+        if code == 0:
+            base = "HEAD"
+        else:
+            _, empty = git.run(["hash-object", "-t", "tree", "/dev/null"])
+            base = empty.decode().strip()
+        git.stream(["diff", *flags, "--end-of-options", base, *tail], patch)
+        _, listed = git.run(["ls-files", "-z", "--others", "--exclude-standard", "--full-name", *tail])
+        new_files = [p for p in listed.decode("utf-8", "surrogateescape").split("\0") if p and not p.endswith("/")]
+        if len(new_files) > DIFF_MAX_NEW_FILES:
+            notes.append(f"{len(new_files) - DIFF_MAX_NEW_FILES} more new files are not in it "
+                         f"(at most {DIFF_MAX_NEW_FILES}; name paths after -- to pick)")
+            new_files = new_files[:DIFF_MAX_NEW_FILES]
+        for p in new_files:
+            git.stream(["diff", "--no-index", *flags, "--", "/dev/null", p], patch, ok=(0, 1), cwd=top)
+    if patch.over:
+        return None, patch.size, title, notes
+    return _note_binary_sizes(git, patch.data, top), patch.size, title, notes
+
+
+def _diff_fail(msg):
+    _eprint(f"blerg-runner diff: {msg}")
+    sys.exit(1)
+
+
+def publish_diff(revs, staged=False, worktree=False, paths=(), title=None, fail=_diff_fail):
+    """Make the diff, publish it as <slug>.diff and return (the server's reply, title, paths,
+    adds, dels). fail(msg) is called (and must exit) when it cannot be made or published."""
+    if (staged or worktree) and revs:
+        fail("--staged and --worktree compare the working folder; give them without commits or ranges")
+    if staged and worktree:
+        fail("give --staged or --worktree, not both")
+    limit, total, used = _publish_limits()
+    git = _Git(os.getcwd())
+    try:
+        data, size, default_title, notes = _make_diff(git, list(revs), staged, worktree, list(paths), limit)
+    except _DiffError as exc:
+        fail(str(exc))
+    title = (title or "").strip() or default_title
+    name = _diff_slug(title) + ".diff"
+    if data is None:
+        fail(f"the diff is {_fmt_size(size)}; this runner takes at most {_fmt_limit(limit)} per file "
+             "(narrow it with paths after --, or a shorter range)")
+    if not data.strip():
+        fail("no changes to show" + (" in those paths" if paths else ""))
+    size = len(data)
+    if size > limit:
+        fail(f"the diff is {_fmt_size(size)}; this runner takes at most {_fmt_limit(limit)} per file "
+             "(narrow it with paths after --, or a shorter range)")
+    if total is not None and used + size > total:
+        fail(f"the diff is {_fmt_size(size)}, and this session's published files would go over their "
+             f"{_fmt_limit(total)} total ({_fmt_size(used)} used); delete one first "
+             "(blerg-runner files lists them; blerg-runner unpublish <name> frees a slot)")
+    files, adds, dels = _diff_stats(data)
+    fd, tmp = tempfile.mkstemp(suffix=".diff")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        out = _upload_artifact(tmp, name, size, limit, fail)
+    finally:
+        os.unlink(tmp)
+    for note in notes:
+        print(f"Note: {note}")
+    return out, title, files, adds, dels, size
+
+
+def cmd_diff(revs, staged=False, worktree=False, paths=(), title=None):
+    out, title, files, adds, dels, size = publish_diff(revs, staged, worktree, paths, title)
+    n = len(files)
+    head = f"Published diff {title}"
+    version = out.get("version")
+    if isinstance(version, int) and version > 1:
+        head += f" as v{version}"
+    head += f" · {n} file{'' if n == 1 else 's'} · +{adds} −{dels}"
+    view = out.get("view", "none")
+    if view == "none":
+        print(f"{head} — no in-app preview (download only)")
+    elif view == "diff" and size > DIFF_VIEW_MAX:
+        print(f"{head} — too large for the app's diff viewer (over {_fmt_limit(DIFF_VIEW_MAX)}): "
+              "the person can download it")
+    else:
+        print(f"{head} — viewable in the app")
+    if out.get("url"):
+        print(f"Link: {out['url']}")
+
+
 # ── topic (mark a piece of work for the History tab) ─────────────────────────
 
 # The agent reads this (topic --help and the top-level usage). Its first paragraph is the line the
@@ -776,6 +1237,7 @@ sha of 7 to 40 hex characters, repeated or comma-separated, at most 50.
 """
 
 TOPIC_MAX_COMMITS = 50
+CHECKLIST_MAX_COMMITS = 20
 _SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 
 
@@ -784,8 +1246,10 @@ def _topic_fail(msg):
     sys.exit(1)
 
 
-def _topic_commits(given):
+def _topic_commits(given, fail=None, limit=None, what="topic"):
     """The --commit values (each one sha or a comma-separated list), in order; refuses a bad one."""
+    fail = fail or _topic_fail
+    limit = limit or TOPIC_MAX_COMMITS
     shas = []
     for value in given:
         for piece in value.split(","):
@@ -793,12 +1257,12 @@ def _topic_commits(given):
             if not piece:
                 continue
             if not _SHA_RE.fullmatch(piece):
-                _topic_fail(f"--commit {piece!r} is not a commit sha (7 to 40 hex characters)")
+                fail(f"--commit {piece!r} is not a commit sha (7 to 40 hex characters)")
             shas.append(piece)
     if not shas:
-        _topic_fail("give a commit sha with --commit (7 to 40 hex characters)")
-    if len(shas) > TOPIC_MAX_COMMITS:
-        _topic_fail(f"at most {TOPIC_MAX_COMMITS} commits on one topic, got {len(shas)}")
+        fail("give a commit sha with --commit (7 to 40 hex characters)")
+    if len(shas) > limit:
+        fail(f"at most {limit} commits on one {what}, got {len(shas)}")
     return shas
 
 
@@ -841,6 +1305,251 @@ def cmd_topic(title, done, commits=None):
     if closed:
         line += f" (closed: {closed.get('title', '')})"
     print(line)
+
+
+# ── checklist, pin, unpin (what the session works through) ─────────────────────
+
+# The agent reads these (checklist --help, pin --help and the top-level usage). WORK_LINE is the
+# line the session guide and the managed CLAUDE.md block carry (daemon/claudecode.go workGuideLine).
+WORK_LINE = """\
+When you work on a ticket, read it with the tools you have, then `blerg-runner pin` it (`blerg-runner
+pin --help` shows the shape); keep a checklist with `blerg-runner checklist` and tick items as you
+finish them.
+"""
+
+CHECKLIST_GUIDE = WORK_LINE + """
+The checklist is the work you will do in this session, as short lines; the person sees it at the top
+of the session panel ("3 of 7 done") and as a compact row in the chat. Set it once you know the steps,
+tick each item as it is done, add one you discover. Only you change it.
+
+  blerg-runner checklist set "Reproduce the crash" "Write a failing test" "Fix it"
+  blerg-runner checklist tick 2            (a number is the item's place, 1 is the first)
+  blerg-runner checklist tick "Fix it"     (or its exact text; --text "2" when the text is a number)
+  blerg-runner checklist tick 3 --commit 1a2b3c4   (name the commits that finished it; repeat or comma-separate)
+  blerg-runner checklist untick 2
+  blerg-runner checklist add "Update the docs"
+  blerg-runner checklist clear
+
+At most 50 items of 200 characters. Each command prints the list after the change. With --commit,
+run it in the repository: it also publishes the diff of those commits (as `blerg-runner diff` does),
+which the person opens from the item's "View diff"; when it cannot (not a commit here, over the
+size limit) the item keeps its commits without one.
+"""
+
+PIN_GUIDE = WORK_LINE + """
+`blerg-runner pin <file.json>` (or `-` to read stdin) pins a ticket from any tracker into the
+session: a card in the chat and the Ticket section at the top of the person's session panel. Map
+what your tracker tool returned into this shape (only source, key and title are required; leave out
+what you do not have; unknown fields are dropped). Pin again to refresh it (the card says what
+changed); at most 5 at once, the newest is the current one. Pinning copies the ticket's text into the
+session, where whoever can see the session can read it.
+
+  {"source": "jira" | "bugzilla" | "github" | "gitlab" | "linear" | "blerg-board" | <any name>,
+   "key": "ABC-123", "url": "https://...", "title": "...",
+   "status": "...", "type": "...", "priority": "...", "assignee": "...", "reporter": "...",
+   "labels": ["..."], "description": "<markdown>",
+   "fields": [{"name": "...", "value": "..."}],
+   "comments": [{"author": "...", "at": "...", "body": "<markdown>"}],   (oldest first; the last 5 are kept)
+   "acceptance": ["..."]}
+
+A JIRA issue: key = issue.key, url = <site>/browse/<key>, title = fields.summary,
+  status = fields.status.name, type = fields.issuetype.name, priority = fields.priority.name,
+  assignee/reporter = displayName, labels = fields.labels, description = the description as markdown,
+  fields = e.g. Sprint, Components, Fix versions as text, comments = the latest few.
+A Bugzilla bug: source "bugzilla", key = the bug id as text, url = <site>/show_bug.cgi?id=<id>,
+  title = summary, status = status (+ " " + resolution), type = component, priority = priority or
+  severity, assignee = assigned_to, reporter = creator, description = the first comment's text,
+  comments = the latest few, fields = e.g. Product, Version, Severity.
+
+--checklist also sets the checklist to the ticket's acceptance criteria.
+`blerg-runner unpin [<source>:<key>]` unpins one (no argument: the current one).
+"""
+
+CHECKLIST_MAX_ITEMS = 50
+PIN_MAX_BYTES = 256 * 1024
+
+
+def _work_fail(cmd, msg):
+    _eprint(f"blerg-runner {cmd}: {msg}")
+    sys.exit(1)
+
+
+def _work_post(cmd, route, body, what):
+    """POST body to /api/sessions/<id>/<route>; the parsed reply. A runner older than the route (its
+    app page, an ingress's plain 404, a 405) is said in words; nothing was recorded."""
+    url = f"{SERVER_HTTP}/api/sessions/{urllib.parse.quote(SESSION_ID, safe='')}/{route}"
+    too_old = f"this runner server is older than {what}; nothing was recorded"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=_headers(), method="POST")
+    try:
+        with _open(req, timeout=30) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        data = exc.read()
+        if exc.code == 405 or (exc.code == 404 and "application/json" not in (exc.headers.get("Content-Type") or "")):
+            _work_fail(cmd, too_old)
+        _work_fail(cmd, _http_failure(exc.code, url, data))
+    except _NET_ERRORS as exc:
+        _work_fail(cmd, _conn_failure(url, exc))
+    if "application/json" not in ctype:
+        _work_fail(cmd, too_old)
+    try:
+        reply = json.loads(raw or b"{}")
+    except ValueError:
+        _work_fail(cmd, too_old)
+    if not isinstance(reply, dict):
+        _work_fail(cmd, too_old)
+    return reply
+
+
+def _print_checklist(reply):
+    items = reply.get("items") or []
+    if not items:
+        print("Checklist: empty")
+        return
+    done = sum(1 for it in items if isinstance(it, dict) and it.get("done"))
+    print(f"Checklist · {done} of {len(items)} done")
+    for i, it in enumerate(items, 1):
+        if isinstance(it, dict):
+            print(f"  {'☑' if it.get('done') else '☐'} {i}. {it.get('text', '')}")
+
+
+def _checklist_target(value):
+    """The item a tick names: a bare integer is its place, anything else its exact text."""
+    if re.fullmatch(r"\d+", value or ""):
+        return {"index": int(value)}
+    if not value:
+        _work_fail("checklist", "name the item by its number (1 is the first) or its exact text")
+    return {"text": value}
+
+
+class _NoDiff(Exception):
+    pass
+
+
+def _no_diff(msg):
+    raise _NoDiff(msg)
+
+
+def _checklist_diff(shas, text=None):
+    """Publish the diff of the commits an item names; its artifact id, or None (said in one line:
+    the item keeps its commits without a diff)."""
+    try:
+        git = _Git(os.getcwd())
+        try:
+            for sha in shas:
+                _resolve_commit(git, sha)
+        except _DiffError as exc:
+            raise _NoDiff(str(exc))
+        title = (text or "").strip() or ("commits " + " ".join(shas[:3]) + (" and more" if len(shas) > 3 else ""))
+        out, title, files, adds, dels, _ = publish_diff(shas, title=title, fail=_no_diff)
+    except _NoDiff as exc:
+        print(_redact(f"No diff of the commits: {exc}; the item keeps its commits."))
+        return None
+    aid = out.get("id")
+    if not (isinstance(aid, str) and re.fullmatch(r"[0-9a-f]{32}", aid)):
+        print("No diff of the commits: the server gave no id for it; the item keeps its commits.")
+        return None
+    n = len(files)
+    print(f"Diff of the commits published: {out.get('name') or title} \u00b7 {n} file{'' if n == 1 else 's'} "
+          f"\u00b7 +{adds} \u2212{dels}")
+    return aid
+
+
+def cmd_checklist(op, values, force_text=None, commits=None):
+    body = {"op": op}
+    if commits:
+        if op not in ("add", "tick"):
+            _work_fail("checklist", "--commit goes with add and tick: name the commits that finished the item")
+        body["commits"] = _topic_commits(commits, lambda m: _work_fail("checklist", m), CHECKLIST_MAX_COMMITS, "item")
+    if op == "set":
+        items = [v for v in values if v.strip()]
+        if not items:
+            _work_fail("checklist", 'give the items: blerg-runner checklist set "<item>" "<item>" ...')
+        if len(items) > CHECKLIST_MAX_ITEMS:
+            _work_fail("checklist", f"at most {CHECKLIST_MAX_ITEMS} items, got {len(items)}")
+        body["items"] = items
+    elif op == "add":
+        if len(values) != 1 or not values[0].strip():
+            _work_fail("checklist", 'give one item: blerg-runner checklist add "<item>"')
+        body["item"] = values[0]
+    elif op in ("tick", "untick"):
+        if force_text is not None:
+            if values or not force_text:
+                _work_fail("checklist", f'name one item: blerg-runner checklist {op} --text "<exact text>"')
+            body["text"] = force_text
+        elif len(values) != 1:
+            _work_fail("checklist", f"name one item: blerg-runner checklist {op} <number|text>")
+        else:
+            body.update(_checklist_target(values[0]))
+    elif values:
+        _work_fail("checklist", "clear takes no items")
+    if body.get("commits"):
+        diff_id = _checklist_diff(body["commits"], body.get("item") or body.get("text"))
+        if diff_id:
+            body["diff"] = diff_id
+    _print_checklist(_work_post("checklist", "checklist", body, "checklists"))
+
+
+def _read_ticket(path):
+    try:
+        if path == "-":
+            raw = sys.stdin.buffer.read(PIN_MAX_BYTES + 1)
+        else:
+            with open(path, "rb") as fh:
+                raw = fh.read(PIN_MAX_BYTES + 1)
+    except OSError as exc:
+        _work_fail("pin", f"cannot read {path}: {exc.strerror or 'read failed'}")
+    if len(raw) > PIN_MAX_BYTES:
+        _work_fail("pin", "the ticket is larger than 256 KiB; leave out older comments or cut the description")
+    try:
+        ticket = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        _work_fail("pin", "the ticket is not valid JSON (pin --help shows the shape)")
+    if not isinstance(ticket, dict):
+        _work_fail("pin", "the ticket must be a JSON object (pin --help shows the shape)")
+    return ticket
+
+
+def _pinned_line(reply):
+    pinned = reply.get("pinned") or []
+    if not pinned:
+        return "Nothing is pinned now."
+    names = [f"{p.get('source', '')}:{p.get('key', '')}" for p in pinned if isinstance(p, dict)]
+    return "Pinned now: " + ", ".join(names) + " (the first is current)"
+
+
+def cmd_pin(path, with_checklist=False):
+    ticket = _read_ticket(path)
+    reply = _work_post("pin", "tickets", {"action": "pin", "ticket": ticket}, "pinned tickets")
+    t = reply.get("ticket") or {}
+    verb = "Updated" if reply.get("action") == "update" else "Pinned"
+    line = f"{verb} {t.get('source', '')}:{t.get('key', '')} · {t.get('title', '')}"
+    prev = reply.get("previous")
+    if isinstance(prev, dict) and prev.get("status", "") != t.get("status", ""):
+        line += f" (status {prev.get('status') or '—'} → {t.get('status') or '—'})"
+    print(line)
+    print(_pinned_line(reply))
+    if with_checklist:
+        acceptance = [a for a in (t.get("acceptance") or []) if isinstance(a, str) and a.strip()]
+        if not acceptance:
+            print("The ticket has no acceptance criteria; the checklist was not changed.")
+            return
+        _print_checklist(_work_post("checklist", "checklist", {"op": "set", "items": acceptance[:CHECKLIST_MAX_ITEMS]}, "checklists"))
+
+
+def cmd_unpin(target=None):
+    body = {"action": "unpin"}
+    if target:
+        source, sep, key = target.partition(":")
+        if sep:
+            body["source"], body["key"] = source.strip(), key.strip()
+        else:
+            body["key"] = target.strip()
+    reply = _work_post("unpin", "tickets", body, "pinned tickets")
+    t = reply.get("ticket") or {}
+    print(f"Unpinned {t.get('source', '')}:{t.get('key', '')} · {t.get('title', '')}")
+    print(_pinned_line(reply))
 
 
 # ── fetch (files the user attached to this session) ───────────────────────────
@@ -1768,7 +2477,9 @@ def main():
         epilog="publish <file|dir>: give the user a file.\n\n" + PUBLISH_GUIDE
                + "\nfetch: download the files the user attached.\n\n" + FETCH_GUIDE
                + "\nreview: answer a person's review of a published file.\n\n" + REVIEW_GUIDE
-               + "\ntopic: mark a piece of work for the person's History tab.\n\n" + TOPIC_GUIDE,
+               + "\ntopic: mark a piece of work for the person's History tab.\n\n" + TOPIC_GUIDE
+               + "\nchecklist, pin, unpin: what the session works through.\n\n" + WORK_LINE
+               + "\ndiff: show the person what you changed.\n\n" + DIFF_GUIDE,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1847,6 +2558,21 @@ def main():
     pr_reply.add_argument("status", choices=list(REVIEW_STATUSES), help="done: you made the change; declined: you did not")
     pr_reply.add_argument("line", help="One line for the person: what you did, or why not")
 
+    p_diff = sub.add_parser(
+        "diff",
+        help="Show the person what you changed: publish a diff they can open (diff --help)",
+        usage="blerg-runner diff [<range> | <commit> ... | --staged | --worktree] [--title TITLE] [-- <path> ...]",
+        description="Run git here and publish the patch as <title>.diff, which the app opens in its diff viewer.",
+        epilog=DIFF_GUIDE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_diff.add_argument("revs", nargs="*", metavar="REV",
+                        help="A range (A..B, A...B) or commits; none: everything not committed")
+    p_diff.add_argument("--staged", action="store_true", help="What is staged for the next commit")
+    p_diff.add_argument("--worktree", action="store_true",
+                        help="Everything not committed: staged, unstaged and new files (the default)")
+    p_diff.add_argument("--title", default=None, help="The diff's title (default: what was compared)")
+
     p_topic = sub.add_parser(
         "topic",
         help="Mark the start of a piece of work (or --done its end) for the person's History tab",
@@ -1859,6 +2585,37 @@ def main():
                          help="Close the open topic, with a one-line outcome")
     p_topic.add_argument("--commit", action="append", default=None, metavar="SHA",
                          help="With --done: a commit the work landed (repeat it, or comma-separate the shas)")
+
+    p_check = sub.add_parser(
+        "checklist",
+        help="Keep the session's checklist: set, add, tick, untick, clear (checklist --help)",
+        description="Keep the session's checklist, shown at the top of the person's session panel.",
+        epilog=CHECKLIST_GUIDE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_check.add_argument("op", choices=["set", "add", "tick", "untick", "clear"], help="What to do")
+    p_check.add_argument("values", nargs="*", metavar="ITEM",
+                         help="set: the items; add: one item; tick/untick: its number (1 is the first) or exact text")
+    p_check.add_argument("--text", default=None, dest="force_text", metavar="TEXT",
+                         help="tick/untick: the item's exact text, even when it is a number")
+    p_check.add_argument("--commit", action="append", default=None, metavar="SHA",
+                         help="add/tick: a commit that finished the item (repeat it, or comma-separate the shas)")
+
+    p_pin = sub.add_parser(
+        "pin",
+        help="Pin a tracker's ticket into the session (pin --help shows the shape)",
+        description="Pin a ticket from any tracker into the session: a card in the chat and the Ticket section of the panel.",
+        epilog=PIN_GUIDE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_pin.add_argument("file", metavar="FILE.json", help="The ticket as JSON, or - to read it from stdin")
+    p_pin.add_argument("--checklist", action="store_true", help="Also set the checklist to the ticket's acceptance criteria")
+
+    p_unpin = sub.add_parser("unpin", help="Unpin a ticket (no argument: the current one)",
+                             description="Unpin a pinned ticket.", epilog=PIN_GUIDE,
+                             formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_unpin.add_argument("target", nargs="?", default=None, metavar="SOURCE:KEY",
+                         help="The ticket, as <source>:<key> (or just its key when no other pin shares it)")
 
     # ── board ──────────────────────────────────────────────────────────────────
     p_board =sub.add_parser("board", help="Board commands")
@@ -1974,10 +2731,17 @@ def main():
     ptag_list = tag_sub.add_parser("list", help="List all distinct tags on a board")
     ptag_list.add_argument("board", nargs="?", help="Board id (default: $BLERG_RUNNER_BOARD_ID)")
 
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    diff_paths = []
+    if argv[:1] == ["diff"] and "--" in argv:
+        # Paths after -- are paths, whatever they look like; argparse would take them for revisions.
+        cut = argv.index("--")
+        argv, diff_paths = argv[:cut], argv[cut + 1:]
+    args = parser.parse_args(argv)
 
     # ── session messaging commands (existing) ──────────────────────────────────
-    if args.cmd in ("update", "ask", "note", "publish", "fetch", "files", "unpublish", "review", "topic"):
+    if args.cmd in ("update", "ask", "note", "publish", "fetch", "files", "unpublish", "review", "topic",
+                    "checklist", "pin", "unpin", "diff"):
         if not _configured():
             _noop_notice()
             sys.exit(0)
@@ -1986,8 +2750,16 @@ def main():
                 cmd_review_list(args.file)
             elif args.review_cmd == "reply":
                 cmd_review_reply(args.id, args.status, args.line)
+        elif args.cmd == "diff":
+            cmd_diff(args.revs, staged=args.staged, worktree=args.worktree, paths=diff_paths, title=args.title)
         elif args.cmd == "topic":
             cmd_topic(args.title, args.done, args.commit)
+        elif args.cmd == "checklist":
+            cmd_checklist(args.op, args.values, args.force_text, args.commit)
+        elif args.cmd == "pin":
+            cmd_pin(args.file, args.checklist)
+        elif args.cmd == "unpin":
+            cmd_unpin(args.target)
         elif args.cmd == "files":
             cmd_files()
         elif args.cmd == "unpublish":

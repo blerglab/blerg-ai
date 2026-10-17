@@ -296,10 +296,6 @@ func TestResumeClusterSessionCarriesPlugins(t *testing.T) {
 	}
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000a1"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "cluster", "runner", ""); err != nil {
 		t.Fatal(err)

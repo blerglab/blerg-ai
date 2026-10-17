@@ -5,6 +5,7 @@ import { TabBar, NotificationsButton, BrandHeader } from './App'
 import { useMessageStore } from './hooks/useMessageStore'
 import { coreOrigin } from './authClient'
 import { usePendingProposals } from './lib/proposals'
+import { setSettingsOpen, settingsIsOpen } from './lib/settingsDialog'
 
 // TabBar uses useNavigate and useLocation — must be inside a Router.
 function renderTabBar(initialPath = '/') {
@@ -14,6 +15,15 @@ function renderTabBar(initialPath = '/') {
     </MemoryRouter>,
   )
 }
+
+describe('TabBar Settings', () => {
+  it('has a Settings tab that opens the dialog and does not navigate', () => {
+    renderTabBar('/sessions')
+    fireEvent.click(screen.getByTestId('settings-tab'))
+    expect(settingsIsOpen()).toBe(true)
+    setSettingsOpen(false)
+  })
+})
 
 describe('TabBar open-questions badge', () => {
   beforeEach(() => {

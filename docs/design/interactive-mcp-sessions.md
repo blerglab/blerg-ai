@@ -119,7 +119,7 @@ connections"; a new line on what an interactive grant session can reach — the 
 exfiltration, with the pod's own environment and the shared daemon token named as already
 reachable by any interactive cluster session), `docs/crons.md` (unchanged in substance; one
 cross-reference), `runner/README.md` where `RestrictTools` is described, `CHANGELOG.md` (Changed:
-behaviour change for launch-sheet sessions with connections). The launch sheet says next to the
+behavior change for launch-sheet sessions with connections). The launch sheet says next to the
 connections that a session with connections is private to you.
 
 ## Verification

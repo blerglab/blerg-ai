@@ -6,7 +6,9 @@ curate. Sessions spawned from blerg-board cards work in this repo.
 ## Build & test
 
 - Go server: `go build ./...`; tests need Postgres:
-  `TEST_DATABASE_URL='postgres://...' go test -p 1 ./...` (shared DB — keep -p 1)
+  `GOWORK=off TEST_DATABASE_URL='postgres://...' go test -timeout 30m ./...`.
+  Use a dedicated test server and a user with CREATEDB. Fixtures clone a private
+  migrated template per test and clean up their databases; packages run in parallel.
 - Web UI: `npm ci` at the REPOSITORY root (board/web is a member of the npm
   workspace there, with packages/chat and runner/frontend), then
   `cd web && npm run build`. A session's conversation is the shared chat,

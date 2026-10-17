@@ -486,6 +486,7 @@ function SubagentsCard({ d }: { d: SessionInsightsResponse }) {
         <div className="si-two">
           <CountTable head="Type" rows={s.by_type} testId="si-sub-types" />
           <CountTable head="Model" rows={s.by_model} testId="si-sub-models" mono />
+          <CountTable head="Configured effort" rows={s.by_effort ?? [{ key: 'unknown', count: s.count }]} testId="si-sub-efforts" />
         </div>
       )}
     </Card>

@@ -3,7 +3,8 @@
 // (model/artifactViews.ts):
 //
 //   text / json / markdown / csv   read as TEXT and drawn by React (escaped): <pre>, the chat's
-//                                  Markdown component (no raw HTML), a table. Capped.
+//   / diff                         Markdown component (no raw HTML), a table, the diff viewer
+//                                  (DiffView: parsed, file by file). Capped.
 //   image (svg included)           <img src=blob:>. An SVG is never inlined: inside <img> its
 //                                  scripts do not run.
 //   pdf                            <iframe src=blob:> typed application/pdf (not sandboxed: the
@@ -34,6 +35,7 @@ import { FILE_GONE_MESSAGE, FileRequestError, fileErrorText, isArtifactGone } fr
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { useChat } from './context'
 import ErrorId from './ErrorId'
+import DiffView from './DiffView'
 import Markdown from './Markdown'
 import MarkupMode from './markup/MarkupMode'
 import ReviewMode from './review/ReviewMode'
@@ -141,7 +143,7 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
     <div className="artifact-overlay artifact-overlay-viewer" data-testid="artifact-viewer-overlay" {...backdrop}>
       <div
         ref={dialogRef}
-        className={`artifact-dialog artifact-viewer${mode !== 'view' ? ' is-review' : ''}`}
+        className={`artifact-dialog artifact-viewer${mode !== 'view' ? ' is-review' : ''}${view === 'diff' ? ' is-diff' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -211,7 +213,7 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
   )
 }
 
-function NoPreview({ artifact, tooBig }: { artifact: ArtifactInfo; tooBig: boolean }) {
+export function NoPreview({ artifact, tooBig }: { artifact: ArtifactInfo; tooBig: boolean }) {
   return (
     <div className="artifact-nopreview" data-testid="artifact-no-preview">
       <p className="artifact-nopreview-head">
@@ -228,7 +230,7 @@ function NoPreview({ artifact, tooBig }: { artifact: ArtifactInfo; tooBig: boole
   )
 }
 
-function BlobView({ artifact, url, autoplay }: { artifact: ArtifactInfo; url: string; autoplay: boolean }) {
+export function BlobView({ artifact, url, autoplay }: { artifact: ArtifactInfo; url: string; autoplay: boolean }) {
   switch (artifact.view) {
     case 'image':
       return <img className="artifact-image" src={url} alt={artifact.name} />
@@ -248,7 +250,7 @@ function BlobView({ artifact, url, autoplay }: { artifact: ArtifactInfo; url: st
   }
 }
 
-function TextView({ artifact, text, showAll, onShowAll }: { artifact: ArtifactInfo; text: string; showAll: boolean; onShowAll: () => void }) {
+export function TextView({ artifact, text, showAll, onShowAll }: { artifact: ArtifactInfo; text: string; showAll: boolean; onShowAll: () => void }) {
   if (artifact.view === 'html') {
     return (
       <iframe
@@ -261,6 +263,7 @@ function TextView({ artifact, text, showAll, onShowAll }: { artifact: ArtifactIn
     )
   }
   if (artifact.view === 'csv') return <CsvView artifact={artifact} text={text} />
+  if (artifact.view === 'diff') return <DiffView text={text} />
 
   const body = artifact.view === 'json' ? prettyJson(text) : text
   const capped = !showAll && body.length > TEXT_PREVIEW_CAP

@@ -33,3 +33,15 @@ describe("SessionChat boardMeta", () => {
     });
   });
 });
+
+
+it("preserves explicit native steering and effort while retaining advertised file limits", () => {
+  const limits = { max_file_bytes: 100 * 1024 * 1024 };
+  const row = { created_at: "board-start", model: "board-model", engine: "claude", effort: "high", steering_supported: true };
+  expect(boardMeta({ status: "running", started_at: "native-start", model: "native-model", engine: "codex", effort: "", steering_supported: false, limits }, row)).toEqual({
+    status: "running", started_at: "native-start", model: "native-model", engine: "codex", effort: "", steering_supported: false, limits,
+  });
+  expect(boardMeta({ status: "running", started_at: "", limits }, row)).toEqual({
+    status: "running", started_at: "board-start", model: "board-model", engine: "claude", effort: "high", steering_supported: true, limits,
+  });
+});

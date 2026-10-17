@@ -97,21 +97,23 @@ func TestRunnerManifestOperations(t *testing.T) {
 		got[op.Name] = op.Method + " " + op.Path
 	}
 	want := map[string]string{
-		"start":         "POST /api/runner/start",
-		"status":        "GET /api/runner/sessions/{id}",
-		"send_message":  "POST /api/runner/sessions/{id}/message",
-		"interrupt":     "POST /api/runner/sessions/{id}/interrupt",
-		"stop":          "POST /api/runner/sessions/{id}/stop",
-		"events":        "GET /api/runner/sessions/{id}/events",
-		"events_stream": "GET /api/runner/sessions/{id}/events/stream",
-		"events_live":   "GET /api/runner/sessions/{id}/events/live",
-		"result":        "GET /api/runner/sessions/{id}/result",
-		"files_list":    "GET /api/runner/sessions/{id}/artifacts",
-		"file_raw":      "GET /api/runner/sessions/{id}/artifacts/{aid}/raw",
-		"file_download": "GET /api/runner/sessions/{id}/artifacts/{aid}/download",
-		"file_delete":   "DELETE /api/runner/sessions/{id}/artifacts/{aid}",
-		"upload":        "POST /api/runner/sessions/{id}/uploads",
-		"me":            "GET /api/runner/me",
+		"start":                   "POST /api/runner/start",
+		"discover_launch_options": "GET /api/runner/launch-options",
+		"status":                  "GET /api/runner/sessions/{id}",
+		"send_message":            "POST /api/runner/sessions/{id}/message",
+		"set_model":               "POST /api/runner/sessions/{id}/model",
+		"interrupt":               "POST /api/runner/sessions/{id}/interrupt",
+		"stop":                    "POST /api/runner/sessions/{id}/stop",
+		"events":                  "GET /api/runner/sessions/{id}/events",
+		"events_stream":           "GET /api/runner/sessions/{id}/events/stream",
+		"events_live":             "GET /api/runner/sessions/{id}/events/live",
+		"result":                  "GET /api/runner/sessions/{id}/result",
+		"files_list":              "GET /api/runner/sessions/{id}/artifacts",
+		"file_raw":                "GET /api/runner/sessions/{id}/artifacts/{aid}/raw",
+		"file_download":           "GET /api/runner/sessions/{id}/artifacts/{aid}/download",
+		"file_delete":             "DELETE /api/runner/sessions/{id}/artifacts/{aid}",
+		"upload":                  "POST /api/runner/sessions/{id}/uploads",
+		"me":                      "GET /api/runner/me",
 	}
 	for name, route := range want {
 		if got[name] != route {

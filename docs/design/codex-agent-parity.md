@@ -62,13 +62,13 @@ errors, and is complemented by fake protocol, race, browser and database-backed 
 Native questions use private session asks with correlated answers and turn cancellation. Secret
 questions are refused rather than placing credentials into chat. A replacement pod without native
 history passes a bounded archive of roles, messages and tool outcomes to its next thread, explicitly
-labelled as untrusted transcript data. The displayed user message stays unchanged, and the session
+labeled as untrusted transcript data. The displayed user message stays unchanged, and the session
 reports that this is a reconstructed context rather than claiming a native conversation resumed.
 
 ## Managed and restricted runtimes
 
 Managed plugins use immutable per-session native Codex snapshots, frozen local marketplace
-catalogues and private launch configuration. The installer has no account credentials. Selected
+catalogs and private launch configuration. The installer has no account credentials. Selected
 plugins do not mutate the person's configuration or workshop cache, and their conversation paths
 remain stable across native resume and host/container launches. Daemons advertise supported plugin
 engines; the legacy plugin flag means Claude only.

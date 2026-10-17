@@ -97,7 +97,11 @@ func (h *Hub) requestReposRoot(ctx context.Context, dc *DaemonConn, root string)
 // when the daemon's read pump exits, so a send racing that close is
 // recovered from and reported as not sent.
 func (h *Hub) trySendToDaemon(dc *DaemonConn, data []byte) (sent bool) {
-	if h.GetDaemon(dc.ID) != dc {
+	// Check and enqueue atomically with connection replacement. The send is
+	// nonblocking; no database or network I/O runs under the hub lock.
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.daemons[dc.ID] != dc {
 		return false
 	}
 	defer func() {

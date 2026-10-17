@@ -93,7 +93,7 @@ export interface SessionInsightsResponse {
   tool_calls: number
   tool_calls_by_tool: CountRow[]
   messages_from_person: number
-  subagents: { count: number; by_type: CountRow[]; by_model: CountRow[]; tool_calls: number }
+  subagents: { by_effort?: CountRow[]; count: number; by_type: CountRow[]; by_model: CountRow[]; tool_calls: number }
   // null, with tokens_hidden, for anyone but the session's owner and an administrator
   tokens: {
     totals: TokenCounts

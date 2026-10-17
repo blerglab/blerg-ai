@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/pelletier/go-toml/v2"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 func TestCodexInteractiveHomePreservesLoginSettingsAndHistoryWithoutAmbientMCP(t *testing.T) {
@@ -136,7 +137,8 @@ func TestCodexEveryGrantedModeDisablesResolvedSystemMCPBeforeStartingThread(t *t
 			driver.RestrictedRuntime = &codexRestrictedRuntime{Restricted: restricted}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			go driver.Run(ctx)
+			stopDriver := startTestCodexDriver(ctx, t, driver)
+			defer stopDriver()
 			driver.Enqueue("fixture", "chat")
 			deadline := time.Now().Add(5 * time.Second)
 			for !contains(emitter.kinds(), "turn_done") && time.Now().Before(deadline) {

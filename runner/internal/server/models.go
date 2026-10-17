@@ -258,8 +258,9 @@ func (a *API) handleClusterModels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if principal.Kind != "human" {
-		writeError(w, http.StatusUnauthorized, "a browser session is required")
+	owner := runnerPrincipalFromIdentity(principal)
+	if (principal.Kind != "human" && principal.Kind != "agent") || owner.spawningAccountID() == "" || !owner.proof().valid() {
+		writeError(w, http.StatusUnauthorized, "an account-bound launch principal is required")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -268,7 +269,7 @@ func (a *API) handleClusterModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "Cluster runtime is not configured")
 		return
 	}
-	list := a.clusterModelSnapshot(r.Context(), r.PathValue("engine"), principal.Sub, proofFromPrincipal(principal), r.URL.Query().Get("refresh") == "1")
+	list := a.clusterModelSnapshot(r.Context(), r.PathValue("engine"), owner.spawningAccountID(), owner.proof(), r.URL.Query().Get("refresh") == "1")
 	list.EngineEfforts = models.EffortsFor(r.PathValue("engine"))
 	writeJSON(w, http.StatusOK, list)
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,9 +44,12 @@ type DaemonConn struct {
 	// BoundSessionID and RuntimeTokenID are immutable server-verified pod authority.
 	BoundSessionID string
 	RuntimeTokenID string
-	ID             string
-	Name           string
-	Mode           string
+	// BackgroundTaskLifetime is immutable, accepted only from a valid full hello inventory.
+	BackgroundTaskLifetime string
+	workRegistered         bool // guarded by the daemon ID's work fence; fixtures may remain unregistered
+	ID                     string
+	Name                   string
+	Mode                   string
 	// ReposRoot is the root the daemon reported in its hello. The owner can
 	// change it live (set_repos_root), so read CurrentReposRoot instead.
 	ReposRoot string
@@ -344,6 +348,9 @@ func (dc *DaemonConn) AvailableEngines() []string {
 // Hub holds maps of connected daemons and browsers and serialises access to
 // those maps.
 type Hub struct {
+	// daemonWorkFences is guarded by mu. Never wait for a fence while holding mu.
+	// Entries include waiters and are removed when their final holder releases.
+	daemonWorkFences     map[string]*daemonWorkFence
 	mu                   sync.RWMutex
 	daemons              map[string]*DaemonConn            // keyed by daemon ID (UUID string)
 	browsers             map[string]*BrowserConn           // keyed by connection ID
@@ -364,12 +371,14 @@ type Hub struct {
 	// autoStopper ends a one-shot session whose turn has just finished
 	// (autostop.go). Registered by NewAPI for the same reason as the notifier
 	// above: the daemon message path holds a Hub, not an API.
-	autoStopper func(sessionID string)
+	autoStopper  func(sessionID string)
+	modelControl func(context.Context, RunnerPrincipal, string, string, string) (map[string]any, *APIError)
 	// starts tracks each session's current start attempt (startstages.go).
 	starts startTracker
 	// reposRootReqs are set_repos_root requests waiting for their daemon's
 	// answer (reposroot.go).
-	reposRootReqs reposRootRequests
+	reposRootReqs     reposRootRequests
+	workspaceFileReqs workspaceFileRequests
 	// privacy reads which sessions are private (privacy.go). Guarded by mu.
 	privacy privacyGate
 	// mcpStart is how a session start reaches the MCP gateway (mcpstart.go).
@@ -557,8 +566,44 @@ func (h *Hub) SetServerBuild(release, commit string) {
 	h.serverRelease, h.serverCommit = release, commit
 }
 
+// daemonWorkFence serializes work and connection replacement for one stable daemon
+// ID, including old and new sockets. References count both holders and waiters.
+type daemonWorkFence struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockDaemonWork pins the fence before waiting, so removal cannot split waiters
+// across two mutexes. The hub map is locked only for bookkeeping, never for I/O.
+func (h *Hub) lockDaemonWork(id string) func() {
+	h.mu.Lock()
+	if h.daemonWorkFences == nil {
+		h.daemonWorkFences = make(map[string]*daemonWorkFence)
+	}
+	fence := h.daemonWorkFences[id]
+	if fence == nil {
+		fence = &daemonWorkFence{}
+		h.daemonWorkFences[id] = fence
+	}
+	fence.refs++
+	h.mu.Unlock()
+	fence.mu.Lock()
+	return sync.OnceFunc(func() {
+		fence.mu.Unlock()
+		h.mu.Lock()
+		fence.refs--
+		if fence.refs == 0 {
+			delete(h.daemonWorkFences, id)
+		}
+		h.mu.Unlock()
+	})
+}
+
 // Register adds a daemon to the hub.
 func (h *Hub) Register(d *DaemonConn) {
+	unlock := h.lockDaemonWork(d.ID)
+	defer unlock()
+	d.workRegistered = true
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.daemons[d.ID] = d
@@ -571,6 +616,8 @@ func (h *Hub) Register(d *DaemonConn) {
 // an unconditional delete would clobber the live connection. The boolean lets
 // callers skip stale disconnect handling when they have been superseded.
 func (h *Hub) UnregisterIfCurrent(dc *DaemonConn) bool {
+	unlock := h.lockDaemonWork(dc.ID)
+	defer unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.daemons[dc.ID] == dc {
@@ -868,16 +915,24 @@ func (h *Hub) GetHostDaemons() []*DaemonConn {
 //
 // Unlike AnyDaemon this is repo-aware: it backs the board-driven desktop start
 // path (R9), where the caller names a repo and only some daemons have it.
-func (h *Hub) DaemonForRepo(repo string) *DaemonConn {
+func (h *Hub) DaemonForRepo(repo string, requirements ...HostSelection) *DaemonConn {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	ids := make([]string, 0, len(h.daemons))
 	for id, dc := range h.daemons {
-		if isHostDaemon(dc) {
+		if isHostDaemon(dc) && hostMatchesSelection(dc, requirements) {
 			ids = append(ids, id)
 		}
 	}
-	slices.Sort(ids)
+	sort.Slice(ids, func(i, j int) bool {
+		if len(requirements) > 0 {
+			a, b := hostEngineState(h.daemons[ids[i]], requirements[0]), hostEngineState(h.daemons[ids[j]], requirements[0])
+			if a != b {
+				return a == "available"
+			}
+		}
+		return ids[i] < ids[j]
+	})
 	for _, id := range ids {
 		if slices.Contains(h.daemons[id].CheckedOutRepos(), repo) {
 			return h.daemons[id]
@@ -894,22 +949,30 @@ func (h *Hub) DaemonForRepo(repo string) *DaemonConn {
 // Deterministic (lowest id), preferring one with the sandbox image unless the
 // caller asked for the bare host — the runtime resolveDaemonRuntime then
 // picks for it. nil when none is connected.
-func (h *Hub) DaemonForScratch(runtime string) *DaemonConn {
+func (h *Hub) DaemonForScratch(runtime string, requirements ...HostSelection) *DaemonConn {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	ids := make([]string, 0, len(h.daemons))
 	for id, dc := range h.daemons {
-		if isHostDaemon(dc) {
+		if isHostDaemon(dc) && hostMatchesSelection(dc, requirements) {
 			ids = append(ids, id)
 		}
 	}
 	if len(ids) == 0 {
 		return nil
 	}
-	slices.Sort(ids)
+	sort.Slice(ids, func(i, j int) bool {
+		if len(requirements) > 0 {
+			a, b := hostEngineState(h.daemons[ids[i]], requirements[0]), hostEngineState(h.daemons[ids[j]], requirements[0])
+			if a != b {
+				return a == "available"
+			}
+		}
+		return ids[i] < ids[j]
+	})
 	if runtime != runnerRuntimeDaemon {
 		for _, id := range ids {
-			if h.daemons[id].SandboxAvailable() {
+			if h.daemons[id].SandboxAvailable() && (len(requirements) == 0 || hostEngineState(h.daemons[id], requirements[0]) == hostEngineState(h.daemons[ids[0]], requirements[0])) {
 				return h.daemons[id]
 			}
 		}

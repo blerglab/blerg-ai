@@ -48,8 +48,13 @@ flowchart LR
 
 The three services share one login: core issues it, and the board and runner verify it. The
 board and runner never see a password. A page without a token goes to core's `/auth/refresh` for
-one at most once per page load (and three times in two minutes); when it can't get one, the runner
-says "Couldn't sign you in" with a Retry instead of showing an empty page. Agents authenticate with tokens core mints, scoped by a
+one at most once per page load (and three times in two minutes); when it can't get one, the board
+and runner say "Couldn't sign you in · Retry" instead of showing an empty page, and keep trying by
+themselves through the hidden-frame renewal (never a full-page redirect): when the network comes
+back, when the tab is shown, and after 5, 15, 30 and 60 seconds, then every two minutes while the tab
+is visible. A token takes the banner down with no reload. If core answers that the sign-in itself
+has ended (no refresh cookie, or its session expired or was revoked), the banner reads "Your sign-in
+has ended · Sign in" and stops trying; a core that does not answer is retried. Agents authenticate with tokens core mints, scoped by a
 preset, and a session gets a token of its own, valid for that session only and revoked when it
 ends.
 
@@ -68,6 +73,11 @@ How the local sandbox is hardened and what it mounts: [`install/desktop/DAEMON.m
 Changing the image sessions run in: [`sandbox-image.md`](sandbox-image.md).
 
 ## Engine adapters and catalogs
+
+Use the [feature inventory](features.md) to check application coverage and
+[Adding an engine](adding-an-engine.md) for adapter work, verification, and current abstraction
+limits. The [parity review](design/engine-parity-review.md) separates implemented extension
+points from proposed consolidation.
 
 Daemon `EngineSpec` entries own native process setup, credentials, model discovery and driver
 selection. Shared launch and recovery paths reject unknown engine names before preparing a

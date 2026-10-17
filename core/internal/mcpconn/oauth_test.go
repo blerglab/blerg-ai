@@ -29,18 +29,37 @@ const (
 	liveSid     = "00000000-0000-4000-8000-0000000000aa"
 )
 
+type oauthTestClock struct {
+	mu  sync.RWMutex
+	now time.Time
+}
+
+func (c *oauthTestClock) Now() time.Time { c.mu.RLock(); defer c.mu.RUnlock(); return c.now }
+func (c *oauthTestClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
 type oauthEnv struct {
-	svc  *mcpconn.Service
-	pool *pgxpool.Pool
-	as   *mcptest.Server
-	acct string
+	clock *oauthTestClock
+	svc   *mcpconn.Service
+	pool  *pgxpool.Pool
+	as    *mcptest.Server
+	acct  string
 }
 
 func loopbackPolicy() netguard.Policy {
 	return netguard.Policy{AllowHTTPHosts: []string{"127.0.0.1"}, AllowPrivateHosts: []string{"127.0.0.1"}}
 }
 
-func newOAuthEnv(t *testing.T) *oauthEnv {
+func newOAuthEnv(t *testing.T) *oauthEnv { return newOAuthEnvClock(t, nil) }
+
+func newOAuthEnvAt(t *testing.T, at time.Time) *oauthEnv {
+	return newOAuthEnvClock(t, &oauthTestClock{now: at})
+}
+
+func newOAuthEnvClock(t *testing.T, clock *oauthTestClock) *oauthEnv {
 	t.Helper()
 	pool := testPool(t)
 	backend, err := keybackend.NewLocal(bytes.Repeat([]byte{7}, 32))
@@ -49,9 +68,14 @@ func newOAuthEnv(t *testing.T) *oauthEnv {
 	}
 	as := mcptest.New()
 	t.Cleanup(as.Close)
+	var opts []mcpconn.Option
+	if clock != nil {
+		opts = append(opts, mcpconn.WithOAuthClock(clock.Now))
+	}
 	return &oauthEnv{
-		svc:  mcpconn.NewService(db.NewPgStore(pool), backend, loopbackPolicy()),
-		pool: pool, as: as, acct: newAccount(t, pool),
+		clock: clock,
+		svc:   mcpconn.NewService(db.NewPgStore(pool), backend, loopbackPolicy(), opts...),
+		pool:  pool, as: as, acct: newAccount(t, pool),
 	}
 }
 
@@ -646,15 +670,19 @@ func TestOAuthTransientRefreshFailureKeepsConnection(t *testing.T) {
 }
 
 func TestOAuthExpiredTokenAndTransientFailureIsUnavailable(t *testing.T) {
-	e := newOAuthEnv(t)
+	e := newOAuthEnvAt(t, time.Unix(1800000000, 0).UTC())
 	ctx := context.Background()
-	e.as.SetAccessTTL(1)
+	e.as.SetAccessTTL(30)
 	c := e.connect(t, "notes")
-	time.Sleep(1200 * time.Millisecond)
 	e.as.Lock()
 	e.as.RefreshStatus = 503
 	e.as.Unlock()
-	_, err := e.fetch(t, c.ID)
+	before, err := e.fetch(t, c.ID)
+	if err != nil || !strings.HasPrefix(before.Value, "Bearer at-") || before.ExpiresAt == nil || !before.ExpiresAt.Equal(e.clock.Now().Add(30*time.Second)) {
+		t.Fatalf("token not usable before expiry: %v", err)
+	}
+	e.clock.Advance(30 * time.Second)
+	_, err = e.fetch(t, c.ID)
 	if !errors.Is(err, mcpconn.ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent } from '@blerglab/chat'
-import { foldLive, type LiveReply } from './liveState'
+import { foldLive, isLiveTrigger, type LiveReply } from './liveState'
 
 const T0 = Date.parse('2026-10-15T10:00:00Z')
 const iso = (min: number) => new Date(T0 + min * 60_000).toISOString()
@@ -113,5 +113,107 @@ describe('foldLive', () => {
     expect(foldLive(r, [], T0 + 13 * HOUR).counts.running).toBe(0)
     // An update is a sign of life.
     expect(foldLive(r, [ev('subagent_update', { child_id: 'k1' }, 11, 10 * 60)], T0 + 13 * HOUR).subagents).toHaveLength(1)
+  })
+})
+
+
+it('folds child effort independently and clears stale effort on a model-only reroute', () => {
+  const start = ev('subagent_started', { child_id: 'effort', model: 'child', effort: 'low' }, 11)
+  const update = ev('subagent_update', { child_id: 'effort', effort: 'high' }, 12)
+  expect(foldLive(reply(), [start, update], T0).subagents[0].effort).toBe('high')
+  const partial = ev('subagent_update', { child_id: 'effort', model: 'child' }, 13)
+  expect(foldLive(reply(), [start, update, partial], T0).subagents[0].effort).toBe('high')
+  const unset = ev('subagent_update', { child_id: 'effort', effort: null }, 13)
+  expect(foldLive(reply(), [start, update, unset], T0).subagents[0].effort).toBe('')
+  const reset = ev('subagent_update', { child_id: 'effort', effort: '' }, 13)
+  expect(foldLive(reply(), [start, update, reset], T0).subagents[0].effort).toBe('')
+  const reroute = ev('subagent_update', { child_id: 'effort', model: 'other-child' }, 13)
+  expect(foldLive(reply(), [start, update, reroute], T0).subagents[0].effort).toBe('')
+})
+
+describe('foldLive: the checklist, the plan and the pins', () => {
+  const items = (...xs: [string, boolean][]) => xs.map(([text, done]) => ({ text, done }))
+  it('reads them from the reply', () => {
+    const v = foldLive(reply({
+      checklist: { items: items(['a', true], ['b', false]), event_id: 'c1', updated_at: iso(0) },
+      plan: { items: [{ text: 'x', status: 'in_progress', active: 'Doing x' }], updated_at: iso(0) },
+      tickets: [{ source: 'jira', key: 'A-1', title: 'T', status: 'Open', url: 'https://x.example/A-1', event_id: 't1', seq: 3, updated_at: iso(0) }],
+      ticket: { source: 'jira', key: 'A-1', title: 'T', status: 'Open', description: 'd', event_id: 't1', updated_at: iso(0) },
+    }), [], T0)
+    expect(v.checklist).toEqual({ items: items(['a', true], ['b', false]), eventId: 'c1', updatedAt: T0 })
+    expect(v.plan?.items[0].active).toBe('Doing x')
+    expect(v.tickets.map(t => t.key)).toEqual(['A-1'])
+    expect(v.ticket).toMatchObject({ key: 'A-1', description: 'd', eventId: 't1', updatedAt: T0 })
+  })
+
+  it('a reply without them (an older server) has none', () => {
+    const v = foldLive(reply(), [], T0)
+    expect([v.checklist, v.plan, v.tickets, v.ticket]).toEqual([null, null, [], null])
+  })
+
+  it('folds the events after the reply: the latest checklist wins, pins and unpins move the list', () => {
+    const v = foldLive(reply({
+      checklist: { items: items(['a', false]), event_id: 'c1', updated_at: iso(0) },
+      tickets: [{ source: 'jira', key: 'A-1', title: 'T', status: 'Open', url: '', event_id: 't1', seq: 3, updated_at: iso(0) }],
+      ticket: { source: 'jira', key: 'A-1', title: 'T', status: 'Open', event_id: 't1', updated_at: iso(0) },
+    }), [
+      ev('checklist', { items: items(['a', true]), op: 'tick', changed: { index: 1, text: 'a', done: true } }, 11),
+      ev('ticket', { action: 'pin', ticket: { source: 'github', key: '9', title: 'Nine' } }, 12),
+      ev('ticket', { action: 'unpin', ticket: { source: 'jira', key: 'A-1', title: 'T' } }, 13),
+    ], T0)
+    expect(v.checklist?.items[0].done).toBe(true)
+    expect(v.tickets.map(t => t.key)).toEqual(['9'])
+    expect(v.ticket?.key).toBe('9')
+    expect(foldLive(reply({ checklist: { items: items(['a', false]), event_id: 'c1', updated_at: iso(0) } }), [ev('checklist', { items: [], op: 'clear' }, 11)], T0).checklist).toBeNull()
+  })
+
+  it('a checklist, a pin and a main-agent task tool call bring a new read; a subagent\'s does not', () => {
+    expect(isLiveTrigger(ev('checklist', {}))).toBe(true)
+    expect(isLiveTrigger(ev('ticket', {}))).toBe(true)
+    expect(isLiveTrigger(ev('tool_call', { tool: 'TaskUpdate', call_id: 'u', input: {} }))).toBe(true)
+    expect(isLiveTrigger(ev('tool_call', { tool: 'TaskUpdate', call_id: 'u', input: {}, parent_call_id: 'A' }))).toBe(false)
+    expect(isLiveTrigger(ev('tool_call', { tool: 'Bash', call_id: 'b', input: {} }))).toBe(false)
+  })
+})
+
+describe('foldLive: MCP and checklist commits', () => {
+  const mcp = (status: string, settled: boolean, extra: object = {}) => ({
+    servers: [{ name: 'jira', status, source: 'user', tools: 3 }], settled, since: iso(0), engine: 'claude', ...extra,
+  })
+
+  it('reads the reply\'s snapshot, hold and the owner\'s right to release', () => {
+    const v = foldLive(reply({ mcp: mcp('pending', false), mcp_hold: { since: iso(0), until: iso(0.5) }, can_release_prompt: true }), [], T0)
+    expect(v.mcp?.servers[0].status).toBe('pending')
+    expect(v.mcpHold).toEqual({ since: T0, until: T0 + 30_000 })
+    expect(v.canReleasePrompt).toBe(true)
+    const none = foldLive(reply(), [], T0)
+    expect(none.mcp).toBeNull()
+    expect(none.mcpHold).toBeNull()
+    expect(none.canReleasePrompt).toBe(false)
+  })
+
+  it('a later mcp_status replaces the snapshot and ends the hold when it settles', () => {
+    const r = reply({ mcp: mcp('pending', false), mcp_hold: { since: iso(0), until: iso(0.5) } })
+    const held = ev('mcp_status', mcp('pending', false, { hold: { since: iso(0), until: iso(0.5) } }), 11)
+    expect(foldLive(r, [held], T0).mcpHold).not.toBeNull()
+    const done = ev('mcp_status', mcp('connected', true, { released: 'settled' }), 12)
+    const v = foldLive(r, [held, done], T0)
+    expect(v.mcp?.servers[0].status).toBe('connected')
+    expect(v.mcp?.released).toBe('settled')
+    expect(v.mcpHold).toBeNull()
+  })
+
+  it('mcp_status is a live trigger', () => {
+    expect(isLiveTrigger(ev('mcp_status', mcp('connected', true)))).toBe(true)
+  })
+
+  it('carries the checklist\'s commits and their pages through a fold', () => {
+    const r = reply({ checklist: { items: [{ text: 'a', done: true, commits: ['abcdef1'] }], event_id: 'c1', updated_at: iso(0), commit_urls: { abcdef1: 'https://forge.example.test/c/abcdef1' } } })
+    expect(foldLive(r, [], T0).checklist?.commitUrls).toEqual({ abcdef1: 'https://forge.example.test/c/abcdef1' })
+    const next = ev('checklist', { items: [{ text: 'a', done: true, commits: ['abcdef1', '1234567'] }], op: 'tick' }, 11)
+    const c = foldLive(r, [next], T0).checklist
+    expect(c?.items[0].commits).toEqual(['abcdef1', '1234567'])
+    // A commit the reply knew keeps its page; a newer one has none until the next read.
+    expect(c?.commitUrls).toEqual({ abcdef1: 'https://forge.example.test/c/abcdef1' })
   })
 })

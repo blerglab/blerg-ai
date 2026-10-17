@@ -284,10 +284,6 @@ func expectFor(rt authzRoute, class string) int {
 func TestAuthzRoutes(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	const daemonTok = "daemon-secret"
 	hub := NewHub()
 	if err := db.UpsertDaemon(ctx, pool, authzHubDaemonID, "authz-hub-daemon", "local", "/repos"); err != nil {

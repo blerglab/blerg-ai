@@ -40,11 +40,10 @@ func newStubRunner(t *testing.T) *stubRunner {
 		body, _ := io.ReadAll(r.Body)
 		s.mu.Lock()
 		s.seen = append(s.seen, recorded{
-			Method:  r.Method,
-			Path:    r.URL.RequestURI(),
-			Headers: r.Header.Clone(),
-			Body:    string(body),
-
+			Method:        r.Method,
+			Path:          r.URL.RequestURI(),
+			Headers:       r.Header.Clone(),
+			Body:          string(body),
 			ContentLength: r.ContentLength,
 		})
 		respond := s.respond
@@ -205,8 +204,6 @@ func TestRoutesForward(t *testing.T) {
 				if got.Headers.Get("Content-Type") != "text/plain" {
 					t.Fatalf("Content-Type = %q", got.Headers.Get("Content-Type"))
 				}
-				// The browser's declared size travels, so the runner can refuse a file
-				// over its limit before reading it.
 				if got.ContentLength != int64(len(tc.body)) {
 					t.Fatalf("runner Content-Length = %d, want %d", got.ContentLength, len(tc.body))
 				}
@@ -331,15 +328,29 @@ func TestAuthorizeSeesTheSessionID(t *testing.T) {
 	}
 }
 
-func TestModelIs501(t *testing.T) {
+func TestModelForwardsAuthorizedSettings(t *testing.T) {
 	runner := newStubRunner(t)
 	srv, _ := app(t, runner, allow)
-	resp := call(t, srv, "POST", "/blerg/sessions/s1/model", `{"model":"x","effort":"high"}`, nil)
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501", resp.StatusCode)
+	resp := call(t, srv, "POST", "/blerg/sessions/s1/model", `{"model":"gpt-example","effort":"high"}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("setter: %d", resp.StatusCode)
 	}
-	if got := runner.requests(); len(got) != 0 {
-		t.Fatalf("runner saw %d requests for the reserved route, want 0", len(got))
+	got := runner.only(t)
+	if got.Path != "/api/runner/sessions/s1/model" || got.Body != `{"effort":"high","model":"gpt-example"}` {
+		t.Fatalf("model forwarding: %+v", got)
+	}
+}
+
+func TestMessagePreservesReceiptIdentity(t *testing.T) {
+	runner := newStubRunner(t)
+	srv, _ := app(t, runner, allow)
+	resp := call(t, srv, "POST", "/blerg/sessions/s1/messages", `{"text":"Continue","client_id":"stable-client-id","source":"system"}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("message: %d", resp.StatusCode)
+	}
+	got := runner.only(t)
+	if !strings.Contains(got.Body, `"client_id":"stable-client-id"`) || strings.Contains(got.Body, `"source"`) {
+		t.Fatalf("receipt lost or forged source: %+v", got)
 	}
 }
 
@@ -614,6 +625,31 @@ func TestMessageSourceIsSentToTheRunner(t *testing.T) {
 	}
 }
 
+func TestModelRejectsEngineOrSessionOverrideAndMalformedSettings(t *testing.T) {
+	runner := newStubRunner(t)
+	srv, _ := app(t, runner, allow)
+	for _, body := range []string{`{}`, `{"model":"m","engine":"codex"}`, `{"model":"m","session_id":"other"}`, `{"effort":42}`, `{"model":"m"} {}`} {
+		response := call(t, srv, "POST", "/blerg/sessions/s1/model", body, nil)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid control %s: %d", body, response.StatusCode)
+		}
+	}
+	if len(runner.requests()) != 0 {
+		t.Fatal("invalid control reached runner")
+	}
+}
+
+func TestModelUsesAuthorizedMappedSessionID(t *testing.T) {
+	runner := newStubRunner(t)
+	srv := appWith(t, runner, Options{Authorize: func(_ *http.Request, id string) (bool, error) { return id == "app-row", nil }, Resolve: func(_ *http.Request, id string) (string, error) { return "native-session", nil }})
+	response := call(t, srv, "POST", "/blerg/sessions/app-row/model", `{"effort":"high"}`, nil)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || runner.only(t).Path != "/api/runner/sessions/native-session/model" {
+		t.Fatal("model control used wrong authority/identity")
+	}
+}
+
 // An upload the browser sent without a declared size goes on chunked, as it came;
 // a declared one arrives declared.
 func TestUploadsForwardTheDeclaredSize(t *testing.T) {
@@ -641,5 +677,56 @@ func TestUploadsForwardTheDeclaredSize(t *testing.T) {
 		if got := ContentLength(bad); got != -1 {
 			t.Errorf("ContentLength(%q) = %d, want -1", bad, got)
 		}
+	}
+}
+
+func TestPreferencesForwardTheSignedInAccount(t *testing.T) {
+	runner := newStubRunner(t)
+	client := &recordingClient{inner: &HTTPRunnerClient{BaseURL: runner.srv.URL, Token: token}}
+	mux := http.NewServeMux()
+	var sawSession = "unset"
+	MountWith(mux, "/blerg", client, Options{
+		Authorize: func(_ *http.Request, id string) (bool, error) { sawSession = id; return true, nil },
+		Account:   func(r *http.Request) string { return r.Header.Get("X-Test-Account") },
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	resp := call(t, srv, "GET", "/blerg/preferences", "", map[string]string{"X-Test-Account": "acct 1&x=2"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	got := runner.only(t)
+	if got.Method != "GET" || got.Path != "/api/runner/preferences?account=acct+1%26x%3D2" {
+		t.Errorf("runner saw %s %s", got.Method, got.Path)
+	}
+	if got.Headers.Get("Cookie") != "" || got.Headers.Get("Authorization") == "Bearer browser-token" {
+		t.Error("browser credentials reached the runner")
+	}
+	if sawSession != "" {
+		t.Errorf("Authorize saw session %q, want empty", sawSession)
+	}
+	// Nobody signed in to name: {} and the runner is not asked.
+	resp = call(t, srv, "GET", "/blerg/preferences", "", nil)
+	if body := readAll(t, resp.Body); resp.StatusCode != 200 || body != "{}" {
+		t.Errorf("no account: %d %q", resp.StatusCode, body)
+	}
+	if n := len(runner.requests()); n != 1 {
+		t.Errorf("runner saw %d requests, want 1", n)
+	}
+	// Only a read exists.
+	if resp := call(t, srv, "PUT", "/blerg/preferences", `{}`, nil); resp.StatusCode != http.StatusMethodNotAllowed && resp.StatusCode != http.StatusNotFound {
+		t.Errorf("PUT = %d", resp.StatusCode)
+	}
+}
+
+func TestPreferencesRefusedWhenNotAuthorized(t *testing.T) {
+	runner := newStubRunner(t)
+	srv, _ := app(t, runner, func(*http.Request, string) (bool, error) { return false, nil })
+	if resp := call(t, srv, "GET", "/blerg/preferences", "", nil); resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+	if len(runner.requests()) != 0 {
+		t.Error("runner contacted after a refusal")
 	}
 }

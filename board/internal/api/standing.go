@@ -250,7 +250,7 @@ func (a *API) runStandingAgent(ctx context.Context, agent db.StandingAgent, boar
 			return err
 		}
 		if ok {
-			if err := a.runner.Driver.Message(ctx, ext, standingAgentCardMessage(card), "blerg-board"); err != nil {
+			if err := a.messageOnRunner(ctx, board.ID, ext, standingAgentCardMessage(card), "blerg-board", ""); err != nil {
 				return fmt.Errorf("message persistent session: %w", err)
 			}
 			a.linkCardToStandingSession(ctx, card, ext, agent.Name)
@@ -302,11 +302,12 @@ func (a *API) spawnStandingSession(ctx context.Context, agent db.StandingAgent, 
 	// Routed through boardRoleModel so every spawn path reads its model from
 	// one place.
 	model := boardRoleModel(board, "standing")
-	extID, err := a.startOnRunner(ctx, board.ID, runner.StartRequest{
+	extID, configured, err := a.startOnRunnerConfigured(ctx, board.ID, runner.StartRequest{
 		Repo:        triggerCard.Repos[0],
 		Title:       title,
 		Prompt:      prompt,
 		Model:       model,
+		Effort:      boardRoleEffort(board, "standing"),
 		GitURL:      boardGitURL(board, triggerCard.Repos[0]),
 		Interaction: interactionForRole("standing"),
 		Env: map[string]string{
@@ -322,9 +323,9 @@ func (a *API) spawnStandingSession(ctx context.Context, agent db.StandingAgent, 
 	}
 	var rsID string
 	err = a.Pool.QueryRow(ctx, `
-		INSERT INTO runner_sessions (card_id, board_id, runner, external_session_id, lifecycle, role, standing_agent_id, model)
-		VALUES ($1,$2,$3,$4,'starting','standing',$5,$6) RETURNING id`,
-		cardID, board.ID, a.runner.Driver.Name(), extID, agent.ID, model).Scan(&rsID)
+		INSERT INTO runner_sessions (card_id, board_id, runner, external_session_id, lifecycle, role, standing_agent_id, model, engine, effort)
+		VALUES ($1,$2,$3,$4,'starting','standing',$5,$6,$7,$8) RETURNING id`,
+		cardID, board.ID, a.runner.Driver.Name(), extID, agent.ID, configured.Model, configured.Engine, configured.Effort).Scan(&rsID)
 	if err != nil {
 		return err
 	}

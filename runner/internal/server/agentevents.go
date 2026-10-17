@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -71,6 +72,43 @@ const (
 // the daemon, fan out to subscribed browsers, and apply side effects
 // (model/effort mirroring, status transitions).
 func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *DaemonConn, msg protocol.AgentEvent) {
+	if msg.Kind == protocol.PlanUpdatedKind {
+		plan, ok := protocol.DecodePlanUpdated(msg.Payload)
+		if !ok {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+		msg.Payload, _ = json.Marshal(plan)
+		msg.Transient = false
+	}
+	isBackground := msg.Kind == backgroundStartedKind || msg.Kind == backgroundDoneKind
+	isSubagent := msg.Kind == "subagent_started" || msg.Kind == "subagent_update" || msg.Kind == "subagent_done"
+	backgroundCount := 0
+
+	if isBackground {
+		var valid bool
+		msg.Payload, valid = backgroundTaskPayload(msg.Payload, dc.BackgroundTaskLifetime)
+		if !valid {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+		msg.Transient = false
+	}
+	if isSubagent {
+		var p map[string]json.RawMessage
+		if json.Unmarshal(msg.Payload, &p) != nil || p == nil {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+		var childID string
+		if json.Unmarshal(p["child_id"], &childID) != nil || !protocol.ValidBackgroundTaskID(childID) {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+		stripBackgroundTaskMarkers(p)
+		msg.Payload, _ = json.Marshal(p)
+		msg.Transient = false
+	}
 	if msg.Kind == protocol.CapabilitiesKind {
 		// Shown to users as-is: re-check it here rather than trusting the
 		// sender (see protocol.SanitizeCapabilities). A payload that isn't
@@ -87,6 +125,30 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 			return
 		}
 		msg.Payload = raw
+	}
+	if msg.Kind == protocol.MCPStatusKind {
+		var payload protocol.MCPStatusPayload
+		if json.Unmarshal(msg.Payload, &payload) != nil {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+		clean := protocol.SanitizeMCPStatus(payload)
+		if clean.Engine == "" || clean.Since == "" {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+		msg.Payload, _ = json.Marshal(clean)
+		msg.Transient = false // Inventory snapshots must be sanitized and durable, never raw deltas.
+	}
+	// Fence only the owning connection check and durable work append. Later
+	// acknowledgements, input settlement and notifications do not hold it.
+	unlockWork := func() {}
+	if isBackground || isSubagent {
+		unlockWork = h.lockDaemonWork(dc.ID)
+		defer unlockWork()
+		if current := h.GetDaemon(dc.ID); current != dc && (current != nil || dc.workRegistered) {
+			return
+		}
 	}
 	seq := msg.Seq
 	// Without a database every event counts as new; with one, only an event this call stored does.
@@ -108,7 +170,21 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		if !h.ingest.admit(msg.SessionID, msg.ClientEventID) {
 			return
 		}
-		s, fresh, err := appendAgentEvent(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), at)
+		var s int64
+		var fresh bool
+		var err error
+		switch {
+		case isBackground:
+			s, fresh, backgroundCount, err = db.AppendBackgroundTaskEventAt(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), at, dc.ID)
+		case isSubagent:
+			s, fresh, err = db.AppendSubagentEventAt(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), at, dc.ID)
+		default:
+			s, fresh, err = appendAgentEvent(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), at)
+		}
+		if errors.Is(err, db.ErrBackgroundTaskAuthority) {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
 		if err != nil {
 			log.Printf("agent_event append %s/%s: %v", msg.SessionID, msg.Kind, err)
 			h.ingest.failed(msg.SessionID, msg.ClientEventID, err)
@@ -116,6 +192,8 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		}
 		seq, inserted = s, fresh
 	}
+
+	unlockWork()
 
 	if err := settleSessionInput(ctx, pool, msg); err != nil {
 		h.ingest.failed(msg.SessionID, msg.ClientEventID, err)
@@ -185,23 +263,11 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 			h.starts.merge(msg.SessionID, p.Stages, true)
 		}
 	case backgroundStartedKind, backgroundDoneKind:
-		// The sessions list counts the tasks running, for a session nobody has open. Counted once
-		// per event: a re-sent one (already recorded) returned above.
-		if pool == nil {
-			break
+		if pool != nil {
+			h.BroadcastJSON(protocol.SessionBackgroundChanged{
+				Type: "session_background_changed", SessionID: msg.SessionID, BackgroundTasks: backgroundCount,
+			})
 		}
-		delta := 1
-		if msg.Kind == backgroundDoneKind {
-			delta = -1
-		}
-		n, err := db.AddSessionBackgroundTasks(ctx, pool, msg.SessionID, delta)
-		if err != nil {
-			log.Printf("agent background tasks %s: %v", msg.SessionID, err)
-			break
-		}
-		h.BroadcastJSON(protocol.SessionBackgroundChanged{
-			Type: "session_background_changed", SessionID: msg.SessionID, BackgroundTasks: n,
-		})
 	case turnDoneKind:
 		// A one-shot session (start with auto_stop) is over as soon as its
 		// first turn is recorded; every other session is untouched by this.

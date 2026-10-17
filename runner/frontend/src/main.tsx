@@ -4,6 +4,7 @@ import './index.css'
 import App from './App.tsx'
 import { consumeAccessTokenFromFragment, getAccessToken, startTokenRenewal } from './authClient'
 import { clearRefreshAttempted } from './refreshGuard'
+import { applyCodeColoursToPage } from './lib/codeColours'
 
 // Pick up an access token left in the URL fragment by GET /auth/refresh
 // before the app renders — see authClient.ts.
@@ -18,6 +19,9 @@ if (getAccessToken()) clearRefreshAttempted()
 // Keep the token fresh in the background so a request after ten minutes does not have to send the
 // page away to renew it.
 if (getAccessToken()) startTokenRenewal()
+
+// The last choice of code colours, before the first paint (the server's choice follows).
+applyCodeColoursToPage()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

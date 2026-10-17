@@ -8,7 +8,6 @@ package server
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -38,12 +37,12 @@ func newReconcileFixture(t *testing.T, status string) *reconcileFixture {
 
 	var mu sync.Mutex
 	hits := 0
-	recv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	recv, callbackURL := newWebhookReceiver(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		hits++
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 	t.Cleanup(recv.Close)
 
 	const daemonID = "00000000-0000-4000-8000-0000000000da"
@@ -57,8 +56,8 @@ func newReconcileFixture(t *testing.T, status string) *reconcileFixture {
 	if err := db.SetSessionPosture(ctx, pool, sessionID, "cluster", false); err != nil {
 		t.Fatal(err)
 	}
-	allowLoopbackDelivery(t, recv.URL+"/hook")
-	if err := db.SetSessionCallback(ctx, pool, sessionID, recv.URL+"/hook", ""); err != nil {
+	allowLoopbackDelivery(t, callbackURL)
+	if err := db.SetSessionCallback(ctx, pool, sessionID, callbackURL, ""); err != nil {
 		t.Fatal(err)
 	}
 	return &reconcileFixture{
@@ -88,6 +87,7 @@ func (f *reconcileFixture) waitForWebhook(t *testing.T, want int) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if f.hits() >= want {
+			waitForWebhookRecorded(t, f.pool, f.sessionID)
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -447,6 +447,7 @@ func TestClusterReconcilerRevokesSessionTokens(t *testing.T) {
 	if _, err := db.ValidateBoardToken(ctx, f.pool, token); err == nil {
 		t.Error("session token still valid after the session was finalised")
 	}
+	f.waitForWebhook(t, 1)
 }
 
 // The loop honours its context: cancelling it stops the reconciler.
@@ -459,6 +460,15 @@ func TestClusterReconcilerLoopStopsOnContextCancel(t *testing.T) {
 	go func() {
 		f.api.StartClusterJobReconciler(ctx, 10*time.Millisecond)
 		close(done)
+	}()
+
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("reconciler cleanup did not finish")
+		}
 	}()
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -477,4 +487,5 @@ func TestClusterReconcilerLoopStopsOnContextCancel(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("reconciler did not stop on context cancel")
 	}
+	f.waitForWebhook(t, 1)
 }

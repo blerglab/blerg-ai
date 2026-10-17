@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -31,9 +30,6 @@ func spawnTokenFixture(t *testing.T) (*API, *Hub, *DaemonConn, *pgxpool.Pool) {
 	t.Helper()
 	pool := connectSrvTestSchemaPool(t)
 	ctx := context.Background()
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "0d0d0d0d-0d0d-4d0d-8d0d-0d0d0d0d0d0d"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "laptop", "local", "/repos"); err != nil {
 		t.Fatalf("UpsertDaemon: %v", err)
@@ -46,26 +42,11 @@ func spawnTokenFixture(t *testing.T) (*API, *Hub, *DaemonConn, *pgxpool.Pool) {
 	return api, hub, dc, pool
 }
 
-// connectSrvTestSchemaPool is connectSrvTestDB + setupSrvTestSchema with the
-// schema pinned on EVERY connection of the pool (search_path as a connection
-// parameter), not only on the one that ran SET: a test whose work spans
-// goroutines (a daemon websocket's read pump) uses several connections, and
-// one of them landing in another schema made such tests flaky.
+// connectSrvTestSchemaPool retains the fixture entry point; every connection
+// addresses this test's private database and pinned nonpublic schema.
 func connectSrvTestSchemaPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	setup := connectSrvTestDB(t)
-	setupSrvTestSchema(t, setup)
-	cfg, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = "test_blerg_runner_srv"
-	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return connectSrvTestDB(t)
 }
 
 // spawnViaREST POSTs /api/sessions with a session.start token and returns the

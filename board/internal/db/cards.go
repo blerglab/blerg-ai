@@ -20,6 +20,7 @@ type Link struct {
 }
 
 type Card struct {
+	Effort      string          `json:"effort"`
 	ID          string          `json:"id"`
 	BoardID     string          `json:"board_id"`
 	Number      int             `json:"number"`
@@ -56,7 +57,7 @@ type Card struct {
 	Blockers []Blocker `json:"blockers"`
 }
 
-const cardCols = `id, board_id, number, column_id, type, title, body, priority, size, model,
+const cardCols = `id, board_id, number, column_id, type, title, body, priority, size, model, effort,
 	fields, dedup_key, external_id, rank, auto_merge, run_attempts, merged_sha,
 	to_char(merged_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(stuck_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
@@ -67,7 +68,7 @@ const cardCols = `id, board_id, number, column_id, type, title, body, priority, 
 func scanCard(row pgx.Row) (Card, error) {
 	var c Card
 	err := row.Scan(&c.ID, &c.BoardID, &c.Number, &c.ColumnID, &c.Type, &c.Title, &c.Body,
-		&c.Priority, &c.Size, &c.Model, &c.Fields, &c.DedupKey, &c.ExternalID, &c.Rank,
+		&c.Priority, &c.Size, &c.Model, &c.Effort, &c.Fields, &c.DedupKey, &c.ExternalID, &c.Rank,
 		&c.AutoMerge, &c.RunAttempts, &c.MergedSHA, &c.MergedAt, &c.StuckAt, &c.StaleAt,
 		&c.ArchivedAt, &c.Version, &c.GateFlag, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -79,6 +80,7 @@ func scanCard(row pgx.Row) (Card, error) {
 // CardParams is a create/update payload. Nil pointers mean "unchanged" on
 // update; on create, sensible defaults apply.
 type CardParams struct {
+	Effort     *string         `json:"effort"`
 	Type       *string         `json:"type"`
 	Title      *string         `json:"title"`
 	Body       *string         `json:"body"`
@@ -104,6 +106,9 @@ type CardParams struct {
 }
 
 func normalizeCardParams(p *CardParams) error {
+	if err := checkEffort("effort", p.Effort); err != nil {
+		return err
+	}
 	if p.Model != nil {
 		*p.Model = strings.TrimSpace(*p.Model)
 	}
@@ -429,11 +434,11 @@ func CreateCard(ctx context.Context, pool *pgxpool.Pool, boardID string, p CardP
 	}
 
 	card, err := scanCard(tx.QueryRow(ctx, `
-		INSERT INTO cards (board_id, number, column_id, type, title, body, priority, size, model,
+		INSERT INTO cards (board_id, number, column_id, type, title, body, priority, size, model, effort,
 			fields, dedup_key, external_id, rank)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		RETURNING `+cardCols,
-		boardID, number, columnID, typ, *p.Title, p.Body, priority, p.Size, deref(p.Model),
+		boardID, number, columnID, typ, *p.Title, p.Body, priority, p.Size, deref(p.Model), deref(p.Effort),
 		fields, emptyToNil(p.DedupKey), emptyToNil(p.ExternalID), rank))
 	if err != nil {
 		if isUniqueViolation(err, "cards_external_id_uidx") {
@@ -691,6 +696,9 @@ func changedFields(before Card, p CardParams) []string {
 	if p.Model != nil {
 		mark("model", *p.Model != before.Model)
 	}
+	if p.Effort != nil {
+		mark("effort", *p.Effort != before.Effort)
+	}
 	if p.AutoMerge != nil {
 		mark("auto_merge", *p.AutoMerge != before.AutoMerge)
 	}
@@ -792,6 +800,10 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	// actually changes. Only the collections need the extra reads, and only
 	// when the patch carries them.
 	before := card
+	if p.Model != nil && *p.Model != before.Model && p.Effort == nil {
+		empty := ""
+		p.Effort = &empty
+	}
 	if p.Repos != nil || p.Tags != nil || p.Links != nil || p.AddLinks != nil {
 		if err := loadCardExtras(ctx, tx, &before); err != nil {
 			return Card{}, err
@@ -834,6 +846,9 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	}
 	if p.Model != nil {
 		add("model", *p.Model)
+	}
+	if p.Effort != nil {
+		add("effort", *p.Effort)
 	}
 	if p.DedupKey != nil {
 		add("dedup_key", emptyToNil(p.DedupKey))
@@ -1091,7 +1106,7 @@ func ListCards(ctx context.Context, pool *pgxpool.Pool, boardID string, archived
 
 // cardColsC is cardCols with every column qualified by the alias "c" — kept
 // explicit rather than derived because to_char(...) expressions contain commas.
-const cardColsC = `c.id, c.board_id, c.number, c.column_id, c.type, c.title, c.body, c.priority, c.size, c.model,
+const cardColsC = `c.id, c.board_id, c.number, c.column_id, c.type, c.title, c.body, c.priority, c.size, c.model, c.effort,
 	c.fields, c.dedup_key, c.external_id, c.rank, c.auto_merge, c.run_attempts, c.merged_sha,
 	to_char(c.merged_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(c.stuck_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),

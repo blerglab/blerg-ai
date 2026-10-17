@@ -25,6 +25,7 @@ func TestLiveIndexMatchesTheKinds(t *testing.T) {
 	for _, k := range strings.Split(strings.Trim(db.LiveKindsSQL, "()"), ",") {
 		kinds = append(kinds, strings.Trim(strings.TrimSpace(k), "'"))
 	}
+	kinds = append(kinds, "mcp_status")
 	if !reflect.DeepEqual(kinds, livestate.Kinds) {
 		t.Errorf("LiveKindsSQL %v != livestate.Kinds %v", kinds, livestate.Kinds)
 	}
@@ -169,4 +170,71 @@ func TestLiveQueryUsesThePartialIndex(t *testing.T) {
 		t.Fatalf("ListLiveEvents = %d rows, %v; want 4000", len(got), err)
 	}
 	t.Logf("read 4000 live events of 100k in %v", time.Since(start))
+}
+
+func TestListLiveEventsLatestMCPStatusBoundedByCursor(t *testing.T) {
+	pool := reelTestPool(t)
+	sid := reelSession(t, pool)
+	for i := int64(1); i <= 50; i++ {
+		putEvent(t, pool, sid, i, "mcp_status", `{"engine":"claude"}`)
+	}
+	putEvent(t, pool, sid, 51, "turn_done", `{}`)
+	for _, through := range []int64{20, 50, 51} {
+		rows, err := db.ListLiveEvents(t.Context(), pool, sid, through)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, row := range rows {
+			if row.Kind == "mcp_status" {
+				count++
+				want := through
+				if want > 50 {
+					want = 50
+				}
+				if row.Seq != want {
+					t.Fatalf("snapshot seq %d want %d", row.Seq, want)
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatalf("snapshot count %d", count)
+		}
+	}
+	sql, err := os.ReadFile("migrations/056_mcp_status_latest_idx.sql")
+	if err != nil || !strings.Contains(string(sql), "WHERE kind = 'mcp_status'") || !strings.Contains(db.LatestMCPStatusSQL, "LIMIT 1") {
+		t.Fatalf("snapshot index/query: %v", err)
+	}
+}
+
+func TestLatestMCPStatusUsesBoundedPartialIndex(t *testing.T) {
+	pool := reelTestPool(t)
+	sid := reelSession(t, pool)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO agent_events(session_id,seq,client_event_id,kind,payload)
+ SELECT $1,g,gen_random_uuid(),CASE WHEN g % 5=0 THEN 'mcp_status' ELSE 'tool_result' END,'{}'::jsonb FROM generate_series(1,10000) g`, sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `ANALYZE agent_events`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pool.Query(t.Context(), `EXPLAIN `+db.LatestMCPStatusSQL, sid, int64(10000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(plan, "\n")
+	if !strings.Contains(joined, "agent_events_latest_mcp_status_idx") || !strings.Contains(joined, "Limit") || strings.Contains(joined, "Sort") {
+		t.Fatalf("snapshot must use newest-first bounded index:\n%s", joined)
+	}
 }

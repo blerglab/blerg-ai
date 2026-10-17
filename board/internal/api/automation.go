@@ -18,7 +18,7 @@ import (
 // Every session blerg-board starts — Run board's dispatcher, the quiet-worker
 // respawn, reviewer and conflict-worker spawns, standing agents, AND the ones
 // a human asks for from the UI (card Run/Discuss, board chat) — reaches the
-// runner through one call, startOnRunner. Before this, that call carried the
+// runner through one call, startOnRunnerConfigured. Before this, that call carried the
 // shared BLERG_RUNNER_KEY, a credential with no account behind it, so a
 // cluster session could only use the operator's shared engine credential —
 // which a self-service install deliberately does not have, and the session
@@ -136,10 +136,10 @@ func (a *API) startIdentity(ctx context.Context, boardID string) (token, engine 
 	return ba.Token, ba.Engine, nil
 }
 
-// modelForEngine drops a Claude model name when the session runs another
-// engine. Board models are Claude model ids ("claude-opus-5"); handed to
-// codex or hermes as --model they would fail the session outright, where
-// sending none lets that engine use its own configured default.
+// modelForEngine is a compatibility repair for boards saved before engine
+// changes invalidated future model/effort settings. Old Claude defaults must
+// not become another engine's CLI arguments. New engine changes clear all
+// future overrides transactionally, without guessing from model prefixes.
 func modelForEngine(engine, model string) string {
 	if engine != "" && engine != db.EngineClaude && strings.HasPrefix(model, "claude") {
 		return ""
@@ -147,16 +147,23 @@ func modelForEngine(engine, model string) string {
 	return model
 }
 
-// startOnRunner is the ONE way blerg-board starts a runner session: it
-// resolves the board's automation identity and makes the start under it.
-func (a *API) startOnRunner(ctx context.Context, boardID string, req runner.StartRequest) (string, error) {
+// startOnRunnerConfigured is the shared launch entry: it resolves current
+// automation authority and returns the settings actually sent to the runner.
+// Credentials are removed from that metadata before it is returned.
+func (a *API) startOnRunnerConfigured(ctx context.Context, boardID string, req runner.StartRequest) (string, runner.StartRequest, error) {
 	token, engine, err := a.startIdentity(ctx, boardID)
 	if err != nil {
-		return "", err
+		return "", runner.StartRequest{}, err
 	}
 	req.Token, req.Engine = token, engine
-	req.Model = modelForEngine(engine, req.Model)
-	return a.runner.Driver.Start(ctx, req)
+	model := modelForEngine(engine, req.Model)
+	if model != req.Model {
+		req.Effort = ""
+	}
+	req.Model = model
+	id, err := a.runner.Driver.Start(ctx, req)
+	req.Token = "" // never return authority as launch metadata
+	return id, req, err
 }
 
 // writeStartError answers a failed start for a human-facing endpoint: a

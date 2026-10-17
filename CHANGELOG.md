@@ -8,6 +8,138 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
+### Upgrade notes
+- Desktop: reinstall the daemon (`./daemon/install.sh install`). 0.3.0 needs it for opening session
+  files, MCP connection tracking and the first-message wait, Codex plan updates, background-task
+  reconciliation, child effort reporting, the shared command guidance for Codex sessions, and the
+  session guide lines that ask agents to pin their ticket, keep a checklist and publish diffs. The
+  `blerg-runner` CLI itself updates with the checkout and works under an older guide; until the
+  reinstall, the panel simply has less to show.
+- Runner: migrations 053 to 058 (cron engine, latest capabilities, checklist/ticket/plan and MCP-status
+  indexes on `agent_events`, `account_preferences`) run when the server starts. No manual step.
+- Chat package: `@blerglab/chat` is now 0.17.1. An app that embeds it takes the new version from the
+  runner's manifest and installs it ([Install](packages/chat/README.md#install)); ChatView's
+  `onViewCommitDiff` (0.15.0) is removed, and a side panel that drew checklist "View diff" passes
+  `onViewDiff(artifactId)` instead. A proxy that serves the board's chat may add the optional
+  `GET {prefix}/preferences` route for code colors.
+- Contributors: Go database tests need a Postgres user with CREATEDB
+  ([CONTRIBUTING.md](CONTRIBUTING.md)).
+- New optional setting: `BLERG_RUNNER_MCP_PROMPT_WAIT_S` (default 30; 0 turns the first-message wait off).
+
+### Added
+- Chat (`@blerglab/chat` 0.12.0 to 0.17.1, now 0.17.1):
+  - Code blocks are syntax-colored (a lazily loaded highlighter; diff lines colored) and, over 25
+    lines, show 15 with Show all and an Open viewer with line numbers; a pasted message over 25 lines
+    compacts the same way. Markdown, text, code, JSON, CSV and PDF files get small inline previews
+    (size-capped, fetched when scrolled into view). (0.12.0)
+  - `checklist` rows and `ticket` cards in the transcript; the checklist, the engine's plan and the
+    pinned tickets in `LiveState`. (0.13.0)
+  - Code color themes: `codeThemes`, `applyCodeColours` and friends, and six new code tokens
+    (variable, built-in, operator, text, background, line numbers). (0.14.0)
+  - MCP and checklist commits: `slots.aboveComposer`, `commitUrl`, `McpHoldLine`, `CommitChips`,
+    `mcp_status` helpers. (0.15.0)
+  - Diffs and file links: `DiffView`, the `diff` view, `parsePatch` and friends; `canOpenWorkspaceFiles`,
+    `files.workspaceFile`, `workspaceFromCode`/`workspaceFromHref`. (0.16.0)
+  - Rich copy and paste: every message has a Copy button that copies its Markdown source and its
+    rendered HTML; selecting text in the chat and copying keeps headings, lists, links, tables and code
+    as Markdown plus sanitized HTML (card chrome left out); and pasting rich HTML into the message box
+    inserts it as Markdown (code language kept, images and scripts dropped), with Ctrl/Cmd+Shift+V
+    still pasting plain text, as does a very large or deeply nested paste. See [Copying and pasting](docs/talking-to-an-agent.md#copying-and-pasting).
+    (0.17.0)
+- Diffs. `blerg-runner diff [<range> | <commit>... | --staged | --worktree] [--title T] [-- <paths>]`
+  runs git in the session's folder (hooks, filters, external diff tools and text conversions of the
+  repository never run) and publishes the patch as `<title>.diff`; `.diff` and `.patch` files get the
+  view `diff`, a card that says "N files · +a −d" with the first names, and a diff viewer (file list,
+  unified or side by side, line numbers, folded context, the code colors, Copy patch). The session
+  guide names the command. See [Diffs](docs/artifacts.md#diffs).
+- Clickable file links in the chat. A relative link or a path in inline code in the agent's text
+  (`README.md`, `src/a.go:120`, `docs/a.md#L12`) opens that file from the session's folder in the
+  viewer, scrolled to and marking the line when one was named, with Copy path, Download and
+  **Save a copy to Files**. Only human session owners (and administrators, for sessions that are not
+  private) can open these files, through the daemon, with traversal, symlink, file-identity and
+  secret-file protections. See [Files the agent mentions](docs/talking-to-an-agent.md#files-the-agent-mentions).
+- Settings. A **Settings** entry under Insights in the left bar (a tab on a phone) opens a dialog over
+  the current page; it holds Show thinking and Compact tool calls, which left the session panel (same
+  per-browser keys, so earlier choices carry over), the code colors below, and a link to Blerg's main
+  Settings. The session panel's Settings section is gone; **Resume when limit resets**, which belongs to
+  one session, sits in its Session section.
+- Code colors. Settings has a **Code colors** section with ten themes
+  (Blerg, GitHub Dark and Light, One Dark, Dracula, Monokai, Solarized Dark and Light, Nord, Gruvbox
+  Dark), one for dark mode and one for light, per-color changes under Customize, and a live preview of
+  real code blocks (ts, go, python, json, diff). The choice is kept per account on the runner
+  (`GET`/`PUT /api/me/preferences`, migration 057 `account_preferences`) and cached in the browser. The
+  chat's code blocks, viewer and file previews wear it, in the runner and in the board (which reads it
+  through its chat proxy, `GET /api/chat/preferences`, and the runner's `GET /api/runner/preferences`;
+  the board has no editor).
+- The session checklist and pinned tickets. `blerg-runner checklist set|add|tick|untick|clear` keeps
+  a checklist of the session's work; `blerg-runner pin <file.json>` pins a ticket from any tracker
+  (JIRA, Bugzilla, GitHub, GitLab, Linear, a Board card, …) in one source-neutral shape, and
+  `blerg-runner unpin` takes it off. The chat draws a compact checklist row and a ticket card (a re-pin
+  says what changed); the session panel shows them above the engine's own plan. `checklist tick|add
+  --commit <sha>` names the commits that finished an item (a commit chip per item, linked when the
+  repository is known) and also publishes the diff of those commits; the chip gets **View diff**. New
+  routes `POST /api/sessions/{id}/checklist` and `/tickets` (the session's own token); `GET /live` gains
+  `checklist`, `plan`, `tickets` and `ticket`. Migration 055 adds three partial indexes on
+  `agent_events`. Pinning copies the ticket's text into the session.
+- Engine plans in the session panel. Claude Code's own task list and Codex's native plan updates both
+  appear as **Plan** when the agent set no checklist.
+- MCP servers in the session panel and **Send now**. Claude and Codex MCP connection state is tracked
+  natively, with durable live snapshots. The Live tab gains an **MCP servers** line ("Connecting 2 of
+  3…", then "2 connected · 1 failed · 1 needs sign-in") that opens to each server's state, source and
+  tools; the first message is held for up to 30 seconds while the servers connect, the chat shows
+  "Waiting for MCP servers before sending your first message · 0:12 / 0:30 · Send now" above the
+  message box, and the session's owner can send it at once (a `release_held_prompt` message; `GET
+  /live` gains `can_release_prompt`).
+- Reported child configured effort in chat, Live and Insights, with explicit unknown values.
+- Adapter-specific tool-definition refresh guidance in capabilities and tool-change review.
+- Target-scoped engine/model/effort discovery for browser, REST and MCP callers, including
+  existing-session catalogs and dynamic launch, cron and Board engine choices.
+- Board role/card effort settings, effective native session metadata and backend-qualified
+  recovery; engine changes clear future-launch overrides while preserving existing sessions.
+- Published artifact links can open the chat viewer directly through a trusted session mapping.
+
+### Changed
+- The session panel has a **Plan** tab (Live, Plan, History, Files, Capabilities): pinned tickets,
+  the checklist or the engine's plan, and the session's published diffs move there, and Live keeps one
+  summary line ("Checklist · 18 of 23 · Next: ...") that opens it, so a long checklist no longer pushes
+  Needs you and Running now off screen. The tab shows only when there is something for it.
+- Go test suites run packages in parallel with isolated template-backed PostgreSQL fixtures and
+  shorter injected test waits (the runner suite takes about 3 minutes, down from about 10); database
+  test users need CREATEDB. Fixtures safely clean abandoned helper databases; OAuth, Codex timeout and
+  webhook tests use controlled clocks and wait for asynchronous work before teardown. Stale Claude
+  idle timers no longer close a newly rearmed idle window.
+- Agent-facing launch guidance uses target-scoped engine/model discovery instead of unscoped catalogs.
+- Engine integration metadata, customization roots, managed credential access modes and
+  restriction/limit capabilities use shared registries with explicit adapter boundaries.
+- REST/MCP and embedded proxies share model controls and optional durable message IDs.
+
+### Fixed
+- The "Couldn't sign you in · Retry" banner on the board and runner heals itself. After a power cut
+  or an outage it used to stay until the person pressed Retry; it now tries the quiet hidden-frame
+  renewal when the network comes back, when the tab is shown, and on a 5 s, 15 s, 30 s, 60 s, then
+  two-minute backoff (paused while the tab is hidden, one attempt at a time), and a token takes it
+  down with no page reload (the runner reconnects, the board reloads its data). When core answers
+  that the sign-in has ended, the banner says "Your sign-in has ended · Sign in" and stops trying;
+  for that core now sends a renewal frame whose sign-in is gone back to the page's own
+  `/silent-refresh.html` with `#signin_error=<reason>` instead of to its login page. Automatic
+  full-page redirects to `/auth/refresh` stay bounded exactly as before.
+- A long checklist item wraps beside its box instead of dropping the whole text onto the next line.
+- The session panel's "Resume when limit resets" checkbox keeps its status line under it in muted
+  text.
+- Codex terminal and recovered sessions receive the shared Blerg command guidance without overwriting
+  user instructions.
+- Orphaned background tasks close after daemon restarts, with atomic running counts and compatible
+  live-task inventory; reconciliation does not block unrelated daemons.
+- Usage caps without a reported reset use neutral wording instead of inferring a monetary spend limit.
+- Root model usage attribution uses native usage identities/reports and validated partitions; ambiguous
+  model-switch usage remains unknown, and partitions preserve a single logical turn count.
+- Codex custom-home detection, transient background inventory recovery, capability model
+  refresh and root/subagent model-reroute reporting. Newer manual settings retain priority.
+- Insights attributes child usage to observed effective models without double counting.
+- Scoped launch/recovery validation and Board session recovery/control handling.
+
 ## [0.2.1] - 2026-10-16
 
 ### Upgrade notes
@@ -946,7 +1078,8 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/blerglab/blerg-ai/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/blerglab/blerg-ai/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/blerglab/blerg-ai/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/blerglab/blerg-ai/compare/v0.1.1...v0.1.2

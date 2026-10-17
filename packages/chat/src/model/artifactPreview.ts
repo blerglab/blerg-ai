@@ -3,7 +3,13 @@
 // session and file); a video or audio file gets a play tile and is not fetched until it is
 // opened, since a first frame would cost the whole file; an HTML page is drawn small, in the same
 // sandbox the viewer uses (components/ArtifactCard.tsx), and opens in the viewer to be used.
+// Markdown, text and code, JSON and tables show a short excerpt; a PDF shows its first page.
+// All of these are gated by the size the list reports, so nothing big is ever fetched for a
+// preview, and only the small result (an excerpt, a thumbnail) is kept, in a bounded cache.
 import { TEXT_VIEW_MAX, blobTypeFor } from './artifactViews'
+import { excerptOf, type Excerpt } from './previewExcerpt'
+import { patchSummary, type PatchSummary } from './patch'
+import { renderPdfThumb } from '../pdf/thumb'
 
 /** An image over this size keeps the plain card: the transcript is not a download manager. */
 export const INLINE_IMAGE_MAX = 10 * 1024 * 1024
@@ -15,12 +21,27 @@ export const INLINE_HTML_MAX = TEXT_VIEW_MAX
  *  desktop-width page, so what is shown small is what the viewer shows large. */
 export const HTML_PREVIEW_PAGE = { width: 1024, height: 640 }
 
-export type PreviewKind = 'image' | 'media' | 'html'
+/** Text-like files preview only up to this size (they are read whole to cut the excerpt). */
+export const INLINE_TEXT_MAX = 256 * 1024
+
+/** A PDF previews only up to this size (its first page is drawn, then the document is released). */
+export const INLINE_PDF_MAX = 5 * 1024 * 1024
+
+export type PreviewKind = 'image' | 'media' | 'html' | 'markdown' | 'text' | 'csv' | 'pdf' | 'diff'
+
+/** The kinds drawn as an excerpt of the file's text. */
+export const EXCERPT_KINDS: ReadonlySet<PreviewKind> = new Set(['markdown', 'text', 'csv'])
 
 export function previewKind(view: string, size: number): PreviewKind | null {
   if (view === 'image') return size <= INLINE_IMAGE_MAX ? 'image' : null
   if (view === 'video' || view === 'audio') return 'media'
   if (view === 'html') return size <= INLINE_HTML_MAX ? 'html' : null
+  if (view === 'markdown') return size <= INLINE_TEXT_MAX ? 'markdown' : null
+  if (view === 'text' || view === 'json') return size <= INLINE_TEXT_MAX ? 'text' : null
+  if (view === 'csv') return size <= INLINE_TEXT_MAX ? 'csv' : null
+  if (view === 'pdf') return size <= INLINE_PDF_MAX ? 'pdf' : null
+  // A larger patch keeps the plain card (its name and size): it is not read for a count.
+  if (view === 'diff') return size <= INLINE_TEXT_MAX ? 'diff' : null
   return null
 }
 
@@ -50,17 +71,57 @@ export function loadPreviewUrl(
 
 const textCache = new Map<string, Promise<string>>()
 
-/** The source of an HTML page, fetched once per session and file through `raw`. A failed fetch
- *  is forgotten so a retry can work. */
+/** The source of an HTML page, fetched once per session and file through `raw` (bounded like the
+ *  other small caches). A failed fetch is forgotten so a retry can work. */
 export function loadPreviewText(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>): Promise<string> {
-  const key = `${sessionId}/${artifactId}`
-  let p = textCache.get(key)
-  if (!p) {
-    p = raw(artifactId).then(b => b.text())
-    p.catch(() => textCache.delete(key))
-    textCache.set(key, p)
+  return remember(textCache, `${sessionId}/${artifactId}`, async () => (await raw(artifactId)).text())
+}
+
+// The small results of the text and PDF previews, at most this many at a time (oldest out first).
+const SMALL_MAX = 50
+
+function remember<T>(map: Map<string, Promise<T>>, key: string, make: () => Promise<T>): Promise<T> {
+  const hit = map.get(key)
+  if (hit) {
+    map.delete(key) // most recently used last
+    map.set(key, hit)
+    return hit
   }
+  const p = make()
+  p.catch(() => map.delete(key))
+  map.set(key, p)
+  if (map.size > SMALL_MAX) map.delete(map.keys().next().value as string)
   return p
+}
+
+const excerpts = new Map<string, Promise<Excerpt>>()
+
+/** The excerpt of a markdown, text, JSON or CSV file, fetched once per session and file. The file
+ *  is read whole (it is at most INLINE_TEXT_MAX, by previewKind) but only the excerpt is kept. */
+export function loadPreviewExcerpt(
+  sessionId: string,
+  artifact: { id: string; name: string; view: string; content_type: string },
+  raw: (id: string) => Promise<Blob>,
+): Promise<Excerpt> {
+  return remember(excerpts, `${sessionId}/${artifact.id}`, async () => {
+    const text = await (await raw(artifact.id)).text()
+    return excerptOf(artifact.view, artifact.name, artifact.content_type, text)
+  })
+}
+
+const diffs = new Map<string, Promise<PatchSummary>>()
+
+/** What a diff's card says (files, +/−, the first names), read once per session and file. The
+ *  patch is read whole (at most INLINE_TEXT_MAX, by previewKind) but only the summary is kept. */
+export function loadDiffSummary(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>): Promise<PatchSummary> {
+  return remember(diffs, `${sessionId}/${artifactId}`, async () => patchSummary(await (await raw(artifactId)).text()))
+}
+
+const thumbs = new Map<string, Promise<string>>()
+
+/** The first page of a PDF as a small picture (a data URL), made once per session and file. */
+export function loadPdfThumb(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>): Promise<string> {
+  return remember(thumbs, `${sessionId}/${artifactId}`, async () => renderPdfThumb(await raw(artifactId)))
 }
 
 /** Forgets every cached preview (tests, or a page that leaves the session). */
@@ -68,4 +129,7 @@ export function clearPreviewCache(): void {
   for (const p of cache.values()) p.then(u => URL.revokeObjectURL(u)).catch(() => {})
   cache.clear()
   textCache.clear()
+  excerpts.clear()
+  diffs.clear()
+  thumbs.clear()
 }

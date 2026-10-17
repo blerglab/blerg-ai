@@ -16,10 +16,6 @@ import (
 func TestSetSessionStatus_CarriesStoredUnread(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000051"
 	sessionID := "00000000-0000-0000-0000-000000000052"

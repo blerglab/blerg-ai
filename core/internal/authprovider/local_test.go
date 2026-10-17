@@ -3,11 +3,9 @@ package authprovider_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,69 +15,18 @@ import (
 
 	"github.com/blerglab/blerg-ai/core/internal/authprovider"
 	"github.com/blerglab/blerg-ai/core/internal/db"
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 )
 
-// testSchema is a fixed schema name reused (dropped+recreated) by every test
-// in this package; tests here don't run in parallel with each other, so one
-// name is enough.
-const testSchema = "test_blerg_core_authprovider"
-
-// testPool connects to DATABASE_URL and gives the caller a fresh, isolated
-// schema, dropped and recreated before the test and dropped again on
-// cleanup. Schema isolation (rather than a plain "SET search_path", which
-// only affects the one pgxpool connection it runs on) is required because
-// core's identity/authprovider tests otherwise share one live Postgres
-// database with no per-row cleanup — see the identical helper and comment
-// in core/internal/identity/accounts_test.go, and
-// runner/internal/db/ticket_graph_test.go's connectWithSchema, which
-// established this pattern in the monorepo.
+// testPool provides a fresh database cloned from the migrated package template.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-	ctx := context.Background()
-
-	setupPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", testSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("drop schema: %v", err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA %s", testSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("create schema: %v", err)
-	}
-	setupPool.Close()
-
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = testSchema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		bg := context.Background()
-		pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", testSchema))
-		pool.Close()
-	})
-
-	return pool
+	return testsupport.Pool(t, db.Migrate)
 }
 
 func freshStore(t *testing.T) (*pgxpool.Pool, db.Store) {
 	t.Helper()
 	pool := testPool(t)
-	ctx := context.Background()
-	if err := db.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
 	return pool, db.NewPgStore(pool)
 }
 

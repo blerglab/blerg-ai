@@ -4,11 +4,13 @@ import { refreshReturnUrl } from './refreshGuard'
 // vi.mock factories are hoisted above top-level const declarations, so the
 // spies themselves must be created inside vi.hoisted to be visible in the
 // factory below.
-const { redirectToRefresh, ensureFreshToken, getAccessToken, consumeAccessTokenFromFragment } = vi.hoisted(() => ({
+const { redirectToRefresh, ensureFreshToken, getAccessToken, consumeAccessTokenFromFragment, renewSilently, startTokenRenewal } = vi.hoisted(() => ({
   redirectToRefresh: vi.fn(),
   ensureFreshToken: vi.fn<() => Promise<boolean>>(),
   getAccessToken: vi.fn<() => string | null>(),
   consumeAccessTokenFromFragment: vi.fn(),
+  renewSilently: vi.fn<() => Promise<'token' | 'signed-out' | 'no-answer'>>(),
+  startTokenRenewal: vi.fn(),
 }))
 
 vi.mock('./authClient', () => ({
@@ -16,6 +18,8 @@ vi.mock('./authClient', () => ({
   ensureFreshToken,
   getAccessToken,
   consumeAccessTokenFromFragment,
+  renewSilently,
+  startTokenRenewal,
 }))
 
 // A minimal fake WebSocket: ws.ts only touches onopen/onclose/onmessage/onerror,
@@ -62,6 +66,8 @@ describe('ws.ts', () => {
     ensureFreshToken.mockResolvedValue(false)
     getAccessToken.mockReset()
     consumeAccessTokenFromFragment.mockReset()
+    renewSilently.mockReset()
+    renewSilently.mockResolvedValue('no-answer')
     FakeWebSocket.instances = []
     vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket)
     sessionStorage.clear()
@@ -184,5 +190,37 @@ describe('ws.ts', () => {
     const { signInStuck } = await import('./signIn')
     expect(redirectToRefresh).toHaveBeenCalledTimes(MAX_ATTEMPTS)
     expect(signInStuck()).toBe(true)
+  })
+
+  it('the banner from a spent bounce heals itself: a quiet retry gets a token and the socket connects', async () => {
+    vi.useFakeTimers()
+    sessionStorage.setItem('blerg_refresh_attempted', '1')
+    window.history.replaceState(null, '', '/sessions#blerg_refresh_return')
+    getAccessToken.mockReturnValue(null)
+
+    await import('./ws')
+    const { signInStuck } = await import('./signIn')
+    expect(signInStuck()).toBe(true)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+
+    // core still unreachable at the first timed attempt
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(signInStuck()).toBe(true)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+
+    // core answers at the next timed attempt (no online event, no visibility change: only the
+    // retry itself can bring the socket up)
+    const tok = UNEXPIRED_TOKEN()
+    renewSilently.mockImplementation(async () => {
+      getAccessToken.mockReturnValue(tok)
+      return 'token'
+    })
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(renewSilently).toHaveBeenCalledTimes(2)
+    expect(signInStuck()).toBe(false)
+    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+    expect(ws.protocols).toEqual(['bearer', tok])
+    expect(redirectToRefresh).not.toHaveBeenCalled()
+    vi.useRealTimers()
   })
 })

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/blerglab/blerg-ai/board/internal/runner"
@@ -53,6 +54,19 @@ func TestSessionIDFromLabel(t *testing.T) {
 	for label, want := range cases {
 		if got := sessionIDFromLabel(label); got != want {
 			t.Fatalf("sessionIDFromLabel(%q) = %q, want %q", label, got, want)
+		}
+	}
+}
+
+func TestModelNamesPreserveEngineQualifiedAndContextSuffixes(t *testing.T) {
+	for _, model := range []string{"claude-opus-5[1m]", "provider/" + strings.Repeat("m", 80), "codex-model"} {
+		if !modelNameRe.MatchString(model) {
+			t.Errorf("valid opaque model rejected: %q", model)
+		}
+	}
+	for _, model := range []string{"--flag", "model name", strings.Repeat("x", 129), "model\nsecret"} {
+		if modelNameRe.MatchString(model) {
+			t.Errorf("unsafe model accepted: %q", model)
 		}
 	}
 }

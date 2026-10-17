@@ -411,7 +411,7 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 		}
 		// The repository is not there (not created, or not visible to this
 		// token): start in an empty one that pushes to where it should be.
-		log.Printf("runner: new repository: clone failed after %d attempt(s); initialising an empty repository", attempts)
+		log.Printf("runner: new repository: clone failed after %d attempt(s); initializing an empty repository", attempts)
 		if err := initNewRepo(cfg, workDir, cloneURL); err != nil {
 			return "", "", err
 		}
@@ -585,7 +585,7 @@ func Run(ctx context.Context, cfg Config) error {
 	activity := newIdleTracker()
 	var credentialSource daemon.EngineCredentialSource
 	if cfg.ManagedCredential {
-		credentialSource = daemon.ManagedEngineCredentialSource(cfg.ServerHTTP, cfg.DaemonToken)
+		credentialSource = daemon.ManagedEngineCredentialSource(cfg.ServerHTTP, cfg.DaemonToken, cfg.Engine)
 	}
 	host := daemon.NewAgentHost(client, daemon.AgentHostConfig{
 		CredentialSource: credentialSource,
@@ -607,6 +607,9 @@ func Run(ctx context.Context, cfg Config) error {
 		},
 	})
 
+	// AgentHost owns independent session contexts and native processes. Close
+	// them on every return path, including startup failure and pod cancellation.
+	defer host.Kill(cfg.SessionID)
 	client.OnMessage("agent_event_ack", func(raw []byte) {
 		var msg protocol.AgentEventAck
 		if json.Unmarshal(raw, &msg) == nil {
@@ -635,11 +638,23 @@ func Run(ctx context.Context, cfg Config) error {
 			host.Interrupt(msg.SessionID)
 		}
 	})
+	client.OnMessage("release_held_prompt", func(raw []byte) {
+		var msg protocol.ReleaseHeldPrompt
+		if json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
+			host.ReleaseHeldPrompt(msg.SessionID)
+		}
+	})
 	client.OnMessage("kill_session", func(raw []byte) {
 		var msg protocol.KillSession
 		if json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
 			host.Kill(msg.SessionID)
 			close(killed)
+		}
+	})
+	client.OnMessage("read_workspace_file", func(raw []byte) {
+		var msg protocol.ReadWorkspaceFile
+		if json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
+			host.ReadWorkspaceFile(msg)
 		}
 	})
 	// Start stage reports queue until the connection allows them; each
@@ -720,7 +735,7 @@ func Run(ctx context.Context, cfg Config) error {
 		// folds to a green check) says what the workspace is instead, and the
 		// agent's first prompt says what that means for pushing.
 		stages.report(protocol.StartStage{ID: protocol.StageClone, State: protocol.StageStateWarning,
-			Detail: "Initialised an empty repository — no remote yet"})
+			Detail: "Initialized an empty repository — no remote yet"})
 		cfg.InitialPrompt = newRepoNote(cfg.Repo, gitprovider.RedactURL(cfg.GitURL)) + cfg.InitialPrompt
 		var once sync.Once
 		pushProblem = func(_, sessionID, detail string) {

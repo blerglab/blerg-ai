@@ -236,7 +236,11 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			dc.SetHostClaude(hello.ClaudeCLIAvailable, hello.AnthropicKeySet, hello.SandboxClaudeCredential)
 			dc.SetAvailableEngines(hello.AvailableEngines)
 			dc.SetEngineModels(hello.EngineModels)
+			if protocol.ValidBackgroundTaskInventory(hello.BackgroundTasks) {
+				dc.BackgroundTaskLifetime = hello.BackgroundTasks.Lifetime
+			}
 			h.Register(dc)
+			reconcileBackgroundTaskInventory(ctx, h, dbPool, dc, hello.BackgroundTasks)
 			// Sessions the daemon still has but that were stopped while it was away: tell it so.
 			killStoppedSessions(dc, stoppedWhileAway)
 			// A session it still runs with a dead token gets a fresh one.
@@ -387,7 +391,7 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 		}
 		// Global daemon control responses are never a pod capability.
 		switch env.Type {
-		case "daemon_heartbeat", "session_started", "session_state_changed", "session_ended", "session_paused", "session_meta_changed", "session_output", "agent_event", "session_scrollback":
+		case "daemon_heartbeat", "session_started", "session_state_changed", "session_ended", "session_paused", "session_meta_changed", "session_output", "agent_event", "session_scrollback", "workspace_file_result":
 		default:
 			return true
 		}
@@ -414,22 +418,47 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 			if hb.EngineModels != nil {
 				dc.SetEngineModels(hb.EngineModels)
 			}
-			// Absent (an older daemon) = unchanged.
-			if hb.ReposRoot != "" && dc.RuntimeTokenID == "" {
-				applyReposRoot(ctx, dbPool, dc, hb.ReposRoot)
-			}
 		}
+		// Serialize only ownership-sensitive reconciliation with replacement and
+		// work writes for this daemon. Token healing and replay run after release.
+		unlock := h.lockDaemonWork(dc.ID)
+		if current := h.GetDaemon(dc.ID); current != dc && (current != nil || dc.workRegistered) {
+			unlock()
+			return true
+		}
+		// This update also writes daemon metadata in Postgres, so a replaced
+		// socket must not perform it outside the ownership fence.
+		if hbOK && hb.ReposRoot != "" && dc.RuntimeTokenID == "" {
+			applyReposRoot(ctx, dbPool, dc, hb.ReposRoot)
+		}
+		var changes []db.BackgroundTaskReconciliation
+		var stopped, reported []string
 		if dbPool != nil {
 			if err := db.SetDaemonStatus(ctx, dbPool, dc.ID, "connected"); err != nil {
 				log.Printf("heartbeat update %s: %v", dc.ID, err)
 			}
 			if hbOK {
-				reported := boundSessionIDs(dc.Mode, dc.Name, hb.ActiveSessions)
+				changes = reconcileBackgroundTaskInventoryLocked(ctx, h, dbPool, dc, hb.BackgroundTasks)
+				reported = boundSessionIDs(dc.Mode, dc.Name, hb.ActiveSessions)
 				queued := boundSessionIDs(dc.Mode, dc.Name, hb.QueuedSessions)
-				killStoppedSessions(dc, reconcileSessionsQueued(ctx, h, dbPool, dc.ID, reported, queued, hb.SessionStates))
-				healSessionTokens(ctx, h, dbPool, dc, reported)
-				replayPendingSessionInputs(ctx, h, dbPool, dc, reported)
+				stopped = reconcileSessionsQueued(ctx, h, dbPool, dc.ID, reported, queued, hb.SessionStates)
 			}
+		}
+		unlock()
+		publishBackgroundTaskReconciliation(ctx, h, dbPool, changes)
+		if dbPool != nil && hbOK {
+			killStoppedSessions(dc, stopped)
+			healSessionTokens(ctx, h, dbPool, dc, reported)
+			replayPendingSessionInputs(ctx, h, dbPool, dc, reported)
+		}
+
+	case "workspace_file_result":
+		if len(raw) > workspaceFileMaxFrame {
+			return true
+		}
+		var msg protocol.WorkspaceFileResult
+		if json.Unmarshal(raw, &msg) == nil {
+			h.deliverWorkspaceFileResult(dc, msg)
 		}
 
 	case "repos_root_result":
@@ -511,7 +540,7 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 			log.Printf("daemon %s malformed agent_event: %v", dc.ID, err)
 			return true
 		}
-		if msg.Transient {
+		if msg.Transient && msg.Kind != protocol.MCPStatusKind && msg.Kind != protocol.PlanUpdatedKind && msg.Kind != backgroundStartedKind && msg.Kind != backgroundDoneKind && msg.Kind != "subagent_started" && msg.Kind != "subagent_update" && msg.Kind != "subagent_done" {
 			// Streaming deltas: fan out only — no DB, no ack.
 			h.FanOutSessionOutput(msg.SessionID, raw)
 			return true
@@ -851,14 +880,16 @@ func killStoppedSessions(dc *DaemonConn, ids []string) {
 func handleDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 	// Requests waiting on this connection can never be answered now.
 	h.abandonReposRootRequests(dc)
+	h.abandonWorkspaceFileRequests(dc)
 	if !h.UnregisterIfCurrent(dc) {
 		return
 	}
 	// A desktop daemon gets a grace period before its sessions are marked lost
 	// (daemongrace.go): most disconnects are a restart that is back in seconds.
-	if isHostDaemon(dc) && daemonLostGrace > 0 {
+	grace := time.Duration(daemonLostGrace.Load())
+	if isHostDaemon(dc) && grace > 0 {
 		gen := h.away.begin(dc.ID)
-		time.AfterFunc(daemonLostGrace, func() {
+		time.AfterFunc(grace, func() {
 			if h.GetDaemon(dc.ID) != nil {
 				return // back in time: nothing was ever marked
 			}

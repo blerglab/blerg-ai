@@ -19,13 +19,12 @@ import (
 // The package's tests run a daemon disconnect synchronously, as it ran before the grace period
 // existed: almost all of them are about what the disconnect does, not when. The tests that are
 // about the grace period set it themselves (withGrace).
-func init() { daemonLostGrace = 0 }
+func init() { daemonLostGrace.Store(0) }
 
 func withGrace(t *testing.T, d time.Duration) {
 	t.Helper()
-	old := daemonLostGrace
-	daemonLostGrace = d
-	t.Cleanup(func() { daemonLostGrace = old })
+	old := daemonLostGrace.Swap(int64(d))
+	t.Cleanup(func() { daemonLostGrace.Store(old) })
 }
 
 func rowStatus(ctx context.Context, t *testing.T, pool *pgxpool.Pool, id string) string {

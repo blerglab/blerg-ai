@@ -68,3 +68,13 @@ func TestInteractionForRole(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionURLExcludesCredentialBearingOrInvalidBases(t *testing.T) {
+	for _, base := range []string{"https://name:password@runner.example.test/sessions", "https://runner.example.test/sessions?token=private", "javascript:alert(1)", "/sessions"} {
+		a := &API{}
+		a.SetRunner(RunnerConfig{UIBase: base})
+		if got := a.sessionURL("session"); got != "" {
+			t.Fatal("unsafe runner URL exposed as session metadata")
+		}
+	}
+}

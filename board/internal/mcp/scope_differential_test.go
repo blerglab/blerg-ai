@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/blerglab/blerg-ai/board/internal/api"
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
+	"github.com/blerglab/blerg-ai/board/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -36,19 +36,8 @@ type diffWorld struct {
 
 func newDiffWorld(t *testing.T) diffWorld {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
 	ctx := context.Background()
-	pool, err := db.Connect(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE boards, tokens, admission_reviews, runner_capacity RESTART IDENTITY CASCADE`); err != nil {
-		t.Fatal(err)
-	}
+	pool := testsupport.Pool(t, db.RunMigrations)
 	f := false
 	w := diffWorld{pool: pool, ids: map[string]map[string]string{}}
 	for _, side := range []string{"A", "B"} {

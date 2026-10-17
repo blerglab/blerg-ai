@@ -104,15 +104,22 @@ type ccProc struct {
 	killedByDriver     bool
 	dying              bool // being killed: no new message may be written to it
 	lastNoise          string
+	rootUsage          claudeRootUsage
+	mcpInit            mcpProbe
+	mcpWait            map[string]chan ccMCPReply
+	interruptID        string
 }
 
 type steerState struct {
-	legacy  bool
-	closed  bool // the session is ending: no timer may emit
-	proc    *ccProc
-	nextGen int
-	pidTag  string
-	sq      []steerQueued // accepted, not yet written
+	// startMu serializes the run loop and read-only MCP preparation. Never take it while holding sm.
+	startMu      sync.Mutex
+	mcpInputGate func(context.Context)
+	legacy       bool
+	closed       bool // the session is ending: no timer may emit
+	proc         *ccProc
+	nextGen      int
+	pidTag       string
+	sq           []steerQueued // accepted, not yet written
 	// awaiting: written to the process, not yet echoed back (consumed).
 	awaiting []awaitMsg
 	settled  []string // uuids whose user_message was emitted without an echo
@@ -127,6 +134,8 @@ type steerState struct {
 	killTimer      *time.Timer
 	settleTimer    *time.Timer
 	idleTimer      *time.Timer
+	// idleEpoch fences callbacks that Stop cannot retract once they have begun.
+	idleEpoch uint64
 	// idleDeferrals counts the idle shutdowns put off in a row for background tasks (reset when the
 	// timer is armed afresh); deferLogged says the deferral was logged once for this session.
 	idleDeferrals int
@@ -262,6 +271,10 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 			return
 		}
 		d.sm.Lock()
+		if d.steer.legacy || d.steer.closed {
+			d.sm.Unlock()
+			return
+		}
 		var m steerQueued
 		ok := len(d.steer.sq) > 0
 		if ok {
@@ -272,6 +285,15 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 		if ok {
 			d.failMessage(m, "claude-code start: "+err.Error())
 		}
+		return
+	}
+	d.sm.Lock()
+	gate := d.steer.mcpInputGate
+	d.sm.Unlock()
+	if gate != nil {
+		gate(ctx)
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	uuid := ccUUID()
@@ -325,12 +347,20 @@ func (d *claudeCodeDriver) failMessage(m steerQueued, why string) {
 	d.emit("error", agent.ErrorPayload{Message: why, Retryable: true})
 }
 
-// ensureProc returns a live process, starting one when there is none. Only the run loop calls it, so starts
-// never overlap; a process on its way out is waited for first (two live processes on one session would fork
-// its conversation).
+// ensureProc returns a live process, starting one when there is none. The run loop and
+// read-only MCP preparation serialize starts; two processes would fork the conversation.
 func (d *claudeCodeDriver) ensureProc(ctx context.Context) (*ccProc, error) {
+	d.steer.startMu.Lock()
+	defer d.steer.startMu.Unlock()
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		d.sm.Lock()
+		if d.steer.closed || d.steer.legacy {
+			d.sm.Unlock()
+			return nil, fmt.Errorf("claude streaming process unavailable")
+		}
 		p := d.steer.proc
 		if p != nil && !p.dying && !p.stdinClosed {
 			d.sm.Unlock()
@@ -511,6 +541,9 @@ func (d *claudeCodeDriver) onLine(p *ccProc, line []byte) {
 			d.onSystem(&ev, line)
 		}
 	case "assistant":
+		d.sm.Lock()
+		p.rootUsage.observe(&ev)
+		d.sm.Unlock()
 		d.markRunning("agent turn")
 		d.emitAssistantBlocks(&ev)
 	case "stream_event":
@@ -524,7 +557,7 @@ func (d *claudeCodeDriver) onLine(p *ccProc, line []byte) {
 	case "result":
 		d.onResult(p, &ev)
 	case "control_response":
-		d.onControlResponse(p)
+		d.onControlResponse(p, line)
 	}
 }
 
@@ -544,6 +577,7 @@ func (d *claudeCodeDriver) markRunning(reason string) {
 }
 
 func (d *claudeCodeDriver) onInit(p *ccProc, ev *ccLine, line []byte) {
+	d.observeMCPInit(p, line)
 	d.sm.Lock()
 	p.sawInit, p.inTurn = true, true
 	d.steer.turnSeq++ // a turn is starting: timers armed for an earlier one are stale
@@ -676,6 +710,8 @@ func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
 	turn, gen := d.steer.turnSeq, p.gen
 	p.sawResult, p.inTurn = true, false
 	noise := p.lastNoise
+	partition := p.rootUsage.partition(ev.ccUsage())
+	p.rootUsage = claudeRootUsage{}
 	settle := len(d.steer.awaiting) > 0
 	closeNow := false
 	if settle {
@@ -705,7 +741,7 @@ func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
 	default:
 		d.takeAPIError()
 	}
-	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: p.model, Usage: ev.ccUsage()})
+	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: p.model, Usage: ev.ccUsage(), UsageByModel: partition})
 	if !settle {
 		d.syncStatus("turn_done")
 	}
@@ -716,10 +752,17 @@ func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
 
 // onControlResponse: the interrupt was acknowledged. The turn is being cut, which can take a while (a slow
 // tool), so the short "not honoured" timer gives way to a long one waiting for the result.
-func (d *claudeCodeDriver) onControlResponse(p *ccProc) {
+func (d *claudeCodeDriver) onControlResponse(p *ccProc, line []byte) {
+	if d.routeMCPControlResponse(p, line) {
+		return
+	}
+	var reply ccControlResponse
+	if json.Unmarshal(line, &reply) != nil {
+		return
+	}
 	d.sm.Lock()
 	defer d.sm.Unlock()
-	if d.steer.killTimer == nil {
+	if d.steer.proc != p || d.steer.killTimer == nil || reply.Response.Subtype != "success" || reply.Response.RequestID == "" || reply.Response.RequestID != p.interruptID {
 		return
 	}
 	d.stopTimerLocked(&d.steer.killTimer)
@@ -773,8 +816,9 @@ func (d *claudeCodeDriver) Interrupt() {
 		d.sm.Unlock()
 		return
 	}
+	id := ccUUID()
 	line, _ := json.Marshal(map[string]any{
-		"type": "control_request", "request_id": ccUUID(),
+		"type": "control_request", "request_id": id,
 		"request": map[string]any{"subtype": "interrupt"},
 	})
 	select {
@@ -783,6 +827,7 @@ func (d *claudeCodeDriver) Interrupt() {
 		d.sm.Unlock()
 		return
 	}
+	p.interruptID = id
 	d.steer.interruptUntil = time.Now().Add(ccInterruptFlagTTL)
 	turn, gen := d.steer.turnSeq, p.gen
 	d.stopTimerLocked(&d.steer.killTimer)
@@ -858,65 +903,96 @@ func (d *claudeCodeDriver) idleLocked(p *ccProc) bool {
 	if d.steer.stale {
 		return true
 	}
-	d.stopIdleTimerLocked()
 	d.steer.idleDeferrals = 0
-	gen := p.gen
-	d.steer.idleTimer = time.AfterFunc(ccIdleShutdown, func() { d.idleFired(gen) })
+	d.armIdleTimerLocked(p.gen)
 	return false
+}
+
+// armIdleTimerLocked gives every idle window its own identity. The caller holds sm.
+func (d *claudeCodeDriver) armIdleTimerLocked(gen int) {
+	d.stopIdleTimerLocked()
+	epoch := d.steer.idleEpoch
+	d.steer.idleTimer = time.AfterFunc(ccIdleShutdown, func() { d.idleFired(gen, epoch) })
 }
 
 // idleFired closes an idle process, unless it is running background tasks: closing it would end them, so
 // the shutdown waits another ccIdleShutdown, at most ccIdleMaxDeferrals times in a row. Past that the
 // process is closed as usual and its tasks are reported stopped (procExited).
-func (d *claudeCodeDriver) idleFired(gen int) {
-	running := d.backgroundRunning() // subMu before sm: never both at once
+func (d *claudeCodeDriver) idleFired(gen int, epoch uint64) {
+	// All combined acquisitions use subMu -> sm. Holding both through the close
+	// decision prevents task start/end or an idle reset from slipping past it.
+	d.subMu.Lock()
+	running := d.backgroundRunningLocked()
 	d.sm.Lock()
 	p := d.steer.proc
-	if d.steer.closed || p == nil || p.gen != gen || !d.isIdleLocked(p) {
+	if d.steer.closed || p == nil || p.gen != gen || d.steer.idleEpoch != epoch || !d.isIdleLocked(p) {
 		d.sm.Unlock()
+		d.subMu.Unlock()
 		return
 	}
 	if running > 0 && d.steer.idleDeferrals < ccIdleMaxDeferrals {
 		d.steer.idleDeferrals++
 		logIt := !d.steer.deferLogged
 		d.steer.deferLogged = true
-		d.steer.idleTimer = time.AfterFunc(ccIdleShutdown, func() { d.idleFired(gen) })
+		d.armIdleTimerLocked(gen)
 		d.sm.Unlock()
+		d.subMu.Unlock()
 		if logIt {
 			log.Printf("claude-code: idle shutdown deferred: %d background tasks running", running)
 		}
 		return
 	}
+	// Validation and the irreversible state transition belong to one critical
+	// section. Channel closure and the grace timer need no state locks.
+	closeNow := d.markStdinClosedLocked(p)
+	d.stopIdleTimerLocked()
 	d.sm.Unlock()
-	d.closeStdin(p)
+	d.subMu.Unlock()
+	if closeNow {
+		d.finishStdinClose(p)
+	}
 }
 
-// backgroundIdle is called when the last background task has ended: an idle session gets the ordinary
-// idle shutdown again, counted from now.
-func (d *claudeCodeDriver) backgroundIdle() {
+// backgroundIdleLocked rearms an idle session as part of the last-task removal,
+// before subMu is released or callbacks/events can delay it. The caller holds
+// subMu; this is the same subMu -> sm order used by idleFired. A returned process
+// has its close committed already; finishStdinClose runs outside both locks.
+func (d *claudeCodeDriver) backgroundIdleLocked() *ccProc {
 	d.sm.Lock()
+	defer d.sm.Unlock()
 	p := d.steer.proc
 	if d.steer.legacy || d.steer.closed || p == nil {
-		d.sm.Unlock()
-		return
+		return nil
 	}
-	closeNow := d.idleLocked(p)
-	d.sm.Unlock()
-	if closeNow {
-		d.closeStdin(p)
+	if d.idleLocked(p) && d.markStdinClosedLocked(p) {
+		d.stopIdleTimerLocked()
+		return p
 	}
+	return nil
 }
 
 // closeStdin shuts an idle process down cleanly; that exit is not a crash. A process that does not leave
 // within the grace period is killed.
 func (d *claudeCodeDriver) closeStdin(p *ccProc) {
 	d.sm.Lock()
+	closeNow := d.markStdinClosedLocked(p)
+	d.sm.Unlock()
+	if closeNow {
+		d.finishStdinClose(p)
+	}
+}
+
+// markStdinClosedLocked commits shutdown while the caller's validation is still
+// protected by sm. It performs no I/O or callbacks.
+func (d *claudeCodeDriver) markStdinClosedLocked(p *ccProc) bool {
 	if p.stdinClosed {
-		d.sm.Unlock()
-		return
+		return false
 	}
 	p.stdinClosed, p.intentionalClose = true, true
-	d.sm.Unlock()
+	return true
+}
+
+func (d *claudeCodeDriver) finishStdinClose(p *ccProc) {
 	p.closeOnce.Do(func() { close(p.closeReq) })
 	time.AfterFunc(ccCloseGrace, func() {
 		select {
@@ -934,7 +1010,10 @@ func (d *claudeCodeDriver) stopTimerLocked(t **time.Timer) {
 	}
 }
 
-func (d *claudeCodeDriver) stopIdleTimerLocked() { d.stopTimerLocked(&d.steer.idleTimer) }
+func (d *claudeCodeDriver) stopIdleTimerLocked() {
+	d.steer.idleEpoch++
+	d.stopTimerLocked(&d.steer.idleTimer)
+}
 
 // ── exit handling ────────────────────────────────────────────────────────────
 

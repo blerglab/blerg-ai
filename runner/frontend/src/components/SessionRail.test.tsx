@@ -31,7 +31,7 @@ function viewport(width: number) {
 }
 
 function seedSession(over: Partial<SessionInfo> = {}) {
-  const session = makeSession({ kind: 'agent', status: 'running', title: 'Ship it', model: 'claude-opus-5-5', effort: 'high', runtime: 'docker', started_at: new Date(Date.now() - 135 * MIN).toISOString(), ...over })
+  const session = makeSession({ limit_resume_supported: true, kind: 'agent', status: 'running', title: 'Ship it', model: 'claude-opus-5-5', effort: 'high', runtime: 'docker', started_at: new Date(Date.now() - 135 * MIN).toISOString(), ...over })
   useSessionStore.setState({ daemons: [makeDaemon()], sessions: [session], statusChangedAt: { [session.id]: Date.now() }, serverVersion: 'test' })
   return session
 }
@@ -138,21 +138,21 @@ describe('session side panel', () => {
     document.body.style.overflow = ''
   })
 
-  it.each(['claude', 'codex'])('places %s automatic resume once in the session panel Settings', async engine => {
-    seedSession({ engine })
+  it.each(['claude', 'codex', 'future-engine'])('places %s automatic resume once, in the panel Session section', async engine => {
+    seedSession({ engine, limit_resume_supported: true })
     seedEvents(user())
     await renderPage()
-    const settings = screen.getByTestId('rail-settings')
-    expect(within(settings).getByRole('checkbox', { name: 'Resume when limit resets' })).toBeInTheDocument()
+    expect(screen.queryByTestId('rail-settings')).toBeNull()
+    expect(within(screen.getByTestId('rail-session')).getByRole('checkbox', { name: 'Resume when limit resets' })).toBeInTheDocument()
     expect(screen.getAllByRole('checkbox', { name: 'Resume when limit resets' })).toHaveLength(1)
     expect(fetchCalls().filter(url => url.endsWith('/limit-resume'))).toEqual(['/api/sessions/sess-a/limit-resume'])
   })
 
   it('does not offer automatic resume to engines without support', async () => {
-    seedSession({ engine: 'hermes' })
+    seedSession({ engine: 'hermes', limit_resume_supported: false })
     seedEvents(user())
     await renderPage()
-    expect(within(screen.getByTestId('rail-settings')).queryByRole('checkbox', { name: 'Resume when limit resets' })).not.toBeInTheDocument()
+    expect(within(screen.getByTestId('rail-session')).queryByRole('checkbox', { name: 'Resume when limit resets' })).not.toBeInTheDocument()
     expect(fetchCalls().filter(url => url.endsWith('/limit-resume'))).toEqual([])
   })
 
@@ -633,8 +633,11 @@ describe('session side panel', () => {
       fireEvent.click(toggle())
       const drawer = screen.getByRole('dialog', { name: 'Session panel' })
       const close = within(drawer).getByRole('button', { name: 'Close' })
-      // The last control on the tab on screen (Live: its Settings), not one of a hidden tab.
-      const last = await within(drawer).findByRole('checkbox', { name: 'Resume when limit resets' })
+      // The last control on the tab on screen (Live), not one of a hidden tab.
+      await within(drawer).findByRole('tabpanel', { name: /^Live/ })
+      const live = within(drawer).getByRole('tabpanel', { name: /^Live/ })
+      const stops = Array.from(live.querySelectorAll<HTMLElement>('button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href]'))
+      const last = stops[stops.length - 1]
       expect(close).toHaveFocus()
       fireEvent.keyDown(drawer, { key: 'Tab', shiftKey: true })
       expect(last).toHaveFocus()

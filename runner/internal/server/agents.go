@@ -55,12 +55,15 @@ func componentVersionString() string {
 // Every operation is behind authRunner, which requires coreAuthRunnerCap on a
 // core-issued token, so they all carry the same Cap.
 var runnerOperations = []agentsmanifest.Operation{
+	{Name: "discover_launch_options", Method: "GET", Path: "/api/runner/launch-options", Cap: coreAuthRunnerCap, Idempotent: true, Summary: "Discover target-scoped engines, model catalogs and reasoning efforts for the launch principal."},
 	{Name: "start", Method: "POST", Path: "/api/runner/start", Cap: coreAuthRunnerCap, Idempotent: true,
 		Summary: "Start a coding-agent session on a repository; repeat safely with the Idempotency-Key header."},
 	{Name: "status", Method: "GET", Path: "/api/runner/sessions/{id}", Cap: coreAuthRunnerCap, Idempotent: true,
 		Summary: "Session status: lifecycle, runtime, whether it can be resumed."},
 	{Name: "send_message", Method: "POST", Path: "/api/runner/sessions/{id}/message", Cap: coreAuthRunnerCap,
 		Summary: "Send a conversational turn to the session; resumes a disconnected one."},
+	{Name: "set_model", Method: "POST", Path: "/api/runner/sessions/{id}/model", Cap: coreAuthRunnerCap,
+		Summary: "Set the session model or effort for its next turn; does not change engines."},
 	{Name: "interrupt", Method: "POST", Path: "/api/runner/sessions/{id}/interrupt", Cap: coreAuthRunnerCap,
 		Summary: "Cancel the session's in-flight turn without ending it."},
 	{Name: "stop", Method: "POST", Path: "/api/runner/sessions/{id}/stop", Cap: coreAuthRunnerCap, Idempotent: true,
@@ -179,6 +182,8 @@ func (a *API) HandleRunnerMe(w http.ResponseWriter, r *http.Request) {
 // contract, and openapi_test.go drives the same function — a documented route
 // that is never registered fails the build's tests rather than an agent's call.
 func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
+	// Documented browser integration primitive; its own handler refuses every non-human credential.
+	a.RegisterWorkspaceFileRoutes(mux)
 	// Discovery: public, no auth (see HandleAgents).
 	mux.HandleFunc("GET /agents", a.HandleAgents)
 	mux.HandleFunc("GET /openapi.json", handleOpenAPI)
@@ -186,13 +191,17 @@ func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
 	// credential (authBrowserOrRunner), so it lives on the contract too.
 	mux.HandleFunc("GET /api/models/{engine}", a.HandleGetModels)
 
-	// The session contract: every handler calls authRunner itself.
-	mux.HandleFunc("GET /api/runner/me", a.HandleRunnerMe)
 	// The daemon-token check the installer makes before it replaces a daemon (daemon_whoami.go).
 	mux.HandleFunc("GET /api/daemon/whoami", a.HandleDaemonWhoami)
+
+	// The session contract: handlers authorize the caller's runner or browser principal.
+	mux.HandleFunc("GET /api/runner/me", a.HandleRunnerMe)
+	mux.HandleFunc("GET /api/runner/launch-options", a.HandleLaunchOptions)
 	mux.HandleFunc("POST /api/runner/start", a.HandleRunnerStart)
 	mux.HandleFunc("GET /api/runner/sessions/{id}", a.HandleRunnerStatus)
+	mux.HandleFunc("GET /api/runner/preferences", a.HandleRunnerGetPreferences)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/message", a.HandleRunnerMessage)
+	mux.HandleFunc("POST /api/runner/sessions/{id}/model", a.HandleRunnerModel)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/interrupt", a.HandleRunnerInterrupt)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/stop", a.HandleRunnerStop)
 	mux.HandleFunc("GET /api/runner/sessions/{id}/events", a.HandleRunnerEvents)

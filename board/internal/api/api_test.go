@@ -10,7 +10,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -20,6 +19,7 @@ import (
 	"github.com/blerglab/blerg-ai/board/internal/db"
 	"github.com/blerglab/blerg-ai/board/internal/gate"
 	"github.com/blerglab/blerg-ai/board/internal/mcp"
+	"github.com/blerglab/blerg-ai/board/internal/testsupport"
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -76,23 +76,11 @@ func wireFakeCore(t *testing.T, a *auth.Auth) {
 
 func testServer(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	pool, err := db.Connect(context.Background(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := testsupport.Pool(t, db.RunMigrations)
 	if err := db.SetAutomationKey([]byte("0123456789abcdef0123456789abcdef")); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.SetAutomationKey(nil) })
-	if _, err := pool.Exec(context.Background(),
-		`TRUNCATE boards, tokens, admission_reviews, runner_capacity RESTART IDENTITY CASCADE`); err != nil {
-		t.Fatal(err)
-	}
 	a := auth.New(pool, "svc-key-123")
 	if err := a.EnsureServiceToken(context.Background()); err != nil {
 		t.Fatal(err)
@@ -438,19 +426,7 @@ func (unavailableBackend) Review(_ context.Context, _ gate.Input) (gate.Verdict,
 // held-review resolution tests below.
 func testServerHeld(t *testing.T) (*httptest.Server, *pgxpool.Pool, db.Board, []db.Column, string) {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	pool, err := db.Connect(context.Background(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(context.Background(),
-		`TRUNCATE boards, tokens, admission_reviews, runner_capacity RESTART IDENTITY CASCADE`); err != nil {
-		t.Fatal(err)
-	}
+	pool := testsupport.Pool(t, db.RunMigrations)
 	a := auth.New(pool, "svc-key-123")
 	if err := a.EnsureServiceToken(context.Background()); err != nil {
 		t.Fatal(err)

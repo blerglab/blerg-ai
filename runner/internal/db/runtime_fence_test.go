@@ -3,12 +3,11 @@ package db
 import (
 	"context"
 	"errors"
-	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -29,24 +28,10 @@ func TestLockPoolSizeFollowsSessionCap(t *testing.T) {
 // A fence that cannot get a pool connection in time is retried once instead
 // of dropping the pod's socket.
 func TestRuntimeLaunchFenceRetriesOncePoolTimeout(t *testing.T) {
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database tests")
-	}
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	// A DSN of its own gives this test a fresh fence pool at the floor size.
-	cfg, err := pgxpool.ParseConfig(dsn + sep + "application_name=fence_retry_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	main, err := pgxpool.NewWithConfig(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(main.Close)
+	main := testsupport.Blank(t, "TEST_DATABASE_URL")
+	oldTimeout := runtimeFenceTimeout
+	runtimeFenceTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { runtimeFenceTimeout = oldTimeout })
 	SetLockPoolSessions(func() int { return 0 })
 	t.Cleanup(func() { lockPoolSessions.Store(nil) })
 	ctx := context.Background()
@@ -57,7 +42,7 @@ func TestRuntimeLaunchFenceRetriesOncePoolTimeout(t *testing.T) {
 	if fence.Config().MaxConns != lockPoolFloor {
 		t.Fatalf("fence pool %d connections, want %d", fence.Config().MaxConns, lockPoolFloor)
 	}
-	// Hold every fence connection past the first attempt's 5 s deadline.
+	// Hold every fence connection past the first attempt's shortened deadline.
 	var held []*pgxpool.Conn
 	for i := 0; i < lockPoolFloor; i++ {
 		c, err := fence.Acquire(ctx)
@@ -68,7 +53,7 @@ func TestRuntimeLaunchFenceRetriesOncePoolTimeout(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	wg.Add(1)
-	time.AfterFunc(5500*time.Millisecond, func() {
+	time.AfterFunc(300*time.Millisecond, func() {
 		defer wg.Done()
 		for _, c := range held {
 			c.Release()

@@ -30,10 +30,6 @@ func newIngestFixture(t *testing.T) *ingestFixture {
 	t.Helper()
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000c1"
 	sessionID := "00000000-0000-0000-0000-0000000000c2"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "laptop", "daemon", ""); err != nil {
@@ -45,8 +41,9 @@ func newIngestFixture(t *testing.T) *ingestFixture {
 	hub := NewHub()
 	sub := make(chan []byte, 64)
 	hub.Subscribe(sessionID, "b1", sub)
-	return &ingestFixture{ctx: ctx, hub: hub, pool: pool, sessionID: sessionID,
-		dc: &DaemonConn{ID: daemonID, inputReceipts: true, send: make(chan []byte, 64)}, sub: sub}
+	dc := &DaemonConn{ID: daemonID, inputReceipts: true, send: make(chan []byte, 64)}
+	hub.Register(dc)
+	return &ingestFixture{ctx: ctx, hub: hub, pool: pool, sessionID: sessionID, dc: dc, sub: sub}
 }
 
 // cid is the client event id (a uuid column) a test names by a short label; label() reverses it.

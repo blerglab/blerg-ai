@@ -401,10 +401,22 @@ const topicGuideLine = "When you start a piece of work the user asked for that t
 	"`blerg-runner topic --done \"<one-line outcome>\"`, and when the work landed commits, pass them: `--commit <sha>`. " +
 	"One topic at a time; not for a quick question, and not from a subagent."
 
+// workGuideLine asks the agent to pin the ticket it works on and keep a checklist; the session
+// panel's Ticket and Checklist sections show them. A bullet of the managed CLAUDE.md block too, and
+// the first paragraph of `blerg-runner checklist --help` / `pin --help` (WORK_LINE). It names only
+// commands the CLI has: on the desktop the CLI updates with the checkout, this line with a reinstall.
+const workGuideLine = "When you work on a ticket, read it with the tools you have, then `blerg-runner pin` it " +
+	"(`blerg-runner pin --help` shows the shape); keep a checklist with `blerg-runner checklist` and tick items as you finish them."
+
+// diffGuideLine tells the agent how to show the person what it changed: a diff they open in the
+// app's diff viewer. A bullet of the managed CLAUDE.md block too, and the first line of
+// `blerg-runner diff --help` (DIFF_LINE).
+const diffGuideLine = "To show the person what you changed, `blerg-runner diff <range>` posts a diff they can open."
+
 // ccSessionGuide is appended to the system prompt of every unrestricted Claude
 // Code turn. It does not depend on the user's own instructions file (a session
 // started or resumed before that file was updated would not know the commands).
-const ccSessionGuide = "You are running inside Blerg Runner. " +
+var ccSessionGuide = "You are running inside Blerg Runner. " +
 	"To give the user a file they can view or download, run `blerg-runner publish <file>` (a directory is zipped). " +
 	"Publishing a name that already exists creates a new version of it, so to revise a file publish it again under the same name. " +
 	"The app shows markdown, text and code, json, csv, images, pdf, audio, video and a single self-contained html file (no network access); " +
@@ -415,7 +427,7 @@ const ccSessionGuide = "You are running inside Blerg Runner. " +
 	"The user can review a markdown or PDF file you published, or mark up an image, from the chat: the review arrives as a message " +
 	"listing requests with ids (and a diff of their own edits, to apply first). Make the changes in the file it was published from, " +
 	"publish it again, and answer each request with `blerg-runner review reply <id> done|declined \"<one line>\"` (`blerg-runner review --help`). " +
-	topicGuideLine
+	sessionWorkGuidePrompt()
 
 // withPluginDirs loads the given plugin directories into every turn.
 func withPluginDirs(dirs []string) ccOption {
@@ -1031,6 +1043,7 @@ func (d *claudeCodeDriver) runTurn(ctx context.Context, text string) {
 	d.takeAPIError() // a new turn: nothing reported yet
 	lastNoise := ""  // last non-JSON line: the only clue when the turn dies
 	var turnUsage agent.Usage
+	var rootUsage claudeRootUsage
 	for sc.Scan() {
 		line := sc.Bytes()
 		if ccSkipStreamLine(line) {
@@ -1054,6 +1067,7 @@ func (d *claudeCodeDriver) runTurn(ctx context.Context, text string) {
 				d.onSystem(&ev, line)
 			}
 		case "assistant":
+			rootUsage.observe(&ev)
 			d.emitAssistantBlocks(&ev)
 		case "stream_event":
 			d.onStreamEvent(&ev)
@@ -1098,7 +1112,7 @@ func (d *claudeCodeDriver) runTurn(ctx context.Context, text string) {
 	}
 	// One process per turn: whatever it left running in the background ended with it.
 	d.endBackgroundTasks()
-	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: d.model, Usage: turnUsage})
+	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: d.model, Usage: turnUsage, UsageByModel: rootUsage.partition(turnUsage)})
 }
 
 // turnFailureDetail renders the last unparsed output line as a suffix for an

@@ -16,13 +16,13 @@ Do the work, don't skim. A spec review is grounded in the repo, not in taste:
    file paths, line numbers, function names, "X requires Y", "there is no Z" —
    open the file and verify it. A spec built on a wrong reading of the code
    sends the worker down a hole. Stale line numbers alone aren't fatal; a
-   wrong claim about behaviour is.
+   wrong claim about behavior is.
 2. Check it is buildable. Could a competent agent with only this body and the
    repo implement it without guessing? Name every place it would have to
    guess: undefined terms, unstated defaults, an interface described but never
    specified, a migration implied but not called for.
 3. Hunt for what the author missed: cases the design doesn't cover, existing
-   behaviour it silently breaks, a cheaper approach it never considered and
+   behavior it silently breaks, a cheaper approach it never considered and
    never ruled out, work already done elsewhere in the repo, and open
    questions the body raises but leaves unanswered.
 4. Check the scope. One card = one unit of work. If the body is really two or

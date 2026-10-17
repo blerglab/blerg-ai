@@ -22,9 +22,11 @@ function ok(body: unknown, status = 200) {
 }
 
 let posted: { url: string; method: string; body: Record<string, unknown> }[]
+let launchReply: Record<string, unknown>
 let saveResponse: () => Promise<unknown>
 
 beforeEach(() => {
+  launchReply = { runtime: 'docker', state: 'known', engines: [{ id: 'claude', name: 'Claude', restricted: true }, { id: 'codex', name: 'Codex', restricted: true }] }
   posted = []
   apiFetch.mockReset()
   saveResponse = () => ok({ id: 'new-cron' }, 201)
@@ -33,6 +35,7 @@ beforeEach(() => {
       posted.push({ url, method: init.method, body: JSON.parse(String(init.body)) })
       return saveResponse()
     }
+    if (url.startsWith('/api/runner/launch-options?')) return ok(launchReply)
     if (url === '/api/mcp/connections') return ok({ connections: CONNS })
     if (url === '/api/mcp/connections/c1/tools') return ok({ tools: TOOLS })
     if (url === '/api/cluster/status') return ok({ configured: false })
@@ -76,13 +79,15 @@ describe('CronForm', () => {
     await waitFor(() => expect(posted).toHaveLength(1))
     expect(posted[0].body.engine).toBe('codex')
     expect(posted[0].body.model).toBe('fixture-codex')
-    expect(apiFetch.mock.calls.some(([url]) => String(url).startsWith('/api/models/codex'))).toBe(true)
+    expect(apiFetch.mock.calls.some(([url]) => String(url).startsWith('/api/models/'))).toBe(false)
+    expect(apiFetch.mock.calls.some(([url]) => String(url).includes('personal_only=1'))).toBe(true)
   })
   it.each(['cluster', 'auto'] as const)('uses the cluster catalog for %s and saves Codex model and effort', async runtime => {
     const previous = apiFetch.getMockImplementation()!
-    apiFetch.mockImplementation((url: string, init?: RequestInit) => url === '/api/models/codex?runtime=cluster'
-      ? ok({ source: 'live', models: [{ id: 'fixture-codex', name: 'Fixture Codex', section: 'main', efforts: ['low', 'ultra'], default_effort: 'low' }] })
-      : url === '/api/cluster/status' ? ok({ configured: true }) : previous(url, init))
+    launchReply = { state: 'known', engines: [{ id: 'claude', name: 'Claude', restricted: true }, { id: 'codex', name: 'Codex', restricted: true,
+      models: { source: 'live', models: [{ id: 'fixture-codex', name: 'Fixture Codex', section: 'main', efforts: ['low', 'ultra'], default_effort: 'low' }] },
+    }] }
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => url === '/api/cluster/status' ? ok({ configured: true }) : previous(url, init))
     await renderForm(existing({ engine: 'codex', runtime, daemon_id: null }))
     fireEvent.click(await screen.findByRole('button', { name: 'Fixture Codex' }))
     fireEvent.click(screen.getByRole('radio', { name: 'ultra' }))
@@ -424,5 +429,40 @@ describe('CronForm', () => {
       await renderForm()
       expect(screen.getByTestId('cron-board-template-note').textContent).toMatch(/focus board/i)
     })
+  })
+})
+
+
+describe('available cron engines', () => {
+  it('selects sole Codex and hides the redundant engine field', async () => {
+    launchReply = { state: 'known', engines: [{ id: 'codex', name: 'Codex', restricted: true }] }
+    await renderForm()
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
+    expect(document.getElementById('cron-engine')).toBeNull()
+    fill('cron-name', 'Codex digest')
+    fill('cron-prompt', 'Read the files')
+    save()
+    await waitFor(() => expect(posted[0]?.body.engine).toBe('codex'))
+  })
+
+  it('uses discovered future engine labels and forwards the selection', async () => {
+    launchReply = { state: 'known', engines: [{ id: 'codex', name: 'Codex', restricted: true }, { id: 'fixture-engine', name: 'Future Engine', restricted: true }] }
+    await renderForm()
+    await screen.findByRole('option', { name: 'Future Engine' })
+    expect(screen.queryByRole('option', { name: 'Claude' })).not.toBeInTheDocument()
+    fill('cron-engine', 'fixture-engine')
+    fill('cron-name', 'Future digest')
+    fill('cron-prompt', 'Read the files')
+    save()
+    await waitFor(() => expect(posted[0]?.body.engine).toBe('fixture-engine'))
+  })
+
+  it('keeps an unavailable discovery distinct from an empty engine list', async () => {
+    launchReply = { state: 'unknown', engines: [], error: 'Credential service unavailable' }
+    await renderForm()
+    expect(await screen.findByText('Credential service unavailable')).toBeInTheDocument()
+    expect(document.getElementById('cron-engine')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Create cron' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Retry engines' })).toBeInTheDocument()
   })
 })

@@ -18,10 +18,6 @@ import (
 func TestHandlePostAndGetMessages(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000e1"
 	sessionID := "00000000-0000-0000-0000-0000000000e2"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "msg-api-daemon", "local", "/repos"); err != nil {
@@ -90,10 +86,6 @@ func TestHandlePostAndGetMessages(t *testing.T) {
 func TestHandlePostMessageReply(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000a1"
 	sessionID := "00000000-0000-0000-0000-0000000000a2"
 	db.UpsertDaemon(ctx, pool, daemonID, "reply-daemon", "local", "/repos")
@@ -175,10 +167,6 @@ func TestHandlePostMessageReply(t *testing.T) {
 func TestHandlePostMessageExpire(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000b1"
 	sessionID := "00000000-0000-0000-0000-0000000000b2"
 	db.UpsertDaemon(ctx, pool, daemonID, "expire-daemon", "local", "/repos")
@@ -259,10 +247,6 @@ drained:
 func TestMessagesBoardToken(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	// Fixtures: daemon + two sessions.
 	daemonID := "00000000-0000-0000-0000-0000000000c1"
@@ -295,6 +279,7 @@ func TestMessagesBoardToken(t *testing.T) {
 	}
 
 	api := NewAPI(NewHub(), pool, "daemonTok", nil, "")
+	api.answerHold = 40 * time.Millisecond
 
 	postMsg := func(token, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "/api/messages", bytes.NewBufferString(body))
@@ -463,6 +448,11 @@ func TestMessagesBoardToken(t *testing.T) {
 	if daemonForeignRec.Code != http.StatusOK {
 		t.Errorf("daemon-token answer-poll foreign = %d, want 200 (no ownership check); body=%s", daemonForeignRec.Code, daemonForeignRec.Body.String())
 	}
+	var daemonForeignAnswer answerResponse
+	if err := json.Unmarshal(daemonForeignRec.Body.Bytes(), &daemonForeignAnswer); err != nil || daemonForeignAnswer.Answered {
+		t.Fatalf("open foreign ask response=%s: %v", daemonForeignRec.Body.String(), err)
+	}
+
 }
 
 // TestFormatNoteReply covers the pure helper that builds the inject text.
@@ -531,15 +521,13 @@ func TestFormatNoteReply(t *testing.T) {
 func TestHandleGetMessageAnswer(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	daemonID := "00000000-0000-0000-0000-0000000000f1"
 	sessionID := "00000000-0000-0000-0000-0000000000f2"
 	db.UpsertDaemon(ctx, pool, daemonID, "ans-daemon", "local", "/repos")
 	db.InsertSession(ctx, pool, sessionID, daemonID, "running", "/repos/app", "app", "Ans", "")
 	api := NewAPI(NewHub(), pool, "tok", nil, "")
+	const shortHold = 40 * time.Millisecond
+	api.answerHold = shortHold
 
 	answer := func(id, query string) (*httptest.ResponseRecorder, answerResponse) {
 		req := httptest.NewRequest("GET", "/api/messages/"+id+"/answer"+query, nil)
@@ -564,10 +552,12 @@ func TestHandleGetMessageAnswer(t *testing.T) {
 	if _, resp := answer(askID, "?wait=1"); resp.Answered {
 		t.Errorf("open ask short wait → %+v, want answered=false", resp)
 	}
-	if time.Since(start) < 800*time.Millisecond {
-		t.Errorf("hold returned too fast (%v); should wait ~1s", time.Since(start))
+	if time.Since(start) < shortHold*3/4 {
+		t.Errorf("hold returned too fast (%v); should wait for configured hold", time.Since(start))
 	}
 
+	// Restore a long cap: signalling must wake the poll before its timeout.
+	api.answerHold = maxAnswerHold
 	// Open ask, longer wait, answered+signalled concurrently → wakes with the answer.
 	ask2, _ := db.CreateMessage(ctx, pool, sessionID, "ask", "green or amber?")
 	go func() {

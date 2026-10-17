@@ -4,7 +4,7 @@
 import type { AgentEvent, MessagingPayload } from '../types'
 import { askStates } from './asks'
 import { liveCalls } from './liveCalls'
-import { doingLine, inputField, resumedSubagent, subagentModel, subagentStatus, subagentTitle, subagentTokens } from './subagents'
+import { doingLine, inputField, resumedSubagent, subagentEffort, subagentModel, subagentStatus, subagentTitle, subagentTokens } from './subagents'
 import { parseTs } from './timeLabel'
 import { buildTimeline, parentCallOf, type SubagentEntry, type TimelineItem } from './toolGroups'
 
@@ -17,6 +17,8 @@ export interface SubagentLive {
   /** Its type (general-purpose, Explore, …); '' when not reported. */
   type: string
   model: string
+  /** Child-reported configured effort, absent/empty when unknown. */
+  effort?: string
   /** Every token its API calls used so far, or null when none was reported. */
   tokens: number | null
   /** What it is doing now ("running Bash · npm test"); '' before its first step. */
@@ -89,6 +91,7 @@ export function liveSubagents(
       title: subagentTitle(sub),
       type: sub.info.agent_type || inputField(sub.call?.call.input, 'subagent_type'),
       model: subagentModel(sub),
+      ...(subagentEffort(sub) ? { effort: subagentEffort(sub) } : {}),
       tokens: subagentTokens(sub),
       doing: doingLine(sub),
       // Only a start that is held: the first event held of a subagent that began on a page not

@@ -36,9 +36,9 @@ const TOOLS: Array<{ id: Tool; label: string; key: string }> = [
   { id: 'pin', label: 'Pin', key: 'N' },
 ]
 const SWATCHES: Array<{ id: Swatch; label: string }> = [
-  { id: 'accent', label: 'Accent colour' },
-  { id: 'danger', label: 'Danger colour' },
-  { id: 'info', label: 'Info colour' },
+  { id: 'accent', label: 'Accent color' },
+  { id: 'danger', label: 'Danger color' },
+  { id: 'info', label: 'Info color' },
 ]
 const WIDTHS = [2, 4, 6]
 
@@ -274,7 +274,7 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
           <button type="button" className="markup-tool" onClick={undo} disabled={history.length === 0} title="Undo (Z)">Undo</button>
           <button type="button" className="markup-tool" onClick={clear} disabled={empty}>Clear</button>
         </div>
-        <div className="markup-group" role="group" aria-label="Colour">
+        <div className="markup-group" role="group" aria-label="Color">
           {SWATCHES.map(s => (
             <button
               key={s.id}

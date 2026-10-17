@@ -28,7 +28,7 @@ managed in **core Settings → MCP connections**.
 ## OAuth connections
 
 Choose **Sign in** instead of a static token when adding a connection. Core discovers how the server
-authorises (registering itself as a client where the server allows it; otherwise you supply a client
+authorizes (registering itself as a client where the server allows it; otherwise you supply a client
 id), sends you to the server to approve, and stores what comes back.
 
 - **Redirect URI.** The server redirects back to `<core public URL>/auth/mcp/callback`. Set
@@ -83,7 +83,7 @@ depends on the connection's **Definition changes** setting (core Settings → MC
   not). Changes wait 7 days. The agent is told the tool is unavailable and asked not to lobby you.
 - **Accept automatically.** The runner re-pins a changed tool and grants a new one by the preset
   you launched with (Allow all grants it, Require approval queues its calls, Customize grants
-  nothing), and records every such event. Use it only for servers your organisation runs: a
+  nothing), and records every such event. Use it only for servers your organization runs: a
   changed description can steer the agent's use of your other connections and the session's own
   tools. A server that changes one tool more than three times in an hour is treated as *Ask me*
   for the rest of the hour. The setting reaches running sessions within five minutes.

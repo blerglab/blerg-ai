@@ -478,8 +478,8 @@ func (h *cronsHandler) create(w http.ResponseWriter, r *http.Request) {
 	if !decodeCronBody(w, r, &req) {
 		return
 	}
-	if req.Engine != "" && req.Engine != "claude" && req.Engine != "codex" {
-		writeError(w, http.StatusBadRequest, `crons run with the "claude" or "codex" engine`)
+	if !restrictedEngineSupported(req.Engine) {
+		writeError(w, http.StatusBadRequest, "crons require an engine with restricted-tool support")
 		return
 	}
 	ctx := r.Context()
@@ -552,8 +552,8 @@ func (h *cronsHandler) patch(w http.ResponseWriter, r *http.Request) {
 	if !decodeCronBody(w, r, &req) {
 		return
 	}
-	if req.Engine != nil && *req.Engine != "claude" && *req.Engine != "codex" {
-		writeError(w, http.StatusBadRequest, `crons run with the "claude" or "codex" engine`)
+	if req.Engine != nil && (*req.Engine == "" || !restrictedEngineSupported(*req.Engine)) {
+		writeError(w, http.StatusBadRequest, "crons require an engine with restricted-tool support")
 		return
 	}
 	patch := cron.CronPatch{

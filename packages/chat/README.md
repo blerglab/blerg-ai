@@ -1,6 +1,6 @@
 # @blerglab/chat
 
-The chat surface for apps built on Blerg sessions: transcript, composer, files, cards and a
+The chat surface for apps built on Blerg sessions: transcript, composer, files, cards, highlighted code, diffs and a
 token theme, over a pluggable transport. The runner's own web app renders it; your app can too,
 against your own backend, with the runner's agent token never leaving your server.
 
@@ -32,8 +32,8 @@ your core, or the runner's own `GET <runner>/agents`) carries `ui.chat_package`:
   "ui": {
     "chat_package": {
       "name": "@blerglab/chat",
-      "version": "0.11.0",
-      "url": "https://runner.example.test/packages/blerglab-chat-0.11.0.tgz",
+      "version": "0.17.1",
+      "url": "https://runner.example.test/packages/blerglab-chat-0.17.1.tgz",
       "sha512": "…",
       "docs_url": "https://runner.example.test/packages/@blerglab/chat/README.md"
     }
@@ -61,8 +61,8 @@ runner's operator.
 
 The tarball route is immutable (`Cache-Control: public, max-age=31536000, immutable`) and
 unauthenticated, as `/agents` is; a new version is a new file name. The package needs
-`react` and `react-dom` 19 as peers and brings `react-markdown`, `remark-gfm` and `zustand`
-with it; nothing else.
+`react` and `react-dom` 19 as peers and brings `react-markdown`, `remark-gfm`, `zustand` and
+`lowlight` (the code highlighter, loaded on demand) with it; nothing else.
 
 ## Mount the proxy
 
@@ -125,13 +125,19 @@ GET    /blerg/sessions/{id}/events/live?...       -> GET    /api/runner/sessions
 GET    /blerg/sessions/{id}/events?...            -> GET    /api/runner/sessions/{id}/events
 POST   /blerg/sessions/{id}/messages {text}       -> POST   /api/runner/sessions/{id}/message
 POST   /blerg/sessions/{id}/stop                  -> POST   /api/runner/sessions/{id}/stop
-POST   /blerg/sessions/{id}/model                 -> 501 (reserved)
+POST   /blerg/sessions/{id}/model                 -> POST   /api/runner/sessions/{id}/model
 GET    /blerg/sessions/{id}/artifacts             -> GET    /api/runner/sessions/{id}/artifacts
 GET    /blerg/sessions/{id}/artifacts/{aid}/raw   -> GET    .../artifacts/{aid}/raw
 GET    /blerg/sessions/{id}/artifacts/{aid}/download -> GET .../artifacts/{aid}/download
 DELETE /blerg/sessions/{id}/artifacts/{aid}       -> DELETE .../artifacts/{aid}
 POST   /blerg/sessions/{id}/uploads               -> POST   /api/runner/sessions/{id}/uploads  (raw bytes, X-Artifact-Name)
+GET    /blerg/preferences                         -> GET    /api/runner/preferences?account=...   (0.14.0, optional)
 ```
+
+The last route reads the signed-in person's display preferences (their code colors) so the chat
+shows code in them. `Options.Account` names the person (the blerg-core account id); `Authorize` runs
+with an empty session id; with no `Account` the route answers `{}` and the runner is not asked. It
+is read-only: the person changes their colors in the runner.
 
 Every route calls `Authorize` first. Only the runner's status code, `Content-Type`,
 `Content-Disposition` and `Cache-Control` come back to the browser; `Set-Cookie` and
@@ -183,7 +189,8 @@ the agent marked with `blerg-runner topic`) draws as a thin divider (`▸ <title
 
 - `theme`: a `ThemeTokens` object instead of a CSS file.
 - `cards`: a registry from `createCardRegistry([...])`; see Cards.
-- `slots`: `header`, `composerActions`, `messageFooter` for your own chrome.
+- `slots`: `header`, `composerActions`, `messageFooter` and, since 0.15.0, `aboveComposer` (a node between the transcript and the composer) for your own chrome.
+- `commitUrl(sha)` (0.15.0): where a commit named on a checklist item links (null: the chip copies the sha). 0.15.0's `onViewCommitDiff(sha)` is gone in 0.16.0: an item's "View diff" opens the diff the agent published of its commits, in the chat's own viewer.
 - `maxFileBytes`: the largest file a person may attach, in bytes; a larger one is refused in the
   browser, with the limit named, before it is sent (0.11.0). Without it the chat uses the
   session's `limits.max_file_bytes`, which the runner (0.2.1 on) puts in its session status and
@@ -197,9 +204,33 @@ the words and the id to show.
 
 `createProxyTransport({ baseUrl })` speaks the proxy contract above. Its `files` are present
 (so the Files button and the attach control show) because the proxy forwards the artifact and
-upload routes; a `501` from `/model` simply leaves `setModel` unavailable. The transport
+upload routes. Model/effort controls forward to the session’s existing engine; an unsupported
+control is reported as an error. `send` forwards `SendOptions.clientId` as `client_id`, allowing
+the runner to persist and deduplicate conversational messages until native consumption.
+The transport
 subscribes with `tail=true` to open a long transcript at its end and resubscribes from the last
 sequence number after a drop.
+
+Published artifact links in messages open the existing file viewer on an ordinary click when
+that file is known, viewable, and belongs to the current session. Modified clicks retain normal
+navigation. The direct Blerg transport knows its runner URL. An embedded proxy needs an explicit
+mapping to the public runner URL, because its local session ID may name a different database row:
+
+```ts
+createProxyTransport({
+  baseUrl: '/api/chat',
+  publishedSessionUrl: appSessionId => {
+    const runnerId = sessions.get(appSessionId)?.external_session_id
+    return runnerId ? `https://runner.example.com/sessions/${encodeURIComponent(runnerId)}` : null
+  },
+})
+```
+
+The canonical URL must contain no query, fragment, or user information. Without this optional
+mapping, links keep their existing behavior; the component never guesses the runner from an
+embedded page's origin. Only the exact declared origin and session path with a single `artifact`
+query parameter are recognized. External, other-session, unknown-file and download-only links
+keep normal navigation; unrelated relative links remain inert as before.
 
 An app whose own sign-in is a bearer token rather than a cookie passes `headers` (asked for on
 every request, the live stream's reconnects included) and `onUnauthorized`:
@@ -319,6 +350,10 @@ for dark mode; the components never branch on light or dark themselves.
 | `--chat-text-sm` | small text size |
 | `--chat-density` | spacing scale (1 = default) |
 | `--chat-card-user-bg`, `--chat-card-assistant-bg`, … | per-kind card backgrounds |
+| `--chat-code-keyword`, `-string`, `-number`, `-comment`, `-title`, `-type` | muted syntax colors in code blocks and previews (0.12.0) |
+| `--chat-code-variable`, `-builtin`, `-operator` | variables and attributes, built-ins and meta, operators (0.14.0) |
+| `--chat-code-fg`, `-bg`, `-linenum` | code text, code background and the viewer's line numbers (0.14.0) |
+| `--chat-diff-add`, `--chat-diff-del` | added and removed lines of a `diff` block (0.12.0) |
 
 A minimal `chat-theme.css`:
 
@@ -356,6 +391,24 @@ A minimal `chat-theme.css`:
 
 `@blerglab/chat/blerg.css` is the runner's own mapping, if you want to start from how the
 runner looks.
+
+## Code color themes
+
+Added in 0.14.0; no new props, nothing removed. Six code tokens were added (above), so a theme can
+set what editors' themes set.
+
+- **`codeThemes`** (and `CODE_THEMES`, the same in picker order) are ten named sets of the code
+  tokens: Blerg (follows the app's palette, with its own light colors), GitHub Dark, GitHub Light,
+  One Dark, Dracula, Monokai, Solarized Dark, Solarized Light, Nord and Gruvbox Dark. Pure data,
+  no network.
+- **A choice** is `{ dark, light, overrides: { dark, light } }`: a theme per mode and, on top, a
+  `#rrggbb` color per token. `validateCodeColours` refuses anything else; `normaliseCodeColours`
+  makes a stored value safe, piece by piece.
+- **`applyCodeColours(el, choice, mode)`** (or `applyCodeTheme(el, themeId, mode, overrides)`)
+  sets the custom properties on an element, the document root or a preview box;
+  `currentCodeMode()` says which mode the page shows. The runner keeps the choice per account and
+  offers it in Settings → Code colors; the board reads it through the proxy's
+  `GET {prefix}/preferences` (see the proxy contract; the route is optional).
 
 ## Cards
 
@@ -401,6 +454,126 @@ Rules the renderer enforces, so you can rely on them:
 The package defines no kinds. Your agent learns the kinds and their shapes from your app's own
 instructions (its `CLAUDE.md` or a skill): tell it the fence form and the fields each kind takes.
 
+## Checklist, plan and pinned tickets
+
+Added in 0.13.0; no new props, nothing removed.
+
+- **Event kinds `checklist` and `ticket`.** The runner records them for `blerg-runner checklist`
+  and `blerg-runner pin` / `unpin`. A checklist event holds the whole list after the change and the
+  item it touched; consecutive changes with nothing drawn between them are one row (the latest),
+  collapsed, that opens to the list. A ticket event holds the whole ticket and what it did (pin,
+  update with the status and title it had, unpin); a pin or an update is a card, an unpin a line.
+  Older chat builds draw nothing for either.
+- **Tracker data is untrusted.** Every field renders as text; the description and the comments go
+  through the package's Markdown without the app's cards (a `card:` fence stays a code block), and,
+  as everywhere, without raw HTML or images; the key links only to an `http:`/`https:` url. Any
+  session token can claim any source, so the badge's tooltip says the agent pinned it.
+- **`LiveState` gains `checklist`, `plan`, `tickets` and `ticket`** (all optional). `useLiveState`
+  derives the checklist and the pins from the events it holds; the engine's plan comes only from
+  the runner's `GET /api/sessions/{id}/live`. `TicketModal`, `TicketDetails`, `ChecklistItems` and
+  the model helpers (`foldTicketEvent`, `readChecklist`, `planLabel`, …) are exported for a side
+  panel.
+
+## MCP servers and checklist commits
+
+Added in 0.15.0; nothing removed. Older builds draw neither.
+
+- **Event kind `mcp_status`** (the runner records it when an engine reports its MCP servers). It is
+  never drawn in the transcript. `readMcp`, `readMcpHold`, `mcpFromEvents`, `mcpSummary` ("Connecting
+  2 of 3…", "2 connected · 1 failed · 1 needs sign-in") and `holdClock` read it for a side panel.
+  `LiveState` gains optional `mcp`, `mcpHold` (the first message is held while servers connect) and
+  `canReleasePrompt`; `useLiveState` derives the first two from the events held.
+- **`McpHoldLine`** is the line "Waiting for MCP servers before sending your first message · 0:12 /
+  0:30 · Send now". Mount it in `slots.aboveComposer`; pass `onSendNow` only for a viewer who may
+  release the prompt (the runner's session owner), otherwise it has no button.
+- **Checklist items carry commits.** An item (and a checklist event's `changed`) may hold `commits`,
+  shas of 7 to 40 hex characters. The checklist row and `ChecklistItems` draw a chip ("2 commits")
+  that opens to the shas, linked when `commitUrl` (or `ChecklistItems`'s `commitUrls`) knows the page,
+  otherwise copy buttons. `CommitChips` is the shared chip list. (0.16.0 replaces the per-sha
+  "View diff" hook: see Diffs.)
+
+## Files the agent mentions
+
+Added in 0.16.0; nothing removed. Older builds leave such text as text.
+
+- **`canOpenWorkspaceFiles`** (ChatView): with a transport that has `files.workspaceFile` (the
+  runner's), a relative link or a path in inline code in the agent's text (`README.md`,
+  `src/a.go:120`, `docs/a.md#L12`) opens that file from the session's folder in the viewer, at the
+  line named, with Copy path, Download and Save a copy to Files. Pass it only for a viewer the route
+  accepts (the runner's session owner).
+
+## Copying and pasting
+
+Added in 0.17.0; nothing removed, no new props. The converter is hand-written on the DOM (no
+dependency, about 6 kB gzipped, in the main bundle because a copy event must answer synchronously).
+
+0.17.1 changes wording only, to American English: the markup colors ("Accent color", the "Color" group), the
+"upload was canceled" message, and `center` in an anchor's place name (it was `centre`).
+
+- **Copy on a message.** Every assistant and own message has a Copy button (hover or keyboard focus;
+  always shown on a touch screen). It puts the message's Markdown source on the clipboard as
+  `text/plain` and the rendered message, sanitized, as `text/html`.
+- **Selecting keeps structure.** A copy whose selection lies in rendered Markdown puts the selection
+  as Markdown (`text/plain`) and sanitized HTML; timestamps, buttons and the like are left out. A
+  selection inside one code block copies the code exactly. Anything else, or any failure, is the
+  browser's own copy.
+- **Pasting into the message box.** Rich HTML (a web page, Docs, Slack, GitHub, Jira) is inserted as
+  Markdown: headings, emphasis, code and fenced blocks with their language, lists, task lists,
+  `http`/`https`/`mailto` links, tables, quotes and rules. Images, scripts, styles, frames, forms and
+  raw HTML are dropped. Plain text, HTML that is only spans (an editor or terminal) and text that is
+  already Markdown go in unchanged; Ctrl/Cmd+Shift+V pastes plain text; undo takes the paste back in
+  one step; a pasted file still attaches.
+
+## Diffs
+
+Added in 0.16.0. Removed: ChatView's `onViewCommitDiff` (0.15.0); `ChecklistItems`'s `onViewDiff`
+now takes an artifact id, not a sha.
+
+- **View `diff`.** A published `.diff` or `.patch` (the runner gives it view `diff`; `blerg-runner
+  diff` makes one from git) opens in **`DiffView`** inside the viewer: the files with their +/−
+  beside the patch (above it under 700 px), unified by default and **Side by side** from 900 px,
+  hunk headers, both sides' line numbers, runs of more than 8 unchanged lines folded behind a click,
+  each file's code colored by its extension with the code colors, commit headers for a patch of
+  commits, binary files by their size, **Copy patch**. A file draws `DIFF_FILE_LINES` (5 000) lines
+  before **Show more**; a patch over 2 MiB is download-only like any text. The patch is parsed
+  (`parsePatch`, `patchSummary`, `splitRows`, `foldContext`) and drawn as text, never markup. A
+  workspace file named `.diff` or `.patch` opens the same way.
+- **The diff card.** An artifact of view `diff` up to 256 KiB is read when its card nears the
+  viewport and says "3 files · +12 −4" with the first file names; the tile opens the viewer. A larger
+  one keeps the plain card (name and size).
+- **Checklist "View diff".** A checklist item may carry `diff`, the artifact id of the diff
+  `blerg-runner checklist tick --commit` published of its commits. The item's commit chip gets one
+  **View diff**, which opens that file in the chat's viewer when the session's list has it (no
+  button otherwise). `ChecklistItems`'s `onViewDiff(artifactId)` lets a side panel open it its own
+  way. Two helpers are exported for hosts that color code themselves: `useHighlighterReady` and
+  `splitTokenLines`.
+
+## Code, pasted text and file previews
+
+Added in 0.12.0; no new props, nothing removed.
+
+- **Code blocks.** A fence that has closed is colored for ts/tsx/js/jsx, go, python, bash/sh,
+  json, yaml, sql, html/xml, css, rust, java, c/c++ and markdown (an unknown language stays plain);
+  `diff` and `patch` fences color added and removed lines. The highlighter is `lowlight`
+  (highlight.js grammars, MIT/BSD-3) in a chunk of its own, loaded when the first block is
+  drawn: plain text shows until it arrives, it produces spans (never HTML), and results are
+  cached by language and text. A fence still streaming is plain and uncapped; the cap and the
+  colors apply once it closes. Card fences work as before.
+- **Line cap.** A block over 25 lines shows its first 15 with a fade, "Show all N lines" (and
+  "Show less") and "Open": a small viewer with the language, line numbers and Copy. Copy on
+  the block always copies the whole block.
+- **Pasted text.** A person's message over 25 lines compacts the same way (a long closed fence
+  inside it caps itself instead). A message a host draws as a collapsed brief is not touched.
+- **File previews.** Besides images, video/audio and HTML, a published file (and a person's
+  attachment) shows a small preview in its card, fetched once when the card scrolls into view
+  and opening the viewer on click: markdown rendered (about 12 lines, no card fences), text, code
+  and JSON (12 lines; code colored by file extension; JSON pretty-printed), CSV/TSV (6 rows by 6
+  columns) and a PDF's first page. Text-like files preview up to 256 KiB and PDFs up to 5 MiB;
+  over that, or if the fetch fails, the card stays plain. Only the small result is kept (up to
+  50 per kind), and the PDF document is released after its page is drawn.
+- **Theme.** The colors are `--chat-code-*` and `--chat-diff-add`/`--chat-diff-del` tokens with
+  light and dark values (`blerg.css` follows the app's `--diff-add`/`--diff-del`).
+
 ## Review and mark-up
 
 The file viewer that `ChatView` opens has two feedback modes, with nothing for the app to wire:
@@ -435,6 +608,6 @@ origin; the app is a Go backend with a React frontend. Stop at any failing check
    - `curl -sSN -b "$COOKIE" "http://localhost:8080/blerg/sessions/$SID/events/live?tail=1" | head -c 2000` shows `event:` frames arriving, the first batch ending with `event: replay_done`, then `event: status`.
    - `curl -sS -D - -o /dev/null -b "$COOKIE" http://localhost:8080/blerg/sessions/$SID/artifacts | grep -i set-cookie` prints nothing.
 
-8. **Open the page.** Load the chat page in a browser (or a headless one) for `SID`. Check: the transcript shows the session's history, typing a message and sending it makes a user bubble appear and the runner's session receive it (`GET /blerg/sessions/$SID/events?limit=1` after a moment shows the new event), the Files panel lists the session's files, and the page renders in both colour schemes.
+8. **Open the page.** Load the chat page in a browser (or a headless one) for `SID`. Check: the transcript shows the session's history, typing a message and sending it makes a user bubble appear and the runner's session receive it (`GET /blerg/sessions/$SID/events?limit=1` after a moment shows the new event), the Files panel lists the session's files, and the page renders in both color schemes.
 
 9. **Report.** The package version and sha512 installed, where `chatproxy.go` landed, the prefix, what `Authorize` keys on, and the output of each check.

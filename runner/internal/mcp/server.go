@@ -115,7 +115,7 @@ func toolText(v any) map[string]any {
 		// Nothing this package returns is unserialisable, but a silent empty
 		// block would be a worse answer than saying so.
 		return map[string]any{
-			"content": []map[string]any{{"type": "text", "text": `{"error":"result could not be serialised"}`}},
+			"content": []map[string]any{{"type": "text", "text": `{"error":"result could not be serialized"}`}},
 			"isError": true,
 		}
 	}
@@ -173,6 +173,16 @@ func decodeArgs(args json.RawMessage, into any) map[string]any {
 
 func (s *Server) dispatch(ctx context.Context, p server.RunnerPrincipal, name string, args json.RawMessage) map[string]any {
 	switch name {
+	case "discover_launch_options":
+		var request server.LaunchOptionsRequest
+		if bad := decodeArgs(args, &request); bad != nil {
+			return bad
+		}
+		options, err := s.api.DiscoverLaunchOptions(ctx, p, request)
+		if err != nil {
+			return apiToolError(err)
+		}
+		return toolText(options)
 	case "start_session":
 		var a struct {
 			server.RunnerStartRequest
@@ -223,13 +233,29 @@ func (s *Server) dispatch(ctx context.Context, p server.RunnerPrincipal, name st
 	case "send_message":
 		var a struct {
 			SessionID string `json:"session_id"`
+			ClientID  string `json:"client_id,omitempty"`
 			Text      string `json:"text"`
 			Source    string `json:"source"`
 		}
 		if bad := decodeArgs(args, &a); bad != nil {
 			return bad
 		}
-		body, apiErr := s.api.SendMessage(ctx, p, a.SessionID, a.Text, a.Source)
+		body, apiErr := s.api.SendMessage(ctx, p, a.SessionID, a.Text, a.Source, a.ClientID)
+		if apiErr != nil {
+			return apiToolError(apiErr)
+		}
+		return toolText(body)
+
+	case "set_session_model":
+		var a struct {
+			SessionID string `json:"session_id"`
+			Model     string `json:"model"`
+			Effort    string `json:"effort"`
+		}
+		if bad := decodeArgs(args, &a); bad != nil {
+			return bad
+		}
+		body, apiErr := s.api.SetSessionModel(ctx, p, a.SessionID, a.Model, a.Effort)
 		if apiErr != nil {
 			return apiToolError(apiErr)
 		}

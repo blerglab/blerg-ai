@@ -32,6 +32,9 @@ export type AgentEventKind =
   | 'capabilities'
   | 'artifact'
   | 'topic'
+  | 'checklist'
+  | 'ticket'
+  | 'mcp_status'
 
 export interface AgentEvent {
   type: 'agent_event'
@@ -76,6 +79,9 @@ export interface ModelChangedPayload { model: string; effort: string; source: st
 export interface TokenUsage { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number }
 export interface SubagentPayload {
   child_id: string; agent_type: string; model: string; summary: string
+  /** Child-reported configured effort; empty/absent means unknown, never inherited from the parent. */
+  effort?: string
+  usage_by_model?: Record<string, TokenUsage>
   usage?: TokenUsage; tool_uses?: number; duration_ms?: number; background?: boolean
   // it failed (a daemon older than the field leaves it out; an "error:" summary says the same)
   is_error?: boolean
@@ -88,6 +94,42 @@ export interface SubagentPayload {
 // A piece of work the agent marked (`blerg-runner topic`; the server records it): "start" opens topic
 // id with its title and ends the open one; "done" closes the open one, with an optional outcome.
 export interface TopicPayload { id: string; title: string; action: 'start' | 'done'; outcome?: string }
+// kind "checklist" (`blerg-runner checklist`; the server records it): the FULL list after the change,
+// the operation, and the item it touched (index 1-based; absent for set and clear).
+/** diff: the id of the session's published diff of the item's commits (`checklist tick --commit`). */
+export interface ChecklistItem { text: string; done: boolean; commits?: string[]; diff?: string }
+export interface ChecklistPayload {
+  items: ChecklistItem[]
+  op: 'set' | 'add' | 'tick' | 'untick' | 'clear' | string
+  changed?: { index: number; text: string; done: boolean; commits?: string[]; diff?: string }
+}
+// kind "ticket" (`blerg-runner pin` / `unpin`): a tracker's ticket the agent pinned, in one
+// source-neutral shape (the server caps every field). Untrusted tracker data: drawn as text, the url
+// only when it is http(s). A pin is identified by (source, key). action: pin (new), update (a re-pin;
+// previous holds the status and title it had), unpin (ticket holds only source, key, title, status, url).
+export interface TicketField { name: string; value: string }
+export interface TicketComment { author?: string; at?: string; body: string }
+export interface Ticket {
+  source: string
+  key: string
+  url?: string
+  title: string
+  status?: string
+  type?: string
+  priority?: string
+  assignee?: string
+  reporter?: string
+  labels?: string[]
+  description?: string
+  fields?: TicketField[]
+  comments?: TicketComment[]
+  acceptance?: string[]
+}
+export interface TicketPayload {
+  ticket: Ticket
+  action: 'pin' | 'update' | 'unpin' | string
+  previous?: { status: string; title: string }
+}
 // kinds background_task_started | background_task_done: something the agent left running in the
 // background (a background shell, a Monitor, a background subagent) and its end. task_id is the
 // engine's id for it, call_id the tool call that started it. Only a Claude Code session sends them.
@@ -100,6 +142,8 @@ export interface BackgroundTaskDonePayload {
   task_id: string; call_id: string; kind: BackgroundTaskKind | string; status: string; summary: string; description?: string
 }
 export interface TurnDonePayload {
+  /** Complete usage partition; replaces aggregate usage for attribution, never added to it. */
+  usage_by_model?: Record<string, TokenUsage>
   stop_reason: string
   model: string
   usage: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number }
@@ -213,6 +257,7 @@ export interface SessionInfo {
   title: string
   model?: string
   effort?: string
+  steering_supported?: boolean
   engine?: string // "" / absent = claude
   started_at: string
   ended_at?: string | null

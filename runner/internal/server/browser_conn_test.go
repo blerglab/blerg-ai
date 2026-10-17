@@ -478,10 +478,6 @@ func TestActiveDisconnectPromotes(t *testing.T) {
 func TestSetSessionStar(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000071"
 	sessionID := "00000000-0000-0000-0000-000000000072"
@@ -564,10 +560,6 @@ func TestSetSessionStar(t *testing.T) {
 func TestMarkSessionRead(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000061"
 	sessionID := "00000000-0000-0000-0000-000000000062"
@@ -640,10 +632,6 @@ func TestMarkSessionRead(t *testing.T) {
 func TestInitialStateCarriesUnreadAndStarred(t *testing.T) {
 	pool := connectSrvTestDB(t)
 	ctx := context.Background()
-	setupSrvTestSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-000000000081"
 	sessionID := "00000000-0000-0000-0000-000000000082"

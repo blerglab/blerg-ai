@@ -137,6 +137,16 @@ describe('ChatView queued messages and Esc', () => {
     expect(screen.getByTestId('queued-message').textContent).toMatch(/next step/)
   })
 
+  it.each([
+    { engine: 'future-engine', steering_supported: true },
+    { engine: 'codex', steering_supported: false },
+  ])('uses declared steering support for $engine ($steering_supported)', async declaration => {
+    mount(createFakeTransport(), { ...base, ...declaration })
+    expect(screen.getByTestId('composer-hint').textContent).toMatch(declaration.steering_supported ? /Enter sends/ : /Enter queues/)
+    await enter(type('a message during work'))
+    expect(screen.getByTestId('queued-message').textContent?.includes('next step')).toBe(declaration.steering_supported)
+  })
+
   it('puts Attach beside Send, after the text box', () => {
     mount(createFakeTransport(), { ...base, status: 'idle' })
     const attach = screen.getByRole('button', { name: 'Attach files' })

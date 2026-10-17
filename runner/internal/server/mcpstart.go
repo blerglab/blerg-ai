@@ -559,7 +559,7 @@ type grantTarget struct {
 const (
 	msgMCPHumanOnly      = "MCP connections can only be attached by a signed-in person, not by an agent token or the runner key"
 	msgMCPSignIn         = "your sign-in is no longer valid for MCP connections: sign in again and retry"
-	msgMCPEngine         = "MCP connections work only with the claude or codex engine"
+	msgMCPEngine         = "MCP connections require an engine with restricted-tool support"
 	msgCodexRestrictOld  = "this daemon does not report codex_restricted: update it to run a Codex MCP or unattended session"
 	msgMCPKind           = "MCP connections need an agent session (kind \"agent\")"
 	msgMCPRuntime        = "MCP connections run only in a cluster pod or the Docker sandbox, never directly on the host"
@@ -594,7 +594,7 @@ func (a *API) checkGrantTarget(t grantTarget) *APIError {
 	if a.dbPool == nil {
 		return apiErrorf(http.StatusServiceUnavailable, "%s", msgMCPNoDB)
 	}
-	if t.Engine != "" && t.Engine != "claude" && t.Engine != "codex" {
+	if !restrictedEngineSupported(t.Engine) {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPEngine)
 	}
 	if t.Kind != "agent" {
@@ -629,6 +629,9 @@ func (a *API) checkGrantTarget(t grantTarget) *APIError {
 // placement that can restrict it: never the bare host, and on Docker only a daemon that says it
 // honours RestrictTools. A cluster pod is the same build as the server and always can.
 func checkRestrictTarget(runtime string, dc *DaemonConn, engine ...string) *APIError {
+	if len(engine) > 0 && !restrictedEngineSupported(engine[0]) {
+		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPEngine)
+	}
 	switch runtime {
 	case runnerRuntimeCluster:
 		return nil

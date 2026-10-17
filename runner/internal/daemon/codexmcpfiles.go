@@ -82,7 +82,7 @@ func (f *codexRestrictedFiles) Execute(name string, raw json.RawMessage) (string
 }
 func (f *codexRestrictedFiles) ExecuteContext(ctx context.Context, name string, raw json.RawMessage) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return "", errors.New("file tool cancelled")
+		return "", errors.New("file tool canceled")
 	}
 	if len(raw) > 2*codexFileLimit {
 		return "", errors.New("file tool arguments exceed the restricted size limit")
@@ -177,7 +177,7 @@ func (f *codexRestrictedFiles) ExecuteContext(ctx context.Context, name string, 
 		readBytes := 0
 		for _, p := range files {
 			if ctx.Err() != nil {
-				return "", errors.New("file tool cancelled")
+				return "", errors.New("file tool canceled")
 			}
 			if name == "glob" {
 				matched, err := path.Match(in.Pattern, p)
@@ -225,7 +225,7 @@ func (f *codexRestrictedFiles) listFiles(ctx context.Context) ([]string, error) 
 	var walk func(string, int) error
 	walk = func(dir string, depth int) error {
 		if ctx.Err() != nil {
-			return errors.New("file tool cancelled")
+			return errors.New("file tool canceled")
 		}
 		if depth > 64 || visited >= 10000 {
 			return errors.New("workspace file listing exceeds the restricted tool limit")

@@ -514,7 +514,20 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 				log.Printf("browser %s set_session_model %s: refused model %q / effort %q", bc.ID, msg.SessionID, msg.Model, msg.Effort)
 				continue
 			}
-			forwardToSessionDaemon(h, bc, msg.SessionID, fwd)
+			if dbPool == nil {
+				forwardToSessionDaemon(h, bc, msg.SessionID, fwd)
+			} else if _, problem := h.changeSessionModel(ctx, RunnerPrincipal{Kind: "human", Sub: bc.AccountID, Sid: bc.SessionID}, msg.SessionID, fwd.Model, fwd.Effort); problem != nil {
+				recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": problem.Message, "retryable": problem.Status == http.StatusServiceUnavailable})
+			}
+
+		case "release_held_prompt":
+			var msg protocol.ReleaseHeldPrompt
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				continue
+			}
+			if problem := handleReleaseHeldPrompt(ctx, h, bc, dbPool, msg); problem != nil {
+				log.Printf("browser %s: release held prompt refused (%d)", bc.ID, problem.Status)
+			}
 
 		case "interrupt_session":
 			var msg protocol.InterruptSession
@@ -811,7 +824,7 @@ func handleBrowserAgentMessageUnlocked(ctx context.Context, h *Hub, bc *BrowserC
 				// messages sent after grace expires. The daemon picks them up on return.
 				return
 			}
-			if err := resumeClusterSessionMode(ctx, h, dbPool, msg.SessionID, msg.Text, bc.AccountID, bc.SessionID, false, msg.ClientID); err != nil {
+			if err := resumeClusterSessionMode(ctx, h, dbPool, msg.SessionID, msg.Text, bc.AccountID, bc.SessionID, false, resumeInput{ClientID: msg.ClientID, Source: msg.Source, Proof: coreProof{SessionID: bc.SessionID}}); err != nil {
 				recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": "Session could not resume; retry shortly.", "retryable": true, "client_id": msg.ClientID})
 				_ = db.SettleSessionInput(ctx, dbPool, msg.SessionID, msg.ClientID)
 			}
@@ -819,7 +832,9 @@ func handleBrowserAgentMessageUnlocked(ctx context.Context, h *Hub, bc *BrowserC
 			// its actual consumption settles the outbox; the daemon deduplicates both.
 			return
 		}
-		resumeClusterSession(ctx, h, dbPool, msg.SessionID, msg.Text, bc.AccountID, bc.SessionID)
+		if err := resumeClusterSessionMode(ctx, h, dbPool, msg.SessionID, msg.Text, bc.AccountID, bc.SessionID, false, resumeInput{Source: msg.Source, Proof: coreProof{SessionID: bc.SessionID}}); err != nil {
+			recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": "Session could not resume; retry shortly.", "retryable": true})
+		}
 		return
 	}
 	if forwardToSessionDaemon(h, bc, msg.SessionID, protocol.AgentUserMessage{

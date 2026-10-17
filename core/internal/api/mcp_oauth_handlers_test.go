@@ -584,9 +584,9 @@ func TestMCPOAuthRefreshFailureIs404OnInternalRoute(t *testing.T) {
 
 func TestMCPOAuthTransientRefreshFailureIs503(t *testing.T) {
 	e := newOAuthAPIEnv(t)
-	e.as.SetAccessTTL(1)
+	e.as.SetAccessTTL(0.001)
 	id := e.connect(t, "notes")
-	time.Sleep(1100 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 	e.as.Lock()
 	e.as.RefreshStatus = 503
 	e.as.Unlock()

@@ -5,7 +5,7 @@
 // session page shows an agent session (the header badge counts from it, open panel or not): at once,
 // when the transcript is loaded again (a reconnect), when `refresh` changes (the session's status,
 // the side panel opening or its Capabilities tab coming on screen), when the page comes back (focus, visibility) and when the transcript
-// store takes an event that changes the live state (LIVE_TRIGGER_KINDS). Every read sends
+// store takes an event that changes the live state (isLiveTrigger). Every read sends
 // If-None-Match; one runs at a time, reads start at least LIVE_MIN_GAP_MS apart, and a trigger that
 // comes too early or during a read gets one trailing read (useTopics' pattern). All of it is one
 // session's: a new sessionId starts over and a reply for the previous one is dropped, but a session
@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import { apiFetch } from '../apiFetch'
-import { LIVE_FOLD_KINDS, LIVE_TRIGGER_KINDS, foldLive, type LiveReply, type LiveView } from '../lib/liveState'
+import { LIVE_FOLD_KINDS, foldLive, isLiveTrigger, type LiveReply, type LiveView } from '../lib/liveState'
 
 export const LIVE_MIN_GAP_MS = 5000
 
@@ -63,7 +63,7 @@ const isNoRoute = (status: number) => status === 200 || status === 404 || status
 
 function countTriggers(events: readonly AgentEvent[]): number {
   let n = 0
-  for (const ev of events) if (LIVE_TRIGGER_KINDS.has(ev.kind)) n++
+  for (const ev of events) if (isLiveTrigger(ev)) n++
   return n
 }
 

@@ -129,7 +129,7 @@ func gitSafetyEnv() []string {
 // over another transport.
 var (
 	errCloneTimedOut  = errors.New("clone timed out")
-	errCloneCancelled = errors.New("clone cancelled: the session was stopped")
+	errCloneCancelled = errors.New("clone canceled: the session was stopped")
 )
 
 // runClone runs cmd — a clone — under ctx and timeout. Cancellation (a kill,
@@ -256,7 +256,7 @@ func EnsureClonedTarget(ctx context.Context, reposRoot string, t CloneTarget) er
 		if ok && got.Key() == ref.Key() {
 			return nil
 		}
-		what := "a folder with no recognisable origin"
+		what := "a folder with no recognizable origin"
 		if ok {
 			what = fmt.Sprintf("%s repository %s", got.Provider, got.FullName())
 		}

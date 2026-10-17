@@ -2,9 +2,11 @@ package server
 
 import (
 	"math"
+	"slices"
 	"sort"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/engines"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
@@ -15,13 +17,7 @@ import (
 // (daemon_limits_changed); initial_state carries it in DaemonInfo. A daemon
 // says it all again on every connect. A cluster pod reports none.
 
-// usageProviders and usageWindowIDs are what a report may name.
-var (
-	usageProviders = map[string]bool{"codex": true, "claude": true}
-	usageWindowIDs = map[string]bool{"5h": true, "7d": true, "month": true, "day": true, "spend-week": true, "capped": true}
-)
-
-// usageResetHorizon bounds a believable reset time: the longest window is a week.
+// usageResetHorizon bounds a believable reset time, including monthly windows.
 const usageResetHorizon = 31 * 24 * time.Hour
 
 // sanitizeUsageLimits checks a daemon's report: false for a provider this
@@ -29,7 +25,8 @@ const usageResetHorizon = 31 * 24 * time.Hour
 // clamped to 0–100, a reset in the far past or future forgotten, a fetched_at
 // in the future set to now.
 func sanitizeUsageLimits(u protocol.UsageLimits, now time.Time) (protocol.UsageLimits, bool) {
-	if !usageProviders[u.Provider] {
+	descriptor, registered := engines.Lookup(u.Provider)
+	if u.Provider == "" || !registered || len(descriptor.UsageWindows) == 0 {
 		return protocol.UsageLimits{}, false
 	}
 	out := protocol.UsageLimits{Provider: u.Provider, Windows: []protocol.UsageWindow{}, FetchedAt: u.FetchedAt.UTC()}
@@ -38,7 +35,7 @@ func sanitizeUsageLimits(u protocol.UsageLimits, now time.Time) (protocol.UsageL
 	}
 	seen := map[string]bool{}
 	for _, w := range u.Windows {
-		if !usageWindowIDs[w.ID] || seen[w.ID] {
+		if !slices.Contains(descriptor.UsageWindows, w.ID) || seen[w.ID] {
 			continue
 		}
 		seen[w.ID] = true

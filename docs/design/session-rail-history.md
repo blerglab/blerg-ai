@@ -240,7 +240,7 @@ commits.
   unmarked summary), work around a marker, a two-topic document, a deleted version, each subagent
   status.
 - **Server:** `GET` access (owner, shared viewer, other's private, agent token, unknown id),
-  `tokens_hidden`, `ETag`/`304` incl. session end; `POST` binding, `409`s, sanitiser, cap, two
+  `tokens_hidden`, `ETag`/`304` incl. session end; `POST` binding, `409`s, sanitizer, cap, two
   concurrent starts; the 100k plan and timing.
 - **Daemon:** `is_error`, both sources. **CLI** (`test_blerg_runner.py`): start, done ± outcome, a
   title with `--done` refused. **UI:** tab persistence; fetching only while visible; every trigger

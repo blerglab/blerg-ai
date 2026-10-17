@@ -13,16 +13,18 @@ import (
 
 // Session represents a single running PTY session.
 type Session struct {
-	ID          string
-	ProjectPath string
-	Repo        string
-	ptmx        *os.File
-	cmd         *exec.Cmd
-	seq         atomic.Int64
-	OutputCh    chan []byte   // raw PTY output chunks
-	done        chan struct{} // closed when session ends
-	exitCode    int
-	signal      *string
+	workspace     string
+	workspaceInfo os.FileInfo
+	ID            string
+	ProjectPath   string
+	Repo          string
+	ptmx          *os.File
+	cmd           *exec.Cmd
+	seq           atomic.Int64
+	OutputCh      chan []byte   // raw PTY output chunks
+	done          chan struct{} // closed when session ends
+	exitCode      int
+	signal        *string
 }
 
 // winsize converts a client-supplied terminal size to the uint16 pair the
@@ -44,6 +46,10 @@ func winsize(cols, rows int) *pty.Winsize {
 // NewSession starts a new PTY session running the given command.
 // If command is empty, it defaults to ["claude", "--dangerously-skip-permissions"].
 func NewSession(id, projectPath string, cols, rows int, env []string, command []string) (*Session, error) {
+	workspaceInfo, workspaceErr := os.Stat(projectPath)
+	if workspaceErr != nil {
+		return nil, workspaceErr
+	}
 	if len(command) == 0 {
 		claudePath, err := exec.LookPath("claude")
 		if err != nil {
@@ -62,12 +68,14 @@ func NewSession(id, projectPath string, cols, rows int, env []string, command []
 	}
 
 	s := &Session{
-		ID:          id,
-		ProjectPath: projectPath,
-		ptmx:        ptmx,
-		cmd:         cmd,
-		OutputCh:    make(chan []byte, 256),
-		done:        make(chan struct{}),
+		workspace:     projectPath,
+		workspaceInfo: workspaceInfo,
+		ID:            id,
+		ProjectPath:   projectPath,
+		ptmx:          ptmx,
+		cmd:           cmd,
+		OutputCh:      make(chan []byte, 256),
+		done:          make(chan struct{}),
 	}
 
 	go s.readLoop()

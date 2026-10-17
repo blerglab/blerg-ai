@@ -13,10 +13,6 @@ import (
 func TestBoardCRUD(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	desc := "my board"
 	board, err := db.CreateBoard(ctx, pool, "Sprint 1", &desc, []string{"repo-a", "repo-b"}, nil)
@@ -132,10 +128,6 @@ func TestBoardCRUD(t *testing.T) {
 func TestColumnOperations(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	board, err := db.CreateBoard(ctx, pool, "Ops Board", nil, nil, nil)
 	if err != nil {
@@ -282,10 +274,6 @@ func TestColumnOperations(t *testing.T) {
 func TestColumnDeleteLiveTickets(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	board, err := db.CreateBoard(ctx, pool, "Ticket Board", nil, nil, nil)
 	if err != nil {

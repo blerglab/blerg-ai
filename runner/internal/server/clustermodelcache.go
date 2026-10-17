@@ -34,6 +34,11 @@ type clusterModelCache struct {
 // WarmClusterModelCache restores persisted catalogs without fetching credentials
 // or waiting for a cluster pod. Startup never needs a person's live proof.
 func (a *API) WarmClusterModelCache(parent context.Context) {
+	// Operator readiness can be warmed without impersonating a person.
+	// Personal catalogs still require the caller's own current proof.
+	if a.hub != nil && a.hub.JobManager() != nil {
+		a.clusterReadinessSnapshot(parent, runnerPrincipal{Kind: runnerKeyPrincipalKind}, false)
+	}
 	if a.dbPool == nil {
 		return
 	}
@@ -69,9 +74,17 @@ func (a *API) WarmClusterModelCache(parent context.Context) {
 // clusterModelSnapshot never performs credential or Kubernetes I/O on the
 // request path. Even the first persistent-cache lookup happens in background.
 func (a *API) clusterModelSnapshot(ctx context.Context, engine, accountID string, proof coreProof, force bool) models.List {
+	return a.clusterModelSnapshotFor(ctx, engine, accountID, proof, force, false)
+}
+
+func (a *API) operatorClusterModelSnapshot(ctx context.Context, engine string, force bool) models.List {
+	return a.clusterModelSnapshotFor(ctx, engine, "", coreProof{}, force, true)
+}
+
+func (a *API) clusterModelSnapshotFor(ctx context.Context, engine, accountID string, proof coreProof, force, operator bool) models.List {
 	engine = models.NormalizeEngine(engine)
 	empty := models.List{Models: []models.Model{}, Source: models.SourceNone}
-	if !proof.valid() || accountID == "" {
+	if !operator && (!proof.valid() || accountID == "") {
 		empty.Error = errNoLivenessProof.Error()
 		return empty
 	}
@@ -155,7 +168,15 @@ func (a *API) refreshClusterModelCatalog(parent context.Context, jm *JobManager,
 	} else {
 		provider, supported := clusterModelProviderFor(key.engine)
 		if supported {
-			list, err = provider.probe(ctx, jm, key.accountID, proof, force)
+			if key.accountID == "" {
+				if provider.probeOperator == nil {
+					err = errors.New("operator catalog unavailable")
+				} else {
+					list, err = provider.probeOperator(ctx, jm, force)
+				}
+			} else {
+				list, err = provider.probe(ctx, jm, key.accountID, proof, force)
+			}
 		} else {
 			err = errors.New("engine has no cluster model catalog")
 		}
@@ -218,7 +239,7 @@ func (a *API) loadClusterModelCatalog(ctx context.Context, key clusterModelCache
 	if a.clusterModels.load != nil {
 		return a.clusterModels.load(ctx, key.accountID, key.engine, key.image)
 	}
-	if a.dbPool == nil {
+	if a.dbPool == nil || key.accountID == "" {
 		return models.List{}, false, nil
 	}
 	raw, at, found, err := db.LoadClusterModelCatalog(ctx, a.dbPool, key.accountID, key.engine, key.image)
@@ -232,7 +253,7 @@ func (a *API) storeClusterModelCatalog(ctx context.Context, key clusterModelCach
 	if a.clusterModels.store != nil {
 		return a.clusterModels.store(ctx, key.accountID, key.engine, key.image, list)
 	}
-	if a.dbPool == nil {
+	if a.dbPool == nil || key.accountID == "" {
 		return nil
 	}
 	raw, err := json.Marshal(list)

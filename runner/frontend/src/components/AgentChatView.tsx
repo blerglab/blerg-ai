@@ -3,11 +3,13 @@
 // runner's own — the model and effort pickers, the Rules panel, the ready card's repo line — and
 // wires the package to the runner's websocket and token. The chat's settings (Show thinking,
 // Compact tool calls), its Files and the Skills & plugins are in the session panel (SessionRail).
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ChatView,
+  McpHoldLine,
   ReadyCard,
   createBlergTransport,
+  type McpHold,
   type SessionMeta,
   type Transport,
 } from '@blerglab/chat'
@@ -114,12 +116,18 @@ interface Props {
   compact: boolean
   /** A file the History tab asked to open; n changes with every request. */
   openArtifact?: { id: string; n: number } | null
+  /** The first message is held while the session's MCP servers connect (from the live state). */
+  mcpHold?: McpHold | null
+  /** The viewer owns the session: "Send now" works for them, and they may open the files the agent names. */
+  canReleasePrompt?: boolean
+  /** The web page of each commit the checklist names (the live state's), for the chat's chips. */
+  commitUrls?: Readonly<Record<string, string>>
 }
 
 // Memoised: the page around it re-renders as the side panel's state moves, the chat need not.
 export default memo(AgentChatView)
 
-function AgentChatView({ session, thinking, compact, openArtifact }: Props) {
+function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canReleasePrompt, commitUrls }: Props) {
   const sessionId = session.id
   const transport = blergTransport()
   // The server's per-file limit (initial_state): the chat refuses a larger attachment before sending it.
@@ -148,6 +156,7 @@ function AgentChatView({ session, thinking, compact, openArtifact }: Props) {
   const meta: SessionMeta = session
   const engine = ENGINE_LABELS[session.engine || 'claude'] ?? session.engine
   const runtime = RUNTIME_LABELS[session.runtime || 'daemon'] ?? session.runtime
+  const commitUrl = useCallback((sha: string) => commitUrls?.[sha] ?? null, [commitUrls])
   const slots = useMemo(() => ({
     header: (
       <>
@@ -197,12 +206,15 @@ function AgentChatView({ session, thinking, compact, openArtifact }: Props) {
         {showRules && <RulesPanel project={session.repo} />}
       </>
     ),
+    aboveComposer: mcpHold
+      ? <McpHoldLine hold={mcpHold} onSendNow={canReleasePrompt ? () => { ws.send({ type: 'release_held_prompt', session_id: sessionId }) } : undefined} />
+      : null,
     readyCard: (m: SessionMeta, readyAt: number) => (
       <ReadyCard meta={{ ...m, engine, runtime }} readyAt={readyAt}>
         <div><dt>Repo</dt><dd data-testid="ready-repo">{repoDetail(session.repo)}</dd></div>
       </ReadyCard>
     ),
-  }), [session.model, session.effort, session.repo, sessionId, currentModel, engineModels, sessionEfforts, showRules, engine, runtime])
+  }), [session.model, session.effort, session.repo, sessionId, currentModel, engineModels, sessionEfforts, showRules, engine, runtime, mcpHold, canReleasePrompt])
 
   return (
     <ChatView
@@ -213,8 +225,10 @@ function AgentChatView({ session, thinking, compact, openArtifact }: Props) {
       thinking={thinking ? 'shown' : 'hidden'}
       compact={compact}
       filesButton={false}
+      canOpenWorkspaceFiles={canReleasePrompt === true}
       maxFileBytes={maxFileBytes ?? undefined}
       linkedArtifact={linked}
+      commitUrl={commitUrl}
       onLinkedArtifactConsumed={() => { setLinked(null); clearArtifactParam() }}
     />
   )

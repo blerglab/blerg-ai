@@ -14,64 +14,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/blerglab/blerg-ai/core/internal/api"
 	"github.com/blerglab/blerg-ai/core/internal/authprovider"
 	"github.com/blerglab/blerg-ai/core/internal/db"
+	"github.com/blerglab/blerg-ai/core/internal/testsupport"
 )
 
-// mainTestSchema is distinct from every other package's test schema name so this package's
-// isolated schema never collides with theirs, even though all run against the same shared
-// DATABASE_URL (audit M-1: this package used to run TestBuildDepsWiresRegisterKeyFromEnv
-// directly against the shared "public" schema with no isolation).
-const mainTestSchema = "test_blerg_core_cmd_main"
-
-// mainTestStore gives the caller a fresh, isolated, migrated schema (dropped and recreated,
-// then dropped again on cleanup) wrapped in a *db.PgStore (buildDeps's own parameter type) —
-// the same ConnConfig.RuntimeParams pattern established in
-// internal/api/auth_handlers_test.go's testPool.
+// mainTestStore provides a fresh database cloned from the migrated package template.
 func mainTestStore(t *testing.T) *db.PgStore {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-	ctx := context.Background()
-
-	setupPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", mainTestSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("drop schema: %v", err)
-	}
-	if _, err := setupPool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA %s", mainTestSchema)); err != nil {
-		setupPool.Close()
-		t.Fatalf("create schema: %v", err)
-	}
-	setupPool.Close()
-
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = mainTestSchema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		bg := context.Background()
-		pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", mainTestSchema))
-		pool.Close()
-	})
-	if err := db.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	return db.NewPgStore(pool)
+	return db.NewPgStore(testsupport.Pool(t, db.Migrate))
 }
 
 func TestHealthz(t *testing.T) {
@@ -326,13 +278,8 @@ func TestValidateSecrets(t *testing.T) {
 // hash.
 func TestUsersCLI(t *testing.T) {
 	st := mainTestStore(t)
-	// runUsers opens its own pool from DATABASE_URL; point it at this test's schema.
-	sep := "?"
-	if strings.Contains(os.Getenv("DATABASE_URL"), "?") {
-		sep = "&"
-	}
-	t.Setenv("DATABASE_URL", os.Getenv("DATABASE_URL")+sep+"options=-csearch_path%3D"+mainTestSchema)
-	_ = st
+	// runUsers must reconnect to this fixture database.
+	t.Setenv("DATABASE_URL", st.Pool().Config().ConnString())
 	var out bytes.Buffer
 	if code := runUsers([]string{"create", "--subject", "eve", "--role", "member"}, &out); code != 0 {
 		t.Fatalf("create exit %d: %s", code, out.String())

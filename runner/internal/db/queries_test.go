@@ -3,60 +3,67 @@ package db_test
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func connect(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping database tests")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	return migratedPool(t, 8)
+}
+
+// migratedPool gives each test an independent copy of the once-migrated template.
+func migratedPool(t *testing.T, maxConns int32) *pgxpool.Pool {
+	t.Helper()
+	base := testsupport.Open(t, "TEST_DATABASE_URL", "runner-db-schema", func(ctx context.Context, base *pgxpool.Pool) error {
+		if _, err := base.Exec(ctx, "CREATE SCHEMA test_blerg_runner"); err != nil {
+			return err
+		}
+		cfg := base.Config()
+		cfg.ConnConfig.RuntimeParams["search_path"] = "test_blerg_runner"
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		return db.RunMigrations(ctx, pool)
+	})
+	cfg := base.Config()
+	cfg.MaxConns = maxConns
+	cfg.ConnConfig.RuntimeParams["search_path"] = "test_blerg_runner"
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("connect to postgres: %v", err)
+		t.Fatal("open isolated test database")
 	}
-	t.Cleanup(func() { pool.Close() })
+	t.Cleanup(pool.Close)
 	return pool
 }
 
-// setupSchema drops and recreates a fresh test schema so tests are isolated.
-func setupSchema(t *testing.T, pool *pgxpool.Pool) {
+// unmigratedPool retains the nonpublic-schema migration regression while
+// isolating the database from every other test and package process.
+func unmigratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	ctx := context.Background()
-	schema := "test_blerg_runner"
-
-	_, err := pool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
-	if err != nil {
-		t.Fatalf("drop schema: %v", err)
+	base := testsupport.Blank(t, "TEST_DATABASE_URL")
+	if _, err := base.Exec(context.Background(), "CREATE SCHEMA migration_fixture"); err != nil {
+		t.Fatal(err)
 	}
-	_, err = pool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA %s", schema))
+	cfg := base.Config()
+	cfg.ConnConfig.RuntimeParams["search_path"] = "migration_fixture"
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("create schema: %v", err)
+		t.Fatal("open nonpublic migration fixture")
 	}
-	_, err = pool.Exec(ctx, fmt.Sprintf("SET search_path TO %s", schema))
-	if err != nil {
-		t.Fatalf("set search_path: %v", err)
-	}
-
-	t.Cleanup(func() {
-		bCtx := context.Background()
-		pool.Exec(bCtx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
-	})
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 func TestMigrationsAndQueries(t *testing.T) {
-	pool := connect(t)
+	pool := unmigratedPool(t)
 	ctx := context.Background()
-
-	setupSchema(t, pool)
 
 	// Run migrations — first pass.
 	if err := db.RunMigrations(ctx, pool); err != nil {
@@ -210,11 +217,6 @@ func TestMigrationsAndQueries(t *testing.T) {
 func TestSetSessionUnread(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-0000000000b1"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "unread-daemon", "local", "/repos"); err != nil {
@@ -267,11 +269,6 @@ func TestSetSessionUnread(t *testing.T) {
 func TestSetSessionStarred(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-0000000000c1"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "starred-daemon", "local", "/repos"); err != nil {
@@ -331,11 +328,6 @@ func TestSetSessionStarred(t *testing.T) {
 func TestAppendSessionEventAllowsDuplicateSeq(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-0000000000a1"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "dupe-daemon", "local", "/repos"); err != nil {
@@ -389,10 +381,6 @@ func TestAppendSessionEventAllowsDuplicateSeq(t *testing.T) {
 func TestMessages(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-0000000000d1"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "msg-daemon", "local", "/repos"); err != nil {
@@ -463,10 +451,6 @@ func TestMessages(t *testing.T) {
 func TestGetSessionEventsTail(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-0000000000e1"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "tail-daemon", "local", "/repos"); err != nil {
@@ -583,10 +567,6 @@ func TestGetSessionEventsTail(t *testing.T) {
 func TestGetSessionEventsTailMultiBatch(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	daemonID := "00000000-0000-0000-0000-0000000000f1"
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "tail-multibatch-daemon", "local", "/repos"); err != nil {
@@ -673,11 +653,7 @@ func firstID(l []db.MessageRow) string {
 
 func TestAgentEvents(t *testing.T) {
 	pool := connect(t)
-	setupSchema(t, pool)
 	ctx := context.Background()
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 	if err := db.UpsertDaemon(ctx, pool, "11111111-1111-4111-8111-111111111111", "d", "local", "/r"); err != nil {
 		t.Fatal(err)
 	}
@@ -725,11 +701,7 @@ func TestAgentEvents(t *testing.T) {
 
 func TestAgentDataPlane(t *testing.T) {
 	pool := connect(t)
-	setupSchema(t, pool)
 	ctx := context.Background()
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 
 	// Memories: upsert, re-upsert, list, delete.
 	if err := db.UpsertAgentMemory(ctx, pool, "proj", "toolchain", "project", "use go 1.25", []float32{0.1, 0.2}); err != nil {
@@ -780,10 +752,6 @@ func TestAgentDataPlane(t *testing.T) {
 func TestListSessionsByDaemonMode(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	const placeholderDaemonID = "00000000-0000-4000-8000-00000000f00d"
 	const podDaemonID = "00000000-0000-4000-8000-000000000001"
@@ -854,10 +822,6 @@ func TestListSessionsByDaemonMode(t *testing.T) {
 func TestSessionRowsCarryKindAndRuntime(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 
 	const daemonID = "00000000-0000-4000-8000-0000000000d1"
 	const agentID = "00000000-0000-4000-8000-0000000000a1"

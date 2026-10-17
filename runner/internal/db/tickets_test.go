@@ -11,18 +11,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// setupTicketBoard creates a board with repos "repo-a" and "repo-b", drops and
-// recreates the test schema, runs migrations, and returns the board and the
-// three default columns (Backlog, Doing, Done) in rank order. All operations
-// use the provided pool so that search_path remains consistent throughout the
-// test.
+// setupTicketBoard creates a board with repos "repo-a" and "repo-b" in the
+// provided isolated database and returns the three default columns
+// (Backlog, Doing, Done) in rank order.
 func setupTicketBoard(t *testing.T, pool *pgxpool.Pool) (*db.BoardRow, []db.ColumnRow) {
 	t.Helper()
 	ctx := context.Background()
-	setupSchema(t, pool)
-	if err := db.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
 	board, err := db.CreateBoard(ctx, pool, "Test Board", nil, []string{"repo-a", "repo-b"}, nil)
 	if err != nil {
 		t.Fatalf("CreateBoard: %v", err)

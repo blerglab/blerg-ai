@@ -110,13 +110,20 @@ func readCodexRateLimits(ctx context.Context, bin string, timeout time.Duration)
 		_ = cmd.Wait()
 	}()
 
+	return codexLimitsConversationContext(ctx, stdin, stdout)
+}
+
+// codexLimitsConversationContext applies the deadline independently of process
+// startup. Closing the transport after cancellation releases the reader.
+func codexLimitsConversationContext(ctx context.Context, in io.Writer, out io.Reader) ([]protocol.UsageWindow, error) {
+
 	type outcome struct {
 		windows []protocol.UsageWindow
 		err     error
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		w, err := codexLimitsConversation(stdin, stdout)
+		w, err := codexLimitsConversation(in, out)
 		done <- outcome{w, err}
 	}()
 	select {

@@ -3,29 +3,28 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"github.com/blerglab/blerg-ai/contracts/engines"
 	"net/http"
+	"regexp"
+	"slices"
 	"time"
 )
 
-// validEngines is the closed set the runner actually knows how to inject (see
-// runner/internal/server/k8sjobs.go engineCredentialKey). Free-text engine names were a
-// storage sink (audit M-3): anyone with a human token could POST an arbitrary "engine" string
-// and have it accepted and encrypted forever, even though nothing downstream would ever read it.
-//
-// The git-provider kinds are not agent engines but credential KINDS stored in the same per-user
-// vault: the personal token a cluster session pod clones and pushes with (so work lands as the
-// launching human rather than as a shared service identity), and that the runner lists the
-// person's own repositories with. Each is the id of a provider registered in the runner's
-// gitprovider.Default — adding a provider there means adding its id here.
+var credentialKindShape = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+
+// Git providers use the same vault without being coding engines.
 var gitCredentialKinds = []string{"github", "gitlab"}
 
-var validEngines = func() map[string]bool {
-	m := map[string]bool{"claude": true, "codex": true, "hermes": true, "openclaw": true}
-	for _, k := range gitCredentialKinds {
-		m[k] = true
+func validCredentialKind(kind string) bool {
+	if slices.Contains(gitCredentialKinds, kind) {
+		return true
 	}
-	return m
-}()
+	if kind == "" {
+		return false
+	}
+	descriptor, ok := engines.Lookup(kind)
+	return ok && descriptor.CredentialImport
+}
 
 // storeCredentialRequest is POST /api/credentials's body. There is deliberately no account-id
 // field here (and handleStoreCredential never reads one from the request) — the account acted
@@ -67,7 +66,7 @@ func (d Deps) handleStoreCredential(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "engine and credential are required", http.StatusBadRequest)
 		return
 	}
-	if !validEngines[body.Engine] {
+	if !validCredentialKind(body.Engine) {
 		http.Error(w, "unknown engine", http.StatusBadRequest)
 		return
 	}
@@ -134,9 +133,30 @@ func (d Deps) handleDeleteCredential(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "engine is required", http.StatusBadRequest)
 		return
 	}
-	if !validEngines[engine] {
-		http.Error(w, "unknown engine", http.StatusBadRequest)
+	if !credentialKindShape.MatchString(engine) {
+		http.Error(w, "invalid engine", http.StatusBadRequest)
 		return
+	}
+	// Registration may disappear before an owner removes an old connection.
+	// Deletion grants no import authority. Unknown names require an existing
+	// entry in this owner's vault, never a lookup in another account's state.
+	if _, registered := engines.Lookup(engine); !registered && !slices.Contains(gitCredentialKinds, engine) {
+		entries, err := d.Credentials.List(r.Context(), principal.Sub)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		found := false
+		for _, entry := range entries {
+			if entry.Engine == engine {
+				found = true
+				break
+			}
+		}
+		if !found {
+			http.Error(w, "unknown engine", http.StatusBadRequest)
+			return
+		}
 	}
 	if err := d.Credentials.Delete(r.Context(), principal.Sub, engine); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)

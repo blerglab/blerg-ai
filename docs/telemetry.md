@@ -26,7 +26,7 @@ slowest, the box covers the middle half of starts (25th to 75th percentile), a t
 median and a hollow mark the 90th percentile. Beside it: how many starts the step has (`n`), the
 slowest, and how many were **slow**, meaning they took more than twice the step's median, so one bad
 image pull reads as "1 slow" and not as a long bar. A step with fewer than five starts shows its
-fastest, median and slowest start as dots, labelled "too few starts for a box". The axis is linear
+fastest, median and slowest start as dots, labeled "too few starts for a box". The axis is linear
 unless the slowest start is more than 20 times the largest step median, when it turns logarithmic
 and says so; hover or focus a step for every figure.
 

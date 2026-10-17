@@ -32,6 +32,32 @@ func TestEngineRegistryLookup(t *testing.T) {
 	}
 }
 
+func TestCodexAvailabilityUsesConfiguredHome(t *testing.T) {
+	home, custom, bin := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	mustWrite(t, filepath.Join(bin, "codex"), "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(filepath.Join(bin, "codex"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("CODEX_HOME", custom)
+	mustWrite(t, filepath.Join(custom, "auth.json"), "{}")
+	if !codexAlreadyLoggedIn() {
+		t.Fatal("custom Codex login was reported unavailable")
+	}
+	if err := os.Remove(filepath.Join(custom, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(home, ".codex", "auth.json"), "{}")
+	if codexAlreadyLoggedIn() {
+		t.Fatal("configured empty Codex home borrowed the default login")
+	}
+	t.Setenv("CODEX_HOME", "")
+	if !codexAlreadyLoggedIn() {
+		t.Fatal("empty override did not use the default Codex home")
+	}
+}
+
 // TestAvailableEngineDetection exercises the config-file half of each
 // *AlreadyConfigured/*AlreadyLoggedIn check by pointing HOME at a scratch
 // directory. The binary-presence half only looks the CLI up on PATH, so a

@@ -6,6 +6,7 @@ import SessionList from './SessionList'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { useMessageStore } from '../hooks/useMessageStore'
 import { makeDaemon, makeSession } from '../test/fixtures'
+import { setSettingsOpen, settingsIsOpen } from '../lib/settingsDialog'
 import { setFocus } from '../lib/sidebarPrefs'
 import { usePendingProposals } from '../lib/proposals'
 
@@ -125,6 +126,21 @@ describe('SessionList', () => {
     unmount()
     renderList()
     expect(screen.queryByTestId('insights-nav')).toBeNull()
+  })
+
+  it('has a Settings entry right under Insights that opens the dialog without leaving the page', () => {
+    const { unmount } = renderList({ variant: 'sidebar' })
+    const insights = screen.getByTestId('insights-nav')
+    const settings = screen.getByTestId('settings-nav')
+    expect(settings).toHaveTextContent('Settings')
+    expect(insights.nextElementSibling).toBe(settings)
+    expect(settingsIsOpen()).toBe(false)
+    fireEvent.click(settings)
+    expect(settingsIsOpen()).toBe(true)
+    setSettingsOpen(false)
+    unmount()
+    renderList()
+    expect(screen.queryByTestId('settings-nav')).toBeNull()
   })
 
   it('lists active sessions one after the next, each card saying its repo, with no repo groups', () => {

@@ -36,6 +36,9 @@ const CONTRACT = [
   'success', 'warning', 'info', 'danger', 'border', 'radius', 'font', 'font-mono',
   'text-xs', 'text-sm', 'density',
   'card-user-bg', 'card-assistant-bg', 'card-tool-bg', 'card-system-bg',
+  'code-keyword', 'code-string', 'code-number', 'code-comment', 'code-title', 'code-type',
+  'code-variable', 'code-builtin', 'code-operator', 'code-fg', 'code-bg', 'code-linenum',
+  'diff-add', 'diff-del',
 ]
 
 describe('theme tokens', () => {

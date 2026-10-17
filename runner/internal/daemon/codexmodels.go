@@ -59,7 +59,11 @@ func (a *codexApp) loadModelCatalog() {
 }
 
 func (d *codexDriver) reconcileEffortLocked(model, effort string) string {
-	if m, ok := d.modelCatalog[model]; ok && len(m.Efforts) > 0 && !slices.Contains(m.Efforts, effort) {
+	m, ok := d.modelCatalog[model]
+	if ok && len(m.Efforts) == 0 {
+		return ""
+	}
+	if ok && !slices.Contains(m.Efforts, effort) {
 		if m.DefaultEffort != "" {
 			return m.DefaultEffort
 		}

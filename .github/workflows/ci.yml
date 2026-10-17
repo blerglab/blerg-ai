@@ -23,7 +23,7 @@ jobs:
         with: { go-version-file: core/go.mod }
       - run: test -z "$(gofmt -l ./contracts ./core ./board ./runner)"
       - run: go vet ./contracts/... ./core/...
-      - run: go test ./contracts/... ./core/...
+      - run: go test -timeout 30m ./contracts/... ./core/...
 
   # One configuration (.golangci.yml at the root) for all four modules. contracts and
   # core are linted together through go.work; runner and board are standalone modules,
@@ -64,8 +64,9 @@ jobs:
           args: --config=${{ github.workspace }}/.golangci.yml ${{ matrix.args }}
 
   # runner and board are standalone modules (not in go.work), each with its
-  # own database. Their DB-backed tests read TEST_DATABASE_URL and share one
-  # database per module, hence -p 1.
+  # own admin database. DB-backed fixtures read TEST_DATABASE_URL and create
+  # isolated template copies, so packages run in parallel. The official image
+  # creates POSTGRES_USER as a superuser, including the required CREATEDB privilege.
   go-module:
     runs-on: ubuntu-latest
     strategy:
@@ -103,7 +104,7 @@ jobs:
           git config --global user.email "ci@example.test"
           git config --global init.defaultBranch main
       - run: go vet ./...
-      - run: go test -p 1 -timeout 30m ./...
+      - run: go test -timeout 30m ./...
 
   frontend:
     runs-on: ubuntu-latest

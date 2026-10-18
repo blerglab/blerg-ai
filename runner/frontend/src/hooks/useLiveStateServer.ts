@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
+import { useChildrenSignal } from './useChildrenSignal'
 import { apiFetch } from '../apiFetch'
 import { LIVE_FOLD_KINDS, foldLive, isLiveTrigger, type LiveReply, type LiveView } from '../lib/liveState'
 
@@ -179,9 +180,10 @@ export function useLiveStateServer(sessionId: string, enabled: boolean, refresh:
   }, [])
 
   // Numbers and flags, so an event that is not a trigger does not render the page again.
+  const childrenChanged = useChildrenSignal(sessionId)
   const triggers = useTranscriptStore(s => (enabled ? countTriggers(s.sessions[sessionId]?.events ?? NO_EVENTS) : 0))
   const replayDone = useTranscriptStore(s => !!s.sessions[sessionId]?.replayDone)
-  useEffect(() => { if (enabled) read() }, [enabled, sessionId, triggers, replayDone, refresh, read])
+  useEffect(() => { if (enabled) read() }, [enabled, sessionId, triggers, replayDone, refresh, childrenChanged, read])
   useEffect(() => {
     if (!enabled) return
     const onVisible = () => { if (document.visibilityState === 'visible') read() }

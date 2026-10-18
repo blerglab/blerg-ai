@@ -60,6 +60,12 @@ func canSee(p runnerPrincipal, row *db.SessionRow) bool {
 	if row == nil {
 		return false
 	}
+	// A parent session acting for its children (delegation.go) sees its own children and
+	// nothing else: not itself, not its owner's other sessions, private or not.
+	if p.Kind == sessionDelegateKind {
+		return p.Sub != "" && row.ParentSessionID != nil && *row.ParentSessionID == p.Sub &&
+			p.OnBehalfOf != "" && ownsSession(p.OnBehalfOf, row)
+	}
 	if row.Private {
 		return ownsSession(p.spawningAccountID(), row)
 	}

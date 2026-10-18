@@ -384,6 +384,11 @@ func (a *API) handleGetCard(w http.ResponseWriter, r *http.Request, p auth.Princ
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	card, err = a.CardForPrincipal(r.Context(), p, card)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, card)
 }
 
@@ -451,6 +456,13 @@ func (a *API) handleUpdateCard(w http.ResponseWriter, r *http.Request, p auth.Pr
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if card.Sensitive && req.Body != nil {
+		if err := p.RequireAdmin(card.BoardID); err != nil {
+			writeError(w, http.StatusForbidden, "Sensitive reproduction details require board administration.")
+			return
+		}
+		req.SensitiveBodyAllowed = true
+	}
 	if req.IfMatch == nil {
 		req.IfMatch = ifMatch(r)
 	}
@@ -463,7 +475,11 @@ func (a *API) handleUpdateCard(w http.ResponseWriter, r *http.Request, p auth.Pr
 		writeDBError(w, err)
 		return
 	}
-	payload, _ := json.Marshal(req.CardParams)
+	gateParams := req.CardParams
+	if card.Sensitive {
+		gateParams.Body = nil
+	}
+	payload, _ := json.Marshal(gateParams)
 	out, handled := a.gateCheck(w, r, p, board, &card, "update", payload, req.DisputeOf, req.Rebuttal)
 	if handled {
 		return

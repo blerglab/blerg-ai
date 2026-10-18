@@ -74,7 +74,10 @@ export interface InsightsResponse {
 export type ModelTokens = TokenCounts & { model: string; priced: boolean }
 
 /** The shape of GET /api/sessions/{id}/insights: one session's figures. */
+export interface StartedSessionInsight { id: string; title: string; engine: string; model: string; effort?: string; status?: string; tokens: number | null; cost_usd?: number }
+
 export interface SessionInsightsResponse {
+  started_sessions?: { count: number; sessions: StartedSessionInsight[] }
   session_id: string
   title: string
   kind: string
@@ -96,6 +99,7 @@ export interface SessionInsightsResponse {
   subagents: { by_effort?: CountRow[]; count: number; by_type: CountRow[]; by_model: CountRow[]; tool_calls: number }
   // null, with tokens_hidden, for anyone but the session's owner and an administrator
   tokens: {
+    children_total?: TokenCounts
     totals: TokenCounts
     main: TokenCounts
     subagents: TokenCounts

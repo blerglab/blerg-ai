@@ -74,7 +74,7 @@ func TestPlanSnapshotReadUsesNewestFirstPartialIndex(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(plan.String(), "agent_events_latest_plan_updated_idx") || !strings.Contains(plan.String(), "Limit") || strings.Contains(plan.String(), "Sort") {
+	if (!strings.Contains(plan.String(), "agent_events_latest_plan_updated_idx") && !strings.Contains(plan.String(), "agent_events_scoped_progress_idx")) || !strings.Contains(plan.String(), "Limit") || strings.Contains(plan.String(), "Sort") {
 		t.Fatalf("latest snapshot query lacks bounded index plan:\n%s", plan.String())
 	}
 }

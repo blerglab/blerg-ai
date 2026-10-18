@@ -1008,3 +1008,23 @@ run `install/desktop/daemon/install.sh install` from the updated checkout to reb
 and restart the daemon. Restarting an old binary alone does not install the new
 behavior. The option is in each owned Claude or Codex agent chat; see
 [Resume after a usage limit](../../docs/talking-to-an-agent.md#resume-after-a-usage-limit).
+
+### Adding to an existing session
+
+The session panel's **Capabilities → Add plugin or skill** uses the same marketplace policy and
+account settings as always-on plugins. **This session only** adds to that session's private
+snapshot without changing the account list. **Always on** saves the engine-specific account entry;
+on a compatible live session it can load there too.
+
+Live application currently requires an updated desktop daemon and an unrestricted host Claude
+agent session. The daemon waits until foreground turns and owned background work are idle,
+installs a verified fresh snapshot, and resumes the conversation with the plugin directories.
+It preserves the session's existing MCP configuration and permissions. A failed install retains
+the old plugin snapshot. Codex, containers, cluster pods, restricted sessions and older daemons
+cannot load it into the existing session through this path; the panel offers always-on changes
+for new sessions and says so. Installing the updated daemon enables this path for supported
+sessions; no separate change to the person's interactive CLI configuration is needed.
+
+An agent's `request-plugin` command only asks the person. Approval is required before installing
+or saving an account setting, including for cron and board-started sessions. Rejection or expiry
+leaves both the running session and settings unchanged.

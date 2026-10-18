@@ -93,6 +93,30 @@ func TestSiteEndpointIsPublic(t *testing.T) {
 	}
 }
 
+// /api/site carries latest_version and latest_url only when a newer release is known.
+func TestSiteEndpointLatestRelease(t *testing.T) {
+	get := func(latest func() (string, string)) string {
+		h := NewRouter(Deps{Audience: "blerg-core", LatestRelease: latest})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/site", nil))
+		return rec.Body.String()
+	}
+	body := get(func() (string, string) { return "0.4.1", "https://github.com/o/r/releases/tag/v0.4.1" })
+	for _, want := range []string{`"latest_version":"0.4.1"`, `"latest_url":"https://github.com/o/r/releases/tag/v0.4.1"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %s: %s", want, body)
+		}
+	}
+	for name, latest := range map[string]func() (string, string){
+		"nil":   nil,
+		"empty": func() (string, string) { return "", "" },
+	} {
+		if body := get(latest); strings.Contains(body, "latest_") {
+			t.Errorf("%s: body has latest_ keys: %s", name, body)
+		}
+	}
+}
+
 // GET /agents is public: an agent has to be able to read how to obtain a credential before it
 // has one, so discovery cannot be gated behind a credential. (It used to require card.read;
 // the manifest holds no secrets, only public URLs and documentation.) The document carries the

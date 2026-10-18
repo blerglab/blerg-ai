@@ -1,3 +1,4 @@
+import { RestrictedMarker } from "./CardOrigin";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError, Board, Card, Column, boardSocket, pendingBlockers } from "./api";
@@ -463,6 +464,7 @@ export function BoardView({ boardId }: { boardId: string }) {
                     <div className="head">
                       <span className="num">#{card.number}</span>
                       <span className="title">{card.title}</span>
+                      <RestrictedMarker sensitive={card.sensitive} />
                       {indicatorFor(card, active, reviewCols)}
                     </div>
                     <div className="meta">

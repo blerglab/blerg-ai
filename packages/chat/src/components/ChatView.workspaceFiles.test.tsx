@@ -4,7 +4,7 @@ import ChatView from './ChatView'
 import { createFakeTransport } from '../test/fakeTransport'
 import { ev, meta, resetChatState, seed, SESSION } from '../test/chat'
 import { WorkspaceFileError } from '../transport/files'
-import type { WorkspaceFile } from '../transport/types'
+import type { ArtifactInfo, WorkspaceFile } from '../transport/types'
 
 beforeEach(resetChatState)
 
@@ -14,11 +14,11 @@ const file = (over: Partial<WorkspaceFile> & { body?: string } = {}): WorkspaceF
   return { path: 'README.md', size: blob.size, view: 'markdown', content_type: 'text/markdown; charset=utf-8', mtime: '2026-10-17T00:00:00Z', blob, ...rest }
 }
 
-interface Opts { can?: boolean; reply?: (path: string, signal?: AbortSignal) => Promise<WorkspaceFile> }
+interface Opts { can?: boolean; reply?: (path: string, signal?: AbortSignal) => Promise<WorkspaceFile>; published?: ArtifactInfo[] }
 
 function mount(text: string, opts: Opts = {}) {
   seed(ev({ kind: 'assistant_text', payload: { text }, seq: 1 }))
-  const t = createFakeTransport()
+  const t = createFakeTransport(opts.published ? { files: { items: opts.published } } : undefined)
   const read = vi.fn(async (_s: string, path: string, signal?: AbortSignal) => (opts.reply ? opts.reply(path, signal) : file({ path })))
   Object.assign(t.files!, { workspaceFile: read })
   render(<ChatView session={SESSION} transport={t.transport} meta={meta()} canOpenWorkspaceFiles={opts.can ?? true} />)
@@ -26,6 +26,22 @@ function mount(text: string, opts: Opts = {}) {
 }
 
 describe('files the agent names', () => {
+  it('opens a bare name the session published as that published file, not from the folder', async () => {
+    const plan: ArtifactInfo = { id: 'p1', name: 'plan.md', size: 20, content_type: 'text/markdown', view: 'markdown', origin: 'agent' }
+    const { read } = mount('Open `plan.md`, then `docs/plan.md`.', { published: [plan] })
+    const bare = await screen.findByText('plan.md')
+    fireEvent.click(bare.closest('[data-workspace-path]')!)
+    expect(await screen.findByRole('dialog', { name: /plan\.md/ })).toBeInTheDocument()
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  it('still reads a bare name from the folder when nothing of that name is published', async () => {
+    const { read } = mount('Open `notes.md`.', { published: [] })
+    fireEvent.click((await screen.findByText('notes.md')).closest('[data-workspace-path]')!)
+    await screen.findByRole('dialog', { name: 'notes.md' })
+    expect(read).toHaveBeenCalledWith('s1', 'notes.md', expect.anything())
+  })
+
   it('turns relative links and path-like inline code into buttons, and nothing else', async () => {
     mount('See [the readme](README.md#L3), `src/a.go:12`, `fmt.Println`, `1.2.3`, [web](https://x.io/a.md), ```` and\n\n```\nsrc/b.go\n```\n')
     const found = await screen.findAllByTitle('Open from the session’s folder')

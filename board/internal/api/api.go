@@ -105,6 +105,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/boards/{id}/cards", authed(a.handleListCards))
 	mux.HandleFunc("POST /api/boards/{id}/cards", authed(a.handleCreateCard))
+	mux.HandleFunc("POST /api/boards/{id}/file-card", authed(a.handleFileCard))
 	mux.HandleFunc("GET /api/boards/{id}/cards/search", authed(a.handleSearch))
 	mux.HandleFunc("GET /api/boards/{id}/schema", authed(a.handleGetSchema))
 	mux.HandleFunc("GET /api/cards/{id}", authed(a.handleGetCard))
@@ -160,6 +161,8 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func writeDBError(w http.ResponseWriter, err error) {
 	var fe *db.FieldError
 	switch {
+	case errors.Is(err, db.ErrSensitiveBodyForbidden):
+		writeError(w, http.StatusForbidden, "Sensitive reproduction details require board administration.")
 	case errors.Is(err, db.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, db.ErrStaleVersion):

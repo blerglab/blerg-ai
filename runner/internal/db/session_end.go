@@ -37,6 +37,8 @@ const (
 	EndReasonNotResumed       = "not_resumed"
 	EndReasonDaemonLost       = "daemon_lost"
 	EndReasonDaemonUnreported = "daemon_unreported"
+	// EndReasonParentEnded: the session was a child and its parent ended for good (059).
+	EndReasonParentEnded = "parent_ended"
 )
 
 var validEndReasons = map[string]bool{
@@ -52,6 +54,25 @@ var validEndReasons = map[string]bool{
 	EndReasonNotResumed:       true,
 	EndReasonDaemonLost:       true,
 	EndReasonDaemonUnreported: true,
+	EndReasonParentEnded:      true,
+}
+
+// TerminallyEnded reports whether a session ended for good: a person or agent stopped it, the
+// auto-stop or a parent's end did, its process exited or never started — and not a reconcile
+// "daemon_unreported", a lost daemon's "error", or a pause. A row a person cleared after its daemon
+// was lost ("stopped" with daemon_lost) counts, as stoppedForGood (daemon_conn.go) counts it.
+func TerminallyEnded(row *SessionRow) bool {
+	if row == nil || row.EndedAt == nil || row.EndReason == nil {
+		return false
+	}
+	switch *row.EndReason {
+	case EndReasonStoppedByUser, EndReasonStoppedByAgent, EndReasonAutoStopped, EndReasonProcessExited,
+		EndReasonProcessFailed, EndReasonStartFailed, EndReasonParentEnded:
+		return true
+	case EndReasonDaemonLost:
+		return row.Status == "stopped"
+	}
+	return false
 }
 
 // ValidEndReason reports whether r is in the vocabulary.
@@ -190,9 +211,13 @@ func RecordSessionEnd(ctx context.Context, conn *pgxpool.Pool, sessionID string,
 
 // EndSessionStatus is UpdateSessionStatus for a write that ends the session:
 // the status, ended_at (as given, exactly like UpdateSessionStatus) and the
-// attribution land in one statement, and an attribution already on the row (a
-// stop recorded when it was requested) is kept rather than overwritten.
+// attribution land in one statement. The first real end is kept; a recoverable
+// lost/unreported observation cannot mask a subsequent confirmed stop or exit.
 func EndSessionStatus(ctx context.Context, conn *pgxpool.Pool, sessionID, status string, endedAt *time.Time, end SessionEnd) error {
+	return endSessionStatus(ctx, conn, sessionID, status, endedAt, end)
+}
+
+func endSessionStatus(ctx context.Context, conn sessionWriteExecutor, sessionID, status string, endedAt *time.Time, end SessionEnd) error {
 	reason, kind, account, err := end.columns()
 	if err != nil {
 		return err
@@ -201,13 +226,20 @@ func EndSessionStatus(ctx context.Context, conn *pgxpool.Pool, sessionID, status
 		UPDATE sessions
 		   SET status            = $2,
 		       ended_at          = $3,
+		       delegation_ended_at = CASE WHEN $3::timestamptz IS NOT NULL
+		         AND (CASE WHEN `+replaceRecoverableEndSQL+` THEN $4 ELSE end_reason END IN
+		           ('stopped_by_user','stopped_by_agent','auto_stopped','process_exited',
+		            'process_failed','start_failed','parent_ended')
+		           OR ($2='stopped' AND end_reason='daemon_lost'))
+		         AND (delegation_ended_at IS NULL OR NOT COALESCE((`+terminallyEndedSQL("sessions")+`),false))
+		         THEN clock_timestamp() ELSE delegation_ended_at END,
 		       status_changed_at = now(),
 		       background_tasks  = 0,
 		       paused_reason     = NULL,
-		       ended_by_kind     = CASE WHEN end_reason IS NULL THEN $5 ELSE ended_by_kind END,
-		       ended_by_account  = CASE WHEN end_reason IS NULL THEN $6 ELSE ended_by_account END,
-		       end_recorded_at   = CASE WHEN end_reason IS NULL THEN now() ELSE end_recorded_at END,
-		       end_reason        = coalesce(end_reason, $4)
+		       ended_by_kind     = CASE WHEN `+replaceRecoverableEndSQL+` THEN $5 ELSE ended_by_kind END,
+		       ended_by_account  = CASE WHEN `+replaceRecoverableEndSQL+` THEN $6 ELSE ended_by_account END,
+		       end_recorded_at   = CASE WHEN `+replaceRecoverableEndSQL+` THEN now() ELSE end_recorded_at END,
+		       end_reason        = CASE WHEN `+replaceRecoverableEndSQL+` THEN $4 ELSE end_reason END
 		 WHERE id = $1 AND `+runtimeWriteGuard("$7")+`
 	`, sessionID, status, endedAt, reason, kind, account, runtimeAuthorityToken(ctx))
 	if err != nil {
@@ -221,6 +253,13 @@ func EndSessionStatus(ctx context.Context, conn *pgxpool.Pool, sessionID, status
 	}
 	return nil
 }
+
+// Evaluated against the OLD row, including its status. A cleared daemon_lost
+// row (stopped) is already a real end; an error/daemon_lost observation is not.
+const replaceRecoverableEndSQL = `(end_reason IS NULL OR
+	((end_reason='daemon_unreported' OR (end_reason='daemon_lost' AND status<>'stopped'))
+	 AND $4 IN ('stopped_by_user','stopped_by_agent','auto_stopped','process_exited',
+	 'process_failed','start_failed','parent_ended')))`
 
 // RetractSessionEnd undoes one RecordSessionEnd whose stop never reached the
 // daemon, and reports whether it did. It is a compare-and-swap on exactly what

@@ -466,3 +466,21 @@ describe('subagent card: stale guard', () => {
     expect(vi.getTimerCount()).toBe(before)
   })
 })
+
+describe('main reply while a Codex subagent finishes', () => {
+  beforeEach(() => { resetChatState(); seq = 0 })
+
+  it('keeps the root typing passage visible when a child message is persisted', () => {
+    seed(agentCall('child-call'), started('child-call'))
+    const { t } = mount('running')
+    act(() => { t.emit({ ...childText('Child working note', 'child-call'), transient: true, seq: undefined, payload: { text: 'Child working note', done: false, parent_call_id: 'child-call' } }) })
+    expect(screen.queryByTestId('streaming')).not.toBeInTheDocument()
+    act(() => { t.emit({ ...ev('assistant_text', { text: 'Root passage still being written', done: false }), transient: true, seq: undefined }) })
+    expect(screen.getByTestId('streaming')).toHaveTextContent('Root passage still being written')
+    act(() => { t.emit(childText('Child completed its review', 'child-call')) })
+    expect(screen.getByTestId('streaming')).toHaveTextContent('Root passage still being written')
+    act(() => { t.emit(ev('assistant_text', { text: 'Root passage still being written', done: true })) })
+    expect(screen.queryByTestId('streaming')).not.toBeInTheDocument()
+    expect(screen.getAllByText('Root passage still being written')).toHaveLength(1)
+  })
+})

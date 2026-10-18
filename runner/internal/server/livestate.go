@@ -40,6 +40,7 @@ type liveReply struct {
 	livestate.State
 	// The checklist, the engine's plan and the pinned tickets (worklist.go).
 	workState
+	liveDelegation
 	ToolChanges int        `json:"tool_changes"`
 	Counts      liveCounts `json:"counts"`
 	// CanReleasePrompt says the viewer owns the session, so "Send now" on a held first prompt works
@@ -51,13 +52,13 @@ type liveReply struct {
 // foreground subagent runs only while a turn does), the viewer's pending tool changes on the
 // session, the session's ask rows (an ask closed on the Messages page or by expiry writes no event)
 // and the viewer class (tokens shown or hidden).
-func liveETag(through int64, status string, toolChanges int, asks db.AskRows, showTokens bool) string {
+func liveETag(through int64, status string, toolChanges int, asks db.AskRows, showTokens bool, childrenDigest string) string {
 	class := "h"
 	if showTokens {
 		class = "t"
 	}
 	return `"` + strconv.FormatInt(through, 10) + "." + status + "." + strconv.Itoa(toolChanges) + "." +
-		strconv.Itoa(asks.Open) + "/" + strconv.Itoa(asks.Total) + "." + class + `"`
+		strconv.Itoa(asks.Open) + "/" + strconv.Itoa(asks.Total) + "." + class + "." + childrenDigest + `"`
 }
 
 // HandleGetLive is GET /api/sessions/{id}/live. Access is /topics' (and /insights'): a signed-in
@@ -93,6 +94,12 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	// A person opening their pre-upgrade session supplies the missing live
+	// proof for read-only Board discovery. Public-session viewers and admins
+	// reading somebody else's session never delegate their own credentials.
+	if ownsSession(p.Sub, row) && p.Sid != "" {
+		recordBoardFilingProof(withFilingProject(withCoreProof(ctx, proofFromPrincipal(p)), p.Project), a.dbPool, sid)
+	}
 	showTokens := ownsSession(p.Sub, row) || p.Has(insightsAdminCap)
 	fail := func(what string, err error) {
 		log.Printf("live %s %s: %v", what, sid, err)
@@ -113,7 +120,21 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 		fail("ReadAskRows", err)
 		return
 	}
-	etag := liveETag(through, row.Status, toolChanges, asks, showTokens)
+	snapshot, err := a.readChildrenSnapshot(ctx, row, p.Sub)
+	if err != nil {
+		fail("readChildrenSnapshot", err)
+		return
+	}
+	var prices []db.ModelPrice
+	if showTokens && len(snapshot.Rows) > 0 {
+		prices, err = db.ListModelPrices(ctx, a.dbPool)
+		if err != nil {
+			fail("ListModelPrices", err)
+			return
+		}
+	}
+	priceJSON, _ := json.Marshal(prices)
+	etag := liveETag(through, row.Status, toolChanges, asks, showTokens, snapshot.digest()+"."+childrenDigestBytes(priceJSON))
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-store")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
@@ -141,10 +162,16 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 		fail("readWorkState", err)
 		return
 	}
+	st.Progress = ws.Progress
+	children, _, err := a.liveChildren(ctx, snapshot.Rows, p.Sub, showTokens, p.Has(insightsAdminCap), prices)
+	if err != nil {
+		fail("liveChildren", err)
+		return
+	}
 	a.addChecklistCommitURLs(row, &ws)
 	writeJSON(w, http.StatusOK, liveReply{
-		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, workState: ws, ToolChanges: toolChanges,
-		Counts:           liveCounts{NeedsYou: len(st.Asks) + toolChanges, Running: len(st.Subagents) + len(st.Tasks)},
+		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, workState: ws, ToolChanges: toolChanges, liveDelegation: liveDelegation{Children: children, DelegationRequests: snapshot.Requests, DelegationGrants: snapshot.Grants},
+		Counts:           liveCounts{NeedsYou: len(st.Asks) + toolChanges + len(snapshot.Requests), Running: len(st.Subagents) + len(st.Tasks) + runningChildren(children)},
 		CanReleasePrompt: ownsSession(p.Sub, row),
 	})
 }
@@ -158,7 +185,15 @@ func buildLiveState(ctx context.Context, pool *pgxpool.Pool, sid string, through
 	if err != nil {
 		return livestate.State{}, err
 	}
-	return livestate.Build(append(events, liveEvents(tails)...), opt), nil
+	events = append(events, liveEvents(tails)...)
+	for _, tail := range livestate.Pending(events, opt) {
+		scoped, err := db.ListScopeProgressEvents(ctx, pool, sid, through, tail.Key, tail.Seq)
+		if err != nil {
+			return livestate.State{}, err
+		}
+		events = append(events, liveEvents(scoped)...)
+	}
+	return livestate.Build(events, opt), nil
 }
 
 // liveWork is what a session still runs: its subagents and its background tasks.

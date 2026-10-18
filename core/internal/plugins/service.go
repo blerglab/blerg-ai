@@ -12,13 +12,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/core/internal/db"
+	"github.com/blerglab/blerg-ai/core/internal/identity"
 )
 
 // Entry is one plugin in an account's list.
@@ -75,6 +78,10 @@ var ErrConflict = errors.New("plugins: list changed concurrently")
 
 // ErrUnknownEngine is returned for an engine with no registry entry.
 var ErrUnknownEngine = errors.New("plugins: unknown engine")
+
+// ErrHumanProof is deliberately indistinguishable for absent, foreign, revoked,
+// expired sessions and disabled accounts.
+var ErrHumanProof = errors.New("plugins: live human proof required")
 
 // Service reads and writes the user_plugins table under the operator's marketplace allow-list.
 type Service struct {
@@ -150,6 +157,9 @@ func (s *Service) Replace(ctx context.Context, accountID, engine string, entries
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockList(ctx, tx, accountID, engine); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM user_plugins WHERE account_id = $1 AND engine = $2`, accountID, engine); err != nil {
 		return err
 	}
@@ -165,4 +175,87 @@ func (s *Service) Replace(ctx context.Context, accountID, engine string, entries
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+func lockList(ctx context.Context, tx pgx.Tx, accountID, engine string) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "user_plugins:"+accountID+":"+engine)
+	return err
+}
+
+// AddApproved appends exactly one entry without replacing another request's
+// settings. It shares Replace's fence and rechecks the exact browser session
+// inside the transaction, after any wait for that fence. The row locks preserve
+// the approval's liveness through commit without calling identity through a
+// second pool connection. This predicate matches HumanSessionLive; unlike its
+// read probe it uses clock_timestamp so lock waits cannot freeze expiry time.
+func (s *Service) AddApproved(ctx context.Context, accountID, sessionID, engine string, entry Entry) error {
+	if err := s.Validate(engine, []Entry{entry}); err != nil {
+		return err
+	}
+	tx, err := s.st.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockList(ctx, tx, accountID, engine); err != nil {
+		return err
+	}
+	var proof, role string
+	err = tx.QueryRow(ctx, `SELECT hs.id::text,a.role FROM human_sessions hs JOIN accounts a ON a.id=hs.account_id
+		WHERE hs.chain_id=$1 AND hs.account_id=$2 AND hs.revoked_at IS NULL
+		AND hs.expires_at>clock_timestamp() AND a.disabled_at IS NULL AND NOT a.must_change_password
+		ORDER BY hs.created_at DESC LIMIT 1 FOR SHARE OF hs,a`, sessionID, accountID).Scan(&proof, &role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrHumanProof
+	}
+	if err != nil {
+		return err
+	}
+	// Settings PUT requires card.read from the account's current role. Internal
+	// approval cannot grant a capability that the same person's Settings lacks.
+	if !slices.Contains(identity.PlatformRoleCaps[role], "card.read") {
+		return ErrHumanProof
+	}
+	commitApproved := func() error {
+		// Row locks prevent revocation/disable/role changes, but wall time
+		// keeps advancing while those locks are acquired and rows are written.
+		var live bool
+		if err := tx.QueryRow(ctx, `SELECT expires_at>clock_timestamp() AND revoked_at IS NULL FROM human_sessions WHERE id=$1`, proof).Scan(&live); err != nil {
+			return err
+		}
+		if !live {
+			return ErrHumanProof
+		}
+		return tx.Commit(ctx)
+	}
+	rows, err := tx.Query(ctx, `SELECT marketplace_source,plugin_name FROM user_plugins WHERE account_id=$1 AND engine=$2 ORDER BY position`, accountID, engine)
+	if err != nil {
+		return err
+	}
+	var entries []Entry
+	for rows.Next() {
+		var existing Entry
+		if err := rows.Scan(&existing.Marketplace, &existing.Plugin); err != nil {
+			rows.Close()
+			return err
+		}
+		entries = append(entries, existing)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, existing := range entries {
+		if strings.EqualFold(existing.Marketplace, entry.Marketplace) && existing.Plugin == entry.Plugin {
+			return commitApproved()
+		}
+	}
+	if len(entries) >= pluginspec.MaxEntries {
+		return &ValidationError{fmt.Sprintf("at most %d plugins", pluginspec.MaxEntries)}
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO user_plugins(account_id,engine,position,marketplace_source,plugin_name) VALUES($1,$2,$3,$4,$5)`, accountID, engine, len(entries), entry.Marketplace, entry.Plugin)
+	if err != nil {
+		return err
+	}
+	return commitApproved()
 }

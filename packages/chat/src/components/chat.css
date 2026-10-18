@@ -2857,3 +2857,122 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   background: none;
   transform: rotate(40deg);
 }
+
+/* ─── The delegation card: a session asks to start another ───────────────────────────────── */
+.agent-card.delegation-card {
+  border-left: 3px solid var(--chat-info);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-card.delegation-card.status-pending {
+  border-left-color: var(--chat-accent);
+}
+
+.agent-card.delegation-card.status-denied,
+.agent-card.delegation-card.status-expired {
+  border-left-color: var(--chat-border);
+}
+
+.delegation-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.delegation-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.delegation-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: var(--chat-text-xs);
+}
+
+.delegation-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  opacity: 0.8;
+}
+
+.delegation-warn {
+  color: var(--chat-warning);
+  font-weight: 600;
+}
+
+.delegation-name {
+  font-weight: 600;
+}
+
+.delegation-prompt {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  opacity: 0.85;
+}
+
+.delegation-budget {
+  opacity: 0.6;
+}
+
+.delegation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.delegation-btn {
+  background: none;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--chat-text-xs);
+  padding: 3px 10px;
+}
+
+.delegation-btn.warn {
+  border-color: color-mix(in srgb, var(--chat-warning) 55%, var(--chat-border));
+}
+
+.delegation-btn:hover:not(:disabled),
+.delegation-btn:focus-visible {
+  background: var(--chat-surface-2);
+}
+
+.delegation-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.delegation-link {
+  align-self: flex-start;
+  background: none;
+  border: 0;
+  color: var(--chat-accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.delegation-readonly,
+.delegation-decided {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  font-size: var(--chat-text-xs);
+  opacity: 0.75;
+}
+
+.delegation-start-error,
+.delegation-error {
+  font-size: 11px;
+  color: var(--chat-danger);
+}

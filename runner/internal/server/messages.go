@@ -474,6 +474,7 @@ func (a *API) HandlePostMessageExpire(w http.ResponseWriter, r *http.Request) {
 			log.Printf("api expire reload %s: %v", id, err)
 		} else {
 			a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)})
+			a.hub.ChildActivity(row.SessionID)
 		}
 	}
 	// Always 200 — idempotent.

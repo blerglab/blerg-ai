@@ -7,6 +7,7 @@ import "net/http"
 // authenticates the caller itself (a signed-in person, owner only).
 func (a *API) RegisterProposalRoutes(mux *http.ServeMux) {
 	h := &proposalsHandler{api: a}
+	mux.HandleFunc("PATCH /api/proposals/{id}/draft", h.editBoardDraft)
 	mux.HandleFunc("GET /api/proposals", h.list)
 	mux.HandleFunc("GET /api/proposals/count", h.count)
 	mux.HandleFunc("GET /api/proposals/{id}", h.get)

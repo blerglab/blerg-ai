@@ -74,6 +74,7 @@ func recordInteraction(ctx context.Context, pool *pgxpool.Pool, sessionID, mode 
 	if pool == nil {
 		return
 	}
+	recordBoardFilingProof(ctx, pool, sessionID)
 	if err := db.SetSessionInteraction(ctx, pool, sessionID, mode); err != nil {
 		log.Printf("SetSessionInteraction %s: %v", sessionID, err)
 	}

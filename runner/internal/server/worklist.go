@@ -43,7 +43,15 @@ const (
 
 // RegisterWorklistRoutes registers the checklist's and the pinned tickets' routes on mux.
 func (a *API) RegisterWorklistRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/sessions/{id}/board-options", a.HandleFilingBoards)
+	mux.HandleFunc("GET /api/sessions/{id}/board-search", a.HandleFilingSearch)
+	mux.HandleFunc("POST /api/sessions/{id}/file-ticket", a.HandleFileTicket)
+	mux.HandleFunc("POST /api/sessions/{id}/filing-tools", a.HandleFilingTools)
+	mux.HandleFunc("GET /api/sessions/{id}/plugins", a.HandleSessionPlugins)
+	mux.HandleFunc("POST /api/sessions/{id}/plugins", a.HandleAddSessionPlugin)
+	mux.HandleFunc("POST /api/sessions/{id}/plugin-requests", a.HandleSessionPluginRequest)
 	mux.HandleFunc("POST /api/sessions/{id}/checklist", a.HandlePostChecklist)
+	mux.HandleFunc("POST /api/sessions/{id}/progress", a.HandlePostProgress)
 	mux.HandleFunc("POST /api/sessions/{id}/tickets", a.HandlePostTickets)
 }
 
@@ -327,10 +335,11 @@ type liveTicket struct {
 // workState is what GET /live carries besides livestate.State: each null (tickets empty) when the
 // session has none.
 type workState struct {
-	Checklist *liveChecklist   `json:"checklist"`
-	Plan      *livestate.Plan  `json:"plan"`
-	Tickets   []ticket.Summary `json:"tickets"`
-	Ticket    *liveTicket      `json:"ticket"`
+	Progress  *livestate.Progress `json:"-"`
+	Checklist *liveChecklist      `json:"checklist"`
+	Plan      *livestate.Plan     `json:"plan"`
+	Tickets   []ticket.Summary    `json:"tickets"`
+	Ticket    *liveTicket         `json:"ticket"`
 }
 
 // readWorkState reads a session's checklist, engine plan and pins as of seq through.
@@ -350,6 +359,11 @@ func readWorkState(ctx context.Context, q db.Querier, sid string, through int64)
 		return ws, err
 	}
 	ws.Plan = livestate.PlanFrom(liveEvents(planRows))
+	progressRows, err := db.ListScopeProgressEvents(ctx, q, sid, through, "", 0)
+	if err != nil {
+		return ws, err
+	}
+	ws.Progress = livestate.ProgressFor(liveEvents(progressRows), "", 0)
 	rows, err := db.ListTicketRows(ctx, q, sid, through)
 	if err != nil {
 		return ws, err

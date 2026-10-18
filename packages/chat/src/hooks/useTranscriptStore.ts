@@ -91,12 +91,17 @@ function handOn(prev: AgentEvent[], next: AgentEvent[], ids: Set<string>) {
   idSets.set(next, ids)
 }
 
-/** A consolidated assistant_text (or turn end) closes the streaming buffer. A retry notice or a
- *  dropped message's error does not: the turn goes on. */
-const closesStream = (ev: AgentEvent) =>
+// The typing bubble belongs to the main agent. A child's completed message is
+// drawn inside its own card and cannot replace any part of that bubble.
+const isMainEvent = (ev: AgentEvent) => !(ev.payload as { parent_call_id?: string } | null)?.parent_call_id
+
+/** Only a main-agent consolidated message (or turn end) closes its streaming buffer.
+ *  A retry notice or a dropped message's error leaves the turn running. */
+const closesStream = (ev: AgentEvent) => isMainEvent(ev) && (
   (ev.kind === 'assistant_text' && (ev.payload as AssistantTextPayload).done) ||
   ev.kind === 'turn_done' ||
   isTurnError(ev)
+)
 
 export const useTranscriptStore = create<TranscriptState>((set) => ({
   sessions: {},
@@ -110,7 +115,7 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
       if (ev.transient) {
         const thinking = nextThinking(cur.thinking ?? false, ev)
         const answering = nextAnswering(cur.answering ?? false, ev)
-        if (ev.kind === 'assistant_text') {
+        if (ev.kind === 'assistant_text' && isMainEvent(ev)) {
           const p = ev.payload as AssistantTextPayload
           return { sessions: { ...state.sessions, [ev.session_id]: { ...cur, thinking, answering, streaming: cur.streaming + p.text } } }
         }
@@ -161,7 +166,7 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
         if (ev.transient) {
           thinking = nextThinking(thinking, ev)
           answering = nextAnswering(answering, ev)
-          if (ev.kind === 'assistant_text') streaming += (ev.payload as AssistantTextPayload).text
+          if (ev.kind === 'assistant_text' && isMainEvent(ev)) streaming += (ev.payload as AssistantTextPayload).text
           continue
         }
         if (ids.has(ev.client_event_id)) continue

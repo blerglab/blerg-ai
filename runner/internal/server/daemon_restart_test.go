@@ -65,7 +65,7 @@ func TestDaemonBackWithinGraceLeavesSessionsAlone(t *testing.T) {
 	dc2 := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte, 8)}
 	reconcileSessions(ctx, hub, pool, dc.ID, []string{sessionID}, nil)
 	hub.Register(dc2)
-	hub.deliverHeld(dc2)
+	hub.deliverHeld(t.Context(), dc2)
 	select {
 	case got := <-dc2.send:
 		if string(got) != string(raw) {
@@ -177,8 +177,8 @@ func TestReconcileDoesNotReviveAStoppedSession(t *testing.T) {
 	}
 }
 
-// Cleared from the app after the lost-daemon sweep had already ended it: the row is "stopped"
-// and keeps the sweep's reason. That is a stop too.
+// Clearing a recoverably lost session records the person's real stop. A later
+// hello must respect that decision rather than revive the sweep's observation.
 func TestReconcileDoesNotReviveASessionClearedAfterItWasLost(t *testing.T) {
 	api, hub, dc, pool := spawnTokenFixture(t)
 	ctx := context.Background()
@@ -187,10 +187,10 @@ func TestReconcileDoesNotReviveASessionClearedAfterItWasLost(t *testing.T) {
 	if err := db.EndSessionStatus(ctx, pool, sessionID, "error", &now, systemEnd(db.EndReasonDaemonLost)); err != nil {
 		t.Fatal(err)
 	}
-	// What the delete of an orphaned session writes: its own reason does not replace the first.
+	// A real decision replaces the earlier recoverable observation.
 	setSessionStatusEnd(ctx, hub, pool, sessionID, "stopped", &now, nil, true, systemEnd(db.EndReasonStoppedByUser))
 	row, _ := db.GetSession(ctx, pool, sessionID)
-	if row == nil || row.Status != "stopped" || row.EndReason == nil || *row.EndReason != db.EndReasonDaemonLost {
+	if row == nil || row.Status != "stopped" || row.EndReason == nil || *row.EndReason != db.EndReasonStoppedByUser || row.DelegationEndedAt == nil {
 		t.Fatalf("precondition: %+v", row)
 	}
 	if stopped := reconcileSessions(ctx, hub, pool, dc.ID, []string{sessionID}, nil); len(stopped) != 1 {

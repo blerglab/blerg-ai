@@ -201,7 +201,7 @@ var ErrMCPCoreOutdated = errors.New("blerg-core does not offer MCP connections: 
 // (the router answered), the two of which used to be reported as "sign in again".
 func coreNotFound(resp *http.Response) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-	if strings.TrimSpace(string(raw)) == "not found" {
+	if strings.EqualFold(strings.TrimSpace(string(raw)), "not found") {
 		return ErrMCPProofInvalid
 	}
 	return ErrMCPCoreOutdated
@@ -538,13 +538,14 @@ func (dc *DaemonConn) SetRestrictTools(v bool) {
 
 // grantRequester is who is asking for a grant: the verified principal of a public route.
 type grantRequester struct {
+	Project string
 	Kind    string
 	Account string
 	Sid     string
 }
 
 func requesterOf(p identity.Principal) grantRequester {
-	return grantRequester{Kind: p.Kind, Account: p.Sub, Sid: p.Sid}
+	return grantRequester{Kind: p.Kind, Account: p.Sub, Sid: p.Sid, Project: p.Project}
 }
 
 // grantTarget is where the session would run.
@@ -869,6 +870,14 @@ func mcpKeyInBody(raw []byte) bool {
 func RejectMCPArgument(raw json.RawMessage) *APIError {
 	if mcpKeyInBody(raw) {
 		return apiErrorf(http.StatusBadRequest, "%s", msgMCPBodyForbidden)
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil {
+		for key := range fields {
+			if strings.EqualFold(key, "board_id") {
+				return apiErrorf(http.StatusBadRequest, "board_id can only be selected by a signed-in person through the launch sheet")
+			}
+		}
 	}
 	return nil
 }

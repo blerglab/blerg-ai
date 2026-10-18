@@ -44,6 +44,7 @@ type Options struct {
 
 // State is GET /api/sessions/{id}/live's lists. Each is oldest first.
 type State struct {
+	Progress     *Progress                  `json:"progress,omitempty"`
 	MCP          *protocol.MCPStatusPayload `json:"mcp,omitempty"`
 	MCPHold      *protocol.MCPHold          `json:"mcp_hold,omitempty"`
 	Asks         []Ask                      `json:"asks"`
@@ -66,6 +67,7 @@ type Ask struct {
 // StaleRunning after that). Resumed: a finished subagent the main agent resumed, running until its
 // own end whatever the turn does; Background then says how its original ran.
 type Subagent struct {
+	Progress   *Progress `json:"progress,omitempty"`
 	Effort     string    `json:"effort"`
 	Key        string    `json:"key"`
 	Title      string    `json:"title"`
@@ -201,6 +203,22 @@ func readSubagents(events []Event) (order []*subAcc, lastTurnDone int64) {
 				a.background = p.Background
 				a.final = !p.Background
 			}
+		case protocol.PlanUpdatedKind, protocol.ProgressUpdatedKind:
+			var marker struct {
+				Parent string `json:"parent_call_id"`
+				Child  string `json:"child_id"`
+			}
+			if json.Unmarshal(ev.Payload, &marker) != nil {
+				continue
+			}
+			key, ok := protocol.ProgressScope(marker.Parent, marker.Child)
+			if !ok || key == "" {
+				continue
+			}
+			a := byKey[key]
+			if a != nil && a.started != nil && !a.final && ev.Seq > a.first.Seq && !ev.Ts.Before(a.first.Ts) {
+				a.touch(ev.Ts)
+			}
 		case "tool_call", "assistant_text":
 			var p struct {
 				Parent string `json:"parent_call_id"`
@@ -273,7 +291,9 @@ func Build(events []Event, opt Options) State {
 			continue
 		}
 		listed[a.key] = true
-		st.Subagents = append(st.Subagents, a.view(opt.ShowTokens))
+		view := a.view(opt.ShowTokens)
+		view.Progress = ProgressFor(events, a.key, a.first.Seq)
+		st.Subagents = append(st.Subagents, view)
 	}
 	if live(opt.Status) {
 		for _, t := range runningTasks(events, opt.Now) {

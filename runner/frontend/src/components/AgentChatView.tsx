@@ -3,6 +3,7 @@
 // runner's own — the model and effort pickers, the Rules panel, the ready card's repo line — and
 // wires the package to the runner's websocket and token. The chat's settings (Show thinking,
 // Compact tool calls), its Files and the Skills & plugins are in the session panel (SessionRail).
+import { useNavigate } from 'react-router-dom'
 import { memo, useEffect, useMemo, useState } from 'react'
 import {
   ChatView,
@@ -10,6 +11,7 @@ import {
   ReadyCard,
   type McpHold,
   type SessionMeta,
+  type DescribeUserMessage,
 } from '@blerglab/chat'
 import '@blerglab/chat/blerg.css'
 import * as ws from '../ws'
@@ -22,6 +24,7 @@ import type { SessionInfo } from '../types'
 import { useSessionStore } from '../hooks/useSessionStore'
 import './AgentChatView.css'
 import ModelCatalogNotice from './ModelCatalogNotice'
+import {SessionPluginChatRequests} from './SessionPlugins'
 
 // The ?artifact=<id> of the address: the link `blerg-runner publish` prints.
 function artifactParam(): string | null {
@@ -104,6 +107,9 @@ export default memo(AgentChatView)
 
 function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canReleasePrompt }: Props) {
   const sessionId = session.id
+  const navigate = useNavigate()
+  const parentTitle = useSessionStore(s => s.sessions.find(p => p.id === session.parent_session_id)?.title) || session.started_by?.name
+  const describeUserMessage: DescribeUserMessage = (_event, payload) => payload.source === 'session' ? { author: parentTitle ? `from ${parentTitle}` : 'from another session' } : undefined
   const transport = blergTransport()
   // The server's per-file limit (initial_state): the chat refuses a larger attachment before sending it.
   const maxFileBytes = useSessionStore(s => s.maxFileBytes)
@@ -182,9 +188,10 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
         {showRules && <RulesPanel project={session.repo} />}
       </>
     ),
-    aboveComposer: mcpHold
-      ? <McpHoldLine hold={mcpHold} onSendNow={canReleasePrompt ? () => { ws.send({ type: 'release_held_prompt', session_id: sessionId }) } : undefined} />
-      : null,
+    aboveComposer: <>
+      {mcpHold && <McpHoldLine hold={mcpHold} onSendNow={canReleasePrompt ? () => { ws.send({ type: 'release_held_prompt', session_id: sessionId }) } : undefined} />}
+      <SessionPluginChatRequests sessionId={sessionId} active={canReleasePrompt === true}/>
+    </>,
     readyCard: (m: SessionMeta, readyAt: number) => (
       <ReadyCard meta={{ ...m, engine, runtime }} readyAt={readyAt}>
         <div><dt>Repo</dt><dd data-testid="ready-repo">{repoDetail(session.repo)}</dd></div>
@@ -196,6 +203,8 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
     <ChatView
       session={sessionId}
       transport={transport}
+      onOpenSession={id => navigate(`/sessions/${encodeURIComponent(id)}`)}
+      describeUserMessage={describeUserMessage}
       meta={meta}
       slots={slots}
       thinking={thinking ? 'shown' : 'hidden'}

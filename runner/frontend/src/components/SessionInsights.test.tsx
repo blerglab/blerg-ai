@@ -280,3 +280,19 @@ describe('SessionInsights', () => {
     expect(apiFetch).toHaveBeenCalledTimes(1)
   })
 })
+
+it('keeps parent token totals unchanged while showing children separately', async () => {
+  const d = fixture()
+  d.started_sessions = { count: 2, sessions: [{ id: 'child', title: 'Codex review', engine: 'codex', model: 'fixture-model', tokens: 5000, cost_usd: 1.25 }, { id: 'hidden', title: 'Hidden usage', engine: 'hermes', model: 'local', tokens: null }] }
+  d.tokens = { ...d.tokens!, children_total: tok(1000, 4000, 0, 0, 1.25) }
+  apiFetch.mockImplementation(() => json(d))
+  const { MemoryRouter } = await import('react-router-dom')
+  render(<MemoryRouter><SessionInsights sessionId="sess-a" title="Parent" live={false} onClose={() => {}} /></MemoryRouter>)
+  const started = await screen.findByTestId('si-started-sessions')
+  expect(started).toHaveTextContent('Codex review')
+  expect(started).toHaveTextContent('fixture-model')
+  expect(started).toHaveTextContent('$1.25')
+  const tile = screen.getByTestId('si-tile-tokens')
+  expect(tile.querySelector('.si-tile-value')).toHaveTextContent('46.1k')
+  expect(tile).toHaveTextContent('incl. 2 started sessions: 51.1k')
+})

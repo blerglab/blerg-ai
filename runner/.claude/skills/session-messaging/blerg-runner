@@ -8,9 +8,14 @@ and surfaced in the Chat UI (and optionally pushed to the user's phone).
 
 Subcommands
 -----------
+  ticket boards                 List the boards the session owner can use.
+  ticket search --board B --query Q   Search for duplicates without approval.
+  ticket file --board B --title T --body D [--type bug] [--sensitive] [--repo R]
+                                Propose a ticket; no board write until the person approves.
   update "<text>"                 Post an FYI (no reply needed); returns immediately.
   ask    "<text>" [--timeout N]   Post a blocking question; blocks until the user
                                   answers; prints the answer to stdout.
+  request-plugin <name> "<why>"  Request a permitted plugin; human approval required.
   note   "<text>"                 Post an async note; returns immediately. The user's
                                 reply is delivered back into the session as PTY input.
   publish <file|dir> [--name N] [--card | --card-id ID]
@@ -41,6 +46,7 @@ Subcommands
   topic --done ["<outcome>"] [--commit <sha> ...]
                                 Close the open topic, with a one-line outcome and the
                                 commits the work landed.
+  progress <n>/<m> "<label>"     Show measured steps in the session panel; --done finishes the bar.
   checklist set|add|tick|untick|remove|clear ...
                                 Keep the session's checklist (the person's session panel shows it);
                                 `checklist --help` says how.
@@ -49,6 +55,11 @@ Subcommands
                                 session: a card in the chat and the panel's Ticket section.
                                 `pin --help` shows the shape, with a JIRA and a Bugzilla mapping.
   unpin [<source>:<key>]        Unpin a ticket (no argument: the current one).
+  budget [--json]               How much of each engine's usage is spent (per provider).
+  session start|wait|list|send|model|interrupt|upload|files|download|events|watch|result|stop
+                                Start other sessions on this daemon and drive them; the person
+                                approves a start (a card in the chat) unless a rule or grant
+                                allows it. `session --help` has the rules and the exit codes.
 
 Environment (injected by the Blerg Runner daemon):
   BLERG_RUNNER_SERVER_HTTP    e.g. http://runner.example.test
@@ -58,7 +69,8 @@ Environment (injected by the Blerg Runner daemon):
                               re-issued later (the first was revoked by a start race) is in
                               $BLERG_RUNNER_DAEMON_STATE_DIR (default ~/.blerg-runner-daemon)
                               /session-tokens/<session id>, and is used first.
-  BLERG_RUNNER_BOARD_TOKEN    Bearer token with "message" cap (Assist sessions)
+  BLERG_RUNNER_BOARD_TOKEN    Board gateway grant, or legacy Assist board token
+  BLERG_RUNNER_BOARD_GATEWAY_URL  Selected-board MCP gateway (normal sessions)
   BLERG_RUNNER_DAEMON_TOKEN   Legacy: the daemon master token. No longer injected
                               into any session; honored only if present.
 
@@ -68,11 +80,14 @@ so skills stay portable across non-Blerg Runner environments.
 """
 
 import argparse
+import contextlib
+import signal
 import http.client
 import ipaddress
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -82,6 +97,44 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+
+def _valid_progress_marker(value):
+    try:
+        return isinstance(value, str) and bool(value) and len(value.encode("utf-8")) <= 256 and value.isprintable()
+    except UnicodeError:
+        return False
+
+
+def _progress_scope_hook():
+    """Attach per-Bash-call metadata without reading credentials or deciding permissions.
+
+    PreToolUse updatedInput replaces the entire argument object, so retain every
+    original field. Shell quoting makes even an opaque native ID literal data.
+    Invalid metadata leaves the original tool unchanged; no input is executed.
+    """
+    result = {}
+    try:
+        raw = sys.stdin.buffer.read(256 * 1024 + 1)
+        if len(raw) <= 256 * 1024:
+            event = json.loads(raw)
+            tool_input = event.get("tool_input")
+            call_id = event.get("tool_use_id")
+            if (event.get("hook_event_name") == "PreToolUse" and event.get("tool_name") == "Bash"
+                    and isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str)
+                    and _valid_progress_marker(call_id)):
+                updated = dict(tool_input)
+                updated["command"] = "export BLERG_RUNNER_PROGRESS_CALL_ID=" + shlex.quote(call_id) + "\n" + tool_input["command"]
+                result = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}
+    except (ValueError, OSError, AttributeError, TypeError, RecursionError):
+        pass
+    print(json.dumps(result))
+
+
+# This internal hook must run before Config reads token files or asks tmux for identity.
+if __name__ == "__main__" and sys.argv[1:] == ["_progress_scope_hook"]:
+    _progress_scope_hook()
+    sys.exit(0)
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -162,8 +215,9 @@ SESSION_TOKEN = _session_token()
 DAEMON_TOKEN  = os.environ.get("BLERG_RUNNER_DAEMON_TOKEN", "")
 BOARD_ID      = os.environ.get("BLERG_RUNNER_BOARD_ID", "")
 BOARD_TOKEN   = os.environ.get("BLERG_RUNNER_BOARD_TOKEN", "")
+BOARD_GATEWAY_URL = os.environ.get("BLERG_RUNNER_BOARD_GATEWAY_URL", "")
 # A session the blerg-board service started for a card gets its address, a token for the card's board and the
-# card's id (distinct from the runner's own legacy board variables above).
+# card's id (distinct from the selected-board/legacy CLI variables above).
 CARD_BOARD_URL   = os.environ.get("BLERG_BOARD_URL", "")
 CARD_BOARD_TOKEN = os.environ.get("BLERG_BOARD_TOKEN", "")
 CARD_ID          = os.environ.get("BLERG_BOARD_CARD", "")
@@ -239,8 +293,15 @@ def _direct_host(host):
     return "." not in host
 
 
-_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_ENV_OPENER = urllib.request.build_opener()
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # Authenticated runner/board endpoints return their answer directly. A
+    # redirect must never forward a session credential to a different target.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+_ENV_OPENER = urllib.request.build_opener(_NoRedirect())
 
 
 class _RequestError(urllib.error.URLError):
@@ -283,13 +344,19 @@ def _safe_reason(exc):
     return f"the request failed ({reason.__class__.__name__})"
 
 
-def _open(req, timeout):
+_DIRECT_NO_REDIRECT = _DIRECT_OPENER
+_ENV_NO_REDIRECT = _ENV_OPENER
+
+
+def _open(req, timeout, allow_redirects=True):
     """urlopen for every request this command makes: direct for a local host, else through the
     environment's proxy (if any). An error reply raises HTTPError as urlopen does; ANY other
     failure, while the request is built, sent through a proxy or answered, raises _RequestError
     with fixed words (_safe_reason), so nothing a proxy variable holds can reach the output."""
     try:
         opener = _DIRECT_OPENER if _direct_host(_host_of(req.full_url)) else _ENV_OPENER
+        if not allow_redirects:
+            opener = _DIRECT_NO_REDIRECT if _direct_host(_host_of(req.full_url)) else _ENV_NO_REDIRECT
         return opener.open(req, timeout=timeout)
     except urllib.error.HTTPError:
         raise
@@ -519,6 +586,42 @@ def cmd_ask(text, timeout_seconds=3600):
             # retry until the overall deadline.  A slow/restarting server
             # should not kill an ask mid-wait.
             time.sleep(2)
+
+
+def cmd_request_plugin(name, reason):
+    """Queue a human approval; never call an installer or write account settings."""
+    parts = name.split("@")
+    valid_name = bool(re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", parts[0]))
+    if len(parts) == 2:
+        source = parts[1]
+        valid_name = valid_name and bool(re.fullmatch(r"[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}", source))
+        valid_name = valid_name and not source.startswith((".", "-")) and source.split("/")[-1] not in (".", "..")
+    elif len(parts) != 1:
+        valid_name = False
+    if not valid_name:
+        _eprint("blerg-runner: use a plugin name or plugin@owner/repo from an allowed marketplace")
+        sys.exit(1)
+    if not reason.strip() or len(reason.encode("utf-8")) > 2000 or any((ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) <= 159 for c in reason):
+        _eprint("blerg-runner: give a reason of 1-2000 UTF-8 bytes without control characters")
+        sys.exit(1)
+    path = "/api/sessions/" + urllib.parse.quote(SESSION_ID, safe="") + "/plugin-requests"
+    data = json.dumps({"name": name, "reason": reason}).encode()
+    req = urllib.request.Request(SERVER_HTTP + path, data=data, headers=_headers(), method="POST")
+    try:
+        with _open(req, timeout=30, allow_redirects=False) as resp:
+            raw = resp.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("oversized reply")
+        result = json.loads(raw)
+        if not isinstance(result, dict) or result.get("state") != "pending" or not isinstance(result.get("id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result["id"]):
+            raise ValueError("invalid reply")
+    except urllib.error.HTTPError as exc:
+        _eprint("blerg-runner: plugin request was refused (HTTP " + str(exc.code) + "); check the allowed marketplace and session access")
+        sys.exit(1)
+    except (_NET_ERRORS + (ValueError, TypeError)):
+        _eprint("blerg-runner: plugin request could not be queued; no installation was requested")
+        sys.exit(1)
+    print("Plugin request " + result["id"] + " is waiting for human approval; nothing is installed.")
 
 
 def cmd_note(text):
@@ -1307,6 +1410,52 @@ def cmd_topic(title, done, commits=None):
     print(line)
 
 
+# ── progress (measured work without a plan) ────────────────────────────────────
+
+PROGRESS_GUIDE = """Show measured work in the session panel: blerg-runner progress 3/7 "Running checks".
+Counts must be whole numbers: 0 <= n <= m <= 1000000 and m >= 1.
+The label must be one nonempty line of at most 200 characters.
+Use blerg-runner progress --done to finish the last explicit progress bar.
+Run inside the current foreground Bash call; background or ended calls cannot report.
+Supported engines attribute subagent calls automatically. A Claude shell without its
+Blerg hook must be upgraded/restarted; unknown metadata is refused, never guessed.
+No progress is inferred from command output. Prefer a plan for work with known steps.
+"""
+
+
+def cmd_progress(counter, label, done=False):
+    if done:
+        if counter is not None or label is not None:
+            _work_fail("progress", "give n/m and a label, or --done, not both")
+        body = {"done": True}
+    else:
+        if counter is None or not re.fullmatch(r"[0-9]{1,7}/[0-9]{1,7}", counter):
+            _work_fail("progress", "give whole numbers n/m: 0 <= n <= m <= 1000000 and m >= 1")
+        completed, total = (int(value) for value in counter.split("/"))
+        if total < 1 or completed > total or total > 1000000:
+            _work_fail("progress", "counts must satisfy 0 <= n <= m <= 1000000 and m >= 1")
+        label = (label or "").strip()
+        if not label or len(label) > 200 or any(ord(ch) < 32 or 127 <= ord(ch) <= 159 or 0xd800 <= ord(ch) <= 0xdfff for ch in label):
+            _work_fail("progress", "give one nonempty label of at most 200 characters without control characters")
+        body = {"completed": completed, "total": total, "label": label}
+    # These are claims, not authority. The daemon resolves them against its
+    # current native call/thread ownership; unknown claims are never root scope.
+    if "BLERG_RUNNER_PROGRESS_CALL_ID" in os.environ:
+        marker = os.environ["BLERG_RUNNER_PROGRESS_CALL_ID"]
+        if not _valid_progress_marker(marker):
+            _work_fail("progress", "invalid native progress attribution")
+        body["call_id"] = marker
+    elif any(key in os.environ for key in ("CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT")):
+        _work_fail("progress", "this Claude shell has no Blerg progress hook; upgrade/restart the session and run progress inside its current foreground Bash call")
+    elif "CODEX_THREAD_ID" in os.environ:
+        marker = os.environ["CODEX_THREAD_ID"]
+        if not _valid_progress_marker(marker):
+            _work_fail("progress", "invalid native progress attribution")
+        body["native_thread_id"] = marker
+    _work_post("progress", "progress", body, "progress bars")
+    print("Progress: done" if done else f"Progress: {completed}/{total} · {label}")
+
+
 # ── checklist, pin, unpin (what the session works through) ─────────────────────
 
 # The agent reads these (checklist --help, pin --help and the top-level usage). WORK_LINE is the
@@ -2049,10 +2198,166 @@ def cmd_review_reply(req_id, status, line):
           else f"No open requests left in {name}")
 
 
+# ── file a ticket on another board (approval required) ────────────────────────
+
+FILING_GUIDE = """Search for duplicates before proposing a ticket: ticket boards, then
+ ticket search --board <name|id> --query "<keywords>".
+ ticket file --board <name|id> --title "<title>" --body "<details>" [--type bug]
+The person approves, edits, retargets or declines the proposal before any board write.
+Use --sensitive for reproduction details restricted to board administrators.
+Use --repo for target-board repositories; the originating session's repo is not assumed.
+"""
+
+
+def _filing_text(value, name, maximum, multiline=False):
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+        _work_fail("ticket", f"{name} is required and at most {maximum} characters")
+    if not multiline and any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in value):
+        _work_fail("ticket", f"{name} must be one line without control characters")
+    return value if multiline else value.strip()
+
+
+def _filing_request(method, route, payload=None):
+    url = f"{SERVER_HTTP}/api/sessions/{urllib.parse.quote(SESSION_ID, safe='')}/{route}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, headers=_headers(), method=method)
+    try:
+        with _open(req, timeout=30, allow_redirects=False) as response:
+            ctype = response.headers.get('Content-Type', '')
+            raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            _work_fail('ticket', 'board filing reply exceeds 1 MiB')
+        if 'application/json' not in ctype:
+            _work_fail('ticket', 'this runner server is older than board filing; nothing was filed')
+        reply = json.loads(raw)
+        if not isinstance(reply, dict):
+            raise ValueError('invalid reply')
+        return reply
+    except urllib.error.HTTPError as exc:
+        _work_fail('ticket', _http_failure(exc.code, url, exc.read(65536)))
+    except _NET_ERRORS as exc:
+        _work_fail('ticket', _conn_failure(url, exc))
+    except (ValueError, TypeError, KeyError, RecursionError):
+        _work_fail('ticket', 'invalid board filing reply; nothing was confirmed')
+
+
+def cmd_ticket_file(board, title, body, card_type=None, sensitive=False, repos=None):
+    payload = {'board': _filing_text(board, 'board', 200),
+               'title': _filing_text(title, 'title', 200),
+               'body': _filing_text(body, 'body', 65536, multiline=True),
+               'sensitive': sensitive}
+    if len(payload['body'].encode('utf-8')) > 65536:
+        _work_fail('ticket', 'body is at most 65536 UTF-8 bytes')
+    if card_type is not None:
+        payload['type'] = _filing_text(card_type, 'type', 64)
+    if repos:
+        if len(repos) > 20:
+            _work_fail('ticket', 'at most 20 target repositories')
+        payload['repos'] = [_filing_text(repo, 'repo', 512) for repo in repos]
+    reply = _filing_request('POST', 'file-ticket', payload)
+    if not isinstance(reply.get('proposal_id'), str) or reply.get('state') != 'pending':
+        _work_fail('ticket', 'the runner did not return a pending ticket proposal')
+    print(f"Ticket proposed: {reply['proposal_id']} (awaiting approval; no card written)")
+
+
+def cmd_ticket_boards():
+    reply = _filing_request('GET', 'board-options')
+    if not reply.get('configured'):
+        print('Board service is not configured.')
+        return
+    boards = reply.get('boards') or []
+    if not boards:
+        print('No accessible boards.')
+    for board in boards:
+        print(f"{board['name']}  ({board['id']})")
+
+
+def cmd_ticket_search(board, query):
+    params = urllib.parse.urlencode({'board': _filing_text(board, 'board', 200),
+                                     'q': _filing_text(query, 'query', 1000)})
+    reply = _filing_request('GET', 'board-search?' + params)
+    cards = reply.get('cards') or []
+    if not cards:
+        print('(no matching cards)')
+    for card in cards:
+        print(f"#{card.get('number', '?')} {card['title']}  ({card['id']})")
+    if reply.get('truncated'):
+        _eprint('blerg-runner: search results are truncated; narrow the query')
+
+
+def _mcp_redacted_value(value, depth=0):
+    # Redact string values before serializing, so header redaction cannot eat
+    # JSON delimiters or corrupt the stdio framing.
+    if depth > 64:
+        raise ValueError('reply nesting exceeds limit')
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, dict):
+        return {key: _mcp_redacted_value(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_mcp_redacted_value(item, depth + 1) for item in value]
+    return value
+
+
+def cmd_session_mcp():
+    """Bounded stdio transport for two fixed, approval-gated session tools."""
+    global SESSION_TOKEN
+    maximum = 256 * 1024
+    for raw in iter(lambda: sys.stdin.buffer.readline(maximum + 1), b''):
+        request_id = None
+        response = None
+        try:
+            if len(raw) > maximum:
+                while raw and not raw.endswith(b'\n'):
+                    raw = sys.stdin.buffer.readline(maximum + 1)
+                raise ValueError('oversized message')
+            request = json.loads(raw)
+            if not isinstance(request, dict):
+                raise ValueError('invalid request')
+            request_id = request.get('id')
+            if request_id is None:
+                continue  # MCP notifications have no response and need no credential.
+            if isinstance(request_id, bool) or not isinstance(request_id, (str, int)) or len(str(request_id)) > 128:
+                request_id = None
+                raise ValueError('invalid request id')
+            method = request.get('method')
+            if method not in ('initialize', 'ping', 'tools/list', 'tools/call'):
+                response = {'error': {'code': -32601, 'message': 'Unknown Blerg session method'}}
+            elif method == 'tools/call' and (not isinstance(request.get('params'), dict) or request['params'].get('name') not in ('blerg_ticket_file', 'blerg_request_plugin')):
+                response = {'error': {'code': -32602, 'message': 'Only Blerg ticket filing and plugin requests are available'}}
+            else:
+                SESSION_TOKEN = _session_token()  # Token rotation must work without restarting MCP.
+                if not SERVER_HTTP or not SESSION_ID or not SESSION_TOKEN:
+                    raise ValueError('session tools are not configured')
+                url = f"{SERVER_HTTP}/api/sessions/{urllib.parse.quote(SESSION_ID, safe='')}/filing-tools"
+                req = urllib.request.Request(url, data=json.dumps(request).encode(), method='POST',
+                                             headers={'Authorization': 'Bearer ' + SESSION_TOKEN,
+                                                      'Content-Type': 'application/json', 'Accept': 'application/json'})
+                with _open(req, timeout=30, allow_redirects=False) as reply:
+                    body = reply.read(1024 * 1024 + 1)
+                    if len(body) > 1024 * 1024 or 'application/json' not in reply.headers.get('Content-Type', ''):
+                        raise ValueError('invalid session tool reply')
+                response = json.loads(body)
+                if not isinstance(response, dict) or response.get('id') != request_id or response.get('jsonrpc') != '2.0':
+                    raise ValueError('invalid session tool reply')
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            response = {'error': {'code': -32600, 'message': 'Invalid or unavailable Blerg session tool request'}}
+        except _NET_ERRORS:
+            response = {'error': {'code': -32000, 'message': 'Blerg session tools are temporarily unavailable'}}
+        response.update(jsonrpc='2.0', id=request_id)
+        try:
+            for field in ("result", "error"):
+                if field in response:
+                    response[field] = _mcp_redacted_value(response[field])
+        except (ValueError, RecursionError):
+            response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32600, "message": "Invalid Blerg session tool reply"}}
+        print(json.dumps(response), flush=True)
+
+
 # ── Board auth / helpers ──────────────────────────────────────────────────────
 
 def _board_configured():
-    return bool(SERVER_HTTP and BOARD_ID and BOARD_TOKEN)
+    return bool((BOARD_GATEWAY_URL or SERVER_HTTP) and BOARD_ID and BOARD_TOKEN)
 
 
 def _board_noop_notice():
@@ -2073,6 +2378,8 @@ def _board_headers():
 
 def _board_get(path, timeout=30):
     """GET with board auth; exit on HTTP error."""
+    if BOARD_GATEWAY_URL:
+        return _gateway_board_request("GET", path, None, timeout)
     url = f"{SERVER_HTTP}{path}"
     req = urllib.request.Request(url, headers=_board_headers(), method="GET")
     try:
@@ -2088,6 +2395,8 @@ def _board_get(path, timeout=30):
 
 def _board_post(path, payload, timeout=30):
     """POST JSON with board auth; return parsed response body."""
+    if BOARD_GATEWAY_URL:
+        return _gateway_board_request("POST", path, payload, timeout)
     url = f"{SERVER_HTTP}{path}"
     data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, headers=_board_headers(), method="POST")
@@ -2105,6 +2414,8 @@ def _board_post(path, payload, timeout=30):
 
 def _board_patch(path, payload, timeout=30):
     """PATCH JSON with board auth; return parsed response body."""
+    if BOARD_GATEWAY_URL:
+        return _gateway_board_request("PATCH", path, payload, timeout)
     url = f"{SERVER_HTTP}{path}"
     data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, headers=_board_headers(), method="PATCH")
@@ -2122,6 +2433,8 @@ def _board_patch(path, payload, timeout=30):
 
 def _board_delete(path, timeout=30):
     """DELETE with board auth."""
+    if BOARD_GATEWAY_URL:
+        return _gateway_board_request("DELETE", path, None, timeout)
     url = f"{SERVER_HTTP}{path}"
     req = urllib.request.Request(url, headers=_board_headers(), method="DELETE")
     try:
@@ -2133,6 +2446,123 @@ def _board_delete(path, timeout=30):
     except _NET_ERRORS as exc:
         _eprint(f"blerg-runner: {_conn_failure(url, exc)}")
         sys.exit(1)
+
+
+def _board_refused(reason):
+    _eprint("blerg-runner: " + reason)
+    sys.exit(1)
+
+
+def _gateway_tool(name, arguments, timeout=30):
+    """Use only the server-issued per-board gateway grant, never a Core token."""
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": name, "arguments": arguments}}
+    req = urllib.request.Request(BOARD_GATEWAY_URL, data=json.dumps(request).encode(),
+                                 headers=_board_headers(), method="POST")
+    try:
+        with _open(req, timeout=timeout, allow_redirects=False) as resp:
+            raw = resp.read(2 * 1024 * 1024 + 1)
+        if len(raw) > 2 * 1024 * 1024:
+            _board_refused("board reply exceeds 2 MiB")
+        result = json.loads(raw)
+        if result.get("error"):
+            _board_refused("board gateway: " + str(result["error"]))
+        if not isinstance(result, dict) or result.get("id") != 1:
+            _board_refused("invalid board gateway reply")
+        output = result["result"]
+        if output.get("isError"):
+            _board_refused("board gateway: " + str(output.get("content", [])))
+        texts = [c["text"] for c in output["content"] if c.get("type") == "text"]
+        value = json.loads("".join(texts))
+        if name in ("blerg_card_search", "blerg_column_list"):
+            if value is None:
+                return []
+            if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+                _board_refused("invalid board gateway reply")
+        elif not isinstance(value, dict):
+            _board_refused("invalid board gateway reply")
+        return value
+    except urllib.error.HTTPError as exc:
+        _eprint(f"blerg-runner: {_http_failure(exc.code, BOARD_GATEWAY_URL, exc.read(65536))}")
+        sys.exit(1)
+    except _NET_ERRORS as exc:
+        _eprint(f"blerg-runner: {_conn_failure(BOARD_GATEWAY_URL, exc)}")
+        sys.exit(1)
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        _board_refused("invalid board gateway reply")
+
+
+def _selected_board(board_id):
+    if board_id != BOARD_ID:
+        _board_refused("this session is limited to its selected board")
+
+
+def _gateway_cards(query="", **filters):
+    cards = _gateway_tool("blerg_card_search", {"board_id": BOARD_ID, "query": query,
+                                               "limit": 100, **filters}) or []
+    if not isinstance(cards, list):
+        _board_refused("invalid board gateway card list")
+    if len(cards) >= 100:
+        _eprint("blerg-runner: results may be incomplete (board search limit: 100); narrow the search")
+    return cards
+
+
+def _gateway_card(card_id):
+    card = _gateway_tool("blerg_card_get", {"card_id": card_id})
+    _selected_board(card.get("board_id"))
+    return card
+
+
+def _gateway_board_request(method, path, payload, timeout):
+    """Translate the legacy CLI vocabulary without widening the gateway allowlist."""
+    url = urllib.parse.urlsplit(path)
+    parts = url.path.strip("/").split("/")
+    params = urllib.parse.parse_qs(url.query)
+    if len(parts) >= 3 and parts[:2] == ["api", "boards"]:
+        _selected_board(parts[2])
+        if method == "GET" and len(parts) == 3:
+            board = _gateway_tool("blerg_board_get", {"board_id": BOARD_ID}, timeout)
+            board["columns"] = _gateway_tool("blerg_column_list", {"board_id": BOARD_ID}, timeout) or []
+            board["tickets"] = _gateway_cards()
+            return board
+        if method == "GET" and len(parts) == 4 and parts[3] == "tickets":
+            if params.get("cursor") or params.get("ready"):
+                _board_refused("cursor and ready filters are unavailable for selected boards")
+            cards = _gateway_cards(**({"priority": params["priority"][0]} if "priority" in params else {}))
+            for key, field in (("column", "column_id"), ("size", "size")):
+                if key in params:
+                    cards = [c for c in cards if c.get(field) == params[key][0]]
+            for tag in params.get("tag", []):
+                cards = [c for c in cards if tag in (c.get("tags") or [])]
+            if "limit" in params:
+                cards = cards[:max(0, int(params["limit"][0]))]
+            return {"tickets": cards}
+        if method == "POST" and len(parts) == 4 and parts[3] == "tickets":
+            result = _gateway_tool("blerg_card_create", {"board_id": BOARD_ID, **payload}, timeout)
+            if not isinstance(result.get("card"), dict):
+                _board_refused("board gateway did not return a created card")
+            return result["card"]
+    if len(parts) == 3 and parts[:2] == ["api", "tickets"]:
+        card_id = parts[2]
+        if method == "GET":
+            return _gateway_card(card_id)
+        if method == "PATCH":
+            args = dict(payload)
+            card = _gateway_card(card_id)
+            args.update(card_id=card_id, if_match=card["version"])
+            if "column_id" in args:
+                if "after" in args:
+                    _board_refused("move --after is unavailable for selected boards; use --before")
+                if "before" in args:
+                    _gateway_card(args["before"])
+                    args["before_card_id"] = args.pop("before")
+                return _gateway_tool("blerg_card_move", args, timeout)
+            for field in ("tags", "repos"):
+                add, remove = args.pop("add_" + field, []), args.pop("rm_" + field, [])
+                if add or remove:
+                    args[field] = list(dict.fromkeys([v for v in args.get(field, card.get(field) or []) if v not in remove] + add))
+            return _gateway_tool("blerg_card_update", args, timeout)
+    _board_refused("this action is unavailable with a selected-board grant")
 
 
 # ── id-or-name resolution ─────────────────────────────────────────────────────
@@ -2175,8 +2605,14 @@ def _resolve_ticket(name_or_id, board_id=None):
     """Return a ticket id; resolve title against the board's tickets if not a UUID."""
     if _is_uuid(name_or_id):
         return name_or_id
-    board = _fetch_board(board_id)
-    matches = [t for t in board.get("tickets", []) if t["title"] == name_or_id]
+    if BOARD_GATEWAY_URL:
+        _selected_board(board_id or BOARD_ID)
+        candidates = _gateway_cards(query=name_or_id)
+        if len(candidates) >= 100:
+            _board_refused("too many matching cards; use an id")
+    else:
+        candidates = _fetch_board(board_id).get("tickets", [])
+    matches = [t for t in candidates if t["title"] == name_or_id]
     if len(matches) == 0:
         print(f'blerg-runner: ticket not found: "{name_or_id}"', file=sys.stderr)
         sys.exit(1)
@@ -2469,9 +2905,659 @@ def cmd_tag_list(board_id):
             print(tag)
 
 
+# ── session: start and drive other sessions ──────────────────────────────────
+
+_SESSION_DIRECT_OPENER = _DIRECT_OPENER
+_SESSION_ENV_OPENER = _ENV_OPENER
+_SESSION_SEEN_TOKENS = {SESSION_TOKEN}
+
+
+def _session_remaining(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _RequestError("command timeout")
+    return remaining
+
+
+def _session_pause(deadline, seconds):
+    time.sleep(max(0, min(seconds, deadline - time.monotonic())))
+
+
+@contextlib.contextmanager
+def _session_deadline(deadline):
+    """Bound the complete POSIX CLI request, including DNS and trickled headers.
+
+    Blerg's Linux/macOS CLI runs on the main thread. Other Python hosts retain the
+    socket/read deadline fallback. Restore an existing handler/timer on every exit.
+    """
+    if deadline is None or not hasattr(signal, "setitimer") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    remaining = _session_remaining(deadline)
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
+
+    def expired(_signum, _frame):
+        raise TimeoutError("command timeout")
+
+    signal.signal(signal.SIGALRM, expired)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            left = max(0.000001, previous_timer[0] - (time.monotonic() - started))
+            signal.setitimer(signal.ITIMER_REAL, left, previous_timer[1])
+
+
+def _session_read(resp, deadline):
+    if deadline is None:
+        return resp.read()
+    parts = []
+    while True:
+        remaining = _session_remaining(deadline)
+        # urllib's timeout is an inactivity timeout. Reset it to the remaining command
+        # budget for each read so a slow stream cannot restart the full allowance.
+        stream = resp
+        for _ in range(5):
+            sock = getattr(stream, "_sock", None)
+            if sock is not None:
+                sock.settimeout(remaining)
+                break
+            stream = getattr(stream, "fp", None) or getattr(stream, "raw", None)
+            if stream is None:
+                break
+        reader = getattr(resp, "read1", resp.read)
+        part = reader(65536)
+        _session_remaining(deadline)
+        if not part:
+            return b"".join(parts)
+        parts.append(part)
+
+
+def _session_text(text):
+    text = str(text)
+    for secret in sorted((v for v in _SESSION_SEEN_TOKENS if v and len(v) >= 4), key=len, reverse=True):
+        text = text.replace(secret, "[token]")
+    return _redact(text)
+
+
+def _session_print(text):
+    print(_session_text(text))
+
+
+def _session_json_value(value):
+    if isinstance(value, str):
+        return _session_text(value)
+    if isinstance(value, list):
+        return [_session_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {_session_text(key): _session_json_value(item) for key, item in value.items()}
+    return value
+
+
+def _session_print_json(value, pretty=False):
+    print(json.dumps(_session_json_value(value), indent=2 if pretty else None, ensure_ascii=False))
+
+
+# The agent reads this (session --help). Its first paragraph is the line the session guide and the
+# managed CLAUDE.md block carry (daemon/claudecode.go childSessionGuideLine).
+SESSION_LINE = ("To hand work to another session, run `blerg-runner budget`, then `blerg-runner session start ...`; "
+                "`blerg-runner session --help` explains approval, waiting and driving it. Never answer a "
+                "child's question that asks for something destructive or irreversible: escalate it with "
+                "`blerg-runner ask`. When raising `--timeout` (seconds), set the Bash tool timeout higher (milliseconds).")
+
+SESSION_GUIDE = SESSION_LINE + """
+
+Choose the engine first. `blerg-runner budget` prints, per engine, how much of its usage windows is
+spent. Budgets are per provider (Claude, Codex), not per model. Prefer an engine with room when
+another is above 80% of its 5-hour window or capped. A local engine (Hermes, OpenClaw on your own
+hardware) costs nothing, but a Hermes endpoint on a loopback address may not be reachable from a
+docker child: prefer --runtime daemon for a local Hermes.
+
+  blerg-runner session start --engine codex --repo myrepo --title "Fix the flaky test" "the prompt"
+  blerg-runner session start --no-repo --prompt-file task.md
+
+`start` asks the person (a card in the chat) unless a rule or a grant they gave already allows it.
+It prints `started <child>` once the child runs. Each start sends an Idempotency-Key (printed to
+stderr); repeat the SAME start with --idempotency-key <key> and you get the same request or child,
+not a second one.
+
+Waiting. `start`, `wait` and `watch` stop waiting after --timeout seconds (default 100, at most
+540), including network calls and retries, and then print
+`still waiting — run: blerg-runner session wait <request_id>` (or `… watch
+<child>`) and exit with code 3: that is not a failure. Run `wait` (or `watch`) again; never run
+`start` with a NEW key, which would put a second card in front of the person. If a start
+times out before a request id arrives, repeat the same start with the printed --idempotency-key.
+If you raise --timeout, give
+the Bash tool a timeout above it (milliseconds). Exit codes: 0 done, 1 failed, 2 the person denied
+it, 3 still waiting or nobody answered.
+
+`watch` checks the current open questions before tailing and before showing an event question.
+Older servers without open_asks can reconcile only questions in replayed events; use --after
+with a known earlier sequence to include older questions. Event pages are drained before showing
+an unanswered question. Downloads never replace files: defaults and output directories pick a
+numbered name on a clash; an explicit -o file must not exist.
+
+Driving a child (it is yours alone; anything else answers not found):
+  session list                      your children, one line each
+  session watch <child>             prints its text, its open questions and short tool lines until its turn ends
+  session send <child> "text"       a message; it answers the child's open question when there is one
+  session result <child>            its last answer and state; session stop <child> ends it
+  session model <child> <model> [--effort X]     session interrupt <child>
+  session upload <child> <file>     the child gets the file as data to read, not as instructions
+  session files <child>  /  session download <child> <name|id> [-o path]
+  session events <child> [--after N]             raw events as JSON lines
+
+Never answer a child's question that asks for something destructive or irreversible (deleting
+data, force-pushing, spending money, anything you cannot undo): escalate with `blerg-runner ask`
+so the person decides. Stop children you no longer need.
+"""
+
+SESSION_DEFAULT_TIMEOUT = 100
+SESSION_MAX_TIMEOUT = 540
+SESSION_NET_RETRIES = 3
+
+
+def _call_full(method, path, payload=None, headers=None, raw=None, timeout=30, deadline=None):
+    """Fixed-server authenticated call. Redirects are refused; deadline includes response reads."""
+    global SESSION_TOKEN
+    SESSION_TOKEN = _session_token()
+    _SESSION_SEEN_TOKENS.add(SESSION_TOKEN)
+    url = f"{SERVER_HTTP}{path}"
+    hdrs = _headers()
+    data = None
+    if raw is not None:
+        hdrs["Content-Type"] = "application/octet-stream"
+        if hasattr(raw, "read"):
+            hdrs["Content-Length"] = str(os.fstat(raw.fileno()).st_size)
+        data = raw
+    elif payload is not None:
+        data = json.dumps(payload).encode()
+    elif method == "POST":
+        data = b"{}"
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+    try:
+        with _session_deadline(deadline):
+            if deadline is not None:
+                timeout = min(timeout, _session_remaining(deadline))
+            opener = _SESSION_DIRECT_OPENER if _direct_host(_host_of(url)) else _SESSION_ENV_OPENER
+            try:
+                resp = opener.open(req, timeout=timeout)
+            except urllib.error.HTTPError as exc:
+                resp = exc
+            with resp:
+                return resp.code, _session_read(resp, deadline), resp.headers
+    except Exception as exc:
+        # Proxy and network errors can contain addresses or credentials. Never echo them.
+        raise _RequestError(_safe_reason(exc)) from None
+
+
+def _call(method, path, payload=None, headers=None, raw=None, timeout=30, deadline=None):
+    status, body, _ = _call_full(method, path, payload, headers, raw, timeout, deadline)
+    return status, body
+
+
+def _json_of(body):
+    try:
+        out = json.loads(body)
+    except (ValueError, TypeError):
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
+def _sfail(cmd, msg, code=1):
+    _eprint(_session_text(f"blerg-runner session {cmd}: {msg}"))
+    sys.exit(code)
+
+
+def _sess_path(suffix=""):
+    return f"/api/sessions/{urllib.parse.quote(SESSION_ID, safe='')}/children{suffix}"
+
+
+def _child_path(child, suffix=""):
+    return _sess_path("/" + urllib.parse.quote(child, safe="") + suffix)
+
+
+def _sess_do(cmd, method, path, payload=None, headers=None, raw=None, timeout=30, ok=(200, 201, 202)):
+    """A call whose failure ends the command: any status outside ok, or no reply at all."""
+    url = f"{SERVER_HTTP}{path}"
+    try:
+        status, body, hdrs = _call_full(method, path, payload, headers, raw, timeout)
+    except _NET_ERRORS as exc:
+        _sfail(cmd, _conn_failure(url, exc))
+    if status not in ok:
+        line = _http_failure(status, url, body)
+        wait = hdrs.get("Retry-After") if hdrs is not None else None
+        if status == 429 and wait:
+            line += f"; retry after {_redact(wait)[:10]}s"
+        _sfail(cmd, line)
+    return status, body
+
+
+def _hhmm(stamp):
+    """A server timestamp as the local clock time, hh:mm; the text itself when it does not parse."""
+    import datetime
+    try:
+        when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        return when.astimezone().strftime("%H:%M")
+    except ValueError:
+        return str(stamp)
+
+
+def _clock(stamp):
+    import datetime
+    try:
+        when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        return when.astimezone().strftime("%I:%M %p").lstrip("0")
+    except ValueError:
+        return str(stamp)
+
+
+def _budget_line(eng):
+    """`claude  5h 62% used, resets 4:10 PM · 7d 31%`, `hermes  local (runs on your hardware)`."""
+    name = eng.get("engine", "?")
+    wins = [w for w in (eng.get("windows") or []) if isinstance(w, dict) and w.get("id") != "capped"]
+    if not eng.get("available", True):
+        return f"{name}  not installed on this daemon"
+    parts = []
+    for i, w in enumerate(wins):
+        pct = w.get("used_percent", 0)
+        pct = int(pct) if float(pct) == int(pct) else round(float(pct), 1)
+        text = f"{w.get('id', '?')} {pct}%"
+        if i == 0:
+            text += " used"
+            if w.get("resets_at"):
+                text += f", resets {_clock(w['resets_at'])}"
+        parts.append(text)
+    line = " · ".join(parts)
+    if not line:
+        line = eng.get("note") or ("local (runs on your hardware)" if eng.get("local") else "usage unknown")
+    if eng.get("capped_until"):
+        line += f" · capped until {_clock(eng['capped_until'])}"
+    return f"{name}  {line}"
+
+
+def cmd_budget(as_json=False):
+    status, body = _sess_do("budget", "GET", f"/api/sessions/{urllib.parse.quote(SESSION_ID, safe='')}/budget")
+    data = _json_of(body)
+    if as_json:
+        _session_print_json(data)
+        return
+    engines = data.get("engines") or []
+    if not engines:
+        _session_print(data.get("note") or "no engines reported")
+        return
+    for eng in engines:
+        _session_print(_budget_line(eng))
+
+
+def _started_lines(child, via, plugins, budget):
+    _session_print(f"started {child.get('id', '?')} ({child.get('engine', '?')} {child.get('model') or 'default model'}, "
+          f"{child.get('runtime') or '?'}, via {via or '?'})")
+    _session_print(f"plugins: {plugins or 'skipped'}")
+    if isinstance(budget, dict) and budget:
+        _session_print(_budget_line(budget))
+    sys.stdout.flush()
+
+
+def _still_waiting(cmd_line):
+    _session_print(f"still waiting — run: {cmd_line}")
+    sys.stdout.flush()
+    sys.exit(3)
+
+
+def _wait_request(request_id, timeout=SESSION_DEFAULT_TIMEOUT, deadline=None):
+    """Wait for a decision AND a start receipt; an allowed request may still be starting."""
+    path = f"/api/delegation-requests/{urllib.parse.quote(request_id, safe='')}"
+    url = f"{SERVER_HTTP}{path}"
+    deadline = deadline if deadline is not None else time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        wait = max(0, min(25, int(deadline - time.monotonic())))
+        try:
+            status, body = _call("GET", f"{path}?wait={wait}", timeout=wait + 10, deadline=deadline)
+        except _NET_ERRORS:
+            status, body = None, b""
+        if status is not None and status != 200:
+            if status < 500:
+                _sfail("wait", _http_failure(status, url, body))
+            status = None
+        if status == 200:
+            data = _json_of(body)
+            st = data.get("status")
+            if st == "allowed":
+                if data.get("child_session_id"):
+                    _session_print(f"started {data['child_session_id']}")
+                    return
+                if data.get("start_error"):
+                    _sfail("wait", f"the person allowed it, but the session did not start: {data['start_error']}")
+            if st == "denied":
+                _sfail("wait", "the person denied it", code=2)
+            if st == "expired":
+                _sfail("wait", "nobody answered; ask again with a new start", code=3)
+        _session_pause(deadline, 2 if status is None else 0.05)
+    _still_waiting(f"blerg-runner session wait {request_id}")
+
+
+def _timeout_arg(value):
+    return max(1, min(SESSION_MAX_TIMEOUT, int(value)))
+
+
+def cmd_session_start(args):
+    if args.prompt_file and args.prompt:
+        _sfail("start", "give the prompt as an argument or with --prompt-file, not both", code=2)
+    prompt = _read_prompt_file(args.prompt_file) if args.prompt_file else args.prompt
+    if not prompt or not prompt.strip():
+        _sfail("start", "a prompt is required (an argument or --prompt-file)", code=2)
+    if not args.repo and not args.no_repo:
+        _sfail("start", "give --repo <name> or --no-repo", code=2)
+    body = {"prompt": prompt}
+    for key in ("engine", "model", "effort", "runtime", "title"):
+        if getattr(args, key):
+            body[key] = getattr(args, key)
+    if args.repo:
+        body["repo"] = args.repo
+    if args.no_repo:
+        body["no_repo"] = True
+    if args.keep_running:
+        body["keep_running"] = True
+    import uuid
+    key = args.idempotency_key or uuid.uuid4().hex
+    _eprint(f"idempotency key: {key}")
+    url = f"{SERVER_HTTP}{_sess_path()}"
+    deadline = time.monotonic() + args.timeout
+    retry_hint = f"repeat the same blerg-runner session start with --idempotency-key {key}"
+    last = None
+    for attempt in range(SESSION_NET_RETRIES + 1):
+        if time.monotonic() >= deadline:
+            _still_waiting(retry_hint)
+        try:
+            status, reply, rhdrs = _call_full("POST", _sess_path(), body, headers={"Idempotency-Key": key}, timeout=60, deadline=deadline)
+            break
+        except _NET_ERRORS as exc:
+            last = exc
+            if time.monotonic() >= deadline:
+                _still_waiting(retry_hint)
+            if attempt < SESSION_NET_RETRIES:
+                _session_pause(deadline, 0.5 * (attempt + 1))
+    else:
+        _sfail("start", _conn_failure(url, last) + f"; run the same start again with --idempotency-key {key}")
+    data = _json_of(reply)
+    if status == 201:
+        _started_lines(data.get("child") or {}, data.get("via"), data.get("plugins"), data.get("budget"))
+        return
+    if status not in (200, 202):
+        line = _http_failure(status, url, reply)
+        if status == 429 and rhdrs.get("Retry-After"):
+            line += f"; retry after {_redact(rhdrs['Retry-After'])[:10]}s"
+        _sfail("start", line)
+    request_id = data.get("request_id")
+    if not request_id:
+        _sfail("start", "unexpected reply from the server (no request id)")
+    st = data.get("status") or "pending"
+    if st == "allowed" and data.get("child_session_id"):
+        _session_print(f"started {data['child_session_id']}")
+        return
+    _session_print(f"request {request_id}")
+    sys.stdout.flush()
+    if st == "pending":
+        exp = f", expires {_hhmm(data['expires_at'])}" if data.get("expires_at") else ""
+        _eprint(f"waiting for the person to approve (request {request_id}{exp})")
+    if args.no_wait:
+        return
+    _wait_request(request_id, args.timeout, deadline=deadline)
+
+
+def _read_prompt_file(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        _sfail("start", f"cannot read {path}: {os.strerror(exc.errno or 0).lower() or 'error'}", code=2)
+
+
+def cmd_session_list():
+    _, body = _sess_do("list", "GET", _sess_path())
+    kids = _json_of(body).get("children") or []
+    if not kids:
+        _session_print("no children")
+    for k in kids:
+        _session_print(f"{k.get('id')}  {k.get('engine')}  {k.get('model')}  {k.get('status')}  {k.get('title')}")
+
+
+def cmd_session_send(child, text):
+    _, body = _sess_do("send", "POST", _child_path(child, "/message"), {"text": text})
+    _session_print("answered its question" if _json_of(body).get("answered_ask") else "sent")
+
+
+def cmd_session_model(child, model, effort):
+    payload = {"model": model}
+    if effort:
+        payload["effort"] = effort
+    _sess_do("model", "POST", _child_path(child, "/model"), payload)
+    _session_print("model set")
+
+
+def cmd_session_interrupt(child):
+    _sess_do("interrupt", "POST", _child_path(child, "/interrupt"), {})
+    _session_print("interrupted")
+
+
+def cmd_session_stop(child):
+    _sess_do("stop", "POST", _child_path(child, "/stop"), {})
+    _session_print("stopped")
+
+
+def cmd_session_result(child):
+    _, body = _sess_do("result", "GET", _child_path(child, "/result"))
+    _session_print_json(_json_of(body), pretty=True)
+
+
+def cmd_session_upload(child, src):
+    try:
+        fh = open(src, "rb")
+    except OSError as exc:
+        _sfail("upload", f"cannot read {src}: {os.strerror(exc.errno or 0).lower() or 'error'}")
+    with fh:
+        name = urllib.parse.quote(os.path.basename(src), safe="")
+        _, body = _sess_do("upload", "POST", _child_path(child, "/uploads"), raw=fh,
+                           headers={"X-Artifact-Name": name}, timeout=120)
+    art = _json_of(body)
+    _session_print(f"uploaded {art.get('name') or os.path.basename(src)}" + (f" ({art['id']})" if art.get("id") else ""))
+
+
+def _child_files(child):
+    _, body = _sess_do("files", "GET", _child_path(child, "/artifacts"))
+    return _json_of(body).get("artifacts") or []
+
+
+def cmd_session_files(child):
+    items = _child_files(child)
+    if not items:
+        _session_print("no files")
+    for it in items:
+        _session_print(f"{it.get('id')}  {it.get('name')}  v{it.get('version', 1)}  ({_fmt_size(int(it.get('size', 0)))})")
+
+
+def cmd_session_download(child, target, out):
+    items = _child_files(child)
+    hit = next((it for it in items if it.get("id") == target), None)
+    if hit is None:
+        named = [it for it in items if it.get("name") == target]
+        if named:
+            hit = max(named, key=lambda it: it.get("version", 0))
+    if hit is None:
+        _sfail("download", f"no file {target!r} (try: blerg-runner session files {child})")
+    path = _child_path(child, "/artifacts/" + urllib.parse.quote(hit["id"], safe="") + "/download")
+    _, data = _sess_do("download", "GET", path, timeout=120)
+    dest = out or _safe_local_name(hit.get("name"))
+    try:
+        if not out or os.path.isdir(out):
+            dest, fh = _open_new(out or ".", _safe_local_name(hit.get("name")))
+        else:
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+            fh = os.fdopen(fd, "wb")
+        with fh:
+            fh.write(data)
+    except OSError as exc:
+        _sfail("download", f"cannot write {dest}: {os.strerror(exc.errno or 0).lower() or 'error'}")
+    _session_print(f"saved {dest} ({_fmt_size(len(data))})")
+
+
+def cmd_session_events(child, after):
+    _, body = _sess_do("events", "GET", _child_path(child, f"/events?after_seq={int(after)}"))
+    for ev in _json_of(body).get("events") or []:
+        _session_print_json(ev)
+
+
+def _watch_print(events, asks, answered):
+    """Print what the events say; True when one of them ended the turn."""
+    turn_done = False
+    for ev in events:
+        kind, p = ev.get("kind"), ev.get("payload") or {}
+        if kind == "assistant_text" and p.get("done") and p.get("text") and not p.get("parent_call_id"):
+            _session_print(p["text"])
+        elif kind == "tool_call" and not p.get("parent_call_id"):
+            _session_print(f"tool: {p.get('tool', '?')}")
+        elif kind == "ask":
+            asks[p.get("message_id", "")] = p.get("body", "")
+        elif kind == "user_message" and p.get("source") == "ask_answer":
+            answered.add(p.get("message_id", ""))
+        elif kind == "turn_done":
+            turn_done = True
+    sys.stdout.flush()
+    return turn_done
+
+
+def cmd_session_watch(child, until, timeout, after):
+    deadline = time.monotonic() + timeout
+    asks, answered = {}, set()
+    done = False
+
+    def snapshot():
+        try:
+            status, body = _call("GET", _child_path(child), deadline=deadline)
+        except _NET_ERRORS:
+            return None
+        if 400 <= status < 500:
+            _sfail("watch", _http_failure(status, f"{SERVER_HTTP}{_child_path(child)}", body))
+        return _json_of(body) if status == 200 else None
+
+    def show_state(info, allow_terminal=True):
+        if info is None:
+            return False
+        # New peers provide the authoritative set, including asks preceding the tail.
+        if "open_asks" in info:
+            open_asks = [(q.get("message_id", ""), q.get("body", ""))
+                         for q in info.get("open_asks") or [] if isinstance(q, dict)]
+        else:
+            # Old peers: only replayed events can establish an open ask. Drain all pages first.
+            open_asks = [(mid, text) for mid, text in asks.items() if mid not in answered]
+        if open_asks:
+            mid, text = open_asks[0]
+            _session_print(f"ask [{mid}]: {text}")
+            sys.stdout.flush()
+            return True
+        if allow_terminal and info.get("lifecycle") in ("ended", "error"):
+            _session_print(f"the session {info['lifecycle']}")
+            return True
+        return False
+
+    # Check status before establishing the tail, so a preexisting question is not lost.
+    while time.monotonic() < deadline:
+        info = snapshot()
+        if info is not None:
+            if show_state(info, allow_terminal=after is None):
+                return
+            break
+        _session_pause(deadline, 2)
+    if after is None:
+        while time.monotonic() < deadline:
+            try:
+                status, body = _call("GET", _child_path(child, "/events?before_seq=0&limit=1"), deadline=deadline)
+            except _NET_ERRORS:
+                status, body = None, b""
+            if status is not None and 400 <= status < 500:
+                _sfail("watch", _http_failure(status, f"{SERVER_HTTP}{_child_path(child)}", body))
+            if status == 200:
+                evs = _json_of(body).get("events") or []
+                after = evs[-1]["seq"] if evs else 0
+                break
+            _session_pause(deadline, 2)
+    after = after or 0
+    while time.monotonic() < deadline:
+        wait = max(0, min(25, int(deadline - time.monotonic())))
+        try:
+            status, body = _call("GET", _child_path(child, f"/events?after_seq={after}&wait={wait}"),
+                                 timeout=wait + 10, deadline=deadline)
+        except _NET_ERRORS:
+            status, body = None, b""
+        if status is not None and 400 <= status < 500:
+            _sfail("watch", _http_failure(status, f"{SERVER_HTTP}{_child_path(child)}", body))
+        if status == 200:
+            data = _json_of(body)
+            evs = data.get("events") or []
+            if evs:
+                next_after = max(after, max(int(e.get("seq", 0)) for e in evs))
+                done = _watch_print(evs, asks, answered) or done
+                advanced = next_after > after
+                after = next_after
+                if data.get("has_more") and advanced:
+                    continue
+            # Recheck before exposing an event ask: it may already have been answered.
+            # Also catches a question arriving between the initial snapshot and the tail.
+            info = snapshot()
+            if info is not None:
+                if show_state(info):
+                    return
+                if done and until == "turn":
+                    return
+            _session_pause(deadline, 0.05 if info is not None else 2)
+        else:
+            _session_pause(deadline, 2)
+    _still_waiting(f"blerg-runner session watch {child} --after {after}")
+
+
+def cmd_session(args):
+    sub = args.session_cmd
+    if sub == "start":
+        cmd_session_start(args)
+    elif sub == "wait":
+        _wait_request(args.request_id, args.timeout)
+    elif sub == "list":
+        cmd_session_list()
+    elif sub == "send":
+        cmd_session_send(args.child, args.text)
+    elif sub == "model":
+        cmd_session_model(args.child, args.model, args.effort)
+    elif sub == "interrupt":
+        cmd_session_interrupt(args.child)
+    elif sub == "upload":
+        cmd_session_upload(args.child, args.file)
+    elif sub == "files":
+        cmd_session_files(args.child)
+    elif sub == "download":
+        cmd_session_download(args.child, args.target, args.out)
+    elif sub == "events":
+        cmd_session_events(args.child, args.after)
+    elif sub == "watch":
+        cmd_session_watch(args.child, args.until, args.timeout, args.after)
+    elif sub == "result":
+        cmd_session_result(args.child)
+    elif sub == "stop":
+        cmd_session_stop(args.child)
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
+    if sys.argv[1:] == ["_session_mcp"]:
+        cmd_session_mcp()
+        return
     parser = argparse.ArgumentParser(
         prog="blerg-runner",
         description="Send messages and files from a Claude session to the user via Blerg Runner.",
@@ -2574,6 +3660,13 @@ def main():
                         help="Everything not committed: staged, unstaged and new files (the default)")
     p_diff.add_argument("--title", default=None, help="The diff's title (default: what was compared)")
 
+    p_progress = sub.add_parser("progress", help="Report measured steps in the session panel",
+                                description=PROGRESS_GUIDE,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_progress.add_argument("counter", nargs="?", metavar="N/M", help="Completed and total steps")
+    p_progress.add_argument("label", nargs="?", help="What is happening, up to 200 characters")
+    p_progress.add_argument("--done", action="store_true", help="Finish the last explicit progress bar")
+
     p_topic = sub.add_parser(
         "topic",
         help="Mark the start of a piece of work (or --done its end) for the person's History tab",
@@ -2618,6 +3711,82 @@ def main():
     p_unpin.add_argument("target", nargs="?", default=None, metavar="SOURCE:KEY",
                          help="The ticket, as <source>:<key> (or just its key when no other pin shares it)")
 
+    p_plugin = sub.add_parser("request-plugin", help="Request a plugin or its skills; waits for human approval, never installs")
+    p_plugin.add_argument("name", help="Plugin name, or plugin@owner/repo from an allowed marketplace")
+    p_plugin.add_argument("reason", help="Why the session needs it (1-2000 UTF-8 bytes)")
+
+    p_budget = sub.add_parser(
+        "budget",
+        help="Show how much of each engine's usage is spent, before you pick an engine for a child session",
+        description="One line per engine on the parent's daemon: its usage windows, or that it runs locally.",
+        epilog=SESSION_GUIDE, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_budget.add_argument("--json", action="store_true", dest="as_json", help="Print the raw reply")
+
+    p_sess = sub.add_parser(
+        "session",
+        help="Start and drive other sessions on this daemon, with the person's approval (session --help)",
+        description="Hand work to a child session: start it, wait for the person's approval, watch it, send, stop.",
+        epilog=SESSION_GUIDE, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sess_sub = p_sess.add_subparsers(dest="session_cmd", required=True)
+
+    def _timeout(p, default):
+        p.add_argument("--timeout", type=_timeout_arg, default=default, metavar="SECONDS",
+                       help=f"Stop waiting after this long (default {default}, at most {SESSION_MAX_TIMEOUT}); "
+                            "give the Bash tool a longer timeout when you raise it. Exit code 3 means still waiting")
+
+    ps_start = sess_sub.add_parser("start", help="Start a child session (asks the person unless a rule or grant allows it)")
+    ps_start.add_argument("--engine", default=None, help="claude, codex, hermes or openclaw (default: the runner default engine)")
+    ps_start.add_argument("--model", default=None)
+    ps_start.add_argument("--effort", default=None)
+    ps_start.add_argument("--repo", default=None, help="A repository checked out on the daemon")
+    ps_start.add_argument("--no-repo", action="store_true", help="No repository")
+    ps_start.add_argument("--runtime", choices=["docker", "daemon"], default=None)
+    ps_start.add_argument("--title", default=None)
+    ps_start.add_argument("--keep-running", action="store_true", help="Keep the child running if its parent ends")
+    ps_start.add_argument("--no-wait", action="store_true", help="Print the request id and return; wait later with `session wait`")
+    ps_start.add_argument("--idempotency-key", default=None, metavar="KEY",
+                          help="Repeat a start safely: the same key returns the same request or child")
+    ps_start.add_argument("--prompt-file", default=None, metavar="FILE", help="Read the prompt from FILE")
+    ps_start.add_argument("prompt", nargs="?", default=None, help="The child's first message")
+    _timeout(ps_start, SESSION_DEFAULT_TIMEOUT)
+
+    ps_wait = sess_sub.add_parser("wait", help="Wait for the person's decision on a start request")
+    ps_wait.add_argument("request_id")
+    _timeout(ps_wait, SESSION_DEFAULT_TIMEOUT)
+
+    sess_sub.add_parser("list", help="Your child sessions")
+    ps_send = sess_sub.add_parser("send", help="Send a child a message")
+    ps_send.add_argument("child")
+    ps_send.add_argument("text")
+    ps_model = sess_sub.add_parser("model", help="Change a child's model")
+    ps_model.add_argument("child")
+    ps_model.add_argument("model")
+    ps_model.add_argument("--effort", default=None)
+    ps_int = sess_sub.add_parser("interrupt", help="Interrupt a child's turn")
+    ps_int.add_argument("child")
+    ps_up = sess_sub.add_parser("upload", help="Give a child a file (it reads it as data)")
+    ps_up.add_argument("child")
+    ps_up.add_argument("file")
+    ps_files = sess_sub.add_parser("files", help="The files a child published")
+    ps_files.add_argument("child")
+    ps_dl = sess_sub.add_parser("download", help="Download a file a child published")
+    ps_dl.add_argument("child")
+    ps_dl.add_argument("target", metavar="NAME|ID")
+    ps_dl.add_argument("-o", "--out", default=None, metavar="PATH")
+    ps_ev = sess_sub.add_parser("events", help="A child's events as JSON lines")
+    ps_ev.add_argument("child")
+    ps_ev.add_argument("--after", type=int, default=0, metavar="N")
+    ps_watch = sess_sub.add_parser("watch", help="Follow a child: its text, open questions and tools, until its turn ends")
+    ps_watch.add_argument("child")
+    ps_watch.add_argument("--until", choices=["turn", "end"], default="turn")
+    ps_watch.add_argument("--after", type=int, default=None, metavar="N",
+                          help="Start after this event number (default: from now)")
+    _timeout(ps_watch, SESSION_DEFAULT_TIMEOUT)
+    ps_res = sess_sub.add_parser("result", help="A child's last answer and state")
+    ps_res.add_argument("child")
+    ps_stop = sess_sub.add_parser("stop", help="Stop a child")
+    ps_stop.add_argument("child")
+
     # ── board ──────────────────────────────────────────────────────────────────
     p_board =sub.add_parser("board", help="Board commands")
     board_sub = p_board.add_subparsers(dest="board_cmd", required=True)
@@ -2660,6 +3829,19 @@ def main():
     # ── ticket ─────────────────────────────────────────────────────────────────
     p_tick = sub.add_parser("ticket", help="Ticket commands")
     tick_sub = p_tick.add_subparsers(dest="ticket_cmd", required=True)
+
+    tick_sub.add_parser("boards", help="List boards this session's owner can access")
+    pt_search = tick_sub.add_parser("search", help="Search a board for duplicates without approval")
+    pt_search.add_argument("--board", required=True, help="Target board name or id")
+    pt_search.add_argument("--query", required=True, help="Search terms")
+    pt_file = tick_sub.add_parser("file", help="Propose a ticket for the person to approve",
+                                  description=FILING_GUIDE, formatter_class=argparse.RawDescriptionHelpFormatter)
+    pt_file.add_argument("--board", required=True, help="Target board name or id")
+    pt_file.add_argument("--title", required=True)
+    pt_file.add_argument("--body", required=True)
+    pt_file.add_argument("--type", dest="card_type", default=None)
+    pt_file.add_argument("--sensitive", action="store_true", help="Restrict reproduction details to board administrators")
+    pt_file.add_argument("--repo", dest="target_repos", action="append", help="Target-board repo; repeat for several")
 
     pt_list = tick_sub.add_parser("list", help="List tickets")
     pt_list.add_argument("board", nargs="?", help="Board id (default: $BLERG_RUNNER_BOARD_ID)")
@@ -2742,17 +3924,32 @@ def main():
 
     # ── session messaging commands (existing) ──────────────────────────────────
     if args.cmd in ("update", "ask", "note", "publish", "fetch", "files", "unpublish", "review", "topic",
-                    "checklist", "pin", "unpin", "diff"):
+                    "checklist", "pin", "unpin", "diff", "progress", "request-plugin", "session", "budget") or (args.cmd == "ticket" and args.ticket_cmd in ("boards", "search", "file")):
         if not _configured():
             _noop_notice()
             sys.exit(0)
-        if args.cmd == "review":
+        if args.cmd == "request-plugin":
+            cmd_request_plugin(args.name, args.reason)
+        elif args.cmd == "ticket":
+            if args.ticket_cmd == "boards":
+                cmd_ticket_boards()
+            elif args.ticket_cmd == "search":
+                cmd_ticket_search(args.board, args.query)
+            elif args.ticket_cmd == "file":
+                cmd_ticket_file(args.board, args.title, args.body, args.card_type, args.sensitive, args.target_repos)
+        elif args.cmd == "review":
             if args.review_cmd == "list":
                 cmd_review_list(args.file)
             elif args.review_cmd == "reply":
                 cmd_review_reply(args.id, args.status, args.line)
+        elif args.cmd == "session":
+            cmd_session(args)
+        elif args.cmd == "budget":
+            cmd_budget(args.as_json)
         elif args.cmd == "diff":
             cmd_diff(args.revs, staged=args.staged, worktree=args.worktree, paths=diff_paths, title=args.title)
+        elif args.cmd == "progress":
+            cmd_progress(args.counter, args.label, args.done)
         elif args.cmd == "topic":
             cmd_topic(args.title, args.done, args.commit)
         elif args.cmd == "checklist":

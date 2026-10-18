@@ -54,10 +54,18 @@ func settleSessionInput(ctx context.Context, pool *pgxpool.Pool, msg protocol.Ag
 }
 
 func replayPendingSessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *DaemonConn, sessionIDs []string) {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	if pool == nil || dc == nil || !dc.CanInputReceipts() {
 		return
 	}
 	for _, id := range sessionIDs {
+		if problem := parentResumeProblem(ctx, pool, id); problem != nil {
+			if problem.Status == http.StatusConflict {
+				failPendingSessionInputs(ctx, h, pool, id)
+			}
+			continue
+		}
 		// Every heartbeat lists every active session: take the lock only when
 		// there is something to replay.
 		if pending, err := db.HasPendingSessionInputs(ctx, pool, id); err != nil || !pending {
@@ -66,39 +74,45 @@ func replayPendingSessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool,
 			}
 			continue
 		}
-		err := withLimitResumeActionLock(ctx, pool, id, func(_ *pgxpool.Conn) error {
-			row, err := db.GetSession(ctx, pool, id)
-			if err != nil {
-				return err
-			}
-			if row == nil || row.DaemonID != dc.ID {
-				return nil
-			}
-			if sessionInputsEnded(row) {
-				failPendingSessionInputs(ctx, h, pool, id)
-				return nil
-			}
-			pending, err := db.PendingSessionInputs(ctx, pool, id)
-			if err != nil {
-				return err
-			}
-			for _, input := range pending {
-				var msg protocol.AgentUserMessage
-				if json.Unmarshal([]byte(input.Frame), &msg) != nil {
-					continue
-				}
-				if (msg.Source == "" || answersAsk(msg.Source) || msg.AnswerMessageID != "") && answerAskFromChat(ctx, h, pool, id, msg.Text, msg.ClientID, msg.AnswerMessageID) {
-					continue
-				}
-				if err := ctx.Err(); err != nil {
+		err := withLimitResumeActionLock(ctx, pool, id, func(conn *pgxpool.Conn) error {
+			return withParentInputGuard(ctx, pool, id, func() error {
+				row, err := db.GetSession(ctx, pool, id)
+				if err != nil {
 					return err
 				}
-				if !h.trySendToDaemon(dc, []byte(input.Frame)) {
-					return nil // disconnected, replaced, or busy: retried on the next heartbeat
+				if row == nil || row.DaemonID != dc.ID {
+					return nil
 				}
-			}
-			return nil
+				if sessionInputsEnded(row) {
+					failPendingSessionInputs(ctx, h, pool, id)
+					return nil
+				}
+				pending, err := db.PendingSessionInputs(ctx, pool, id)
+				if err != nil {
+					return err
+				}
+				for _, input := range pending {
+					var msg protocol.AgentUserMessage
+					if json.Unmarshal([]byte(input.Frame), &msg) != nil {
+						continue
+					}
+					if (msg.Source == "" || answersAsk(msg.Source) || msg.AnswerMessageID != "") && answerAskFromChat(ctx, h, pool, id, msg.Text, msg.ClientID, msg.AnswerMessageID) {
+						continue
+					}
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					if !h.trySendToDaemon(dc, []byte(input.Frame)) {
+						return nil // disconnected, replaced, or busy: retried on the next heartbeat
+					}
+				}
+				return nil
+			})
 		})
+		if errors.Is(err, db.ErrDelegationEnded) {
+			failPendingSessionInputs(ctx, h, pool, id)
+			continue
+		}
 		if err != nil {
 			log.Printf("pending session inputs %s: %v", id, err)
 		}

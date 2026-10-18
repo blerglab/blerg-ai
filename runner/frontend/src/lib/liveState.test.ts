@@ -171,7 +171,7 @@ describe('foldLive: the checklist, the plan and the pins', () => {
     expect(isLiveTrigger(ev('checklist', {}))).toBe(true)
     expect(isLiveTrigger(ev('ticket', {}))).toBe(true)
     expect(isLiveTrigger(ev('tool_call', { tool: 'TaskUpdate', call_id: 'u', input: {} }))).toBe(true)
-    expect(isLiveTrigger(ev('tool_call', { tool: 'TaskUpdate', call_id: 'u', input: {}, parent_call_id: 'A' }))).toBe(false)
+    expect(isLiveTrigger(ev('tool_call', { tool: 'TaskUpdate', call_id: 'u', input: {}, parent_call_id: 'A' }))).toBe(true)
     expect(isLiveTrigger(ev('tool_call', { tool: 'Bash', call_id: 'b', input: {} }))).toBe(false)
   })
 })
@@ -216,4 +216,34 @@ describe('foldLive: MCP and checklist commits', () => {
     // A commit the reply knew keeps its page; a newer one has none until the next read.
     expect(c?.commitUrls).toEqual({ abcdef1: 'https://forge.example.test/c/abcdef1' })
   })
+})
+
+
+describe('live progress', () => {
+  const progress = { completed: 2, total: 5, label: 'Run tests', updated_at: iso(0) }
+  it('keeps root and child progress separate', () => {
+    const view = foldLive(reply({ progress, subagents: [sub('child', { progress: { ...progress, completed: 1, label: 'Audit' } })] }), [], T0)
+    expect(view.progress).toEqual(progress)
+    expect(view.subagents[0].progress).toEqual({ ...progress, completed: 1, label: 'Audit' })
+  })
+  it.each([
+    { completed: -1, total: 5, label: 'bad' }, { completed: 6, total: 5, label: 'bad' },
+    { completed: 0, total: 0, label: 'bad' }, { completed: 0.5, total: 5, label: 'bad' },
+    { completed: 1, total: Number.MAX_SAFE_INTEGER + 1, label: 'bad' },
+  ])('hides malformed progress: %j', bad => {
+    expect(foldLive(reply({ progress: bad }), [], T0).progress).toBeNull()
+  })
+  it('refreshes explicit/native root and child plans and Claude task completion', () => {
+    for (const kind of ['plan_updated', 'progress_updated']) expect(isLiveTrigger(ev(kind, {}))).toBe(true)
+    expect(isLiveTrigger(ev('tool_call', { tool: 'TodoWrite', parent_call_id: 'child' }))).toBe(true)
+    expect(isLiveTrigger(ev('tool_result', { call_id: 'create-task' }))).toBe(true)
+  })
+})
+
+it('counts pending child requests and active child sessions separately from subagents', () => {
+  const child = { id: 'child', title: 'Review', engine: 'codex', model: 'fixture', effort: 'high', status: 'running', started_at: iso(0), ended_at: null, asking: true, tokens: 123 }
+  const out = foldLive(reply({ children: [child, { ...child, id: 'done', status: 'ended', ended_at: iso(1) }], delegation_requests: [{ request_id: 'request', engine: 'codex', title: 'Other review', expires_at: iso(10) }], delegation_grants: [{ id: 'grant', engine: 'codex', runtime: 'docker' }] }), [], T0)
+  expect(out.counts).toEqual({ needsYou: 1, running: 1 })
+  expect(out.children).toHaveLength(2)
+  expect(out.delegationGrants?.[0].id).toBe('grant')
 })

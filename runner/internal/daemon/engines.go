@@ -85,6 +85,11 @@ type EngineSpec struct {
 	// the launch sheet's Engine picker at session-launch time remains the
 	// real source of truth.
 	DetectAvailable func() bool
+	// DetectLocal reports that this engine's endpoint is on this machine or its
+	// LAN and no provider key is configured for it (so its use costs no
+	// provider quota). Only Hermes and OpenClaw have one; nil means "not
+	// local". Best-effort and fail closed: when in doubt, false.
+	DetectLocal func() bool
 	// Capabilities, when set, is this engine's best-effort answer to "what
 	// has this session loaded" (skills, plugins, MCP servers, ...), for an
 	// engine that does not report it itself. AgentHost calls it once when an
@@ -174,6 +179,7 @@ var engineRegistry = map[string]EngineSpec{
 		ListModels:      probeHermesModels,
 		NewAgentDriver:  func(o AgentDriverOpts) sessionDriver { return newHermesDriver(o) },
 		DetectAvailable: hermesAlreadyConfigured,
+		DetectLocal:     hermesLocal,
 		Capabilities:    hermesCapabilities,
 	},
 	// `openclaw chat` is an alias for `tui --local` (embedded runtime, no
@@ -196,6 +202,7 @@ var engineRegistry = map[string]EngineSpec{
 			},
 		},
 		DetectAvailable: openclawAlreadyConfigured,
+		DetectLocal:     openclawLocal,
 	},
 }
 

@@ -10,6 +10,7 @@
 import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useBackdropClose } from '../hooks/useBackdropClose'
+import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { parseTs } from '../model/timeLabel'
 import { priorityGlyph, sourceLabel, statusTone, ticketHref, ticketMeta } from '../model/worklist'
 import type { Ticket, TicketComment } from '../types'
@@ -205,6 +206,7 @@ export function TicketModal({ ticket, onClose, onShow }: {
 }) {
   const titleId = useId()
   const ref = useRef<HTMLDivElement | null>(null)
+  useSelectAllIn(ref)
   const backdrop = useBackdropClose(onClose)
   useEffect(() => {
     const before = document.activeElement as HTMLElement | null

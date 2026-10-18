@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/secrets"
+	"github.com/blerglab/blerg-ai/contracts/updatenotice"
 	"github.com/blerglab/blerg-ai/runner/internal/coreauth"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcp"
@@ -186,6 +187,10 @@ func main() {
 	hub := server.NewHub()
 	hub.SetServerVersion(version)
 	hub.SetServerBuild(release, commit)
+	// A newer public release, as core's update checker found it (nil without BLERG_CORE_URL).
+	if feed := updatenotice.NewCoreFeed(os.Getenv("BLERG_CORE_URL")); feed != nil {
+		hub.SetLatestRelease(feed.Latest)
+	}
 	// The same version the hub reports also goes in the agent manifest served at
 	// GET /agents and sent to core on registration.
 	server.SetComponentVersion(version)
@@ -239,6 +244,8 @@ func main() {
 	server.StartCrons(ctx, api, cfg.CoreURL, cfg.CoreInternalKey)
 	// Proposal expiry, lost approvals and pruning: independent of crons and of blerg-core.
 	server.StartProposalMaintenance(ctx, api)
+	// Delegation requests: expire stale ones, mark starts lost to a restart (every 5 min).
+	server.StartDelegationMaintenance(ctx, api)
 	if emb := server.NewEmbedderFromEnv(); emb != nil {
 		api.SetEmbedder(emb)
 		log.Println("knowledge-search embedder enabled (Voyage)")
@@ -284,6 +291,7 @@ func main() {
 	api.RegisterTopicRoutes(mux)
 	api.RegisterLiveRoutes(mux)
 	api.RegisterWorklistRoutes(mux)
+	api.RegisterDelegationRoutes(mux)
 	api.RegisterMCPRoutes(mux)
 	api.RegisterCronRoutes(mux, cfg.CoreURL, cfg.CoreInternalKey)
 	api.RegisterProposalRoutes(mux)

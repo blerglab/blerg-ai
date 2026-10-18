@@ -70,13 +70,15 @@ func (h *AgentHost) recordable(msg protocol.SpawnSession) bool {
 func (h *AgentHost) keepRecord(msg protocol.SpawnSession, workDir, model string, ad *adoptRequest) *recordKeeper {
 	rec := AgentRecord{
 		SessionID: msg.SessionID, Repo: msg.Repo, WorkDir: workDir, Engine: msg.Engine,
-		Interaction: msg.Interaction, Assist: msg.Assist, BoardID: msg.BoardID, TicketID: msg.TicketID,
+		RequireRecoveryReady: msg.RequireRecoveryReady,
+		Interaction:          msg.Interaction, Assist: msg.Assist, BoardID: msg.BoardID, TicketID: msg.TicketID,
 		SessionToken: msg.SessionToken, BoardToken: msg.BoardToken, ExtraEnv: msg.ExtraEnv,
 		Plugins: msg.Plugins, Model: model, Effort: msg.Effort,
 	}
 	if ad != nil {
 		rec.CodexThreadID = ad.rec.CodexThreadID
 		rec.KnownSubagents = ad.rec.KnownSubagents
+		rec.PluginRequests = ad.rec.PluginRequests
 		rec.CreatedAt = ad.rec.CreatedAt
 		rec.ClaudeSessionID = ad.rec.ClaudeSessionID
 		rec.CurrentTurnID = ad.rec.CurrentTurnID
@@ -224,6 +226,7 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 		Interaction: rec.Interaction, Assist: rec.Assist, BoardID: rec.BoardID, TicketID: rec.TicketID,
 		SessionToken: rec.SessionToken, BoardToken: rec.BoardToken, ExtraEnv: rec.ExtraEnv,
 		Plugins: rec.Plugins, Model: rec.Model, Effort: rec.Effort,
+		RequireRecoveryReady: rec.RequireRecoveryReady,
 	}
 	// A model or effort the daemon no longer accepts must not cost the session: fall back to the
 	// default, as a spawn with none would.
@@ -406,8 +409,23 @@ func (h *AgentHost) finishAdoption(ad *adoptRequest, sess *agentSession, driver 
 		// Not before the server has had its say: its answer to the hello is where a session
 		// that was stopped while the daemon was down gets killed, and where it says which
 		// sessions have a question open. With no server, no continue.
-		<-h.connected
-		time.Sleep(adoptContinueDelay)
+		if msg.RequireRecoveryReady {
+			h.waitRecoveryReady(sess.workspaceCtx)
+			if sess.workspaceCtx.Err() != nil {
+				return
+			}
+		} else {
+			select {
+			case <-h.connected:
+			case <-sess.workspaceCtx.Done():
+				return
+			}
+			select {
+			case <-time.After(adoptContinueDelay):
+			case <-sess.workspaceCtx.Done():
+				return
+			}
+		}
 		if h.get(msg.SessionID) != sess {
 			return // stopped meanwhile
 		}

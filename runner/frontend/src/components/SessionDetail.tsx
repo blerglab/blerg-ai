@@ -20,6 +20,7 @@ import CapabilitiesPanel from './CapabilitiesPanel'
 import SessionInsights from './SessionInsights'
 import StatusPill from './StatusPill'
 import { backgroundCount, displayState } from '../lib/displayState'
+import { childIsRunning } from '../lib/liveState'
 import SessionRail, { PanelIcon } from './SessionRail'
 import { readRailPref, useCompact, useThinking, writeRailPref } from '../lib/sessionRail'
 import { isNoRepo, repoLabel } from '../lib/noRepo'
@@ -158,8 +159,8 @@ export default function SessionDetail() {
   const liveShown = useCallback(() => setLiveAsk(null), [])
   if (liveAsk !== null && liveAsk !== sessionId) setLiveAsk(null)
   // A background subagent is listed (and counted) once, as a subagent.
-  const needsYou = liveState.openAsks.length + toolChanges
-  const runningNow = liveState.subagents.length + liveState.backgroundRunning
+  const needsYou = liveState.openAsks.length + toolChanges + (sessionLive.delegationRequests?.length ?? 0)
+  const runningNow = liveState.subagents.length + liveState.backgroundRunning + (sessionLive.children ?? []).filter(childIsRunning).length
   if (agentSession && sessionId) {
     if (railPref === null && needsYou + runningNow > 0 && autoOpenFor !== sessionId) {
       setAutoOpenFor(sessionId)
@@ -769,6 +770,9 @@ export default function SessionDetail() {
           machine={daemon?.name}
           live={liveState}
           tasks={sessionLive.tasks}
+          childSessions={sessionLive.children}
+          delegationRequests={sessionLive.delegationRequests}
+          delegationGrants={sessionLive.delegationGrants}
           liveRunning={liveRunning}
           toolChanges={toolChanges}
           mode={narrow ? 'drawer' : 'panel'}

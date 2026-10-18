@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -81,6 +82,15 @@ func sessionLabel(title, repo, id string) string {
 // It inserts a new session row, appends a state_change event, and broadcasts
 // to all browsers.
 func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, daemonID string, msg protocol.SessionStarted) {
+	if pool != nil {
+		if blocked, err := db.DelegationResumeBlocked(ctx, pool, msg.SessionID); err != nil {
+			log.Printf("session_started %s: recovery policy unavailable", msg.SessionID)
+			return
+		} else if blocked {
+			_ = endOrphanedSession(ctx, hub, pool, msg.SessionID, hub.GetDaemon(daemonID))
+			return
+		}
+	}
 	// A session already live on another daemon is not this daemon's to be
 	// handed a token for, whatever its session_started claims (read before the
 	// upsert below moves the row).
@@ -102,12 +112,14 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 				origin = db.SessionOrigin{SpawningAccount: owner, Private: true}
 			}
 		}
-		if err := db.InsertSessionAs(ctx, pool, msg.SessionID, daemonID, "starting",
+		if err := db.ReviveSessionAs(ctx, pool, msg.SessionID, daemonID, "starting",
 			msg.ProjectPath, msg.Repo, msg.Title, msg.Model, origin); err != nil {
-			log.Printf("InsertSession %s: %v", msg.SessionID, err)
-			if db.HasRuntimeAuthority(ctx) {
+			if errors.Is(err, db.ErrDelegationEnded) {
+				_ = endOrphanedSession(ctx, hub, pool, msg.SessionID, hub.GetDaemon(daemonID))
 				return
 			}
+			log.Printf("InsertSession %s: %v", msg.SessionID, err)
+			return
 		}
 		if err := db.AppendSessionEvent(ctx, pool, msg.SessionID, "state_change",
 			`{"status":"starting"}`, 0); err != nil {
@@ -141,6 +153,7 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	engine := ""
 	cronID := "" // set when a cron started the session, so the badge shows from the first message
 	var startedBy *protocol.StartedBy
+	var parentSessionID *string
 	interaction := ""
 	if pool != nil {
 		if row, err := db.GetSession(ctx, pool, msg.SessionID); err != nil {
@@ -155,6 +168,7 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 			engine = derefOrEmpty(row.Engine)
 			cronID = derefOrEmpty(row.CronID)
 			startedBy = startedByOf(row)
+			parentSessionID = row.ParentSessionID
 			interaction = effectiveInteraction(row)
 			if kind == "" {
 				kind = row.Kind
@@ -163,6 +177,7 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	}
 
 	// The engine is starting: every stage before it is behind the session.
+	hub.ChildActivity(msg.SessionID)
 	// Derived (not authoritative), so it never overrides a pod's own report.
 	advanceStart(ctx, hub, pool, msg.SessionID, false,
 		protocol.StartStage{ID: protocol.StageEngine, State: protocol.StageStateActive, Detail: "Starting the engine"})
@@ -170,6 +185,7 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	hub.BroadcastJSON(protocol.BrowserSessionStarted{
 		Type: "session_started",
 		Session: protocol.SessionInfo{
+			ParentSessionID:      parentSessionID,
 			SteeringSupported:    engineSteeringSupported(engine, kind),
 			LimitResumeSupported: kind == "agent" && engineLimitResumeSupported(engine),
 			ID:                   msg.SessionID,
@@ -225,6 +241,11 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		if current == nil {
 			return handleSessionNotFound(hub, msg)
 		}
+		if blocked, err := db.DelegationResumeBlocked(ctx, pool, msg.SessionID); err != nil {
+			return err
+		} else if blocked {
+			return endOrphanedSession(ctx, hub, pool, msg.SessionID, hub.FindDaemonForSession(msg.SessionID))
+		}
 
 		if !isValidTransition(current.Status, msg.Status) {
 			log.Printf("HandleSessionStateChanged: invalid transition %s → %s for session %s, skipping",
@@ -257,15 +278,26 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		case terminalSessionStatus(msg.Status) && msg.Status != "error":
 			end = systemEnd(db.EndReasonProcessExited)
 		}
+		if end.Reason != "" && endedAt == nil {
+			now := time.Now()
+			endedAt = &now
+		}
 		var updateErr error
 		if end.Reason != "" {
 			updateErr = db.EndSessionStatus(ctx, pool, msg.SessionID, msg.Status, endedAt, end)
 		} else {
-			updateErr = db.UpdateSessionStatus(ctx, pool, msg.SessionID, msg.Status, endedAt)
+			updateErr = db.UpdateSessionStatusGuarded(ctx, pool, msg.SessionID, msg.Status, endedAt)
+		}
+		if errors.Is(updateErr, db.ErrDelegationEnded) {
+			return endOrphanedSession(ctx, hub, pool, msg.SessionID, hub.FindDaemonForSession(msg.SessionID))
 		}
 		if updateErr != nil {
 			return fmt.Errorf("UpdateSessionStatus %s → %s: %w", msg.SessionID, msg.Status, updateErr)
 		}
+		if end.Reason != "" {
+			hub.SessionTerminallyEnded(msg.SessionID)
+		}
+		hub.ChildActivity(msg.SessionID)
 
 		// Persist why a spawn/run failed so the row isn't left with a bare
 		// "error" status once the daemon's one-shot broadcast is gone (trial
@@ -379,6 +411,7 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 			}
 		}
 		shown = sessionEndFor(ctx, pool, msg.SessionID, finalStatus)
+		hub.SessionTerminallyEnded(msg.SessionID)
 
 		data, _ := json.Marshal(map[string]any{
 			"status":    finalStatus,

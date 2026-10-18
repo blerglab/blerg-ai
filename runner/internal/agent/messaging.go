@@ -115,6 +115,10 @@ func (t askTool) Execute(ctx context.Context, in json.RawMessage) (string, error
 	defer l.emit("status_changed", StatusPayload{Status: "running", Reason: "ask answered"})
 	select {
 	case ans := <-ch:
+		if !l.beforeRecoveryInput(ctx) {
+			l.clearAsk()
+			return "", errors.New("ask interrupted")
+		}
 		l.clearAsk()
 		// The answer is recorded when it is taken, as the person's answer to this ask: it never
 		// starts a turn of its own, so nothing else would record it.

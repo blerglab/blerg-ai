@@ -532,10 +532,23 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				d.emit("error", staleLimitResumeError())
 				continue
 			}
-			if active == "" && !passedGate {
-				d.mu.Lock()
-				gate := d.mcpInputGate
-				d.mu.Unlock()
+			d.mu.Lock()
+			recoveryGate, recoveryReady := d.recoveryInputGate, d.recoveryInputReady
+			mcpGate := d.mcpInputGate
+			d.mu.Unlock()
+			if (active == "" && !passedGate) || (recoveryReady != nil && !recoveryReady()) {
+				var gate func(context.Context)
+				waitMCP := active == ""
+				if recoveryGate != nil || mcpGate != nil {
+					gate = func(ctx context.Context) {
+						if waitMCP && mcpGate != nil {
+							mcpGate(ctx)
+						}
+						if recoveryGate != nil {
+							recoveryGate(ctx)
+						}
+					}
+				}
 				if gate != nil {
 					d.mu.Lock()
 					d.retryInput = &msg // input is unaccepted; preserve it if this process dies during the hold.
@@ -1149,10 +1162,16 @@ func (a *codexApp) dynamicTool(ctx context.Context, ev codexRPC) {
 	}
 	out := "Tool request is not permitted"
 	success := false
-	if json.Unmarshal(ev.Params, &request) == nil && request.ThreadID == a.threadID() {
+	decoded := json.Unmarshal(ev.Params, &request) == nil
+	root := decoded && request.ThreadID == a.threadID()
+	child := decoded && sessionBuiltinAllowed(request.Tool) && a.sessionBuiltinChildAllowed(request.ThreadID)
+	if decoded && (root || child) {
 		callCtx, cancel := context.WithCancel(ctx)
 		a.mu.Lock()
 		valid := request.TurnID == a.turn && !a.interruptRequested
+		if child {
+			valid = !a.interruptRequested && request.TurnID != "" && a.childTurns[request.ThreadID] == request.TurnID && a.interruptedChildren[request.ThreadID] != request.TurnID
+		}
 		key := string(ev.ID)
 		if valid {
 			if a.dynamicCalls == nil {

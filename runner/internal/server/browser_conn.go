@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -224,7 +225,12 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 
 	h.mu.RLock()
 	sv, release, commit := h.serverVersion, h.serverRelease, h.serverCommit
+	latest := h.latestRelease
 	h.mu.RUnlock()
+	var latestVersion, latestURL string
+	if latest != nil {
+		latestVersion, latestURL = latest()
+	}
 
 	// Messages (open + recent), so each session's thread is populated on load.
 	messageInfos := []protocol.MessageInfo{}
@@ -246,6 +252,8 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 		ServerVersion: sv,
 		ServerRelease: release,
 		ServerCommit:  commit,
+		LatestVersion: latestVersion,
+		LatestURL:     latestURL,
 	}
 	limits := currentFileLimits()
 	msg.Limits = &limits
@@ -784,12 +792,27 @@ func handleUnsubscribeSession(h *Hub, bc *BrowserConn, sessionID string) {
 // held for the daemon, which hands it to the session hosted again — where it replaces recovery's
 // continue. A message accepted for the session (forwarded or held) ends its pause by a restart.
 func handleBrowserAgentMessage(ctx context.Context, h *Hub, bc *BrowserConn, dbPool *pgxpool.Pool, msg protocol.AgentUserMessage) {
-	if err := withCancelledPendingLimitResume(ctx, dbPool, msg.SessionID, func() error { handleBrowserAgentMessageUnlocked(ctx, h, bc, dbPool, msg); return nil }); err != nil {
-		recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": "Continuation is busy; retry your message shortly.", "retryable": true, "client_id": msg.ClientID})
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	if err := withCancelledPendingLimitResumeConn(ctx, dbPool, msg.SessionID, func(conn *pgxpool.Conn) error {
+		return withParentInputGuard(ctx, dbPool, msg.SessionID, func() error {
+			handleBrowserAgentMessageUnlocked(ctx, h, bc, dbPool, msg)
+			return nil
+		})
+	}); err != nil {
+		message, retryable := "Continuation is busy; retry your message shortly.", true
+		if errors.Is(err, db.ErrDelegationEnded) {
+			message, retryable = "The session's parent ended; this child cannot resume.", false
+		}
+		recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": message, "retryable": retryable, "client_id": msg.ClientID})
 	}
 }
 
 func handleBrowserAgentMessageUnlocked(ctx context.Context, h *Hub, bc *BrowserConn, dbPool *pgxpool.Pool, msg protocol.AgentUserMessage) {
+	if problem := parentResumeProblem(ctx, dbPool, msg.SessionID); problem != nil {
+		recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": problem.Message, "retryable": problem.Status == http.StatusServiceUnavailable, "client_id": msg.ClientID})
+		return
+	}
 	fresh, err := acceptSessionInput(ctx, h, dbPool, msg)
 	if err != nil {
 		recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": sessionInputError(err), "retryable": true, "client_id": msg.ClientID})

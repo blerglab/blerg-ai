@@ -8,7 +8,7 @@ import (
 )
 
 func TestPlanUpdatedValidationAndExplicitClear(t *testing.T) {
-	for _, raw := range []string{`{}`, `null`, `{"items":null}`, `{"items":"bad"}`, `{"items":[{"text":"x","status":"unknown"}]}`, `{"items":[{"text":"   ","status":"pending"}]}`, `{"items":[{"text":"x","status":"pending"}],"parent_call_id":"child"}`, `{"items":[],"child_id":"child"}`} {
+	for _, raw := range []string{`{}`, `null`, `{"items":null}`, `{"items":"bad"}`, `{"items":[{"text":"x","status":"unknown"}]}`, `{"items":[{"text":"   ","status":"pending"}]}`} {
 		if _, ok := DecodePlanUpdated(json.RawMessage(raw)); ok {
 			t.Fatalf("malformed/child accepted: %s", raw)
 		}
@@ -37,5 +37,19 @@ func TestPlanUpdatedRejectsOversizedRawBeforeDecode(t *testing.T) {
 	raw := json.RawMessage(`{"items":[{"text":"` + strings.Repeat("x", MaxPlanUpdatedBytes) + `","status":"pending"}]}`)
 	if _, ok := DecodePlanUpdated(raw); ok {
 		t.Fatal("oversized wire snapshot accepted")
+	}
+}
+
+func TestPlanUpdatedAcceptsBoundedSeparateChildScopes(t *testing.T) {
+	for _, marker := range []string{`"parent_call_id":"claude-child"`, `"child_id":"codex-child"`} {
+		p, ok := DecodePlanUpdated(json.RawMessage(`{"items":[{"text":"Child work","status":"in_progress"}],` + marker + `}`))
+		if !ok || (p.ParentCallID == "" && p.ChildID == "") {
+			t.Fatal("child plan lost its attribution")
+		}
+	}
+	for _, marker := range []string{`"parent_call_id":"a","child_id":"b"`, `"child_id":"bad\nchild"`, `"child_id":"` + strings.Repeat("x", 257) + `"`} {
+		if _, ok := DecodePlanUpdated(json.RawMessage(`{"items":[],` + marker + `}`)); ok {
+			t.Fatal("invalid child attribution accepted")
+		}
 	}
 }

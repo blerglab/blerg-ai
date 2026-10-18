@@ -24,6 +24,7 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/contracts/logsafe"
 	"github.com/blerglab/blerg-ai/contracts/secrets"
+	"github.com/blerglab/blerg-ai/contracts/updatenotice"
 )
 
 // validateSecrets refuses to boot on placeholder or too-short shared secrets (R4) — a copied
@@ -73,9 +74,16 @@ var release, commit string
 
 // versionHandler serves GET /api/version: the build version plus the release and commit the web
 // footer shows. Public and static, so it holds nothing but build identifiers.
-func versionHandler(version, release, commit string) http.HandlerFunc {
-	body, _ := json.Marshal(map[string]string{"version": version, "release": release, "commit": commit})
+func versionHandler(version, release, commit string, latest func() (string, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
+		m := map[string]string{"version": version, "release": release, "commit": commit}
+		// A newer public release, when core's update checker knows of one.
+		if latest != nil {
+			if v, u := latest(); v != "" && u != "" {
+				m["latest_version"], m["latest_url"] = v, u
+			}
+		}
+		body, _ := json.Marshal(m)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(body)
 	}
@@ -201,11 +209,16 @@ func main() {
 		log.Printf("runner: blerg-runner driver at %s", runnerURL)
 	}
 
+	var latestRelease func() (string, string)
+	if feed := updatenotice.NewCoreFeed(os.Getenv("BLERG_CORE_URL")); feed != nil {
+		latestRelease = feed.Latest
+	}
+
 	mux := http.NewServeMux()
 	// Discovery first: GET /agents and GET /openapi.json, both public.
 	api.RegisterBoardContractRoutes(mux, apiSrv)
 	apiSrv.Routes(mux)
-	mux.HandleFunc("GET /api/version", versionHandler(version, release, commit))
+	mux.HandleFunc("GET /api/version", versionHandler(version, release, commit, latestRelease))
 	mux.Handle("/mcp", mcp.New(apiSrv))
 
 	// SPA: serve web/dist with an index.html fallback for client routes.

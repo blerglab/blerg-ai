@@ -23,6 +23,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"time"
 
@@ -55,23 +56,33 @@ type askAnswerPayload struct {
 }
 
 // recordServerAgentEvent appends an event the server itself writes into a session's transcript and
-// fans it out. A duplicate (the same client id) is not fanned out again.
+// fans it out. A duplicate (the same client id) is not fanned out again. Failures are logged.
 func recordServerAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, clientEventID, kind string, payload any) {
+	if err := appendServerAgentEvent(ctx, h, pool, sessionID, clientEventID, kind, payload); err != nil {
+		log.Printf("agent event %s/%s: %v", sessionID, kind, err)
+	}
+}
+
+// appendServerAgentEvent is recordServerAgentEvent for a caller that must know the event landed
+// (a delegation request whose card is the only way to decide it).
+func appendServerAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, clientEventID, kind string, payload any) error {
+	if pool == nil {
+		return errors.New("no database")
+	}
 	raw, err := json.Marshal(payload)
-	if err != nil || pool == nil {
-		return
+	if err != nil {
+		return err
 	}
 	raw = protocol.StripNUL(raw)
 	at := time.Now()
 	seq, inserted, err := db.AppendAgentEventAt(ctx, pool, sessionID, clientEventID, kind, string(raw), at)
 	if err != nil {
-		log.Printf("agent event %s/%s: %v", sessionID, kind, err)
-		return
+		return err
 	}
-	if !inserted {
-		return
+	if inserted {
+		fanOutServerEvent(h, sessionID, clientEventID, kind, raw, seq, at)
 	}
-	fanOutServerEvent(h, sessionID, clientEventID, kind, raw, seq, at)
+	return nil
 }
 
 // fanOutServerEvent sends an event the server recorded to the session's subscribers.
@@ -82,6 +93,10 @@ func fanOutServerEvent(h *Hub, sessionID, clientEventID, kind string, raw []byte
 	})
 	if err == nil {
 		h.FanOutAgentEvent(sessionID, seq, msg)
+		switch kind {
+		case "ask", "user_message", "delegation_request", "delegation_decided":
+			h.ChildActivity(sessionID)
+		}
 	}
 }
 
@@ -245,10 +260,11 @@ func answerAskFromChat(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionI
 }
 
 // answersAsk reports whether a message sent through the runner API with this source may answer an
-// open ask: a person's (human, chat) or an API caller's (runner), never a board's automation.
+// open ask: a person's (human, chat), an API caller's (runner) or a parent session's for its child
+// (session), never a board's automation.
 func answersAsk(source string) bool {
 	switch source {
-	case "human", "chat", "runner":
+	case "human", "chat", "runner", "session":
 		return true
 	}
 	return false

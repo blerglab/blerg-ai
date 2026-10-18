@@ -97,13 +97,21 @@ type API struct {
 	// beforeMarkPrivate is a test seam: it runs at the top of MarkPrivate, that is
 	// between a session's insert and its marking (privacy_atomic_test.go).
 	beforeMarkPrivate func(sessionID string)
-	hub               *Hub
-	dbPool            *pgxpool.Pool
-	daemonToken       string
-	repos             *RepoLister
-	userRepos         *UserRepoLister // per-caller repos from their own git tokens; nil without core
-	vapidPublicKey    string
-	waiters           *messageWaiters
+	// delegationPush is a test seam: when set, pushForDelegation calls it instead of SendPush.
+	delegationPush func(heading, body, link string)
+	// delegLocks serializes delegated starts per account in this process (delegation_start.go).
+	delegLocks     delegationLocks
+	hub            *Hub
+	dbPool         *pgxpool.Pool
+	daemonToken    string
+	repos          *RepoLister
+	userRepos      *UserRepoLister // per-caller repos from their own git tokens; nil without core
+	vapidPublicKey string
+	waiters        *messageWaiters
+	// delegationWaiters wakes long polls on a delegation request (delegation_requests.go).
+	delegationWaiters *delegationWaiters
+	delegationLife    delegationLifecycle
+	children          childrenNotifier
 	// answerHold overrides the polling cap for deterministic short test timers.
 	// Nonpositive uses maxAnswerHold; configure before serving requests.
 	answerHold time.Duration
@@ -164,10 +172,13 @@ type API struct {
 	// pluginAllow is this server's marketplace allow-list (BLERG_RUNNER_PLUGIN_MARKETPLACES), read
 	// once at construction, for sessions sent to a workstation daemon (daemonPlugins). The cluster
 	// path keeps its own copy on the JobManager, which a desktop install does not have.
-	pluginAllow pluginspec.Allowlist
+	pluginAllow         pluginspec.Allowlist
+	sessionOriginLookup func(context.Context, string) (string, error)
+	boardFiling         boardFilingUpstream
 	// fetchPlugins fetches an account's always-on plugin list for a daemon session. nil = core's
 	// internal endpoint; tests set it.
-	fetchPlugins func(ctx context.Context, accountID string, proof coreProof) ([]pluginspec.Entry, error)
+	fetchPlugins   func(ctx context.Context, accountID string, proof coreProof) ([]pluginspec.Entry, error)
+	sessionPlugins sessionPluginCore
 	// fetchTokenName asks core for an agent token's label (startedby.go). nil = the HTTP
 	// lookup; tests set it.
 	fetchTokenName func(ctx context.Context, accountID, tokenID string) (string, error)
@@ -264,6 +275,8 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		repos:          repos,
 		vapidPublicKey: vapidPublicKey,
 		waiters:        newMessageWaiters(),
+
+		delegationWaiters: newDelegationWaiters(),
 	}
 	api.pluginAllow, _ = pluginAllowlistFromEnv()
 	// Several paths that end a session are package functions on the hub side
@@ -277,6 +290,15 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		}
 		hub.SetPrivacyPool(dbPool) // lets every broadcast withhold private sessions (privacy.go)
 		hub.SetCompletionNotifier(api.notifyCompletion)
+		hub.SetDelegationHooks(api.onParentTerminalEnd, api.onParentPaused)
+		hub.SetChildActivityHook(api.noteChildActivity)
+		hub.SetDelegationHelloHook(api.onDelegationDaemonHello)
+		hub.SetDelegationInputGuard(func(ctx context.Context, id string, enqueue func() error) error {
+			if dbPool == nil {
+				return enqueue()
+			}
+			return db.WithDelegationInputGuardForPool(ctx, dbPool, id, enqueue)
+		})
 		hub.SetAutoStopper(api.autoStopOnTurnDone)
 		hub.setModelController(api.SetSessionModel)
 		hub.SetAskSignal(api.waiters.signal)
@@ -303,6 +325,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // whether "you" ended the session, never whose account did.
 func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	info := protocol.SessionInfo{
+		ParentSessionID:      row.ParentSessionID,
 		SteeringSupported:    engineSteeringSupported(derefOrEmpty(row.Engine), row.Kind),
 		LimitResumeSupported: row.Kind == "agent" && engineLimitResumeSupported(derefOrEmpty(row.Engine)),
 		ID:                   row.ID,
@@ -674,7 +697,8 @@ type spawnSessionRequest struct {
 	// MCP selects the caller's own MCP connections (and tools) for this session
 	// (mcpstart.go). Only this route, for a signed-in person, accepts it. Absent or
 	// empty means none.
-	MCP []MCPSelection `json:"mcp,omitempty"`
+	MCP     []MCPSelection `json:"mcp,omitempty"`
+	BoardID string         `json:"board_id,omitempty"`
 	// Interaction says whether a person is reading the session's chat as it works:
 	// "interactive" (the default here: the launch sheet is a person) or "unattended".
 	// Anything else is a 400 (interaction.go).
@@ -715,6 +739,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	ctx := withFilingProject(withCoreProof(r.Context(), proofFromPrincipal(principal)), principal.Project)
 	var req spawnSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -722,11 +747,15 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only a signed-in person may attach MCP connections: refuse anyone else before
 	// anything else is looked at.
-	if len(req.MCP) > 0 {
+	if len(req.MCP) > 0 || req.BoardID != "" {
 		if apiErr := checkGrantRequester(requesterOf(principal)); apiErr != nil {
 			writeAPIError(w, apiErr)
 			return
 		}
+	}
+	if req.BoardID != "" && principal.Project != "" && principal.Project != req.BoardID {
+		writeError(w, http.StatusForbidden, "the selected board is outside this credential's scope")
+		return
 	}
 	// runtime is a closed set (spec §2). An unrecognised value is a caller
 	// mistake, and the only safe answer is to refuse: silently falling back
@@ -766,7 +795,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	if req.Runtime == "cluster" {
 		listDaemon = ""
 	}
-	if msg := a.modelEffortProblem(r.Context(), req.Engine, req.Model, req.Effort, listDaemon); msg != "" {
+	if msg := a.modelEffortProblem(ctx, req.Engine, req.Model, req.Effort, listDaemon); msg != "" {
 		writeError(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
@@ -786,7 +815,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.NoRepo {
-			a.startClusterNoRepo(w, r, principal.Sub, proofFromPrincipal(principal), requesterOf(principal), req)
+			a.startClusterNoRepo(w, r.WithContext(ctx), principal.Sub, proofFromPrincipal(principal), requesterOf(principal), req)
 			return
 		}
 		if req.Repo == "" {
@@ -858,7 +887,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		// The caller's MCP selection is checked, against core and the live upstream, before
 		// anything is recorded (mcpstart.go).
-		grant, apiErr := a.resolveGrant(r.Context(), requesterOf(principal), req.MCP,
+		grant, apiErr := a.resolveLaunchGrant(ctx, requesterOf(principal), req.MCP, req.BoardID,
 			grantTarget{Runtime: runnerRuntimeCluster, Engine: req.Engine, Kind: req.Kind})
 		if apiErr != nil {
 			writeAPIError(w, apiErr)
@@ -874,7 +903,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusUnprocessableEntity, msg)
 				return
 			}
-			st, apiErr := a.createClusterRepo(withCoreProof(r.Context(), proofFromPrincipal(principal)), req, principal.Sub)
+			st, apiErr := a.createClusterRepo(withCoreProof(ctx, proofFromPrincipal(principal)), req, principal.Sub)
 			if apiErr != nil {
 				writeAPIError(w, apiErr)
 				return
@@ -888,7 +917,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		// a possibly-not-yet-open WS — without this row a lost session_started
 		// makes the session invisible and every event append fail.
 		if a.dbPool != nil {
-			if err := db.UpsertDaemon(r.Context(), a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+			if err := db.UpsertDaemon(ctx, a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
 				log.Printf("cluster daemon upsert: %v", err)
 			}
 			// runtime='cluster' goes in with the row (see InsertClusterSession):
@@ -898,7 +927,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			// insert: no other account can list it before attachGrant marks it.
 			origin := sessionOriginFor(principal.Sub, grant != nil, "")
 			a.notePrivateInsert(sessionID, origin)
-			if err := db.InsertClusterSessionAs(r.Context(), a.dbPool, sessionID, clusterDaemonID, "starting",
+			if err := db.InsertClusterSessionAs(ctx, a.dbPool, sessionID, clusterDaemonID, "starting",
 				"/workspace/"+req.Repo, req.Repo, req.Title, req.Model, origin); err != nil {
 				writeError(w, http.StatusInternalServerError, "session create failed")
 				return
@@ -907,37 +936,37 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			// request body) so a later resume (resumeClusterSession) can look
 			// up this account's personal credential again instead of falling
 			// back to the shared operator Secret.
-			if err := db.SetSessionSpawningAccount(r.Context(), a.dbPool, sessionID, principal.Sub); err != nil {
+			if err := db.SetSessionSpawningAccount(ctx, a.dbPool, sessionID, principal.Sub); err != nil {
 				log.Printf("cluster SetSessionSpawningAccount %s: %v", sessionID, err)
 			}
-			if err := db.SetSessionKind(r.Context(), a.dbPool, sessionID, "agent"); err != nil {
+			if err := db.SetSessionKind(ctx, a.dbPool, sessionID, "agent"); err != nil {
 				log.Printf("cluster SetSessionKind %s: %v", sessionID, err)
 			}
-			if err := db.SetSessionEngine(r.Context(), a.dbPool, sessionID, req.Engine); err != nil {
+			if err := db.SetSessionEngine(ctx, a.dbPool, sessionID, req.Engine); err != nil {
 				log.Printf("cluster SetSessionEngine %s: %v", sessionID, err)
 			}
 			// The clone URL (no token in it) is what names the provider: a
 			// resume clones the same repository from the same host, and
 			// picks the git credential by that host.
-			if err := db.SetSessionGitURL(r.Context(), a.dbPool, sessionID, gitURL); err != nil {
+			if err := db.SetSessionGitURL(ctx, a.dbPool, sessionID, gitURL); err != nil {
 				log.Printf("cluster SetSessionGitURL %s: %v", sessionID, err)
 			}
 			if req.NewRepo {
-				if err := db.SetSessionNewRepo(r.Context(), a.dbPool, sessionID); err != nil {
+				if err := db.SetSessionNewRepo(ctx, a.dbPool, sessionID); err != nil {
 					log.Printf("cluster SetSessionNewRepo %s: %v", sessionID, err)
 				}
 			}
-			recordInteraction(r.Context(), a.dbPool, sessionID, req.Interaction)
+			recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
 		}
 		if a.dbPool != nil {
-			recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
+			recordLaunchEffort(ctx, a.dbPool, sessionID, req.Effort)
 		}
 		// The grant goes on now that the spawning account is recorded (the session is made
 		// private after it); its tokens go only into the per-session Secret.
 		var gateway *protocol.MCPGatewayConfig
 		if grant != nil {
-			if gateway, apiErr = a.attachGrant(r.Context(), sessionID, grant); apiErr != nil {
-				a.abortGrantSession(r.Context(), sessionID)
+			if gateway, apiErr = a.attachGrant(ctx, sessionID, grant); apiErr != nil {
+				a.abortGrantSession(ctx, sessionID)
 				writeAPIError(w, apiErr)
 				return
 			}
@@ -953,7 +982,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			Interaction:   req.Interaction,
 			SessionID:     sessionID, Repo: req.Repo, Title: req.Title,
 			Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.InitialPrompt,
-			ExtraEnv: withClusterSessionToken(r.Context(), a.dbPool, sessionID, nil),
+			ExtraEnv: sessionBoardEnv(withClusterSessionToken(ctx, a.dbPool, sessionID, nil), req.BoardID, gateway),
 			GitURL:   gitURL,
 			// A new repository: the pod initialises when the clone fails, and
 			// never holds the operator's git token (newrepo.go).
@@ -967,18 +996,18 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			AuthSessionID: proofFromPrincipal(principal).SessionID,
 			TokenID:       proofFromPrincipal(principal).TokenID,
 		}
-		jm.ResolvePlugins(r.Context(), &spec)
-		announceClusterStart(r.Context(), a.hub, a.dbPool, sessionID, req.Repo, false, pluginStage(spec.Plugins, spec.PluginsNote), lead...)
+		jm.ResolvePlugins(ctx, &spec)
+		announceClusterStart(ctx, a.hub, a.dbPool, sessionID, req.Repo, false, pluginStage(spec.Plugins, spec.PluginsNote), lead...)
 		if err := jm.CreateSessionJob(spec); err != nil { //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
 			// The row exists (and browsers were told), so the failure is
 			// recorded on it rather than leaving a session that is forever
 			// about to begin — the same text the caller gets in the 503
 			// (CreateSessionJob keeps anything sensitive out of it).
-			a.markClusterStartFailed(r.Context(), sessionID, err.Error())
+			a.markClusterStartFailed(ctx, sessionID, err.Error())
 			writeError(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
-		clusterJobCreated(r.Context(), a.hub, a.dbPool, sessionID, a.startWatchEvery())
+		clusterJobCreated(ctx, a.hub, a.dbPool, sessionID, a.startWatchEvery())
 		writeJSON(w, http.StatusAccepted, map[string]string{"session_id": sessionID})
 		return
 	}
@@ -1030,7 +1059,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	// MCP connections: never on the bare host, only on a daemon that says it can deliver them
 	// (mcpstart.go). Checked before any row, token or clone credential exists.
-	grant, apiErr := a.resolveGrant(r.Context(), requesterOf(principal), req.MCP,
+	grant, apiErr := a.resolveLaunchGrant(ctx, requesterOf(principal), req.MCP, req.BoardID,
 		grantTarget{Runtime: runtimeName(req.Runtime), Engine: req.Engine, Kind: req.Kind, Daemon: daemon})
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
@@ -1061,7 +1090,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		var problem string
 		var status int
-		folder, cloneFrom, gitToken, status, problem = a.namedCloneSpawn(withCoreProof(r.Context(), proofFromPrincipal(principal)), daemon, req.Provider, req.Repo, principal.Sub, req.Runtime == "docker")
+		folder, cloneFrom, gitToken, status, problem = a.namedCloneSpawn(withCoreProof(ctx, proofFromPrincipal(principal)), daemon, req.Provider, req.Repo, principal.Sub, req.Runtime == "docker")
 		if problem != "" {
 			writeError(w, status, problem)
 			return
@@ -1095,20 +1124,20 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		Engine:  req.Engine,
 		// Interactive unless the caller said nobody is reading (interaction.go).
 		Interaction: req.Interaction,
-		SessionToken: a.spawnSessionToken(r.Context(), sessionID, daemon, folder, req.Title, req.Model,
+		SessionToken: a.spawnSessionToken(ctx, sessionID, daemon, folder, req.Title, req.Model,
 			sessionOriginFor(principal.Sub, grant != nil, "")),
 	}
 
 	if a.dbPool != nil {
-		if err := db.SetSessionPosture(r.Context(), a.dbPool, sessionID, runtimeName(req.Runtime), req.DangerouslySkipPermissions); err != nil {
+		if err := db.SetSessionPosture(ctx, a.dbPool, sessionID, runtimeName(req.Runtime), req.DangerouslySkipPermissions); err != nil {
 			log.Printf("SetSessionPosture %s: %v", sessionID, err)
 		}
-		recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
-		recordInteraction(r.Context(), a.dbPool, sessionID, req.Interaction)
+		recordLaunchEffort(ctx, a.dbPool, sessionID, req.Effort)
+		recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
 		// The engine too, as the cluster and v1 paths already do: the
 		// in-session model switcher asks for the session engine's model list.
 		if req.Engine != "" {
-			if err := db.SetSessionEngine(r.Context(), a.dbPool, sessionID, req.Engine); err != nil {
+			if err := db.SetSessionEngine(ctx, a.dbPool, sessionID, req.Engine); err != nil {
 				log.Printf("SetSessionEngine %s: %v", sessionID, err)
 			}
 		}
@@ -1118,13 +1147,13 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		// — for as long as the daemon takes to answer, or forever if it never
 		// does. The daemon's own SetSessionKind stays as the confirming write.
 		if req.Kind == "agent" {
-			if err := db.SetSessionKind(r.Context(), a.dbPool, sessionID, "agent"); err != nil {
+			if err := db.SetSessionKind(ctx, a.dbPool, sessionID, "agent"); err != nil {
 				log.Printf("SetSessionKind %s: %v", sessionID, err)
 			}
 		}
 		// Desktop sessions are attributed too (agent-safety I6) — from the
 		// verified token, never the body, same as the cluster branch.
-		if err := db.SetSessionSpawningAccount(r.Context(), a.dbPool, sessionID, principal.Sub); err != nil {
+		if err := db.SetSessionSpawningAccount(ctx, a.dbPool, sessionID, principal.Sub); err != nil {
 			log.Printf("SetSessionSpawningAccount %s: %v", sessionID, err)
 		}
 	}
@@ -1132,23 +1161,24 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	if grant != nil {
 		// The spawning account is recorded above; the session becomes private after it, and
 		// the tokens travel only in this spawn message.
-		if msg.MCPGateway, apiErr = a.attachGrant(r.Context(), sessionID, grant); apiErr != nil {
-			a.abortGrantSession(r.Context(), sessionID)
+		if msg.MCPGateway, apiErr = a.attachGrant(ctx, sessionID, grant); apiErr != nil {
+			a.abortGrantSession(ctx, sessionID)
 			writeAPIError(w, apiErr)
 			return
 		}
 		// A launch-sheet session is watched: it keeps its tools, settings and plugins,
 		// connections or not (docs/design/interactive-mcp-sessions.md).
 	}
+	msg.BoardID = req.BoardID
 	// Always-on plugins (non-secret): only for a Claude agent-kind session, on a daemon that can
 	// load them.
 	var pluginNote string
-	msg.Plugins, pluginNote = a.daemonPlugins(r.Context(), daemon, principal.Sub, proofFromPrincipal(principal), req.Kind, req.Engine, msg.RestrictTools)
+	msg.Plugins, pluginNote = a.daemonPlugins(ctx, daemon, principal.Sub, proofFromPrincipal(principal), req.Kind, req.Engine, msg.RestrictTools)
 
 	data, err := json.Marshal(msg) //nolint:gosec // the spawn message must carry the session token (and any MCP gateway grant) to the daemon over the authenticated websocket; never logged
 	if err != nil {
 		if grant != nil {
-			a.abortGrantSession(r.Context(), sessionID)
+			a.abortGrantSession(ctx, sessionID)
 		}
 		writeError(w, http.StatusInternalServerError, "marshal error")
 		return
@@ -1157,12 +1187,12 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	select {
 	case daemon.send <- data:
 	default:
-		abortSpawnSessionToken(r.Context(), a.dbPool, sessionID)
+		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
 		writeError(w, http.StatusServiceUnavailable, "daemon send buffer full")
 		return
 	}
 	if req.Kind == "agent" {
-		announceDaemonAgentStart(r.Context(), a.hub, a.dbPool, sessionID, daemon.Name, req.Runtime == "docker", pluginStage(msg.Plugins, pluginNote))
+		announceDaemonAgentStart(ctx, a.hub, a.dbPool, sessionID, daemon.Name, req.Runtime == "docker", pluginStage(msg.Plugins, pluginNote))
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"session_id": sessionID})
@@ -1178,7 +1208,7 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 		writeError(w, http.StatusServiceUnavailable, "cluster runtime not configured on this server")
 		return
 	}
-	grant, apiErr := a.resolveGrant(r.Context(), who, req.MCP,
+	grant, apiErr := a.resolveLaunchGrant(r.Context(), who, req.MCP, req.BoardID,
 		grantTarget{Runtime: runnerRuntimeCluster, Engine: req.Engine, Kind: req.Kind})
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
@@ -1224,7 +1254,7 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 		Interaction:   req.Interaction,
 		SessionID:     sessionID, NoRepo: true, Title: req.Title,
 		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.InitialPrompt,
-		ExtraEnv:          withClusterSessionToken(r.Context(), a.dbPool, sessionID, nil),
+		ExtraEnv:          sessionBoardEnv(withClusterSessionToken(r.Context(), a.dbPool, sessionID, nil), req.BoardID, gateway),
 		SpawningAccountID: accountID,
 		AuthSessionID:     proof.SessionID,
 		TokenID:           proof.TokenID,
@@ -1450,6 +1480,7 @@ func (a *API) deleteSessionUnlocked(w http.ResponseWriter, r *http.Request) {
 				// disconnect "error", a resumable cluster session, a start
 				// still pending) is ended here, by this caller.
 				setSessionStatusEnd(r.Context(), a.hub, a.dbPool, sessionID, "stopped", &now, nil, true, end)
+				a.hub.SessionTerminallyEnded(sessionID)
 				revokeSessionTokens(r.Context(), a.dbPool, sessionID, "delete: orphaned session")
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -1457,6 +1488,16 @@ func (a *API) deleteSessionUnlocked(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusNotFound, "session not found or daemon not connected")
 		return
+	}
+
+	// A recoverable observation is not a pending live stop. Confirm this
+	// explicit stop durably, instead of letting its old reason mask the exit.
+	if a.dbPool != nil {
+		if row, err := db.GetSession(r.Context(), a.dbPool, sessionID); err == nil && row != nil && row.EndedAt != nil && !db.TerminallyEnded(row) {
+			a.stopSessionUnlocked(r.Context(), sessionID, end)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 	}
 
 	msg := protocol.KillSession{

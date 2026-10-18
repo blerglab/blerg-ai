@@ -168,6 +168,9 @@ export interface ModelList {
 export type AgentEventKind =
   | 'user_message'
   | 'input_accepted'
+  | 'session_upload'
+  | 'delegation_request'
+  | 'delegation_decided'
   | 'assistant_text'
   | 'assistant_thinking'
   | 'thinking_started'
@@ -195,7 +198,9 @@ export type AgentEventKind =
   | 'topic'
   | 'checklist'
   | 'ticket'
-  | 'mcp_status';
+  | 'mcp_status'
+  | 'delegation_request'
+  | 'delegation_decided';
 
 export interface AgentEvent {
   type: 'agent_event';
@@ -383,6 +388,9 @@ export interface InitialState {
   /** The release version (the VERSION file) and short git commit the server was built from. */
   server_release?: string;
   server_commit?: string;
+  /** A newer public release, when the server knows of one (version without the "v", and its page). */
+  latest_version?: string;
+  latest_url?: string;
   /** What a session's files may weigh, in bytes (from 0.2.1; an older server sends none). */
   limits?: FileLimits;
 }
@@ -551,7 +559,10 @@ export interface TicketDependencyChanged {
 }
 
 // Discriminated union of all server→browser messages.
+export interface ChildrenChanged { type: 'children_changed'; session_id: string }
+
 export type ServerMessage =
+  | ChildrenChanged
   | InitialState
   | DaemonConnected
   | DaemonDisconnected
@@ -786,8 +797,10 @@ export interface CronInfo {
 // person approves or rejects it. `arguments` is authoritative (exactly what an approval sends);
 // `agent_summary` is a convenience line built by the gateway. `result` is untrusted upstream output.
 export type ProposalState = 'pending' | 'executing' | 'done' | 'rejected' | 'expired' | 'failed' | 'unknown'
-export type ProposalResult = null | { content?: { type: string; text?: string }[]; isError?: boolean } | { error: string }
+export type ProposalResult = { state: string; message?: string } | null | { content?: { type: string; text?: string }[]; isError?: boolean } | { error: string }
 export interface ProposalInfo {
+  kind?: 'board_file' | 'mcp' | 'plugin_request'
+  plugin_session_apply?: boolean
   id: string
   state: ProposalState
   connection_id: string

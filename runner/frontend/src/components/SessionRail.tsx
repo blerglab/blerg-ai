@@ -43,12 +43,12 @@ import {
   type ArtifactInfo,
   type AskLive,
   type BackgroundTask,
-  type LiveState,
   type PlanLive,
-  type SubagentLive,
+  type LiveState,
   type Ticket,
   type TicketSummaryLive,
 } from '@blerglab/chat'
+import { readProgress, type LiveProgress, type ProgressSubagent, type SessionPanelLiveState } from '../lib/liveState'
 import { blergTransport } from '../lib/chatTransport'
 import { ENGINE_LABELS, RUNTIME_LABELS } from '../lib/runtimes'
 import { diffArtifacts, hasPlanTab, planList, planSummary, planTabLabel, type PlanList } from '../lib/railPlan'
@@ -56,6 +56,8 @@ import { RAIL_TABS, lifetimeLabel, readRailTab, waitLabel, writeRailTab, type Ra
 import FilesTab from './FilesTab'
 import HistoryTab from './HistoryTab'
 import CapabilitiesTab from './CapabilitiesTab'
+import {PluginPicker,PluginRequests} from './SessionPlugins'
+import {useSessionPlugins} from '../hooks/useSessionPlugins'
 import { useCapabilities } from '../hooks/useCapabilities'
 import { enabledCapabilityCount, latestCapabilitiesEvent } from '../lib/capabilities'
 import ShowLink from './RailShowLink'
@@ -63,6 +65,8 @@ import type { SessionInfo } from '../types'
 import StatusPill from './StatusPill'
 import UsageLimitResume from './UsageLimitResume'
 import { backgroundCount, displayState } from '../lib/displayState'
+import { ChildSessionRow, StartedSessions } from './ChildSessions'
+import { childIsRunning, type LiveChildSession, type LiveDelegationGrant, type LiveDelegationRequest } from '../lib/liveState'
 import './SessionRail.css'
 
 /** How long a "Show in conversation" that found nothing says so. */
@@ -71,6 +75,9 @@ const MISSING_MS = 4000
 const FOCUSABLE = 'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
 
 export interface SessionRailProps {
+  childSessions?: LiveChildSession[]
+  delegationRequests?: LiveDelegationRequest[]
+  delegationGrants?: LiveDelegationGrant[]
   /** The element's id (the header toggle's aria-controls). */
   id: string
   session: SessionInfo
@@ -78,7 +85,7 @@ export interface SessionRailProps {
   machine?: string
   /** What is live in the session, read once by the page (useSessionLive: the server's whole log, or
    *  the chat's useLiveState on an older server); its header badge counts from it too. */
-  live: LiveState
+  live: SessionPanelLiveState
   /** The background tasks still running, by the server; absent or null: the chat's list (what the
    *  transcript holds). Finished ones always come from the chat's list (they linger, a failure stays). */
   tasks?: BackgroundTask[] | null
@@ -113,8 +120,11 @@ export default function SessionRail(props: SessionRailProps) {
   const running = (props.tasks ?? bg.running).filter(t => !ended.has(t.taskId))
   const tasks = [...running, ...bg.recent].filter(t => !(t.kind === 'agent' && subKeys.has(t.callId)))
   const runningTasks = tasks.filter(t => !t.done).length
+  const children = props.childSessions ?? []
+  const runningChildren = children.filter(childIsRunning)
+  const requests = props.delegationRequests ?? []
   // The clock runs only while something timed is on screen.
-  const timed = open && (live.subagents.length > 0 || live.openAsks.length > 0 || tasks.length > 0)
+  const timed = open && (live.subagents.length > 0 || live.openAsks.length > 0 || tasks.length > 0 || runningChildren.length > 0)
   const now = useTicker(timed) - live.clockOffset
   // Lifetime moves by the minute: a slow clock while the panel is open.
   const minute = useMinute(open)
@@ -183,6 +193,8 @@ export default function SessionRail(props: SessionRailProps) {
   const capEvent = useTranscriptStore(s => latestCapabilitiesEvent(s.sessions[session.id]?.events))
   const capEvents = useMemo(() => (capEvent ? [capEvent] : NO_EVENTS), [capEvent])
   const capabilities = useCapabilities(session.id, capEvents, capabilitiesShown)
+  const canManagePlugins = live.canReleasePrompt === true
+  const plugins = useSessionPlugins(session.id, canManagePlugins && open && (tab === 'live' || tab === 'capabilities'))
   const enabled = enabledCapabilityCount(capabilities?.payload)
   // On a phone the drawer goes first, so the file opens over the chat the person is looking at.
   const openFile = (id: string, commit?: string) => {
@@ -206,8 +218,10 @@ export default function SessionRail(props: SessionRailProps) {
     onDraft: (text: string) => setDrafts(d => ({ ...d, [eventId]: text })),
   })
 
-  const needsCount = live.openAsks.length + (toolChanges > 0 ? 1 : 0)
-  const runningCount = live.subagents.length + runningTasks
+  const pluginPending = canManagePlugins ? (plugins.data?.requests ?? []).filter(p => p.state === 'pending').length : 0
+  const needsCount = live.openAsks.length + (toolChanges > 0 ? 1 : 0) + pluginPending + requests.length
+  const runningCount = live.subagents.length + runningTasks + runningChildren.length
+  const sessionProgress = readProgress(live.progress)
 
   // A pinned ticket opened over the page (the current one in full, another by its summary).
   const [ticketOpen, setTicketOpen] = useState<{ ticket: Ticket; eventId: string } | null>(null)
@@ -248,9 +262,11 @@ export default function SessionRail(props: SessionRailProps) {
     <>
       {list && <PlanSummary list={list} ticket={tickets[0]} onOpenTicket={() => openTicket(tickets[0])} onOpen={() => goPlan()} />}
 
-      <Section title="Needs you" count={live.openAsks.length + toolChanges} tone="attention" testId="rail-needs" empty="Nothing needs you.">
+      <Section title="Needs you" count={live.openAsks.length + toolChanges + pluginPending + requests.length} tone="attention" testId="rail-needs" empty="Nothing needs you.">
         {needsCount > 0 && (
           <ul className="rail-list">
+            {pluginPending > 0 && <li className="rail-item"><PluginRequests model={plugins} pendingOnly /></li>}
+            {requests.map(r => <li key={r.request_id} className="rail-item"><div className="rail-item-title">Approve started session: {r.title || r.engine}</div><button type="button" className="rail-link" onClick={() => jump(`request:${r.request_id}`, () => { const event = useTranscriptStore.getState().sessions[session.id]?.events.find(ev => ev.kind === 'delegation_request' && (ev.payload as { request_id?: string })?.request_id === r.request_id); return event ? scrollToEvent(event.client_event_id) : false })}>Review in conversation</button>{missing === `request:${r.request_id}` && <p role="status">Load earlier messages to review this request.</p>}</li>)}
             {live.openAsks.map(a => (
               <AskRow
                 key={a.eventId}
@@ -278,8 +294,13 @@ export default function SessionRail(props: SessionRailProps) {
       </Section>
 
       <Section title="Running now" count={runningCount} tone="running" testId="rail-running" empty="Nothing is running.">
-        {live.subagents.length + tasks.length > 0 && (
+        {(sessionProgress || live.subagents.length + tasks.length + runningChildren.length > 0) && (
           <ul className="rail-list">
+            {sessionProgress && <li className="rail-item" data-testid="rail-session-progress">
+              <div className="rail-item-head"><span className="rail-item-title">Session</span></div>
+              <WorkProgress progress={sessionProgress} />
+            </li>}
+            {runningChildren.map(c => <ChildSessionRow key={c.id} child={c} now={now} />)}
             {live.subagents.map(s => (
               <SubagentRow
                 key={s.key}
@@ -303,6 +324,7 @@ export default function SessionRail(props: SessionRailProps) {
         )}
       </Section>
 
+      <StartedSessions sessionId={session.id} children={children} grants={props.delegationGrants ?? []} now={now} />
       <Section title="Session" testId="rail-session">
         <SessionFacts session={session} machine={props.machine} now={minute} liveRunning={props.liveRunning ?? null} />
         {session.limit_resume_supported === true &&
@@ -313,7 +335,7 @@ export default function SessionRail(props: SessionRailProps) {
 
   const body = (
     <>
-      <RailTabs idBase={props.id} tab={tab} onPick={pick} plan={planShown ? (planTabLabel(list, tickets.length, diffs.length) ?? '') : null} needs={live.openAsks.length + toolChanges} files={live.files ? fileCount(live.files.items) : 0} enabled={enabled} />
+      <RailTabs idBase={props.id} tab={tab} onPick={pick} plan={planShown ? (planTabLabel(list, tickets.length, diffs.length) ?? '') : null} needs={live.openAsks.length + toolChanges + pluginPending + requests.length} files={live.files ? fileCount(live.files.items) : 0} enabled={enabled} />
       <div className="rail-tabpanel" role="tabpanel" id={`${props.id}-panel-live`} aria-labelledby={`${props.id}-tab-live`} hidden={tab !== 'live'}>
         {liveBody}
       </div>
@@ -332,7 +354,11 @@ export default function SessionRail(props: SessionRailProps) {
         <FilesTab sessionId={session.id} active={open && tab === 'files'} files={live.files} onOpenArtifact={openFile} onAttach={attachFiles} />
       </div>
       <div className="rail-tabpanel" role="tabpanel" id={`${props.id}-panel-capabilities`} aria-labelledby={`${props.id}-tab-capabilities`} hidden={tab !== 'capabilities'}>
-        <CapabilitiesTab report={capabilities} pendingToolChanges={toolChanges} liveMcp={live.mcp ?? null} />
+        {canManagePlugins && <>
+          <PluginPicker key={session.id} model={plugins} />
+          <PluginRequests model={plugins} />
+        </>}
+        <CapabilitiesTab report={capabilities} pendingToolChanges={toolChanges} liveMcp={live.mcp ?? null} startedBySession={session.started_by?.kind === 'session'} />
       </div>
     </>
   )
@@ -637,7 +663,17 @@ function AskRow({ ask, now, answer, draft, onDraft, missing, onShow }: {
   )
 }
 
-function SubagentRow({ sub, now, missing, onShow }: { sub: SubagentLive; now: number; missing: boolean; onShow: () => void }) {
+function WorkProgress({ progress }: { progress: LiveProgress }) {
+  const valid = readProgress(progress)
+  if (!valid) return null
+  return <div className="rail-work-progress">
+    <span className="rail-work-count">{valid.completed}/{valid.total}</span>
+    <Progress done={valid.completed} total={valid.total} />
+    {valid.label && <span className="rail-work-label" title={valid.label}>{valid.label}</span>}
+  </div>
+}
+
+function SubagentRow({ sub, now, missing, onShow }: { sub: ProgressSubagent; now: number; missing: boolean; onShow: () => void }) {
   const model = sub.model.replace(/^claude-/, '')
   return (
     // A background subagent is drawn dashed, like its card in the transcript.
@@ -655,6 +691,7 @@ function SubagentRow({ sub, now, missing, onShow }: { sub: SubagentLive; now: nu
         <span className="rail-chip" data-testid="rail-sub-effort" title="Child-reported configured effort; unknown when not reported">effort: {sub.effort || 'unknown'}</span>
         {sub.tokens !== null && sub.tokens > 0 && <span className="rail-chip" data-testid="rail-sub-tokens">{tokenLabel(sub.tokens)}</span>}
       </div>
+      {sub.progress && <WorkProgress progress={sub.progress} />}
       {sub.doing && <div className="rail-item-line doing" data-testid="rail-sub-doing">{sub.doing}</div>}
       <div className="rail-actions"><ShowLink onShow={onShow} missing={missing} /></div>
     </li>
@@ -678,10 +715,10 @@ function TaskRow({ t, now, missing, onShow, onDismiss }: {
       <li className={`rail-item rail-task rail-shell ${state}`} data-testid="rail-task" data-task-id={t.taskId} title={titleOf(t)}>
         <div className="rail-item-head">
           <KindIcon t={t} />
-          <code className="rail-cmd" data-testid="rail-command">{commandOf(t)}</code>
+          <code className="rail-cmd" data-testid="rail-command" tabIndex={0} role="region" aria-label="Shell command">{commandOf(t)}</code>
           <span className="rail-glyph"><StatusGlyph t={t} /></span>
         </div>
-        {note && <div className="rail-item-line" data-testid="rail-task-note">{note}</div>}
+        {note && <div className="rail-item-line rail-shell-copy" data-testid="rail-task-note" tabIndex={0} role="region" aria-label="Command description">{note}</div>}
         {t.startedAt !== null && (
           <div className="rail-item-line">
             <time dateTime={new Date(t.startedAt).toISOString()}>
@@ -697,7 +734,7 @@ function TaskRow({ t, now, missing, onShow, onDismiss }: {
             {!t.done ? 'running' : failed ? 'failed' : 'done'}
           </span>
         </div>
-        {t.done && t.done.summary && <div className={`rail-item-line${failed ? ' bad' : ''}`} data-testid="rail-task-summary">{t.done.summary}</div>}
+        {t.done && t.done.summary && <div className={`rail-item-line rail-shell-copy${failed ? ' bad' : ''}`} data-testid="rail-task-summary" tabIndex={0} role="region" aria-label="Command result">{t.done.summary}</div>}
         <div className="rail-actions">
           <ShowLink onShow={onShow} missing={missing} />
           {failed && <button type="button" className="rail-link" data-testid="rail-dismiss" onClick={onDismiss}>Dismiss</button>}

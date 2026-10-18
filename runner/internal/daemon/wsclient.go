@@ -90,19 +90,23 @@ func (c *Config) unconfirmedAfter() time.Duration {
 // WSClient is a WebSocket client that maintains a persistent connection to the
 // blerg-runner server, reconnecting automatically with exponential backoff.
 type WSClient struct {
-	config        Config
-	mu            sync.Mutex // guards conn and handlers
-	writeMu       sync.Mutex // guards WriteMessage calls (at most one concurrent writer)
-	conn          *websocket.Conn
-	background    *backgroundTaskTracker // guarded by mu; process lifetime and replay-safe live IDs
-	handlers      map[string]func([]byte)
-	onConnect     func()
-	sessionStates func() map[string]string
+	recoveryMu      sync.Mutex
+	recoveryState   RecoveryState
+	recoveryHandler func(RecoveryState)
+	config          Config
+	mu              sync.Mutex // guards conn and handlers
+	writeMu         sync.Mutex // guards WriteMessage calls (at most one concurrent writer)
+	conn            *websocket.Conn
+	background      *backgroundTaskTracker // guarded by mu; process lifetime and replay-safe live IDs
+	handlers        map[string]func([]byte)
+	onConnect       func()
+	sessionStates   func() map[string]string
 	// queuedSessions lists the spawns received but not started (Manager.QueuedSpawnIDs).
-	queuedSessions func() []string
-	engineModels   EngineModelSource
-	reposRootFn    func() string
-	hbKick         chan struct{} // RequestHeartbeat: send one now
+	queuedSessions           func() []string
+	recoveryRequiredSessions func() []string
+	engineModels             EngineModelSource
+	reposRootFn              func() string
+	hbKick                   chan struct{} // RequestHeartbeat: send one now
 	// status is the link's state, mirrored to Config.ConnectionFile.
 	status *connReporter
 
@@ -121,6 +125,10 @@ func (c *WSClient) SetOnConnect(fn func()) {
 // started yet, reported in the hello and every heartbeat (QueuedSessions).
 func (c *WSClient) SetQueuedSessions(fn func() []string) {
 	c.queuedSessions = fn
+}
+
+func (c *WSClient) SetRecoveryRequiredSessions(fn func() []string) {
+	c.recoveryRequiredSessions = fn
 }
 
 // SetSessionStates registers a provider for per-session detector states,
@@ -380,6 +388,9 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 		return linkResult{}, err
 	}
 
+	generation := c.beginRecoveryLink()
+	defer c.noteRecoveryLink(generation, RecoveryDisconnected)
+
 	// Send daemon_hello. The connection is not c.conn until the hello is written: the server
 	// reads the first frame as the hello, so Send (any other sender) fails "not connected" until then.
 	sessions := activeSessions()
@@ -400,6 +411,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 		CheckedOutRepos:    checkedOut,
 		SandboxAvailable:   sandboxImageAvailable(),
 		AvailableEngines:   availableEngines(),
+		LocalEngines:       localEngines(),
 		ClaudeCLIAvailable: claudeOnPath(),
 		AnthropicKeySet:    os.Getenv("ANTHROPIC_API_KEY") != "",
 
@@ -413,10 +425,17 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	hello.CodexRestricted = runtime.GOOS == "linux" // Spawn rechecks the actual CLI version before exposing only rooted dynamic tools.
 	hello.RestrictTools = true                      // SpawnSession.RestrictTools (claudecode.go ccHardeningFlags)
 	hello.PluginEngines = pluginEnginesCapability()
+	if pluginsCapability() {
+		hello.SessionPluginEngines = []string{"claude"}
+	}
 	hello.Plugins = pluginsCapability() // SpawnSession.Plugins (pluginworkshop.go)
 	hello.InputReceipts = true
 	hello.SessionTokenFile = true // SessionToken → SessionTokenResult (sessiontoken.go)
-	hello.Welcome = true          // DaemonWelcome (linkWatch): "connected" only once the server says so
+	hello.RecoveryReady = true
+	if c.recoveryRequiredSessions != nil {
+		hello.RecoveryRequiredSessions = c.recoveryRequiredSessions()
+	}
+	hello.Welcome = true // DaemonWelcome (linkWatch): "connected" only once the server says so
 	hello.QueuedSessions = c.queued()
 	hello.BackgroundTasks = c.backgroundTaskInventory()
 	// sentModelsGen is the generation of the model lists this connection
@@ -499,6 +518,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 				SandboxAvailable:   sandboxImageAvailable(),
 				CheckedOutRepos:    repos,
 				AvailableEngines:   availableEngines(),
+				LocalEngines:       localEngines(),
 				ClaudeCLIAvailable: claudeOnPath(),
 				AnthropicKeySet:    os.Getenv("ANTHROPIC_API_KEY") != "",
 				ReposRoot:          root,
@@ -527,7 +547,28 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 		_ = conn.Close()
 	}()
 
-	readErr := c.readLoop(conn, watch.welcome)
+	welcomed := false
+	var recoverySessionID string
+	readErr := c.readLoop(conn, func(raw []byte) {
+		watch.welcome(raw)
+		var msg protocol.DaemonWelcome
+		if json.Unmarshal(raw, &msg) != nil || welcomed {
+			return
+		}
+		welcomed = true
+		recoverySessionID = msg.SessionID
+		phase := RecoveryLegacy
+		if msg.RecoveryHold {
+			phase = RecoveryHeld
+		}
+		c.noteRecoveryLink(generation, phase)
+	}, func(raw []byte) {
+		var ready protocol.DaemonRecoveryReady
+		if json.Unmarshal(raw, &ready) == nil && ready.SessionID == recoverySessionID {
+			c.noteRecoveryLink(generation, RecoveryReady)
+		}
+	})
+	c.noteRecoveryLink(generation, RecoveryDisconnected)
 	link := watch.close()
 
 	// Stop the heartbeat, then close the conn to unblock any in-progress write.
@@ -548,7 +589,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 
 // readLoop reads messages from conn until it returns an error, dispatching each
 // to the registered handler (if any); daemon_welcome goes to onWelcome.
-func (c *WSClient) readLoop(conn *websocket.Conn, onWelcome func([]byte)) error {
+func (c *WSClient) readLoop(conn *websocket.Conn, onWelcome func([]byte), onRecoveryReady ...func([]byte)) error {
 	type envelope struct {
 		Type string `json:"type"`
 	}
@@ -560,6 +601,12 @@ func (c *WSClient) readLoop(conn *websocket.Conn, onWelcome func([]byte)) error 
 		var env envelope
 		if err := json.Unmarshal(raw, &env); err != nil {
 			log.Printf("daemon: malformed message: %v", err)
+			continue
+		}
+		if env.Type == "daemon_recovery_ready" {
+			if len(onRecoveryReady) > 0 {
+				onRecoveryReady[0](raw)
+			}
 			continue
 		}
 		if env.Type == "daemon_welcome" {

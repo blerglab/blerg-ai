@@ -1,12 +1,15 @@
 // Proposals (/proposals): what agents asked to do through a tool in `propose` mode (spec 9). The
 // gateway froze each call; nothing ran. Here the person reads the FROZEN ARGUMENTS (authoritative:
-// approving sends exactly these), then approves or rejects. The summary line is built by the
-// gateway and is only a convenience. Upstream results are untrusted: shown as plain text only.
+// approving sends exactly these), then approves or rejects. Built-in board filing drafts can be
+// edited first; their saved arguments require a fresh confirmation. Ordinary MCP calls stay frozen.
+// The summary line is built by the gateway and is only a convenience. Upstream results are untrusted: shown as plain text only.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
 import ToolChanges from './ToolChanges'
+import BoardFileDraft from './BoardFileDraft'
+import {pluginApplication,pluginState,type PluginScope} from '../lib/sessionPlugins'
 import {
   PROPOSALS_POLL_MS, applyPendingCount, approveFailureMessage, beginCountRequest, collapsedArguments, formatArguments, isAwaitingYou, resultText,
   usePendingProposals,
@@ -69,12 +72,20 @@ interface CardProps {
   error: string | undefined
   onAsk: () => void
   onCancel: () => void
-  onApprove: () => void
+  onApprove: (scope?: PluginScope) => void
   onReject: () => void
   onResolve: (outcome: 'done' | 'failed') => void
+  onSavedDraft: (updated: ProposalInfo) => void
 }
 
-function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, onApprove, onReject, onResolve }: CardProps) {
+function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, onApprove, onReject, onResolve, onSavedDraft }: CardProps) {
+  const [editing, setEditing] = useState(false)
+  const boardFile = p.kind === 'board_file'
+  const [pluginScope, setPluginScope] = useState<PluginScope>(p.plugin_session_apply ? 'session' : 'always')
+  const isPlugin = p.kind === 'plugin_request'
+  const scope = p.plugin_session_apply ? pluginScope : 'always'
+  const stateLabel = pluginState(p)
+  const stateColor = stateLabel === 'queued' || stateLabel === 'installing' ? PILL.executing : stateLabel === 'failed' ? PILL.failed : PILL[p.state]
   const result = resultText(p.result)
   return (
     <div
@@ -84,9 +95,14 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <span style={{ color: 'var(--chalk)', fontWeight: 700, fontFamily: 'var(--mono, monospace)' }}>{p.tool}</span>
         <span style={muted}>on {p.connection_name}</span>
-        <span data-testid="proposal-state" style={{ marginLeft: 'auto', color: PILL[p.state], border: `1px solid ${PILL[p.state]}`, borderRadius: 10, padding: '0 8px', fontSize: 12 }}>{p.state}</span>
+        <span data-testid="proposal-state" style={{ marginLeft: 'auto', color: stateColor, border: `1px solid ${stateColor}`, borderRadius: 10, padding: '0 8px', fontSize: 12 }}>{stateLabel === 'new_sessions' ? 'new sessions only' : stateLabel}</span>
       </div>
+      {boardFile && <div>File a ticket on {typeof p.arguments.board_name === 'string' ? p.arguments.board_name : String(p.arguments.board_id ?? '')}</div>}
       <Arguments p={p} complete={confirming} />
+      {boardFile && p.state === 'pending' && (editing
+        ? <BoardFileDraft proposal={p} onSaved={updated => { setEditing(false); onSavedDraft(updated) }} onCancel={() => setEditing(false)} />
+        : <button type="button" style={button} disabled={busy || !p.arguments_raw} onClick={() => { onCancel(); setEditing(true) }}>Edit ticket draft</button>)}
+      {isPlugin && <p role="status" style={muted}>{pluginApplication(p)}</p>}
       {p.agent_summary && (
         <div
           data-testid="proposal-summary" title="Written by the gateway for convenience; not checked against the arguments above"
@@ -122,19 +138,23 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
 
       {p.state === 'executing' && <div style={muted}>Running now. Refresh in a moment.</div>}
 
-      {p.state === 'pending' && !confirming && (
+      {p.state === 'pending' && !confirming && !editing && (
         <div style={{ display: 'flex', gap: 8 }}>
-          <button type="button" style={primary} disabled={busy} onClick={onAsk}>Approve</button>
+          <button type="button" style={primary} disabled={busy || boardFile && !p.arguments_raw} onClick={onAsk}>Approve</button>
           <button type="button" style={button} disabled={busy} onClick={onReject}>Reject</button>
         </div>
       )}
-      {p.state === 'pending' && confirming && (
+      {p.state === 'pending' && confirming && !editing && (
         <div data-testid={`approve-confirm-${p.id}`} style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid var(--stone)', paddingTop: 8 }}>
           <div style={{ color: 'var(--chalk)', fontSize: 13 }}>
-            This will run {p.tool} on {p.connection_name} with exactly these arguments, shown in full above. It can take up to a minute.
+            {isPlugin ? 'Approve this exact plugin request. It will be installed only after your confirmation.' : <>This will run {p.tool} on {p.connection_name} with exactly these arguments, shown in full above. It can take up to a minute.</>}
           </div>
+          {isPlugin && <>
+            <label>Apply plugin<select aria-label="Apply plugin" value={scope} onChange={e=>setPluginScope(e.target.value as PluginScope)} disabled={busy}><option value="session" disabled={!p.plugin_session_apply}>This session only</option><option value="always">Always on</option></select></label>
+            <p style={muted}>{scope === 'session' ? 'Loads between turns; account settings stay unchanged.' : p.plugin_session_apply ? 'Saves to account settings and loads between turns.' : 'Saves for new sessions; this session keeps its current plugins.'}</p>
+          </>}
           <div style={{ display: 'flex', gap: 8 }}>
-            <button type="button" style={primary} disabled={busy} onClick={onApprove}>{busy ? 'Running…' : 'Run it'}</button>
+            <button type="button" style={primary} disabled={busy || (isPlugin && typeof p.arguments_raw !== 'string')} onClick={()=>onApprove(isPlugin ? scope : undefined)}>{busy ? 'Running…' : isPlugin ? 'Add plugin' : 'Run it'}</button>
             <button type="button" style={button} disabled={busy} onClick={onCancel}>Cancel</button>
           </div>
         </div>
@@ -178,6 +198,7 @@ export default function Proposals() {
   const [tab, setTab] = useState<Tab>('pending')
   const [focused, setFocused] = useState<ProposalInfo | null>(null)
   const [focusError, setFocusError] = useState<string | null>(null)
+  const [confirmedRaw, setConfirmedRaw] = useState<Record<string, string | undefined>>({})
   const [confirming, setConfirming] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -379,12 +400,18 @@ export default function Proposals() {
           p={p}
           focused={p.id === focusId}
           busy={busy === p.id}
-          confirming={confirming === p.id}
+          confirming={confirming === p.id && ((p.kind !== 'board_file' && p.kind !== 'plugin_request') || confirmedRaw[p.id] === p.arguments_raw)}
           error={errors[p.id]}
-          onAsk={() => setConfirming(p.id)}
+          onAsk={() => { setConfirmedRaw(previous => ({ ...previous, [p.id]: p.arguments_raw })); setConfirming(p.id) }}
           onCancel={() => setConfirming(null)}
-          onApprove={() => void act(p.id, 'approve', undefined, approveFailureMessage)}
+          onApprove={scope => void act(p.id, 'approve', p.kind === 'plugin_request' ? {scope,expected_arguments_raw:confirmedRaw[p.id]} : p.kind === 'board_file' ? {expected_arguments_raw:confirmedRaw[p.id]} : undefined, p.kind === 'plugin_request' ? (_status, message) => `Plugin change was not accepted: ${message}` : approveFailureMessage)}
           onReject={() => void act(p.id, 'reject', undefined, (_s, m) => m)}
+          onSavedDraft={updated => {
+            ++openSeq.current
+            setOpen(previous => previous?.map(item => item.id === updated.id ? updated : item) ?? null)
+            setFocused(previous => previous?.id === updated.id ? updated : previous)
+            setConfirming(null)
+          }}
           onResolve={outcome => void act(p.id, 'resolve', { outcome }, (_s, m) => m)}
         />
       ))}

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -97,8 +98,18 @@ func ValidateRuntimeBinding(ctx context.Context, pool *pgxpool.Pool, sessionID, 
 	if pool == nil {
 		return ErrTokenInvalid
 	}
+	return validateRuntimeBinding(ctx, pool, sessionID, tokenID, slide)
+}
+
+// ValidateRuntimeBindingTx checks current launch identity under a caller-held session row lock.
+// It uses that same transaction rather than acquiring a second pool connection.
+func ValidateRuntimeBindingTx(ctx context.Context, tx pgx.Tx, sessionID, tokenID string) error {
+	return validateRuntimeBinding(ctx, tx, sessionID, tokenID, false)
+}
+
+func validateRuntimeBinding(ctx context.Context, q Querier, sessionID, tokenID string, slide bool) error {
 	var ok bool
-	err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM session_runtime r JOIN sessions s ON s.id=r.session_id JOIN board_tokens t ON t.id=r.runtime_token_id WHERE r.session_id=$1 AND r.runtime_token_id=$2 AND s.runtime='cluster' AND s.ended_at IS NULL AND s.status NOT IN ('stopped','ended') AND t.revoked_at IS NULL AND t.expires_at>now())`, sessionID, tokenID).Scan(&ok)
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM session_runtime r JOIN sessions s ON s.id=r.session_id JOIN board_tokens t ON t.id=r.runtime_token_id WHERE r.session_id=$1 AND r.runtime_token_id=$2 AND s.runtime='cluster' AND s.ended_at IS NULL AND s.status NOT IN ('stopped','ended') AND t.revoked_at IS NULL AND t.expires_at>now())`, sessionID, tokenID).Scan(&ok)
 	if err != nil {
 		return err
 	}
@@ -106,7 +117,7 @@ func ValidateRuntimeBinding(ctx context.Context, pool *pgxpool.Pool, sessionID, 
 		return ErrTokenInvalid
 	}
 	if slide {
-		_, err = pool.Exec(ctx, `UPDATE board_tokens t SET expires_at=now()+interval '24 hours' FROM session_runtime r JOIN sessions s ON s.id=r.session_id JOIN board_tokens rt ON rt.id=r.runtime_token_id WHERE r.session_id=$1 AND r.runtime_token_id=$2 AND s.runtime='cluster' AND s.ended_at IS NULL AND s.status NOT IN ('stopped','ended') AND rt.revoked_at IS NULL AND rt.expires_at>now() AND t.id IN(r.runtime_token_id,r.messaging_token_id) AND t.revoked_at IS NULL AND t.expires_at>now() AND t.expires_at<now()+interval '12 hours'`, sessionID, tokenID)
+		_, err = q.Exec(ctx, `UPDATE board_tokens t SET expires_at=now()+interval '24 hours' FROM session_runtime r JOIN sessions s ON s.id=r.session_id JOIN board_tokens rt ON rt.id=r.runtime_token_id WHERE r.session_id=$1 AND r.runtime_token_id=$2 AND s.runtime='cluster' AND s.ended_at IS NULL AND s.status NOT IN ('stopped','ended') AND rt.revoked_at IS NULL AND rt.expires_at>now() AND t.id IN(r.runtime_token_id,r.messaging_token_id) AND t.revoked_at IS NULL AND t.expires_at>now() AND t.expires_at<now()+interval '12 hours'`, sessionID, tokenID)
 	}
 	return err
 }

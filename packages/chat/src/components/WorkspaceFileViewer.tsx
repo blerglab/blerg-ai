@@ -10,6 +10,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { useBackdropClose } from '../hooks/useBackdropClose'
+import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { formatSize } from '../model/artifacts'
 import { ARTIFACT_VIEWS, blobTypeFor, isViewable, tooBigToPreview } from '../model/artifactViews'
 import { langFromName, langLabel } from '../model/codeLang'
@@ -44,6 +45,7 @@ interface Props {
 export default function WorkspaceFileViewer({ sessionId, files, path, line, onClose, onSaved }: Props) {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
+  useSelectAllIn(dialogRef)
   const backdrop = useBackdropClose(onClose)
   const [state, setState] = useState<State>({ kind: 'loading' })
   const [attempt, setAttempt] = useState(0)

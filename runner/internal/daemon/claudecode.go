@@ -74,11 +74,12 @@ type toolRefresher interface {
 }
 
 type claudeCodeDriver struct {
-	workDir string
-	model   string
-	effort  string // "" = Claude Code's own default for the model
-	emitter agent.Emitter
-	env     []string // sanitised env every `claude` turn starts from
+	workDir  string
+	progress progressCalls
+	model    string
+	effort   string // "" = Claude Code's own default for the model
+	emitter  agent.Emitter
+	env      []string // sanitised env every `claude` turn starts from
 	// prefix routes each turn through `docker exec` into the session's
 	// sandbox container; empty means the turn runs on the host (the default).
 	prefix sandboxExec
@@ -93,6 +94,8 @@ type claudeCodeDriver struct {
 	interaction string
 	// pluginDirs: always-on plugin directories loaded into every turn.
 	pluginDirs []string
+	// pendingPlugins is consumed only by the driver run loop, between turns (sm).
+	pendingPlugins []func(context.Context)
 
 	// caps reports what Claude Code loaded (its init line) as a capabilities
 	// event, deduped so a per-turn re-init that changed nothing is silent.
@@ -337,6 +340,7 @@ type ccOptions struct {
 	// turn's only MCP servers), plus the deny rules for the config directory.
 	// A grant alone does not restrict the turn.
 	MCPConfigPath string
+	MCPAmbient    bool
 	// RestrictTools makes the turn restricted with or without a grant:
 	// --mcp-config=<path or empty> --strict-mcp-config plus the hardening flags
 	// (tool allow-list, no settings, the full deny rules, no session guide).
@@ -407,6 +411,15 @@ const topicGuideLine = "When you start a piece of work the user asked for that t
 // commands the CLI has: on the desktop the CLI updates with the checkout, this line with a reinstall.
 const workGuideLine = "When you work on a ticket, read it with the tools you have, then `blerg-runner pin` it " +
 	"(`blerg-runner pin --help` shows the shape); keep a checklist with `blerg-runner checklist` and tick items as you finish them."
+
+// childSessionGuideLine tells the agent it can hand work to another session. It is the first line of
+// the session guide, a bullet of the managed CLAUDE.md block, and the first paragraph of
+// `blerg-runner session --help` (SESSION_LINE). The full rules (budgets are per provider, wait after
+// a timeout, never start twice, loopback Hermes from a docker child) live in that help text.
+const childSessionGuideLine = "To hand work to another session, run `blerg-runner budget`, then `blerg-runner session start ...`; " +
+	"`blerg-runner session --help` explains approval, waiting and driving it. Never answer a " +
+	"child's question that asks for something destructive or irreversible: escalate it with " +
+	"`blerg-runner ask`. When raising `--timeout` (seconds), set the Bash tool timeout higher (milliseconds)."
 
 // diffGuideLine tells the agent how to show the person what it changed: a diff they open in the
 // app's diff viewer. A bullet of the managed CLAUDE.md block too, and the first line of
@@ -538,10 +551,24 @@ func (d *claudeCodeDriver) RestoreContext(events []agent.RestoredEvent) {
 // path for BLERG_CLAUDE_STEERING=0 and for a CLI too old for the streaming input mode.
 func (d *claudeCodeDriver) runLegacy(ctx context.Context) {
 	for {
+		d.applyPendingPlugins(ctx)
 		select {
 		case <-ctx.Done():
 			return
+		case <-d.steer.wake:
+			continue
+		case <-d.pluginUpdateWake():
+			continue
 		case msg := <-d.queue:
+			d.sm.Lock()
+			recoveryGate := d.steer.recoveryInputGate
+			d.sm.Unlock()
+			if recoveryGate != nil {
+				recoveryGate(ctx)
+			}
+			if ctx.Err() != nil {
+				return
+			}
 			background := d.backgroundRunning()
 			d.sm.Lock()
 			valid := msg.ExpectedTurnID == "" || (msg.ExpectedTurnID == d.usageTurnID && len(d.queue) == 0 && background == 0)
@@ -696,6 +723,9 @@ func (d *claudeCodeDriver) emitAssistantBlocks(ev *ccLine) {
 				d.emit("assistant_thinking", agent.AssistantThinkingPayload{Text: block.Thinking, ParentCallID: parent})
 			}
 		case "tool_use":
+			if block.Name == "Bash" {
+				d.progress.start(block.ID, parent)
+			}
 			d.emit("tool_call", agent.ToolCallPayload{
 				Tool: block.Name, CallID: block.ID, Input: block.Input, ParentCallID: parent,
 			})
@@ -760,6 +790,7 @@ func (d *claudeCodeDriver) emitToolResults(ev *ccLine) {
 	parent := d.subagentParent(ev.ParentToolUseID)
 	for _, block := range ev.blocks() {
 		if block.Type == "tool_result" {
+			d.progress.end(block.ToolUseID)
 			out := decodeToolResultContent(block.Content)
 			if parent == "" {
 				d.sendResult(block.ToolUseID, out, block.IsError)
@@ -969,6 +1000,8 @@ func ccCommonArgs(model, effort, resumeID string, opts ...ccOption) []string {
 		}
 		args = append(args, "--mcp-config="+mcp, "--strict-mcp-config")
 		args = append(args, ccHardeningFlags(configDir)...)
+	case o.MCPConfigPath != "" && o.MCPAmbient:
+		args = append(args, "--mcp-config="+o.MCPConfigPath)
 	case o.MCPConfigPath != "":
 		// A watched session with a grant: the gateway's servers and nothing
 		// ambient, the config directory kept from the file tools (hygiene: the
@@ -977,7 +1010,7 @@ func ccCommonArgs(model, effort, resumeID string, opts ...ccOption) []string {
 			"--disallowedTools="+strings.Join(ccGrantDenyRules(configDir), ","))
 	}
 	if o.SessionGuide && !o.RestrictTools {
-		args = append(args, "--append-system-prompt="+ccSystemPromptFor(o.Interaction))
+		args = append(args, "--settings="+progressHookSettings, "--append-system-prompt="+ccSystemPromptFor(o.Interaction))
 	}
 	// One `--flag=value` token per plugin, after everything else: nothing
 	// variadic can swallow the prompt, and a dir is never read as one.
@@ -1003,6 +1036,9 @@ func (d *claudeCodeDriver) runTurn(ctx context.Context, text string) {
 			return
 		}
 		turnOpts = append(turnOpts, withMCPConfigPath(path))
+		if d.mcpFile.sessionFiling && d.mcpFile.cfg == nil {
+			turnOpts = append(turnOpts, func(o *ccOptions) { o.MCPAmbient = true })
+		}
 	}
 	turnOpts = append(turnOpts, withPluginDirs(d.pluginDirs))
 	turnOpts = append(turnOpts, withCLIFlags(d.cliFlags(ctx))...)
@@ -1016,6 +1052,7 @@ func (d *claudeCodeDriver) runTurn(ctx context.Context, text string) {
 	defer func() {
 		d.mu.Lock()
 		d.cmd = nil
+		d.progress.clear()
 		prefix := d.prefix
 		d.mu.Unlock()
 		// Drop the finished turn's PID file: the container could recycle that

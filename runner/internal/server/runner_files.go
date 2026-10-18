@@ -28,22 +28,28 @@ func (a *API) runnerSessionFiles(w http.ResponseWriter, r *http.Request) (runner
 	if !ok {
 		return runnerPrincipal{}, "", false
 	}
-	if a.dbPool == nil {
-		writeError(w, http.StatusServiceUnavailable, noDatabaseMsg)
-		return runnerPrincipal{}, "", false
-	}
-	// The id becomes a directory name below, so only a canonical uuid gets near a path; the
-	// answer is the same 404 requireSessionAccess gives an unknown one.
 	sid := r.PathValue("id")
-	if !validSessionID(sid) {
-		writeError(w, http.StatusNotFound, "session not found")
-		return runnerPrincipal{}, "", false
-	}
-	if _, apiErr := a.requireSessionAccess(r.Context(), principal, sid); apiErr != nil {
-		writeAPIError(w, apiErr)
+	if !a.sessionFilesFor(w, r, principal, sid) {
 		return runnerPrincipal{}, "", false
 	}
 	return principal, sid, true
+}
+
+// sessionFilesFor is the shared file gate; authentication belongs to each surface.
+func (a *API) sessionFilesFor(w http.ResponseWriter, r *http.Request, principal runnerPrincipal, sid string) bool {
+	if a.dbPool == nil {
+		writeError(w, http.StatusServiceUnavailable, noDatabaseMsg)
+		return false
+	}
+	if !validSessionID(sid) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return false
+	}
+	if _, problem := a.requireSessionAccess(r.Context(), principal, sid); problem != nil {
+		writeAPIError(w, problem)
+		return false
+	}
+	return true
 }
 
 // HandleRunnerFilesList is GET /api/runner/sessions/{id}/artifacts.

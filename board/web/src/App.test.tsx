@@ -50,6 +50,21 @@ describe("Shell nav", () => {
     expect(el).toHaveTextContent("v0.2.0 · 510d0c0");
     expect(el).toHaveAttribute("title", expect.stringContaining("release 0.2.0"));
   });
+  it("links to a newer release only when /api/version reports one", async () => {
+    responses["/api/me"] = { kind: "service", is_admin: false, is_human: true };
+    responses["/api/version"] = { version: "x", release: "0.4.0", commit: "x" };
+    const first = render(<MemoryRouter><Shell><div /></Shell></MemoryRouter>);
+    await screen.findByText(/v0\.4\.0/);
+    expect(document.querySelector(".build-update")).toBeNull();
+    first.unmount();
+    responses["/api/version"] = { version: "x", release: "0.4.0", commit: "x", latest_version: "0.4.1", latest_url: "https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1" };
+    render(<MemoryRouter><Shell><div /></Shell></MemoryRouter>);
+    const link = await screen.findByRole("link", { name: /v0\.4\.1 available/ });
+    expect(link).toHaveAttribute("href", "https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(link).toHaveAttribute("title", "A newer Blerg release is available");
+  });
   it("shows no version when /api/version fails, rather than an ellipsis", async () => {
     responses["/api/me"] = { kind: "service", is_admin: false, is_human: true };
     const mock = vi.mocked(api);

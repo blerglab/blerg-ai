@@ -41,6 +41,7 @@ These features are shared control-plane services, independent of the coding engi
 | CRED-07 | Access-only session credential refresh without distributing managed refresh authority | [Runner credential broker](../runner/internal/server/enginecredentials.go), [daemon credential contract](../runner/internal/daemon/enginecredentials.go) |
 | PLUG-01 | Ordered per-account always-on plugin settings, replace/remove, marketplace policy, and entry validation | [Core plugins](../core/internal/plugins/service.go), [shared grammar](../contracts/pluginspec/), [UI](../core/web/src/PluginsSection.tsx); Claude/Codex only |
 | PLUG-02 | Native engine plugin preparation and per-session snapshots | [Daemon engines](../runner/internal/daemon/engines.go), [Codex preparation](../runner/internal/daemon/codexplugins.go), [plugin documentation](../install/desktop/DAEMON.md#always-on-plugins) |
+| PLUG-03 | Owner-approved plugin requests, session-only or additive always-on selection, between-turn reload, and explicit new-session-only outcomes | [Runner workflow](../runner/internal/server/sessionplugins.go), [daemon reload](../runner/internal/daemon/sessionplugins.go), [protocol](../runner/internal/protocol/sessionplugins.go), [panel](../runner/frontend/src/components/SessionPlugins.tsx); live reload: unrestricted host Claude only |
 | CONN-01 | Named account-owned HTTP MCP connections, metadata, rename/update/delete, and status/events | [Connection service](../core/internal/mcpconn/service.go), [UI](../core/web/src/McpConnectionsSection.tsx) |
 | CONN-02 | Bearer/header-secret, OAuth, and built-in board connection authentication | [MCP connection service](../core/internal/mcpconn/), [connection guide](mcp-connections.md) |
 | CONN-03 | OAuth discovery/registration, consent callback, reconnect, refresh, and credential isolation | [OAuth implementation](../core/internal/mcpconn/oauth.go), [token rotation](../core/internal/mcpconn/oauth_tokens.go) |
@@ -49,6 +50,11 @@ These features are shared control-plane services, independent of the coding engi
 | CONN-06 | URL validation, DNS/address policy, redirect refusal, and outbound request limits | [Network guard](../contracts/netguard/), [connection policy](../core/internal/mcpconn/pin_policy_test.go) |
 
 ## Session launching and control plane
+
+Sessions on a desktop can start and drive their own child sessions with owner approval, standing
+rules or session grants. Child controls, files, live status and separate usage totals share the
+engine-independent runner services; nesting is limited to one generation. See
+[sessions starting sessions](talking-to-an-agent.md#when-the-agent-starts-other-sessions).
 
 Implementation roots: [server](../runner/internal/server/), [DB](../runner/internal/db/), [MCP](../runner/internal/mcp/), [gateway](../runner/internal/mcpgw/), [protocol](../runner/internal/protocol/). Evidence paths below are relative to those roots unless a full path is shown. GAP references identify findings in the accompanying review.
 

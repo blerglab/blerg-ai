@@ -17,6 +17,7 @@ import type {
   MessagingPayload,
   ModelChangedPayload,
   StatusPayload,
+  SessionUploadPayload,
   SubagentPayload,
   ToolCallPayload,
   ToolResultPayload,
@@ -26,6 +27,7 @@ import type {
 } from '../../types'
 import ArtifactCard from '../ArtifactCard'
 import AskReply from '../AskReply'
+import DelegationCard from './DelegationCard'
 import { useAsks } from '../askContext'
 import { MessageText } from '../AttachmentChips'
 import CopyMessage from '../CopyMessage'
@@ -294,6 +296,16 @@ export function renderEvent(
         </div>
       )
     }
+    case 'session_upload': {
+      const p = ev.payload as Partial<SessionUploadPayload> | null
+      const name = typeof p?.name === 'string' ? p.name : 'a file'
+      const parent = typeof p?.from_title === 'string' && p.from_title ? p.from_title : 'another session'
+      return <div key={key} className="agent-card marker" data-testid="session-upload" data-event-id={key}>📎 {name} · from {parent}{typeof p?.size === 'number' && Number.isFinite(p.size) && p.size >= 0 ? ` · ${p.size.toLocaleString()} bytes` : ''}<TimeLabel ts={ev.ts} className="card-time-end" /></div>
+    }
+    case 'delegation_request':
+      return <DelegationCard key={key} ev={ev} />
+    case 'delegation_decided':
+      return null // folded into its request's card
     case 'ask':
       return <AskCard key={key} ev={ev} cards={options.cards} />
     case 'update':

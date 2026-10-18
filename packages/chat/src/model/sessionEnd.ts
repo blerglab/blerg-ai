@@ -52,6 +52,7 @@ export const END_REASON: Record<string, EndReasonEntry> = {
   job_disappeared: { text: () => 'The cluster job was removed outside Blerg', failure: true },
   not_resumed: { text: () => 'Expired: nobody resumed it within a day', failure: true },
   daemon_lost: { text: () => 'Its daemon disconnected and never came back', failure: true },
+  parent_ended: { text: () => 'Stopped when the session that started it ended' },
   daemon_unreported: { text: () => 'Its daemon no longer had this session' },
 }
 

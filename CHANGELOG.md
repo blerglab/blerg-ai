@@ -8,6 +8,38 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-17
+
+### Upgrade notes
+- Reinstall the desktop daemon for child-session recovery and local-engine reports; start a new
+  session to receive the updated CLI guide. Chat is 0.22.0.
+
+### Added
+- Add permitted plugins and bundled skills from a session’s Capabilities panel, with human-approved agent requests and between-turn loading for supported host Claude sessions.
+- A session can start and drive other sessions on its desktop with your approval
+  (`blerg-runner session …`), with children in Live, the sidebar and Insights (chat 0.22.0).
+- `blerg-runner budget` reports the desktop's remaining capacity separately by provider.
+
+- Propose Board cards from Claude or Codex sessions, with editable approval drafts, verified source metadata, and optional administrator-only card details.
+
+- Choose a Board when launching a session, with verified access, shared MCP/CLI tools, and matching cron board discovery.
+- Session and subagent progress bars show native plans or explicit `blerg-runner progress` counts, with each caller kept separate.
+- A "vX.Y.Z available" link beside the version in the runner sidebar, core footer and board top bar when a
+  newer public release exists, linking to its GitHub release page. Core checks api.github.com every 6 hours
+  (the check shows the server's IP to GitHub); `BLERG_UPDATE_CHECK=0` turns it off, `BLERG_UPDATE_REPO`
+  changes the repository.
+
+### Fixed
+- Authenticated messaging CLI requests refuse redirects, preserving session and board credentials.
+
+- Keep long shell commands and results compact in the session panel, with scrollable full text and visible status and actions.
+- Codex subagent typing stays separate from the main reply, and a completed subagent message no longer makes the main agent's unfinished text disappear.
+- Ctrl+A (Cmd+A) with a file, code or ticket open over the page selects what is in it, ready to copy,
+  instead of the whole page behind it; a text field keeps its own select-all (chat 0.21.1).
+- A bare file name the agent mentions (`plan.md`, no folder) that is a file published in the session
+  opens that published file, instead of looking for it at the top of the session's folder and saying
+  "Not found" (chat 0.21.2).
+
 ## [0.3.1] - 2026-10-17
 
 ### Upgrade notes
@@ -18,6 +50,7 @@ minor release and are called out here.
   Blerg: they open the item's diff or copy the sha).
 
 ### Added
+
 - On a touch screen, holding a message, code block, ticket card or checklist row opens a sheet with
   Copy message, Select text and Cancel; the always-visible Copy buttons are gone there (desktop keeps
   the hover button). Nothing is selected by the hold itself, and Select text opens the text full
@@ -1144,7 +1177,8 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/blerglab/blerg-ai/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/blerglab/blerg-ai/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/blerglab/blerg-ai/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/blerglab/blerg-ai/compare/v0.2.0...v0.2.1

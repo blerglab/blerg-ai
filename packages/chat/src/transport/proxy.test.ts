@@ -302,3 +302,21 @@ describe('published artifact session URL', () => {
     expect(t.publishedSessionUrl?.('unmapped')).toBeNull()
   })
 })
+
+describe('subagent typing proxy isolation', () => {
+  it('preserves child scope instead of mixing its deltas into the main typing callback', async () => {
+    const { r, t } = make()
+    const child = { type: 'agent_event', session_id: 's1', client_event_id: 'child-delta', ts: 't', kind: 'assistant_text', payload: { text: 'child words', done: false, parent_call_id: 'child-call' }, transient: true }
+    r.on(/\/events\/live/, () => sse([
+      frame('agent_event', { ...child, client_event_id: 'root-delta', payload: { text: 'root words', done: false } }),
+      frame('agent_event', child),
+      frame('replay_done', { last_seq: 0, has_more: false }),
+    ], true))
+    const h = handlers()
+    const off = t.subscribe('s1', {}, h)
+    await until(() => h.onReplayDone.mock.calls.length === 1)
+    expect(h.onStreaming.mock.calls).toEqual([['root words']])
+    expect(h.onEvent).toHaveBeenCalledWith(child)
+    off()
+  })
+})

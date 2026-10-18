@@ -160,11 +160,17 @@ func types2str(e ast.Expr) string {
 // scopeRegistry has one zero value of every protocol struct that names a
 // session. TestScopeRegistryIsComplete fails when a new one is missing.
 var scopeRegistry = map[string]any{
-	"ReadWorkspaceFile":   protocol.ReadWorkspaceFile{},
-	"WorkspaceFileResult": protocol.WorkspaceFileResult{},
-	"SessionStarted":      protocol.SessionStarted{},
-	"SessionOutput":       protocol.SessionOutput{}, "SessionStateChanged": protocol.SessionStateChanged{},
-	"SessionMetaChanged": protocol.SessionMetaChanged{}, "SessionBackgroundChanged": protocol.SessionBackgroundChanged{},
+	"ResolveProgressOrigin": protocol.ResolveProgressOrigin{},
+	"ProgressOriginResult":  protocol.ProgressOriginResult{},
+	"ReadSessionOrigin":     protocol.ReadSessionOrigin{},
+	"SessionOriginResult":   protocol.SessionOriginResult{},
+	"ReadWorkspaceFile":     protocol.ReadWorkspaceFile{},
+	"WorkspaceFileResult":   protocol.WorkspaceFileResult{},
+	"SessionStarted":        protocol.SessionStarted{},
+	"SessionOutput":         protocol.SessionOutput{}, "SessionStateChanged": protocol.SessionStateChanged{},
+	"ApplySessionPlugins":  protocol.ApplySessionPlugins{},
+	"SessionPluginsResult": protocol.SessionPluginsResult{},
+	"SessionMetaChanged":   protocol.SessionMetaChanged{}, "SessionBackgroundChanged": protocol.SessionBackgroundChanged{},
 	"SessionTitleChanged": protocol.SessionTitleChanged{},
 	"SessionEnded":        protocol.SessionEnded{}, "SpawnSession": protocol.SpawnSession{},
 	"SendInput": protocol.SendInput{}, "KillSession": protocol.KillSession{},
@@ -193,6 +199,7 @@ var scopeRegistry = map[string]any{
 	"SessionPausedChanged": protocol.SessionPausedChanged{},
 	"OpenAsks":             protocol.OpenAsks{},
 	"DaemonWelcome":        protocol.DaemonWelcome{},
+	"DaemonRecoveryReady":  protocol.DaemonRecoveryReady{},
 }
 
 func TestScopeRegistryIsComplete(t *testing.T) {

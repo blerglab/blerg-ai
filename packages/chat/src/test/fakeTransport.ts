@@ -2,7 +2,7 @@
 // play the server — deliver an event or a typing delta, end a replay page, change the status, drop
 // and restore the link, answer an older page, and hold or fail an upload. Every call into the
 // component's handlers must be wrapped in act() by the TEST; the fake never does that itself.
-import type { AgentEvent, AssistantTextPayload, SessionStatus } from '../types'
+import type { AgentEvent, AssistantTextPayload, DelegationChoice, DelegationDecidedPayload, SessionStatus } from '../types'
 import { ArtifactGoneError } from '../transport/files'
 import type {
   ArtifactInfo,
@@ -58,6 +58,8 @@ export interface FakeTransportOptions {
   setModel?: boolean
   /** true: the transport passes a reply's answerTo on (as the runner's websocket does). */
   answersAsks?: boolean
+  /** true: the transport can decide a delegation request (decideDelegation, delegationRequest). */
+  decidesDelegations?: boolean
   /** Pages loadOlder is answered with at once, in order; afterwards each call waits for answerOlder. */
   olderPages?: OlderPage[]
 }
@@ -179,6 +181,22 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
     files,
   }
   if (opts.answersAsks) transport.answersAsks = true
+  const decisions: Array<{ requestId: string; choice: DelegationChoice }> = []
+  const fullPrompts: string[] = []
+  const delegation = { decideImpl: null as null | ((requestId: string, choice: DelegationChoice) => Promise<DelegationDecidedPayload>), prompt: 'the whole prompt' }
+  if (opts.decidesDelegations) {
+    transport.decideDelegation = async (requestId, choice) => {
+      decisions.push({ requestId, choice })
+      if (delegation.decideImpl) return delegation.decideImpl(requestId, choice)
+      return choice === 'deny'
+        ? { request_id: requestId, status: 'denied' }
+        : { request_id: requestId, status: 'allowed', choice, child_session_id: 'child-1234567890' }
+    }
+    transport.delegationRequest = async requestId => {
+      fullPrompts.push(requestId)
+      return { prompt: delegation.prompt }
+    }
+  }
   if (opts.interrupt !== false) transport.interrupt = async () => { interrupts++ }
   if (opts.setModel !== false) transport.setModel = async (_sessionId, model, effort) => { setModelCalls.push({ model, effort }) }
 
@@ -189,6 +207,12 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
     /** The file fake, or undefined when the transport has none. */
     files,
     sent,
+    /** Every delegation decision made through the transport. */
+    decisions,
+    /** Request ids delegationRequest was asked for. */
+    fullPrompts,
+    /** decideImpl replaces the default reply; prompt is what delegationRequest answers. */
+    delegation,
     /** Every message sent, with the options it went with. */
     sentWith,
     older,
@@ -199,7 +223,7 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
     get meta() { return meta },
     /** A persisted event to onEvent; a transient assistant_text delta to onStreaming. */
     emit(ev: AgentEvent) {
-      if (ev.transient && ev.kind === 'assistant_text') {
+      if (ev.transient && ev.kind === 'assistant_text' && !(ev.payload as AssistantTextPayload).parent_call_id) {
         const text = (ev.payload as AssistantTextPayload).text
         each(h => h.onStreaming(text))
       } else {

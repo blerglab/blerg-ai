@@ -32,6 +32,18 @@ The mode is fixed for the session's life: it cannot be changed after the start. 
 unattended says **Unattended** under its title on the session page. You can still write to one;
 the message is delivered as usual.
 
+## Choose a board at launch
+
+The launch sheet's optional **Board** choice connects the session to a standalone Blerg Board.
+Your browser remembers the choice, and the server checks your live access again before starting.
+Choose an agent session in a supported local sandbox or cluster runtime. The session keeps its
+coding tools and can read and write that board directly through the built-in `board` connection.
+It appears in the panel's Capabilities tab; the session's supported `blerg-runner board` and
+`ticket` commands use it too. See [board connection details](mcp-connections.md#the-built-in-board-connection).
+
+If a remembered board is unavailable, choose another or explicitly clear it before launching.
+Discovery has a timeout and a Retry control; launches without a board do not wait on it.
+
 ## When the app calls you
 
 The runner tells you when a session needs you: a toast in the runner page you have open and, when
@@ -103,7 +115,8 @@ path (`runner/internal/server/artifacts.go:120`, `README.md`, `./scripts/scrub.s
 is drawn with a dotted underline and the hint "Open from the session's folder". Only the agent's
 text is read this way, never your own messages, a code block, a URL or a host path such as
 `/home/...`. A bare `foo.bar` is not taken for a file unless its extension is a known one, and a name
-with a slash needs a file-like last part (`and/or` and `src/components` stay text).
+with a slash needs a file-like last part (`and/or` and `src/components` stay text). A bare name with no
+folder (`plan.md`) that is also a file published in the session opens that published file instead.
 
 A click reads the file through the session (`GET /api/sessions/{id}/workspace-file?path=`, without any
 `:line`, `#L` or query part) and opens it in the same viewer as published files: markdown, text, JSON,
@@ -199,6 +212,8 @@ text full screen, all of it selected with the phone's own handles: drag them in,
 what is still selected, or everything) and **Cancel**. A press on a link keeps the
 browser's own menu. Selecting part of the chat and copying keeps the structure (headings, lists, links, tables,
 code) without the timestamps and buttons; a selection inside one code block copies that code exactly.
+With a file, code or ticket open over the page, Ctrl+A (Cmd+A) selects what is in it, not the page
+behind it; in a text field it still selects that field.
 Pasting formatted text from a web page, Docs, Slack or GitHub into the message box inserts it as
 Markdown: images and scripts are dropped, a code block keeps its language. Plain text, code copied
 from an editor or terminal, and text that is already Markdown go in as they are. **Ctrl/Cmd+Shift+V**
@@ -304,7 +319,10 @@ Terminal sessions have no panel.
   for this session, with a link to the Proposals page showing that session's proposals and tool
   changes (with a link back to all of them).
 - **Running now**: the subagents at work, each with its task, type, model, tokens, what it is doing
-  and how long it has run; and the background tasks.
+  and how long it has run; and the background tasks. When the session or a subagent has a plan,
+  its row also shows a short progress bar, the completed/total count and the current step's label
+  (or its last completed step). A completed bar is green. Each subagent has its own plan and count;
+  its updates never replace the session's plan. No plan or explicit progress means no bar.
 - **Session**: where it runs, the engine and model, when it started and how long it has lived. The
   session's Insights open from the Insights button in the session header. For an engine that can
   continue after a usage limit, **Resume when limit resets** is here too: it belongs to this session
@@ -335,6 +353,23 @@ flashes it; in the drawer it then closes the drawer. A row whose place is furthe
 chat has drawn says so, and the drawer stays open; scroll up in the chat to reach it. An answer you
 were typing in the drawer is still there when you open it again.
 
+### Progress
+
+For work without a plan, report a script's progress with `blerg-runner progress 3/7 "Run checks"`
+and finish it with `blerg-runner progress --done`. The command replaces that caller's progress;
+a later native plan replaces it again. Counts must be whole numbers, with a positive total up to
+1,000,000, and completed no greater than total. Labels are limited to 200 characters. Progress is
+reported explicitly, never guessed from command output.
+
+Claude shell calls receive a per-call scope through a Blerg `PreToolUse` hook; Codex shell calls
+supply their native thread identity. The owning daemon resolves those identities to the current
+session or subagent run before accepting progress. Unknown or ended calls are refused, including
+a background script after its Bash call has returned. Keep the engine environment when invoking
+the CLI so it retains its scope. A shell started outside either engine, with no native identity, reports session progress. Upgrade both
+the runner and daemon to use this command; an older daemon times out with a clear error rather
+than assigning an unknown caller to the session. The hook runs inside the engine's environment,
+changes no permissions, and is absent from restricted sessions, which have no shell.
+
 ### What is live is read from the whole session
 
 Live, the header badge and the panel opening by itself read what is live from the runner server,
@@ -345,6 +380,37 @@ part of the conversation the chat has loaded, and Running now agrees with the si
 server is asked again when something starts, ends or asks (at most every five seconds), and what
 happens in between moves the list at once. A runner server older than this reads only what the chat
 has loaded, as before: the lists fill in as the history loads.
+
+### Add a plugin or skill during a session
+
+Open **Session panel → Capabilities → Add plugin or skill**. Choose an allowed marketplace and
+enter its plugin name; skills are supplied by plugin bundles. The available marketplaces come
+from the install's policy. Choose **This session only** to leave account settings unchanged, or
+**Always on** to add it to the account's engine-specific plugin list as Settings does.
+
+A supported host Claude session loads the plugin between turns, after foreground and background
+work is idle. The engine process resumes its conversation with the new snapshot; an active turn
+is never interrupted to install it. Codex, container and cluster sessions, and restricted
+sessions currently offer always-on settings for **new sessions only**, with an explanation in the
+panel. Restricted sessions continue to run without plugins; the setting applies to future
+unrestricted sessions. They do not claim to have loaded it into the current session.
+
+The agent can ask with `blerg-runner request-plugin helper@example/plugins "Why it is needed"`.
+The built-in `blerg_request_plugin` tool takes `{name, reason}` and offers the same request in
+restricted or unattended sessions without a shell. A bare plugin name is accepted only when its
+marketplace is unambiguous. This queues a private
+approval request, shown beside the chat and in the panel with a link to approve or decline on
+**Proposals**. The person reviews the exact plugin, marketplace and reason, chooses its scope,
+and confirms. The agent cannot approve its own request or request a marketplace outside policy.
+A restricted session can request an always-on setting for future unrestricted sessions; approval
+does not install into the restricted session. An unattended session's request waits for the person
+too, and expires after seven days like
+other proposals. Declining or expiry changes nothing.
+
+Queued, applied, failed and new-session-only outcomes are shown from the server's
+state. A failed application is not shown as loaded. See the
+[desktop plugin notes](../install/desktop/DAEMON.md#adding-to-an-existing-session) for the daemon
+requirement and [proposal rules](proposals.md).
 
 ### Tickets and checklists
 
@@ -381,6 +447,36 @@ publishes the diff of those commits ([Diffs](artifacts.md#diffs)) and keeps its 
 gets **View diff**, which opens it. When the diff cannot be made (the commits are not in that
 repository, or it is over the per-file limit) the command says so and the item keeps its commits
 without one.
+
+### Proposing a new Board ticket
+
+To file something discovered during a session, the agent first lists the Boards the session owner
+can access and searches the chosen board for duplicates:
+
+```sh
+blerg-runner ticket boards
+blerg-runner ticket search --board "Example" --query "startup progress"
+blerg-runner ticket file --board "Example" --title "Show startup progress" \
+  --body "Describe the observed behavior and the expected result." --type bug --repo app
+```
+
+`--board` accepts a board name or ID. Repeat `--repo` for multiple target repositories; these are
+independent of the session's source repository. If a board requires a repository and has only one,
+that repository can be its default; otherwise select the target repositories explicitly.
+Add `--sensitive` when the body should be readable only by that target board's administrators.
+Keep sensitive details out of the title: the title and source metadata remain visible, and this
+flag does not hide anything already in the session's conversation.
+
+These commands do not need a Board selected at launch. The built-in `blerg_ticket_file` tool also
+offers `list_boards`, `search` and `propose` actions to Claude and Codex, including restricted
+sessions without a shell. It provides this approval-gated workflow without adding arbitrary tools
+or changing the session's existing MCP grants.
+
+Filing queues a proposal for the person. On **Proposals**, review it, edit or retarget the pending
+draft if needed, then approve the current exact draft or reject it. Blerg records the source
+session, repository, verified commit when available, and engine. Nothing is written before
+approval, and an ambiguous **unknown** result is never retried automatically. See
+[Board filing proposals](proposals.md#filing-a-board-card-from-a-session).
 
 ### The first message waits for MCP servers
 
@@ -457,6 +553,43 @@ it started ([what is live](#what-is-live-is-read-from-the-whole-session), above)
 knows only the ones in the part of the conversation you have loaded. The board's chat has no panel: there only the working line
 says what runs. A session that goes idle with tasks still running keeps its agent process alive for
 them, up to about an hour; after that the process is closed and the tasks are marked stopped.
+
+## When the agent starts other sessions
+
+An agent on your desktop can ask another session to do part of its work. The approval card shows
+the engine, model, repository, runtime, prompt, and whether the child should keep running after its
+parent ends. A host request warns that it runs outside the sandbox. You can deny it, allow it once,
+allow matching starts for this parent session, or create a standing rule for that engine, runtime,
+and desktop. Session grants match the approved repository; standing rules cover any repository.
+Choices that would widen the parent's permissions always ask again.
+
+Only sessions you launched directly can use preapproval. Board, cron, private, and agent-started
+parents ask for each start; a child cannot start another generation of children. New child starts
+need an updated, connected desktop daemon. Cluster children are not supported in this release.
+
+The parent's Live tab lists its children and pending requests. Open a child to read its conversation;
+Started sessions shows the temporary permissions and their Revoke buttons. Revoking permission
+prevents future starts; it does not stop existing children. Settings lists standing rules and lets
+you add or remove them. The sidebar groups children under their parent, and Insights shows child
+usage separately from the parent's own usage.
+
+A parent can have three running children and make twenty starts. Across your account, the limits
+are six running children and sixty starts per hour. Approval requests expire after ten minutes.
+Pausing or restarting a parent expires its pending requests while preserving existing children and
+session permissions. A real end revokes those permissions and stops children, including children
+whose daemon reconnects later, unless you approved **Keep running** for them. Resuming the parent
+does not revive children stopped by that earlier end.
+An engine already running on an offline daemon can only be stopped when that daemon reconnects.
+
+Agents use `blerg-runner budget` to read the capacity their own desktop reports, separately for each
+provider. Missing usage information is shown as unknown. A local engine is labeled local; a
+Claude budget does not imply the same capacity for Codex or another provider.
+
+Host sessions share the daemon's home directory. A host session can therefore read another host
+session's token file; session-token API checks do not provide isolation from code running on the
+same host. Use the desktop sandbox when you need that boundary. A container also needs an engine
+endpoint it can reach; a Hermes endpoint bound only to the host's loopback may be unreachable there.
+OpenClaw remains host-only.
 
 ## Settings
 

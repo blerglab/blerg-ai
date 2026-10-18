@@ -17,7 +17,8 @@ import (
 // Who started a session (migration 037). A session the person launches in the app records
 // nothing; a start through the v1 contract records the principal's kind and, for an agent
 // token, the owner's label for it (asked of core once, best effort), so the app can keep
-// tool-started sessions apart from the person's own.
+// tool-started sessions apart from the person's own. A child session (delegation.go) records kind
+// "session" and its parent's title.
 
 // startedByOf is the browser's view of a row: nil for the person's own session.
 func startedByOf(row *db.SessionRow) *protocol.StartedBy {
@@ -42,9 +43,13 @@ func (a *API) recordStartedBy(ctx context.Context, sessionID string, principal r
 	if kind == "human" {
 		kind = "" // the person's own start: nothing to record
 	}
-	if cronID != "" {
+	switch {
+	case cronID != "":
 		kind = "cron"
-	} else if principal.Kind == agentPrincipalKind {
+	case principal.Kind == sessionDelegateKind:
+		// A child: started by its parent session, named by the parent's title.
+		kind, name = "session", a.parentLabel(ctx, principal.Sub)
+	case principal.Kind == agentPrincipalKind:
 		lookup := a.fetchTokenName
 		if lookup == nil {
 			lookup = func(ctx context.Context, accountID, tokenID string) (string, error) {

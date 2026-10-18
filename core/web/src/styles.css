@@ -661,3 +661,13 @@ textarea:focus {
     max-width: 30vw;
   }
 }
+
+.shell-footer a.build-update {
+  color: var(--blaze);
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+
+.shell-footer a.build-update:hover {
+  text-decoration: underline;
+}

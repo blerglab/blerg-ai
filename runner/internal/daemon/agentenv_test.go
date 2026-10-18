@@ -98,14 +98,14 @@ func TestAgentSessionEnvCarriesSessionIdentity(t *testing.T) {
 		"BLERG_BOARD_URL":            "http://board.local",
 	} {
 		if env[k] != want {
-			t.Errorf("env[%s] = %q, want %q", k, env[k], want)
+			t.Errorf("env[%s] does not match fixture", k)
 		}
 	}
 	if _, ok := env["BLERG_RUNNER_DAEMON_TOKEN"]; ok {
 		t.Error("the daemon master token reached an agent-kind session")
 	}
 	if !strings.HasPrefix(env["PATH"], filepath.Join(home, ".local", "bin")+string(os.PathListSeparator)) {
-		t.Errorf("PATH does not start with ~/.local/bin (blerg-runner would not resolve): %q", env["PATH"])
+		t.Error("PATH does not start with ~/.local/bin (blerg-runner would not resolve)")
 	}
 }
 

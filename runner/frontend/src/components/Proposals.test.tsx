@@ -403,3 +403,116 @@ describe('Decided results', () => {
     expect((await screen.findByTestId('proposal-result-p1')).textContent).toBe('refused <script>')
   })
 })
+
+
+describe('Board filing proposals', () => {
+  const draft = { board_id: 'b1', board_name: 'First board', title: 'Bug', body: 'Reproduction', type: 'bug', sensitive: true, repos: ['target/repo'], origin: { repo: 'source/repo', engine: 'codex', commit: 'abcdef1', session_url: 'https://runner.example.test/sessions/s1' } }
+  beforeEach(() => {
+    items = [prop({ kind: 'board_file', connection_name: 'Board', tool: 'file_ticket', arguments: draft })]
+    action = url => url === '/api/session-boards' ? res({ configured: true, boards: [{ id: 'b1', name: 'First board' }, { id: 'b2', name: 'Second board' }] }) : null
+  })
+  it('does not file on edit and sends approved exact arguments only after confirmation', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+    expect(posts()).toHaveLength(0)
+    action = url => url === APPROVE ? res({}) : null
+    fireEvent.click(screen.getByRole('button', { name: 'Run it' }))
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0].body).toEqual({ expected_arguments_raw: JSON.stringify(draft) })
+  })
+  it('edits, retargets and preserves target repos separately from read-only origin', async () => {
+    const before = JSON.stringify(draft)
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit ticket draft' }))
+    await screen.findByRole('option', { name: 'Second board' })
+    expect(screen.getByLabelText('Target board')).toHaveValue('b1')
+    fireEvent.change(screen.getByLabelText('Target board'), { target: { value: 'b2' } })
+    fireEvent.change(screen.getByLabelText('Ticket title'), { target: { value: 'Edited title' } })
+    fireEvent.change(screen.getByLabelText('Target repositories (optional)'), { target: { value: 'other/repo, second/repo' } })
+    const updated = { ...draft, board_id: 'b2', board_name: 'Second board', title: 'Edited title', repos: ['other/repo', 'second/repo'] }
+    action = url => url.endsWith('/draft') ? res(prop({ kind: 'board_file', arguments: updated })) : null
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(() => expect(calls.some(c => c.method === 'PATCH')).toBe(true))
+    const patch = calls.find(c => c.method === 'PATCH')!
+    expect(patch.body).toEqual({ expected_arguments_raw: before, draft: { board_id: 'b2', title: 'Edited title', body: 'Reproduction', type: 'bug', sensitive: true, repos: ['other/repo', 'second/repo'] } })
+    expect(posts()).toHaveLength(0)
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument())
+    expect(screen.getByTestId('proposal-args-p1')).toHaveTextContent('Edited title')
+    expect(screen.getByTestId('proposal-args-p1')).toHaveTextContent('source/repo')
+  })
+  it('keeps failed edits open and cannot approve the unsaved changes', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit ticket draft' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save draft' })).toBeEnabled())
+    action = url => url.endsWith('/draft') ? res({ error: 'Draft changed; reload it.' }, 409) : null
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
+    expect(await screen.findByText('Draft changed; reload it.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(posts()).toHaveLength(0)
+  })
+  it('requires a fresh confirmation when a poll returns a changed draft', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+    expect(screen.getByRole('button', { name: 'Run it' })).toBeInTheDocument()
+    const updated = { ...draft, title: 'Changed elsewhere' }
+    items = [prop({ kind: 'board_file', arguments: updated })]
+    fireEvent(window, new Event('focus'))
+    await waitFor(() => expect(screen.getByTestId('proposal-args-p1')).toHaveTextContent('Changed elsewhere'))
+    expect(screen.queryByRole('button', { name: 'Run it' })).not.toBeInTheDocument()
+    expect(posts()).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    action = url => url === APPROVE ? res({}) : null
+    fireEvent.click(screen.getByRole('button', { name: 'Run it' }))
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0].body).toEqual({ expected_arguments_raw: JSON.stringify(updated) })
+  })
+  it('keeps an unavailable board selected and prevents saving an unverified target', async () => {
+    action = url => url === '/api/session-boards' ? res({}, 503) : null
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit ticket draft' }))
+    await screen.findByRole('button', { name: 'Retry boards' })
+    expect(screen.getByLabelText('Target board')).toHaveValue('b1')
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled()
+    expect(calls.some(c => c.url === '/api/boards')).toBe(false)
+    expect(posts()).toHaveLength(0)
+  })
+  it('never makes ordinary MCP arguments editable', async () => {
+    items = [prop()]
+    renderPage()
+    await screen.findByTestId('proposal-p1')
+    expect(screen.queryByRole('button', { name: 'Edit ticket draft' })).not.toBeInTheDocument()
+  })
+})
+
+describe('plugin request approval',()=>{
+ it('requires human confirmation and posts the reviewed arguments plus chosen scope',async()=>{
+  items=[prop({kind:'plugin_request',plugin_session_apply:true,tool:'request_plugin',arguments:{marketplace:'example/plugins',plugin:'helper',reason:'Review changes'},agent_summary:''})]
+  action=url=>url===APPROVE?res({...items[0],state:'executing'}):null
+  renderPage()
+  const card=await screen.findByTestId('proposal-p1')
+  fireEvent.click(within(card).getByRole('button',{name:'Approve'}))
+  expect(posts()).toHaveLength(0)
+  fireEvent.change(within(card).getByLabelText('Apply plugin'),{target:{value:'always'}})
+  fireEvent.click(within(card).getByRole('button',{name:'Add plugin'}))
+  await waitFor(()=>expect(posts()).toEqual([{url:APPROVE,method:'POST',body:{scope:'always',expected_arguments_raw:items[0].arguments_raw}}]))
+ })
+ it('does not offer a session-only install when current eligibility is unavailable',async()=>{
+  items=[prop({kind:'plugin_request',plugin_session_apply:false,tool:'request_plugin',agent_summary:''})]
+  renderPage()
+  const card=await screen.findByTestId('proposal-p1')
+  fireEvent.click(within(card).getByRole('button',{name:'Approve'}))
+  expect(within(card).getByRole('option',{name:'This session only'})).toBeDisabled()
+  expect(within(card).getByLabelText('Apply plugin')).toHaveValue('always')
+  expect(within(card).getByText(/new sessions/)).toBeInTheDocument()
+ })
+})
+
+describe('plugin application status',()=>{
+ it('does not show approval as a completed installation while the daemon is queued',async()=>{
+  items=[prop({kind:'plugin_request',state:'done',result:{state:'queued',message:'Waiting for idle.'}})]
+  renderPage('/proposals?id=p1')
+  const card=await screen.findByTestId('proposal-p1')
+  expect(within(card).getByTestId('proposal-state')).toHaveTextContent('queued')
+  expect(within(card).getByText('Waiting for idle.')).toBeInTheDocument()
+ })
+})

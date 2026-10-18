@@ -22,6 +22,7 @@ type codexRestrictedRuntime struct {
 	files               *codexRestrictedFiles
 	bridge              *codexMCPBridge
 	specs               []map[string]any
+	filing              *sessionFilingTool
 }
 
 func prepareCodexRestrictedRuntime(ctx context.Context, workDir, authHome string, prefix sandboxExec, gateway *protocol.MCPGatewayConfig, externalAuth bool) (*codexRestrictedRuntime, error) {
@@ -126,6 +127,9 @@ func (r *codexRestrictedRuntime) Specs() []map[string]any {
 	return append([]map[string]any(nil), r.specs...)
 }
 func (r *codexRestrictedRuntime) Call(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	if sessionBuiltinAllowed(name) && r.filing != nil {
+		return r.filing.CallNamed(ctx, name, args)
+	}
 	if strings.HasPrefix(name, "blerg_mcp__") {
 		if r.bridge == nil {
 			return "", errors.New("no MCP grant is attached")

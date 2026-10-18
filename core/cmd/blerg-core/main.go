@@ -18,6 +18,7 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/contracts/secrets"
+	"github.com/blerglab/blerg-ai/contracts/updatenotice"
 	"github.com/blerglab/blerg-ai/core/internal/api"
 	"github.com/blerglab/blerg-ai/core/internal/authprovider"
 	"github.com/blerglab/blerg-ai/core/internal/credentials"
@@ -25,6 +26,7 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/discovery"
 	"github.com/blerglab/blerg-ai/core/internal/identity"
 	"github.com/blerglab/blerg-ai/core/internal/keybackend"
+	"github.com/blerglab/blerg-ai/core/internal/landing"
 	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
 	"github.com/blerglab/blerg-ai/core/internal/plugins"
 	"github.com/blerglab/blerg-ai/core/internal/projects"
@@ -514,6 +516,11 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("build deps: %w", err)
 	}
+
+	// Look for a newer public release in the background (BLERG_UPDATE_CHECK=0 turns it off).
+	updates := updatenotice.NewChecker(landing.Release(), landing.Version())
+	deps.LatestRelease = updates.Latest
+	updates.Start(ctx)
 
 	// Seed the bootstrap admin account (idempotent no-op once accounts exist) only when the
 	// local password provider is actually active — an OIDC/GitHub deployment (Tasks 10/11)

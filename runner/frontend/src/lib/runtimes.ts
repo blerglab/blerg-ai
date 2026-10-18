@@ -95,3 +95,6 @@ export function runtimeDisabledReason(
   if (daemons.length === 0) return NO_DAEMON_REASON
   return null
 }
+
+/** Compact engine badges; unknown future engines retain their identifier. */
+export const ENGINE_SHORT: Record<string, string> = { claude: 'Cl', codex: 'Cx', hermes: 'H', openclaw: 'OC' }

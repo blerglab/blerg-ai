@@ -37,12 +37,13 @@ type queuedMsg = Input
 // Loop is one agent session's engine. Not safe for concurrent Run calls;
 // Enqueue is safe from any goroutine.
 type Loop struct {
-	cfg      Config
-	mu       sync.Mutex
-	queue    []queuedMsg
-	wake     chan struct{}
-	messages []Message  // provider-format context
-	askCh    chan Input // non-nil while an ask blocks; Enqueue routes here
+	recoveryInputGate func(context.Context) // guarded by mu; runs on workers, never Enqueue
+	cfg               Config
+	mu                sync.Mutex
+	queue             []queuedMsg
+	wake              chan struct{}
+	messages          []Message  // provider-format context
+	askCh             chan Input // non-nil while an ask blocks; Enqueue routes here
 
 	pending    *modelChange // model/effort change awaiting application
 	turnBlocks []Block      // assistant blocks emitted this turn (thinking detection)
@@ -187,6 +188,11 @@ func (l *Loop) EnqueueInput(in Input) {
 		default:
 		}
 	}
+	if l.recoveryInputGate != nil && len(l.queue) >= 64 {
+		l.mu.Unlock()
+		l.emit("error", ErrorPayload{Message: "message queue full — dropped", Retryable: true, ClientID: in.ClientID})
+		return
+	}
 	l.queue = append(l.queue, in)
 	l.mu.Unlock()
 	select {
@@ -227,6 +233,9 @@ func (l *Loop) Run(ctx context.Context) {
 			case <-l.wake:
 				continue
 			}
+		}
+		if !l.beforeRecoveryInput(ctx) {
+			return
 		}
 		tctx, cancel := context.WithCancel(ctx)
 		l.mu.Lock()
@@ -506,3 +515,21 @@ type toolError string
 func (e toolError) Error() string      { return string(e) }
 func errUnknownTool(name string) error { return toolError("unknown tool: " + name) }
 func errRejected(msg string) error     { return toolError(msg) }
+
+// SetRecoveryInputGate fences delegated input against the current daemon link.
+// Enqueue remains bounded and nonblocking while the engine worker waits.
+func (l *Loop) SetRecoveryInputGate(wait func(context.Context), ready func() bool) {
+	l.mu.Lock()
+	l.recoveryInputGate = wait
+	l.mu.Unlock()
+}
+
+func (l *Loop) beforeRecoveryInput(ctx context.Context) bool {
+	l.mu.Lock()
+	gate := l.recoveryInputGate
+	l.mu.Unlock()
+	if gate != nil {
+		gate(ctx)
+	}
+	return ctx.Err() == nil
+}

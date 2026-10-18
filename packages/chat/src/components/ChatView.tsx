@@ -33,6 +33,8 @@ import { loadDiffSummary } from '../model/artifactPreview'
 import WorkspaceFileViewer from './WorkspaceFileViewer'
 import Composer from './Composer'
 import { AskContext, type AskContextValue } from './askContext'
+import { DelegationContext, type DelegationContextValue } from './delegationContext'
+import { delegationStates } from '../model/delegations'
 import { ChatContext, type ChatContextValue } from './context'
 import FilesPanel from './FilesPanel'
 import Transcript, { WINDOW, type BackgroundLine } from './Transcript'
@@ -62,6 +64,9 @@ export interface ChatSlots {
 
 export interface ChatViewProps {
   session: string
+  /** Opens another session (a child a delegation card names) in the host's app. Absent: the card
+   *  shows the child's short id. */
+  onOpenSession?: (sessionId: string) => void
   /** @deprecated Not used since 0.19.0: commit chips never link out of Blerg (they open the item's
    *  diff at the commit, or copy the sha). Accepted so a host that passes it still compiles. */
   commitUrl?: (sha: string) => string | null | undefined
@@ -269,7 +274,15 @@ export default function ChatView(props: ChatViewProps) {
     diffSummary: files ? (id: string) => loadDiffSummary(sessionId, id, x => files.raw(sessionId, x)) : undefined,
     files,
     view: (a: ArtifactInfo, opts?: { autoplay?: boolean }) => { setAutoplay(!!opts?.autoplay); setDiffAnchor(null); setViewing(a) },
-    openWorkspaceFile: canOpenWorkspace ? (path: string, line?: number) => setWorkspaceFile({ path, line }) : undefined,
+    // A bare name (no folder) that is a file published in this session opens that file: an agent that
+    // says "open `plan.md`" means the one it published, not one at the top of its folder.
+    openWorkspaceFile: canOpenWorkspace ? (path: string, line?: number) => {
+      const published = files && !path.includes('/')
+        ? findLatest(artifacts.items, { name: path, origin: 'agent' }) ?? findLatest(artifacts.items, { name: path, origin: 'user' })
+        : undefined
+      if (published) { setAutoplay(false); setDiffAnchor(null); setViewing(published); return }
+      setWorkspaceFile({ path, line })
+    } : undefined,
     artifactLink: href => files ? resolveArtifactLink(href, publishedSessionUrl, artifacts.items) : null,
     latestVersion: (a: ArtifactPayload) => latestVersions.get(`${a.origin === 'user' ? 'user' : 'agent'}\0${a.name}`),
     byName: (name: string) => findLatest(artifacts.items, { name, origin: 'user' }),
@@ -505,6 +518,16 @@ export default function ChatView(props: ChatViewProps) {
       }
     : undefined, [canAnswer, transport, send])
   const askContext = useMemo<AskContextValue>(() => ({ states: asks.byEvent, answer: answerAsk }), [asks.byEvent, answerAsk])
+  const delegationFns = useMemo(() => ({
+    decide: transport.decideDelegation && !props.readOnly ? transport.decideDelegation.bind(transport) : undefined,
+    fullPrompt: transport.delegationRequest ? async (id: string) => (await transport.delegationRequest!(id)).prompt : undefined,
+    decideUrl: transport.publishedSessionUrl?.(sessionId) ?? null,
+  }), [transport, props.readOnly, sessionId])
+  const delegationContext = useMemo<DelegationContextValue>(() => ({
+    states: delegationStates(shownEvents),
+    ...delegationFns,
+    onOpenSession: props.onOpenSession,
+  }), [shownEvents, delegationFns, props.onOpenSession])
   const askOpen = asks.open !== null && !!transport.answersAsks
 
   // What a view beside the chat (useLiveState: the host's side panel) reads about this session:
@@ -647,6 +670,7 @@ export default function ChatView(props: ChatViewProps) {
       )}
 
       <AskContext.Provider value={askContext}>
+      <DelegationContext.Provider value={delegationContext}>
       <Transcript
         sessionId={sessionId}
         events={shownEvents}
@@ -678,6 +702,7 @@ export default function ChatView(props: ChatViewProps) {
         steers={steers}
         pin={pin}
       />
+      </DelegationContext.Provider>
       </AskContext.Provider>
 
       {ended && (

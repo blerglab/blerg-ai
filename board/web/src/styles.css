@@ -1055,3 +1055,5 @@ textarea { resize: vertical; }
 }
 /* the board session drawer: everything under its head */
 .board-chat .session-chat { flex: 1; }
+.topbar .build-update { font-family: var(--mono); font-size: 11px; color: var(--blaze); white-space: nowrap; text-decoration: none; }
+.topbar .build-update:hover { text-decoration: underline; }

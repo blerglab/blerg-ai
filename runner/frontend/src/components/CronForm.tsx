@@ -5,12 +5,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { apiFetch } from '../apiFetch'
-import { listBoards } from '../lib/boardApi'
+import { useSessionBoards } from '../lib/sessionBoards'
 import { buildExpression, describeSchedule, hasFiveFields, parseExpression, DAY_NAMES } from '../lib/cronSchedule'
 import type { PresetKind } from '../lib/cronSchedule'
 import { launchEngineModels, useLaunchOptions } from '../lib/launchOptions'
 import { FOCUS_BOARD_PROMPT } from '../lib/focusPrompt'
-import type { Board, CronInfo, CronRuntime, McpSelectionEntry } from '../types'
+import type { CronInfo, CronRuntime, McpSelectionEntry } from '../types'
 import type { RunDaemon } from '../lib/runtimes'
 import McpPicker from './McpPicker'
 import ModelPicker from './ModelPicker'
@@ -113,16 +113,14 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
   const [confirmStarter, setConfirmStarter] = useState(false)
 
   const [daemons, setDaemons] = useState<RunDaemon[]>([])
-  const [boards, setBoards] = useState<Board[] | null>(null)
+  const boardDiscovery = useSessionBoards(true)
+  const boards = boardDiscovery.state === 'ready' && boardDiscovery.configured ? boardDiscovery.boards : []
   useEffect(() => {
     let live = true
     apiFetch('/api/daemons')
       .then(r => (r.ok ? r.json() : []))
       .then(d => { if (live && Array.isArray(d)) setDaemons(d as RunDaemon[]) })
       .catch(() => { /* the pin is optional */ })
-    listBoards()
-      .then(b => { if (live) setBoards(b) })
-      .catch(() => { if (live) setBoards(null) })
     return () => { live = false }
   }, [])
 
@@ -224,7 +222,8 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
 
   const showTimes = kind !== 'advanced'
   const timeCount = kind === 'weekly' ? 1 : times.length
-  const boardKnown = boards?.some(b => b.id === boardId) ?? false
+  const boardKnown = boards.some(b => b.id === boardId)
+  const showBoardChoice = boardId !== '' || boardDiscovery.state === 'ready' && boardDiscovery.configured
 
   return (
     <form onSubmit={submit} data-testid="cron-form" style={{ padding: 16, maxWidth: 720 }}>
@@ -379,21 +378,26 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
         )}
       </div>
 
-      <div style={field}>
-        <label style={label} htmlFor="cron-board">Target board (optional)</label>
-        {boards ? (
+      {(showBoardChoice || boardDiscovery.state !== 'ready') && <div style={field}>
+        {showBoardChoice && <>
+          <label style={label} htmlFor="cron-board">Target board (optional)</label>
           <select id="cron-board" value={boardId} onChange={e => setBoardId(e.target.value)} style={control}>
             <option value="">None</option>
             {boards.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-            {boardId && !boardKnown && <option value={boardId}>{boardId}</option>}
+            {boardId && !boardKnown && <option value={boardId}>{boardId} (saved board)</option>}
           </select>
-        ) : (
-          <input id="cron-board" value={boardId} onChange={e => setBoardId(e.target.value)} placeholder="board id" style={control} />
-        )}
-        <p data-testid="cron-board-template-note" style={note}>
+        </>}
+        {boardDiscovery.state === 'loading' && <p style={note} role="status">Checking available boards…</p>}
+        {boardDiscovery.state === 'failed' && <p style={note} role="status">
+          Couldn't load boards.{' '}<button type="button" onClick={boardDiscovery.retry}>Retry boards</button>
+        </p>}
+        {boardId && !boardKnown && boardDiscovery.state !== 'loading' && <p data-testid="cron-board-unavailable" style={note}>
+          The saved board is currently unavailable. Saving keeps its ID unless you explicitly clear or change it; runs cannot use it until access is restored.
+        </p>}
+        {showBoardChoice && <p data-testid="cron-board-template-note" style={note}>
           For the starter prompt, create the board in the board app with the Focus board template (New board, then Template), then choose it here.
-        </p>
-      </div>
+        </p>}
+      </div>}
 
       <div style={field}>
         <span style={label}>MCP tools</span>

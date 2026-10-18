@@ -13,9 +13,10 @@ import (
 //
 // epoch is stamped when the native reader receives the event. A plan queued
 // during turn/start may be applied after its response binds the accepted turn;
-// an idle/prior-turn event cannot become the next turn's plan later.
+// an idle/prior-turn event cannot become the next turn's plan later. Child
+// notifications are bound to their owned active native turn and display run ID.
 func (a *codexApp) observePlan(raw json.RawMessage, epoch uint64) {
-	if len(raw) > protocol.MaxPlanUpdatedBytes || epoch == 0 || a.ctx == nil || a.ctx.Err() != nil {
+	if len(raw) > protocol.MaxPlanUpdatedBytes || a.ctx == nil || a.ctx.Err() != nil {
 		return
 	}
 	var native struct {
@@ -46,13 +47,31 @@ func (a *codexApp) observePlan(raw json.RawMessage, epoch uint64) {
 		return
 	}
 	a.d.mu.Lock()
-	current := a.d.app == a && a.d.threadID != "" && native.ThreadID == a.d.threadID && a.d.activeTurn && !a.d.codexToolsRestricted()
+	current := a.d.app == a && a.d.threadID != "" && !a.d.codexToolsRestricted()
+	root := native.ThreadID == a.d.threadID
+	if root {
+		current = current && a.d.activeTurn && epoch != 0
+	} else {
+		child := a.d.children[native.ThreadID]
+		current = current && child != nil && !child.done && child.callID != ""
+		if current {
+			// Native thread identity survives resumes; display identity does not.
+			// A late plan must never attach to a previous run's panel row.
+			clean.ChildID = child.callID
+		}
+	}
 	a.d.mu.Unlock()
 	if !current {
 		return
 	}
 	a.mu.Lock()
-	current = a.planEpoch == epoch && a.turn != "" && native.TurnID == a.turn
+	if root {
+		current = a.planEpoch == epoch && a.turn != "" && native.TurnID == a.turn
+	} else {
+		// Children can continue after the root has finished its turn. Their
+		// owned, active native turn is the authority, independent of root epochs.
+		current = native.TurnID != "" && a.childTurns[native.ThreadID] == native.TurnID
+	}
 	a.mu.Unlock()
 	if !current || a.ctx.Err() != nil {
 		return

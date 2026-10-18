@@ -28,3 +28,16 @@ export function setFocus(id: string | null): void {
     localStorage.setItem(FOCUS_KEY, JSON.stringify(id))
   }
 }
+
+const CHILDREN_KEY = 'blerg-runner.sidebar.childrenClosed'
+export function childrenExpanded(parent: string): boolean {
+  try { return !(JSON.parse(localStorage.getItem(CHILDREN_KEY) ?? '[]') as unknown[]).includes(parent) } catch { return true }
+}
+export function setChildrenExpanded(parent: string, expanded: boolean): void {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(CHILDREN_KEY) ?? '[]')
+    const closed = new Set(Array.isArray(saved) ? saved.filter((v): v is string => typeof v === 'string') : [])
+    if (expanded) closed.delete(parent); else closed.add(parent)
+    localStorage.setItem(CHILDREN_KEY, JSON.stringify([...closed].slice(-200)))
+  } catch { /* Storage is optional. */ }
+}

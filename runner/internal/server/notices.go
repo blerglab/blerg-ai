@@ -30,8 +30,8 @@ import (
 
 // headlessSession reports whether nobody watches the session, so nothing about it should call a
 // person: an unattended session (effectiveInteraction: chosen at start, and the reading of an
-// older row), a cron's, one the operator key started, and one an agent token started that did not
-// ask for a person in the chat. A board's Discuss and board sessions (agent-token starts recorded
+// older row), a cron's, one the operator key started, a child another session started
+// (delegation.go), and one an agent token started that did not ask for a person in the chat. A board's Discuss and board sessions (agent-token starts recorded
 // interactive) and its Assist sessions are driven by a person and keep their notices.
 func headlessSession(row *db.SessionRow) bool {
 	if row == nil {
@@ -44,7 +44,7 @@ func headlessSession(row *db.SessionRow) bool {
 		return true
 	}
 	switch row.StartedByKind {
-	case "cron", "runner_key":
+	case "cron", "runner_key", "session":
 		return true
 	case agentPrincipalKind:
 		return row.Interaction != protocol.InteractionInteractive

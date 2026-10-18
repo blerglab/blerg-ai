@@ -16,6 +16,9 @@ func (c *WSClient) SendWorkspaceFileResult(result protocol.WorkspaceFileResult) 
 	return c.sendWorkspaceFileResult(result, 10*time.Second)
 }
 func (c *WSClient) sendWorkspaceFileResult(result protocol.WorkspaceFileResult, timeout time.Duration) error {
+	return c.sendBoundedWorkspaceReply(result, timeout)
+}
+func (c *WSClient) sendBoundedWorkspaceReply(result any, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	c.mu.Lock()
 	conn := c.conn

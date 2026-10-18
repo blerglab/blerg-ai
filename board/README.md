@@ -95,6 +95,31 @@ survive proxying for durable input receipts; retry an ambiguous send with the
 same ID and content. Live model/effort updates apply to the next turn and never
 change the session's engine.
 
+## Sensitive card details and origin
+
+A card filed from a Runner session can carry a **restricted** marker. Its body is kept separately
+from ordinary card records and is returned by the card-detail read only to principals with actual
+`board.admin` access to that board. A board-scoped admin capability counts; membership or
+`card.read` alone does not. Other readers can still see the card's title, marker, origin and
+ordinary metadata. Keep private reproduction details in the body, not the title.
+
+Lists, search, history, events and automation inputs omit sensitive bodies, including for an
+administrator; an authorized detail read is required. An administrator may update the private
+body, but a normal metadata edit cannot clear it accidentally. The sensitive marker and source
+origin are not mutable through ordinary card updates. This protection applies to the target
+Board, not to text already shared in the originating conversation or proposal.
+
+Source metadata identifies the Runner session, source repository, engine and verified Git commit
+when available. An unborn or non-repository workspace has no verifiable commit. Source metadata
+is recorded by Blerg; it is distinct from the target repositories chosen for the card. A board
+that requires repositories can default to its sole configured repository; multiple configured
+repositories require an explicit selection when no target was supplied.
+
+Board administrators can enable **Include component version** in Board settings. This opt-in adds
+Blerg component version and component commit metadata to newly filed cards; it does not change
+older cards. The source repository commit remains a separate field. Filing through Runner always
+waits for the person's [proposal approval](../docs/proposals.md#filing-a-board-card-from-a-session).
+
 ## License
 
 Apache License 2.0 — see [`LICENSE`](../LICENSE).

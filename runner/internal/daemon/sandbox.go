@@ -278,7 +278,12 @@ func sandboxNetworkEnv(env []string) []string {
 	localServer := false
 	for _, kv := range env {
 		if v, ok := strings.CutPrefix(kv, "BLERG_RUNNER_SERVER_URL="); ok {
-			_, localServer = loopbackURL(v)
+			_, loop := loopbackURL(v)
+			localServer = localServer || loop
+		}
+		if v, ok := strings.CutPrefix(kv, "BLERG_RUNNER_SERVER_HTTP="); ok {
+			_, loop := loopbackURL(v)
+			localServer = localServer || loop
 		}
 	}
 	out := make([]string, 0, len(env)+1)

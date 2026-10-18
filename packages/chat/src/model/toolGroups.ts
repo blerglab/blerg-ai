@@ -17,7 +17,7 @@ export const HIDDEN_KINDS = new Set([
 const CARD_KINDS = new Set([
   'user_message', 'assistant_text', 'assistant_thinking', 'check_in', 'ask', 'update', 'note',
   'model_changed', 'subagent_started', 'subagent_done', 'turn_done', 'error', 'compaction', 'artifact',
-  'topic', 'checklist', 'ticket',
+  'topic', 'checklist', 'ticket', 'delegation_request', 'session_upload',
 ])
 
 // Tools whose result is a link or image worth seeing at once: they stay full

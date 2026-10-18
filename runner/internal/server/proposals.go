@@ -82,12 +82,14 @@ type proposalExecutor interface {
 // record (what an approval sends); agent_summary is a one-line convenience. The connection URL,
 // the tool hash and every credential are deliberately absent.
 type proposalView struct {
-	ID             string          `json:"id"`
-	State          string          `json:"state"`
-	ConnectionID   string          `json:"connection_id"`
-	ConnectionName string          `json:"connection_name"`
-	Tool           string          `json:"tool"`
-	Arguments      json.RawMessage `json:"arguments"`
+	Kind               string          `json:"kind,omitempty"`
+	ID                 string          `json:"id"`
+	State              string          `json:"state"`
+	ConnectionID       string          `json:"connection_id"`
+	ConnectionName     string          `json:"connection_name"`
+	Tool               string          `json:"tool"`
+	Arguments          json.RawMessage `json:"arguments"`
+	PluginSessionApply bool            `json:"plugin_session_apply,omitempty"`
 	// ArgumentsRaw is the same frozen call as the exact stored jsonb text (what an approval sends),
 	// as a string: the browser shows it without re-serialising, so number lexemes survive.
 	ArgumentsRaw string          `json:"arguments_raw"`
@@ -106,6 +108,15 @@ func viewOfProposal(p *db.Proposal) proposalView {
 		ID: p.ID, State: p.State, ConnectionID: p.ConnectionID, ConnectionName: p.ConnectionName, Tool: p.Tool,
 		Arguments: p.Arguments, ArgumentsRaw: string(p.Arguments), AgentSummary: p.AgentSummary, CreatedAt: p.CreatedAt, ExpiresAt: p.CreatedAt.Add(proposalExpiry),
 		DecidedAt: p.DecidedAt, DecidedBy: p.DecidedBy, Result: p.Result,
+	}
+	if db.IsBoardFilingProposal(p) {
+		v.Kind = "board_file"
+	} else if db.IsSessionPluginProposal(p) {
+		v.Kind = "plugin_request"
+		var args sessionPluginArguments
+		if json.Unmarshal(p.Arguments, &args) == nil {
+			v.PluginSessionApply = args.SessionApply
+		}
 	}
 	if p.SessionID != "" {
 		v.SessionID = &p.SessionID
@@ -356,6 +367,14 @@ func (h *proposalsHandler) approve(w http.ResponseWriter, r *http.Request) {
 	}
 	if time.Since(p.CreatedAt) >= proposalExpiry {
 		writeError(w, http.StatusConflict, "this proposal has expired (it is older than 7 days) and can no longer be approved: let the agent propose again")
+		return
+	}
+	if db.IsBoardFilingProposal(p) {
+		h.approveBoardDraft(w, r, who, p)
+		return
+	}
+	if db.IsSessionPluginProposal(p) {
+		h.approveSessionPlugin(w, r, who, p, http.StatusOK)
 		return
 	}
 	cfg := h.api.hub.mcpStart.get()

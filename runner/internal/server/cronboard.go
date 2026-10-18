@@ -6,7 +6,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/url"
 	"strings"
@@ -85,19 +84,11 @@ func (s *CronService) addBoardGrant(ctx context.Context, c *db.Cron, grant *Reso
 			return nil, s.startError(ctx, c, apiErr)
 		}
 	}
-	cfg := a.hub.mcpStart.get()
-	if cfg == nil || cfg.Board == nil || !cfg.Board.BoardConfigured() {
-		return nil, &boardAccessError{fmt.Errorf("this cron targets a board, but the runner has no board configured (set %s or %s)", envBoardURL, envBoardMCPURL)}
+	result, apiErr := a.addSessionBoardGrant(grant, derefOrEmpty(c.BoardID), mcpgw.Proof{AccountID: c.OwnerAccountID, TokenID: c.TokenID})
+	if apiErr != nil {
+		return nil, &boardAccessError{apiErr}
 	}
-	boardID := derefOrEmpty(c.BoardID)
-	if grant == nil {
-		grant = &ResolvedGrant{AccountID: c.OwnerAccountID, Proof: mcpgw.Proof{AccountID: c.OwnerAccountID, TokenID: c.TokenID}}
-	}
-	if len(grant.Connections) >= maxGatewayServers {
-		return nil, &boardAccessError{fmt.Errorf("this cron names %d MCP connections, which leaves no room for the board connection", len(grant.Connections))}
-	}
-	grant.Connections = append(grant.Connections, mcpgw.BoardGrantSpec(boardID, cfg.Board.BoardMCPURL()))
-	return grant, nil
+	return result, nil
 }
 
 // ---- revoking at session end -----------------------------------------------------------------

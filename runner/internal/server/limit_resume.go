@@ -203,8 +203,12 @@ func ingestLimitResume(ctx context.Context, h *Hub, pool *pgxpool.Pool, msg prot
 // Cancellation and the manual operation use the same lock as dispatch. A
 // cancellation that completed cannot be followed by a previously claimed send.
 func withCancelledPendingLimitResume(ctx context.Context, pool *pgxpool.Pool, id string, fn func() error) error {
+	return withCancelledPendingLimitResumeConn(ctx, pool, id, func(_ *pgxpool.Conn) error { return fn() })
+}
+
+func withCancelledPendingLimitResumeConn(ctx context.Context, pool *pgxpool.Pool, id string, fn func(*pgxpool.Conn) error) error {
 	if pool == nil {
-		return fn()
+		return fn(nil)
 	}
 	return withLimitResumeActionLock(ctx, pool, id, func(conn *pgxpool.Conn) error {
 		previous, err := db.GetLimitResume(ctx, conn, id)
@@ -217,7 +221,7 @@ func withCancelledPendingLimitResume(ctx context.Context, pool *pgxpool.Pool, id
 		if previous.State == "pending" || previous.State == "dispatched" {
 			limitResumeAudit(ctx, nil, pool, id, newUUID(), "Automatic continuation canceled by manual intervention.")
 		}
-		return fn()
+		return fn(conn)
 	})
 }
 
@@ -301,6 +305,13 @@ func (a *API) checkLimitResumes(ctx context.Context) {
 				if !state.Enabled || state.State != "pending" || state.ResetAt == nil || time.Now().Before(state.ResetAt.Add(time.Minute)) {
 					return nil
 				}
+				blocked, err := db.DelegationResumeBlocked(ctx, conn, id)
+				if err != nil {
+					return err
+				}
+				if blocked {
+					return db.SetLimitResumeState(ctx, conn, id, "blocked", "The session's parent ended; this child cannot resume.")
+				}
 				if state.ExpiresAt == nil || time.Now().After(*state.ExpiresAt) {
 					settleAutoStop = true
 					return db.SetLimitResumeState(ctx, conn, id, "blocked", "The continuation window expired; continue manually.")
@@ -357,30 +368,38 @@ func (a *API) checkLimitResumes(ctx context.Context) {
 						return db.SetLimitResumeState(ctx, conn, id, "blocked", "MCP authorization requires manual continuation.")
 					}
 				}
-				attemptID := newUUID()
-				claimed, e := db.ClaimLimitResumeAttempt(ctx, conn, id, attemptID)
-				if e != nil || !claimed {
-					return e
-				}
-				dispatched = true
-				limitResumeAudit(ctx, a.hub, a.dbPool, id, messageEventID(attemptID, "limit-resume-dispatch"), "Automatic continuation requested after the provider usage limit reset.")
-				if dc != nil {
-					raw, _ := json.Marshal(protocol.AgentUserMessage{Type: "agent_user_message", SessionID: id, Text: limitResumePrompt, Source: limitResumeSource, ExpectedTurnID: state.TurnID})
-					select {
-					case dc.send <- raw:
-						return nil
-					default:
-						settleAutoStop = true
-						return db.SetLimitResumeState(ctx, conn, id, "blocked", "The runtime could not accept continuation; continue manually.")
+				dispatchErr := withParentInputGuard(ctx, a.dbPool, id, func() error {
+					attemptID := newUUID()
+					claimed, e := db.ClaimLimitResumeAttempt(ctx, conn, id, attemptID)
+					if e != nil || !claimed {
+						return e
 					}
+					dispatched = true
+					limitResumeAudit(ctx, a.hub, a.dbPool, id, messageEventID(attemptID, "limit-resume-dispatch"), "Automatic continuation requested after the provider usage limit reset.")
+					if dc != nil {
+						raw, _ := json.Marshal(protocol.AgentUserMessage{Type: "agent_user_message", SessionID: id, Text: limitResumePrompt, Source: limitResumeSource, ExpectedTurnID: state.TurnID})
+						select {
+						case dc.send <- raw:
+							return nil
+						default:
+							settleAutoStop = true
+							return db.SetLimitResumeState(ctx, conn, id, "blocked", "The runtime could not accept continuation; continue manually.")
+						}
+					}
+					// The strict path validates retained owner authority at actual credential
+					// fetch and forbids operator fallback even if the proof expired meanwhile.
+					if e := resumeClusterSessionStrict(ctx, a.hub, a.dbPool, id, limitResumePrompt, derefOrEmpty(row.SpawningAccountID), state.AuthSessionID); e != nil {
+						settleAutoStop = true
+						return db.SetLimitResumeState(ctx, conn, id, "blocked", "The pod could not resume with your authorization; sign in and continue manually.")
+					}
+					return nil
+				})
+				if errors.Is(dispatchErr, db.ErrDelegationEnded) {
+					dispatched = false
+					settleAutoStop = false
+					return db.SetLimitResumeState(ctx, conn, id, "blocked", "The session's parent ended; this child cannot resume.")
 				}
-				// The strict path validates retained owner authority at actual credential
-				// fetch and forbids operator fallback even if the proof expired meanwhile.
-				if e := resumeClusterSessionStrict(ctx, a.hub, a.dbPool, id, limitResumePrompt, derefOrEmpty(row.SpawningAccountID), state.AuthSessionID); e != nil {
-					settleAutoStop = true
-					return db.SetLimitResumeState(ctx, conn, id, "blocked", "The pod could not resume with your authorization; sign in and continue manually.")
-				}
-				return nil
+				return dispatchErr
 			})
 		})
 		if err != nil && !errors.Is(err, db.ErrLimitResumeBusy) {

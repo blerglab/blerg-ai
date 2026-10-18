@@ -404,6 +404,10 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		if err := p.RequireBoard(card.BoardID, "card.read"); err != nil {
 			return nil, err
 		}
+		card, err = s.api.CardForPrincipal(ctx, p, card)
+		if err != nil {
+			return nil, err
+		}
 		return toolText(card), nil
 
 	case "blerg_card_create":

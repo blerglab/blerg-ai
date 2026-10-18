@@ -40,7 +40,8 @@ beforeEach(() => {
     if (url === '/api/mcp/connections/c1/tools') return ok({ tools: TOOLS })
     if (url === '/api/cluster/status') return ok({ configured: false })
     if (url === '/api/daemons') return ok([{ id: 'd1', name: 'workstation', mode: 'local', repos_root: '/r', status: 'connected' }])
-    if (url === '/api/boards') return ok([{ id: 'b1', name: 'Focus', description: null, repos: [], default_daemon_id: null, created_at: '', updated_at: '' }])
+    if (url === '/api/session-boards') return ok({ configured: true, boards: [{ id: 'b1', name: 'Focus' }] })
+    if (url === '/api/boards') return ok([{ id: 'legacy-board', name: 'Legacy runner board', description: null, repos: [], default_daemon_id: null, created_at: '', updated_at: '' }])
     if (url.startsWith('/api/models/')) return ok({ models: [], source: 'none' })
     return ok({ error: 'unexpected ' + url }, 404)
   })
@@ -464,5 +465,48 @@ describe('available cron engines', () => {
     expect(document.getElementById('cron-engine')).toBeNull()
     expect(screen.getByRole('button', { name: 'Create cron' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Retry engines' })).toBeInTheDocument()
+  })
+})
+
+
+describe('CronForm standalone board discovery', () => {
+  it('uses the same standalone board catalog as launch, never the legacy runner boards', async () => {
+    await renderForm()
+    expect(await screen.findByRole('option', { name: 'Focus' })).toHaveValue('b1')
+    expect(apiFetch.mock.calls.some(([url]) => url === '/api/session-boards')).toBe(true)
+    expect(apiFetch.mock.calls.some(([url]) => url === '/api/boards')).toBe(false)
+    expect(screen.queryByRole('option', { name: 'Legacy runner board' })).not.toBeInTheDocument()
+  })
+  it('hides the optional selector when no standalone board is configured', async () => {
+    const previous = apiFetch.getMockImplementation()!
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => url === '/api/session-boards' ? ok({ configured: false, boards: [] }) : previous(url, init))
+    await renderForm()
+    await waitFor(() => expect(screen.queryByText('Checking available boards…')).not.toBeInTheDocument())
+    expect(screen.queryByLabelText('Target board (optional)')).not.toBeInTheDocument()
+  })
+  it.each(['failed', 'unconfigured', 'removed'])('preserves an existing board through discovery %s and saving', async mode => {
+    const previous = apiFetch.getMockImplementation()!
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url !== '/api/session-boards') return previous(url, init)
+      return mode === 'failed' ? ok({}, 503) : ok({ configured: mode !== 'unconfigured', boards: [] })
+    })
+    await renderForm(existing({ board_id: 'saved-board' }))
+    const choice = await screen.findByLabelText('Target board (optional)')
+    expect(choice).toHaveValue('saved-board')
+    expect(await screen.findByTestId('cron-board-unavailable')).toBeInTheDocument()
+    save()
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0].body.board_id).toBe('saved-board')
+  })
+  it('allows an explicit clear after discovery fails, without accepting arbitrary IDs', async () => {
+    const previous = apiFetch.getMockImplementation()!
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => url === '/api/session-boards' ? ok({}, 503) : previous(url, init))
+    await renderForm(existing())
+    await screen.findByRole('button', { name: 'Retry boards' })
+    expect(screen.getByLabelText('Target board (optional)').tagName).toBe('SELECT')
+    fill('cron-board', '')
+    save()
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0].body.board_id).toBe('')
   })
 })

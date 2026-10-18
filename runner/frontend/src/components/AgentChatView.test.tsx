@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render as renderRaw, screen, waitFor } from '@testing-library/react'
+import type { DescribeUserMessage } from '@blerglab/chat'
 import type { ReactNode } from 'react'
+import { MemoryRouter } from 'react-router-dom'
+const render = (ui: ReactNode) => renderRaw(ui, { wrapper: MemoryRouter })
 import AgentChatView from './AgentChatView'
 import { makeSession } from '../test/fixtures'
 import * as ws from '../ws'
@@ -10,8 +13,8 @@ const apiFetch = vi.fn()
 vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }))
 vi.mock('../ws', () => ({ send: vi.fn(), onMessage: vi.fn() }))
 vi.mock('@blerglab/chat', () => ({
-  ChatView: ({ slots, maxFileBytes, canOpenWorkspaceFiles }: { slots: { header: ReactNode }; maxFileBytes?: number; canOpenWorkspaceFiles?: boolean }) => (
-    <div data-testid="chat" data-max-file-bytes={maxFileBytes ?? 'none'} data-workspace-files={String(canOpenWorkspaceFiles)}>{slots.header}</div>
+  ChatView: ({ slots, maxFileBytes, canOpenWorkspaceFiles, describeUserMessage }: { slots: { header: ReactNode }; maxFileBytes?: number; canOpenWorkspaceFiles?: boolean; describeUserMessage?: DescribeUserMessage }) => (
+    <div data-testid="chat" data-session-author={describeUserMessage?.({} as never, { source: 'session', text: 'fixture' }, { first: false })?.author} data-max-file-bytes={maxFileBytes ?? 'none'} data-workspace-files={String(canOpenWorkspaceFiles)}>{slots.header}</div>
   ),
   ReadyCard: () => null,
   createBlergTransport: () => ({}),
@@ -96,4 +99,10 @@ describe('AgentChatView model controls', () => {
     render(<AgentChatView session={makeSession({ kind: 'agent', runtime: 'daemon', engine: 'codex', daemon_id: 'workstation' })} thinking={false} compact={false} />)
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/models/codex?daemon_id=workstation', expect.anything()))
   })
+})
+
+it('labels session-sourced messages with the listed parent title', () => {
+  useSessionStore.setState({ sessions: [makeSession({ id: 'parent', title: 'Parent task' })] })
+  render(<AgentChatView session={makeSession({ parent_session_id: 'parent', started_by: { kind: 'session', name: 'Old name' } })} thinking={false} compact={false} />)
+  expect(screen.getByTestId('chat')).toHaveAttribute('data-session-author', 'from Parent task')
 })

@@ -94,7 +94,7 @@ func TicketAt(ctx context.Context, q Querier, sessionID string, seq int64) ([]by
 // LatestPlanSnapshotSQL probes one newest native plan at a time. Keyset fallback skips malformed
 // historical rows without streaming every prior snapshot; normal validated ingestion needs one probe.
 const LatestPlanSnapshotSQL = `SELECT session_id, seq, client_event_id, kind, payload::text, ts FROM agent_events
- WHERE session_id = $1 AND kind = 'plan_updated' AND seq <= $2 ORDER BY seq DESC LIMIT 1`
+ WHERE session_id = $1 AND kind = 'plan_updated' AND COALESCE(NULLIF(payload->>'child_id',''),payload->>'parent_call_id','') = '' AND seq <= $2 ORDER BY seq DESC LIMIT 1`
 
 func latestValidPlanSnapshot(ctx context.Context, q Querier, sessionID string, through int64) (*AgentEventRow, error) {
 	for through > 0 {
@@ -106,7 +106,7 @@ func latestValidPlanSnapshot(ctx context.Context, q Querier, sessionID string, t
 		if err != nil {
 			return nil, err
 		}
-		if _, valid := protocol.DecodePlanUpdated([]byte(r.Payload)); valid {
+		if p, valid := protocol.DecodePlanUpdated([]byte(r.Payload)); valid && p.ParentCallID == "" && p.ChildID == "" {
 			return &r, nil
 		}
 		through = r.Seq - 1

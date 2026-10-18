@@ -15,20 +15,21 @@ import (
 
 // SessionRow is the result of listing sessions (includes joined daemon name).
 type SessionRow struct {
-	ID          string
-	DaemonID    string
-	DaemonName  string
-	Status      string
-	ProjectPath string
-	Repo        string
-	Title       *string
-	Model       *string
-	Engine      *string
-	Effort      *string
-	StartedAt   time.Time
-	EndedAt     *time.Time
-	Unread      bool
-	Starred     bool
+	ID                string
+	DaemonID          string
+	DaemonName        string
+	Status            string
+	ProjectPath       string
+	Repo              string
+	Title             *string
+	Model             *string
+	Engine            *string
+	Effort            *string
+	StartedAt         time.Time
+	EndedAt           *time.Time
+	DelegationEndedAt *time.Time // durable boundary, populated by GetSession
+	Unread            bool
+	Starred           bool
 	// SpawningAccountID is the verified account id (identity.Principal.Sub)
 	// of the human who requested this session, set by HandlePostSessions
 	// right after InsertSession. Nil for sessions created before this column
@@ -90,6 +91,15 @@ type SessionRow struct {
 	// PausedReason is why the session is paused waiting for a message (migration 043): "restart"
 	// (a daemon restart cut it off and did not continue it), "" when it is not.
 	PausedReason string
+	// ParentSessionID is the session that started this one (migration 008 column, written for
+	// children only since 059); nil for every other session. BoardID (migration 009) is the board
+	// of a board-started or assist session. DelegationVia is how a child was allowed ("rule:<id>" |
+	// "grant:<id>" | "request:<id>", migration 059), "" otherwise. KeepRunning: the child survives
+	// its parent's end.
+	ParentSessionID *string
+	BoardID         *string
+	DelegationVia   string
+	KeepRunning     bool
 }
 
 // IdempotencyRow is one runner_idempotency record: which session a
@@ -187,8 +197,8 @@ func GetDaemonByName(ctx context.Context, conn *pgxpool.Pool, name string) (*Dae
 // DaemonName is not populated (no join is performed).
 func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*SessionRow, error) {
 	row := conn.QueryRow(ctx, `
-		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text, started_by_kind, started_by_name, interaction, background_tasks, COALESCE(paused_reason, '')
-		  FROM sessions
+		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text, started_by_kind, started_by_name, interaction, background_tasks, COALESCE(paused_reason, ''), parent_session_id::text, board_id::text, COALESCE(delegation_via, ''), keep_running
+		       , delegation_ended_at FROM sessions
 		 WHERE id = $1
 	`, sessionID)
 	var r SessionRow
@@ -196,7 +206,8 @@ func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*Ses
 		&r.Title, &r.Model, &r.Engine, &r.Effort, &r.StartedAt, &r.EndedAt, &r.Unread, &r.Starred, &r.SpawningAccountID,
 		&r.Runtime, &r.SkipPermissions, &r.ErrorReason,
 		&r.TokenID, &r.CallbackURL, &r.CallbackSecret, &r.GitURL, &r.AutoStop, &r.Kind,
-		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID, &r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason)
+		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID, &r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason,
+		&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.DelegationEndedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -296,6 +307,24 @@ type SessionOrigin struct {
 	Private bool
 	// CronID is the cron that started the session (migration 023).
 	CronID string
+	// ParentSessionID, DelegationVia and KeepRunning describe a child session (migration 059):
+	// the session that started it, how the person allowed it, and whether it outlives the parent.
+	ParentSessionID    string
+	DelegationVia      string
+	KeepRunning        bool
+	RequireParentEpoch bool
+	ParentEpoch        *time.Time
+}
+
+// childArgs are the child-session insert arguments (parent id, delegation_via; NULL when empty).
+func (o SessionOrigin) childArgs() (parent, via any) {
+	if o.ParentSessionID != "" {
+		parent = o.ParentSessionID
+	}
+	if o.DelegationVia != "" {
+		via = o.DelegationVia
+	}
+	return parent, via
 }
 
 // sessionOriginArgs are the extra insert arguments: spawning account, private, cron id.
@@ -313,19 +342,33 @@ func (o SessionOrigin) args() (account any, private bool, cronID any) {
 // same statement. On a conflict (a revived session) an origin only ever adds:
 // a private session stays private and a known account or cron is not erased.
 func InsertSessionAs(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status, projectPath, repo, title, model string, o SessionOrigin) error {
+	if o.RequireParentEpoch {
+		return insertDelegatedSessionAs(ctx, conn, id, daemonID, status, projectPath, repo, title, model, o)
+	}
+	return insertSessionAs(ctx, conn, id, daemonID, status, projectPath, repo, title, model, o)
+}
+
+func insertSessionAs(ctx context.Context, conn sessionWriteExecutor, id, daemonID, status, projectPath, repo, title, model string, o SessionOrigin) error {
 	account, private, cronID := o.args()
+	parent, via := o.childArgs()
 	// Upsert: a resumed cluster session re-sends session_started for a row
 	// that already exists — revive it (status/daemon) instead of erroring.
 	tag, err := conn.Exec(ctx, `
 		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, model,
-		                      spawning_account_id, private, cron_id)
-		SELECT $1::uuid, $2::uuid, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8::text, $9::boolean, $10::uuid
- WHERE $11::text='' OR EXISTS (SELECT 1 FROM sessions WHERE id=$1 AND `+runtimeWriteGuard("$11")+`)
+		                      spawning_account_id, private, cron_id,
+		                      parent_session_id, delegation_via, keep_running)
+		SELECT $1::uuid, $2::uuid, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8::text, $9::boolean, $10::uuid,
+		       $11::uuid, $12::text, $13::boolean
+ WHERE $14::text='' OR EXISTS (SELECT 1 FROM sessions WHERE id=$1 AND `+runtimeWriteGuard("$14")+`)
 		ON CONFLICT (id) DO UPDATE
 		  SET daemon_id         = EXCLUDED.daemon_id,
 		      spawning_account_id = COALESCE(EXCLUDED.spawning_account_id, sessions.spawning_account_id),
 		      private           = sessions.private OR EXCLUDED.private,
 		      cron_id           = COALESCE(EXCLUDED.cron_id, sessions.cron_id),
+		      -- A revived child keeps its parent, how it was allowed and keep_running (059).
+		      parent_session_id = COALESCE(sessions.parent_session_id, EXCLUDED.parent_session_id),
+		      delegation_via    = COALESCE(sessions.delegation_via, EXCLUDED.delegation_via),
+		      keep_running      = sessions.keep_running OR EXCLUDED.keep_running,
 		      status            = EXCLUDED.status,
 		      -- Where the host actually put the session wins over the row the
 		      -- server pre-created: a "No repository" scratch folder whose name
@@ -349,8 +392,8 @@ func InsertSessionAs(ctx context.Context, conn *pgxpool.Pool, id, daemonID, stat
 		      daemon_lost_at    = NULL,
 		      background_tasks  = 0,
 		      paused_reason     = NULL
- WHERE `+runtimeWriteGuard("$11")+`
-	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID, runtimeAuthorityToken(ctx))
+ WHERE `+runtimeWriteGuard("$14")+`
+	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID, parent, via, o.KeepRunning, runtimeAuthorityToken(ctx))
 	if err == nil && tag.RowsAffected() == 0 && runtimeAuthorityToken(ctx) != "" {
 		return ErrTokenInvalid
 	}
@@ -376,6 +419,9 @@ func InsertClusterSession(ctx context.Context, conn *pgxpool.Pool, id, daemonID,
 // InsertClusterSessionAs is InsertClusterSession that also writes the session's
 // origin (private, cron, spawning account) in the same statement; see
 // SessionOrigin and InsertSessionAs.
+//
+// The child-session fields of o (ParentSessionID, DelegationVia, KeepRunning) are ignored here:
+// children never run on the cluster, and the start path refuses it.
 func InsertClusterSessionAs(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status, projectPath, repo, title, model string, o SessionOrigin) error {
 	account, private, cronID := o.args()
 	_, err := conn.Exec(ctx, `
@@ -436,6 +482,10 @@ func CreateAssistSession(ctx context.Context, conn *pgxpool.Pool, sessionID, dae
 // still landing did. One statement, so an ending that lands concurrently can
 // never have its fresh reason erased by a separate clear.
 func UpdateSessionStatus(ctx context.Context, conn *pgxpool.Pool, id, status string, endedAt *time.Time) error {
+	return updateSessionStatus(ctx, conn, id, status, endedAt)
+}
+
+func updateSessionStatus(ctx context.Context, conn sessionWriteExecutor, id, status string, endedAt *time.Time) error {
 	tag, err := conn.Exec(ctx, `
 		UPDATE sessions
 		   SET status            = $2,
@@ -494,7 +544,7 @@ func ListSessions(ctx context.Context, conn *pgxpool.Pool) ([]SessionRow, error)
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, '')
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 ORDER BY s.started_at DESC
@@ -512,7 +562,7 @@ func ListSessionsByStatus(ctx context.Context, conn *pgxpool.Pool, status string
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, '')
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.status = $1
@@ -752,7 +802,7 @@ func ListSessionsByDaemon(ctx context.Context, conn *pgxpool.Pool, daemonID stri
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, '')
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.daemon_id = $1
@@ -781,7 +831,7 @@ func ListSessionsByDaemonMode(ctx context.Context, conn *pgxpool.Pool, mode stri
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, '')
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE d.mode = $1
@@ -804,6 +854,7 @@ func scanSessionRows(rows pgx.Rows) ([]SessionRow, error) {
 			&r.Runtime, &r.SkipPermissions, &r.ErrorReason, &r.Kind,
 			&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.SpawningAccountID, &r.Private, &r.CronID,
 			&r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason,
+			&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning,
 		); err != nil {
 			return nil, err
 		}

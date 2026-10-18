@@ -73,7 +73,7 @@ function ThemeToggle() {
 // Site mirrors GET /api/site (core/internal/api/router.go): the build version and the
 // browser-facing component URLs. Public — no token needed — so the footer and the home tiles
 // can render before or without identity.
-export type Site = { version: string; release?: string; commit?: string; board_url: string; runner_url: string };
+export type Site = { version: string; release?: string; commit?: string; board_url: string; runner_url: string; latest_version?: string; latest_url?: string };
 
 const EMPTY_SITE: Site = { version: "", board_url: "", runner_url: "" };
 
@@ -110,7 +110,7 @@ export default function Shell({
   children: ReactNode;
   site?: Site | null;
 }) {
-  const build = formatBuild(site);
+  const build = formatBuild(site && { ...site, latestVersion: site.latest_version, latestUrl: site.latest_url });
   return (
     <div className="shell">
       <header className="shell-header">
@@ -125,6 +125,11 @@ export default function Shell({
               Blerg {build.main}
               {build.commit && <span className="build-commit"> · {build.commit}</span>}
             </span>
+            {build.update && (
+              <a className="build-update" href={build.update.href} target="_blank" rel="noopener noreferrer" title={build.update.title}>
+                {build.update.label} ↗
+              </a>
+            )}
             <span className="sep" aria-hidden="true">
               ·
             </span>

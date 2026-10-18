@@ -138,6 +138,62 @@ describe('session side panel', () => {
     document.body.style.overflow = ''
   })
 
+  describe('progress bars', () => {
+    const progress = { completed: 2, total: 5, label: 'Run tests', updated_at: iso(0) }
+    it('shows separate session and child progress, with accessible bounds', async () => {
+      seedSession()
+      seedEvents(user())
+      stubFetch(0, liveReply({ progress, subagents: [{ key: 'child', title: 'Security audit', type: 'reviewer', model: '', tokens: null, doing: '', started_at: iso(-MIN), active_at: iso(0), background: false, seq: 1, progress: { ...progress, completed: 1, total: 3, label: 'Check tokens' } }] }))
+      await renderPage()
+      const running = within(screen.getByTestId('rail-running'))
+      const root = within(running.getByTestId('rail-session-progress'))
+      expect(root.getByText('2/5')).toBeInTheDocument()
+      expect(root.getByText('Run tests')).toBeInTheDocument()
+      expect(root.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '2')
+      expect(root.getByRole('progressbar')).toHaveAttribute('aria-valuemax', '5')
+      const child = within(running.getByTestId('rail-subagent'))
+      expect(child.getByText('1/3')).toBeInTheDocument()
+      expect(child.getByText('Check tokens')).toBeInTheDocument()
+    })
+    it('updates, completes and clears from authoritative replies after progress events', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      seedSession()
+      seedEvents(user())
+      stubFetch(0, liveReply({ progress }))
+      await renderPage()
+      expect(within(screen.getByTestId('rail-session-progress')).getByText('2/5')).toBeInTheDocument()
+      seq = 100
+      for (const [completed, label] of [[3, 'Build'], [5, 'Done']] as const) {
+        stubFetch(0, liveReply({ through_seq: seq + 1, progress: { ...progress, completed, label } }))
+        vi.advanceTimersByTime(6000)
+        act(() => useTranscriptStore.getState().ingest(ev('progress_updated', { completed, total: 5, label }, 0)))
+        await waitFor(() => expect(within(screen.getByTestId('rail-session-progress')).getByText(`${completed}/5`)).toBeInTheDocument())
+      }
+      expect(within(screen.getByTestId('rail-session-progress')).getByRole('progressbar')).toHaveClass('complete')
+      stubFetch(0, liveReply({ through_seq: seq + 1 }))
+      vi.advanceTimersByTime(6000)
+      act(() => useTranscriptStore.getState().ingest(ev('plan_updated', { items: [] }, 0)))
+      await waitFor(() => expect(screen.queryByTestId('rail-session-progress')).not.toBeInTheDocument())
+    })
+    it('shows a finished green bar, and does not show bars without progress', async () => {
+      seedSession()
+      seedEvents(user())
+      stubFetch(0, liveReply({ progress: { ...progress, completed: 5, label: 'Finished' } }))
+      await renderPage()
+      const bar = within(screen.getByTestId('rail-session-progress')).getByRole('progressbar')
+      expect(bar).toHaveClass('complete')
+      expect(bar).toHaveAttribute('aria-valuenow', '5')
+    })
+    it('keeps Running now free of invented progress on old-server replies', async () => {
+      seedSession()
+      seedEvents(user())
+      stubFetch(0, liveReply())
+      await renderPage()
+      expect(within(screen.getByTestId('rail-running')).queryByRole('progressbar')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('rail-session-progress')).not.toBeInTheDocument()
+    })
+  })
+
   it.each(['claude', 'codex', 'future-engine'])('places %s automatic resume once, in the panel Session section', async engine => {
     seedSession({ engine, limit_resume_supported: true })
     seedEvents(user())
@@ -728,4 +784,17 @@ describe('session side panel', () => {
       expect(box).toHaveValue('yes, staging')
     })
   })
+  it('renders root progress alongside child sessions and pending approvals from the whole-log live reply', async () => {
+    seedSession({ status: 'idle' })
+    seedEvents(user())
+    stubFetch(0, liveReply({ progress: { completed: 2, total: 5, label: 'Verify integration' }, children: [{ id: 'child', title: 'Codex review', engine: 'codex', model: 'fixture', effort: 'high', status: 'running', started_at: iso(-MIN), ended_at: null, asking: true, tokens: 12000 }], delegation_requests: [{ request_id: 'request', engine: 'codex', title: 'Another review', expires_at: iso(MIN) }] }))
+    await renderPage()
+    expect(await screen.findByTestId('rail-child')).toHaveTextContent('Codex review')
+    expect(screen.getByTestId('rail-session-progress')).toHaveTextContent('Verify integration')
+    expect(within(screen.getByTestId('rail-session-progress')).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '2')
+    expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent('1')
+    expect(screen.getByTestId('rail-needs-count')).toHaveTextContent('1')
+    expect(screen.getByTestId('rail-needs')).toHaveTextContent('Another review')
+  })
+
 })

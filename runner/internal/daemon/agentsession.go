@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/agent/anthropic"
 	"github.com/blerglab/blerg-ai/runner/internal/agent/skills"
@@ -115,11 +117,15 @@ type AgentHost struct {
 	// adopted interactive session among them waits for the person.
 	openAsks map[string]bool
 	// connected is closed the first time the daemon has a connection to its server.
-	connected     chan struct{}
-	connectedOnce sync.Once
+	connected       chan struct{}
+	connectedOnce   sync.Once
+	recoveryMu      sync.Mutex
+	recovery        RecoveryState
+	recoveryChanged chan struct{}
 }
 
 type agentSession struct {
+	requireRecoveryReady bool
 	// workspace is the host folder mounted at /workspace for sandbox sessions.
 	// It stays bound to this launch even if the daemon's repos root changes.
 	workspace     string
@@ -134,9 +140,12 @@ type agentSession struct {
 	skills  []skills.Skill
 	// sandboxed marks a session whose engine runs inside a container, so Kill
 	// tears the container down the way killTmuxSession does for a terminal one.
-	sandboxed  bool
-	plugins    bool // holds a Claude plugin snapshot in the workshop (released on Kill)
-	pluginHome bool // holds a native plugin home, released on Kill
+	sandboxed         bool
+	plugins           bool                                     // holds a Claude plugin snapshot in the workshop (released on Kill)
+	pluginSpecs       []pluginspec.Entry                       // applied specs, guarded by AgentHost.mu
+	pluginRequests    map[string]protocol.SessionPluginsResult // guarded by AgentHost.mu
+	pluginGenerations []string                                 // live-update snapshots, cleaned after the driver stops
+	pluginHome        bool                                     // holds a native plugin home, released on Kill
 	// mcp is the session's MCP gateway config file (nil: no grant), removed
 	// when the session ends.
 	mcp             *mcpConfigFile
@@ -239,8 +248,15 @@ func NewAgentHost(sender Sender, cfg AgentHostConfig) *AgentHost {
 			cfg.HomeDir = h
 		}
 	}
-	return &AgentHost{sender: sender, cfg: cfg, sessions: make(map[string]*agentSession),
-		adopting: make(map[string]*adoptingSession), connected: make(chan struct{})}
+	host := &AgentHost{sender: sender, cfg: cfg, sessions: make(map[string]*agentSession),
+		adopting: make(map[string]*adoptingSession), connected: make(chan struct{}), recoveryChanged: make(chan struct{})}
+	if client, ok := sender.(interface{ SetRecoveryStateHandler(func(RecoveryState)) }); ok {
+		client.SetRecoveryStateHandler(host.NoteRecoveryState)
+	}
+	if client, ok := sender.(interface{ SetRecoveryRequiredSessions(func() []string) }); ok {
+		client.SetRecoveryRequiredSessions(host.RecoveryRequiredSessions)
+	}
+	return host
 }
 
 // ─── Event emitter with pending buffer ───────────────────────────────────────
@@ -734,7 +750,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		fail("the session's message receipt journal could not be opened")
 		return
 	}
-	sess := &agentSession{skills: skillList, engine: msg.Engine, inputs: inputs, workspace: workDir, workspaceInfo: workspaceInfo}
+	sess := &agentSession{skills: skillList, engine: msg.Engine, inputs: inputs, workspace: workDir, workspaceInfo: workspaceInfo, requireRecoveryReady: msg.RequireRecoveryReady}
 	// A new session is idle until its first turn starts (the driver says
 	// "running" then). Reporting "running" here made a session with no
 	// initial prompt look busy — spinner, working indicator — while it was
@@ -852,6 +868,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		SessionToken: msg.SessionToken,
 		Extra:        msg.ExtraEnv,
 	})
+	env = append(env, selectedBoardCLIEnv(msg.BoardID, msg.MCPGateway)...)
 
 	// A sandboxed agent-kind session gets the same hardened container a
 	// terminal sandbox gets (sandbox.go) — no tmux inside it, just a place for
@@ -866,6 +883,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// for a daemon with no workshop. A dropped non-empty list is said so in
 	// the start panel, never shown as installed.
 	var pluginDirs []string
+	var appliedPluginSpecs []pluginspec.Entry
 	var pluginHome string
 	var pluginConfig map[string]any
 	nativePluginPrepare := engineRegistry[msg.Engine].PreparePlugins
@@ -911,6 +929,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				}
 				return
 			}
+			appliedPluginSpecs = append([]pluginspec.Entry(nil), res.Entries...)
 			log.Printf("agent session %s: plugins: %s", msg.SessionID, res.Detail())
 			state := protocol.StageStateDone
 			if len(res.Failed)+len(res.Skipped) > 0 {
@@ -1003,8 +1022,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	if len(pluginDirs) > 0 {
 		ccOpts = append(ccOpts, withPluginDirs(pluginDirs))
 	}
-	if msg.MCPGateway != nil && !useCodex {
+	if !useCodex && useClaudeCode && (msg.MCPGateway != nil || (h.cfg.ServerHTTP != "" && msg.SessionToken != "")) {
 		mcpFile = newMCPConfigFile(msg.MCPGateway, prefix)
+		mcpFile.sessionFiling = h.cfg.ServerHTTP != "" && msg.SessionToken != ""
 		if _, err := mcpFile.Ensure(); err != nil {
 			cancel()
 			if msg.Sandbox {
@@ -1056,8 +1076,18 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			}
 			if sess.codexRestricted != nil {
 				cx.RestrictedRuntime = sess.codexRestricted
+				if h.cfg.ServerHTTP != "" && msg.SessionToken != "" {
+					cx.RestrictedRuntime.filing = &sessionFilingTool{server: h.cfg.ServerHTTP, session: msg.SessionID, initialToken: msg.SessionToken, stateDir: DaemonStateDir()}
+					cx.RestrictedRuntime.specs = append(cx.RestrictedRuntime.specs, sessionBuiltinSpecs()...)
+				}
 				cx.CodexHome = sess.codexRestricted.Home
 			}
+		}
+		if cx, ok := driver.(*codexDriver); ok && sess.codexRestricted == nil && h.cfg.ServerHTTP != "" && msg.SessionToken != "" {
+			if cx.RuntimeConfig == nil {
+				cx.RuntimeConfig = map[string]any{}
+			}
+			cx.RuntimeConfig["mcp_servers."+sessionFilingMCPName] = codexSessionFilingStdio()
 		}
 		if cx, ok := driver.(*codexDriver); ok && h.recordable(msg) {
 			sess.record = h.keepRecord(msg, workDir, model, ad)
@@ -1168,6 +1198,10 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	sess.loop = driver
 	sess.cancel = cancel
 	sess.plugins = len(pluginDirs) > 0
+	sess.pluginSpecs = appliedPluginSpecs
+	if ad != nil {
+		sess.pluginRequests = maps.Clone(ad.rec.PluginRequests)
+	}
 	sess.pluginHome = pluginHome != ""
 
 	h.mu.Lock()
@@ -1215,6 +1249,18 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}); ok {
 			caps.emit(emitter, p)
 		}
+	}
+	if msg.RequireRecoveryReady {
+		gated, ok := driver.(interface {
+			SetRecoveryInputGate(func(context.Context), func() bool)
+		})
+		if !ok {
+			// A future recoverable engine must implement worker admission before it can run delegated work.
+			cancel()
+			h.Kill(msg.SessionID)
+			return
+		}
+		gated.SetRecoveryInputGate(h.waitRecoveryReady, h.recoveryInputReady)
 	}
 	driver.Start()
 	if source, ok := driver.(mcpStatusSource); ok {
@@ -1437,6 +1483,9 @@ func (h *AgentHost) kill(sessionID string, exitCode int) {
 	}
 	if sess.plugins {
 		h.cfg.Plugins.release(sessionID) // after the container: the snapshot was mounted in it
+	}
+	for _, generation := range sess.pluginGenerations {
+		h.cfg.Plugins.release(generation)
 	}
 	sess.record.delete() // killed for good: nothing to host again after a restart
 	sess.inputs.close()

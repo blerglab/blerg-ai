@@ -81,7 +81,7 @@ type exchangeRevChecker struct{ cid.RevocationSet }
 func (exchangeRevChecker) StaleBeyondCeiling() bool { return false }
 
 func TestInternalTokenExchangeIssuesScopedShortLivedToken(t *testing.T) {
-	e := newTokEnv(t)
+	e := newExchangeEnv(t)
 	r := e.exchangeOK(t, map[string]any{
 		"account_id": e.acctA, "session_id": e.sidA, "target": "board", "board_id": "board-7", "session_ref": "run-123",
 	})
@@ -110,7 +110,7 @@ func TestInternalTokenExchangeIssuesScopedShortLivedToken(t *testing.T) {
 }
 
 func TestInternalTokenExchangeProofRules(t *testing.T) {
-	e := newTokEnv(t)
+	e := newExchangeEnv(t)
 	base := func(extra map[string]any) map[string]any {
 		b := map[string]any{"account_id": e.acctA, "target": "board", "board_id": "b1"}
 		for k, v := range extra {
@@ -185,7 +185,7 @@ func TestInternalTokenExchangeProofRules(t *testing.T) {
 // A proof token can never yield more than it holds: a read-only token gets a read-only exchange
 // token, a board token gets no column.write, and a cron token (session.start) delegates the target.
 func TestInternalTokenExchangeCapsFollowTheProof(t *testing.T) {
-	e := newTokEnv(t)
+	e := newExchangeEnv(t)
 	ctx := context.Background()
 	readOnly, _, err := e.idSvc.CreateAgentToken(ctx, e.acctA, "ro", "platform", time.Hour) // card.read only
 	if err != nil {
@@ -226,7 +226,7 @@ func TestInternalTokenExchangeCapsFollowTheProof(t *testing.T) {
 }
 
 func TestInternalTokenExchangeValidation(t *testing.T) {
-	e := newTokEnv(t)
+	e := newExchangeEnv(t)
 	for name, b := range map[string]map[string]any{
 		"unknown target": {"target": "runner", "board_id": "b"},
 		"empty target":   {"target": "", "board_id": "b"},
@@ -247,7 +247,7 @@ func TestInternalTokenExchangeValidation(t *testing.T) {
 }
 
 func TestInternalTokenExchangeRevokeAndLogOutEverywhere(t *testing.T) {
-	e := newTokEnv(t)
+	e := newExchangeEnv(t)
 	req := map[string]any{"account_id": e.acctA, "session_id": e.sidA, "target": "board", "board_id": "b1"}
 	r1 := e.exchangeOK(t, req)
 	p1, err := e.verifyBoard(t, r1.Token)
@@ -312,7 +312,7 @@ func TestInternalTokenExchangeRevokeAndLogOutEverywhere(t *testing.T) {
 }
 
 func TestInternalTokenExchangeHiddenAndNotCounted(t *testing.T) {
-	e := newTokEnv(t)
+	e := newExchangeEnv(t)
 	req := map[string]any{"account_id": e.acctA, "session_id": e.sidA, "target": "board", "board_id": "b1"}
 	var sub string
 	for i := 0; i < 5; i++ {
@@ -343,13 +343,14 @@ func TestInternalTokenExchangeHiddenAndNotCounted(t *testing.T) {
 // The route-group table: bad/missing key, public tokens as key, wrong method, no CORS, and no row
 // created by any refused call.
 func TestInternalTokenExchangeRoutesAuthMatrix(t *testing.T) {
-	e := newTokEnv(t)
+	e := newExchangeEnv(t)
 	first := e.exchangeOK(t, map[string]any{"account_id": e.acctA, "session_id": e.sidA, "target": "board", "board_id": "b1"})
 	p, _ := e.verifyBoard(t, first.Token)
 	routes := []struct {
 		name, path string
 		body       map[string]any
 	}{
+		{"board list", "/internal/boards/list", map[string]any{"account_id": e.acctA, "session_id": e.sidA}},
 		{"exchange", "/internal/tokens/exchange", map[string]any{"account_id": e.acctA, "session_id": e.sidA, "target": "board", "board_id": "b1"}},
 		{"exchange revoke", "/internal/tokens/exchange/revoke", map[string]any{"account_id": e.acctA, "token_sub": p.Sub}},
 	}

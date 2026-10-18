@@ -23,14 +23,20 @@ const fakeDaemonToken = "fake-daemon-token-for-tests-0000"
 
 // syncBuffer is a log sink the client's goroutines may write to while the test reads it.
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	written chan struct{}
 }
 
 func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	n, err := b.buf.Write(p)
+	select {
+	case b.written <- struct{}{}:
+	default:
+	}
+	return n, err
 }
 
 func (b *syncBuffer) String() string {
@@ -41,10 +47,25 @@ func (b *syncBuffer) String() string {
 
 func captureLinkLog(t *testing.T) *syncBuffer {
 	t.Helper()
-	b := &syncBuffer{}
+	b := &syncBuffer{written: make(chan struct{}, 1)}
 	log.SetOutput(b)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	return b
+}
+
+// The connection file is published before its log line. Observing that file
+// cannot synchronize an assertion about the logger's separate write.
+func waitLinkLog(t *testing.T, logs *syncBuffer, want string) {
+	t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for !strings.Contains(logs.String(), want) {
+		select {
+		case <-logs.written:
+		case <-timer.C:
+			t.Fatalf("log did not contain %q:\n%s", want, logs.String())
+		}
+	}
 }
 
 // readConnFile reads connection.json; ok is false while there is none.
@@ -163,6 +184,7 @@ func TestWelcomeConfirmsTheConnection(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, st.Since); err != nil {
 		t.Errorf("since %q is not RFC3339", st.Since)
 	}
+	waitLinkLog(t, logs, `daemon: connected to `+ts.wsURL()+` as "test-box"`)
 	if want := `daemon: connected to ` + ts.wsURL() + ` as "test-box"`; !strings.Contains(logs.String(), want) {
 		t.Errorf("log lacks %q:\n%s", want, logs.String())
 	}
@@ -196,6 +218,7 @@ func TestNoWelcomeIsUnconfirmedAfterTheWindow(t *testing.T) {
 	if st.PID != os.Getpid() || st.Detail == "" {
 		t.Errorf("unconfirmed state = %+v", st)
 	}
+	waitLinkLog(t, logs, "not confirmed")
 	out := logs.String()
 	if !strings.Contains(out, "not confirmed") {
 		t.Errorf("log does not say the connection was not confirmed:\n%s", out)
@@ -220,6 +243,7 @@ func TestLateWelcomeMovesUnconfirmedToConnected(t *testing.T) {
 	waitConnState(t, path, ConnStateUnconfirmed)
 	close(release)
 	waitConnState(t, path, ConnStateConnected)
+	waitLinkLog(t, logs, `daemon: connected to `+ts.wsURL()+` as "test-box"`)
 	if !strings.Contains(logs.String(), `daemon: connected to `+ts.wsURL()+` as "test-box"`) {
 		t.Errorf("the late welcome was not logged:\n%s", logs.String())
 	}

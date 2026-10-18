@@ -32,8 +32,8 @@ your core, or the runner's own `GET <runner>/agents`) carries `ui.chat_package`:
   "ui": {
     "chat_package": {
       "name": "@blerglab/chat",
-      "version": "0.21.0",
-      "url": "https://runner.example.test/packages/blerglab-chat-0.21.0.tgz",
+      "version": "0.22.0",
+      "url": "https://runner.example.test/packages/blerglab-chat-0.22.0.tgz",
       "sha512": "…",
       "docs_url": "https://runner.example.test/packages/@blerglab/chat/README.md"
     }

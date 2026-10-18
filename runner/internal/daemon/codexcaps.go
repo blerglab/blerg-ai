@@ -145,6 +145,10 @@ func (a *codexApp) capabilities(model string) {
 			g.Note = "Explicitly granted gateway tools only; native MCP inventory is unavailable."
 		}
 	}
+	if a.d.RestrictedRuntime != nil && a.d.RestrictedRuntime.filing != nil {
+		g.Items = append(g.Items, protocol.CapabilityItem{Name: sessionFilingMCPName, Status: "connected", Source: "Blerg session", Detail: fmt.Sprintf("%d approval-gated session tools", len(sessionBuiltinTools))})
+		bridgeReported = true
+	}
 	if complete || bridgeReported {
 		p.Groups = append(p.Groups, g)
 	}

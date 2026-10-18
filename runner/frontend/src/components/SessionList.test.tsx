@@ -69,6 +69,23 @@ describe('SessionList', () => {
     expect(screen.getByTestId('build-version')).toHaveTextContent('Blerg v0.2.0 · 510d0c0')
   })
 
+  it('links to a newer release only when the server reports one', () => {
+    seed()
+    useSessionStore.setState({ serverRelease: '0.4.0', latestVersion: '', latestUrl: '' })
+    const { unmount } = renderList({ variant: 'sidebar' })
+    expect(screen.queryByTestId('build-update')).toBeNull()
+    unmount()
+    useSessionStore.setState({ latestVersion: '0.4.1', latestUrl: 'https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1' })
+    renderList({ variant: 'sidebar' })
+    const link = screen.getByTestId('build-update')
+    expect(link).toHaveTextContent('v0.4.1 available')
+    expect(link).toHaveAttribute('href', 'https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(link).toHaveAttribute('title', 'A newer Blerg release is available')
+    useSessionStore.setState({ latestVersion: '', latestUrl: '' })
+  })
+
   it('falls back to the server version when the server reports no release', () => {
     seed()
     useSessionStore.setState({ serverVersion: 'dev', serverRelease: '', serverCommit: '' })
@@ -739,5 +756,40 @@ describe('Automated sessions', () => {
     expect(screen.getByTestId('automated-group-cron')).toHaveTextContent('Cron run')
     expect(screen.getByTestId('automated-group-operator key')).toHaveTextContent('Operator')
     expect(screen.getAllByTestId('started-by-chip').length).toBeGreaterThan(0)
+  })
+})
+
+describe('started-session sidebar nesting', () => {
+  beforeEach(() => localStorage.clear())
+  it('lists a child only under its parent and the count chip toggles it', () => {
+    localStorage.removeItem('blerg-runner.sidebar.childrenClosed')
+    seed([makeDaemon()], [makeSession({ id: 'parent', title: 'Parent' }), makeSession({ id: 'child', title: 'Child review', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent' } })])
+    renderList()
+    expect(screen.getAllByText('Child review')).toHaveLength(1)
+    expect(screen.getByTestId('nested-sessions')).toHaveTextContent('Child review')
+    fireEvent.click(screen.getByRole('button', { name: '1 started sessions, hide' }))
+    expect(screen.queryByText('Child review')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '1 started sessions, show' }))
+    expect(screen.getByText('Child review')).toBeInTheDocument()
+  })
+  it('finds a matching child while keeping its parent', () => {
+    seed([makeDaemon()], [makeSession({ id: 'parent', title: 'Unrelated parent', repo: 'app' }), makeSession({ id: 'child', title: 'Needle review', parent_session_id: 'parent', started_by: { kind: 'session' } })])
+    renderList()
+    fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: 'needle' } })
+    expect(screen.getByText('Unrelated parent')).toBeInTheDocument()
+    expect(screen.getByText('Needle review')).toBeInTheDocument()
+  })
+})
+
+describe('nested sessions in sidebar sections', () => {
+  beforeEach(() => localStorage.clear())
+  it.each(['history', 'automated', 'starred'])('keeps the child under a parent in %s', (section) => {
+    const parent = makeSession({ id: 'parent', title: 'Parent container', ...(section === 'history' ? { status: 'stopped' as const } : {}), ...(section === 'automated' ? { started_by: { kind: 'agent', name: 'Automation' } } : {}), ...(section === 'starred' ? { starred: true } : {}) })
+    seed([makeDaemon()], [parent, makeSession({ id: 'child', title: 'Nested child', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent container' }, status: 'ended' })])
+    renderList()
+    if (section === 'history') fireEvent.click(screen.getByRole('button', { name: /History/ }))
+    if (section === 'automated') fireEvent.click(screen.getByRole('button', { name: /Automated/ }))
+    expect(screen.getAllByText('Nested child')).toHaveLength(1)
+    expect(screen.getByTestId('nested-sessions')).toHaveTextContent('Nested child')
   })
 })

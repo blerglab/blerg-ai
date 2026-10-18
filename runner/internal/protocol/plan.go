@@ -16,8 +16,7 @@ type PlanItem struct {
 	Active string `json:"active,omitempty"`
 }
 
-// PlanUpdatedPayload replaces the complete main-agent plan. Non-nil empty Items explicitly clears it.
-// Child markers are accepted only for validation and never retained in a sanitized snapshot.
+// PlanUpdatedPayload replaces the root or one attributed child plan. Empty Items clears that scope.
 type PlanUpdatedPayload struct {
 	Items        []PlanItem `json:"items"`
 	ParentCallID string     `json:"parent_call_id,omitempty"`
@@ -36,13 +35,13 @@ func DecodePlanUpdated(raw json.RawMessage) (PlanUpdatedPayload, bool) {
 	return SanitizePlanUpdated(p)
 }
 
-// SanitizePlanUpdated returns only bounded main-agent metadata. A malformed item invalidates the
+// SanitizePlanUpdated returns only bounded display metadata. A malformed item invalidates the
 // whole snapshot, preserving the prior plan; only an explicit empty list can clear it.
 func SanitizePlanUpdated(p PlanUpdatedPayload) (PlanUpdatedPayload, bool) {
-	if p.Items == nil || len(p.Items) > MaxPlanItems || p.ParentCallID != "" || p.ChildID != "" {
+	if _, ok := ProgressScope(p.ParentCallID, p.ChildID); !ok || p.Items == nil || len(p.Items) > MaxPlanItems {
 		return PlanUpdatedPayload{}, false
 	}
-	out := PlanUpdatedPayload{Items: make([]PlanItem, 0, len(p.Items))}
+	out := PlanUpdatedPayload{Items: make([]PlanItem, 0, len(p.Items)), ParentCallID: p.ParentCallID, ChildID: p.ChildID}
 	for _, item := range p.Items {
 		switch item.Status {
 		case "pending", "in_progress", "completed":

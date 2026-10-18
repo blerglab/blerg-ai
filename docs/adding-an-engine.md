@@ -98,11 +98,53 @@ Expose actual recovery eligibility and mode through [session recovery](../runner
 
 Test retained identity across restart, pause/resume, token renewal, limited availability and child recovery. Workspace contents have a separate lifecycle. If native tool definitions remain fixed on resume, enforce removed grants immediately and disclose whether changed/new definitions require a new session.
 
+Delegated child sessions carry `SpawnSession.RequireRecoveryReady` into their private recovery
+record. Preserve it through every record rewrite, adoption and runtime wrapper. The engine's actual
+turn admission must wait for the current connection's negotiated recovery-ready barrier, including
+queued/manual input and question answers; waiting only before process startup is insufficient.
+Keep the socket reader free to process the server's kills, open-ask snapshot and readiness frame.
+Use the [shared recovery gate](../runner/internal/daemon/recoveryready.go) and its tests rather than
+a delay. Reconnect invalidates readiness; a legacy or failed handshake cannot authorize marked
+work. The server's durable parent-end boundary and epoch guard remain authoritative even after
+the parent resumes. Keep-running children and pauses have different lifecycle rules.
+
+Preserve `parent_call_id` on subagent text throughout streaming and durable events. A subagent's
+text, completion or error must not append to or clear the main reply's streaming buffer. Test both
+live delivery and replay batches when adding another engine's streaming adapter.
+
 ## 7. Wire customization and observed capabilities
 
 Declare `EngineSpec.ConfigBundle` roots, canonical home directory and optional absolute home override; review [config bundles](../runner/internal/daemon/configbundle.go) and [capabilities](../runner/internal/daemon/capabilities.go) for current assumptions. The exporter copies only declared roots and shared `.agents/skills`, with existing archive size/path/link protections. Codex declares instruction files and skills; it deliberately excludes raw `auth.json`, `config.toml`, history and plugin state. Do not expand a bundle to an entire home directory to make one setting work.
 
 Native plugins need [Core plugin registration](../core/internal/plugins/service.go), [shared validation](../contracts/pluginspec/), UI metadata, and an adapter-owned installer/snapshot. Core's descriptor endpoint advertises plugin engines only when a real Core plugin validator is also registered. Settings uses that metadata; frontend suggestions are presentation hints, not a support registry. A newly registered plugin engine gets generic UI without copying a Claude/Codex list. Register only real native support. A marketplace string valid for one engine need not be meaningful for another.
+
+Live plugin reload is a separate capability from installation at launch. Advertise the engine in
+`DaemonHello.session_plugin_engines` only after implementing the owner-approved
+[`apply_session_plugins` / `session_plugins_result` protocol](../runner/internal/protocol/sessionplugins.go).
+The request carries approved additions and a durable request ID. Recheck name/source grammar and
+the daemon's marketplace policy before installing; cache/recover terminal results so reconnect
+replay cannot duplicate application. Serialize concurrent additions, install into a fresh private
+snapshot, retain the old selection on failure, and persist the selection before reporting applied.
+Bound reply writes so a stalled server cannot stop the session loop.
+
+Reload only between turns when foreground and owned background work are idle; fence process
+startup as well as normal turns. Resume the same native conversation, preserve its current MCP
+grants and runtime restrictions, and refresh capabilities when the new process reports them.
+Use [Claude's reload adapter](../runner/internal/daemon/sessionplugins.go) and its tests as the
+current implementation, not as evidence that another engine can resume safely. Unsupported
+engine/runtime combinations must leave `session_apply` false and clearly report that always-on
+settings affect new sessions. Never silently install into a restricted session or claim a running
+session loaded a plugin merely because its account setting was saved. Agent requests remain
+human approvals for every engine; account-level additions use Core's narrow live-human-proof
+endpoint rather than an agent's credentials.
+
+Codex changes currently apply to new sessions in Blerg. Its app-server exposes experimental
+plugin-management RPCs, but a reconciliation result is not a runtime-readiness acknowledgment.
+Blerg's selected plugin homes are immutable; verified live replacement needs a new snapshot,
+a quiescent app-server restart, and recovery of the same thread and its child ownership.
+Do not interpret the current limitation as proof that Codex cannot reload plugins. Check the
+[app-server protocol](https://developers.openai.com/codex/app-server) and native fixtures before
+advertising live support.
 
 Capabilities must distinguish native support, configured support, runtime restrictions, and observed loaded tools. Refresh them when effective settings change, or label the snapshot honestly. Never fabricate tools just to fill the session panel.
 

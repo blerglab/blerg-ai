@@ -28,26 +28,28 @@ import (
 
 // sendOpenAsks tells a daemon which of the sessions it reported have an open ask. Best effort: a
 // daemon that does not hear it continues a session whose record says nothing of a question.
-func sendOpenAsks(ctx context.Context, dbPool *pgxpool.Pool, dc *DaemonConn, sessionIDs []string) {
+func sendOpenAsks(ctx context.Context, dbPool *pgxpool.Pool, dc *DaemonConn, sessionIDs []string) bool {
 	if dbPool == nil || len(sessionIDs) == 0 {
-		return
+		return true
 	}
 	ids, err := db.SessionsWithOpenAsks(ctx, dbPool, sessionIDs)
 	if err != nil {
 		log.Printf("daemon %s: open asks: %v", dc.ID, err)
-		return
+		return false
 	}
 	if ids == nil {
 		ids = []string{}
 	}
 	raw, err := json.Marshal(protocol.OpenAsks{Type: "open_asks", SessionIDs: ids})
 	if err != nil {
-		return
+		return false
 	}
 	select {
 	case dc.send <- raw:
+		return true
 	default:
 		log.Printf("daemon %s: send buffer full — open_asks not sent", dc.ID)
+		return false
 	}
 }
 
@@ -75,6 +77,8 @@ func handleSessionPaused(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *
 	if !set {
 		return // running again already, ended, or reported before
 	}
+	h.SessionPausedForDelegation(msg.SessionID)
+	h.ChildActivity(msg.SessionID)
 	closed, err := db.CloseOpenAsksForSession(ctx, dbPool, msg.SessionID)
 	if err != nil {
 		log.Printf("session_paused %s: close asks: %v", msg.SessionID, err)

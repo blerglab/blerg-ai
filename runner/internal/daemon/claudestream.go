@@ -112,14 +112,15 @@ type ccProc struct {
 
 type steerState struct {
 	// startMu serializes the run loop and read-only MCP preparation. Never take it while holding sm.
-	startMu      sync.Mutex
-	mcpInputGate func(context.Context)
-	legacy       bool
-	closed       bool // the session is ending: no timer may emit
-	proc         *ccProc
-	nextGen      int
-	pidTag       string
-	sq           []steerQueued // accepted, not yet written
+	startMu           sync.Mutex
+	mcpInputGate      func(context.Context)
+	recoveryInputGate func(context.Context)
+	legacy            bool
+	closed            bool // the session is ending: no timer may emit
+	proc              *ccProc
+	nextGen           int
+	pidTag            string
+	sq                []steerQueued // accepted, not yet written
 	// awaiting: written to the process, not yet echoed back (consumed).
 	awaiting []awaitMsg
 	settled  []string // uuids whose user_message was emitted without an echo
@@ -237,7 +238,9 @@ func (d *claudeCodeDriver) syncStatus(reason string) {
 func (d *claudeCodeDriver) runSteering(ctx context.Context) {
 	defer d.shutdown()
 	for {
+		d.applyPendingPlugins(ctx)
 		for {
+			d.applyPendingPlugins(ctx)
 			d.sm.Lock()
 			if d.steer.legacy {
 				d.sm.Unlock()
@@ -257,6 +260,7 @@ func (d *claudeCodeDriver) runSteering(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-d.steer.wake:
+		case <-d.pluginUpdateWake():
 		}
 	}
 }
@@ -265,6 +269,15 @@ func (d *claudeCodeDriver) runSteering(ctx context.Context) {
 // is secured BEFORE the message is taken from the queue, so a process that goes away in between (and puts
 // its unconsumed messages back at the front) can never make a newer message overtake an older one.
 func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
+	d.sm.Lock()
+	recoveryGate := d.steer.recoveryInputGate
+	d.sm.Unlock()
+	if recoveryGate != nil {
+		recoveryGate(ctx)
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	p, err := d.ensureProc(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -292,6 +305,11 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 	d.sm.Unlock()
 	if gate != nil {
 		gate(ctx)
+	}
+	// Discovery or process startup may have overlapped a socket replacement.
+	// Recheck the current recovery link at actual message admission.
+	if recoveryGate != nil {
+		recoveryGate(ctx)
 	}
 	if ctx.Err() != nil {
 		return
@@ -393,6 +411,9 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 			return nil, fmt.Errorf("MCP gateway config: %w", err)
 		}
 		opts = append(opts, withMCPConfigPath(path))
+		if d.mcpFile.sessionFiling && d.mcpFile.cfg == nil {
+			opts = append(opts, func(o *ccOptions) { o.MCPAmbient = true })
+		}
 	}
 	// cfgGen is read BEFORE the model: a change that lands in between leaves this process stale (restarted
 	// at the next idle point) rather than silently running the old model with the flag cleared.
@@ -1021,6 +1042,7 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 	d.sm.Lock()
 	if d.steer.proc == p {
 		d.steer.proc = nil
+		d.progress.clear()
 	}
 	d.stopTimerLocked(&d.steer.killTimer)
 	d.stopTimerLocked(&d.steer.settleTimer)

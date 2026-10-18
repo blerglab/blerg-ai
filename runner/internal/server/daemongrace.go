@@ -18,6 +18,7 @@ package server
 // messages are dropped and the session's "error" status is what the chat shows them against.
 
 import (
+	"context"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -105,17 +106,22 @@ func (h *Hub) HoldForAwayDaemon(sessionID string, raw []byte) bool {
 
 // deliverHeld hands a daemon that has just registered again the messages kept while it was
 // away. Called after Register, so anything arriving from now on is routed to it directly.
-func (h *Hub) deliverHeld(dc *DaemonConn) {
+func (h *Hub) deliverHeld(ctx context.Context, dc *DaemonConn) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	held, _ := h.away.end(dc.ID, 0)
 	for sessionID, msgs := range held {
-		for _, raw := range msgs {
-			select {
-			case dc.send <- raw:
-			default:
-				// The daemon's buffer is full of something else: the rest is lost, as a message
-				// sent to a busy daemon always was.
-				log.Printf("daemon %s: send buffer full — a message held for session %s was dropped", dc.ID, sessionID)
+		_ = h.guardDelegationInput(ctx, sessionID, func() error {
+			for _, raw := range msgs {
+				select {
+				case dc.send <- raw:
+				default:
+					// The daemon's buffer is full of something else: the rest is lost, as a message
+					// sent to a busy daemon always was.
+					log.Printf("daemon %s: send buffer full — a message held for session %s was dropped", dc.ID, sessionID)
+				}
 			}
-		}
+			return nil
+		})
 	}
 }

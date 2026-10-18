@@ -343,6 +343,11 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
             {build.commit && <span className="build-commit"> · {build.commit}</span>}
           </span>
         )}
+        {build.main && build.update && (
+          <a className="build-update" href={build.update.href} target="_blank" rel="noopener noreferrer" title={build.update.title}>
+            {build.update.label} ↗
+          </a>
+        )}
         <nav>
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>Boards</NavLink>
           <NavLink to="/gate" className={({ isActive }) => (isActive ? "active" : "")}>Gate</NavLink>

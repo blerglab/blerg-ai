@@ -61,6 +61,8 @@ type codexDriver struct {
 	cmd                   *exec.Cmd // persistent app-server, for process ownership.
 	mcpGeneration         uint64
 	mcpInputGate          func(context.Context)
+	recoveryInputGate     func(context.Context)
+	recoveryInputReady    func() bool
 
 	settingsMu         sync.Mutex // serialize settings mutation and publication; acquire before mu
 	settingsGeneration uint64     // successful manual settings controls, including same-value selections

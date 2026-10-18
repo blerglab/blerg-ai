@@ -52,7 +52,11 @@ export type {
   TurnDonePayload,
   UnsubscribeSession,
   UserMessagePayload,
+  SessionUploadPayload,
   AgentEventsGap,
+  DelegationChoice,
+  DelegationDecidedPayload,
+  DelegationRequestPayload,
 } from './types'
 
 // ─── Model: events → groups → what to draw; no React in it ──────────────────────────────────

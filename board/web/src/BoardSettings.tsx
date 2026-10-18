@@ -144,6 +144,31 @@ function shortModel(m: string): string {
   return m.replace(/^claude-/, "");
 }
 
+function ComponentVersionSetting({ board, onChanged }: { board: Board; onChanged?: () => void }) {
+  const me = useMe();
+  const [enabled, setEnabled] = useState(board.include_component_version === true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function change(next: boolean) {
+    setBusy(true); setError("");
+    try {
+      await api(`/api/boards/${board.id}`, { method: "PATCH", json: { include_component_version: next } });
+      setEnabled(next);
+      onChanged?.();
+    } catch (e) { setError(e instanceof Error ? e.message : "Couldn't save version collection."); }
+    finally { setBusy(false); }
+  }
+  return <section>
+    <p className="sign pop-head">Filed ticket context</p>
+    {me?.is_admin ? <label style={{ display: "flex", gap: 8, fontSize: 13 }}>
+      <input type="checkbox" checked={enabled} disabled={busy} onChange={e => void change(e.target.checked)} />
+      Include component version on filed tickets
+    </label> : <p>Component version collection: {board.include_component_version ? "on" : "off"}</p>}
+    <p style={{ fontSize: 12 }}>When available, attach the originating component's version and commit to tickets filed on this board.</p>
+    {error && <p role="alert">{error}</p>}
+  </section>;
+}
+
 // Model precedence, mirrored from internal/api/runnerapi.go (boardRoleModel +
 // spawnSession): per-spawn override > the card's own model > the board's role
 // override > board.model > empty, which leaves the choice to the runner. An
@@ -163,9 +188,9 @@ function roleModels(board: Board): RoleModel[] {
 // BoardSettings: the board's configured models, the repo wiring sessions clone
 // from, and the run dispatcher's concurrency — read-only; board admin for
 // those is REST/MCP-only. This exists so a human can answer "is this board on
-// Opus?" or "why is this board only working one card?" without curl. The one
-// thing editable here is the automation identity, because it can only be set
-// by a person, for themselves.
+// Opus?" or "why is this board only working one card?" without curl. The
+// editable controls are the automation identity and the per-board opt-in for
+// recording component versions on filed tickets.
 export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: () => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -277,6 +302,7 @@ export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: 
               </span>
             </dd>
           </dl>
+          <ComponentVersionSetting key={`${board.id}:${board.include_component_version}`} board={board} onChanged={onChanged} />
           <AutomationSection board={board} onChanged={onChanged} />
           <p className="pop-foot">
             Models, repos and the run settings are read-only here. A card can

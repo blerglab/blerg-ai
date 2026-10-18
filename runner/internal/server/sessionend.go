@@ -55,6 +55,10 @@ func stopEndByRunner(p runnerPrincipal) db.SessionEnd {
 	if p.Kind == runnerKeyPrincipalKind {
 		return db.SessionEnd{Reason: db.EndReasonStoppedByAgent, ByKind: db.EndedByRunnerKey}
 	}
+	// A parent session stopping its child is an agent acting for the owner.
+	if p.Kind == sessionDelegateKind {
+		return db.SessionEnd{Reason: db.EndReasonStoppedByAgent, ByKind: db.EndedByAgent, ByAccount: p.OnBehalfOf}
+	}
 	return stopEndByPrincipal(p.Kind, p.Sub, p.OnBehalfOf)
 }
 

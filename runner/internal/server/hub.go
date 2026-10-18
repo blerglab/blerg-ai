@@ -46,6 +46,7 @@ type DaemonConn struct {
 	RuntimeTokenID string
 	// BackgroundTaskLifetime is immutable, accepted only from a valid full hello inventory.
 	BackgroundTaskLifetime string
+	RecoveryReadyCapable   bool // immutable hello capability, not permission to resume
 	workRegistered         bool // guarded by the daemon ID's work fence; fixtures may remain unregistered
 	ID                     string
 	Name                   string
@@ -62,26 +63,28 @@ type DaemonConn struct {
 	// the daemon was already running, are reflected without waiting for a
 	// reconnect (a hello-only snapshot bit a real user: repos checked out
 	// before AND after daemon start both stayed invisible until restart).
-	liveMu              sync.RWMutex
-	checkedOutRepos     []string                       // repo names present on disk at ReposRoot
-	repoRemotes         map[string]protocol.RepoOrigin // checked-out name → provider + "owner/name" of its origin (known ones only)
-	gitProviders        []string                       // providers the daemon can clone from (hello); nil = GitHub only
-	cloneFrom           bool                           // honours SpawnSession.CloneFrom (hello)
-	mcpGateway          bool                           // honours SpawnSession.MCPGateway (hello mcp_gateway)
-	inputReceipts       bool
-	sessionTokenFile    bool        // handles SessionToken and answers it (hello session_token_file)
-	tokenHealSkipLogged atomic.Bool // the "too old for a token heal" line was logged for this connection
-	restrictTools       bool        // honours SpawnSession.RestrictTools (hello restrict_tools)
-	codexRestricted     bool        // isolated Codex file/MCP runtime (hello codex_restricted)
-	plugins             bool        // honours SpawnSession.Plugins (hello plugins)
-	pluginEngines       []string
-	hostTokenClone      bool // owner allows personal-token clones on the bare host (hello)
-	sandboxAvailable    bool
-	hostClaude          hostClaudeCaps
-	availableEngines    []string                        // engine IDs detected as configured/usable on this daemon's host
-	engineModels        map[string]models.Report        // engine → the model list this daemon probed (sanitized)
-	reposRoot           string                          // repos root changed since the hello; "" = ReposRoot
-	usageLimits         map[string]protocol.UsageLimits // provider → latest usage_limits (usage_limits.go)
+	liveMu               sync.RWMutex
+	checkedOutRepos      []string                       // repo names present on disk at ReposRoot
+	repoRemotes          map[string]protocol.RepoOrigin // checked-out name → provider + "owner/name" of its origin (known ones only)
+	gitProviders         []string                       // providers the daemon can clone from (hello); nil = GitHub only
+	cloneFrom            bool                           // honours SpawnSession.CloneFrom (hello)
+	mcpGateway           bool                           // honours SpawnSession.MCPGateway (hello mcp_gateway)
+	inputReceipts        bool
+	sessionTokenFile     bool        // handles SessionToken and answers it (hello session_token_file)
+	tokenHealSkipLogged  atomic.Bool // the "too old for a token heal" line was logged for this connection
+	restrictTools        bool        // honours SpawnSession.RestrictTools (hello restrict_tools)
+	codexRestricted      bool        // isolated Codex file/MCP runtime (hello codex_restricted)
+	plugins              bool        // honours SpawnSession.Plugins (hello plugins)
+	sessionPluginEngines []string
+	pluginEngines        []string
+	hostTokenClone       bool // owner allows personal-token clones on the bare host (hello)
+	sandboxAvailable     bool
+	hostClaude           hostClaudeCaps
+	availableEngines     []string                        // engine IDs detected as configured/usable on this daemon's host
+	engineModels         map[string]models.Report        // engine → the model list this daemon probed (sanitized)
+	reposRoot            string                          // repos root changed since the hello; "" = ReposRoot
+	usageLimits          map[string]protocol.UsageLimits // provider → latest usage_limits (usage_limits.go)
+	localEngines         []string                        // engine endpoints reported local by this daemon
 }
 
 // SetReposRoot records the daemon's repos root after a live change (its
@@ -337,6 +340,29 @@ func (dc *DaemonConn) SetAvailableEngines(engines []string) {
 	dc.liveMu.Unlock()
 }
 
+// SetLocalEngines records the engines this daemon reports as local (endpoint on its machine or
+// LAN, no provider key). Replaced whole on every hello and heartbeat.
+func (dc *DaemonConn) SetLocalEngines(engines []string) {
+	dc.liveMu.Lock()
+	dc.localEngines = append([]string(nil), engines...)
+	dc.liveMu.Unlock()
+}
+
+// LocalEngine reports whether the daemon last reported engine as local.
+func (dc *DaemonConn) LocalEngine(engine string) bool {
+	if dc == nil {
+		return false
+	}
+	dc.liveMu.RLock()
+	defer dc.liveMu.RUnlock()
+	for _, e := range dc.localEngines {
+		if e == engine {
+			return true
+		}
+	}
+	return false
+}
+
 // AvailableEngines returns the engine IDs this daemon last reported as
 // configured/usable.
 func (dc *DaemonConn) AvailableEngines() []string {
@@ -361,13 +387,19 @@ type Hub struct {
 	boardSubs            map[string]map[string]bool        // boardID → set[browserID]
 	lastActivity         time.Time                         // last time any browser reported user interaction
 	serverVersion        string
-	serverRelease        string      // the VERSION file the build was cut from; "" when unstamped
-	serverCommit         string      // the short git commit; "" when unstamped
-	jobs                 *JobManager // cluster runner Jobs; nil = runtime unavailable
+	latestRelease        func() (string, string) // newer public release core knows of; nil reports none
+	serverRelease        string                  // the VERSION file the build was cut from; "" when unstamped
+	serverCommit         string                  // the short git commit; "" when unstamped
+	jobs                 *JobManager             // cluster runner Jobs; nil = runtime unavailable
 	// completionNotifier fires a session's completion webhook (webhook.go).
 	// Registered by NewAPI; nil until then (and in hub-only tests), which is
 	// why every call goes through NotifyCompletion rather than the field.
 	completionNotifier func(sessionID string)
+	childActivity      func(string)
+	delegationTerminal func(sessionID string)
+	delegationPaused   func(sessionID string)
+	delegationHello    func(context.Context, string) error
+	delegationInput    func(context.Context, string, func() error) error
 	// autoStopper ends a one-shot session whose turn has just finished
 	// (autostop.go). Registered by NewAPI for the same reason as the notifier
 	// above: the daemon message path holds a Hub, not an API.
@@ -377,8 +409,10 @@ type Hub struct {
 	starts startTracker
 	// reposRootReqs are set_repos_root requests waiting for their daemon's
 	// answer (reposroot.go).
-	reposRootReqs     reposRootRequests
-	workspaceFileReqs workspaceFileRequests
+	reposRootReqs      reposRootRequests
+	workspaceFileReqs  workspaceFileRequests
+	sessionOriginReqs  sessionOriginRequests
+	progressOriginReqs progressOriginRequests
 	// privacy reads which sessions are private (privacy.go). Guarded by mu.
 	privacy privacyGate
 	// mcpStart is how a session start reaches the MCP gateway (mcpstart.go).
@@ -431,6 +465,65 @@ func (h *Hub) NotifyCompletion(sessionID string) {
 	if fn != nil {
 		fn(sessionID)
 	}
+}
+
+func (h *Hub) SetDelegationHooks(onTerminalEnd, onPaused func(string)) {
+	h.mu.Lock()
+	h.delegationTerminal, h.delegationPaused = onTerminalEnd, onPaused
+	h.mu.Unlock()
+}
+
+// The API callbacks enqueue bounded repair work; never acquire a child/account
+// lock synchronously inside a parent's pooled limit-resume section.
+func (h *Hub) SessionTerminallyEnded(sessionID string) {
+	h.ChildActivity(sessionID)
+	h.mu.RLock()
+	fn := h.delegationTerminal
+	h.mu.RUnlock()
+	if fn != nil {
+		fn(sessionID)
+	}
+}
+
+func (h *Hub) SessionPausedForDelegation(sessionID string) {
+	h.mu.RLock()
+	fn := h.delegationPaused
+	h.mu.RUnlock()
+	if fn != nil {
+		fn(sessionID)
+	}
+}
+
+func (h *Hub) SetDelegationHelloHook(fn func(context.Context, string) error) {
+	h.mu.Lock()
+	h.delegationHello = fn
+	h.mu.Unlock()
+}
+
+func (h *Hub) delegationDaemonHello(ctx context.Context, daemonID string) error {
+	h.mu.RLock()
+	fn := h.delegationHello
+	h.mu.RUnlock()
+	if fn != nil {
+		return fn(ctx, daemonID)
+	}
+	return nil
+}
+
+func (h *Hub) SetDelegationInputGuard(fn func(context.Context, string, func() error) error) {
+	h.mu.Lock()
+	h.delegationInput = fn
+	h.mu.Unlock()
+}
+
+func (h *Hub) guardDelegationInput(ctx context.Context, id string, enqueue func() error) error {
+	h.mu.RLock()
+	fn := h.delegationInput
+	h.mu.RUnlock()
+	if fn != nil {
+		return fn(ctx, id, enqueue)
+	}
+	return enqueue()
 }
 
 // SetAutoStopper registers the callback the hub invokes when a session's turn
@@ -564,6 +657,14 @@ func (h *Hub) SetServerBuild(release, commit string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.serverRelease, h.serverCommit = release, commit
+}
+
+// SetLatestRelease sets where the browser's "newer release available" notice comes from; nil
+// (the default) reports none.
+func (h *Hub) SetLatestRelease(f func() (string, string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.latestRelease = f
 }
 
 // daemonWorkFence serializes work and connection replacement for one stable daemon

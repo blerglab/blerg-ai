@@ -41,6 +41,9 @@ const (
 // capabilities blerg-core treats as sensitive; board only needs to recognise
 // the ones it can itself be asked to honor.
 func SensitiveCaps(capability string) bool {
+	if strings.HasPrefix(capability, "card.create_once:") {
+		return true
+	}
 	switch capability {
 	case "secrets.read", "session.start", "merge", "membership.write", "board.admin", "gate.bypass":
 		return true

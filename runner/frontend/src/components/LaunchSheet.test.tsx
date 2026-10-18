@@ -17,6 +17,7 @@ const AUTO_NAME = 'Granite'
 function buildFetchMock(
   captureBody: { value?: Record<string, unknown> },
   opts?: {
+    sessionBoards?: { configured: boolean; boards: { id: string; name: string }[] } | 'fail'
     launchOptions?: Record<string, unknown>
     daemon?: Record<string, unknown>
     clusterStatus?: Record<string, unknown>
@@ -55,6 +56,9 @@ function buildFetchMock(
         : selected?.available_engines as string[] ?? ['claude', 'codex', 'hermes', 'openclaw']
       if (runtime === 'docker' && target.get('kind') === 'agent' && selected?.sandbox_claude_credential !== undefined) ids = selected.sandbox_claude_credential ? [...new Set(['claude', ...ids])] : ids.filter(id => id !== 'claude')
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ runtime, state: 'known', engines: ids.map(id => ({ id, name: { claude: 'Claude', codex: 'Codex', hermes: 'Hermes', openclaw: 'OpenClaw' }[id] ?? id, restricted: id === 'claude' || id === 'codex' && (runtime === 'cluster' || selected?.codex_restricted === true) })) }) })
+    }
+    if (url === '/api/session-boards') {
+      return Promise.resolve({ ok: opts?.sessionBoards !== 'fail', json: async () => opts?.sessionBoards ?? { configured: false, boards: [] } })
     }
     if (url === '/api/mcp/connections') {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ connections: opts?.mcpConnections ?? [] }) })
@@ -2203,5 +2207,94 @@ describe('LaunchSheet — opens from what it last knew', () => {
     fireEvent.click(await screen.findByRole('checkbox', { name: 'calendar' }))
     await screen.findByTestId('mcp-presets-calendar')
     expect(toolCalls(second.fn)).toBe(1)
+  })
+})
+
+
+describe('LaunchSheet board access', () => {
+  const boards = { configured: true, boards: [{ id: 'board-1', name: 'Engineering' }] }
+  let capture: { value?: Record<string, unknown> }
+  beforeEach(() => {
+    capture = {}
+    vi.stubGlobal('localStorage', makeMemoryStorage())
+  })
+  afterEach(() => vi.unstubAllGlobals())
+  async function open(opts: Parameters<typeof buildFetchMock>[1] = {}) {
+    vi.stubGlobal('fetch', buildFetchMock(capture, { sessionBoards: boards, ...opts }))
+    const view = render(<MemoryRouter><LaunchSheet open onClose={vi.fn()} /></MemoryRouter>)
+    await screen.findByText('Repository')
+    await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
+    return view
+  }
+  async function submit() {
+    const button = screen.getByRole('button', { name: /Launch/ })
+    await waitFor(() => expect(button).toBeEnabled())
+    fireEvent.click(button)
+    await waitFor(() => expect(capture.value).toBeDefined())
+    return capture.value!
+  }
+  it.each([false, true])('offers accessible boards and submits a choice (repository: %s)', async repo => {
+    await open()
+    fireEvent.change(await screen.findByLabelText('Board'), { target: { value: 'board-1' } })
+    if (repo) fireEvent.click(screen.getByText('myrepo'))
+    expect((await submit()).board_id).toBe('board-1')
+  })
+  it('hides the choice when no board is configured and omits board_id', async () => {
+    await open({ sessionBoards: { configured: false, boards: [] } })
+    expect(screen.queryByLabelText('Board')).not.toBeInTheDocument()
+    expect((await submit()).board_id).toBeUndefined()
+  })
+  it('remembers the board on reopening and revalidates access', async () => {
+    const view = await open()
+    fireEvent.change(await screen.findByLabelText('Board'), { target: { value: 'board-1' } })
+    view.unmount()
+    await open()
+    expect(await screen.findByLabelText('Board')).toHaveValue('board-1')
+    expect((await submit()).board_id).toBe('board-1')
+  })
+  it('keeps a selected board when the target cannot carry it and requires an explicit clear', async () => {
+    await open()
+    fireEvent.change(await screen.findByLabelText('Board'), { target: { value: 'board-1' } })
+    fireEvent.click(screen.getByTestId('runtime-daemon'))
+    fireEvent.click(screen.getByTestId('agent-ack'))
+    expect(screen.getByRole('button', { name: /Launch/ })).toBeDisabled()
+    expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('Clear the board')
+    fireEvent.change(screen.getByLabelText('Board'), { target: { value: '' } })
+    expect((await submit()).board_id).toBeUndefined()
+  })
+  it('supports a Codex board session only when its sandbox advertises grants', async () => {
+    await open({ daemon: { codex_restricted: true } })
+    fireEvent.change(await screen.findByLabelText('Board'), { target: { value: 'board-1' } })
+    fireEvent.click(await screen.findByTestId('engine-codex'))
+    const body = await submit()
+    expect(body.engine).toBe('codex')
+    expect(body.board_id).toBe('board-1')
+  })
+  it.each(['kind-tmux', 'engine-codex'])('blocks a preserved board for an unsupported choice: %s', async choice => {
+    await open()
+    fireEvent.change(await screen.findByLabelText('Board'), { target: { value: 'board-1' } })
+    fireEvent.click(await screen.findByTestId(choice))
+    expect(screen.getByRole('button', { name: /Launch/ })).toBeDisabled()
+    expect(screen.getByLabelText('Board')).toHaveValue('board-1')
+  })
+  it('offers retry after failure and allows launching without a board', async () => {
+    await open({ sessionBoards: 'fail' })
+    expect(await screen.findByRole('button', { name: 'Retry boards' })).toBeInTheDocument()
+    expect((await submit()).board_id).toBeUndefined()
+  })
+  it('does not silently drop an inaccessible remembered board', async () => {
+    localStorage.setItem('blerg.launch.board', 'board-gone')
+    await open()
+    expect(screen.getByRole('button', { name: /Launch/ })).toBeDisabled()
+    fireEvent.change(await screen.findByLabelText('Board'), { target: { value: '' } })
+    expect((await submit()).board_id).toBeUndefined()
+  })
+  it('holds an unverified remembered choice after failure until cleared', async () => {
+    localStorage.setItem('blerg.launch.board', 'board-1')
+    await open({ sessionBoards: 'fail' })
+    await screen.findByRole('button', { name: 'Retry boards' })
+    expect(screen.getByRole('button', { name: /Launch/ })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Clear board' }))
+    expect((await submit()).board_id).toBeUndefined()
   })
 })

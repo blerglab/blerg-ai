@@ -12,7 +12,7 @@ import (
 
 func assertSessionWorkGuide(t *testing.T, text string) {
 	t.Helper()
-	for _, line := range []string{workGuideLine, topicGuideLine} {
+	for _, line := range []string{childSessionGuideLine, workGuideLine, topicGuideLine} {
 		if !strings.Contains(text, line) {
 			t.Fatalf("missing shared guidance: %s", line)
 		}
@@ -178,5 +178,21 @@ func TestCodexRecoveryRefreshesPrivateGuide(t *testing.T) {
 				t.Fatal("recovery touched owner default instructions home")
 			}
 		})
+	}
+}
+
+// Agents learn blerg-runner from the text the daemon injects, not from SKILL.md: the injected text
+// must name the commands and carry the rule about destructive questions, and it must be the
+// CLI's own first paragraph.
+func TestChildSessionGuideIsInjected(t *testing.T) {
+	for name, text := range map[string]string{"claude prompt": ccSystemPromptFor(""), "managed block": managedBlock, "codex/shared prompt": sessionWorkGuidePrompt()} {
+		for _, want := range []string{"`blerg-runner session start", "`blerg-runner budget`", "`blerg-runner session --help`", "destructive or irreversible", "`blerg-runner ask`", "`--timeout` (seconds)", "Bash tool timeout higher (milliseconds)"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not say %q", name, want)
+			}
+		}
+	}
+	if !strings.Contains(managedBlock, "- `blerg-runner session` / `blerg-runner budget` — "+childSessionGuideLine) {
+		t.Errorf("managed block lacks the session bullet")
 	}
 }

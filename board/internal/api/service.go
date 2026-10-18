@@ -71,6 +71,12 @@ func (a *API) UpdateCardGated(ctx context.Context, p auth.Principal, cardID stri
 	if err := p.RequireBoard(card.BoardID, "card.write"); err != nil {
 		return CardWriteResult{}, err
 	}
+	if card.Sensitive && params.Body != nil {
+		if err := p.RequireAdmin(card.BoardID); err != nil {
+			return CardWriteResult{}, db.ErrSensitiveBodyForbidden
+		}
+		params.SensitiveBodyAllowed = true
+	}
 	if err := a.resolveArtifactLinks(&params); err != nil {
 		return CardWriteResult{}, err
 	}
@@ -78,7 +84,11 @@ func (a *API) UpdateCardGated(ctx context.Context, p auth.Principal, cardID stri
 	if err != nil {
 		return CardWriteResult{}, err
 	}
-	payload, _ := json.Marshal(params)
+	gateParams := params
+	if card.Sensitive {
+		gateParams.Body = nil
+	}
+	payload, _ := json.Marshal(gateParams)
 	out, err := a.gateFor(ctx, p, board, &card, "update", payload, disputeOf, rebuttal)
 	if err != nil {
 		return CardWriteResult{}, err

@@ -31,6 +31,7 @@ import {
   tooBigToPreview,
 } from '../model/artifactViews'
 import { useBackdropClose } from '../hooks/useBackdropClose'
+import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { composeMarkupMessage } from '../model/feedback'
 import { FILE_GONE_MESSAGE, FileRequestError, fileErrorText, isArtifactGone } from '../transport/files'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
@@ -71,6 +72,7 @@ interface Props {
 export default function ArtifactViewer({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null }: Props) {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
+  useSelectAllIn(dialogRef)
   const backdrop = useBackdropClose(onClose)
   const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [showAll, setShowAll] = useState(false)

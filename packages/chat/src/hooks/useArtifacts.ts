@@ -1,5 +1,5 @@
 // useArtifacts: a session's published files, newest first. Read through the transport when the view
-// opens, and again whenever a new `artifact` event reaches the transcript (live or replayed), so
+// opens, and again whenever a new `artifact` or `session_upload` event reaches the transcript (live or replayed), so
 // the Files button's count and the panel follow what the agent publishes.
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
@@ -24,7 +24,7 @@ export interface Artifacts {
 export function useArtifacts(sessionId: string, files: TransportFiles | null, events: AgentEvent[]): Artifacts {
   const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [reloads, setReloads] = useState(0)
-  const published = useMemo(() => events.reduce((n, ev) => n + (ev.kind === 'artifact' ? 1 : 0), 0), [events])
+  const published = useMemo(() => events.reduce((n, ev) => n + (ev.kind === 'artifact' || ev.kind === 'session_upload' ? 1 : 0), 0), [events])
 
   useEffect(() => {
     if (!files) return

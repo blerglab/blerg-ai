@@ -33,12 +33,14 @@ import (
 // Config is assembled from the pod environment (set by the server's Job
 // manifest).
 type Config struct {
-	ManagedCredential bool // access-only engine connection brokered by Core
+	RequireRecoveryReady bool // BLERG_RUNNER_REQUIRE_RECOVERY_READY=1; internal child attribution only
+	ManagedCredential    bool // access-only engine connection brokered by Core
 
 	ServerWS              string // BLERG_RUNNER_SERVER_WS   e.g. ws://blerg-runner-server:8080/ws/daemon
 	ServerHTTP            string // BLERG_RUNNER_SERVER_HTTP e.g. http://blerg-runner-server:8080
 	DaemonToken           string // BLERG_RUNNER_DAEMON_TOKEN
 	SessionID             string // BLERG_RUNNER_SESSION_ID
+	BoardID               string // selected standalone Board; grant travels in MCPGateway
 	Repo                  string // BLERG_RUNNER_REPO
 	Title                 string // BLERG_RUNNER_TITLE
 	Model                 string // BLERG_RUNNER_MODEL
@@ -162,9 +164,11 @@ func podSpawn(cfg Config, workDir string) protocol.SpawnSession {
 	spawn := protocol.SpawnSession{
 		Type: "spawn_session", SessionID: cfg.SessionID, Repo: cfg.Repo,
 		Title: cfg.Title, Model: cfg.Model, Effort: cfg.Effort, Engine: cfg.Engine, Kind: "agent",
-		MCPGateway:    cfg.MCPGateway,
-		RestrictTools: cfg.RestrictTools,
-		Interaction:   cfg.Interaction,
+		MCPGateway:           cfg.MCPGateway,
+		RestrictTools:        cfg.RestrictTools,
+		Interaction:          cfg.Interaction,
+		RequireRecoveryReady: cfg.RequireRecoveryReady,
+		BoardID:              cfg.BoardID,
 	}
 	if daemon.NativePluginEngine(cfg.Engine) && !cfg.skipsUserConfig() {
 		spawn.Plugins = cfg.Plugins
@@ -196,6 +200,8 @@ func ConfigFromEnv() Config {
 		ServerHTTP:            os.Getenv("BLERG_RUNNER_SERVER_HTTP"),
 		DaemonToken:           os.Getenv("BLERG_RUNNER_DAEMON_TOKEN"),
 		SessionID:             os.Getenv("BLERG_RUNNER_SESSION_ID"),
+		BoardID:               os.Getenv("BLERG_RUNNER_BOARD_ID"),
+		RequireRecoveryReady:  os.Getenv("BLERG_RUNNER_REQUIRE_RECOVERY_READY") == "1",
 		Repo:                  os.Getenv("BLERG_RUNNER_REPO"),
 		Title:                 os.Getenv("BLERG_RUNNER_TITLE"),
 		Model:                 os.Getenv("BLERG_RUNNER_MODEL"),
@@ -649,6 +655,24 @@ func Run(ctx context.Context, cfg Config) error {
 		if json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
 			host.Kill(msg.SessionID)
 			close(killed)
+		}
+	})
+	client.OnMessage("read_session_origin", func(raw []byte) {
+		var msg protocol.ReadSessionOrigin
+		if len(raw) <= 4096 && json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
+			host.ReadSessionOrigin(ctx, msg)
+		}
+	})
+	client.OnMessage("apply_session_plugins", func(raw []byte) {
+		var msg protocol.ApplySessionPlugins
+		if json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
+			host.ApplySessionPlugins(msg)
+		}
+	})
+	client.OnMessage("resolve_progress_origin", func(raw []byte) {
+		var msg protocol.ResolveProgressOrigin
+		if len(raw) <= 4096 && json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
+			host.ResolveProgressOrigin(msg)
 		}
 	})
 	client.OnMessage("read_workspace_file", func(raw []byte) {

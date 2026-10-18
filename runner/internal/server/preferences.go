@@ -125,7 +125,7 @@ func (a *API) HandleRunnerGetPreferences(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if p.Kind == agentPrincipalKind {
+	if preferencesRefused(p) {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -180,4 +180,10 @@ func (a *API) HandlePutMyPreferences(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, stored)
+}
+
+// preferencesRefused: an agent token is not the person, and neither is a parent session acting for
+// its children (unreachable through authRunner, refused here as well).
+func preferencesRefused(p runnerPrincipal) bool {
+	return p.Kind == agentPrincipalKind || p.Kind == sessionDelegateKind
 }

@@ -182,7 +182,8 @@ export function createProxyTransport(opts: ProxyTransportOptions): Transport {
             const ev = normalizeEvent(data, sessionId)
             if (!ev || ev.session_id !== sessionId) return
             if (ev.transient && ev.kind === 'assistant_text') {
-              h.onStreaming((ev.payload as AssistantTextPayload).text)
+              if ((ev.payload as AssistantTextPayload).parent_call_id) h.onEvent(ev)
+              else h.onStreaming((ev.payload as AssistantTextPayload).text)
               return
             }
             h.onEvent(ev)

@@ -33,6 +33,60 @@ they do not match the summary, reject.
   then record it as done or failed.
 - A call that definitely failed is marked failed, with the reason.
 
+## Filing a Board card from a session
+
+A session can list the standalone Boards its owner can access, search for duplicates, and propose
+an issue with `blerg-runner ticket boards`, `ticket search`, and `ticket file`. Claude and Codex
+also receive the built-in `blerg_ticket_file` tool for these three operations, including sessions
+whose tools are restricted. Listing and searching are reads; filing creates a pending proposal.
+No card is written until the person approves it.
+
+A Board filing proposal has an editable draft. On **Proposals**, the session owner can change its
+board, title, body, type, sensitive flag, and target repositories before approving. Discovery must
+verify the selected board before an edited draft can be saved; an unavailable board stays visible
+instead of being silently replaced. Source session, repository, commit and engine are recorded by
+Blerg and cannot be edited as draft fields. A repository with no verifiable HEAD has no commit.
+
+Saving and approving both compare the exact stored draft with the version being reviewed. If
+another edit wins, the stale operation is refused: load and review the current draft and confirm
+again. Retargeting a draft does not preserve authority to its former board. Approval checks the
+approving person's current access to the chosen board and writes only that exact draft. Ordinary
+MCP proposals keep their frozen arguments; this editor applies only to built-in Board filings.
+Rejection is always available and writes nothing.
+
+Target repositories are separate from the source repository. Use repeated `--repo` values, or edit
+the comma-separated list in the draft, when a target needs several repositories. On a board that
+requires a repository, its sole configured repository can be the default; when several are
+configured, choose the target repositories explicitly. The originating session's repository is
+never assumed to be a target repository.
+
+A sensitive filing restricts the card's **body** to principals with `board.admin` access to its
+target board. The card's title, restricted marker, source metadata and other ordinary fields stay
+visible. This does not redact the original conversation or the private proposal: take care with
+what was already shared there. See [Board's sensitive card details](../board/README.md#sensitive-card-details-and-origin).
+
+A completed filing returns the card reference. An **unknown** result is not an instruction to file
+again: Blerg never retries it automatically. Check the target board and resolve the existing
+proposal before proposing another card.
+
+## Plugin requests
+
+`blerg-runner request-plugin <name> "<why>"` queues a private request for a plugin or its bundled
+skills from an allowed marketplace. The built-in `blerg_request_plugin` tool (`{name, reason}`)
+provides the same approval-only request without a shell, including restricted sessions. Neither
+path runs an installer. The session owner sees the
+plugin, marketplace and agent's reason beside the chat, in the session panel, and on this page.
+Read the exact arguments and choose **This session only** or **Always on**, then confirm.
+Ordinary MCP proposal arguments remain frozen; a plugin request's scope is a separate human
+choice, checked again at approval. Requests cannot be edited or retargeted.
+
+Session-only loading leaves account settings unchanged. A supported host Claude session waits
+for foreground and owned background work to become idle, then resumes with the updated snapshot.
+Other runtimes offer an explicit always-on change for new sessions. Approval is complete before
+a queued live reload finishes; its application state stays **queued** until the daemon reports
+success or failure. Rejection and expiry leave the session and account settings unchanged.
+Unattended sessions wait for the person's decision in the same way.
+
 ## Expiry and limits
 
 - A pending proposal **expires after 7 days**. Decided proposals are removed after 30 days.

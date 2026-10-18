@@ -1055,3 +1055,49 @@ describe('published artifact session URL', () => {
     expect(t.publishedSessionUrl?.('s1')).toBe(`${location.origin}/sessions/s1`)
   })
 })
+
+// ─── delegations ─────────────────────────────────────────────────────────────
+
+describe('createBlergTransport delegations', () => {
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+
+  it('decideDelegation posts the choice', async () => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValue(json(200, { request_id: 'r/1', status: 'allowed', choice: 'once', child_session_id: 'c1' }))
+    const out = await t.decideDelegation!('r/1', 'once')
+    expect(out.child_session_id).toBe('c1')
+    const [url, init] = fetch.mock.calls[0]
+    expect(url).toBe('/api/delegation-requests/r%2F1/decide')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({ choice: 'once' })
+    expect(init.headers.Authorization).toBe('Bearer tok')
+  })
+
+  it('decideDelegation rejects with the server message', async () => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValue(json(409, { error: 'already decided' }))
+    await expect(t.decideDelegation!('r1', 'deny')).rejects.toMatchObject({ message: 'already decided', status: 409 })
+  })
+
+  it('delegationRequest reads the request', async () => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValue(json(200, { request_id: 'r1', prompt: 'the whole prompt' }))
+    await expect(t.delegationRequest!('r1')).resolves.toEqual({ prompt: 'the whole prompt' })
+    expect(fetch.mock.calls[0][0]).toBe('/api/delegation-requests/r1')
+  })
+})
+
+describe('subagent typing transport isolation', () => {
+  it('preserves child scope instead of mixing its deltas into the main typing callback', () => {
+    const { t, socket } = make()
+    const h = handlers()
+    const off = t.subscribe('s1', {}, h)
+    socket.emit({ type: 'agent_events_replay_done', session_id: 's1', last_seq: 0, has_more: false })
+    const child = ev(0, { seq: undefined, client_event_id: 'child-delta', transient: true, payload: { text: 'child words', done: false, parent_call_id: 'child-call' } })
+    socket.emit(ev(0, { seq: undefined, client_event_id: 'root-delta', transient: true, payload: { text: 'root words', done: false } }))
+    socket.emit(child)
+    expect(h.onStreaming.mock.calls).toEqual([['root words']])
+    expect(h.onEvent).toHaveBeenCalledWith(child)
+    off()
+  })
+})

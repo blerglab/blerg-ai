@@ -32,9 +32,10 @@ const (
 
 // Principal is the resolved identity of a request.
 type Principal struct {
-	Kind      Kind
-	Token     *db.Token // set for service and agent
-	SessionID string    // set for human
+	CoreAccountID string // verified Core on_behalf_of, never supplied by a native Board token
+	Kind          Kind
+	Token         *db.Token // set for service and agent
+	SessionID     string    // set for human
 
 	// FromCore is true when this principal was resolved via blerg-core
 	// (corePrincipal), rather than board's own session/service-key/token
@@ -254,7 +255,7 @@ func corePrincipal(s coreauth.Synthesized) Principal {
 		}
 		tok.BoardID = &board
 	}
-	return Principal{Kind: kind, FromCore: true, Token: tok}
+	return Principal{Kind: kind, FromCore: true, Token: tok, CoreAccountID: s.OnBehalfOf}
 }
 
 // invalidProjectBoard is the board a token with a malformed Project claim is

@@ -48,12 +48,34 @@ id), sends you to the server to approve, and stores what comes back.
 
 ## The built-in board connection
 
-Crons get a built-in connection named `board` (a reserved name) for the board the cron targets. You
-do not add it or store a token for it. The runner's gateway obtains a short-lived token from core
-that is valid for that one board and is revoked when the run ends. A cron sees a fixed set of board
-tools: reading boards, columns and cards, and creating, updating, moving, commenting on and linking
-cards. Archiving, column changes and board administration are not included. The operator points the
-runner at the board with `BLERG_RUNNER_BOARD_URL` (see [`crons.md`](crons.md#the-target-board)).
+Choose **Board** on the launch sheet to give an agent session access to that board. The choice
+lists the standalone Board service's boards that your sign-in can read, and is remembered in this
+browser. It is hidden when the runner has no Board service configured. Board connections use the
+same supported sandbox/engine targets as other MCP connections; they are not offered for a terminal
+or an unsandboxed host session. The session keeps its normal coding tools.
+
+Crons get the same built-in connection named `board` (a reserved name) for their target board.
+Neither kind of session needs you to store a Board token. The gateway obtains a short-lived,
+single-board credential from Core, verifies that Board accepts it, renews it as needed, and revokes
+issued credentials when the session ends. Core enforces the person's current capabilities and live
+proof; Board currently grants people access through global card capabilities, not separate board
+memberships. Required password changes must be completed before access can be delegated.
+
+The fixed tools read boards, columns and cards, and create, update, move, comment on and link cards.
+Writes to the chosen board are direct. Archiving, column changes and board administration are not
+included. The panel's Capabilities tab lists `board` alongside other connections.
+
+In a launched session, `blerg-runner board show` and the supported `ticket` commands use that same
+gateway grant, including its limits and revocation. They never hold Core's upstream credential.
+The older Runner-only board commands retain their behavior when no gateway is configured. Gateway
+sessions refuse legacy-only actions such as dependency ordering, split, archive and column mutation;
+card searches return at most 100 results and warn when the result may be incomplete.
+
+The operator points the runner at Board with `BLERG_RUNNER_BOARD_URL` or
+`BLERG_RUNNER_BOARD_MCP_URL`; Core verifies access through Board's fresh component registration.
+Both must identify the same Board installation. Core, the runner and the desktop daemon need the
+updated version for board discovery and the session CLI environment. See
+[`crons.md`](crons.md#the-target-board) for cron configuration.
 
 ## Tools are off by default
 

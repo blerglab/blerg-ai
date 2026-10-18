@@ -354,6 +354,7 @@ finished", "The process exited on its own", …).
 | `job_finished` / `job_failed` / `job_disappeared` | the reconciler found its cluster Job exited, failed or gone | — |
 | `not_resumed` | a disconnected cluster session nobody resumed within a day | — |
 | `daemon_lost` / `daemon_unreported` | its daemon never came back / came back without it | — |
+| `parent_ended` | it was a child session and its parent ended for good | — |
 
 The vocabulary is fixed (`internal/db/session_end.go`); nothing a caller sends ends up in it. The
 **first** reason recorded wins: a stop is recorded when it is requested, so the process exit it
@@ -732,6 +733,62 @@ the bytes, the server-classified content type, the hardening headers (`nosniff`,
 
 An `artifact` event in the transcript announces each file the agent publishes, with the same
 fields as a list entry minus `latest_version` and `created_at`.
+
+### Sessions starting sessions (session-token routes)
+
+These private routes accept the parent's own session token (or its bound runtime token), not an
+agent token or a daemon master token. They are separate from the public agent contract and MCP
+operations. The parent must have a human owner and run on its desktop daemon; child sessions cannot
+delegate again. For child operations, another parent's child, the parent itself, and unrelated
+sessions all return the same `404`.
+
+| Route | Body and response |
+|---|---|
+| `GET /api/sessions/{id}/budget` | Provider capacity from the parent's desktop; unknown data remains unknown. |
+| `POST /api/sessions/{id}/children` | `Idempotency-Key` required. Allowlisted body: `engine`, `model`, `effort`, `repo` or `no_repo`, `runtime` (`docker` or `daemon`), `title`, `prompt`, `keep_running`. Returns `201` with a child, or `202` with an approval request. Unknown fields return `422`; limit failures return `429` and `Retry-After`. |
+| `GET /api/delegation-requests/{id}` | Request status; optional `wait` up to 25 seconds. Only its parent's token or its human owner can read it. |
+| `POST /api/delegation-requests/{id}/expire` | Parent cancels its pending request; an already allowed request returns its outcome. |
+| `POST /api/delegation-requests/{id}/decide` | Human with a live browser session only: deny, allow once, allow for the session, or create a standing rule, from the stored request. |
+| `GET /api/delegation-rules` | Human owner's standing rules. |
+| `POST /api/delegation-rules` | Human owner creates a rule for an engine, desktop and runtime across repositories, optionally restricted to a local endpoint. |
+| `DELETE /api/delegation-rules/{id}` | Owner removes a rule; existing children continue. |
+| `POST /api/delegation-grants/{id}/revoke` | Owner revokes a session grant; existing children continue. |
+| `GET /api/sessions/{id}/children` | `{children:[...]}` with status, lifecycle, model, effort, runtime, asking, delegation and keep-running fields. |
+| `GET /api/sessions/{id}/children/{child}` | Session status plus authoritative `open_asks:[{message_id,body}]`. |
+| `POST /api/sessions/{id}/children/{child}/message` | `{text,client_id?}`; `202`, including `answered_ask` when it answers an open question. |
+| `POST /api/sessions/{id}/children/{child}/model` | `{model?,effort?}`; `202`. |
+| `POST /api/sessions/{id}/children/{child}/interrupt` | Interrupts the current turn; `202`. |
+| `POST /api/sessions/{id}/children/{child}/stop` | Stops the child; `200 {status:"stopped"}`. |
+| `GET /api/sessions/{id}/children/{child}/result` | The runner's normal result object. |
+| `GET /api/sessions/{id}/children/{child}/events` | `after_seq`, or `before_seq` (zero means tail), `limit`, optional `wait` up to 25 seconds; `{events,has_more}`. |
+| `POST /api/sessions/{id}/children/{child}/uploads` | Raw bytes and artifact-name header, with normal upload caps; `201`. Stored as an owner upload and announced as `session_upload`, preserving the parent's attribution without ending the child's working state. |
+| `GET /api/sessions/{id}/children/{child}/artifacts` | `{artifacts:[...]}` using ordinary artifact visibility checks. |
+| `GET /api/sessions/{id}/children/{child}/artifacts/{aid}/download` | File bytes with the normal artifact hardening headers. |
+
+| CLI | Purpose |
+|---|---|
+| `blerg-runner budget [--json]` | Read provider capacity before selecting an engine. |
+| `blerg-runner session start ...` | Start a child or wait for its approval. |
+| `blerg-runner session wait <request>` | Resume waiting on a pending request. |
+| `blerg-runner session list` / `watch <child>` | List children or follow completed messages, tools and open questions. |
+| `blerg-runner session send <child> <text>` | Send a message; agents must leave destructive approval questions to the person. |
+| `blerg-runner session upload <child> <file>` / `files <child>` / `download <child> <artifact>` | Exchange files through the artifact service. |
+| `blerg-runner session model <child> ...` / `interrupt <child>` / `stop <child>` / `result <child>` | Change settings, interrupt, stop or read results. |
+
+Waiting commands default to 100 seconds and exit with code 3 when still waiting, printing a command
+to continue. The request remains pending until answered, canceled, or its ten-minute server expiry.
+Use a shell timeout greater than `--timeout` when raising it (maximum 540 seconds). A failed CLI
+wait never means that approval was denied. File downloads refuse existing destinations and symlinks;
+authenticated calls refuse redirects rather than forward credentials.
+Reusing an identical pending request can return `200` with that same request. Expiring an already
+allowed request returns `409` with its existing outcome rather than canceling the child.
+
+Limits are three running children and twenty starts per parent, six running children and sixty
+starts per account per hour. A real parent end stops non-kept children and invalidates old grants,
+including across daemon restart; a pause only expires the requests pending at that pause. New child
+starts require the daemon's recovery-ready handshake. Host sessions share their home and can read
+other host sessions' token files; use a sandbox for isolation. The injected CLI guide is delivered
+when a session starts, so reinstall the daemon and start a new session after upgrading.
 
 ### UI package
 

@@ -30,11 +30,14 @@ export type AgentEventKind =
   | 'compaction'
   | 'start_stage'
   | 'capabilities'
+  | 'session_upload'
   | 'artifact'
   | 'topic'
   | 'checklist'
   | 'ticket'
   | 'mcp_status'
+  | 'delegation_request'
+  | 'delegation_decided'
 
 export interface AgentEvent {
   type: 'agent_event'
@@ -53,6 +56,8 @@ export interface AgentEvent {
 // client_id: the id the sender gave the message (a queued bubble's), echoed by the daemon; absent
 // from a daemon older than the field and on messages no browser sent.
 // message_id: on an ask_answer, the ask (messages API id) it answers.
+export interface SessionUploadPayload { name: string; size: number; artifact_id: string; from_session_id: string; from_title: string }
+
 export interface UserMessagePayload { text: string; source: string; client_id?: string; message_id?: string }
 // parent_call_id (on assistant text, thinking, tool calls and results): the event belongs to a
 // subagent, started by the tool call with this call id (its subagent_started child_id). Absent on
@@ -370,4 +375,40 @@ export interface SetSessionModel {
 export interface InterruptSession {
   type: 'interrupt_session'
   session_id: string
+}
+
+// kinds delegation_request | delegation_decided: a session asked to start another one, and the
+// person's answer (the server writes both into the parent's transcript).
+export type DelegationChoice = 'once' | 'session' | 'always' | 'deny'
+export interface DelegationRequestPayload {
+  request_id: string
+  engine: string
+  model?: string
+  effort?: string
+  repo?: string
+  no_repo?: boolean
+  runtime: 'docker' | 'daemon'
+  daemon_name: string
+  title: string
+  /** The first 500 characters; the whole prompt is Transport.delegationRequest. */
+  prompt: string
+  prompt_truncated?: boolean
+  budget?: {
+    engine: string
+    available: boolean
+    local?: boolean
+    windows: { id: string; used_percent: number; resets_at?: string }[]
+    capped_until?: string | null
+    note?: string
+  }
+  /** The choices the server offers this person for this request. */
+  offered: DelegationChoice[]
+  expires_at: string
+}
+export interface DelegationDecidedPayload {
+  request_id: string
+  status: 'allowed' | 'denied' | 'expired'
+  choice?: 'once' | 'session' | 'always'
+  child_session_id?: string
+  start_error?: string
 }

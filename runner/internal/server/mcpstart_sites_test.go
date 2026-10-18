@@ -305,11 +305,11 @@ func TestSpawnSitesAreEnumerated(t *testing.T) {
 
 	// Grant-aware paths: they resolve or check a grant, attach it, or (resume) re-issue it.
 	aware := map[string]struct{ decide, attach string }{
-		"HandlePostSessions":        {"resolveGrant", "attachGrant"},
-		"startClusterNoRepo":        {"resolveGrant", "attachGrant"},
-		"startRunnerSession":        {"checkGrant", "attachGrant"},
-		"startBoardSessionOnDaemon": {"checkGrant", "attachGrant"},
-		"resumeClusterSessionMode":  {"grantResumeProblem", "reissueGrants"},
+		"HandlePostSessions":              {"resolveLaunchGrant", "attachGrant"},
+		"startClusterNoRepo":              {"resolveLaunchGrant", "attachGrant"},
+		"startRunnerSession":              {"checkGrant", "attachGrant"},
+		"startBoardSessionOnDaemon":       {"checkGrant", "attachGrant"},
+		"resumeClusterSessionModeGuarded": {"grantResumeProblem", "reissueGrants"},
 	}
 	// Paths that never carry a grant, by construction: nothing they decode names one.
 	// reclaimNativeHistory builds a label/fencing spec solely to remove an ended writer; it never starts an engine.
@@ -339,8 +339,13 @@ func TestSpawnSitesAreEnumerated(t *testing.T) {
 	}
 	// The public route has two grant-carrying branches (cluster and daemon); StartSession's
 	// paths have one each.
-	if c := funcs["HandlePostSessions"]; c.calls["attachGrant"] < 2 || c.calls["resolveGrant"] < 2 {
+	if c := funcs["HandlePostSessions"]; c.calls["attachGrant"] < 2 || c.calls["resolveLaunchGrant"] < 2 {
 		t.Errorf("HandlePostSessions must resolve and attach on both the cluster and the daemon branch: %v", c.calls)
+	}
+	// The board-aware wrapper must still resolve personal connections, and it
+	// must verify the human and selected Board before adding the built-in grant.
+	if c := funcs["resolveLaunchGrant"]; c == nil || c.calls["resolveGrant"] != 1 || c.calls["checkGrantRequester"] != 1 || c.calls["sessionBoards"] != 1 || c.calls["addSessionBoardGrant"] != 1 {
+		t.Error("launch grant wrapper no longer validates both personal connections and board access")
 	}
 	// attachGrant is called only from the spawn sites.
 	for name, info := range funcs {

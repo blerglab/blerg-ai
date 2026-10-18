@@ -66,6 +66,11 @@ func planStatus(s string) string {
 
 // PlanFrom folds the plan from events (any order; other events are ignored). nil when there is none.
 func PlanFrom(events []Event) *Plan {
+	p, _ := foldPlan(scopeEvents(events, "", 0))
+	return p
+}
+
+func foldPlan(events []Event) (*Plan, int64) {
 	events = sorted(events)
 	// Native snapshots supersede the complete prior plan. Retain only the latest valid
 	// main-agent snapshot; invalid/child events never erase earlier state.
@@ -115,6 +120,7 @@ func PlanFrom(events []Event) *Plan {
 	byID := map[int]*planTask{}
 	next := 1
 	var updated time.Time
+	var updatedSeq int64
 	native := false
 	text := func(s string) string { return topics.CleanText(s, MaxPlanText) }
 	for _, ev := range events {
@@ -128,7 +134,7 @@ func PlanFrom(events []Event) *Plan {
 				tasks = append(tasks, &planTask{id: i + 1, item: PlanItem{Text: item.Text, Status: item.Status, Active: item.Active}})
 			}
 			native = true
-			updated = ev.Ts
+			updated, updatedSeq = ev.Ts, ev.Seq
 			continue
 		}
 		if ev.Kind != "tool_call" {
@@ -158,7 +164,7 @@ func PlanFrom(events []Event) *Plan {
 				tasks = append(tasks, t)
 				byID[t.id] = t
 			}
-			updated = ev.Ts
+			updated, updatedSeq = ev.Ts, ev.Seq
 		case "TaskCreate":
 			var in struct {
 				Subject    string `json:"subject"`
@@ -193,7 +199,7 @@ func PlanFrom(events []Event) *Plan {
 				tasks = append(tasks, t)
 				byID[id] = t
 			}
-			updated = ev.Ts
+			updated, updatedSeq = ev.Ts, ev.Seq
 		case "TaskUpdate":
 			var in struct {
 				TaskID     json.RawMessage `json:"taskId"`
@@ -217,7 +223,7 @@ func PlanFrom(events []Event) *Plan {
 						break
 					}
 				}
-				updated = ev.Ts
+				updated, updatedSeq = ev.Ts, ev.Seq
 				continue
 			}
 			if in.Status != nil {
@@ -229,11 +235,11 @@ func PlanFrom(events []Event) *Plan {
 			if in.ActiveForm != nil {
 				t.item.Active = text(*in.ActiveForm)
 			}
-			updated = ev.Ts
+			updated, updatedSeq = ev.Ts, ev.Seq
 		}
 	}
 	if len(tasks) == 0 {
-		return nil
+		return nil, updatedSeq
 	}
 	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].id < tasks[j].id })
 	p := &Plan{UpdatedAt: updated}
@@ -247,9 +253,9 @@ func PlanFrom(events []Event) *Plan {
 		p.Items = append(p.Items, t.item)
 	}
 	if len(p.Items) == 0 {
-		return nil
+		return nil, updatedSeq
 	}
-	return p
+	return p, updatedSeq
 }
 
 // taskID reads a TaskUpdate's taskId: a string ("3") or a number.

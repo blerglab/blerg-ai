@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -23,7 +25,7 @@ const (
 )
 
 // validExchangeString reports whether s is a non-empty string of at most limit runes with no
-// control characters. core does not know boards, so this is the only check on a board id.
+// control characters. Board existence is checked through its scoped REST endpoint.
 func validExchangeString(s string, limit int) bool {
 	if s == "" || utf8.RuneCountInString(s) > limit || !utf8.ValidString(s) {
 		return false
@@ -43,6 +45,7 @@ type internalTokenExchangeRequest struct {
 	Target     string `json:"target"`
 	BoardID    string `json:"board_id"`
 	SessionRef string `json:"session_ref,omitempty"`
+	ReadOnly   bool   `json:"read_only,omitempty"`
 }
 
 type internalTokenExchangeResponse struct {
@@ -68,7 +71,7 @@ func (d Deps) handleInternalTokenExchange(w http.ResponseWriter, r *http.Request
 		http.Error(w, "unsupported target", http.StatusBadRequest)
 		return
 	}
-	if !validExchangeString(body.BoardID, maxExchangeBoardIDLen) {
+	if !validBoardID(body.BoardID) {
 		http.Error(w, "board_id is required, at most 64 characters, no control characters", http.StatusBadRequest)
 		return
 	}
@@ -101,6 +104,16 @@ func (d Deps) handleInternalTokenExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	state, stateErr := svc.AccountState(r.Context(), body.AccountID)
+	if stateErr != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if state.Disabled || state.MustChangePassword {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
 	if body.TokenID != "" {
 		// The issued caps are bounded by the proof token's own: a read-only token cannot mint write.
 		caps, err := svc.AgentTokenCaps(r.Context(), body.AccountID, body.TokenID)
@@ -113,6 +126,17 @@ func (d Deps) handleInternalTokenExchange(w http.ResponseWriter, r *http.Request
 			return
 		}
 		proofCaps = caps
+	}
+
+	if body.ReadOnly {
+		// session.start already delegates Board access, but the new credential
+		// must not retain that proof capability: CreateExchangeToken treats it
+		// as broad delegation. Force an explicit card.read ceiling instead.
+		if proofCaps != nil && !slices.Contains(proofCaps, "card.read") && !slices.Contains(proofCaps, "session.start") {
+			http.Error(w, "the proof token holds no read capability for this target", http.StatusForbidden)
+			return
+		}
+		proofCaps = []string{"card.read"}
 	}
 
 	rec, raw, err := svc.CreateExchangeToken(r.Context(), body.AccountID, body.Target, body.BoardID, proofCaps)
@@ -129,6 +153,36 @@ func (d Deps) handleInternalTokenExchange(w http.ResponseWriter, r *http.Request
 	case err != nil:
 		log.Printf("internal tokens exchange: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// Verify the actual scoped permission with Board before returning this credential.
+	// On every refusal, revoke the newly minted grant even if the request was canceled.
+	base, lookupErr := d.operatorBoardURL(r.Context())
+	code := http.StatusServiceUnavailable
+	if lookupErr == nil {
+		var board accessibleBoard
+		code = fetchBoard(r.Context(), base, "/api/boards/"+body.BoardID, raw, &board)
+		if code == http.StatusOK && board.ID != body.BoardID {
+			code = http.StatusNotFound
+		}
+	}
+	if code == http.StatusOK {
+		_, _, stillLive, liveErr := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID)
+		if liveErr != nil {
+			code = http.StatusServiceUnavailable
+		} else if !stillLive {
+			code = http.StatusNotFound
+		}
+	}
+
+	if code != http.StatusOK {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+		revokeErr := svc.RevokeExchangeToken(cleanupCtx, body.AccountID, rec.ID)
+		cancel()
+		if revokeErr != nil {
+			log.Printf("internal tokens: refused exchange revoke failed for %s", rec.ID)
+		}
+		http.Error(w, http.StatusText(code), code)
 		return
 	}
 	// Audit line: ids only, never the token.

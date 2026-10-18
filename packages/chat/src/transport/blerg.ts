@@ -9,7 +9,7 @@
 // It works from the runner's origin with a core-issued browser token, the only place such a token
 // exists; an outside app never uses it (that app's chat goes through proxy.ts).
 import type {
-  AgentEvent, AgentEventsGap, AgentEventsReplayDone, AgentUserMessage, AssistantTextPayload, InterruptSession, SessionInfo,
+  AgentEvent, AgentEventsGap, AgentEventsReplayDone, DelegationDecidedPayload, AgentUserMessage, AssistantTextPayload, InterruptSession, SessionInfo,
   SessionStatus, SetSessionModel, SubscribeAgentEvents, UnsubscribeSession,
 } from '../types'
 import { createFiles } from './files'
@@ -74,6 +74,17 @@ interface PendingOlder {
 }
 
 const enc = encodeURIComponent
+
+/** The server's {error} message, else the status. */
+async function errorText(r: Response): Promise<string> {
+  try {
+    const b = (await r.json()) as { error?: unknown }
+    if (typeof b?.error === 'string' && b.error) return b.error
+  } catch {
+    // not JSON
+  }
+  return `HTTP ${r.status}`
+}
 
 function toMeta(s: SessionInfo): SessionMeta {
   return {
@@ -216,6 +227,7 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
         // held it waits in it, behind the events before it: a closing event there must not
         // clear text that came after it.
         if (page) page.push(ev)
+        else if ((ev.payload as AssistantTextPayload).parent_call_id) h.onEvent(ev)
         else h.onStreaming((ev.payload as AssistantTextPayload).text)
         return
       }
@@ -454,6 +466,25 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
         ...(model !== undefined ? { model } : {}),
         ...(effort !== undefined ? { effort } : {}),
       })
+    },
+
+    // The person's choice on a request to start a session; the server's message rides the error.
+    async decideDelegation(requestId, choice) {
+      const r = await request(`/api/delegation-requests/${enc(requestId)}/decide`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ choice }),
+      })
+      // status rides the error so the card can tell "already decided" (409) from a retryable failure.
+      if (!r.ok) throw Object.assign(new Error(await errorText(r)), { status: r.status })
+      return (await r.json()) as DelegationDecidedPayload
+    },
+
+    async delegationRequest(requestId) {
+      const r = await request(`/api/delegation-requests/${enc(requestId)}`)
+      if (!r.ok) throw new Error(await errorText(r))
+      const body = (await r.json()) as { prompt?: unknown }
+      return { prompt: typeof body.prompt === 'string' ? body.prompt : '' }
     },
 
     connected,

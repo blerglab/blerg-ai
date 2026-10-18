@@ -137,3 +137,21 @@ describe("BoardSettings automation", () => {
     expect(screen.getByText("no token — this board cannot start sessions")).toBeInTheDocument();
   });
 });
+
+describe('BoardSettings originating component metadata', () => {
+  beforeEach(() => { vi.mocked(api).mockClear(); me = { kind: 'service', is_admin: true, is_human: true }; });
+  it('allows an admin to opt this board into version collection', async () => {
+    const onChanged = open(board());
+    const toggle = await screen.findByRole('checkbox', { name: 'Include component version on filed tickets' });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/api/boards/b1', { method: 'PATCH', json: { include_component_version: true } }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+  it('shows the setting without allowing members to change it', async () => {
+    me = { kind: 'service', is_admin: false, is_human: true };
+    open(board({ include_component_version: true }));
+    expect(await screen.findByText('Component version collection: on')).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Include component version on filed tickets' })).not.toBeInTheDocument();
+  });
+});

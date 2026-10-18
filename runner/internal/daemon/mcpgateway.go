@@ -7,7 +7,8 @@ package daemon
 //     directory OUTSIDE the session's working directory (the agent's file
 //     tools can read the workdir, and a token there would be one Read away
 //     from a card or a proposal). The tokens are never in argv, the
-//     environment or a log.
+//     environment or a log, except that the selected-board CLI receives only
+//     its board gateway grant in its environment (never an upstream token).
 //   - In a Docker sandbox the engine runs inside the container, where a host
 //     temp file does not exist: the file is written there through `docker
 //     exec` with the content on stdin, into a 0700 directory under /tmp.
@@ -137,8 +138,9 @@ var sandboxMCPDirBase = "/tmp"
 // mcpConfigFile is one session's MCP config file: on the host, or inside the
 // session's sandbox container when prefix is enabled.
 type mcpConfigFile struct {
-	cfg    *protocol.MCPGatewayConfig
-	prefix sandboxExec
+	cfg           *protocol.MCPGatewayConfig
+	sessionFiling bool
+	prefix        sandboxExec
 
 	mu     sync.Mutex
 	dir    string // private directory (host path, or path inside the container)
@@ -163,6 +165,9 @@ func (f *mcpConfigFile) Ensure() (string, error) {
 		return f.path, nil
 	}
 	body, err := mcpConfigJSON(f.cfg)
+	if f.sessionFiling {
+		body, err = sessionFilingMCPConfigJSON(f.cfg)
+	}
 	if err != nil {
 		return "", err
 	}

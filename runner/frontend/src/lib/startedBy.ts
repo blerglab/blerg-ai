@@ -4,13 +4,15 @@
 // Automated section.
 import type { SessionInfo } from '../types'
 
-export function isAutomated(s: Pick<SessionInfo, 'started_by' | 'cron_id'>): boolean {
+export function isAutomated(s: Pick<SessionInfo, 'started_by' | 'cron_id' | 'parent_session_id'>, listedIds?: ReadonlySet<string>): boolean {
+  if (s.started_by?.kind === 'session' && s.parent_session_id && listedIds?.has(s.parent_session_id)) return false
   return !!s.started_by || !!s.cron_id
 }
 
 /** The source to group and label by: the token's name, else what kind of thing started it. */
 export function startedByLabel(s: Pick<SessionInfo, 'started_by' | 'cron_id'>): string {
   const by = s.started_by
+  if (by?.kind === 'session') return by.name ? `from ${by.name}` : 'another session'
   if (by?.name) return by.name
   const kind = by?.kind ?? (s.cron_id ? 'cron' : '')
   switch (kind) {

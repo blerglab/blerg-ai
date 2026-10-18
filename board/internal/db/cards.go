@@ -20,6 +20,8 @@ type Link struct {
 }
 
 type Card struct {
+	Sensitive   bool            `json:"sensitive"`
+	Origin      json.RawMessage `json:"origin,omitempty"`
 	Effort      string          `json:"effort"`
 	ID          string          `json:"id"`
 	BoardID     string          `json:"board_id"`
@@ -63,14 +65,14 @@ const cardCols = `id, board_id, number, column_id, type, title, body, priority, 
 	to_char(stuck_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(stale_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(archived_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), version, gate_flag,
-	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
+	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), sensitive, origin`
 
 func scanCard(row pgx.Row) (Card, error) {
 	var c Card
 	err := row.Scan(&c.ID, &c.BoardID, &c.Number, &c.ColumnID, &c.Type, &c.Title, &c.Body,
 		&c.Priority, &c.Size, &c.Model, &c.Effort, &c.Fields, &c.DedupKey, &c.ExternalID, &c.Rank,
 		&c.AutoMerge, &c.RunAttempts, &c.MergedSHA, &c.MergedAt, &c.StuckAt, &c.StaleAt,
-		&c.ArchivedAt, &c.Version, &c.GateFlag, &c.CreatedAt, &c.UpdatedAt)
+		&c.ArchivedAt, &c.Version, &c.GateFlag, &c.CreatedAt, &c.UpdatedAt, &c.Sensitive, &c.Origin)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c, ErrNotFound
 	}
@@ -80,21 +82,22 @@ func scanCard(row pgx.Row) (Card, error) {
 // CardParams is a create/update payload. Nil pointers mean "unchanged" on
 // update; on create, sensible defaults apply.
 type CardParams struct {
-	Effort     *string         `json:"effort"`
-	Type       *string         `json:"type"`
-	Title      *string         `json:"title"`
-	Body       *string         `json:"body"`
-	Priority   *string         `json:"priority"`
-	Size       *string         `json:"size"`
-	Model      *string         `json:"model"` // "" clears the override
-	Fields     json.RawMessage `json:"fields"`
-	DedupKey   *string         `json:"dedup_key"`
-	ExternalID *string         `json:"external_id"`
-	ColumnID   *string         `json:"column_id"`
-	AutoMerge  *bool           `json:"auto_merge"`
-	Repos      *[]string       `json:"repos"`
-	Tags       *[]string       `json:"tags"`
-	Links      *[]Link         `json:"links"`
+	SensitiveBodyAllowed bool            `json:"-"`
+	Effort               *string         `json:"effort"`
+	Type                 *string         `json:"type"`
+	Title                *string         `json:"title"`
+	Body                 *string         `json:"body"`
+	Priority             *string         `json:"priority"`
+	Size                 *string         `json:"size"`
+	Model                *string         `json:"model"` // "" clears the override
+	Fields               json.RawMessage `json:"fields"`
+	DedupKey             *string         `json:"dedup_key"`
+	ExternalID           *string         `json:"external_id"`
+	ColumnID             *string         `json:"column_id"`
+	AutoMerge            *bool           `json:"auto_merge"`
+	Repos                *[]string       `json:"repos"`
+	Tags                 *[]string       `json:"tags"`
+	Links                *[]Link         `json:"links"`
 	// AddLinks appends links to the card's existing ones (an entry already present is left alone), atomically
 	// with the write: two writers adding a link at once never lose one, which a read-modify-write of Links can.
 	AddLinks *[]Link `json:"add_links"`
@@ -206,6 +209,20 @@ type CreateResult struct {
 // board, refreshes that card's content (title/body/fields/tags ONLY: never
 // column, rank, priority, or archive state — a sweep must not undo curation).
 func CreateCard(ctx context.Context, pool *pgxpool.Pool, boardID string, p CardParams, ev EventMeta) (CreateResult, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := createCardTx(ctx, tx, boardID, p, ev)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	return result, tx.Commit(ctx)
+}
+
+func createCardTx(ctx context.Context, tx pgx.Tx, boardID string, p CardParams, ev EventMeta) (CreateResult, error) {
+	var err error
 	if err := normalizeCardParams(&p); err != nil {
 		return CreateResult{}, err
 	}
@@ -218,12 +235,6 @@ func CreateCard(ctx context.Context, pool *pgxpool.Pool, boardID string, p CardP
 	if p.Title == nil || *p.Title == "" {
 		return CreateResult{}, fmt.Errorf("title required")
 	}
-
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
 
 	if err := lockBoard(ctx, tx, boardID); err != nil {
 		return CreateResult{}, err
@@ -317,7 +328,7 @@ func CreateCard(ctx context.Context, pool *pgxpool.Pool, boardID string, p CardP
 			if err := loadCardExtras(ctx, tx, &card); err != nil {
 				return CreateResult{}, err
 			}
-			return CreateResult{Card: card, Refreshed: true}, tx.Commit(ctx)
+			return CreateResult{Card: card, Refreshed: true}, nil
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return CreateResult{}, err
@@ -366,7 +377,7 @@ func CreateCard(ctx context.Context, pool *pgxpool.Pool, boardID string, p CardP
 			if err := loadCardExtras(ctx, tx, &card); err != nil {
 				return CreateResult{}, err
 			}
-			return CreateResult{Card: card, Refreshed: true}, tx.Commit(ctx)
+			return CreateResult{Card: card, Refreshed: true}, nil
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return CreateResult{}, err
@@ -474,7 +485,7 @@ func CreateCard(ctx context.Context, pool *pgxpool.Pool, boardID string, p CardP
 	if err := enqueueStandingAgents(ctx, tx, columnID, card.ID, ev.ActorTokenID); err != nil {
 		return CreateResult{}, err
 	}
-	return CreateResult{Card: card}, tx.Commit(ctx)
+	return CreateResult{Card: card}, nil
 }
 
 func emptyToNil(s *string) *string {
@@ -785,6 +796,15 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 		`SELECT `+cardCols+` FROM cards WHERE id = $1 FOR UPDATE`, cardID))
 	if err != nil {
 		return Card{}, err
+	}
+	if card.Sensitive && p.Body != nil {
+		if !p.SensitiveBodyAllowed {
+			return Card{}, ErrSensitiveBodyForbidden
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO sensitive_card_details(card_id,body) VALUES($1,$2) ON CONFLICT(card_id) DO UPDATE SET body=EXCLUDED.body`, cardID, *p.Body); err != nil {
+			return Card{}, err
+		}
+		p.Body = nil
 	}
 	if p.IfMatch != nil && *p.IfMatch != card.Version {
 		return Card{}, ErrStaleVersion
@@ -1112,7 +1132,7 @@ const cardColsC = `c.id, c.board_id, c.number, c.column_id, c.type, c.title, c.b
 	to_char(c.stuck_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(c.stale_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(c.archived_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), c.version, c.gate_flag,
-	to_char(c.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(c.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
+	to_char(c.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(c.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), c.sensitive, c.origin`
 
 func prefixCols(string) string { return cardColsC }
 

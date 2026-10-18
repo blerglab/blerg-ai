@@ -5,7 +5,7 @@ import * as authClient from "./authClient";
 
 // A fetch stub that answers by URL: /api/me with the given identity, /api/site with component
 // URLs, and anything else (the tiles' /healthz probes) with a bare 200.
-function fetchByUrl(me: Record<string, unknown> | null) {
+function fetchByUrl(me: Record<string, unknown> | null, siteExtra: Record<string, unknown> = {}) {
   return vi.fn((url: string) => {
     if (url === "/api/me") {
       return me
@@ -15,7 +15,7 @@ function fetchByUrl(me: Record<string, unknown> | null) {
     if (url === "/api/site") {
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ version: "v-test", release: "0.2.0", commit: "510d0c0", board_url: "https://board.example.com", runner_url: "https://runner.example.com" }),
+        json: () => Promise.resolve({ version: "v-test", release: "0.2.0", commit: "510d0c0", board_url: "https://board.example.com", runner_url: "https://runner.example.com", ...siteExtra }),
       });
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
@@ -126,6 +126,22 @@ describe("App / Home", () => {
     const footer = await screen.findByText(/Blerg v0\.2\.0/);
     expect(footer).toHaveTextContent("Blerg v0.2.0 · 510d0c0");
     expect(footer).toHaveAttribute("title", expect.stringContaining("release 0.2.0"));
+  });
+
+  it("links to a newer release in the footer only when /api/site reports one", async () => {
+    vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
+    vi.stubGlobal("fetch", fetchByUrl(alice));
+    const first = render(<App />);
+    await screen.findByText(/Blerg v0\.2\.0/);
+    expect(document.querySelector(".build-update")).toBeNull();
+    first.unmount();
+    vi.stubGlobal("fetch", fetchByUrl(alice, { latest_version: "0.4.1", latest_url: "https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1" }));
+    render(<App />);
+    const link = await screen.findByRole("link", { name: /v0\.4\.1 available/ });
+    expect(link).toHaveAttribute("href", "https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(link).toHaveAttribute("title", "A newer Blerg release is available");
   });
 
   it("shows no version in the footer when /api/site fails", async () => {

@@ -7,7 +7,10 @@ import { isNoRepo, repoLabel } from '../lib/noRepo'
 import { startedByLabel } from '../lib/startedBy'
 import { BACKGROUND_COLOR, PAUSED_WORDS, displayLabel, displayState, pausedByRestart } from '../lib/displayState'
 
-interface Props {
+export interface SessionCardProps {
+  childrenCount?: number
+  childrenExpanded?: boolean
+  onToggleChildren?: () => void
   session: SessionInfo
   daemon: DaemonInfo | undefined
   active?: boolean
@@ -195,7 +198,7 @@ function backgroundTitle(n: number): string {
   return n === 1 ? '1 background task running' : `${n} background tasks running`
 }
 
-export default function SessionCard({ session, active }: Props) {
+export default function SessionCard({ session, active, childrenCount = 0, childrenExpanded = true, onToggleChildren }: SessionCardProps) {
   const navigate = useNavigate()
   const openSession = useContext(OpenSessionContext)
   const status = session.status
@@ -272,6 +275,7 @@ export default function SessionCard({ session, active }: Props) {
         {session.title || repoLabel(session.repo)}
       </span>
 
+      {childrenCount > 0 && <button type="button" aria-label={`${childrenCount} started sessions, ${childrenExpanded ? 'hide' : 'show'}`} title={`${childrenCount} started sessions, ${childrenExpanded ? 'hide' : 'show'}`} aria-expanded={childrenExpanded} onClick={e => { e.stopPropagation(); onToggleChildren?.() }} style={{ ...chipStyle, cursor: 'pointer' }}>↳ {childrenCount}</button>}
       {/* Unread dot — shown whenever session.unread is true, regardless of status */}
       {unread && (
         <span

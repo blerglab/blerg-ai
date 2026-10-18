@@ -77,6 +77,7 @@ export interface Board {
   discuss_effort?: string;
   chat_effort?: string;
   field_schema: FieldDef[];
+  include_component_version?: boolean;
   require_repo: boolean;
   gate_enabled: boolean;
   gate_on_unavailable: string;
@@ -120,7 +121,11 @@ export interface Column {
 
 export interface CardLink { kind: string; url: string; label: string | null }
 
+export interface CardOriginInfo { session_url: string; repo: string; commit: string; engine: string; component_version?: string; component_commit?: string }
+
 export interface Card {
+  sensitive?: boolean;
+  origin?: CardOriginInfo | null;
   id: string;
   board_id: string;
   number: number;

@@ -5,12 +5,16 @@
 // down). Nothing is listed while the first read is on its way: a list that fills in at once beats one
 // that churns.
 import { useMemo } from 'react'
-import { useChatReportStore, useLiveState, type BackgroundTask, type ChatReport, type LiveState } from '@blerglab/chat'
+import { useChatReportStore, useLiveState, type BackgroundTask, type ChatReport } from '@blerglab/chat'
+import type { SessionPanelLiveState, LiveChildSession, LiveDelegationGrant, LiveDelegationRequest } from '../lib/liveState'
 import { useLiveStateServer } from './useLiveStateServer'
 
 export interface SessionLive {
+  children?: LiveChildSession[]
+  delegationRequests?: LiveDelegationRequest[]
+  delegationGrants?: LiveDelegationGrant[]
   /** The panel's lists, in the chat's LiveState shape (answer, openFiles, filesKey and files are the chat's). */
-  live: LiveState
+  live: SessionPanelLiveState
   /** The background tasks still running, by the server; null when the chat's list is used. */
   tasks: BackgroundTask[] | null
   /** The viewer's pending tool changes on the session, by the server; null when the page must read
@@ -41,7 +45,7 @@ export function useSessionLive(sessionId: string, enabled: boolean, refresh: unk
   const client = useLiveState(fallback ? sessionId : '')
   const clockOffset = server.status === 'ready' || server.status === 'error' ? server.clockOffset : 0
   const generatedAt = reply ? Date.parse(reply.generated_at) : NaN
-  const fromServer = useMemo<LiveState | null>(() => (view
+  const fromServer = useMemo<SessionPanelLiveState | null>(() => (view
     ? {
         settled: true,
         subagents: view.subagents,
@@ -56,6 +60,7 @@ export function useSessionLive(sessionId: string, enabled: boolean, refresh: unk
         heldUntil: Number.isFinite(generatedAt) ? generatedAt : null,
         checklist: view.checklist,
         plan: view.plan,
+        progress: view.progress,
         tickets: view.tickets,
         ticket: view.ticket,
         mcp: view.mcp,
@@ -63,7 +68,7 @@ export function useSessionLive(sessionId: string, enabled: boolean, refresh: unk
         canReleasePrompt: view.canReleasePrompt,
       }
     : null), [view, report.answer, report.openFiles, report.filesKey, report.files, clockOffset, generatedAt])
-  if (fromServer && view) return { live: fromServer, tasks: view.tasks, toolChanges: view.toolChanges, source: 'server' }
+  if (fromServer && view) return { live: fromServer, tasks: view.tasks, toolChanges: view.toolChanges, children: view.children, delegationRequests: view.delegationRequests, delegationGrants: view.delegationGrants, source: 'server' }
   if (fallback) return { live: client, tasks: null, toolChanges: null, source: 'client' }
   // Loading: the chat's reading of no session, which lists nothing.
   return { live: client, tasks: [], toolChanges: null, source: 'loading' }

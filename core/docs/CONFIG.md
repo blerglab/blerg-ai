@@ -17,6 +17,7 @@ board or runner at all — see [Human login](#human-login) below.
 | `BLERG_CORE_LISTEN` | `:8080` | Listen address. |
 | `BLERG_CORE_WEB_DIST` | `web/dist` | Directory `core/web`'s built SPA (`/login`, `/app`, `/settings`) is served from, relative to the process's working directory when not absolute. The Docker image sets this to `/app/web/dist`. If the directory doesn't exist, every SPA route 404s — which looks exactly like "login is broken". |
 | `BLERG_VERSION` | `dev` | Build version shown on the landing page. |
+| `BLERG_UPDATE_CHECK` / `BLERG_UPDATE_REPO` | on / `blerglab/blerg-ai` | Core looks up the latest public release shortly after startup (30 s) and every 6 hours (`GET https://api.github.com/repos/<repo>/releases/latest`, unauthenticated) and, when it is newer than the running release, adds `latest_version` and `latest_url` to `GET /api/site`; the core footer, the board top bar and the runner sidebar then show a "vX.Y.Z available" link to its GitHub release page (board and runner read it from core through `BLERG_CORE_URL`). Privacy: this check contacts `api.github.com`, which sees the server's IP address; nothing else is sent. `BLERG_UPDATE_REPO` must be `owner/name`; anything else disables the check (logged once). Set `BLERG_UPDATE_CHECK=0` to turn it off (no request is made). |
 | `BLERG_CORE_REGISTER_KEY` | unset | Shared bootstrap key components (board, runner) present to `POST /components` to register themselves. Unset disables component self-registration. |
 | `BLERG_CORE_INTERNAL_KEY` | unset | Shared secret guarding `POST /internal/credentials/fetch`, the endpoint runner calls to fetch a spawning account's personal engine credential. Deliberately a DIFFERENT secret from `BLERG_CORE_REGISTER_KEY`: registration is a low-trust bootstrap, credential fetch hands back plaintext. Unset disables the endpoint entirely (runner then always falls back to the shared operator Secret). Runner reads the same value as `BLERG_RUNNER_CORE_INTERNAL_KEY`. |
 | `BLERG_CORE_PLUGIN_MARKETPLACES` | `anthropics/claude-plugins-official` | Comma-separated GitHub `owner/repo` marketplaces an account may register **always-on plugins** from; `*` allows any *valid* `owner/repo` (never a URL or path). Enforced when a list is saved (`422 marketplace not allowed by this install`); the runner re-checks it at install time with its own `BLERG_RUNNER_PLUGIN_MARKETPLACES` — set both to the same value. Malformed entries are logged and dropped, never widened. |
@@ -395,6 +396,31 @@ marketplace must be allowed by `BLERG_CORE_PLUGIN_MARKETPLACES`. The list is not
   [Internal endpoints](#internal-endpoints-which-live-thing-authorizes-the-call); neither, or
   both, is `400`. (The old bare `human_session: true` claim is gone; it is now "neither".) A dead
   or foreign principal is the same anti-enumeration `404`. Returns `{"plugins":[…]}` only.
+
+The session panel's **Capabilities → Add plugin or skill** offers **This session only** (no
+account-setting write) and **Always on** (an additive account-setting write, as opposed to
+Settings' whole-list replacement). Only supported unrestricted host Claude sessions load the
+change into the existing conversation, between turns after foreground and background work are
+idle. Other runtimes explicitly offer new-session-only settings. An agent's `request-plugin`
+command queues an owner approval and never installs or saves settings itself.
+
+The additional internal routes all require `X-Internal-Key` and bounded JSON bodies:
+
+- `POST /internal/plugins/policy`, body `{engine}`: returns marketplace policy and an empty plugin
+  list, with no account settings or credentials; no account proof is needed for this policy read.
+- `POST /internal/plugins/catalog`, body `{account_id,engine,token_id|session_id}`: exactly one live,
+  account-bound proof, like `/internal/plugins/list`; returns that account's entries and policy.
+- `POST /internal/plugins/add`, body `{account_id,session_id,engine,entry:{marketplace,plugin}}`:
+  requires the approving person's live browser session chain for that exact account. Agent-token
+  proofs and arbitrary replacements are not accepted. The account must be enabled, must not
+  require a password change, and its current role must hold the same `card.read` permission as
+  Settings. An account/engine list lock serializes the atomic append with concurrent settings
+  writes; duplicates are idempotent, existing entries are preserved, and the 20-entry cap and
+  marketplace policy still apply. Human proof/account rows remain locked through the write;
+  expiry is checked again immediately before commit. The response includes the resulting list.
+
+A failed validation or dead/foreign approval proof changes no settings. Keep Core, Runner and
+daemon marketplace policies aligned; none of these internal endpoints widens an allow-list.
 
 Known limits: a human session that is logged out or revoked makes the runner's read `404`, so a
 resumed session then starts without plugins (the start panel says so); with `BLERG_CORE_PLUGIN_MARKETPLACES=*`

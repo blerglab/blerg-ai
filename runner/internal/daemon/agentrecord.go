@@ -32,6 +32,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 const (
@@ -44,10 +45,11 @@ const (
 // (recovery must never replay the kickoff), the git token and clone source, and anything about a
 // sandbox, a tool restriction or an MCP grant (a session with one of those has no record).
 type AgentRecord struct {
-	Version   int    `json:"version"`
-	SessionID string `json:"session_id"`
-	Repo      string `json:"repo"`
-	WorkDir   string `json:"work_dir"` // the resolved workspace
+	RequireRecoveryReady bool   `json:"require_recovery_ready,omitempty"`
+	Version              int    `json:"version"`
+	SessionID            string `json:"session_id"`
+	Repo                 string `json:"repo"`
+	WorkDir              string `json:"work_dir"` // the resolved workspace
 
 	Interaction string `json:"interaction,omitempty"`
 	Assist      bool   `json:"assist,omitempty"`
@@ -61,7 +63,8 @@ type AgentRecord struct {
 	ExtraEnv     map[string]string `json:"extra_env,omitempty"`
 
 	// Plugins is the spec only: the snapshot a session loads from is rebuilt at adoption.
-	Plugins []pluginspec.Entry `json:"plugins,omitempty"`
+	Plugins        []pluginspec.Entry                       `json:"plugins,omitempty"`
+	PluginRequests map[string]protocol.SessionPluginsResult `json:"plugin_requests,omitempty"`
 
 	Model  string `json:"model,omitempty"`
 	Effort string `json:"effort,omitempty"`

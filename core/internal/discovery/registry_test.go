@@ -36,9 +36,9 @@ func find(agg agentsmanifest.AggregateManifest, name string) *agentsmanifest.Com
 func TestRegisterAndAggregateMarksStale(t *testing.T) {
 	ctx := context.Background()
 	st := store(t)
-	reg := NewRegistry(st, 50*time.Millisecond)
+	reg := NewRegistry(st, time.Hour)
 
-	// No explicit cleanup needed: store's isolated schema is dropped entirely on t.Cleanup.
+	// No explicit cleanup needed: store's isolated database is dropped on t.Cleanup.
 	name := "blerg-board-" + randSuffix()
 
 	err := reg.Register(ctx, agentsmanifest.ComponentEntry{
@@ -61,9 +61,15 @@ func TestRegisterAndAggregateMarksStale(t *testing.T) {
 	if e.UI == nil || e.UI.ChatPackage == nil || e.UI.ChatPackage.Name != "@blerglab/chat" {
 		t.Fatalf("ui package lost in aggregate: %+v", e.UI)
 	}
-	// After the TTL elapses, the entry is marked stale (not evicted).
-	time.Sleep(80 * time.Millisecond)
-	agg2, _ := reg.Aggregate(ctx)
+	// Age the stored heartbeat explicitly so suite load cannot make the fresh
+	// assertion race a short wall-clock TTL. Stale entries remain present.
+	if _, err := st.Pool().Exec(ctx, `UPDATE components SET last_seen = now() - interval '2 hours' WHERE name = $1`, name); err != nil {
+		t.Fatalf("age heartbeat: %v", err)
+	}
+	agg2, err := reg.Aggregate(ctx)
+	if err != nil {
+		t.Fatalf("aggregate aged entry: %v", err)
+	}
 	e2 := find(agg2, name)
 	if e2 == nil || !e2.Stale {
 		t.Fatalf("expected stale-but-present entry, got %+v", e2)

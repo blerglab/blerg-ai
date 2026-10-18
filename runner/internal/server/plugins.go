@@ -119,6 +119,10 @@ func pluginsRestricted(spec SessionJobSpec) bool {
 // pluginsNoteRestricted is the start panel's reason when a restricted session has no plugins stage.
 const pluginsNoteRestricted = "not loaded: a restricted session runs without plugins"
 
+// pluginsNoteDelegated is the start panel's reason a child session has no plugins: another session
+// started it, and that start has no liveness proof to load the owner's plugins with.
+const pluginsNoteDelegated = "skipped: started by another session"
+
 // pluginsWanted limits always-on plugins to unrestricted sessions with a known
 // spawning account and a registered native installer for their engine.
 func pluginsWanted(spec SessionJobSpec) bool {

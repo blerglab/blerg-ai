@@ -27,6 +27,26 @@ import (
 // routeDecisions: route pattern (as registered, method included) -> the
 // visibility decision that covers it.
 var routeDecisions = map[string]string{
+	"GET /api/sessions/{id}/board-options": "own-session messaging credential only; retained launcher proof and current Core account permission, project-scoped target filtering; names only",
+	"GET /api/sessions/{id}/board-search":  "own-session messaging credential only; current Core proof and selected-board scope; only public duplicate summaries, no body",
+	"POST /api/sessions/{id}/file-ticket":  "own-session messaging credential only; server-derived owner/origin, current target access; private owner-only frozen proposal, no Board write or body fanout",
+	"POST /api/sessions/{id}/filing-tools": "same own-session credential and REST validation as CLI; one fixed built-in tool, no arbitrary upstream or account",
+	"PATCH /api/proposals/{id}/draft":      "human owner only with live sign-in proof and project target scope; pending unexpired built-in filing only, exact prior arguments CAS; origin immutable",
+	"GET /api/session-boards":              "signed-in human only; Core checks live account/session and board access, project-scoped credentials see only their board; no existing session data or credentials returned",
+	"POST /api/sessions/{id}/progress":     "own-session messaging credential or daemon token only; live daemon resolves optional origin; private progress reads use /live visibility",
+	// Parent-session child operations: private surface, never authRunner.
+	"GET /api/sessions/{id}/children":                                  "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"GET /api/sessions/{id}/children/{child}":                          "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"POST /api/sessions/{id}/children/{child}/message":                 "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"POST /api/sessions/{id}/children/{child}/model":                   "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"POST /api/sessions/{id}/children/{child}/interrupt":               "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"POST /api/sessions/{id}/children/{child}/stop":                    "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"GET /api/sessions/{id}/children/{child}/result":                   "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"GET /api/sessions/{id}/children/{child}/events":                   "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"POST /api/sessions/{id}/children/{child}/uploads":                 "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"GET /api/sessions/{id}/children/{child}/artifacts":                "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"GET /api/sessions/{id}/children/{child}/artifacts/{aid}/download": "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+
 	"GET /api/sessions/{id}/workspace-file": "human owner or account.manage administrator only, even for public sessions; correlated current-daemon request with runtime authority rechecked before returning content",
 	// ── browser routes on /api/sessions ──
 	"GET /api/sessions":                   "list filtered by canSeeAccount in HandleGetSessions",
@@ -49,9 +69,21 @@ var routeDecisions = map[string]string{
 	"GET /api/sessions/{id}/files":                    "the session's own credential (agentSession: its messaging token, whose session must equal the path); a person's token is refused",
 	"DELETE /api/sessions/{id}/files/{aid}":           "the session's own credential (agentSession), and only a file the session itself published",
 	"POST /api/sessions/{id}/topics":                  "the session's own credential: its messaging token (whose session must equal the path) or the daemon token; a person's token is refused",
+	"GET /api/sessions/{id}/plugins":                  "human session owner only, live proof checked by Core; no public viewer or agent token reads",
+	"POST /api/sessions/{id}/plugins":                 "human session owner only; exact approved allowlisted change, Core validates live human proof",
+	"POST /api/sessions/{id}/plugin-requests":         "own session messaging token only; only queues owner-scoped approval, never installs",
 	"POST /api/sessions/{id}/checklist":               "the session's own credential: its messaging token (whose session must equal the path) or the daemon token; a person's token is refused; read back through /live",
 	"POST /api/sessions/{id}/tickets":                 "the session's own credential: its messaging token (whose session must equal the path) or the daemon token; a person's token is refused; read back through /live",
 	"GET /api/sessions/{id}/topics":                   "person only (agent token 403); canSeeAccount, a private session answers the uniform 404",
+	"POST /api/sessions/{id}/children":                "the parent's own session token (board_id NULL) or runtime token for the path's session (delegateParent); daemon, assist, agent and browser credentials refused; owner-less, ended and child parents refused",
+	"GET /api/delegation-requests/{id}":               "the parent's own session token (its own requests only) or the owner's browser (who alone also gets the stored request); anything else the uniform 404",
+	"POST /api/delegation-requests/{id}/expire":       "the parent's own session token, for its own request only (CAS from pending); anything else the uniform 404",
+	"POST /api/delegation-requests/{id}/decide":       "human with sid, owner of the request only; anything else the uniform 404; CAS from pending; the child starts from the stored request",
+	"GET /api/delegation-rules":                       "personAccount: the caller's own rules only; names no session",
+	"POST /api/delegation-rules":                      "person with sid; a rule of the caller's own account; names no session",
+	"DELETE /api/delegation-rules/{id}":               "person with sid; only the caller's own rule, else the uniform 404",
+	"POST /api/delegation-grants/{id}/revoke":         "person with sid; only the caller's own grant, else the uniform 404",
+	"GET /api/sessions/{id}/budget":                   "the session's own token (board_id NULL) or its owner's browser; anything else the uniform 404; reads only the session's own daemon",
 	"GET /api/sessions/{id}/live":                     "person only (agent token 403); canSeeAccount, a private session answers the uniform 404; tokens per the Insights rule; tool changes are the viewer's own; MCP inventory, first-prompt hold and engine plans follow the same session privacy boundary",
 	"POST /api/sessions/{id}/uploads":                 "person only (agent token 403); canSeeAccount, a private session answers the uniform 404",
 	"GET /api/sessions/{id}/attachments":              "the session's own credential (its token's session must equal the path) or the daemon token; a person's token is refused",
@@ -129,6 +161,7 @@ const (
 )
 
 var emitDecisions = map[string]emitDecision{
+	"delegation_children_live.go:broadcastChildrenChanged:BroadcastJSON":        {1, whyScoped + "; parent and triggering child are independently privacy-scoped"},
 	"agentevents.go:HandleAgentEvent:BroadcastJSON":                             {2, whyScoped},
 	"agentevents.go:HandleAgentEvent:FanOutAgentEvent":                          {1, whySubscribers},
 	"background_reconcile.go:publishBackgroundTaskReconciliation:BroadcastJSON": {1, whyScoped},
@@ -155,6 +188,7 @@ var emitDecisions = map[string]emitDecision{
 	"messages.go:HandlePostMessageExpire:BroadcastJSON":                         {1, whyScoped},
 	"messages.go:HandlePostMessageReply:BroadcastJSON":                          {1, whyScoped},
 	"messages.go:HandlePostMessages:BroadcastJSON":                              {1, whyScoped},
+	"delegation_start.go:pushForDelegation:SendPush":                            {1, whyPush},
 	"messages.go:pushForMessage:SendPush":                                       {1, whyPush},
 	"notices.go:sendSessionNotice:BroadcastJSON":                                {1, whyScoped},
 	"notices.go:sendSessionNotice:SendPush":                                     {1, whyPush},

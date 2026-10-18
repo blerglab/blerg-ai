@@ -205,7 +205,7 @@ func TestMessageForAPausedSessionIsHeldAndEndsThePause(t *testing.T) {
 	}
 	dc2 := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte, 8)}
 	hub.Register(dc2)
-	hub.deliverHeld(dc2)
+	hub.deliverHeld(t.Context(), dc2)
 	select {
 	case got := <-dc2.send:
 		if !strings.Contains(string(got), "Postgres") {

@@ -5,6 +5,7 @@ import SettingsDialog from './SettingsDialog'
 import { CODE_COLOURS_KEY, fetchCodeColours, getCodeColours, saveCodeColours, setCodeColours } from '../lib/codeColours'
 
 const apiFetch = vi.hoisted(() => vi.fn())
+vi.mock('./DelegationRulesSection', () => ({ default: () => null }))
 vi.mock('../apiFetch', () => ({ apiFetch }))
 
 const preview = () => screen.getByTestId('cc-preview')

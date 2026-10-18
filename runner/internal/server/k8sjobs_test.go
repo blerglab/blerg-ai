@@ -378,6 +378,36 @@ func TestCreateSessionJobManifest(t *testing.T) {
 	}
 }
 
+func TestCreateSessionJobRecoveryMarker(t *testing.T) {
+	for _, required := range []bool{false, true} {
+		t.Run(fmt.Sprint(required), func(t *testing.T) {
+			f := &fakeK8s{}
+			jm := newTestJobManager(t, f)
+			if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "recovery-marker", Repo: "proj", RequireRecoveryReady: required}); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(f.created)
+			if err != nil {
+				t.Fatal(err)
+			}
+			present := strings.Contains(string(raw), `"name":"BLERG_RUNNER_REQUIRE_RECOVERY_READY","value":"1"`)
+			if present != required {
+				t.Fatalf("recovery marker present = %v, required = %v", present, required)
+			}
+		})
+	}
+	for _, value := range []string{"0", "1", ""} {
+		f := &fakeK8s{}
+		jm := newTestJobManager(t, f)
+		if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "override", Repo: "proj", ExtraEnv: map[string]string{"BLERG_RUNNER_REQUIRE_RECOVERY_READY": value}}); err == nil {
+			t.Fatal("accepted caller-controlled recovery marker")
+		}
+		if len(f.created) != 0 {
+			t.Fatal("created a job after refusing a reserved environment key")
+		}
+	}
+}
+
 func TestCreateSessionJobEngine(t *testing.T) {
 	f := &fakeK8s{}
 	jm := newTestJobManager(t, f)

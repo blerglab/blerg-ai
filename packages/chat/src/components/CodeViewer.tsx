@@ -4,6 +4,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useBackdropClose } from '../hooks/useBackdropClose'
+import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { langLabel, type CodeLang } from '../model/codeLang'
 import { useHighlight } from '../model/highlight'
 import { countLines } from '../model/lineCap'
@@ -17,6 +18,7 @@ export default function CodeViewer({ text, lang, title, onClose }: {
 }) {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
+  useSelectAllIn(dialogRef)
   const backdrop = useBackdropClose(onClose)
   const [copied, setCopied] = useState(false)
   const highlighted = useHighlight(lang, text, true)

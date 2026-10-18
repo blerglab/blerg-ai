@@ -612,6 +612,7 @@ func TestAgentHostNativeLoopProviderErrorDoesNotEndTheSession(t *testing.T) {
 	if errs := sender.sessionErrors(); len(errs) > 0 {
 		t.Fatalf("a provider error ended the session: %v", errs)
 	}
+	waitUntil(t, "native loop idle after recovered turn", func() bool { return host.States()["s1"] == "idle" })
 	if got := host.States()["s1"]; got != "idle" {
 		t.Fatalf("session state = %q, want idle (still usable)", got)
 	}

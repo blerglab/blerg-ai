@@ -69,7 +69,8 @@ type openclawTurn struct {
 }
 
 type openclawDriver struct {
-	workDir string
+	recoveryInputGate func(context.Context) // guarded by mu; worker admission only
+	workDir           string
 	engineModel
 	contextChars int
 	emitter      agent.Emitter
@@ -169,6 +170,15 @@ func (d *openclawDriver) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case msg := <-d.queue:
+			d.mu.Lock()
+			gate := d.recoveryInputGate
+			d.mu.Unlock()
+			if gate != nil {
+				gate(ctx)
+			}
+			if ctx.Err() != nil {
+				return
+			}
 			d.emit("user_message", msg.Payload())
 			d.emit("status_changed", agent.StatusPayload{Status: "running", Reason: "turn"})
 			d.runTurn(ctx, msg.Text)

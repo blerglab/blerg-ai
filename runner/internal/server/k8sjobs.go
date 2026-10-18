@@ -25,6 +25,7 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
+	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/scratch"
@@ -508,6 +509,7 @@ type SessionJobSpec struct {
 	InitialPromptSource   string
 	InitialPromptClientID string
 	Resume                bool
+	RequireRecoveryReady  bool // internal child lineage, never caller env
 	// ExtraEnv is caller-supplied env for runner-brokered sessions (e.g.
 	// blerg-board's BLERG_BOARD_URL/BLERG_BOARD_TOKEN). BLERG_RUNNER_*/ANTHROPIC_API_KEY are
 	// rejected upstream so callers cannot shadow blerg-owned variables.
@@ -1037,6 +1039,13 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 	}
 	if spec.NewRepo {
 		env = append(env, map[string]any{"name": "BLERG_RUNNER_NEW_REPO", "value": "1"})
+	}
+	const recoveryReadyEnv = "BLERG_RUNNER_REQUIRE_RECOVERY_READY"
+	if _, dup := spec.ExtraEnv[recoveryReadyEnv]; dup {
+		return fmt.Errorf("env key %s is reserved", recoveryReadyEnv)
+	}
+	if spec.RequireRecoveryReady {
+		env = append(env, map[string]any{"name": recoveryReadyEnv, "value": "1"})
 	}
 	// A grant implies the restriction, so a session that reaches here with one and no flag
 	// (a caller that forgot) is still restricted.
@@ -1631,6 +1640,15 @@ type resumeInput struct {
 }
 
 func resumeClusterSessionMode(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, requesterAccountID, requesterSessionID string, automatic bool, inputs ...resumeInput) error {
+	return h.guardDelegationInput(ctx, sessionID, func() error {
+		return resumeClusterSessionModeGuarded(ctx, h, pool, sessionID, text, requesterAccountID, requesterSessionID, automatic, inputs...)
+	})
+}
+
+func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, requesterAccountID, requesterSessionID string, automatic bool, inputs ...resumeInput) error {
+	if problem := parentResumeProblem(ctx, pool, sessionID); problem != nil {
+		return problem
+	}
 	jm := h.JobManager()
 	if jm == nil || pool == nil {
 		log.Printf("agent_user_message %s: no daemon and no cluster runtime — dropping", sessionID)
@@ -1735,7 +1753,8 @@ func resumeClusterSessionMode(ctx context.Context, h *Hub, pool *pgxpool.Pool, s
 	// A resume is a start too: the browser shows its progress the same way.
 	spec := SessionJobSpec{
 		SessionID: sessionID, Repo: row.Repo, Title: title, Model: model, Effort: effort, Engine: engine,
-		InitialPrompt: text, Resume: true,
+		RequireRecoveryReady: isChildSession(row),
+		InitialPrompt:        text, Resume: true,
 		InitialPromptClientID: func() string {
 			if len(inputs) > 0 {
 				return inputs[0].ClientID
@@ -1791,6 +1810,12 @@ func resumeClusterSessionMode(ctx context.Context, h *Hub, pool *pgxpool.Pool, s
 			return errors.New("cluster resume was not accepted")
 		}
 		spec.MCPGateway = gateway
+		for _, grant := range grants {
+			if grant.Builtin == mcpgw.BuiltinBoard {
+				spec.ExtraEnv = sessionBoardEnv(spec.ExtraEnv, grant.BuiltinRef, gateway)
+				break
+			}
+		}
 	}
 	jm.ResolvePlugins(ctx, &spec)
 	announceClusterStart(ctx, h, pool, sessionID, row.Repo, true, pluginStage(spec.Plugins, spec.PluginsNote))

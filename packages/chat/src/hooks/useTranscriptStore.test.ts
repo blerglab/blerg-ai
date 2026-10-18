@@ -180,3 +180,24 @@ describe('transcript store thinking flag', () => {
     expect(held()).toEqual(['c1'])
   })
 })
+
+describe('subagent text keeps the main reply intact', () => {
+  for (const batched of [false, true]) {
+    it(`does not append child deltas or close root streaming (${batched ? 'replay page' : 'live events'})`, () => {
+      const ingest = (events: AgentEvent[]) => batched ? store().ingestMany('s1', events) : events.forEach(e => store().ingest(e))
+      store().appendStreaming('s1', 'Root commentary still being written')
+      ingest([ev(undefined, 'child-delta', { kind: 'assistant_text', transient: true, payload: { text: 'Child private working note', done: false, parent_call_id: 'child-call' } })])
+      expect(store().sessions.s1.streaming).toBe('Root commentary still being written')
+      ingest([
+        ev(1, 'child-complete', { kind: 'assistant_text', payload: { text: 'Child result', done: true, parent_call_id: 'child-call' } }),
+        ev(2, 'child-turn', { kind: 'turn_done', payload: { parent_call_id: 'child-call' } }),
+        ev(3, 'child-error', { kind: 'error', payload: { message: 'Child failed', parent_call_id: 'child-call' } }),
+      ])
+      expect(store().sessions.s1.streaming).toBe('Root commentary still being written')
+      expect(held()).toContain('child-complete')
+      ingest([ev(4, 'root-complete', { kind: 'assistant_text', payload: { text: 'Root commentary still being written', done: true } })])
+      expect(store().sessions.s1.streaming).toBe('')
+      expect(held()).toContain('root-complete')
+    })
+  }
+})

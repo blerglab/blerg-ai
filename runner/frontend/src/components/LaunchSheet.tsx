@@ -20,6 +20,7 @@ import {
   launchMcpConnections, launchModelsCache, patchCachedDaemon, storeRepos, reposPartFrom,
 } from '../lib/launchCache'
 import type { RepoInfo, DaemonApiInfo, ClusterStatusApi, MyCredentialsApi, ReposPart, LaunchCacheData } from '../lib/launchCache'
+import { useSessionBoards } from '../lib/sessionBoards'
 import './LaunchSheet.css'
 
 function repoKey(r: RepoInfo): string {
@@ -79,6 +80,7 @@ const itemSelected: React.CSSProperties = {
 // Remembers the last-used Engine/Model across launches so people aren't
 // re-picking every time — per-browser (localStorage), not synced across
 // machines. Guarded: localStorage can throw in privacy-restricted contexts.
+const LAST_BOARD_KEY = 'blerg.launch.board'
 const LAST_ENGINE_KEY = 'blerg.launch.engine'
 const LAST_MODEL_KEY = 'blerg.launch.model'
 // The last effort the person explicitly picked. Only an explicit pick is
@@ -223,6 +225,12 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [selectedDaemon, setSelectedDaemon] = useState<DaemonApiInfo | null>(() => boot.defaults?.daemon ?? null)
   const [initialPrompt, setInitialPrompt] = useState('')
   // MCP servers and tools chosen for this session (McpPicker). Empty: none, and no `mcp` is sent.
+  const boards = useSessionBoards(open)
+  const [boardId, setBoardId] = useState(() => loadStored(LAST_BOARD_KEY, (v): v is string => typeof v === 'string' && v.length <= 200) ?? '')
+  function pickBoard(id: string) {
+    setBoardId(id)
+    saveDefault(LAST_BOARD_KEY, id)
+  }
   const [mcp, setMcp] = useState<McpSelectionEntry[]>([])
   // Session kind: the native agent harness (structured chat transcript, no
   // terminal) or the classic tmux-hosted terminal CLI. Agent is the default —
@@ -698,15 +706,19 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
         : parts.daemons === 'failed'
           ? `Couldn't check that ${selectedDaemon.name} is still connected — close and reopen to try again.`
           : `Checking that ${selectedDaemon.name} is still connected…`
-  const blockedReason = runtimeBlockedReason ?? hostClaudeBlockedReason ?? cloneByNameUnsupported ?? clonePlanProblem ?? scratchNameProblem ?? daemonUnconfirmedReason
+  const mcpEngineAvailable = launchOptions.engines.find(e => e.id === engine)?.restricted === true
+  const mcpAvailable = (runtime === 'cluster' || runtime === 'docker') && mcpEngineAvailable && kind === 'agent'
+  const boardProblem = !boardId ? null
+    : !mcpAvailable ? 'Clear the board or choose an agent session in a supported sandbox to use its tools.'
+    : boards.state !== 'ready' ? 'Checking your board access — retry or clear the board to launch without it.'
+    : !boards.configured || !boards.boards.some(b => b.id === boardId) ? 'This board is no longer available to you. Choose another board or clear the board.'
+    : null
+  const blockedReason = boardProblem ?? runtimeBlockedReason ?? hostClaudeBlockedReason ?? cloneByNameUnsupported ?? clonePlanProblem ?? scratchNameProblem ?? daemonUnconfirmedReason
 
   const canSubmit = engineKnown && hasRepoChoice &&
     (!needsDaemon || selectedDaemon !== null) && !submitting &&
     (runtime !== 'daemon' || agentAck) && !clusterEngineBlocked && blockedReason === null &&
     !clusterRepoUnresolved && !freeTextModelInvalid
-
-  const mcpEngineAvailable = launchOptions.engines.find(e => e.id === engine)?.restricted === true
-  const mcpAvailable = (runtime === 'cluster' || runtime === 'docker') && mcpEngineAvailable && kind === 'agent'
 
   // ── Run column handlers ────────────────────────────────────────────────────
   // Any deliberate pick pins the runtime for the life of this sheet.
@@ -861,6 +873,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           // not a server default; fixed for the session's life.
           interaction: kind === 'agent' ? (unattended ? 'unattended' : 'interactive') : undefined,
           // Only when something is selected, and only where a grant can run at all.
+          board_id: boardId || undefined,
           mcp: mcpAvailable && mcp.length > 0 ? mcp : undefined,
         }),
       })
@@ -1286,6 +1299,34 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                   </span>
                 </span>
               </label>
+            )}
+
+            {(boards.state !== 'ready' || boards.configured) && (
+              <div style={{ marginBottom: 20 }}>
+                {boards.state === 'ready' && boards.configured ? (
+                  <>
+                    <label htmlFor="launch-board" style={sectionLabel}>Board</label>
+                    <select id="launch-board" value={boardId} onChange={e => pickBoard(e.target.value)}
+                      style={{ width: '100%', background: 'var(--scree)', border: '1px solid var(--stone)', borderRadius: 6, color: 'var(--chalk)', padding: '8px 10px', fontFamily: 'inherit' }}
+                    >
+                      <option value="">No board</option>
+                      {boardId && !boards.boards.some(b => b.id === boardId) && <option value={boardId}>Previously selected board (unavailable)</option>}
+                      {boards.boards.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                    </select>
+                    <div style={{ color: 'var(--fog)', fontSize: 12, marginTop: 6 }}>
+                      Optional. Give this session tools to work directly on this board. Sessions with a board are private to you.
+                    </div>
+                  </>
+                ) : boards.state === 'failed' ? (
+                  <div role="status" style={{ color: 'var(--fog)', fontSize: 13 }}>
+                    Couldn't load boards. You can launch without one.{' '}
+                    <button type="button" onClick={boards.retry}>Retry boards</button>
+                  </div>
+                ) : <div role="status" style={{ color: 'var(--fog)', fontSize: 13 }}>Checking available boards…</div>}
+              </div>
+            )}
+            {boardId && (boards.state !== 'ready' || !boards.configured) && (
+              <button type="button" onClick={() => pickBoard('')}>Clear board</button>
             )}
 
             {/* MCP servers: all unchecked, every tool off, until the person chooses */}

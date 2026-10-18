@@ -43,6 +43,10 @@ type Deps struct {
 	Registry *discovery.Registry
 	Audience string // "blerg-core"
 
+	// LatestRelease returns the newer public release the update checker knows of (version
+	// without the leading v, and its github.com release page), or "", "". Nil reports nothing.
+	LatestRelease func() (version, url string)
+
 	// Credentials backs POST/GET/DELETE /api/credentials (§5) — the per-account encrypted
 	// credential vault. A nil Credentials makes those three endpoints fail closed (503)
 	// rather than panic, matching the identitySvc()-style fail-closed convention used
@@ -249,13 +253,20 @@ func NewRouter(deps Deps) http.Handler {
 	// server-rendered landing page put in its HTML for anyone to read.
 	mux.HandleFunc("GET /api/site", func(w http.ResponseWriter, _ *http.Request) {
 		l := deps.componentLinks()
-		writeJSON(w, map[string]string{
+		site := map[string]string{
 			"version":    landing.Version(),
 			"release":    landing.Release(),
 			"commit":     landing.Commit(),
 			"board_url":  l.BoardURL,
 			"runner_url": l.RunnerURL,
-		})
+		}
+		// Only when a newer release is known; the keys are absent otherwise.
+		if deps.LatestRelease != nil {
+			if v, u := deps.LatestRelease(); v != "" && u != "" {
+				site["latest_version"], site["latest_url"] = v, u
+			}
+		}
+		writeJSON(w, site)
 	})
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -421,6 +432,9 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("POST /internal/credentials/list", deps.handleInternalListCredentials)
 	// The runner reads an account's plugin list (no secrets) with a mandatory liveness proof.
 	mux.HandleFunc("POST /internal/plugins/list", deps.handleInternalListPlugins)
+	mux.HandleFunc("POST /internal/plugins/catalog", deps.handleInternalPluginCatalog)
+	mux.HandleFunc("POST /internal/plugins/policy", deps.handleInternalPluginPolicy)
+	mux.HandleFunc("POST /internal/plugins/add", deps.handleInternalPluginAdd)
 
 	deps.registerMCPRoutes(mux)
 	deps.registerInternalTokenRoutes(mux)

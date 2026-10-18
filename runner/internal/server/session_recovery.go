@@ -13,6 +13,11 @@ import (
 // mode means an eligible attempt: the replacement still verifies live Core
 // authority, the retained claim's UID and writer fencing before mounting it.
 func sessionResumeEligibility(ctx context.Context, pool *pgxpool.Pool, jobs *JobManager, row *db.SessionRow, account string, proof coreProof) (bool, string, string) {
+	if row != nil {
+		if problem := parentResumeProblem(ctx, pool, row.ID); problem != nil {
+			return false, "", problem.Message
+		}
+	}
 	if row == nil || row.Kind != "agent" || row.Status != "disconnected" || row.EndedAt != nil || derefOrEmpty(row.Runtime) != "cluster" {
 		return false, "", "The session is not a disconnected Cluster conversation"
 	}

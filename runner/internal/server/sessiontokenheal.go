@@ -114,6 +114,9 @@ func healSessionTokens(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *Da
 		return
 	}
 	for _, id := range need {
+		if problem := parentResumeProblem(ctx, dbPool, id); problem != nil {
+			continue
+		}
 		if !h.tokenHeals.claim(id) {
 			continue // a heal of this session is already waiting for its answer
 		}

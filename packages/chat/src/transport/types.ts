@@ -2,7 +2,7 @@
 // today, no more (docs/design/chat-package.md, "The transport contract"). Two adapters ship with
 // the package (blerg.ts over the runner's own websocket and routes, proxy.ts over an app's proxy
 // of the runner's v1 contract); an app with a backend of its own shape writes a third.
-import type { AgentEvent, EndedBy, SessionStatus } from '../types'
+import type { AgentEvent, DelegationChoice, DelegationDecidedPayload, EndedBy, SessionStatus } from '../types'
 import type { ArtifactInfo } from '../model/artifacts'
 import type { UploadedFile } from '../model/attachments'
 
@@ -165,4 +165,9 @@ export interface Transport {
   answersAsks?: boolean
   /** Absent: ChatView shows no Files panel and no attach control. */
   files?: TransportFiles
+  /** Decides a request the session made to start another session (the person's choice). Rejects
+   *  with the server's message on 404/409/422. Absent: a delegation card is read-only. */
+  decideDelegation?(requestId: string, choice: DelegationChoice): Promise<DelegationDecidedPayload>
+  /** The request in full (the whole prompt), for the owner. Absent: no "Show all". */
+  delegationRequest?(requestId: string): Promise<{ prompt: string }>
 }

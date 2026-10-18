@@ -1,0 +1,178 @@
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
+import { apiFetch } from '../apiFetch'
+import type { ProposalInfo } from '../types'
+import { pluginApplication, type PluginScope } from '../lib/sessionPlugins'
+import { useSessionPlugins } from '../hooks/useSessionPlugins'
+import './SessionPlugins.css'
+
+type Model = ReturnType<typeof useSessionPlugins>
+
+export function PluginPicker({ model }: { model: Model }) {
+  const { data, error, refresh, sessionId } = model
+  const [open, setOpen] = useState(false)
+  const [marketplace, setMarketplace] = useState('')
+  const [name, setName] = useState('')
+  const [scope, setScope] = useState<PluginScope>('session')
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState<string | null>(null)
+  const [applied, setApplied] = useState<{ session: string; text: string } | null>(null)
+  const source = marketplace || data?.allowed_marketplaces[0] || ''
+  const effectiveScope = data?.session_apply === true ? scope : 'always'
+  const validName = /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)
+  const validSource =
+    /^[A-Za-z0-9._-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(source) &&
+    !source.startsWith('.') &&
+    !source.startsWith('-') &&
+    !['.', '..'].includes(source.split('/')[1])
+  const allowed =
+    !!data &&
+    (data.any_marketplace || data.allowed_marketplaces.some((s) => s.toLowerCase() === source.toLowerCase()))
+  async function add() {
+    if (busy || !data?.supported || error || !validName || !validSource || !allowed) return
+    setBusy(true)
+    setFailure(null)
+    try {
+      const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/plugins`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ marketplace: source, plugin: name, scope: effectiveScope }),
+      })
+      if (!res.ok) throw new Error('Plugin change was not accepted. Refresh the choices and try again.')
+      const p = (await res.json()) as ProposalInfo
+      setApplied({ session: sessionId, text: pluginApplication(p) })
+      setName('')
+      await refresh()
+    } catch {
+      setFailure('Plugin change was not accepted. Refresh the choices and try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <section className="session-plugins" aria-label="Session plugins">
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        Add plugin or skill
+      </button>
+      {open && (
+        <div className="session-plugin-form">
+          {error && (
+            <p role="alert">
+              {error}{' '}
+              <button type="button" onClick={() => void refresh()}>
+                Retry plugin choices
+              </button>
+            </p>
+          )}
+          {!data && !error && <p role="status">Loading plugin choices…</p>}
+          {data && !error && (
+            <>
+              {data.reason && <p>{data.reason}</p>}
+              {!data.supported ? (
+                <p>Plugins cannot be added to this session.</p>
+              ) : (
+                <>
+                  <p>
+                    Skills are included in plugin bundles. Choose a marketplace permitted by this install.
+                  </p>
+                  <label>
+                    Marketplace
+                    {data.any_marketplace ? (
+                      <input
+                        aria-label="Marketplace"
+                        value={source}
+                        maxLength={140}
+                        onChange={(e) => setMarketplace(e.target.value)}
+                      />
+                    ) : (
+                      <select
+                        aria-label="Marketplace"
+                        value={source}
+                        onChange={(e) => setMarketplace(e.target.value)}
+                      >
+                        {data.allowed_marketplaces.map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </label>
+                  <label>
+                    Plugin name
+                    <input
+                      value={name}
+                      maxLength={64}
+                      onChange={(e) => setName(e.target.value)}
+                      autoCapitalize="none"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label>
+                    Apply plugin
+                    <select value={effectiveScope} onChange={(e) => setScope(e.target.value as PluginScope)}>
+                      <option value="session" disabled={!data.session_apply}>
+                        This session only
+                      </option>
+                      <option value="always">Always on</option>
+                    </select>
+                  </label>
+                  <p>
+                    {effectiveScope === 'session'
+                      ? 'Loads between turns; your account settings stay unchanged.'
+                      : data.session_apply
+                        ? 'Saves to account settings and loads between turns.'
+                        : 'Saves to account settings for new sessions. This session keeps its current plugins.'}
+                  </p>
+                  <button
+                    type="button"
+                    disabled={busy || !validName || !validSource || !allowed}
+                    onClick={() => void add()}
+                  >
+                    {busy ? 'Saving…' : effectiveScope === 'session' ? 'Add to session' : 'Save always on'}
+                  </button>
+                </>
+              )}
+            </>
+          )}
+          {failure && <p role="alert">{failure}</p>}
+          {applied?.session === sessionId && <p role="status">{applied.text}</p>}
+        </div>
+      )}
+    </section>
+  )
+}
+export function PluginRequests({ model, pendingOnly = false }: { model: Model; pendingOnly?: boolean }) {
+  const requests = (model.data?.requests ?? []).filter((p) => !pendingOnly || p.state === 'pending')
+  if (!requests.length) return null
+  return (
+    <section className="session-plugins" aria-label="Plugin requests">
+      <h3>Plugin requests</h3>
+      <ul className="session-plugin-requests">
+        {requests.map((p) => (
+          <li key={p.id}>
+            <strong>{String(p.arguments?.plugin ?? 'Plugin')}</strong>
+            {typeof p.arguments?.marketplace === 'string' && <span> from {p.arguments.marketplace}</span>}
+            {typeof p.arguments?.reason === 'string' && <p>{p.arguments.reason}</p>}
+            <p>{pluginApplication(p)}</p>
+            {p.state === 'pending' && (
+              <Link to={`/proposals?id=${encodeURIComponent(p.id)}`}>
+                Approve or decline {String(p.arguments?.plugin ?? 'plugin')}
+              </Link>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+export function SessionPluginChatRequests({ sessionId, active }: { sessionId: string; active: boolean }) {
+  const model = useSessionPlugins(sessionId, active)
+  if (!active) return null
+  return (
+    <div className="session-plugin-chat-requests">
+      <PluginRequests model={model} pendingOnly />
+    </div>
+  )
+}

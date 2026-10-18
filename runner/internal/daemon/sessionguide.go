@@ -18,6 +18,7 @@ type sessionGuideLine struct {
 
 func sessionWorkGuideLines() []sessionGuideLine {
 	return []sessionGuideLine{
+		{Text: childSessionGuideLine, ManagedPrefix: "- `blerg-runner session` / `blerg-runner budget` — "},
 		{Text: diffGuideLine, ManagedPrefix: "- `blerg-runner diff` — "},
 		{Text: workGuideLine, ManagedPrefix: "- `blerg-runner checklist` / `blerg-runner pin` — "},
 		{Text: topicGuideLine, ManagedPrefix: "- `blerg-runner topic` — mark a piece of work for the History tab of the session page. ", ManagedSuffix: " Without markers the History tab shows only a summary."},

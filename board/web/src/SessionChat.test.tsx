@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentEvent, UserMessagePayload } from "@blerglab/chat";
+import { render, screen } from "@testing-library/react";
+import { ChatView, type AgentEvent, type Transport, type UserMessagePayload } from "@blerglab/chat";
 import { boardMeta, describeUserMessage } from "./SessionChat";
 
 const ev = { type: "agent_event", session_id: "s", client_event_id: "e", ts: "", kind: "user_message", payload: {} } as AgentEvent;
@@ -43,5 +44,35 @@ it("preserves explicit native steering and effort while retaining advertised fil
   });
   expect(boardMeta({ status: "running", started_at: "", limits }, row)).toEqual({
     status: "running", started_at: "board-start", model: "board-model", engine: "claude", effort: "high", steering_supported: true, limits,
+  });
+});
+
+describe("SessionChat delegation request", () => {
+  it("shows a delegation request read-only", async () => {
+    const request = {
+      request_id: "r1", engine: "codex", runtime: "daemon", daemon_name: "laptop", title: "Review it", prompt: "Read the diff.",
+      offered: ["once", "deny"], expires_at: "2099-01-01T00:00:00Z",
+    };
+    const event = { type: "agent_event", session_id: "s", client_event_id: "d1", seq: 1, ts: "2026-10-17T00:00:00Z", kind: "delegation_request", payload: request } as AgentEvent;
+    // The board's transport has no decideDelegation (proxy.ts implements neither).
+    const transport: Transport = {
+      subscribe: (_id, _opts, h) => {
+        h.onConnection(true);
+        h.onEvent(event);
+        h.onReplayDone({ hasMore: false, lastSeq: 1 } as never);
+        return () => {};
+      },
+      loadOlder: async () => ({ events: [], hasOlder: false } as never),
+      session: async () => ({ status: "running", started_at: "2026-10-17T00:00:00Z" }),
+      send: async () => ({ queued: false }),
+      stop: async () => {},
+      connected: () => true,
+    };
+    render(<ChatView session="s" transport={transport} readOnly />);
+    const card = await screen.findByTestId("delegation-card");
+    expect(card).toHaveTextContent("This session wants to start a Codex session");
+    expect(card).toHaveTextContent("on your desktop, unsandboxed");
+    expect(card).toHaveTextContent("Decide in Blerg Runner");
+    expect(card.querySelector("button")).toBeNull();
   });
 });

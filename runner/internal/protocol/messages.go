@@ -208,14 +208,17 @@ type EndedBy struct {
 
 // DaemonHello is the first message a daemon sends upon connecting.
 type DaemonHello struct {
-	Type            string   `json:"type"` // "daemon_hello"
-	Name            string   `json:"name"`
-	Mode            string   `json:"mode"`
-	ReposRoot       string   `json:"repos_root"`
-	Token           string   `json:"token"`
-	ProtocolVersion string   `json:"protocol_version"`
-	Version         string   `json:"version"`
-	ActiveSessions  []string `json:"active_sessions"`
+	// RecoveryReady negotiates the current-link recovery policy barrier.
+	RecoveryReady            bool     `json:"recovery_ready,omitempty"`
+	RecoveryRequiredSessions []string `json:"recovery_required_sessions,omitempty"`
+	Type                     string   `json:"type"` // "daemon_hello"
+	Name                     string   `json:"name"`
+	Mode                     string   `json:"mode"`
+	ReposRoot                string   `json:"repos_root"`
+	Token                    string   `json:"token"`
+	ProtocolVersion          string   `json:"protocol_version"`
+	Version                  string   `json:"version"`
+	ActiveSessions           []string `json:"active_sessions"`
 	// BackgroundTasks is a complete snapshot for this daemon process lifetime.
 	// Absent on old/unknown peers; empty Sessions is authoritative, never partial.
 	BackgroundTasks *BackgroundTaskInventory `json:"background_task_inventory,omitempty"`
@@ -287,6 +290,8 @@ type DaemonHello struct {
 	// PluginEngines names the native plugin installers this daemon can use.
 	// Absent on older daemons, whose plugins capability means Claude only.
 	PluginEngines []string `json:"plugin_engines,omitempty"`
+	// SessionPluginEngines supports owner-approved live updates on host sessions.
+	SessionPluginEngines []string `json:"session_plugin_engines,omitempty"`
 	// AllowHostCredentialClone: this daemon's owner allows a named clone to
 	// use the launching person's own git token on the bare host (a This
 	// machine session). Without it the server sends a token only for a
@@ -313,6 +318,9 @@ type DaemonHello struct {
 	SandboxClaudeCredential *bool `json:"sandbox_claude_credential,omitempty"`
 	// AvailableEngines — see DaemonInfo.AvailableEngines.
 	AvailableEngines []string `json:"available_engines"`
+	// LocalEngines lists the engine ids ("hermes", "openclaw") whose endpoint is on this machine or
+	// its LAN with no provider key configured. Absent means none (or an older daemon).
+	LocalEngines []string `json:"local_engines,omitempty"`
 	// EngineModels is the model lists this daemon probed from its engines'
 	// own CLIs or endpoints (the EngineSpec.ListModels hooks), keyed by engine
 	// id, one entry per engine that has a probe — an empty Models means
@@ -335,8 +343,10 @@ type DaemonHello struct {
 // was accepted and the daemon attached. Sent only when the hello set Welcome,
 // before any other message on the connection. Never carries a credential.
 type DaemonWelcome struct {
-	Type     string `json:"type"` // "daemon_welcome"
-	DaemonID string `json:"daemon_id"`
+	// RecoveryHold keeps marked recovered children paused until daemon_recovery_ready.
+	RecoveryHold bool   `json:"recovery_hold,omitempty"`
+	Type         string `json:"type"` // "daemon_welcome"
+	DaemonID     string `json:"daemon_id"`
 	// Name is the name the server keeps for this daemon (lowercased; a session
 	// pod's is "runner-<session id>", whatever its hello said).
 	Name string `json:"name"`
@@ -395,6 +405,9 @@ type DaemonHeartbeat struct {
 	// AvailableEngines refreshes DaemonHello's field of the same name every
 	// heartbeat — see DaemonInfo.AvailableEngines.
 	AvailableEngines []string `json:"available_engines"`
+	// LocalEngines refreshes DaemonHello.LocalEngines every heartbeat. Absent means none: the
+	// server replaces its copy each time.
+	LocalEngines []string `json:"local_engines,omitempty"`
 	// EngineModels — see DaemonHello.EngineModels. Only sent when changed.
 	EngineModels map[string]models.Report `json:"engine_models,omitempty"`
 	// ReposRoot refreshes DaemonHello's field of the same name: the owner can
@@ -562,6 +575,8 @@ type SessionEnded struct {
 
 // SpawnSession instructs the daemon to start a new session.
 type SpawnSession struct {
+	// RequireRecoveryReady persists fail-closed recovery for delegated work.
+	RequireRecoveryReady  bool   `json:"require_recovery_ready,omitempty"`
 	Type                  string `json:"type"` // "spawn_session"
 	SessionID             string `json:"session_id"`
 	ProjectPath           string `json:"project_path"`
@@ -633,8 +648,9 @@ type SpawnSession struct {
 	GitToken string `json:"git_token,omitempty"`
 	// MCPGateway hands the session its MCP gateway grant: the gateway's base
 	// URL and one token per connection. The daemon turns it into an MCP config
-	// file and never puts it in the environment, argv or a log. It is only
-	// honoured for a Claude Code agent-kind session in a sandbox or cluster
+	// file; the selected-board CLI also receives its board grant in the
+	// environment. Credentials never enter argv or logs. It is only
+	// honoured for an agent-kind session in a sandbox or cluster
 	// pod, and the server only sends it to a daemon whose hello set
 	// DaemonHello.MCPGateway. Absent for every other session.
 	MCPGateway *MCPGatewayConfig `json:"mcp_gateway,omitempty"`
@@ -665,8 +681,9 @@ type SpawnSession struct {
 
 // MCPGatewayConfig is a session's MCP gateway grant as delivered to a daemon
 // or a pod: where the gateway is and the per-connection tokens. It holds
-// secrets, so it is never logged and never forwarded through the session
-// environment. The receiver validates it (daemon.ValidateMCPGateway).
+// secrets, so it is never logged. The selected-board CLI receives only its
+// board gateway token and URL, never upstream credentials or the full config.
+// The receiver validates it (daemon.ValidateMCPGateway).
 type MCPGatewayConfig struct {
 	// BaseURL is the gateway base URL sessions dial, as configured on the
 	// server (not derived from the daemon's WebSocket address). The session's
@@ -770,6 +787,10 @@ type InitialState struct {
 	// commit the server was built from; either is empty when the build was not stamped.
 	ServerRelease string `json:"server_release,omitempty"`
 	ServerCommit  string `json:"server_commit,omitempty"`
+	// LatestVersion and LatestURL name a newer public release (the version without a leading v,
+	// and its github.com page) when one is known; both are absent otherwise.
+	LatestVersion string `json:"latest_version,omitempty"`
+	LatestURL     string `json:"latest_url,omitempty"`
 	// Limits is what a session's files may weigh on this server; absent from an older one
 	// (a client then assumes 25 MiB per file).
 	Limits *FileLimits `json:"limits,omitempty"`
@@ -1161,4 +1182,12 @@ type MessageCreated struct {
 type MessageAnswered struct {
 	Type    string      `json:"type"` // "message_answered"
 	Message MessageInfo `json:"message"`
+}
+
+// DaemonRecoveryReady follows recovery kills and policy snapshots on the same link.
+// It authorizes no other connection and contains no credential data.
+type DaemonRecoveryReady struct {
+	Type string `json:"type"` // "daemon_recovery_ready"
+	// SessionID routes the frame through a session pod's scoped write pump.
+	SessionID string `json:"session_id,omitempty"`
 }

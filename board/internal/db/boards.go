@@ -15,25 +15,26 @@ import (
 )
 
 type Board struct {
-	ChatEffort        string          `json:"chat_effort"`
-	DiscussEffort     string          `json:"discuss_effort"`
-	ReviewerEffort    string          `json:"reviewer_effort"`
-	Effort            string          `json:"effort"`
-	ID                string          `json:"id"`
-	Name              string          `json:"name"`
-	Description       *string         `json:"description"`
-	DefaultRunner     *string         `json:"default_runner"`
-	DeployURL         *string         `json:"deploy_url"`
-	GitBase           string          `json:"git_base"`
-	Model             string          `json:"model"`
-	ReviewerModel     string          `json:"reviewer_model"`
-	DiscussModel      string          `json:"discuss_model"`
-	ChatModel         string          `json:"chat_model"`
-	FieldSchema       json.RawMessage `json:"field_schema"`
-	RequireRepo       bool            `json:"require_repo"`
-	GateEnabled       bool            `json:"gate_enabled"`
-	GateOnUnavailable string          `json:"gate_on_unavailable"`
-	GateOnDispute     string          `json:"gate_on_dispute"`
+	IncludeComponentVersion bool            `json:"include_component_version"`
+	ChatEffort              string          `json:"chat_effort"`
+	DiscussEffort           string          `json:"discuss_effort"`
+	ReviewerEffort          string          `json:"reviewer_effort"`
+	Effort                  string          `json:"effort"`
+	ID                      string          `json:"id"`
+	Name                    string          `json:"name"`
+	Description             *string         `json:"description"`
+	DefaultRunner           *string         `json:"default_runner"`
+	DeployURL               *string         `json:"deploy_url"`
+	GitBase                 string          `json:"git_base"`
+	Model                   string          `json:"model"`
+	ReviewerModel           string          `json:"reviewer_model"`
+	DiscussModel            string          `json:"discuss_model"`
+	ChatModel               string          `json:"chat_model"`
+	FieldSchema             json.RawMessage `json:"field_schema"`
+	RequireRepo             bool            `json:"require_repo"`
+	GateEnabled             bool            `json:"gate_enabled"`
+	GateOnUnavailable       string          `json:"gate_on_unavailable"`
+	GateOnDispute           string          `json:"gate_on_dispute"`
 	// DrivenBy names the external system that owns this board's card
 	// lifecycle (e.g. "blerg-ops"), when one does. Nil/empty = blerg-board-native.
 	DrivenBy *string `json:"driven_by"`
@@ -100,7 +101,7 @@ const boardCols = `effort, reviewer_effort, discuss_effort, chat_effort, id, nam
 	discuss_model, chat_model, field_schema, require_repo,
 	gate_enabled, gate_on_unavailable, gate_on_dispute, driven_by, concurrency, ci_policy,
 	automation_engine, automation_token <> '', automation_token_expires_at, automation_account_id,
-	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
+	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), include_component_version`
 
 func scanBoard(row pgx.Row) (Board, error) {
 	var b Board
@@ -108,7 +109,7 @@ func scanBoard(row pgx.Row) (Board, error) {
 		&b.DiscussModel, &b.ChatModel, &b.FieldSchema,
 		&b.RequireRepo, &b.GateEnabled, &b.GateOnUnavailable, &b.GateOnDispute, &b.DrivenBy, &b.Concurrency,
 		&b.CIPolicy, &b.AutomationEngine, &b.AutomationTokenSet, &b.AutomationTokenExpiresAt, &b.AutomationAccountID,
-		&b.CreatedAt, &b.UpdatedAt)
+		&b.CreatedAt, &b.UpdatedAt, &b.IncludeComponentVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, ErrNotFound
 	}
@@ -116,27 +117,28 @@ func scanBoard(row pgx.Row) (Board, error) {
 }
 
 type BoardParams struct {
-	ChatEffort        *string         `json:"chat_effort"`
-	DiscussEffort     *string         `json:"discuss_effort"`
-	ReviewerEffort    *string         `json:"reviewer_effort"`
-	Effort            *string         `json:"effort"`
-	Name              string          `json:"name"`
-	Description       *string         `json:"description"`
-	DefaultRunner     *string         `json:"default_runner"`
-	DeployURL         *string         `json:"deploy_url"`
-	GitBase           *string         `json:"git_base"`
-	Model             *string         `json:"model"`
-	ReviewerModel     *string         `json:"reviewer_model"`
-	DiscussModel      *string         `json:"discuss_model"`
-	ChatModel         *string         `json:"chat_model"`
-	FieldSchema       json.RawMessage `json:"field_schema"`
-	RequireRepo       *bool           `json:"require_repo"`
-	GateEnabled       *bool           `json:"gate_enabled"`
-	GateOnUnavailable *string         `json:"gate_on_unavailable"`
-	GateOnDispute     *string         `json:"gate_on_dispute"`
-	DrivenBy          *string         `json:"driven_by"`
-	Concurrency       *int            `json:"concurrency"`
-	CIPolicy          *string         `json:"ci_policy"`
+	IncludeComponentVersion *bool           `json:"include_component_version"`
+	ChatEffort              *string         `json:"chat_effort"`
+	DiscussEffort           *string         `json:"discuss_effort"`
+	ReviewerEffort          *string         `json:"reviewer_effort"`
+	Effort                  *string         `json:"effort"`
+	Name                    string          `json:"name"`
+	Description             *string         `json:"description"`
+	DefaultRunner           *string         `json:"default_runner"`
+	DeployURL               *string         `json:"deploy_url"`
+	GitBase                 *string         `json:"git_base"`
+	Model                   *string         `json:"model"`
+	ReviewerModel           *string         `json:"reviewer_model"`
+	DiscussModel            *string         `json:"discuss_model"`
+	ChatModel               *string         `json:"chat_model"`
+	FieldSchema             json.RawMessage `json:"field_schema"`
+	RequireRepo             *bool           `json:"require_repo"`
+	GateEnabled             *bool           `json:"gate_enabled"`
+	GateOnUnavailable       *string         `json:"gate_on_unavailable"`
+	GateOnDispute           *string         `json:"gate_on_dispute"`
+	DrivenBy                *string         `json:"driven_by"`
+	Concurrency             *int            `json:"concurrency"`
+	CIPolicy                *string         `json:"ci_policy"`
 	// AutomationEngine: see Board.AutomationEngine. The automation TOKEN is
 	// deliberately not a BoardParams field — it is set only through
 	// SetBoardAutomationToken, after the API has verified who it belongs to,
@@ -358,12 +360,12 @@ func CreateBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams) (Board,
 		INSERT INTO boards (name, description, default_runner, deploy_url, git_base, model, reviewer_model,
 			discuss_model, chat_model,
 			field_schema, require_repo, gate_enabled, gate_on_unavailable, gate_on_dispute, driven_by,
-			concurrency, ci_policy, automation_engine, effort, reviewer_effort, discuss_effort, chat_effort)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+			concurrency, ci_policy, automation_engine, effort, reviewer_effort, discuss_effort, chat_effort, include_component_version)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 		RETURNING `+boardCols,
 		p.Name, p.Description, p.DefaultRunner, p.DeployURL, gitBase, deref(p.Model), deref(p.ReviewerModel),
 		deref(p.DiscussModel), deref(p.ChatModel), schema,
-		requireRepo, gateEnabled, onUnavail, onDispute, p.DrivenBy, concurrency, ciPolicy, engine, deref(p.Effort), deref(p.ReviewerEffort), deref(p.DiscussEffort), deref(p.ChatEffort)))
+		requireRepo, gateEnabled, onUnavail, onDispute, p.DrivenBy, concurrency, ciPolicy, engine, deref(p.Effort), deref(p.ReviewerEffort), deref(p.DiscussEffort), deref(p.ChatEffort), p.IncludeComponentVersion != nil && *p.IncludeComponentVersion))
 	if err != nil {
 		return Board{}, fmt.Errorf("insert board: %w", err)
 	}
@@ -571,6 +573,9 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 	}
 	if p.RequireRepo != nil {
 		add("require_repo", *p.RequireRepo)
+	}
+	if p.IncludeComponentVersion != nil {
+		add("include_component_version", *p.IncludeComponentVersion)
 	}
 	if p.GateEnabled != nil {
 		add("gate_enabled", *p.GateEnabled)

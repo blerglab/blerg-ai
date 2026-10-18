@@ -4,6 +4,7 @@ import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import { LIVE_MIN_GAP_MS as GAP, useLiveStateServer } from './useLiveStateServer'
 import type { LiveReply } from '../lib/liveState'
 
+vi.mock('../ws', () => import('../test/wsMock'))
 vi.mock('../apiFetch', () => ({ apiFetch: vi.fn() }))
 import { apiFetch } from '../apiFetch'
 const fetchMock = vi.mocked(apiFetch)
@@ -242,4 +243,17 @@ describe('useLiveStateServer', () => {
     await act(async () => { resolveOld(json(reply({ tool_changes: 9 }), '"old"')); await vi.advanceTimersByTimeAsync(0) })
     expect(result.current.status === 'ready' && result.current.view.toolChanges).toBe(4)
   })
+})
+
+it('refreshes on children_changed for this parent only', async () => {
+  fetchMock.mockResolvedValue(json(reply()))
+  const { emit } = await import('../test/wsMock')
+  renderHook(() => useLiveStateServer('s1', true, ''))
+  await flush()
+  act(() => emit({ type: 'children_changed', session_id: 'other' }))
+  await wait(GAP)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  act(() => emit({ type: 'children_changed', session_id: 's1' }))
+  await flush()
+  expect(fetchMock).toHaveBeenCalledTimes(2)
 })

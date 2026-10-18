@@ -72,6 +72,7 @@ const (
 // the daemon, fan out to subscribed browsers, and apply side effects
 // (model/effort mirroring, status transitions).
 func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *DaemonConn, msg protocol.AgentEvent) {
+	progressChild := ""
 	if msg.Kind == protocol.PlanUpdatedKind {
 		plan, ok := protocol.DecodePlanUpdated(msg.Payload)
 		if !ok {
@@ -79,7 +80,22 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 			return
 		}
 		msg.Payload, _ = json.Marshal(plan)
+		progressChild, _ = protocol.ProgressScope(plan.ParentCallID, plan.ChildID)
 		msg.Transient = false
+	}
+	if msg.Kind == protocol.ProgressUpdatedKind {
+		progress, ok := protocol.DecodeProgressUpdated(msg.Payload)
+		if !ok {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+		progressChild, _ = protocol.ProgressScope(progress.ParentCallID, progress.ChildID)
+		msg.Payload, _ = json.Marshal(progress)
+		msg.Transient = false
+	}
+	if progressChild != "" && pool == nil {
+		ackAgentEvent(dc, msg, 0)
+		return
 	}
 	isBackground := msg.Kind == backgroundStartedKind || msg.Kind == backgroundDoneKind
 	isSubagent := msg.Kind == "subagent_started" || msg.Kind == "subagent_update" || msg.Kind == "subagent_done"
@@ -143,7 +159,7 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 	// Fence only the owning connection check and durable work append. Later
 	// acknowledgements, input settlement and notifications do not hold it.
 	unlockWork := func() {}
-	if isBackground || isSubagent {
+	if isBackground || isSubagent || progressChild != "" {
 		unlockWork = h.lockDaemonWork(dc.ID)
 		defer unlockWork()
 		if current := h.GetDaemon(dc.ID); current != dc && (current != nil || dc.workRegistered) {
@@ -174,6 +190,8 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		var fresh bool
 		var err error
 		switch {
+		case progressChild != "":
+			s, fresh, err = db.AppendChildProgressAt(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), progressChild, dc.ID, at)
 		case isBackground:
 			s, fresh, backgroundCount, err = db.AppendBackgroundTaskEventAt(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), at, dc.ID)
 		case isSubagent:
@@ -182,6 +200,7 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 			s, fresh, err = appendAgentEvent(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), at)
 		}
 		if errors.Is(err, db.ErrBackgroundTaskAuthority) {
+			h.ingest.stored(msg.SessionID, msg.ClientEventID) // This event is permanently refused, not retryable.
 			ackAgentEvent(dc, msg, 0)
 			return
 		}
@@ -223,6 +242,10 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 	}
 
 	// Fan out to subscribed browsers with the assigned seq.
+	switch msg.Kind {
+	case "turn_done", "subagent_done", "ask", "user_message":
+		h.ChildActivity(msg.SessionID)
+	}
 	msg.Seq = seq
 	if raw, err := json.Marshal(msg); err == nil {
 		h.FanOutAgentEvent(msg.SessionID, seq, raw)

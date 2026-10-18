@@ -13,6 +13,8 @@ import os
 import subprocess
 import sys
 import threading
+import urllib.request
+import uuid
 
 import pytest
 
@@ -894,3 +896,176 @@ class TestTicketListDefaultBoard:
         gets = [r for r in stub.recorded if r["method"] == "GET"]
         assert gets, "No GET recorded"
         assert gets[0]["path"].startswith(f"/api/boards/{TEST_BOARD_ID}/tickets")
+
+class GatewayHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        self.server.calls.append((self.path, self.headers.get('Authorization'), request))
+        if self.server.redirect:
+            self.send_response(self.server.redirect_code)
+            self.send_header('Location', self.server.redirect)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        name = request['params']['name']
+        args = request['params']['arguments']
+        responses = {
+            'blerg_board_get': {k: v for k, v in CLEAR_BOARD.items() if k not in ('columns', 'tickets')},
+            'blerg_column_list': CLEAR_BOARD['columns'],
+            'blerg_card_search': CLEAR_BOARD['tickets'],
+            'blerg_card_get': CLEAR_BOARD['tickets'][0],
+        }
+        result = responses.get(name, {'id': TICKET_UUID, 'title': args.get('title', 'Fix the bug')})
+        if name == 'blerg_card_get' and self.server.foreign_card:
+            result = {**result, 'board_id': OTHER_UUID}
+        if name == 'blerg_card_create':
+            result = {'card': result, 'refreshed': False}
+        body = {'jsonrpc': '2.0', 'id': request['id'], 'result': {'content': [{'type': 'text', 'text': json.dumps(result)}]}}
+        if self.server.failure:
+            body = {'jsonrpc': '2.0', 'id': request['id'], 'error': {'message': TEST_BOARD_TOKEN + ' denied'}}
+        if self.server.malformed:
+            body = {'jsonrpc': '2.0', 'id': request['id'], 'result': []}
+        raw = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+@pytest.fixture
+def gateway():
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), GatewayHandler)
+    server.calls = []
+    server.failure = False
+    server.foreign_card = False
+    server.malformed = False
+    server.redirect = None
+    server.redirect_code = 302
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    env = {'BLERG_RUNNER_BOARD_GATEWAY_URL': f'http://127.0.0.1:{server.server_port}/mcp-gw/board',
+           'BLERG_RUNNER_BOARD_ID': TEST_BOARD_ID, 'BLERG_RUNNER_BOARD_TOKEN': TEST_BOARD_TOKEN}
+    try:
+        yield server, env
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_selected_board_gateway_show(gateway):
+    server, env = gateway
+    result = run_cli(['board', 'show'], env)
+    assert result.returncode == 0, result.stderr
+    assert 'Test Board' in result.stdout and 'Fix the bug' in result.stdout
+    assert [call[2]['params']['name'] for call in server.calls] == ['blerg_board_get', 'blerg_column_list', 'blerg_card_search']
+    assert all(path == '/mcp-gw/board' and auth == 'Bearer ' + TEST_BOARD_TOKEN for path, auth, _ in server.calls)
+    assert all(call[2]['params']['arguments']['board_id'] == TEST_BOARD_ID for call in server.calls)
+
+
+def test_selected_board_gateway_create_and_update(gateway):
+    server, env = gateway
+    result = run_cli(['ticket', 'create', '--title', 'New work', '--column', COL_UUID], env)
+    assert result.returncode == 0, result.stderr
+    assert 'Ticket created: New work' in result.stdout
+    assert server.calls[-1][2]['params'] == {'name': 'blerg_card_create', 'arguments': {'board_id': TEST_BOARD_ID, 'title': 'New work', 'column_id': COL_UUID}}
+    result = run_cli(['ticket', 'update', TICKET_UUID, '--add-tag', 'new'], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][2]['params']['name'] == 'blerg_card_update'
+    assert server.calls[-1][2]['params']['arguments']['tags'] == ['new']
+    assert server.calls[-1][2]['params']['arguments']['if_match'] == 1
+
+
+@pytest.mark.parametrize('args', [['board', 'show', OTHER_UUID], ['ticket', 'archive', TICKET_UUID], ['column', 'add', '--name', 'Oops']])
+def test_selected_board_gateway_rejects_cross_board_or_unsupported(gateway, args):
+    server, env = gateway
+    result = run_cli(args, env)
+    assert result.returncode != 0
+    assert not server.calls
+
+
+def test_selected_board_gateway_redacts_errors(gateway):
+    server, env = gateway
+    server.failure = True
+    result = run_cli(['board', 'show'], env)
+    assert result.returncode != 0
+    assert TEST_BOARD_TOKEN not in result.stderr
+    assert 'denied' in result.stderr
+
+
+def test_selected_board_gateway_refuses_foreign_card_update(gateway):
+    server, env = gateway
+    server.foreign_card = True
+    result = run_cli(['ticket', 'update', TICKET_UUID, '--title', 'Forbidden'], env)
+    assert result.returncode != 0
+    assert 'selected board' in result.stderr
+    assert [c[2]['params']['name'] for c in server.calls] == ['blerg_card_get']
+
+
+def test_selected_board_gateway_rejects_malformed_rpc(gateway):
+    server, env = gateway
+    server.malformed = True
+    result = run_cli(['board', 'show'], env)
+    assert result.returncode != 0
+    assert 'invalid board gateway reply' in result.stderr
+    assert 'Traceback' not in result.stderr
+
+
+def test_selected_board_gateway_move_uses_version(gateway):
+    server, env = gateway
+    result = run_cli(['ticket', 'move', TICKET_UUID, '--column', COL_UUID], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][2]['params'] == {'name': 'blerg_card_move', 'arguments': {'card_id': TICKET_UUID, 'column_id': COL_UUID, 'if_match': 1}}
+
+
+def test_selected_board_gateway_filters_supported_fields(gateway):
+    server, env = gateway
+    result = run_cli(['ticket', 'list', '--column', COL_UUID, '--priority', 'medium'], env)
+    assert result.returncode == 0, result.stderr
+    assert 'Fix the bug' in result.stdout
+    assert server.calls[-1][2]['params']['arguments']['priority'] == 'medium'
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_selected_board_gateway_never_forwards_token_on_redirect(gateway, code):
+    server, env = gateway
+    class Receiver(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+        def do_GET(self):
+            auth = self.headers.get('Authorization')
+            self.server.authorizations.append(auth)
+            if self.path == self.server.redirect_path:
+                self.server.received.append(auth)
+            self.send_response(200)
+            self.end_headers()
+        do_POST = do_GET
+    receiver = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Receiver)
+    receiver.received = []
+    receiver.authorizations = []
+    receiver.redirect_path = '/steal/' + uuid.uuid4().hex
+    thread = threading.Thread(target=receiver.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # Concurrent suites may retry an old ephemeral port after it is reused.
+        # Prove unrelated traffic cannot impersonate this redirect destination.
+        unrelated = urllib.request.Request(f'http://127.0.0.1:{receiver.server_port}/unrelated/' + uuid.uuid4().hex,
+                                           headers={'Authorization': 'Bearer tok'})
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(unrelated, timeout=2) as response:
+            response.read()
+        assert 'Bearer tok' in receiver.authorizations
+        server.redirect = f'http://127.0.0.1:{receiver.server_port}' + receiver.redirect_path
+        server.redirect_code = code
+        result = run_cli(['board', 'show'], env)
+        assert result.returncode != 0
+        assert not receiver.received
+        assert 'Bearer ' + TEST_BOARD_TOKEN not in receiver.authorizations
+        assert any(auth == 'Bearer ' + TEST_BOARD_TOKEN for _, auth, _ in server.calls)
+        assert TEST_BOARD_TOKEN not in result.stderr
+    finally:
+        receiver.shutdown()
+        receiver.server_close()
+        thread.join()

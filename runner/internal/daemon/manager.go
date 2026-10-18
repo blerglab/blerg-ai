@@ -295,6 +295,14 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	client.OnMessage("resize_session", m.handleResizeSession)
 	client.OnMessage("request_scrollback", m.handleRequestScrollback)
 	client.OnMessage("read_workspace_file", m.handleReadWorkspaceFile)
+	client.OnMessage("read_session_origin", m.handleReadSessionOrigin)
+	client.OnMessage("apply_session_plugins", func(raw []byte) {
+		var msg protocol.ApplySessionPlugins
+		if json.Unmarshal(raw, &msg) == nil {
+			m.agents.ApplySessionPlugins(msg)
+		}
+	})
+	client.OnMessage("resolve_progress_origin", m.handleResolveProgressOrigin)
 	client.OnMessage("inject_note_reply", m.handleInjectNoteReply)
 	client.OnMessage("agent_event_ack", m.handleAgentEventAck)
 	client.OnMessage("agent_user_message", m.handleAgentUserMessage)
@@ -568,17 +576,33 @@ func sanitizedEnviron(extra ...string) []string {
 	base := os.Environ()
 	out := make([]string, 0, len(base)+len(extra))
 	for _, e := range base {
+		key, _, _ := strings.Cut(e, "=")
+		if sessionOriginEnvKeys[key] {
+			continue
+		}
 		// The master token, and a pod's gateway grant (MCPGatewayEnvVar; the pod
 		// entrypoint unsets it as well): neither may reach any child process.
 		// BLERG_RUNNER_PREVIEW_URL is a deprecated daemon setting (an older env
 		// file may still carry it); a session gets BLERG_RUNNER_SERVER_HTTP instead.
 		if !strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") && !strings.HasPrefix(e, MCPGatewayEnvVar+"=") &&
 			!strings.HasPrefix(e, "BLERG_RUNNER_PREVIEW_URL=") &&
+			!strings.HasPrefix(e, "BLERG_RUNNER_BOARD_ID=") &&
+			!strings.HasPrefix(e, "BLERG_RUNNER_BOARD_TOKEN=") &&
+			!strings.HasPrefix(e, "BLERG_RUNNER_BOARD_GATEWAY_URL=") &&
 			!strings.HasPrefix(e, RestrictToolsEnvVar+"=") && !strings.HasPrefix(e, InteractionEnvVar+"=") {
 			out = append(out, e)
 		}
 	}
 	return append(out, extra...)
+}
+
+// Native identities are scoped to one engine invocation, never inherited from
+// a daemon launched inside another coding session. Each engine/hook injects its own.
+var sessionOriginEnvKeys = map[string]bool{
+	"BLERG_RUNNER_PROGRESS_CALL_ID": true,
+	"CODEX_THREAD_ID":               true, "CODEX_SESSION_ID": true, "CODEX_TOOL_CALL_ID": true,
+	"CLAUDECODE": true, "CLAUDE_CODE_CHILD_SESSION": true,
+	"CLAUDE_CODE_SESSION_ID": true, "CLAUDE_CODE_ENTRYPOINT": true,
 }
 
 // reservedExtraEnvKeys are engine credentials a caller's ExtraEnv may not
@@ -601,7 +625,7 @@ func validExtraEnvKey(k string) bool {
 	if strings.HasPrefix(k, "BLERG_RUNNER_") {
 		return false
 	}
-	return !reservedExtraEnvKeys[k]
+	return !reservedExtraEnvKeys[k] && !sessionOriginEnvKeys[k]
 }
 
 // extraEnvPairs renders the per-session messaging token and caller-supplied
@@ -1245,6 +1269,7 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 
 	// Build environment.
 	env := m.sessionEnv(msg.SessionID, msg.Assist, msg.BoardID, msg.BoardToken, msg.SessionToken, msg.ExtraEnv)
+	env = append(env, selectedBoardCLIEnv(msg.BoardID, msg.MCPGateway)...)
 
 	cols, rows := msg.Cols, msg.Rows
 	if cols == 0 {

@@ -9,6 +9,7 @@ import { CapabilitiesView } from './CapabilitiesPanel'
 import './CapabilitiesPanel.css'
 
 export interface CapabilitiesTabProps {
+  startedBySession?: boolean
   report: CapabilitiesReport | null
   /** Tool changes waiting on the session: noted on the MCP servers group. */
   pendingToolChanges: number
@@ -16,9 +17,10 @@ export interface CapabilitiesTabProps {
   liveMcp?: McpLive | null
 }
 
-export default function CapabilitiesTab({ report, pendingToolChanges, liveMcp }: CapabilitiesTabProps) {
+export default function CapabilitiesTab({ report, pendingToolChanges, liveMcp, startedBySession }: CapabilitiesTabProps) {
   return (
     <div className="rail-capabilities" data-testid="rail-capabilities">
+      {startedBySession && <p>Plugins: skipped (started by another session)</p>}
       <CapabilitiesView report={report} pendingToolChanges={pendingToolChanges} liveMcp={liveMcp} />
     </div>
   )

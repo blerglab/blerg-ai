@@ -28,6 +28,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
+	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -104,6 +106,7 @@ const runnerKeyPrincipalKind = "runner_key"
 // sessions it started, and nothing may ever use it to grant access it would not otherwise
 // have (the claim is core-signed, never caller-supplied).
 type runnerPrincipal struct {
+	Project    string   `json:"project,omitempty"`
 	Kind       string   `json:"kind"`
 	Sub        string   `json:"sub,omitempty"`
 	OnBehalfOf string   `json:"on_behalf_of,omitempty"`
@@ -201,6 +204,7 @@ func (a *API) authRunner(w http.ResponseWriter, r *http.Request) (runnerPrincipa
 					Caps:       p.Caps,
 					ExpiresAt:  p.ExpiresAt,
 					Sid:        p.Sid,
+					Project:    p.Project,
 				}, true
 			}
 		}
@@ -275,6 +279,14 @@ type runnerStartRequest struct {
 	// IdemScope overrides the idempotency scope of this start (a cron's is stable across token
 	// renewals: "cron:<cron id>"). In process only, like the fields above.
 	IdemScope string `json:"-"`
+	// The three fields below describe a child session (delegation.go): the session that started
+	// it, how its owner allowed it ("rule:<id>" | "grant:<id>" | "request:<id>") and whether it
+	// outlives the parent. Set only in process by startChild, json:"-" like the fields above: a
+	// body can never carry them and every other caller's idempotency hash is unchanged.
+	ParentSessionID string     `json:"-"`
+	DelegationVia   string     `json:"-"`
+	KeepRunning     bool       `json:"-"`
+	ParentEpoch     *time.Time `json:"-"`
 }
 
 // Runtime values POST /api/runner/start accepts. "" means "whatever this
@@ -368,6 +380,10 @@ const sessionAdminCap = "board.admin"
 // token is an operator too), so they keep the install-wide view they have
 // always had.
 func (p runnerPrincipal) seesAllSessions() bool {
+	// A parent session acting for its children sees only those (canSee), never the install.
+	if p.Kind == sessionDelegateKind {
+		return false
+	}
 	if p.Kind != agentPrincipalKind {
 		return true
 	}
@@ -537,6 +553,7 @@ type StartResponse struct {
 // it from the Idempotency-Key header, MCP from the tool's idempotency_key
 // argument.
 func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req RunnerStartRequest, idemKey string) (StartResponse, *APIError) {
+	ctx = withFilingProject(withCoreProof(ctx, principal.proof()), principal.Project)
 	if req.TargetDaemonID != "" {
 		if req.Runtime != runnerRuntimeDaemon && req.Runtime != runnerRuntimeDocker {
 			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "daemon_id requires an explicit daemon or docker runtime")
@@ -663,7 +680,18 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 // unknown fields in what the caller sent. It is what decides whether a reused
 // Idempotency-Key is a retry or a different request.
 func startRequestHash(req runnerStartRequest) (string, error) {
-	raw, err := json.Marshal(req)
+	var payload any = req
+	if req.ParentSessionID != "" {
+		// A child's in-process fields are part of what was asked (a different keep_running or way
+		// it was allowed is a different request); every other caller's hash is unchanged.
+		payload = struct {
+			Req             runnerStartRequest `json:"req"`
+			ParentSessionID string             `json:"parent_session_id"`
+			DelegationVia   string             `json:"delegation_via"`
+			KeepRunning     bool               `json:"keep_running"`
+		}{req, req.ParentSessionID, req.DelegationVia, req.KeepRunning}
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
@@ -674,6 +702,14 @@ func startRequestHash(req runnerStartRequest) (string, error) {
 // startRunnerSession dispatches a validated start to the chosen runtime,
 // reporting the failure the caller should be told about (nil = started).
 func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, principal runnerPrincipal, sessionID string) *APIError {
+	// A parent session's child runs on the parent's own desktop daemon, never the cluster, and
+	// carries nothing outside the allowlist; refused before anything is recorded.
+	if principal.Kind == sessionDelegateKind {
+		if apiErr := delegateStartProblem(req, principal); apiErr != nil {
+			return apiErr
+		}
+		return a.startBoardSessionOnDaemon(ctx, req, principal, sessionID)
+	}
 	jm := a.hub.JobManager()
 	// Explicit runtime:"daemon" or "docker" runs on a workstation even where a
 	// cluster is configured; the cluster is otherwise the default when it
@@ -780,10 +816,11 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 		}
 	}
 	spec := SessionJobSpec{
-		MCPGateway:    gateway,
-		RestrictTools: restricted,
-		Interaction:   req.Interaction,
-		SessionID:     sessionID, Repo: req.Repo, Title: req.Title,
+		RequireRecoveryReady: principal.Kind == sessionDelegateKind,
+		MCPGateway:           gateway,
+		RestrictTools:        restricted,
+		Interaction:          req.Interaction,
+		SessionID:            sessionID, Repo: req.Repo, Title: req.Title,
 		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.Prompt,
 		ExtraEnv:          withClusterSessionToken(ctx, a.dbPool, sessionID, req.Env),
 		GitURL:            gitURL,
@@ -909,6 +946,9 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	}
 
 	runtime := resolveDaemonRuntime(req.Runtime, dc.SandboxAvailable())
+	if principal.Kind == sessionDelegateKind && !dc.RecoveryReadyCapable {
+		return apiErrorf(http.StatusConflict, "update the daemon before starting child sessions")
+	}
 	// A grant is attached or the start is refused, before anything is recorded: never on the
 	// bare host, and only on a daemon that reports mcp_gateway (mcpstart.go).
 	if req.Grant != nil {
@@ -926,8 +966,23 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	// and nothing for a token id to unlock. The attribution is still recorded
 	// — who asked for this session is worth knowing wherever it ran, and the
 	// record must not depend on which runtime happened to take it.
-	sessionToken := a.spawnSessionToken(ctx, sessionID, dc, req.Repo, req.Title, req.Model,
-		sessionOriginFor(principal.spawningAccountID(), req.Grant != nil || req.CronID != "", req.CronID))
+	// A child inherits its parent's privacy through the insert (R24), never a later marking.
+	parentPrivate, apiErr := a.childParentPrivate(ctx, req.ParentSessionID)
+	if apiErr != nil {
+		return apiErr
+	}
+	origin := sessionOriginFor(principal.spawningAccountID(), req.Grant != nil || req.CronID != "" || parentPrivate, req.CronID)
+	origin.ParentSessionID, origin.DelegationVia, origin.KeepRunning = req.ParentSessionID, req.DelegationVia, req.KeepRunning
+	origin.RequireParentEpoch = principal.Kind == sessionDelegateKind
+	origin.ParentEpoch = req.ParentEpoch
+	sessionToken := a.spawnSessionToken(ctx, sessionID, dc, req.Repo, req.Title, req.Model, origin)
+	if principal.Kind == sessionDelegateKind && (sessionToken == "" || a.dbPool == nil) {
+		// A child whose row (with its parent link) could not be pre-created would be inserted by
+		// the daemon's session_started with no parent: invisible to its parent, never stopped with
+		// it, outside the limits. Refused instead.
+		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+		return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the child session could not be recorded — retry")
+	}
 	// The v1 contract has no dangerously_skip_permissions field, so no start
 	// through it ever asks to bypass the engine's prompts — on either runtime.
 	skipPerms := false
@@ -943,7 +998,18 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 			if err := db.SetSessionTokenID(ctx, a.dbPool, sessionID, tokenID); err != nil {
 				log.Printf("runner start: SetSessionTokenID %s: %v", sessionID, err)
 			}
+		}
+		if principal.Kind != sessionDelegateKind {
+			// Every start records who made it, as the cluster path does: a service or runner-key
+			// start is not the person's own, and a session's trust class reads it (trustDirect).
 			a.recordStartedBy(ctx, sessionID, principal, req.CronID)
+		} else {
+			// Must land: it is one of the marks that keep a child a child (isChildSession).
+			if err := db.SetSessionStartedBy(ctx, a.dbPool, sessionID, "session", a.parentLabel(ctx, principal.Sub)); err != nil {
+				log.Printf("runner start: child started_by %s: %v", sessionID, err)
+				abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+				return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the child session could not be recorded — retry")
+			}
 		}
 		if err := db.SetSessionKind(ctx, a.dbPool, sessionID, "agent"); err != nil {
 			log.Printf("runner start: SetSessionKind %s: %v", sessionID, err)
@@ -988,10 +1054,17 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	}
 	restricted := req.Grant != nil || req.CronID != ""
 	// Always-on plugins for a board-started Claude session on a daemon, as for a launch-sheet one.
-	plugins, pluginNote := a.daemonPlugins(ctx, dc, principal.spawningAccountID(), principal.proof(), "agent", req.Engine, restricted)
+	// A child has no liveness proof of its own to load the owner's plugins with: none, and the start
+	// panel says why.
+	var plugins []pluginspec.Entry
+	pluginNote := pluginsNoteDelegated
+	if principal.Kind != sessionDelegateKind {
+		plugins, pluginNote = a.daemonPlugins(ctx, dc, principal.spawningAccountID(), principal.proof(), "agent", req.Engine, restricted)
+	}
 	raw, err := json.Marshal(protocol.SpawnSession{ //nolint:gosec // the spawn message must carry the session token (and any MCP gateway grant) to the daemon over the authenticated websocket; never logged
-		MCPGateway: gateway,
-		Plugins:    plugins,
+		RequireRecoveryReady: principal.Kind == sessionDelegateKind,
+		MCPGateway:           gateway,
+		Plugins:              plugins,
 		// Every cron session and every grant session runs restricted (mcpstart.go).
 		RestrictTools: req.Grant != nil || req.CronID != "",
 		// Unattended unless the caller said a person is reading (interaction.go).
@@ -1167,11 +1240,16 @@ func (a *API) HandleRunnerMessage(w http.ResponseWriter, r *http.Request) {
 // timed out. The reply then carries "answered_ask": true. A board's automation (blerg-board) never
 // answers an ask.
 func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) (map[string]any, *APIError) {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	if text == "" {
 		return nil, apiErrorf(http.StatusBadRequest, "text required")
 	}
 	if _, e := a.requireSessionAccess(ctx, principal, sessionID); e != nil {
 		return nil, e
+	}
+	if problem := parentResumeProblem(ctx, a.dbPool, sessionID); problem != nil {
+		return nil, problem
 	}
 	var body map[string]any
 	var problem *APIError
@@ -1192,8 +1270,10 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 			}
 			return nil
 		}
-		body, problem = a.sendMessage(ctx, principal, sessionID, text, source, cancelPending, clientIDs...)
-		return nil
+		return withParentInputGuard(ctx, a.dbPool, sessionID, func() error {
+			body, problem = a.sendMessage(ctx, principal, sessionID, text, source, cancelPending, clientIDs...)
+			return nil
+		})
 	}
 	var err error
 	if a.dbPool == nil {
@@ -1202,12 +1282,18 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 		err = withLimitResumeActionLock(ctx, a.dbPool, sessionID, run)
 	}
 	if err != nil {
+		if errors.Is(err, db.ErrDelegationEnded) {
+			return nil, apiErrorf(http.StatusConflict, "the session's parent ended; this child cannot resume")
+		}
 		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry shortly")
 	}
 	return body, problem
 }
 
 func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, cancelPending func() error, clientIDs ...string) (map[string]any, *APIError) {
+	if problem := parentResumeProblem(ctx, a.dbPool, sessionID); problem != nil {
+		return nil, problem
+	}
 	if text == "" {
 		return nil, apiErrorf(http.StatusBadRequest, "text required")
 	}
@@ -1434,6 +1520,7 @@ func (a *API) stopSessionUnlocked(ctx context.Context, sessionID string, end db.
 			// Tell open browsers, reason included, rather than leaving the
 			// session looking alive until the next reload.
 			a.broadcastReconciledStatus(ctx, sessionID, "ended")
+			a.hub.SessionTerminallyEnded(sessionID)
 		}
 	}
 	// A stop is a completion: the broker that asked for it, or any other

@@ -126,6 +126,16 @@ func InsertProposalLimited(ctx context.Context, pool *pgxpool.Pool, p Proposal, 
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('mcp_proposals:' || $1))`, p.AccountID); err != nil {
 		return nil, fmt.Errorf("InsertProposal lock: %w", err)
 	}
+	// Built-in session requests recheck owner and lifecycle after remote policy checks.
+	if IsBoardFilingProposal(&p) || IsSessionPluginProposal(&p) {
+		var account, status string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(spawning_account_id,''),status FROM sessions WHERE id=$1::uuid FOR UPDATE`, p.SessionID).Scan(&account, &status); err != nil {
+			return nil, ErrProposalState
+		}
+		if account != p.AccountID || status == "ended" || status == "stopped" || status == "error" {
+			return nil, ErrProposalState
+		}
+	}
 	var pending int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM mcp_proposals WHERE account_id = $1 AND state = 'pending'`,
 		p.AccountID).Scan(&pending); err != nil {

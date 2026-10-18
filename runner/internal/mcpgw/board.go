@@ -354,6 +354,7 @@ func (c *HTTPBoardExchanger) post(ctx context.Context, path string, body any) (*
 }
 
 type exchangeRequest struct {
+	ReadOnly   bool   `json:"read_only,omitempty"`
 	AccountID  string `json:"account_id"`
 	TokenID    string `json:"token_id,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
@@ -364,12 +365,21 @@ type exchangeRequest struct {
 
 // Exchange implements BoardExchanger.
 func (c *HTTPBoardExchanger) Exchange(ctx context.Context, proof Proof, boardID, sessionRef string) (BoardToken, error) {
+	return c.exchange(ctx, proof, boardID, sessionRef, false)
+}
+
+// ExchangeReadOnly obtains only card.read for duplicate discovery. Ordinary grants retain their capabilities.
+func (c *HTTPBoardExchanger) ExchangeReadOnly(ctx context.Context, proof Proof, boardID, sessionRef string) (BoardToken, error) {
+	return c.exchange(ctx, proof, boardID, sessionRef, true)
+}
+func (c *HTTPBoardExchanger) exchange(ctx context.Context, proof Proof, boardID, sessionRef string, readOnly bool) (BoardToken, error) {
+
 	if !proof.Valid() {
 		return BoardToken{}, errors.New("no liveness proof for the token exchange")
 	}
 	resp, err := c.post(ctx, "/internal/tokens/exchange", exchangeRequest{
 		AccountID: proof.AccountID, TokenID: proof.TokenID, SessionID: proof.SessionID,
-		Target: "board", BoardID: boardID, SessionRef: sessionRef,
+		Target: "board", BoardID: boardID, SessionRef: sessionRef, ReadOnly: readOnly,
 	})
 	if err != nil {
 		return BoardToken{}, err

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
@@ -37,12 +38,13 @@ type sessionSubagents struct {
 }
 
 type sessionTokens struct {
-	Totals         tokenCounts `json:"totals"`
-	Main           tokenCounts `json:"main"`
-	Subagents      tokenCounts `json:"subagents"`
-	ByModel        []modelRow  `json:"by_model"`
-	CacheHitRate   float64     `json:"cache_hit_rate"`
-	UnpricedModels []string    `json:"unpriced_models"`
+	ChildrenTotal  *tokenCounts `json:"children_total,omitempty"`
+	Totals         tokenCounts  `json:"totals"`
+	Main           tokenCounts  `json:"main"`
+	Subagents      tokenCounts  `json:"subagents"`
+	ByModel        []modelRow   `json:"by_model"`
+	CacheHitRate   float64      `json:"cache_hit_rate"`
+	UnpricedModels []string     `json:"unpriced_models"`
 }
 
 // sessionProposals is the session's MCP proposals by what became of them: approved covers every
@@ -61,6 +63,7 @@ type sessionMCPCalls struct {
 }
 
 type sessionInsightsResponse struct {
+	StartedSessions    *startedSessions `json:"started_sessions,omitempty"`
 	SessionID          string           `json:"session_id"`
 	Title              string           `json:"title"`
 	Kind               string           `json:"kind"`
@@ -119,7 +122,7 @@ func (a *API) HandleGetSessionInsights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	showTokens := ownsSession(p.Sub, row) || p.Has(insightsAdminCap)
-	resp, err := a.buildSessionInsights(ctx, row, time.Now().UTC(), showTokens)
+	resp, err := a.buildSessionInsights(ctx, row, time.Now().UTC(), showTokens, p)
 	if err != nil {
 		log.Printf("session insights %s: %v", sid, err)
 		writeError(w, http.StatusInternalServerError, "could not compute insights")
@@ -130,7 +133,7 @@ func (a *API) HandleGetSessionInsights(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildSessionInsights computes the report; showTokens false leaves tokens out (tokens_hidden).
-func (a *API) buildSessionInsights(ctx context.Context, row *db.SessionRow, now time.Time, showTokens bool) (*sessionInsightsResponse, error) {
+func (a *API) buildSessionInsights(ctx context.Context, row *db.SessionRow, now time.Time, showTokens bool, viewers ...identity.Principal) (*sessionInsightsResponse, error) {
 	tokenRows, err := db.ListSessionTokenUsage(ctx, a.dbPool, row.ID)
 	if err != nil {
 		return nil, err
@@ -194,6 +197,32 @@ func (a *API) buildSessionInsights(ctx context.Context, row *db.SessionRow, now 
 		out.TokensHidden = true
 	}
 
+	viewer := identity.Principal{Claims: identity.Claims{Sub: derefOrEmpty(row.SpawningAccountID)}}
+	if len(viewers) > 0 {
+		viewer = viewers[0]
+	}
+	childrenRows, err := db.ListVisibleChildLiveRows(ctx, a.dbPool, row.ID, viewer.Sub)
+	if err != nil {
+		return nil, err
+	}
+	if len(childrenRows) > 0 {
+		children, usage, err := a.liveChildren(ctx, childrenRows, viewer.Sub, showTokens, viewer.Has(insightsAdminCap), prices)
+		if err != nil {
+			return nil, err
+		}
+		out.StartedSessions = &startedSessions{Count: len(children), Sessions: children}
+		complete := showTokens
+		for _, child := range children {
+			complete = complete && child.Tokens != nil
+		}
+		if complete {
+			childTokens := summariseSessionTokens(usage, prices)
+			if len(childTokens.UnpricedModels) > 0 {
+				childTokens.Totals.CostUSD = nil
+			}
+			out.Tokens.ChildrenTotal = &childTokens.Totals
+		}
+	}
 	out.Artifacts = side.Artifacts
 	for state, n := range side.Proposals {
 		switch state {

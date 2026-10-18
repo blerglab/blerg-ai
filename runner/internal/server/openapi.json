@@ -15,6 +15,70 @@
     { "name": "files", "description": "A session's files: what the agent published and what a person attached." }
   ],
   "paths": {
+    "/api/session-boards": {
+      "get": {
+        "tags": [
+          "discovery"
+        ],
+        "operationId": "listSessionBoards",
+        "summary": "List available boards for a human launch-sheet session",
+        "description": "Browser discovery. Returns configured:false when no standalone Board is configured; otherwise checks the live human proof at Core and returns only accessible board IDs and names. Scoped credentials see only their board. No credential or upstream metadata is returned. Agent and service principals are refused. A missing or old Core returns a bounded failure with a retry/update message.",
+        "security": [
+          {
+            "humanSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Board selection availability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "configured",
+                    "boards"
+                  ],
+                  "properties": {
+                    "configured": {
+                      "type": "boolean"
+                    },
+                    "boards": {
+                      "type": "array",
+                      "maxItems": 1000,
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "name"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No live human sign-in"
+          },
+          "403": {
+            "description": "Non-human principal"
+          },
+          "503": {
+            "description": "Board discovery unavailable or Core needs updating"
+          }
+        }
+      }
+    },
     "/api/sessions/{id}/workspace-file": {
       "get": {
         "tags": [
@@ -1024,8 +1088,8 @@
       },
       "EndReason": {
         "type": "string",
-        "enum": ["", "stopped_by_user", "stopped_by_agent", "auto_stopped", "process_exited", "process_failed", "start_failed", "job_finished", "job_failed", "job_disappeared", "not_resumed", "daemon_lost", "daemon_unreported"],
-        "description": "Why the session ended, from a fixed vocabulary; empty while it has not ended, and for sessions that ended before the runner recorded reasons. `stopped_by_user` / `stopped_by_agent`: a stop was requested (by a person, or by an agent token, service or the runner key). `auto_stopped`: the one-shot `auto_stop` ended it after its first turn. `process_exited` / `process_failed`: the process exited on its own, cleanly or not. `start_failed`: it never got going. `job_*`, `not_resumed`, `daemon_lost`, `daemon_unreported`: the runner's reconciler closed it out (the Job finished, failed or vanished; a disconnected session was not resumed within a day; its daemon did not come back; its daemon no longer had it). The first reason recorded wins: a stop is not overwritten by the process exit it causes. For failures `error_reason` still carries the detail. Treat a value you do not know as \"ended\"; the set may grow."
+        "enum": ["", "stopped_by_user", "stopped_by_agent", "auto_stopped", "process_exited", "process_failed", "start_failed", "job_finished", "job_failed", "job_disappeared", "not_resumed", "daemon_lost", "daemon_unreported", "parent_ended"],
+        "description": "Why the session ended, from a fixed vocabulary; empty while it has not ended, and for sessions that ended before the runner recorded reasons. `stopped_by_user` / `stopped_by_agent`: a stop was requested (by a person, or by an agent token, service or the runner key). `auto_stopped`: the one-shot `auto_stop` ended it after its first turn. `process_exited` / `process_failed`: the process exited on its own, cleanly or not. `start_failed`: it never got going. `job_*`, `not_resumed`, `daemon_lost`, `daemon_unreported`: the runner's reconciler closed it out (the Job finished, failed or vanished; a disconnected session was not resumed within a day; its daemon did not come back; its daemon no longer had it). `parent_ended`: the session was started by another session and that parent ended for good. The first reason recorded wins: a stop is not overwritten by the process exit it causes. For failures `error_reason` still carries the detail. Treat a value you do not know as \"ended\"; the set may grow."
       },
       "EndedBy": {
         "type": ["object", "null"],

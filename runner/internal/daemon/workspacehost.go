@@ -46,18 +46,21 @@ func (m *Manager) handleReadWorkspaceFile(raw []byte) {
 	if json.Unmarshal(raw, &req) != nil {
 		return
 	}
+	queueWorkspaceFileRead(m.client, req, m.workspaceFileBinding(req.SessionID))
+}
+func (m *Manager) workspaceFileBinding(id string) workspaceFileBinding {
 	var binding workspaceFileBinding
 	if m.agents != nil {
-		binding = m.agents.workspaceFileBinding(req.SessionID)
+		binding = m.agents.workspaceFileBinding(id)
 	}
 	if binding.live == nil {
 		m.mu.Lock()
-		sess := m.sessions[req.SessionID]
+		sess := m.sessions[id]
 		m.mu.Unlock()
 		if sess != nil && sess.workspace != "" && sess.workspaceInfo != nil && sess.Done() != nil {
 			binding = workspaceFileBinding{root: sess.workspace, info: sess.workspaceInfo, live: func() bool {
 				m.mu.Lock()
-				same := m.sessions[req.SessionID] == sess
+				same := m.sessions[id] == sess
 				m.mu.Unlock()
 				if !same {
 					return false
@@ -71,7 +74,7 @@ func (m *Manager) handleReadWorkspaceFile(raw []byte) {
 			}}
 		}
 	}
-	queueWorkspaceFileRead(m.client, req, binding)
+	return binding
 }
 func queueWorkspaceFileRead(sender Sender, req protocol.ReadWorkspaceFile, binding workspaceFileBinding) {
 	if req.RequestID == "" || len(req.RequestID) > 100 || req.SessionID == "" || len(req.SessionID) > 100 {

@@ -13,6 +13,8 @@ import {
 } from '../lib/insights'
 import './CapabilitiesPanel.css'
 import './SessionInsights.css'
+import { EngineBadge } from './ChildSessions'
+import { Link } from 'react-router-dom'
 
 export const SESSION_INSIGHTS_REFRESH_MS = 30_000
 const TOP_TOOLS = 5
@@ -214,6 +216,7 @@ function Report({ d }: { d: SessionInsightsResponse }) {
           <TokensCard d={d} />
           <WorkCard d={d} isAgent />
           <SubagentsCard d={d} />
+          <StartedSessionsCard d={d} />
         </>
       ) : (
         <>
@@ -258,7 +261,7 @@ function TokensTile({ d }: { d: SessionInsightsResponse }) {
   const costText = cost === null ? 'unpriced' : `est. ${formatUSD(cost)}${t.unpriced_models.length > 0 ? ' + unpriced' : ''}`
   // two parts: on a narrow tile the cache figure drops to a second line (losing its separator on a
   // phone), and nothing is clipped
-  const sub = <><span>{costText}</span> <span><span className="si-sep">· </span>cache {formatTokens(t.totals.cache_read)}</span></>
+  const sub = <><span>{costText}</span> <span><span className="si-sep">· </span>cache {formatTokens(t.totals.cache_read)}</span>{t.children_total && <span>incl. {d.started_sessions?.count ?? 0} started sessions: {formatTokens(t.totals.input + t.totals.output + t.children_total.input + t.children_total.output)}</span>}</>
   return <Tile id="tokens" label="Tokens" value={formatTokens(t.totals.input + t.totals.output)} sub={sub} wrap />
 }
 
@@ -504,4 +507,12 @@ function CountTable({ head, rows, testId, mono }: { head: string; rows: CountRow
       </tbody>
     </table>
   )
+}
+
+function StartedSessionsCard({ d }: { d: SessionInsightsResponse }) {
+  const started = d.started_sessions
+  if (!started?.count) return null
+  return <Card testId="si-started-sessions" title="Started sessions" aside={String(started.count)}>
+    <ul>{started.sessions.map(s => <li key={s.id}><EngineBadge engine={s.engine} /> <Link to={`/sessions/${encodeURIComponent(s.id)}`}>{s.title || 'Untitled session'}</Link> · {s.model}{s.tokens !== null ? ` · ${formatTokens(s.tokens)} tokens` : ''}{s.cost_usd !== undefined ? ` · ${formatUSD(s.cost_usd)}` : ''}</li>)}</ul>
+  </Card>
 }

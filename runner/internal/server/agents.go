@@ -190,6 +190,7 @@ func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
 	// The per-engine model picker: readable by a browser session or a runner
 	// credential (authBrowserOrRunner), so it lives on the contract too.
 	mux.HandleFunc("GET /api/models/{engine}", a.HandleGetModels)
+	mux.HandleFunc("GET /api/session-boards", a.HandleSessionBoards)
 
 	// The daemon-token check the installer makes before it replaces a daemon (daemon_whoami.go).
 	mux.HandleFunc("GET /api/daemon/whoami", a.HandleDaemonWhoami)

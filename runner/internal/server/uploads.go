@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 // The limits on what people attach (maxUploadsPerSession, maxUploadBytesPerSession) are in
@@ -32,7 +33,13 @@ func (h *artifactsHandler) userUpload(w http.ResponseWriter, r *http.Request) {
 // userUploadSession stores a person's attachment to an authenticated session. account is who it
 // is attributed to: the signed-in person on the browser route, the account an agent token acts for
 // on the runner contract (runner_files.go), where the app vouches for the person.
-func (h *artifactsHandler) userUploadSession(w http.ResponseWriter, r *http.Request, sid, account string) {
+type uploadOpt struct{ parentID, parentTitle string }
+
+func uploadFromSession(id, title string) uploadOpt {
+	return uploadOpt{parentID: id, parentTitle: title}
+}
+
+func (h *artifactsHandler) userUploadSession(w http.ResponseWriter, r *http.Request, sid, account string, opts ...uploadOpt) {
 	info := h.store(w, r, sid, artifactIntake{
 		origin: db.OriginUser, uploadedBy: account, noun: "uploaded files",
 		maxFiles: maxUploadsPerSession, maxTotal: maxUploadBytesPerSession,
@@ -40,7 +47,13 @@ func (h *artifactsHandler) userUploadSession(w http.ResponseWriter, r *http.Requ
 	if info == nil {
 		return
 	}
-	// No agent event: the chat message the person sends carries the information.
+	// A parent upload is informational; user_message would incorrectly end a live turn.
+	if len(opts) > 0 && opts[0].parentID != "" {
+		note := opts[0]
+		recordServerAgentEvent(r.Context(), h.api.hub, h.api.dbPool, sid, protocol.SessionMessageEventID(info.ID, "session-upload"), "session_upload", map[string]any{
+			"name": info.Name, "size": info.Size, "artifact_id": info.ID, "from_session_id": note.parentID, "from_title": note.parentTitle,
+		})
+	}
 	writeJSON(w, http.StatusCreated, info)
 }
 

@@ -805,7 +805,7 @@ func TestSessionEnv(t *testing.T) {
 				}
 			}
 			if !found {
-				t.Errorf("sessionEnv missing %q; env = %v", needle, env)
+				t.Errorf("sessionEnv missing %q; keys = %v", envKey(needle), envKeys(env))
 			}
 		}
 	})
@@ -817,7 +817,7 @@ func TestSessionEnv(t *testing.T) {
 		mgr := newManagerWithSender(newRecordingSender(4), ManagerConfig{ServerHTTP: "http://runner.example.test"})
 		for _, e := range mgr.sessionEnv("sess-x", false, "", "", "", nil) {
 			if strings.HasPrefix(e, "BLERG_RUNNER_PREVIEW_URL=") {
-				t.Errorf("sessionEnv carries %q", e)
+				t.Errorf("sessionEnv carries %q", envKey(e))
 			}
 		}
 	})
@@ -832,7 +832,7 @@ func TestSessionEnv(t *testing.T) {
 
 		for _, e := range env {
 			if strings.HasPrefix(e, "BLERG_RUNNER_SERVER_HTTP=") {
-				t.Errorf("BLERG_RUNNER_SERVER_HTTP must be omitted when ServerHTTP is empty; got %q", e)
+				t.Errorf("BLERG_RUNNER_SERVER_HTTP must be omitted when ServerHTTP is empty; found key %q", envKey(e))
 			}
 		}
 
@@ -878,14 +878,14 @@ func TestSessionEnvAssist(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("assist env missing %q; env = %v", needle, assistEnv)
+			t.Errorf("assist env missing %q; keys = %v", envKey(needle), envKeys(assistEnv))
 		}
 	}
 
 	// BLERG_RUNNER_DAEMON_TOKEN must NOT appear at all (strip from os.Environ AND skip config append).
 	for _, e := range assistEnv {
 		if strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") {
-			t.Errorf("assist env must not contain BLERG_RUNNER_DAEMON_TOKEN; got %q", e)
+			t.Errorf("assist env must not contain BLERG_RUNNER_DAEMON_TOKEN; found key %q", envKey(e))
 		}
 	}
 
@@ -905,7 +905,7 @@ func TestSessionEnvAssist(t *testing.T) {
 	normalEnv := mgr.sessionEnv("sess-normal", false, "", "", "", nil)
 	for _, e := range normalEnv {
 		if strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") {
-			t.Errorf("non-assist env must not contain BLERG_RUNNER_DAEMON_TOKEN; got %q", e)
+			t.Errorf("non-assist env must not contain BLERG_RUNNER_DAEMON_TOKEN; found key %q", envKey(e))
 		}
 	}
 }
@@ -917,6 +917,7 @@ func TestSessionEnvAssist(t *testing.T) {
 // daemon's own os.Environ. The per-session token and caller-supplied extra
 // env are what the session gets instead.
 func TestSessionEnvNeverCarriesDaemonToken(t *testing.T) {
+	clearBlergRunnerVars(t, "BLERG_RUNNER_SESSION_TOKEN")
 	t.Setenv("BLERG_RUNNER_DAEMON_TOKEN", "ambient-daemon-tok")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-inherited")
 	mgr := newManagerWithSender(newRecordingSender(2), ManagerConfig{DaemonToken: "config-daemon-tok", ServerHTTP: "http://srv"})
@@ -924,26 +925,26 @@ func TestSessionEnvNeverCarriesDaemonToken(t *testing.T) {
 		env := mgr.sessionEnv("s1", assist, "", "", "sess-tok-123", map[string]string{"BLERG_BOARD_URL": "http://localhost:8082"})
 		for _, e := range env {
 			if strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") {
-				t.Fatalf("assist=%v: master token leaked: %s", assist, e)
+				t.Fatalf("assist=%v: master token leaked via %s", assist, envKey(e))
 			}
 		}
 		if !hasEntry(env, "BLERG_RUNNER_SESSION_TOKEN=sess-tok-123") || !hasEntry(env, "BLERG_BOARD_URL=http://localhost:8082") {
-			t.Fatalf("assist=%v: session token / extra env missing: %v", assist, env)
+			t.Fatalf("assist=%v: session token / extra env missing; keys: %v", assist, envKeys(env))
 		}
 		// The engine's own credential is inherited: the engine cannot run
 		// without it (ruling R1).
 		if !hasEntry(env, "ANTHROPIC_API_KEY=sk-ant-inherited") {
-			t.Fatalf("assist=%v: engine credential not inherited: %v", assist, env)
+			t.Fatalf("assist=%v: engine credential not inherited; keys: %v", assist, envKeys(env))
 		}
 		if !hasEntry(env, "BLERG_RUNNER_SESSION_ID=s1") {
-			t.Fatalf("assist=%v: session id missing: %v", assist, env)
+			t.Fatalf("assist=%v: session id missing; keys: %v", assist, envKeys(env))
 		}
 	}
 	// No token minted (older recovery record, or DB-less server): no
 	// BLERG_RUNNER_SESSION_TOKEN entry at all rather than an empty one.
 	for _, e := range mgr.sessionEnv("s2", false, "", "", "", nil) {
 		if strings.HasPrefix(e, "BLERG_RUNNER_SESSION_TOKEN=") {
-			t.Fatalf("empty session token must not be injected: %s", e)
+			t.Fatalf("empty session token must not be injected: %s", envKey(e))
 		}
 	}
 
@@ -951,14 +952,14 @@ func TestSessionEnvNeverCarriesDaemonToken(t *testing.T) {
 	// every agent-kind driver) starts from.
 	s := sanitizedEnviron("X=1")
 	if !hasEntry(s, "X=1") {
-		t.Fatalf("sanitizedEnviron dropped extra: %v", s)
+		t.Fatalf("sanitizedEnviron dropped extra; keys: %v", envKeys(s))
 	}
 	if !hasEntry(s, "ANTHROPIC_API_KEY=sk-ant-inherited") {
-		t.Fatalf("sanitizedEnviron dropped the engine credential: %v", s)
+		t.Fatalf("sanitizedEnviron dropped the engine credential; keys: %v", envKeys(s))
 	}
 	for _, e := range s {
 		if strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") {
-			t.Fatalf("sanitizedEnviron leaked the master token: %s", e)
+			t.Fatalf("sanitizedEnviron leaked the master token via %s", envKey(e))
 		}
 	}
 
@@ -966,10 +967,10 @@ func TestSessionEnvNeverCarriesDaemonToken(t *testing.T) {
 	// deterministic order, token first, no entry for an empty token.
 	pairs := extraEnvPairs("tok", map[string]string{"B": "2", "A": "1"})
 	if len(pairs) != 3 || pairs[0] != "BLERG_RUNNER_SESSION_TOKEN=tok" || pairs[1] != "A=1" || pairs[2] != "B=2" {
-		t.Fatalf("extraEnvPairs = %v", pairs)
+		t.Fatalf("extraEnvPairs keys = %v", envKeys(pairs))
 	}
 	if got := extraEnvPairs("", nil); len(got) != 0 {
-		t.Fatalf("extraEnvPairs(\"\", nil) = %v, want empty", got)
+		t.Fatalf("extraEnvPairs(\"\", nil) keys = %v, want empty", envKeys(got))
 	}
 
 	// ExtraEnv is caller-supplied: it can't smuggle the master token back in,
@@ -990,17 +991,32 @@ func TestSessionEnvNeverCarriesDaemonToken(t *testing.T) {
 	}
 	got := extraEnvPairs("real-tok", hostile)
 	if len(got) != 2 || got[0] != "BLERG_RUNNER_SESSION_TOKEN=real-tok" || got[1] != "BLERG_BOARD_URL=http://board" {
-		t.Fatalf("extraEnvPairs(hostile) = %q", got)
+		t.Fatalf("extraEnvPairs(hostile) keys = %q", envKeys(got))
 	}
 	full := mgr.sessionEnv("s3", false, "", "", "real-tok", hostile)
 	for _, e := range full {
 		if strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") || e == "ANTHROPIC_API_KEY=stolen" || e == "BLERG_RUNNER_SESSION_TOKEN=forged" {
-			t.Fatalf("hostile extra env reached the session: %s", e)
+			t.Fatalf("hostile extra env reached the session via %s", envKey(e))
 		}
 	}
 	if !hasEntry(full, "ANTHROPIC_API_KEY=sk-ant-inherited") {
-		t.Fatalf("engine credential clobbered: %v", full)
+		t.Fatalf("engine credential clobbered; keys: %v", envKeys(full))
 	}
+}
+
+// Environment assertion diagnostics must never include values: a fixture may
+// accidentally inherit a real credential when run inside an agent session.
+func envKey(entry string) string {
+	key, _, _ := strings.Cut(entry, "=")
+	return key
+}
+
+func envKeys(env []string) []string {
+	keys := make([]string, len(env))
+	for i, entry := range env {
+		keys[i] = envKey(entry)
+	}
+	return keys
 }
 
 func hasEntry(env []string, want string) bool {

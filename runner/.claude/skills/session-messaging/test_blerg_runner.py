@@ -4,6 +4,8 @@ Tests for the blerg-runner CLI.
 Run with: python3 .claude/skills/session-messaging/test_blerg_runner.py
 """
 
+import contextlib
+import tempfile
 import http.server
 import json
 import os
@@ -2714,6 +2716,1188 @@ class TestDiff(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("--staged", result.stdout)
         self.assertIn("--worktree", result.stdout)
+
+
+class FilingStubHandler(TopicStubHandler):
+    def do_GET(self):
+        self.server.recorded.append({'path': self.path, 'method': 'GET', 'auth': self.headers.get('Authorization')})
+        data = self.server.reply_body
+        self.send_response(self.server.reply_status)
+        self.send_header('Content-Type', self.server.reply_type)
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class TestBoardFilingCLI(unittest.TestCase):
+    def _run(self, args, reply, status=200, content_type='application/json'):
+        server = http.server.HTTPServer(('127.0.0.1', 0), FilingStubHandler)
+        server.recorded = []
+        server.reply_body = json.dumps(reply).encode() if not isinstance(reply, bytes) else reply
+        server.reply_status = status
+        server.reply_type = content_type
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        try:
+            result = run_blerg_runner(['ticket'] + args, env_override={
+                'BLERG_RUNNER_SERVER_HTTP': f'http://127.0.0.1:{server.server_port}',
+                'BLERG_RUNNER_SESSION_ID': 'sess-filing', 'BLERG_RUNNER_SESSION_TOKEN': 'fixture-filing-token'})
+        finally:
+            if thread.is_alive():
+                try:
+                    socket.create_connection(server.server_address, timeout=2).close()
+                except OSError:
+                    pass
+            thread.join(timeout=5)
+            server.server_close()
+        self.assertFalse(thread.is_alive())
+        return result, server.recorded
+
+    def test_file_queues_proposal_without_selected_board_or_direct_write(self):
+        result, calls = self._run(['file', '--board', 'Another project', '--title', 'Fixture bug',
+                                  '--body', 'Private reproduction', '--type', 'bug', '--sensitive',
+                                  '--repo', 'target/one', '--repo', 'target/two'],
+                                 {'proposal_id': 'proposal-fixture', 'state': 'pending'}, status=202)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]['path'], '/api/sessions/sess-filing/file-ticket')
+        self.assertEqual(calls[0]['auth'], 'Bearer fixture-filing-token')
+        self.assertEqual(calls[0]['body'], {'board': 'Another project', 'title': 'Fixture bug',
+                                          'body': 'Private reproduction', 'type': 'bug', 'sensitive': True,
+                                          'repos': ['target/one', 'target/two']})
+        self.assertIn('awaiting approval', result.stdout)
+        self.assertNotIn('Private reproduction', result.stdout + result.stderr)
+
+    def test_accessible_board_list_is_session_scoped_read(self):
+        result, calls = self._run(['boards'], {'configured': True, 'boards': [{'id': 'board-fixture', 'name': 'Other project'}]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0]['method'], 'GET')
+        self.assertEqual(calls[0]['path'], '/api/sessions/sess-filing/board-options')
+        self.assertIn('Other project', result.stdout)
+        self.assertIn('board-fixture', result.stdout)
+
+    def test_search_encodes_target_and_query_and_warns_about_truncation(self):
+        result, calls = self._run(['search', '--board', 'Other project', '--query', 'path/x ?'],
+                                 {'cards': [{'id': 'card-fixture', 'number': 12, 'title': 'Duplicate'}], 'truncated': True})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        query = parse_qs(urlparse(calls[0]['path']).query)
+        self.assertEqual(urlparse(calls[0]['path']).path, '/api/sessions/sess-filing/board-search')
+        self.assertEqual(query, {'board': ['Other project'], 'q': ['path/x ?']})
+        self.assertIn('Duplicate', result.stdout)
+        self.assertIn('truncated', result.stderr)
+
+    def test_unconfigured_boards_and_older_server_are_clear(self):
+        result, _ = self._run(['boards'], {'configured': False, 'boards': []})
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('not configured', result.stdout)
+        result, _ = self._run(['boards'], b'<html>Older app</html>', content_type='text/html')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('older', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
+    def test_errors_are_redacted_and_no_spoofed_origin_is_accepted(self):
+        result, _ = self._run(['file', '--board', 'Other', '--title', 'Bug', '--body', 'Repro'],
+                              {'error': 'Denied fixture-filing-token', 'error_id': 'fixture-error'}, status=403)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('fixture-filing-token', result.stderr)
+        self.assertIn('403', result.stderr)
+        result, calls = self._run(['file', '--board', 'Other', '--title', 'Bug', '--body', 'Repro', '--engine', 'forged'], {})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_established_title_bound_is_kept(self):
+        result, _ = self._run(['file', '--board', 'Other', '--title', 'é' * 200, '--body', 'Repro'],
+                              {'proposal_id': 'fixture', 'state': 'pending'}, status=202)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result, calls = self._run(['file', '--board', 'Other', '--title', 'x' * 201, '--body', 'Repro'], {})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_empty_fields_are_refused_before_network(self):
+        for title, body in [('', 'Repro'), ('Bug', '')]:
+            result, calls = self._run(['file', '--board', 'Other', '--title', title, '--body', body], {})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(calls, [])
+
+
+class SessionMCPStub(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *_):
+        pass
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        self.server.requests.append((self.path, self.headers.get('Authorization'), body))
+        if self.server.rotate_path and len(self.server.requests) == 1:
+            with open(self.server.rotate_path, 'w') as f:
+                f.write('fixture-refreshed')
+        if self.server.redirect:
+            self.send_response(302)
+            self.send_header('Location', self.server.redirect)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        response = {'jsonrpc': '2.0', 'id': body['id'], 'result': {'fixture': True}}
+        if self.server.echo_text:
+            response['result'] = {'content': [{'type': 'text', 'text': self.server.echo_text}]}
+        raw = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+class TestSessionMCPShim(unittest.TestCase):
+    def _run(self, messages, redirect=None, echo_text=None):
+        import tempfile
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), SessionMCPStub)
+        server.requests = []
+        server.redirect = redirect
+        server.echo_text = echo_text
+        server.rotate_path = None
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        with tempfile.TemporaryDirectory() as home:
+            state = os.path.join(home, '.blerg-runner-daemon', 'session-tokens')
+            os.makedirs(state)
+            server.rotate_path = os.path.join(state, 'shim-session')
+            with open(server.rotate_path, 'w') as f:
+                f.write('fixture-initial')
+            env = {'HOME': home, 'PATH': '/usr/bin:/bin',
+                   'BLERG_RUNNER_SERVER_HTTP': f'http://127.0.0.1:{server.server_port}',
+                   'BLERG_RUNNER_SESSION_ID': 'shim-session', 'BLERG_RUNNER_SESSION_TOKEN': 'fixture-stale'}
+            try:
+                result = subprocess.run([sys.executable, SCRIPT, '_session_mcp'],
+                                        input=''.join((m if isinstance(m, str) else json.dumps(m)) + '\n' for m in messages),
+                                        text=True, capture_output=True, env=env, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, '')
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+        return [json.loads(line) for line in result.stdout.splitlines()], server.requests
+
+    def test_stdio_requests_are_fixed_to_own_session_and_refresh_token(self):
+        replies, calls = self._run([{'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {}},
+                                   {'jsonrpc': '2.0', 'method': 'notifications/initialized'},
+                                   {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'},
+                                   {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {'name': 'blerg_ticket_file', 'arguments': {'action': 'propose', 'board': 'Other', 'title': 'Fixture', 'body': 'Details'}}}])
+        self.assertEqual([r['id'] for r in replies], [1, 2, 3])
+        self.assertEqual([r[0] for r in calls], ['/api/sessions/shim-session/filing-tools'] * 3)
+        self.assertEqual([r[1] for r in calls], ['Bearer fixture-initial', 'Bearer fixture-refreshed', 'Bearer fixture-refreshed'])
+        self.assertEqual([r[2]['method'] for r in calls], ['initialize', 'tools/list', 'tools/call'])
+
+    def test_plugin_request_uses_fixed_session_and_exact_approval_arguments(self):
+        params = {'name': 'blerg_request_plugin', 'arguments': {'name': 'helper@example/plugins', 'reason': 'Need its review skill'}}
+        replies, calls = self._run([{'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call', 'params': params}])
+        self.assertNotIn('error', replies[0])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], '/api/sessions/shim-session/filing-tools')
+        self.assertEqual(calls[0][2]['params'], params)
+        self.assertEqual(calls[0][1], 'Bearer fixture-initial')
+
+    def test_redaction_preserves_json_framing(self):
+        replies, _ = self._run([{'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}],
+                               echo_text='Authorization: Bearer fixture-initial\nFollow-up text')
+        self.assertEqual(replies[0]['id'], 1)
+        self.assertNotIn('fixture-initial', json.dumps(replies))
+        self.assertIn('[redacted]', replies[0]['result']['content'][0]['text'])
+
+    def test_invalid_and_unrelated_tools_never_reach_network(self):
+        replies, calls = self._run(['not json', 'x' * (256 * 1024 + 1),
+                                   {'jsonrpc': '2.0', 'id': 4, 'method': 'tools/call', 'params': {'name': 'Bash', 'arguments': {'command': 'false'}}},
+                                   {'jsonrpc': '2.0', 'id': 5, 'method': 'arbitrary'}])
+        self.assertEqual(len(replies), 4)
+        self.assertTrue(all('error' in r for r in replies))
+        self.assertEqual(calls, [])
+
+    def test_stdio_redirect_does_not_forward_session_token(self):
+        received = []
+        class Target(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+            def do_GET(self):
+                received.append(self.headers.get('Authorization'))
+                self.send_response(200)
+                self.end_headers()
+            do_POST = do_GET
+        target = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Target)
+        thread = threading.Thread(target=target.serve_forever, daemon=True)
+        thread.start()
+        try:
+            replies, _ = self._run([{'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}],
+                                    redirect=f'http://127.0.0.1:{target.server_port}/steal')
+            self.assertIn('error', replies[0])
+            self.assertEqual(received, [])
+            self.assertNotIn('fixture-initial', json.dumps(replies))
+        finally:
+            target.shutdown()
+            target.server_close()
+            thread.join()
+
+
+class RequestPluginTests(unittest.TestCase):
+    def setUp(self):
+        self.requests = []
+        self.status = 202
+        self.location = None
+        owner = self
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                owner.requests.append((self.path, self.headers.get('Authorization'), json.loads(raw)))
+                self.send_response(owner.status)
+                if owner.location:
+                    self.send_header('Location', owner.location)
+                self.end_headers()
+                self.wfile.write(json.dumps({'id':'proposal-fixture','state':'pending'}).encode())
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.env = {'BLERG_RUNNER_SERVER_HTTP': 'http://127.0.0.1:'+str(self.server.server_port),
+                    'BLERG_RUNNER_SESSION_ID':'session-fixture','BLERG_RUNNER_SESSION_TOKEN':'fixture-token'}
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+    def test_only_queues_exact_name_and_reason(self):
+        reason = 'Review "this"\nwithout installing'
+        result = run_blerg_runner(['request-plugin','helper@example/plugins',reason],self.env)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.requests,[('/api/sessions/session-fixture/plugin-requests','Bearer fixture-token',{'name':'helper@example/plugins','reason':reason})])
+        self.assertIn('proposal-fixture',result.stdout)
+        self.assertIn('approval',result.stdout)
+    def test_bare_name_is_resolved_only_by_server(self):
+        result=run_blerg_runner(['request-plugin','helper','Need its skill'],self.env)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.requests[0][2]['name'],'helper')
+    def test_unconfigured_session_does_not_send_anything(self):
+        result=run_blerg_runner(['request-plugin','helper','Need it'],{})
+        self.assertEqual(result.returncode,0)
+        self.assertEqual(self.requests,[])
+    def test_invalid_names_and_oversized_reasons_never_reach_server(self):
+        for name,reason in [('bad/command','why'),('helper@../repo','why'),('helper',''),('helper','é'*1001),('helper','why\x01')]:
+            result=run_blerg_runner(['request-plugin',name,reason],self.env)
+            self.assertNotEqual(result.returncode,0)
+        self.assertEqual(self.requests,[])
+    def test_refusal_never_claims_installation_or_echoes_token(self):
+        self.status=403
+        result=run_blerg_runner(['request-plugin','helper','why'],self.env)
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('fixture-token',result.stderr+result.stdout)
+        self.assertNotIn('installed',result.stdout)
+    def test_redirect_does_not_forward_session_authority(self):
+        self.status=307
+        self.location='http://127.0.0.1:'+str(self.server.server_port)+'/redirect-target'
+        result=run_blerg_runner(['request-plugin','helper','why'],self.env)
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(len(self.requests),1)
+
+
+class TestProgress(unittest.TestCase):
+    def _run(self, args, status=200, reply=None, extra_env=None):
+        server = make_topic_server(status=status, reply=reply or {'ok': True})
+        env = {'BLERG_RUNNER_SERVER_HTTP': f'http://127.0.0.1:{server.server_port}',
+               'BLERG_RUNNER_SESSION_ID': 'sess-progress', 'BLERG_RUNNER_SESSION_TOKEN': 'fixture-progress-token'}
+        env.update(extra_env or {})
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        try:
+            result = run_blerg_runner(['progress'] + args, env_override=env)
+        finally:
+            if thread.is_alive():
+                try:
+                    socket.create_connection(server.server_address, timeout=2).close()
+                except OSError:
+                    pass
+            thread.join(timeout=5)
+            server.server_close()
+        self.assertFalse(thread.is_alive())
+        return result, server.recorded
+
+    def test_posts_bounded_counter_and_label(self):
+        result, requests = self._run(['3/7', '  Running checks  '])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(requests, [{'path': '/api/sessions/sess-progress/progress',
+                                    'auth': 'Bearer fixture-progress-token',
+                                    'body': {'completed': 3, 'total': 7, 'label': 'Running checks'}}])
+        self.assertIn('3/7', result.stdout)
+        self.assertIn('Running checks', result.stdout)
+
+    def test_counter_and_unicode_label_boundaries(self):
+        for counter in ('0/1', '1000000/1000000'):
+            with self.subTest(counter=counter):
+                result, requests = self._run([counter, 'é' * 200])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(requests[0]['body']['label'], 'é' * 200)
+
+    def test_done_does_not_guess_previous_counter(self):
+        result, requests = self._run(['--done'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(requests[0]['body'], {'done': True})
+        self.assertIn('done', result.stdout.lower())
+
+    def test_refuses_invalid_counts_labels_and_done_combinations(self):
+        cases = [['1/0', 'x'], ['2/1', 'x'], ['-1/3', 'x'], ['1.0/3', 'x'],
+                 ['1e2/300', 'x'], ['１/３', 'x'], ['1/1000001', 'x'], ['1/2/3', 'x'],
+                 ['1' * 5000 + '/2', 'x'], ['1/2'], ['1/2', ''], ['1/2', '  '],
+                 ['1/2', 'x' * 201], ['1/2', 'one\ntwo'], ['1/2', '\x1b[31m'],
+                 ['--done', '1/2', 'x'], ['--done', '1/2'], []]
+        for args in cases:
+            with self.subTest(args=args[:1]):
+                result, requests = self._run(args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [])
+                self.assertNotIn('Traceback', result.stderr)
+
+    def test_refuses_caller_supplied_attribution(self):
+        result, requests = self._run(['1/2', 'Checks', '--parent-call-id', 'another-agent'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(requests, [])
+
+    def test_server_conflict_is_clear_and_redacted(self):
+        result, _ = self._run(['--done'], status=409,
+                              reply={'error': 'No progress for fixture-progress-token', 'error_id': 'fixture-error'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('409', result.stderr)
+        self.assertIn('No progress', result.stderr)
+        self.assertNotIn('fixture-progress-token', result.stderr)
+
+    def test_native_markers_use_call_id_first_and_never_guess(self):
+        for metadata, expected in [({'BLERG_RUNNER_PROGRESS_CALL_ID': 'toolu_current', 'CODEX_THREAD_ID': 'native-root'}, {'call_id': 'toolu_current'}),
+                                   ({'CODEX_THREAD_ID': 'native-child'}, {'native_thread_id': 'native-child'})]:
+            result, requests = self._run(['1/2', 'Checks'], extra_env=metadata)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(requests[0]['body'], {'completed': 1, 'total': 2, 'label': 'Checks', **expected})
+        result, requests = self._run(['--done'], extra_env={'BLERG_RUNNER_PROGRESS_CALL_ID': 'toolu_current'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(requests[0]['body'], {'done': True, 'call_id': 'toolu_current'})
+
+    def test_invalid_origin_is_refused_without_session_fallback(self):
+        for key in ('BLERG_RUNNER_PROGRESS_CALL_ID', 'CODEX_THREAD_ID'):
+            result, requests = self._run(['1/2', 'Checks'], extra_env={key: 'bad\nmarker'})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [])
+            self.assertNotIn('bad', result.stderr)
+
+    def test_claude_without_hook_refuses_root_and_stale_codex_fallback(self):
+        for key in ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT'):
+            result, requests = self._run(['1/2', 'Checks'], extra_env={key: 'fixture', 'CODEX_THREAD_ID': 'stale-codex-thread'})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [])
+            self.assertIn('upgrade/restart', result.stderr)
+            self.assertNotIn('stale-codex-thread', result.stderr)
+        result, requests = self._run(['1/2', 'Checks'], extra_env={'CLAUDECODE': '1', 'BLERG_RUNNER_PROGRESS_CALL_ID': 'current-bash'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(requests[0]['body']['call_id'], 'current-bash')
+
+    def test_empty_marker_is_not_an_unscoped_request(self):
+        for key in ('BLERG_RUNNER_PROGRESS_CALL_ID', 'CODEX_THREAD_ID'):
+            result, requests = self._run(['1/2', 'Checks'], extra_env={key: ''})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [])
+
+    def test_help_names_syntax_bounds_and_done(self):
+        result = run_blerg_runner(['progress', '--help'])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('1000000', result.stdout)
+        self.assertIn('200', result.stdout)
+        self.assertIn('--done', result.stdout)
+
+
+class TestProgressScopeHook(unittest.TestCase):
+    def _hook(self, payload):
+        raw = json.dumps(payload).encode() if not isinstance(payload, bytes) else payload
+        result = subprocess.run([sys.executable, SCRIPT, '_progress_scope_hook'], input=raw,
+                                capture_output=True, timeout=5,
+                                env={'PATH': '/nonexistent', 'HOME': '/nonexistent'})
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stderr, b'')
+        return json.loads(result.stdout)
+
+    def _input(self, command='printf ok', call_id='toolu_fixture'):
+        return {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_use_id': call_id,
+                'tool_input': {'command': command, 'description': 'Fixture', 'timeout': 1234,
+                               'run_in_background': True}}
+
+    def test_wraps_only_command_preserving_fields_without_permission_decision(self):
+        payload = self._input()
+        result = self._hook(payload)
+        self.assertEqual(set(result), {'hookSpecificOutput'})
+        hook = result['hookSpecificOutput']
+        self.assertEqual(set(hook), {'hookEventName', 'updatedInput'})
+        self.assertEqual(hook['hookEventName'], 'PreToolUse')
+        updated = hook['updatedInput']
+        self.assertEqual(updated, {**payload['tool_input'], 'command':
+                         'export BLERG_RUNNER_PROGRESS_CALL_ID=toolu_fixture\nprintf ok'})
+
+    def test_bad_inputs_are_ignored_without_echoing_commands_or_ids(self):
+        cases = [b'not json', b'{}' + b' ' * (256 * 1024), [], {},
+                 self._input(call_id=''), self._input(call_id='x' * 257),
+                 self._input(call_id='x\ny'), self._input(call_id='x\x00y'),
+                 self._input(call_id='é' * 129), self._input(call_id='\ud800'),
+                 {**self._input(), 'tool_name': 'Read'},
+                 {**self._input(), 'hook_event_name': 'PostToolUse'},
+                 {**self._input(), 'tool_input': []}, self._input(command=123)]
+        for payload in cases:
+            with self.subTest(payload_type=type(payload).__name__):
+                self.assertEqual(self._hook(payload), {})
+
+    def test_hook_never_executes_input_and_quotes_shell_metacharacters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, 'must-not-exist')
+            call_id = "fixture'; touch " + marker + "; echo '"
+            command = "printf '%s' \"$BLERG_RUNNER_PROGRESS_CALL_ID\""
+            updated = self._hook(self._input(command, call_id))['hookSpecificOutput']['updatedInput']['command']
+            self.assertFalse(os.path.exists(marker))
+            result = subprocess.run(['/bin/bash', '-c', updated], capture_output=True, text=True,
+                                    env={'PATH': '/usr/bin:/bin'}, timeout=5)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, call_id)
+            self.assertFalse(os.path.exists(marker))
+
+    def test_preserves_multiline_shell_quoting_and_exit_status(self):
+        command = "cat <<'END'\n$(literal)\nEND\nexit 7"
+        updated = self._hook(self._input(command))['hookSpecificOutput']['updatedInput']['command']
+        result = subprocess.run(['/bin/bash', '-c', updated], capture_output=True, text=True,
+                                env={'PATH': '/usr/bin:/bin'}, timeout=5)
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stdout, '$(literal)\n')
+
+    def test_concurrent_calls_have_isolated_scope_and_override_inherited_marker(self):
+        from concurrent.futures import ThreadPoolExecutor
+        def run(call_id):
+            command = 'printf %s "$BLERG_RUNNER_PROGRESS_CALL_ID"'
+            updated = self._hook(self._input(command, call_id))['hookSpecificOutput']['updatedInput']['command']
+            result = subprocess.run(['/bin/bash', '-c', updated], capture_output=True, text=True,
+                                    env={'PATH': '/usr/bin:/bin', 'BLERG_RUNNER_PROGRESS_CALL_ID': 'stale'}, timeout=5)
+            self.assertEqual(result.returncode, 0)
+            return result.stdout
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(list(pool.map(run, ['toolu_root', 'toolu_child'])), ['toolu_root', 'toolu_child'])
+
+
+# ── session start/wait/... and budget ────────────────────────────────────────
+
+class SessionStubHandler(http.server.BaseHTTPRequestHandler):
+    """Plays self.server.script: a list of (method, path_prefix, status, body) answered in order.
+    status None drops the connection without a reply. Every request is recorded."""
+
+    def log_message(self, format, *args):
+        pass
+
+    def _serve(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length) if length else b""
+        srv = self.server
+        srv.recorded.append({"method": self.command, "path": self.path, "headers": dict(self.headers.items()), "raw": raw})
+        if not srv.script:
+            status, body = 599, b'{"error":"script exhausted"}'
+        else:
+            method, prefix, status, body = srv.script[0]
+            if method != self.command or prefix not in self.path:
+                status, body = 598, json.dumps({"error": f"unexpected {self.command} {self.path}, wanted {method} {prefix}"}).encode()
+            elif len(srv.script) > 1 or not srv.repeat_last:
+                srv.script.pop(0)
+        if status is None:
+            self.close_connection = True
+            self.connection.shutdown(socket.SHUT_RDWR)
+            return
+        if not isinstance(body, (bytes, bytearray)):
+            body = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        if status == 429:
+            self.send_header("Retry-After", "60")
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = do_PUT = do_DELETE = _serve
+
+
+CHILD = "11111111-1111-4111-8111-111111111111"
+REQ = "22222222-2222-4222-8222-222222222222"
+STARTED = {"child": {"id": CHILD, "engine": "codex", "model": "gpt-5", "effort": "", "runtime": "docker",
+                     "repo": "", "no_repo": True, "title": "t", "keep_running": False},
+           "via": "rule:r1", "plugins": "skipped",
+           "budget": {"engine": "codex", "available": True, "windows": [{"id": "5h", "used_percent": 12,
+                                                                            "resets_at": "2030-01-01T16:10:00Z"}]}}
+PENDING = {"request_id": REQ, "status": "pending", "choice": "", "child_session_id": "", "start_error": "",
+           "expires_at": "2030-01-01T12:10:00Z", "offered": ["once", "deny"]}
+
+
+class TestSession(unittest.TestCase):
+    def _run(self, args, script, timeout=15, repeat_last=False, extra_env=None, cmd=("session",)):
+        server = http.server.HTTPServer(("127.0.0.1", 0), SessionStubHandler)
+        server.recorded, server.script, server.repeat_last = [], list(script), repeat_last
+        t = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        t.start()
+        env = {
+            "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}",
+            "BLERG_RUNNER_SESSION_ID": "sess-par",
+            "BLERG_RUNNER_SESSION_TOKEN": "sess-tok",
+            "BLERG_RUNNER_DAEMON_TOKEN": None,
+            "BLERG_RUNNER_BOARD_TOKEN": None,
+            "TZ": "UTC",
+        }
+        env.update(extra_env or {})
+        try:
+            result = run_blerg_runner(list(cmd) + args, env_override=env, timeout=timeout)
+        finally:
+            server.shutdown()
+            server.server_close()
+        return result, server.recorded
+
+    def _body(self, rec):
+        return json.loads(rec["raw"]) if rec["raw"] else {}
+
+    def test_start_with_a_rule_prints_the_child(self):
+        result, rec = self._run(["start", "--engine", "codex", "--no-repo", "do it"],
+                                [("POST", "/api/sessions/sess-par/children", 201, STARTED)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], f"started {CHILD} (codex gpt-5, docker, via rule:r1)")
+        self.assertEqual(lines[1], "plugins: skipped")
+        self.assertEqual(lines[2], "codex  5h 12% used, resets 4:10 PM")
+        self.assertEqual(rec[0]["headers"]["Authorization"], "Bearer sess-tok")
+
+    def test_start_sends_an_idempotency_key_and_the_body(self):
+        result, rec = self._run(
+            ["start", "--engine", "codex", "--model", "gpt-5", "--effort", "high", "--repo", "app",
+             "--runtime", "docker", "--title", "T", "--keep-running", "the prompt"],
+            [("POST", "/children", 201, STARTED)], extra_env={})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        key = rec[0]["headers"]["Idempotency-Key"]
+        self.assertRegex(key, r"^[0-9a-f]{32}$")
+        self.assertIn(f"idempotency key: {key}", result.stderr)
+        self.assertEqual(self._body(rec[0]), {"engine": "codex", "model": "gpt-5", "effort": "high", "repo": "app",
+                                              "runtime": "docker", "title": "T", "keep_running": True,
+                                              "prompt": "the prompt"})
+        # an explicit key is used as given; no_repo is the other half of the pair
+        result, rec = self._run(["start", "--no-repo", "--idempotency-key", "k-1", "p"], [("POST", "/children", 201, STARTED)])
+        self.assertEqual(rec[0]["headers"]["Idempotency-Key"], "k-1")
+        self.assertEqual(self._body(rec[0]), {"prompt": "p", "no_repo": True})
+
+    def test_start_needs_a_repo_choice_and_a_prompt(self):
+        result, rec = self._run(["start", "prompt"], [])
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(rec, [])
+        result, rec = self._run(["start", "--no-repo"], [])
+        self.assertEqual(result.returncode, 2)
+
+    def test_start_retries_a_network_error_with_the_same_key(self):
+        result, rec = self._run(["start", "--no-repo", "p"],
+                                [("POST", "/children", None, b""), ("POST", "/children", None, b""),
+                                 ("POST", "/children", 201, STARTED)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rec = [r for r in rec if r["raw"]]  # a request with a body is a start (a dropped connection can be recorded twice)
+        self.assertGreaterEqual(len(rec), 3)
+        keys = {r["headers"]["Idempotency-Key"] for r in rec}
+        self.assertEqual(len(keys), 1)
+        self.assertTrue(all(self._body(r) == {"prompt": "p", "no_repo": True} for r in rec))
+
+    def test_start_gives_up_after_three_retries_and_names_the_key(self):
+        result, rec = self._run(["start", "--no-repo", "--idempotency-key", "kk", "p"],
+                                [("POST", "/children", None, b"")], repeat_last=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertGreaterEqual(len([r for r in rec if r["raw"]]), 4)
+        self.assertIn("--idempotency-key kk", result.stderr)
+        self.assertNotIn("sess-tok", result.stdout + result.stderr)
+
+    def test_start_waits_then_prints_the_allowed_child(self):
+        script = [("POST", "/children", 202, PENDING),
+                  ("GET", f"/api/delegation-requests/{REQ}?wait=", 200, PENDING),
+                  ("GET", f"/api/delegation-requests/{REQ}?wait=", 200,
+                   dict(PENDING, status="allowed", choice="once", child_session_id=CHILD))]
+        result, rec = self._run(["start", "--no-repo", "p"], script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [f"request {REQ}", f"started {CHILD}"])
+        self.assertIn(f"waiting for the person to approve (request {REQ}, expires 12:10)", result.stderr)
+        self.assertTrue(rec[1]["path"].endswith("?wait=25"), rec[1]["path"])
+
+    def test_start_denied_exits_2(self):
+        script = [("POST", "/children", 202, PENDING),
+                  ("GET", "/api/delegation-requests/", 200, dict(PENDING, status="denied", choice="deny"))]
+        result, _ = self._run(["start", "--no-repo", "p"], script)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("the person denied it", result.stderr)
+
+    def test_allowed_with_a_start_error_exits_1(self):
+        script = [("POST", "/children", 202, PENDING),
+                  ("GET", "/api/delegation-requests/", 200, dict(PENDING, status="allowed", start_error="daemon offline"))]
+        result, _ = self._run(["start", "--no-repo", "p"], script)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("daemon offline", result.stderr)
+
+    def test_expired_exits_3(self):
+        script = [("POST", "/children", 202, PENDING),
+                  ("GET", "/api/delegation-requests/", 200, dict(PENDING, status="expired"))]
+        result, _ = self._run(["start", "--no-repo", "p"], script)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("nobody answered; ask again with a new start", result.stderr)
+
+    def test_start_timeout_says_to_wait_and_exits_3(self):
+        # --timeout 1: pending forever. The request is NOT expired: `session wait` resumes it.
+        script = [("POST", "/children", 202, PENDING), ("GET", "/api/delegation-requests/", 200, PENDING)]
+        t0 = time.monotonic()
+        result, rec = self._run(["start", "--no-repo", "--timeout", "1", "p"], script, repeat_last=True)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn(f"still waiting — run: blerg-runner session wait {REQ}", result.stdout)
+        self.assertFalse([r for r in rec if r["path"].endswith("/expire")])
+        self.assertLess(time.monotonic() - t0, 10)
+
+    def test_default_timeout_is_100_and_the_cap_is_540(self):
+        result, _ = run_blerg_runner(["session", "start", "--help"]), None
+        self.assertIn("default 100, at most 540", " ".join(result.stdout.split()))
+        # a larger value is clamped, not refused
+        result, rec = self._run(["wait", REQ, "--timeout", "9999"],
+                                [("GET", "/api/delegation-requests/", 200, dict(PENDING, status="denied"))])
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(rec[0]["path"].endswith("?wait=25"))
+
+    def test_no_wait_prints_the_request(self):
+        result, rec = self._run(["start", "--no-repo", "--no-wait", "p"], [("POST", "/children", 202, PENDING)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"request {REQ}")
+        self.assertEqual(len(rec), 1)
+
+    def test_a_pending_request_is_printed_before_blocking(self):
+        # A killed call still shows the id: stdout has it while the wait is still running.
+        server = http.server.HTTPServer(("127.0.0.1", 0), SessionStubHandler)
+        server.recorded, server.repeat_last = [], True
+        server.script = [("POST", "/children", 202, PENDING), ("GET", "/api/delegation-requests/", 200, PENDING)]
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("BLERG_")}
+        env.update({"BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}",
+                    "BLERG_RUNNER_SESSION_ID": "sess-par", "BLERG_RUNNER_SESSION_TOKEN": "sess-tok"})
+        proc = subprocess.Popen([sys.executable, SCRIPT, "session", "start", "--no-repo", "p"], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(proc.stdout.readline().strip(), f"request {REQ}")
+            proc.terminate()
+            proc.wait(timeout=10)
+        finally:
+            proc.kill()
+            proc.stdout.close()
+            proc.stderr.close()
+            server.shutdown()
+            server.server_close()
+
+    def test_wait_resumes_an_existing_request(self):
+        script = [("GET", f"/api/delegation-requests/{REQ}?wait=", 200, PENDING),
+                  ("GET", f"/api/delegation-requests/{REQ}?wait=", 200,
+                   dict(PENDING, status="allowed", child_session_id=CHILD))]
+        result, rec = self._run(["wait", REQ], script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"started {CHILD}")
+        self.assertEqual(len(rec), 2)
+
+    def test_wait_keeps_going_through_a_server_hiccup(self):
+        script = [("GET", "/api/delegation-requests/", 503, {"error": "busy"}),
+                  ("GET", "/api/delegation-requests/", 200, dict(PENDING, status="allowed", child_session_id=CHILD))]
+        result, _ = self._run(["wait", REQ], script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wait_on_an_unknown_request_fails(self):
+        result, _ = self._run(["wait", REQ], [("GET", "/api/delegation-requests/", 404, {"error": "not found"})])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not found", result.stderr)
+
+    def test_prompt_file(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write("line one\nline two\n")
+        try:
+            result, rec = self._run(["start", "--no-repo", "--prompt-file", fh.name], [("POST", "/children", 201, STARTED)])
+        finally:
+            os.unlink(fh.name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([self._body(r).get("prompt") for r in rec if r["raw"]][0], "line one\nline two\n")
+
+    def test_a_refusal_prints_the_servers_sentence(self):
+        result, _ = self._run(["start", "--no-repo", "p"], [("POST", "/children", 429, {"error": "too many running children"})])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("too many running children", result.stderr)
+        self.assertIn("retry after 60s", result.stderr)
+
+    def test_list_send_model_interrupt_stop_result(self):
+        kid = {"id": CHILD, "engine": "codex", "model": "gpt-5", "status": "running", "title": "Fix it"}
+        script = [("GET", "/api/sessions/sess-par/children", 200, {"children": [kid]}),
+                  ("POST", f"/api/sessions/sess-par/children/{CHILD}/message", 202, {"status": "queued"}),
+                  ("POST", f"/api/sessions/sess-par/children/{CHILD}/model", 202, {}),
+                  ("POST", f"/api/sessions/sess-par/children/{CHILD}/interrupt", 202, {}),
+                  ("POST", f"/api/sessions/sess-par/children/{CHILD}/stop", 200, {"status": "stopped"}),
+                  ("GET", f"/api/sessions/sess-par/children/{CHILD}/result", 200, {"lifecycle": "running", "text": "hi"})]
+        out = []
+        for argv in (["list"], ["send", CHILD, "hello"], ["model", CHILD, "gpt-6", "--effort", "low"],
+                     ["interrupt", CHILD], ["stop", CHILD], ["result", CHILD]):
+            res, rec = self._run(argv, [script.pop(0)])
+            self.assertEqual(res.returncode, 0, (argv, res.stderr))
+            out.append((res.stdout, rec[0]))
+        self.assertEqual(out[0][0].strip(), f"{CHILD}  codex  gpt-5  running  Fix it")
+        self.assertEqual(out[1][0].strip(), "sent")
+        self.assertEqual(self._body(out[1][1]), {"text": "hello"})
+        self.assertEqual(self._body(out[2][1]), {"model": "gpt-6", "effort": "low"})
+        self.assertEqual(out[3][0].strip(), "interrupted")
+        self.assertEqual(out[4][0].strip(), "stopped")
+        self.assertEqual(json.loads(out[5][0]), {"lifecycle": "running", "text": "hi"})
+
+    def test_send_reports_an_answered_question(self):
+        res, _ = self._run(["send", CHILD, "yes"], [("POST", "/children/", 202, {"answered_ask": True})])
+        self.assertEqual(res.stdout.strip(), "answered its question")
+
+    def test_another_sessions_child_is_a_plain_failure(self):
+        res, _ = self._run(["stop", CHILD], [("POST", "/children/", 404, {"error": "not found"})])
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("not found", res.stderr)
+
+    def test_upload_and_download(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "notes.txt")
+            with open(src, "wb") as fh:
+                fh.write(b"hello child")
+            res, rec = self._run(["upload", CHILD, src],
+                                 [("POST", f"/api/sessions/sess-par/children/{CHILD}/uploads", 201, {"id": "a1", "name": "notes.txt"})])
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(rec[0]["raw"], b"hello child")
+            self.assertEqual(rec[0]["headers"]["X-Artifact-Name"], "notes.txt")
+            self.assertEqual(rec[0]["headers"]["Content-Type"], "application/octet-stream")
+            self.assertIn("uploaded notes.txt", res.stdout)
+            listing = {"artifacts": [{"id": "old", "name": "out.txt", "version": 1, "size": 3},
+                                     {"id": "new", "name": "out.txt", "version": 2, "size": 5}]}
+            res, rec = self._run(["files", CHILD], [("GET", "/artifacts", 200, listing)])
+            self.assertIn("new  out.txt  v2", res.stdout)
+            dest = os.path.join(tmp, "got.txt")
+            res, rec = self._run(["download", CHILD, "out.txt", "-o", dest],
+                                 [("GET", "/artifacts", 200, listing),
+                                  ("GET", f"/api/sessions/sess-par/children/{CHILD}/artifacts/new/download", 200, b"newer")])
+            self.assertEqual(res.returncode, 0, res.stderr)
+            with open(dest, "rb") as fh:
+                self.assertEqual(fh.read(), b"newer")
+            res, _ = self._run(["download", CHILD, "nope"], [("GET", "/artifacts", 200, listing)])
+            self.assertEqual(res.returncode, 1)
+
+    def test_events_prints_json_lines(self):
+        evs = {"events": [{"seq": 5, "kind": "turn_done", "payload": {}}, {"seq": 6, "kind": "x", "payload": {}}]}
+        res, rec = self._run(["events", CHILD, "--after", "4"], [("GET", f"/api/sessions/sess-par/children/{CHILD}/events?after_seq=4", 200, evs)])
+        self.assertEqual([json.loads(l)["seq"] for l in res.stdout.splitlines()], [5, 6])
+
+    def test_watch_returns_on_turn_done_and_prints_asks(self):
+        tail = ("GET", f"/api/sessions/sess-par/children/{CHILD}/events?before_seq=0", 200, {"events": [{"seq": 10, "kind": "turn_done", "payload": {}}]})
+        batch = {"events": [
+            {"seq": 11, "kind": "assistant_text", "payload": {"text": "partial", "done": False}},
+            {"seq": 12, "kind": "tool_call", "payload": {"tool": "Bash", "call_id": "c"}},
+            {"seq": 13, "kind": "assistant_text", "payload": {"text": "All done here.", "done": True}},
+            {"seq": 14, "kind": "turn_done", "payload": {"stop_reason": "end_turn"}}]}
+        status = ("GET", f"/children/{CHILD}", 200, {"lifecycle": "running"})
+        res, rec = self._run(["watch", CHILD], [status, tail, ("GET", f"/api/sessions/sess-par/children/{CHILD}/events?after_seq=10&wait=", 200, batch), status])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.splitlines(), ["tool: Bash", "All done here."])
+        # an open ask is printed and returns 0; an answered one is not
+        asks = {"events": [
+            {"seq": 11, "kind": "ask", "payload": {"body": "Delete the table?", "message_id": "m-1"}},
+            {"seq": 12, "kind": "ask", "payload": {"body": "Which color?", "message_id": "m-2"}},
+            {"seq": 13, "kind": "user_message", "payload": {"text": "red", "source": "ask_answer", "message_id": "m-2"}}]}
+        res, _ = self._run(["watch", CHILD], [status, tail, ("GET", "/events?after_seq=10", 200, asks), status])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "ask [m-1]: Delete the table?")
+
+    def test_watch_continues_past_empty_polls_and_times_out_with_3(self):
+        tail = ("GET", "/events?before_seq=0", 200, {"events": []})
+        script = [("GET", f"/children/{CHILD}", 200, {"lifecycle": "running"}), tail, ("GET", "/events?after_seq=0", 200, {"events": []}),
+                  ("GET", f"/api/sessions/sess-par/children/{CHILD}", 200, {"lifecycle": "running"})]
+        res, rec = self._run(["watch", CHILD, "--timeout", "1"], script, repeat_last=False)
+        self.assertEqual(res.returncode, 3, res.stderr)
+        self.assertIn(f"still waiting — run: blerg-runner session watch {CHILD}", res.stdout)
+
+    def test_watch_returns_when_the_child_ends(self):
+        script = [("GET", f"/children/{CHILD}", 200, {"lifecycle": "running"}),
+                  ("GET", "/events?before_seq=0", 200, {"events": []}),
+                  ("GET", "/events?after_seq=0", 200, {"events": []}),
+                  ("GET", f"/api/sessions/sess-par/children/{CHILD}", 200, {"lifecycle": "ended"})]
+        res, _ = self._run(["watch", CHILD, "--until", "end"], script)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("the session ended", res.stdout)
+
+    def test_budget_lines_and_json(self):
+        body = {"daemon": "laptop", "fetched_at": "2030-01-01T00:00:00Z", "engines": [
+            {"engine": "claude", "available": True, "windows": [
+                {"id": "5h", "used_percent": 62, "resets_at": "2030-01-01T16:10:00Z"},
+                {"id": "7d", "used_percent": 31, "resets_at": "2030-01-05T00:00:00Z"}]},
+            {"engine": "codex", "available": True, "windows": [], "note": "usage unknown (remote provider)"},
+            {"engine": "hermes", "available": True, "local": True, "windows": [], "note": "local (runs on your hardware)"},
+            {"engine": "openclaw", "available": False, "windows": []}]}
+        res, rec = self._run(["budget"], [("GET", "/api/sessions/sess-par/budget", 200, body)], cmd=())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.splitlines(), [
+            "claude  5h 62% used, resets 4:10 PM · 7d 31%",
+            "codex  usage unknown (remote provider)",
+            "hermes  local (runs on your hardware)",
+            "openclaw  not installed on this daemon"])
+        res, _ = self._run(["budget", "--json"], [("GET", "/budget", 200, body)], cmd=())
+        self.assertEqual(json.loads(res.stdout), body)
+        capped = {"engines": [{"engine": "claude", "available": True, "capped_until": "2030-01-01T16:10:00Z",
+                               "windows": [{"id": "5h", "used_percent": 100}, {"id": "capped", "used_percent": 100}]}]}
+        res, _ = self._run(["budget"], [("GET", "/budget", 200, capped)], cmd=())
+        self.assertEqual(res.stdout.strip(), "claude  5h 100% used · capped until 4:10 PM")
+        res, _ = self._run(["budget"], [("GET", "/budget", 200, {"engines": [], "note": "no desktop daemon"})], cmd=())
+        self.assertEqual(res.stdout.strip(), "no desktop daemon")
+
+    def test_not_under_blerg_is_a_quiet_noop(self):
+        res = run_blerg_runner(["session", "list"])
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("not running under Blerg Runner", res.stderr)
+
+    def test_help_carries_the_rules(self):
+        res = run_blerg_runner(["session", "--help"])
+        self.assertEqual(res.returncode, 0)
+        for text in ("blerg-runner budget", "session start", "per provider", "destructive or irreversible",
+                     "blerg-runner ask", "session wait <request_id>", "never run\n`start` with a NEW key",
+                     "loopback", "--runtime daemon", "exit with code 3", "80%"):
+            self.assertIn(text, res.stdout, text)
+
+    def test_the_help_starts_with_the_line_the_daemon_injects(self):
+        # daemon/claudecode.go childSessionGuideLine is the same text as SESSION_LINE.
+        import re
+        go = os.path.join(os.path.dirname(SCRIPT), "..", "..", "..", "internal", "daemon", "claudecode.go")
+        if not os.path.exists(go):
+            self.skipTest("not in the repository")
+        with open(go, encoding="utf-8") as fh:
+            src = fh.read()
+        block = re.search(r"const childSessionGuideLine = (.*?)\n\n", src, re.S).group(1)
+        parts = re.findall(r'"((?:[^"\\]|\\.)*)"', block)
+        injected = "".join(p.replace('\\"', '"') for p in parts)
+        res = run_blerg_runner(["session", "--help"])
+        self.assertIn(injected, " ".join(res.stdout.split()))
+
+    def test_no_token_is_printed(self):
+        for as_json in (True, False):
+            server = http.server.HTTPServer(("127.0.0.1", 0), EchoSecretsHandler)
+            server.status, server.as_json = 500, as_json
+            threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+            try:
+                env = {"BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}",
+                       "BLERG_RUNNER_SESSION_ID": "sess-par", "BLERG_RUNNER_SESSION_TOKEN": SECRET_SESSION,
+                       "BLERG_RUNNER_DAEMON_TOKEN": SECRET_DAEMON, "BLERG_RUNNER_BOARD_TOKEN": None}
+                for argv in (["session", "start", "--no-repo", "p"], ["session", "wait", REQ, "--timeout", "1"], ["session", "list"],
+                             ["session", "stop", CHILD], ["session", "watch", CHILD, "--after", "0", "--timeout", "1"],
+                             ["session", "result", CHILD], ["budget"]):
+                    res = run_blerg_runner(argv, env_override=env)
+                    self.assertIn(res.returncode, (1, 3), (argv, res.stderr))
+                    self.assertEqual(_leaks(res.stdout + res.stderr, [SECRET_SESSION, SECRET_DAEMON, SECRET_BASIC]), set(), argv)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+
+@contextlib.contextmanager
+def api_server(reply):
+    records = []
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+        def serve(self):
+            size = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(size) if size else b""
+            records.append((self.command, self.path, dict(self.headers), raw))
+            status, body, headers, delay = reply(self.command, self.path, raw)
+            if delay:
+                time.sleep(delay)
+            chunks = body if isinstance(body, list) else None
+            if chunks is not None:
+                body = b"".join(chunk for chunk, _ in chunks)
+            elif not isinstance(body, bytes):
+                body = json.dumps(body).encode()
+            if isinstance(headers, list):
+                try:
+                    self.wfile.write(f"HTTP/1.0 {status} OK\r\n".encode())
+                    self.wfile.flush()
+                    for fragment, pause in headers:
+                        time.sleep(pause)
+                        self.wfile.write(fragment)
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
+            self.send_response(status)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                if chunks is None:
+                    self.wfile.write(body)
+                else:
+                    for chunk, pause in chunks:
+                        time.sleep(pause)
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        do_GET = do_POST = serve
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", records
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def call(url, args, **kwargs):
+    return run_blerg_runner(args, env_override={
+        "BLERG_RUNNER_SERVER_HTTP": url, "BLERG_RUNNER_SESSION_ID": "fixture-parent",
+        "BLERG_RUNNER_SESSION_TOKEN": "fixture-token", "BLERG_RUNNER_BOARD_TOKEN": None,
+        "BLERG_RUNNER_DAEMON_TOKEN": None,
+    }, **kwargs)
+
+
+class TestSessionReview(unittest.TestCase):
+    def test_legacy_authenticated_calls_never_follow_redirects(self):
+        for code in (301, 302, 303, 307, 308):
+            for args in (["files"], ["update", "fixture update"]):
+                with self.subTest(code=code, command=args[0]):
+                    with api_server(lambda *_: (200, {}, {}, 0)) as (target, seen):
+                        with api_server(lambda *_: (code, {}, {"Location": target + "/other"}, 0)) as (source, _):
+                            result = call(source, args)
+                        self.assertEqual(seen, [], "redirect target received a legacy authenticated request")
+                        self.assertNotIn("fixture-token", result.stdout + result.stderr)
+
+    def test_sensitive_calls_never_follow_redirects(self):
+        for code in (301, 302, 303, 307, 308):
+            with self.subTest(code=code):
+                with api_server(lambda *_: (200, {"children": []}, {}, 0)) as (target, seen):
+                    with api_server(lambda *_: (code, {}, {"Location": target + "/other"}, 0)) as (source, _):
+                        result = call(source, ["session", "list"])
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(seen, [], "redirect target received an authenticated request")
+                    self.assertNotIn("fixture-token", result.stdout + result.stderr)
+
+    def test_allowed_without_outcome_keeps_waiting(self):
+        starting = dict(PENDING, status="allowed")
+        result, seen = TestSession()._run(["wait", REQ, "--timeout", "2"], [
+            ("GET", "/api/delegation-requests/", 200, starting),
+            ("GET", "/api/delegation-requests/", 200, dict(starting, child_session_id=CHILD)),
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"started {CHILD}", result.stdout)
+        self.assertEqual(len(seen), 2)
+
+    def test_watch_drains_answer_page_for_old_peer(self):
+        ask = {"seq": 1, "kind": "ask", "payload": {"message_id": "q", "body": "already answered"}}
+        answer = {"seq": 2, "kind": "user_message", "payload": {"source": "ask_answer", "message_id": "q"}}
+        status = ("GET", f"/children/{CHILD}", 200, {"lifecycle": "running"})
+        result, seen = TestSession()._run(["watch", CHILD, "--after", "0"], [
+            status, ("GET", "/events?after_seq=0", 200, {"events": [ask], "has_more": True}),
+            ("GET", "/events?after_seq=1", 200, {"events": [answer, {"seq": 3, "kind": "turn_done", "payload": {}}]}), status,
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("ask [q]", result.stdout)
+        self.assertEqual(len(seen), 4)
+
+    def test_watch_reports_existing_question(self):
+        snapshot = {"lifecycle": "running", "open_asks": [{"message_id": "q", "body": "existing question"}]}
+        with api_server(lambda *_: (200, snapshot, {}, 0)) as (url, seen):
+            result = call(url, ["session", "watch", CHILD, "--timeout", "1"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ask [q]: existing question", result.stdout)
+        self.assertEqual(len(seen), 1)
+
+    def test_watch_catches_question_between_snapshot_and_tail(self):
+        path = f"/children/{CHILD}"
+        result, _ = TestSession()._run(["watch", CHILD, "--timeout", "2"], [
+            ("GET", path, 200, {"lifecycle": "running", "open_asks": []}),
+            ("GET", "/events?before_seq=0", 200, {"events": [{"seq": 10, "kind": "ask", "payload": {"message_id": "q", "body": "race"}}]}),
+            ("GET", "/events?after_seq=10", 200, {"events": []}),
+            ("GET", path, 200, {"lifecycle": "running", "open_asks": [{"message_id": "q", "body": "race"}]}),
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ask [q]: race", result.stdout)
+
+    def test_watch_prefers_authoritative_empty_snapshot(self):
+        status = ("GET", f"/children/{CHILD}", 200, {"lifecycle": "running", "open_asks": []})
+        result, _ = TestSession()._run(["watch", CHILD, "--after", "0"], [
+            status, ("GET", "/events?after_seq=0", 200, {"events": [
+                {"seq": 1, "kind": "ask", "payload": {"message_id": "q", "body": "stale"}},
+                {"seq": 2, "kind": "turn_done", "payload": {}}]}), status,
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("ask [q]", result.stdout)
+
+    def test_download_defaults_never_replace_files_or_follow_symlinks(self):
+        listing = {"artifacts": [{"id": "a", "name": "out.txt", "version": 1}]}
+        with tempfile.TemporaryDirectory() as folder:
+            original, target = os.path.join(folder, "out.txt"), os.path.join(folder, "target")
+            for path in (original, target):
+                with open(path, "wb") as stream:
+                    stream.write(b"keep")
+            os.symlink(target, os.path.join(folder, "out-1.txt"))
+            with api_server(lambda _, path, __: (200, b"fixture-token" if path.endswith("download") else listing, {}, 0)) as (url, _):
+                result = call(url, ["session", "download", CHILD, "out.txt"], cwd=folder)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for path in (original, target):
+                with open(path, "rb") as stream:
+                    self.assertEqual(stream.read(), b"keep")
+            with open(os.path.join(folder, "out-2.txt"), "rb") as stream:
+                self.assertEqual(stream.read(), b"fixture-token", "download bytes were redacted")
+
+    def test_explicit_download_refuses_existing_file_and_symlink(self):
+        listing = {"artifacts": [{"id": "a", "name": "out.txt", "version": 1}]}
+        with tempfile.TemporaryDirectory() as folder:
+            target, link = os.path.join(folder, "target"), os.path.join(folder, "link")
+            with open(target, "wb") as stream:
+                stream.write(b"keep")
+            os.symlink(target, link)
+            for path in (target, link):
+                with api_server(lambda _, route, __: (200, b"replace" if route.endswith("download") else listing, {}, 0)) as (url, _):
+                    result = call(url, ["session", "download", CHILD, "out.txt", "-o", path])
+                self.assertEqual(result.returncode, 1)
+                with open(target, "rb") as stream:
+                    self.assertEqual(stream.read(), b"keep")
+
+    def test_success_json_redaction_preserves_framing(self):
+        body = {"value": "Authorization: Bearer fixture-token", "nested": ["fixture-token", {"keep": "yes"}]}
+        for args in (["session", "result", CHILD], ["budget", "--json"]):
+            with api_server(lambda *_: (200, body, {}, 0)) as (url, _):
+                result = call(url, args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["nested"][1]["keep"], "yes")
+            self.assertNotIn("fixture-token", result.stdout + result.stderr)
+
+    def test_success_text_and_event_json_are_redacted(self):
+        with api_server(lambda *_: (200, {"children": [{"id": "c", "title": "fixture-token"}]}, {}, 0)) as (url, _):
+            result = call(url, ["session", "list"])
+        self.assertNotIn("fixture-token", result.stdout + result.stderr)
+        with api_server(lambda *_: (200, {"events": [{"seq": 1, "payload": {"text": "Authorization: Bearer fixture-token"}}]}, {}, 0)) as (url, _):
+            result = call(url, ["session", "events", CHILD])
+        self.assertNotIn("fixture-token", result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["seq"], 1)
+
+    def test_watch_finished_child_replays_explicit_cursor(self):
+        status = ("GET", f"/children/{CHILD}", 200, {"lifecycle": "ended", "open_asks": []})
+        result, seen = TestSession()._run(["watch", CHILD, "--after", "0"], [
+            status,
+            ("GET", "/events?after_seq=0", 200, {"events": [
+                {"seq": 1, "kind": "assistant_text", "payload": {"done": True, "text": "finished work"}}], "has_more": True}),
+            ("GET", "/events?after_seq=1", 200, {"events": [
+                {"seq": 2, "kind": "turn_done", "payload": {}}]}), status,
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("finished work", result.stdout)
+        self.assertIn("the session ended", result.stdout)
+        self.assertEqual(len(seen), 4)
+
+    def test_wait_deadline_bounds_slow_stream_body(self):
+        # Each byte arrives before the original one-second inactivity timeout, but
+        # the command as a whole must still finish within its one-second budget.
+        chunks = [(b" ", 0.35)] * 6 + [(json.dumps(PENDING).encode(), 0.35)]
+        with api_server(lambda *_: (200, chunks, {}, 0)) as (url, _):
+            started = time.monotonic()
+            result = call(url, ["session", "wait", REQ, "--timeout", "1"], timeout=5)
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertLess(elapsed, 1.6)
+
+    def test_download_directory_never_overwrites(self):
+        listing = {"artifacts": [{"id": "a", "name": "../out.txt", "version": 1}]}
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "out.txt")
+            with open(path, "wb") as stream:
+                stream.write(b"keep")
+            with api_server(lambda _, route, __: (200, b"new" if route.endswith("download") else listing, {}, 0)) as (url, _):
+                result = call(url, ["session", "download", CHILD, "a", "-o", folder])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(path, "rb") as stream:
+                self.assertEqual(stream.read(), b"keep")
+            with open(os.path.join(folder, "out-1.txt"), "rb") as stream:
+                self.assertEqual(stream.read(), b"new")
+
+    @unittest.skipUnless(sys.platform != "win32", "POSIX request alarm")
+    def test_wait_deadline_bounds_slow_headers(self):
+        fragments = [(b"X-Slow: a", 0)] + [(b"b", 0.35)] * 6 + [(b"\r\nContent-Length: 2\r\n\r\n{}", 0.35)]
+        with api_server(lambda *_: (200, {}, fragments, 0)) as (url, _):
+            started = time.monotonic()
+            result = call(url, ["session", "wait", REQ, "--timeout", "1"], timeout=5)
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertLess(elapsed, 1.6)
+
+    @unittest.skipUnless(sys.platform != "win32", "POSIX request alarm")
+    def test_request_deadline_restores_alarm_after_success_error_timeout(self):
+        code = r"""
+import runpy, signal, sys, time, urllib.error
+ns = runpy.run_path(sys.argv[1], run_name="review_fixture")
+def previous(signum, frame):
+    raise AssertionError("unrelated timer fired")
+for mode in ("success", "http_error", "timeout"):
+    signal.signal(signal.SIGALRM, previous)
+    signal.setitimer(signal.ITIMER_REAL, 10, 3)
+    try:
+        with ns["_session_deadline"](time.monotonic() + 0.03):
+            if mode == "http_error":
+                raise urllib.error.HTTPError("fixture", 403, "refused", {}, None)
+            if mode == "timeout":
+                time.sleep(0.2)
+    except urllib.error.HTTPError:
+        assert mode == "http_error"
+    except TimeoutError:
+        assert mode == "timeout"
+    assert signal.getsignal(signal.SIGALRM) is previous
+    remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+    assert 9 < remaining <= 10 and interval == 3
+    signal.setitimer(signal.ITIMER_REAL, 0)
+# A normal call without a deadline leaves an existing alarm untouched.
+signal.setitimer(signal.ITIMER_REAL, 10)
+with ns["_session_deadline"](None):
+    assert signal.getsignal(signal.SIGALRM) is previous
+signal.setitimer(signal.ITIMER_REAL, 0)
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            result = subprocess.run([sys.executable, "-c", code, SCRIPT], capture_output=True, text=True,
+                                    env={"HOME": folder, "PATH": os.defpath}, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_start_post_and_wait_share_deadline(self):
+        def reply(method, *_):
+            return (202 if method == "POST" else 200), PENDING, {}, 0.7
+        with api_server(reply) as (url, seen):
+            started = time.monotonic()
+            result = call(url, ["session", "start", "--no-repo", "--timeout", "1", "p"], timeout=5)
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertLess(elapsed, 1.6)
+        self.assertIn(f"session wait {REQ}", result.stdout)
+        self.assertEqual([r[0] for r in seen], ["POST", "GET"])
+
+    def test_wait_immediate_inflight_polls_do_not_spin(self):
+        starting = dict(PENDING, status="allowed")
+        with api_server(lambda *_: (200, starting, {}, 0)) as (url, seen):
+            result = call(url, ["session", "wait", REQ, "--timeout", "1"])
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertGreater(len(seen), 1)
+        self.assertLess(len(seen), 30)
+
+    def test_start_deadline_includes_unknown_reply_and_preserves_key(self):
+        with api_server(lambda *_: (202, PENDING, {}, 2)) as (url, _):
+            started = time.monotonic()
+            result = call(url, ["session", "start", "--no-repo", "--timeout", "1", "--idempotency-key", "same-key", "p"], timeout=5)
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertLess(elapsed, 1.6)
+        self.assertIn("--idempotency-key same-key", result.stdout + result.stderr)
+
+    def test_wait_and_watch_slow_replies_obey_total_deadline(self):
+        for args in (["session", "wait", REQ, "--timeout", "1"], ["session", "watch", CHILD, "--timeout", "1"]):
+            with api_server(lambda *_: (200, PENDING, {}, 2)) as (url, _):
+                started = time.monotonic()
+                result = call(url, args, timeout=5)
+                elapsed = time.monotonic() - started
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertLess(elapsed, 1.6)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import { CardOrigin, RestrictedMarker } from "./CardOrigin";
 import { CardLinks, SafeAnchor } from "./CardLinks";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
@@ -332,6 +333,7 @@ export function CardSheet({ card, board, columns, onClose }: {
           <h2>{full.title}</h2>
           <div className="row" style={{ gap: 6 }}>
             <span className="chip type">{full.type}</span>
+            <RestrictedMarker sensitive={full.sensitive} />
             <span className="chip">{full.priority}</span>
             {full.size && <span className="chip">{full.size}</span>}
             {full.model && (
@@ -380,6 +382,7 @@ export function CardSheet({ card, board, columns, onClose }: {
               onDone={(n) => { loadCard(); if (n) setNotice(n); else onClose(); }} />
           )}
 
+          <CardOrigin origin={full.origin} />
           {full.body && <div className="body-text"><MdText text={full.body} /></div>}
 
           {fieldEntries.length > 0 && (

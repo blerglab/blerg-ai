@@ -1,0 +1,21 @@
+.child-discard-trigger { min-height: 28px; }
+.child-discard-status { display: block; color: var(--fog-dim); font-size: var(--text-xs); margin-top: 4px; }
+.child-discard-backdrop { position: fixed; inset: 0; z-index: 1800; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; background: rgba(0,0,0,.65); }
+.child-discard-dialog { box-sizing: border-box; width: min(440px, 100%); max-height: calc(100dvh - 32px); overflow: auto; border: 1px solid var(--stone); border-radius: 10px; padding: 20px; background: var(--scree); color: var(--chalk); font-family: var(--body); }
+.child-discard-dialog h3 { margin: 0 0 14px; }
+.child-discard-dialog p { margin: 10px 0; line-height: 1.5; font-size: var(--text-sm); }
+.child-discard-title { font-weight: 600; overflow-wrap: anywhere; }
+.child-discard-dialog [role='alert'] { color: var(--danger); }
+.child-discard-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 12px; margin-top: 20px; }
+.child-discard-buttons button { border: 1px solid var(--stone); border-radius: 6px; padding: 8px 12px; min-height: 36px; font: inherit; font-size: var(--text-sm); cursor: pointer; color: inherit; background: var(--scree-2); }
+.child-discard-buttons .child-discard-confirm { color: var(--danger); border-color: var(--danger); }
+.child-discard-buttons button:disabled { opacity: .6; cursor: default; }
+.child-card-actions { position: relative; flex: none; }
+.child-card-menu-button { border: 0; border-radius: 4px; color: var(--fog); background: transparent; min-width: 28px; min-height: 28px; font: inherit; cursor: pointer; }
+.child-card-menu { position: absolute; top: 100%; right: 0; z-index: 20; min-width: 150px; border: 1px solid var(--stone); border-radius: 6px; background: var(--scree-2); padding: 6px; box-shadow: 0 4px 12px rgba(0,0,0,.3); }
+.child-card-menu[hidden] { display: none; }
+.child-card-menu .child-discard-trigger { width: 100%; text-align: left; color: var(--danger); background: transparent; border: 0; padding: 6px; cursor: pointer; font: inherit; font-size: var(--text-xs); }
+
+.rail-child-item.has-discard { position: relative; padding-right: 42px; }
+.rail-child-item > .child-discard-trigger { position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; }
+.child-discard-trigger:disabled { opacity: .5; cursor: default; }

@@ -16,12 +16,15 @@ type sessionGuideLine struct {
 	ManagedSuffix string
 }
 
+const sandboxCodingGuideLine = "Sandboxed coding children can build, test and commit on their own worktree branch. Ask them for commit IDs and test results; the parent reviews and handles merging or pushing with the person's authorization. Do not give children Git push credentials."
+
 const visualGuideLine = "Use mermaid fences for diagrams and vega-lite fences for charts with inline data only; external resources and executable HTML or JavaScript are refused. Publish .mmd or .vl.json files to open them in the same viewer."
 
 func sessionWorkGuideLines() []sessionGuideLine {
 	return []sessionGuideLine{
 		{Text: visualGuideLine, ManagedPrefix: "- Rich output — "},
 		{Text: childSessionGuideLine, ManagedPrefix: "- `blerg-runner session` / `blerg-runner budget` — "},
+		{Text: sandboxCodingGuideLine, ManagedPrefix: "- Sandboxed coding children — "},
 		{Text: diffGuideLine, ManagedPrefix: "- `blerg-runner diff` — "},
 		{Text: workGuideLine, ManagedPrefix: "- `blerg-runner checklist` / `blerg-runner pin` — "},
 		{Text: topicGuideLine, ManagedPrefix: "- `blerg-runner topic` — mark a piece of work for the History tab of the session page. ", ManagedSuffix: " Without markers the History tab shows only a summary."},

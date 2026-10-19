@@ -162,7 +162,7 @@ func assertSandboxRun(t *testing.T, calls, sessionID string) {
 	for _, want := range []string{
 		"run -d --name " + dockerContainerName(sessionID),
 		"--cap-drop ALL", "--security-opt no-new-privileges",
-		"--pids-limit 512", "--memory 4g", ":" + sandboxWorkdir,
+		"--pids-limit 512", "--memory 4g", "dst=" + sandboxWorkdir,
 		"-w " + sandboxWorkdir, sandboxImage() + " sleep infinity",
 	} {
 		if !strings.Contains(calls, want) {

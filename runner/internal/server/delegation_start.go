@@ -259,7 +259,7 @@ func (a *API) matchDelegation(ctx context.Context, parent *db.SessionRow, dc *Da
 		}
 		return "rule:" + r.ID, nil
 	}
-	g, err := db.FindDelegationGrant(ctx, a.dbPool, parent.ID, cs.Engine, cs.Runtime, parent.DaemonID, cs.Repo, cs.NoRepo)
+	g, err := db.FindDelegationGrant(ctx, a.dbPool, parent.ID, cs.Engine, cs.Runtime, parent.DaemonID)
 	if err != nil {
 		return "", err
 	}

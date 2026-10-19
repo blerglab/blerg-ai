@@ -367,6 +367,10 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	}
 	info.StartedBy = startedByOf(&row)
 	info.Interaction = effectiveInteraction(&row)
+	if row.ArchivedAt != nil {
+		archived := row.ArchivedAt.UTC().Format(time.RFC3339Nano)
+		info.ArchivedAt = &archived
+	}
 	// Only a live session has tasks running: whatever an ended one left counted is gone with it.
 	switch row.Status {
 	case "starting", "running", "idle", "waiting":

@@ -122,10 +122,10 @@ func TestDaemonOversizedMessageClosesTheConnection(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// A frame over the limit ends the connection (and unregisters the daemon).
-	if err := conn.WriteJSON(protocol.DaemonHeartbeat{Type: "daemon_heartbeat", CheckedOutRepos: []string{strings.Repeat("x", 16<<10)}}); err != nil {
-		t.Fatal(err)
-	}
+	// A frame over the limit ends the connection (and unregisters the daemon). The server may close
+	// it while the frame is still being written, so the write itself may fail ("connection reset by
+	// peer"); that is the outcome under test, not an error. What must hold is the close below.
+	_ = conn.WriteJSON(protocol.DaemonHeartbeat{Type: "daemon_heartbeat", CheckedOutRepos: []string{strings.Repeat("x", 16<<10)}})
 	waitClosed(t, conn)
 	deadline = time.Now().Add(3 * time.Second)
 	for len(hub.GetAllDaemons()) != 0 {

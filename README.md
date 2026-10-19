@@ -86,6 +86,13 @@ attach its results to its card.
   restart cut off carries on by itself unless it was waiting for you, and one stopped by a usage
   limit can resume when the limit resets.
   [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md)
+- **Sessions that run other sessions.** An agent can start another agent session on any engine
+  (say, Claude handing a task to Codex), then message it, send it files, watch it and collect
+  its result, with no token to mint or paste. Each start asks you first: allow once, for this
+  session, or always for an engine in your desktop sandbox. The sessions it started show in its
+  panel like subagents, with their status and token spend, and nest under it in the sidebar. It
+  can also check how much of each provider's usage limit is left and hand work to the engine
+  with room. [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md#when-the-agent-starts-other-sessions)
 - **A board agents write to.** Cards are drafted by agents and curated by people; an admission
   step rejects duplicates and vague cards; a card can start a session. [`board/README.md`](board/README.md)
 - **Files in and out:** attach files to a message, have the agent publish results (including a

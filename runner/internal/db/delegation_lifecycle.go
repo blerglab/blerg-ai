@@ -301,7 +301,7 @@ func terminallyEndedSQL(alias string) string {
 }
 
 func delegationResumeBlockedSQL(child, parent string) string {
-	return `COALESCE(` + child + `.end_reason='parent_ended',false) OR (NOT ` + child + `.keep_running AND (
+	return `(` + child + `.archived_at IS NOT NULL) OR COALESCE(` + child + `.end_reason='parent_ended',false) OR (NOT ` + child + `.keep_running AND (
 		COALESCE((` + terminallyEndedSQL(parent) + `),false) OR
 		COALESCE(` + child + `.started_at <= ` + parent + `.delegation_ended_at,false) OR
 		(` + parent + `.id IS NULL AND (COALESCE(` + child + `.delegation_via,'')<>'' OR COALESCE(` + child + `.started_by_kind,'')='session'))))`

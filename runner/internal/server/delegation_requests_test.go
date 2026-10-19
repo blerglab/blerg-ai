@@ -383,34 +383,43 @@ func TestAllowOnceIsSingleUse(t *testing.T) {
 }
 
 func TestAllowForSessionCreatesGrant(t *testing.T) {
-	fx := newDelegFx(t)
-	id := fx.ask(fx.parent, fx.parentTok, codexBody())
-	if code, out := fx.decide(id, fx.human("owner-1"), choice("session")); code != http.StatusOK {
-		t.Fatalf("decide: %d %v", code, out)
+	for _, approvedNoRepo := range []bool{false, true} {
+		t.Run(fmt.Sprintf("approved_no_repo_%t", approvedNoRepo), func(t *testing.T) {
+			fx := newDelegFx(t)
+			body := codexBody()
+			if approvedNoRepo {
+				delete(body, "repo")
+				body["no_repo"] = true
+			}
+			id := fx.ask(fx.parent, fx.parentTok, body)
+			if code, out := fx.decide(id, fx.human("owner-1"), choice("session")); code != http.StatusOK {
+				t.Fatalf("decide: %d %v", code, out)
+			}
+			fx.spawn()
+			grants, err := db.ListLiveDelegationGrants(context.Background(), fx.pool, fx.parent)
+			if err != nil || len(grants) != 1 {
+				t.Fatalf("grants %v %v", grants, err)
+			}
+			g := grants[0]
+			if g.Engine != "codex" || g.Runtime != runnerRuntimeDocker || g.DaemonID != fx.dc.ID || g.NoRepo != approvedNoRepo || (approvedNoRepo && g.Repo != "") || (!approvedNoRepo && g.Repo != "app") ||
+				g.CreatedFromRequest != id || g.AccountID != "owner-1" {
+				t.Fatalf("grant %+v", g)
+			}
+			other := codexBody()
+			other["prompt"] = "another prompt"
+			other["model"] = ""
+			code, out, _ := fx.postChild(fx.parent, fx.parentTok, other, newUUID())
+			if code != http.StatusCreated || out["via"] != "grant:"+g.ID {
+				t.Fatalf("next start: %d %v", code, out)
+			}
+			fx.spawn()
+			noRepo := map[string]any{"engine": "codex", "no_repo": true, "prompt": "outside the repo"}
+			if code, out, _ := fx.postChild(fx.parent, fx.parentTok, noRepo, newUUID()); code != http.StatusCreated || out["via"] != "grant:"+g.ID {
+				t.Fatalf("no-repo grant start: %d %v", code, out)
+			}
+			fx.spawn()
+		})
 	}
-	fx.spawn()
-	grants, err := db.ListLiveDelegationGrants(context.Background(), fx.pool, fx.parent)
-	if err != nil || len(grants) != 1 {
-		t.Fatalf("grants %v %v", grants, err)
-	}
-	g := grants[0]
-	if g.Engine != "codex" || g.Runtime != runnerRuntimeDocker || g.DaemonID != fx.dc.ID || g.Repo != "app" || g.NoRepo ||
-		g.CreatedFromRequest != id || g.AccountID != "owner-1" {
-		t.Fatalf("grant %+v", g)
-	}
-	other := codexBody()
-	other["prompt"] = "another prompt"
-	other["model"] = ""
-	code, out, _ := fx.postChild(fx.parent, fx.parentTok, other, newUUID())
-	if code != http.StatusCreated || out["via"] != "grant:"+g.ID {
-		t.Fatalf("next start: %d %v", code, out)
-	}
-	fx.spawn()
-	noRepo := map[string]any{"engine": "codex", "no_repo": true, "prompt": "outside the repo"}
-	if code, out, _ := fx.postChild(fx.parent, fx.parentTok, noRepo, newUUID()); code != http.StatusAccepted {
-		t.Fatalf("another repo: %d %v", code, out)
-	}
-	fx.noSpawn()
 }
 
 func TestAlwaysCreatesRule(t *testing.T) {
@@ -784,4 +793,36 @@ func TestExpireDuringTheStartWaitsForTheChild(t *testing.T) {
 	if r := <-waited; r.code != http.StatusOK || r.out["child_session_id"] != child {
 		t.Fatalf("wait %d %v", r.code, r.out)
 	}
+}
+
+func TestPendingSessionApprovalsShareOneRevocableGrant(t *testing.T) {
+	fx := newDelegFx(t)
+	first := fx.ask(fx.parent, fx.parentTok, codexBody())
+	second := fx.ask(fx.parent, fx.parentTok, map[string]any{"engine": "codex", "no_repo": true, "prompt": "work without a repo"})
+	for _, id := range []string{first, second} {
+		if code, out := fx.decide(id, fx.human("owner-1"), choice("session")); code != http.StatusOK {
+			t.Fatalf("decide: %d %v", code, out)
+		}
+		fx.spawn()
+	}
+	grants, err := db.ListLiveDelegationGrants(t.Context(), fx.pool, fx.parent)
+	if err != nil || len(grants) != 1 {
+		t.Fatalf("duplicate effective grants: %+v %v", grants, err)
+	}
+	grant := grants[0]
+	if grant.CreatedFromRequest != first || grant.Repo != "app" || grant.NoRepo {
+		t.Fatalf("canonical approval audit changed: %+v", grant)
+	}
+	for _, id := range []string{first, second} {
+		if got := fx.request(id); got.Status != "allowed" || got.Choice != "session" {
+			t.Fatalf("approval audit lost: %+v", got)
+		}
+	}
+	if ok, err := db.RevokeDelegationGrant(t.Context(), fx.pool, grant.ID, "owner-1"); err != nil || !ok {
+		t.Fatalf("revoke: %v %v", ok, err)
+	}
+	if code, out, _ := fx.postChild(fx.parent, fx.parentTok, map[string]any{"engine": "codex", "no_repo": true, "prompt": "another request after revoke"}, newUUID()); code != http.StatusAccepted {
+		t.Fatalf("revocation did not require new approval: %d %v", code, out)
+	}
+	fx.noSpawn()
 }

@@ -3141,6 +3141,10 @@ SESSION_LINE = ("To hand work to another session, run `blerg-runner budget`, the
 
 SESSION_GUIDE = SESSION_LINE + """
 
+Sandboxed coding children can build, test and commit on their own worktree branch. Ask for commit
+IDs and test results; the parent reviews and handles merging or pushing with the person's
+authorization. Do not give children Git push credentials.
+
 Choose the engine first. `blerg-runner budget` prints, per engine, how much of its usage windows is
 spent. Budgets are per provider (Claude, Codex), not per model. Prefer an engine with room when
 another is above 80% of its 5-hour window or capped. A local engine (Hermes, OpenClaw on your own
@@ -3176,6 +3180,7 @@ Driving a child (it is yours alone; anything else answers not found):
   session watch <child>             prints its text, its open questions and short tool lines until its turn ends
   session send <child> "text"       a message; it answers the child's open question when there is one
   session result <child>            its last answer and state; session stop <child> ends it
+  session discard <child>           stop and archive a worker; keep its history and URL
   session model <child> <model> [--effort X]     session interrupt <child>
   session upload <child> <file>     the child gets the file as data to read, not as instructions
   session files <child>  /  session download <child> <name|id> [-o path]
@@ -3481,6 +3486,11 @@ def cmd_session_stop(child):
     _session_print("stopped")
 
 
+def cmd_session_discard(child):
+    _sess_do("discard", "POST", _child_path(child, "/discard"), {})
+    _session_print("discarded")
+
+
 def cmd_session_result(child):
     _, body = _sess_do("result", "GET", _child_path(child, "/result"))
     _session_print_json(_json_of(body), pretty=True)
@@ -3679,6 +3689,8 @@ def cmd_session(args):
         cmd_session_result(args.child)
     elif sub == "stop":
         cmd_session_stop(args.child)
+    elif sub == "discard":
+        cmd_session_discard(args.child)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -3915,6 +3927,8 @@ def main():
     ps_res.add_argument("child")
     ps_stop = sess_sub.add_parser("stop", help="Stop a child")
     ps_stop.add_argument("child")
+    ps_discard = sess_sub.add_parser("discard", help="Stop and archive a child; keep its history and URL")
+    ps_discard.add_argument("child")
 
     # ── board ──────────────────────────────────────────────────────────────────
     p_board =sub.add_parser("board", help="Board commands")

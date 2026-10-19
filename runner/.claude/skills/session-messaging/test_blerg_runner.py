@@ -3480,6 +3480,17 @@ class TestSession(unittest.TestCase):
         self.assertIn("too many running children", result.stderr)
         self.assertIn("retry after 60s", result.stderr)
 
+    def test_discard_child_archives_only_after_server_accepts(self):
+        path = f"/api/sessions/sess-par/children/{CHILD}/discard"
+        result, recorded = self._run(["discard", CHILD], [("POST", path, 200, {"status": "discarded"})])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "discarded")
+        self.assertEqual(len(recorded), 1)
+        result, _ = self._run(["discard", CHILD], [("POST", path, 503, {"error": "could not stop the child"})])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("discarded", result.stdout)
+        self.assertIn("could not stop the child", result.stderr)
+
     def test_list_send_model_interrupt_stop_result(self):
         kid = {"id": CHILD, "engine": "codex", "model": "gpt-5", "status": "running", "title": "Fix it"}
         script = [("GET", "/api/sessions/sess-par/children", 200, {"children": [kid]}),

@@ -1074,8 +1074,8 @@
           "lifecycle": { "$ref": "#/components/schemas/Lifecycle" },
           "runtime": {
             "type": "string",
-            "enum": ["none", "daemon", "cluster", "job_finished"],
-            "description": "The hosting layer, not the session state — and not the session's `runtime` field: a session hosted by a daemon reads `daemon` here whether its engine runs on that host or in its local sandbox. `GET /api/sessions` carries that distinction."
+            "enum": ["none", "docker", "daemon", "cluster", "job_finished"],
+            "description": "The hosting layer, not the session state. Connected desktop sessions report their stored runtime: `docker` for the local sandbox, `daemon` for the bare host. Cluster reporting retains `cluster`, `job_finished`, `none` and the connected runner's `daemon` value."
           },
           "resumable": { "type": "boolean", "description": "Whether the next message can revive a dead session." },
           "auto_stop": { "type": "boolean", "description": "Whether this session was started one-shot: the runner ends it when its first turn is done." },
@@ -1203,7 +1203,7 @@
           "session_id": { "type": "string", "format": "uuid" },
           "lifecycle": { "$ref": "#/components/schemas/Lifecycle" },
           "terminal": { "type": "boolean", "description": "True for `ended` and `error`: the work is over." },
-          "runtime": { "type": "string" },
+          "runtime": { "$ref": "#/components/schemas/Status/properties/runtime" },
           "repo": { "type": "string" },
           "git_url": { "type": "string" },
           "branch": { "type": "string", "description": "`wip/<session_id>` on the repository's remote." },

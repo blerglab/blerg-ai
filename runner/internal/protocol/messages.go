@@ -136,6 +136,7 @@ type MyCredentials struct {
 
 // SessionInfo describes a terminal or agent session.
 type SessionInfo struct {
+	ArchivedAt           *string `json:"archived_at,omitempty"`
 	SteeringSupported    bool    `json:"steering_supported"`
 	LimitResumeSupported bool    `json:"limit_resume_supported,omitempty"`
 	ID                   string  `json:"id"`

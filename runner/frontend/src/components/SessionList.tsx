@@ -32,7 +32,7 @@ function SessionBranch(props: SessionCardProps) {
   const toggle = () => { const next = !shown; setExpanded(next); if (context?.query) setSearchChoice({ query: context.query, open: next }); setChildrenExpanded(props.session.id, next) }
   return <div data-session-branch={props.session.id}>
     <SessionCard {...props} childrenCount={children.length} childrenExpanded={!!shown} onToggleChildren={toggle} />
-    {shown && children.length > 0 && <div data-testid="nested-sessions" style={{ marginLeft: 12, paddingLeft: 8, borderLeft: '1px solid var(--stone)' }}>{children.map(child => <SessionBranch key={child.id} session={child} daemon={context?.daemons.find(d => d.id === child.daemon_id)} active={context?.activeId === child.id} />)}</div>}
+    {shown && children.length > 0 && <div data-testid="nested-sessions" style={{ marginLeft: 12, paddingLeft: 8, borderLeft: '1px solid var(--stone)' }}>{children.map(child => <SessionBranch key={child.id} session={child} daemon={context?.daemons.find(d => d.id === child.daemon_id)} active={context?.activeId === child.id} nested />)}</div>}
   </div>
 }
 
@@ -215,7 +215,7 @@ function HistorySection({
 
   // One list in time order, most recently ended first: history is read as
   // "what happened lately", not per repo.
-  const endedAt = (s: SessionInfo) => s.ended_at ?? s.started_at
+  const endedAt = (s: SessionInfo) => s.ended_at ?? s.archived_at ?? s.started_at
   const ordered = [...sessions].sort((a, b) => endedAt(b).localeCompare(endedAt(a)))
 
   return (
@@ -260,7 +260,9 @@ function HistorySection({
 
       {expanded && (
         <div style={{ opacity: 0.6 }}>
-          {ordered.map(session => (
+          {ordered.map(session => session.archived_at ? (
+            <SessionCard key={session.id} session={session} daemon={daemons.find(d => d.id === session.daemon_id)} active={isSidebar && session.id === activeSessionId}/>
+          ) : (
             <SessionBranch
               key={session.id}
               session={session}
@@ -364,7 +366,7 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
   }
 
   // Waiting for input: a session working in the background is not, whatever its count.
-  const waitingCount = sessions.filter(s => displayState(s) === 'waiting').length
+  const waitingCount = sessions.filter(s => !s.archived_at && displayState(s) === 'waiting').length
 
   // ── Search state ────────────────────────────────────────────────────────────
   const [query, setQuery] = useState('')
@@ -381,7 +383,9 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
 
   // Separate active from done sessions.
   const activeSessions = ownSessions.filter(s => ACTIVE_STATUSES.has(s.status))
-  const doneSessions = ownSessions.filter(s => !ACTIVE_STATUSES.has(s.status))
+  // Discarded children leave the active tree but remain directly accessible in History.
+  const archivedChildren = sessions.filter(session => session.parent_session_id && session.archived_at && (!q || `${session.title} ${session.repo}`.toLowerCase().includes(q)))
+  const doneSessions = [...ownSessions.filter(s => !ACTIVE_STATUSES.has(s.status)), ...archivedChildren]
 
   // When a query is active, filter active sessions by title or repo (case-insensitive).
   // An empty query leaves all sessions through so focus logic applies normally.

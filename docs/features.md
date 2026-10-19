@@ -54,7 +54,9 @@ These features are shared control-plane services, independent of the coding engi
 Sessions on a desktop can start and drive their own child sessions with owner approval, standing
 rules or session grants. Child controls, files, live status and separate usage totals share the
 engine-independent runner services; nesting is limited to one generation. See
-[sessions starting sessions](talking-to-an-agent.md#when-the-agent-starts-other-sessions).
+[sessions starting sessions](talking-to-an-agent.md#when-the-agent-starts-other-sessions). Children remain in a stable worker list until explicitly discarded through the CLI,
+panel or sidebar. Discard stops and archives the child, preserving searchable History,
+Insights totals and direct URL access; archived workers cannot resume.
 
 Implementation roots: [server](../runner/internal/server/), [DB](../runner/internal/db/), [MCP](../runner/internal/mcp/), [gateway](../runner/internal/mcpgw/), [protocol](../runner/internal/protocol/). Evidence paths below are relative to those roots unless a full path is shown. GAP references identify findings in the accompanying review.
 
@@ -267,7 +269,7 @@ Implementation roots: [board API](../board/internal/api/), [board DB](../board/i
 | OPS-04 | Kubernetes build/push/deploy, configurable namespaces/images, ingress/TLS, and upgrade/rollback checks | [Cluster installer](../install/k8s/README.md), [deploy script](../install/k8s/deploy.sh) |
 | OPS-05 | Agent-readable installation runbook, checkpoints, secret handling, and handoff verification | [Kubernetes agent runbook](../install/k8s/AGENT-INSTALL.md) |
 | OPS-06 | External secret references, Vault choices, cluster session RBAC, and example NetworkPolicy | [Cluster runtime guide](../install/k8s/CLUSTER-RUNTIME.md), [session resources](../install/k8s/cluster-runtime.yaml) |
-| OPS-07 | Extend/replace agent images, pinned engine CLI dependencies, and reproducible image builds | [Image guide](sandbox-image.md), [pinned engines](../runner/sandbox/engines/package.json), [Dockerfile](../runner/sandbox/Dockerfile) |
+| OPS-07 | Extend/replace agent images, pinned engine CLI dependencies, Go/Node build toolchains, linked-worktree sandbox commits, and reproducible image builds | [Image guide](sandbox-image.md), [pinned engines](../runner/sandbox/engines/package.json), [Dockerfile](../runner/sandbox/Dockerfile) |
 | OPS-08 | Data/database/key backup and restore, state inventory, and recovery drill | [Backup guide](backup-and-restore.md) |
 | OPS-09 | Configurable session-resource limits, idle expiry, retained-history lifecycle, and operational status | [Cluster guide](../install/k8s/CLUSTER-RUNTIME.md), [Job manager](../runner/internal/server/k8sjobs.go) |
 | OPS-10 | Health endpoints, component/build versions, operational logging, and Prometheus metrics | [Telemetry](telemetry.md), [build/version contract](../CONTRIBUTING.md#versions-and-releases) |

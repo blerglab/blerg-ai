@@ -317,8 +317,10 @@ finer-grained and is never handed out raw:
 | `error` | failed; `error_reason` says why |
 
 `ended` and `error` are terminal — that is exactly what `result.terminal` reports, what closes the
-SSE stream, and what fires the completion webhook. `runtime` is a separate axis (`none`, `daemon`,
-`cluster`, `job_finished`): where the session is hosted, not what state it is in. `resumable` is
+SSE stream, and what fires the completion webhook. `runtime` is a separate axis (`none`, `docker`, `daemon`,
+`cluster`, `job_finished`): where the session is hosted, not what state it is in.
+Connected desktop sessions report their stored runtime: `docker` for the local sandbox and
+`daemon` for the bare host. `resumable` is
 true only for a `disconnected` session on an install with a cluster runtime.
 
 A session whose cluster Job has finished while the session never got past `starting` reports
@@ -771,6 +773,7 @@ sessions all return the same `404`.
 | `blerg-runner session start ...` | Start a child or wait for its approval. |
 | `blerg-runner session wait <request>` | Resume waiting on a pending request. |
 | `blerg-runner session list` / `watch <child>` | List children or follow completed messages, tools and open questions. |
+| `blerg-runner session discard <child>` | Stop and archive a worker; retain its history, Insights totals and direct URL. |
 | `blerg-runner session send <child> <text>` | Send a message; agents must leave destructive approval questions to the person. |
 | `blerg-runner session upload <child> <file>` / `files <child>` / `download <child> <artifact>` | Exchange files through the artifact service. |
 | `blerg-runner session model <child> ...` / `interrupt <child>` / `stop <child>` / `result <child>` | Change settings, interrupt, stop or read results. |
@@ -1605,3 +1608,12 @@ export BLERG_RUNNER_DAEMON_TOKEN=<same value the server has>
 export CLAUDE_CODE_OAUTH_TOKEN=<from `claude setup-token`>
 go run ./cmd/daemon
 ```
+
+
+Child workers remain in Started sessions and the sidebar until explicitly discarded, across
+running, idle and stopped states. Discard is available from each panel row and the child card's
+Actions menu, with confirmation. It uses `POST /api/sessions/{parent}/children/{child}/discard`:
+the parent's session credential may discard only its own children; a signed-in person must own
+both parent and child. Success stops the child and records `archived_at`; a failed stop leaves it
+visible for retry. Archived workers leave live/nested lists, but remain readable by URL and
+included in History and Insights. Discard is idempotent. Stop alone keeps a worker listed.

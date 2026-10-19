@@ -65,7 +65,7 @@ import type { SessionInfo } from '../types'
 import StatusPill from './StatusPill'
 import UsageLimitResume from './UsageLimitResume'
 import { backgroundCount, displayState } from '../lib/displayState'
-import { ChildSessionRow, StartedSessions } from './ChildSessions'
+import { StartedSessions } from './ChildSessions'
 import { childIsRunning, type LiveChildSession, type LiveDelegationGrant, type LiveDelegationRequest } from '../lib/liveState'
 import './SessionRail.css'
 
@@ -120,7 +120,7 @@ export default function SessionRail(props: SessionRailProps) {
   const running = (props.tasks ?? bg.running).filter(t => !ended.has(t.taskId))
   const tasks = [...running, ...bg.recent].filter(t => !(t.kind === 'agent' && subKeys.has(t.callId)))
   const runningTasks = tasks.filter(t => !t.done).length
-  const children = props.childSessions ?? []
+  const children = (props.childSessions ?? []).filter(child => !child.archived_at)
   const runningChildren = children.filter(childIsRunning)
   const requests = props.delegationRequests ?? []
   // The clock runs only while something timed is on screen.
@@ -220,7 +220,7 @@ export default function SessionRail(props: SessionRailProps) {
 
   const pluginPending = canManagePlugins ? (plugins.data?.requests ?? []).filter(p => p.state === 'pending').length : 0
   const needsCount = live.openAsks.length + (toolChanges > 0 ? 1 : 0) + pluginPending + requests.length
-  const runningCount = live.subagents.length + runningTasks + runningChildren.length
+  const runningCount = live.subagents.length + runningTasks
   const sessionProgress = readProgress(live.progress)
 
   // A pinned ticket opened over the page (the current one in full, another by its summary).
@@ -294,13 +294,12 @@ export default function SessionRail(props: SessionRailProps) {
       </Section>
 
       <Section title="Running now" count={runningCount} tone="running" testId="rail-running" empty="Nothing is running.">
-        {(sessionProgress || live.subagents.length + tasks.length + runningChildren.length > 0) && (
+        {(sessionProgress || live.subagents.length + tasks.length > 0) && (
           <ul className="rail-list">
             {sessionProgress && <li className="rail-item" data-testid="rail-session-progress">
               <div className="rail-item-head"><span className="rail-item-title">Session</span></div>
               <WorkProgress progress={sessionProgress} />
             </li>}
-            {runningChildren.map(c => <ChildSessionRow key={c.id} child={c} now={now} />)}
             {live.subagents.map(s => (
               <SubagentRow
                 key={s.key}

@@ -333,7 +333,7 @@ func (a *API) HandleDecideDelegationRequest(w http.ResponseWriter, r *http.Reque
 }
 
 // decideDelegation runs in one transaction: DecideDelegationRequestTx (CAS); "session" →
-// InsertDelegationGrantTx{engine, runtime, daemon, repo/no_repo from the stored request,
+// InsertDelegationGrantTx{engine, runtime, daemon; repo/no_repo retained for audit from the stored request,
 // created_from_request}; "always" → InsertDelegationRuleTx{engine, runtime, daemon_id = request's
 // daemon, local_only = engine is hermes|openclaw, created_via "card"}. After commit (never inside the
 // tx): for allowed, the server starts the child from the stored request (startDecidedChild) and

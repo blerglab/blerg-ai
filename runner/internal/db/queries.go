@@ -28,6 +28,7 @@ type SessionRow struct {
 	StartedAt         time.Time
 	EndedAt           *time.Time
 	DelegationEndedAt *time.Time // durable boundary, populated by GetSession
+	ArchivedAt        *time.Time
 	Unread            bool
 	Starred           bool
 	// SpawningAccountID is the verified account id (identity.Principal.Sub)
@@ -198,7 +199,7 @@ func GetDaemonByName(ctx context.Context, conn *pgxpool.Pool, name string) (*Dae
 func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*SessionRow, error) {
 	row := conn.QueryRow(ctx, `
 		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text, started_by_kind, started_by_name, interaction, background_tasks, COALESCE(paused_reason, ''), parent_session_id::text, board_id::text, COALESCE(delegation_via, ''), keep_running
-		       , delegation_ended_at FROM sessions
+		       , delegation_ended_at, archived_at FROM sessions
 		 WHERE id = $1
 	`, sessionID)
 	var r SessionRow
@@ -207,7 +208,7 @@ func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*Ses
 		&r.Runtime, &r.SkipPermissions, &r.ErrorReason,
 		&r.TokenID, &r.CallbackURL, &r.CallbackSecret, &r.GitURL, &r.AutoStop, &r.Kind,
 		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID, &r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason,
-		&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.DelegationEndedAt)
+		&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.DelegationEndedAt, &r.ArchivedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -544,7 +545,7 @@ func ListSessions(ctx context.Context, conn *pgxpool.Pool) ([]SessionRow, error)
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 ORDER BY s.started_at DESC
@@ -562,7 +563,7 @@ func ListSessionsByStatus(ctx context.Context, conn *pgxpool.Pool, status string
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.status = $1
@@ -802,7 +803,7 @@ func ListSessionsByDaemon(ctx context.Context, conn *pgxpool.Pool, daemonID stri
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.daemon_id = $1
@@ -831,7 +832,7 @@ func ListSessionsByDaemonMode(ctx context.Context, conn *pgxpool.Pool, mode stri
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE d.mode = $1
@@ -854,7 +855,7 @@ func scanSessionRows(rows pgx.Rows) ([]SessionRow, error) {
 			&r.Runtime, &r.SkipPermissions, &r.ErrorReason, &r.Kind,
 			&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.SpawningAccountID, &r.Private, &r.CronID,
 			&r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason,
-			&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning,
+			&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.ArchivedAt,
 		); err != nil {
 			return nil, err
 		}

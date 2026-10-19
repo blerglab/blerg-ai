@@ -1,6 +1,7 @@
 # Your own session image
 
-Sessions run in an image Blerg builds: Debian with git, node, python and build tools, the engine
+Sessions run in an image Blerg builds: Debian with git, Node.js 22 (at least 22.12), Go 1.26.9
+(the version in `go.mod`), Python and build tools, the engine
 CLIs (`claude`, `codex`, `hermes`), `tmux`, and a non-root `agent` user. Each install has its
 own:
 
@@ -70,3 +71,42 @@ The engines inside the image are pinned: Claude Code and Codex in
 [`runner/sandbox/install-hermes.sh`](../runner/sandbox/install-hermes.sh) (`HERMES_TAG`). Rebuilding
 gives you the same versions until the pins change. To move to a newer engine, change the pin,
 rebuild, and relaunch sessions; running sessions keep the image they started with.
+
+## Coding in a sandboxed child
+
+A local sandbox mounts the child's checkout at `/workspace`. For a linked Git worktree, it also
+mounts the verified shared Git directory read-write at the path the checkout's `.git` file uses.
+The child can create a local commit on its own branch; the parent sees that commit immediately.
+This shares the repository's refs, objects, configuration and hooks with its other worktrees.
+It is containment from the rest of the workstation, not isolation between branches of that repo.
+Only same-owner metadata with a matching worktree backlink is accepted; world-writable,
+foreign-owned or malformed metadata and external object alternates are refused. Custom layouts
+outside a `.git` or bare `*.git` directory need a normal clone/worktree instead.
+
+The checkout and shared Git metadata must be trusted same-user/group storage. Blerg validates
+ownership, metadata identity and backlinks again immediately before launch, but pathname-based
+Docker binds are not a boundary against a host actor who can race modifications to that storage.
+Do not use an attacker-writable checkout or share its writable Git metadata with an untrusted user.
+
+The daemon does not mount the host's Git credential files, SSH keys/agent or Git home configuration,
+and does not forward Git hosting tokens. Repository-local configuration remains shared: do not put
+push credentials in repository URLs, hooks or config. Children should return commit IDs and build/test
+results; the parent reviews, merges and pushes only with the person's authorization. Do not copy
+push credentials into a child to work around a failed push.
+
+The default image includes Go 1.26.9, Node.js 22/npm, Python, Git, make and the C/C++ build tools.
+Project dependencies still need to be installed and may need network access. Browser/system
+libraries, databases, Docker-in-Docker and other language toolchains are not promised; extend the
+image when your project needs them. Changing the Dockerfile does not change a running session:
+build the image and start a new child. The same image override described above applies to children.
+
+For a credential-free Docker regression test after building an image:
+
+```sh
+cd runner
+BLERG_SANDBOX_CHILD_TEST=1 GOWORK=off go test ./internal/daemon -run '^TestSandboxChildWorktreeCommitAndBuild$'
+```
+
+The test uses a disposable repository and container, commits on the child branch, verifies that
+the parent branch stays unchanged, and runs small dependency-free Go and Node tests. It does not
+use an engine login or push a branch.

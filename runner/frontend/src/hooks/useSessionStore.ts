@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { DaemonInfo, SessionInfo, SessionStatus, InitialState, DaemonConnected, DaemonDisconnected, SessionStarted, SessionStateChanged, SessionReadChanged, SessionStarChanged, SessionMetaChanged, SessionTitleChanged, SessionEnded, SessionBackgroundChanged, SessionPausedChanged, SessionNotice, DaemonLimitsChanged } from '../types'
+import type { DaemonInfo, SessionInfo, SessionStatus, InitialState, DaemonConnected, DaemonDisconnected, SessionStarted, SessionStateChanged, SessionReadChanged, SessionStarChanged, SessionMetaChanged, SessionTitleChanged, SessionEnded, SessionArchived, SessionBackgroundChanged, SessionPausedChanged, SessionNotice, DaemonLimitsChanged } from '../types'
 import { onMessage } from '../ws'
 import { useToastStore } from './useToastStore'
 
@@ -264,6 +264,10 @@ export const useSessionStore = create<SessionStore>((set, get) => {
         }
       }),
     }))
+  })
+
+  onMessage<SessionArchived>('session_archived', msg => {
+    set(state => ({sessions: state.sessions.map(session => session.id === msg.session_id ? {...session, archived_at: msg.archived_at} : session)}))
   })
 
   onMessage<SessionEnded>('session_ended', (msg) => {

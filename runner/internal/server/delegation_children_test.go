@@ -36,7 +36,7 @@ func TestChildRoutesOwnChildrenOnly(t *testing.T) {
 	}{
 		{"GET", "", nil}, {"POST", "/message", map[string]any{"text": "hi"}},
 		{"POST", "/model", map[string]any{"effort": "high"}}, {"POST", "/interrupt", nil},
-		{"POST", "/stop", nil}, {"GET", "/result", nil}, {"GET", "/events", nil},
+		{"POST", "/stop", nil}, {"POST", "/discard", nil}, {"GET", "/result", nil}, {"GET", "/events", nil},
 		{"POST", "/uploads", "raw"}, {"GET", "/artifacts", nil}, {"GET", "/artifacts/" + newUUID() + "/download", nil},
 	}
 	for _, route := range routes {

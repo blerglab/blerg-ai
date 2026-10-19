@@ -50,6 +50,27 @@ func TestRunnerLifecycleMapping(t *testing.T) {
 	}
 }
 
+// The result and status builders share this runtime projection. A daemon hosts
+// both Docker sandboxes and bare-host sessions; no database is needed to test it.
+func TestRunnerRuntimeAxisDaemonSession(t *testing.T) {
+	for _, runtime := range []string{"docker", "daemon", ""} {
+		t.Run(runtime, func(t *testing.T) {
+			hub := NewHub()
+			daemon := &DaemonConn{ID: "fixture-daemon"}
+			hub.Register(daemon)
+			hub.SetSessionOwner("fixture-session", daemon.ID)
+			api := &API{hub: hub}
+			want := runtime
+			if want == "" {
+				want = "daemon" // Older sessions may have no stored runtime.
+			}
+			if got := api.runnerRuntimeAxis("fixture-session", runtime); got != want {
+				t.Errorf("result/status runtime = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // buildSessionResult is the shared builder Tasks 8–10 (SSE end event, webhook,
 // MCP get_result) call, so it is tested directly as well as through the route.
 func TestBuildSessionResultRunningAndEnded(t *testing.T) {

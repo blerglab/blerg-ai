@@ -21,6 +21,7 @@ func (a *API) registerDelegationChildRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/model", a.handleChildModel)
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/interrupt", a.handleChildInterrupt)
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/stop", a.handleChildStop)
+	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/discard", a.handleChildDiscard)
 	mux.HandleFunc("GET /api/sessions/{id}/children/{child}/result", a.handleChildResult)
 	mux.HandleFunc("GET /api/sessions/{id}/children/{child}/events", a.handleChildEvents)
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/uploads", a.handleChildUpload)

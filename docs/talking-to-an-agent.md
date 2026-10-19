@@ -570,8 +570,11 @@ An agent on your desktop can ask another session to do part of its work. The app
 the engine, model, repository, runtime, prompt, and whether the child should keep running after its
 parent ends. A host request warns that it runs outside the sandbox. You can deny it, allow it once,
 allow matching starts for this parent session, or create a standing rule for that engine, runtime,
-and desktop. Session grants match the approved repository; standing rules cover any repository.
-Choices that would widen the parent's permissions always ask again.
+and desktop. **Allow for this session** covers any repository, or no repository, for that engine,
+runtime and desktop while the parent session lives. The repository shown on the approval remains
+in the audit record; it does not restrict later starts. There is one live session permission per
+engine, runtime and desktop, and Revoke removes it for future starts. Standing rules cover any
+repository too. Choices that would widen the parent's permissions always ask again.
 
 Only sessions you launched directly can use preapproval. Board, cron, private, and agent-started
 parents ask for each start; a child cannot start another generation of children. New child starts
@@ -733,3 +736,13 @@ and Markdown/text files show a short plain-text excerpt. The name, upload progre
 errors and Remove control stay visible. Previews are generated locally and are
 optional: an unsupported, large or unreadable file keeps its file tile and can still
 be attached. SVG and Office files use file tiles rather than active document previews.
+
+
+### Discarding child workers
+
+A child is a reusable worker. Running, idle and stopped children stay together in Started
+sessions and in the parent's sidebar list; they do not collapse or move when their status
+changes. Use **Discard** on its panel row or in its sidebar card's Actions menu, then confirm.
+Discard stops and archives the child. History, Insights totals and its direct session URL stay
+available. A failed stop leaves the child listed so you can retry. The parent can also run
+`blerg-runner session discard <child>`; `session stop` by itself keeps the worker listed.

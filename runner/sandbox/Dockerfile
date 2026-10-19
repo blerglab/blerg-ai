@@ -11,9 +11,11 @@
 #
 # Toolchain mirrors ../Dockerfile.devcontainer (the k8s "Cluster pod" runtime
 # image) for environment parity between the two isolated runtimes, minus that
-# image's Go build stage and blerg-runner PID1 binary, neither of which apply
-# here — this container just needs tmux + an engine CLI + a normal dev shell.
+# image's blerg-runner PID1 binary. Both images include the repository's Go
+# toolchain so isolated coding children can build and test before committing.
 # Both images now install all three engine CLIs.
+FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS go
+
 FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node
 
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
@@ -59,6 +61,9 @@ ENV PATH="/home/agent/.local/bin:${PATH}"
 # install-hermes.sh pins the release and says what is and is not pinned.
 COPY install-hermes.sh /opt/blerg-engines/install-hermes.sh
 RUN /opt/blerg-engines/install-hermes.sh
+
+COPY --from=go /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 WORKDIR /workspace
 

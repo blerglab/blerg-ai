@@ -22,7 +22,7 @@ func TestDelegationRoutesAreNotInTheAgentContract(t *testing.T) {
 		"POST /api/delegation-grants/{id}/revoke", "GET /api/sessions/{id}/children",
 		"GET /api/sessions/{id}/children/{child}", "POST /api/sessions/{id}/children/{child}/message",
 		"POST /api/sessions/{id}/children/{child}/model", "POST /api/sessions/{id}/children/{child}/interrupt",
-		"POST /api/sessions/{id}/children/{child}/stop", "GET /api/sessions/{id}/children/{child}/result",
+		"POST /api/sessions/{id}/children/{child}/stop", "POST /api/sessions/{id}/children/{child}/discard", "GET /api/sessions/{id}/children/{child}/result",
 		"GET /api/sessions/{id}/children/{child}/events", "POST /api/sessions/{id}/children/{child}/uploads",
 		"GET /api/sessions/{id}/children/{child}/artifacts",
 		"GET /api/sessions/{id}/children/{child}/artifacts/{aid}/download",

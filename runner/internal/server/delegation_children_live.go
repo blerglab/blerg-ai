@@ -33,11 +33,13 @@ type liveDelegationRequest struct {
 }
 
 type liveDelegationGrant struct {
-	ID      string `json:"id"`
-	Engine  string `json:"engine"`
-	Runtime string `json:"runtime"`
-	Repo    string `json:"repo,omitempty"`
-	NoRepo  bool   `json:"no_repo,omitempty"`
+	ID         string `json:"id"`
+	DaemonID   string `json:"daemon_id"`
+	DaemonName string `json:"daemon_name"`
+	Engine     string `json:"engine"`
+	Runtime    string `json:"runtime"`
+	Repo       string `json:"repo,omitempty"`
+	NoRepo     bool   `json:"no_repo,omitempty"`
 }
 
 type liveDelegation struct {
@@ -57,7 +59,13 @@ func (a *API) readChildrenSnapshot(ctx context.Context, parent *db.SessionRow, a
 	if err != nil {
 		return childrenSnapshot{}, err
 	}
-	out := childrenSnapshot{Rows: rows, Requests: []liveDelegationRequest{}, Grants: []liveDelegationGrant{}}
+	visible := rows[:0]
+	for _, row := range rows {
+		if row.ArchivedAt == nil {
+			visible = append(visible, row)
+		}
+	}
+	out := childrenSnapshot{Rows: visible, Requests: []liveDelegationRequest{}, Grants: []liveDelegationGrant{}}
 	requests, err := db.ListPendingDelegationRequests(ctx, a.dbPool, parent.ID)
 	if err != nil {
 		return childrenSnapshot{}, err
@@ -77,8 +85,18 @@ func (a *API) readChildrenSnapshot(ctx context.Context, parent *db.SessionRow, a
 		if err != nil {
 			return childrenSnapshot{}, err
 		}
+		daemonNames := make(map[string]string)
 		for _, g := range grants {
-			out.Grants = append(out.Grants, liveDelegationGrant{ID: g.ID, Engine: g.Engine, Runtime: g.Runtime, Repo: g.Repo, NoRepo: g.NoRepo})
+			name, known := daemonNames[g.DaemonID]
+			if !known {
+				var err error
+				name, _, err = db.HostDaemonName(ctx, a.dbPool, g.DaemonID)
+				if err != nil {
+					return childrenSnapshot{}, err
+				}
+				daemonNames[g.DaemonID] = name
+			}
+			out.Grants = append(out.Grants, liveDelegationGrant{ID: g.ID, DaemonID: g.DaemonID, DaemonName: name, Engine: g.Engine, Runtime: g.Runtime, Repo: g.Repo, NoRepo: g.NoRepo})
 		}
 	}
 	return out, nil

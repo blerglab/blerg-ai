@@ -119,7 +119,7 @@ func TestPauseExpiresRequestsButKeepsChildrenAndGrants(t *testing.T) {
 		t.Fatalf("pause missing decision event: %v", ev)
 	}
 	HandleSessionStarted(t.Context(), fx.hub, fx.pool, fx.dc.ID, protocol.SessionStarted{SessionID: fx.parent, Kind: "agent"})
-	grant, err := db.FindDelegationGrant(t.Context(), fx.pool, fx.parent, "codex", "docker", fx.dc.ID, "app", false)
+	grant, err := db.FindDelegationGrant(t.Context(), fx.pool, fx.parent, "codex", "docker", fx.dc.ID)
 	if err != nil || grant == nil {
 		t.Fatalf("restart erased a surviving session grant: %v", err)
 	}

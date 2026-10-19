@@ -1495,6 +1495,12 @@ func (a *API) stopSession(ctx context.Context, sessionID string, end db.SessionE
 }
 
 func (a *API) stopSessionUnlocked(ctx context.Context, sessionID string, end db.SessionEnd) {
+	_ = a.stopSessionWithDelivery(ctx, sessionID, end, false)
+}
+
+// Discard requires successful stop delivery before the session may leave the worker lists.
+// Ordinary stop retains its existing best-effort cleanup behavior.
+func (a *API) stopSessionWithDelivery(ctx context.Context, sessionID string, end db.SessionEnd, strict bool) error {
 	// Desktop (R9): a board-driven session lives in a daemon process, not a
 	// Job. Marking the row "ended" without telling the daemon would leave the
 	// agent running — and still holding the repo — so kill it first.
@@ -1503,18 +1509,35 @@ func (a *API) stopSessionUnlocked(ctx context.Context, sessionID string, end db.
 			select {
 			case dc.send <- raw:
 			default:
+				if strict {
+					return fmt.Errorf("daemon stop queue is full")
+				}
 				log.Printf("runner stop: daemon %s send buffer full, kill_session dropped for %s", dc.ID, sessionID)
 			}
+		}
+	} else if strict && a.dbPool != nil {
+		row, err := db.GetSession(ctx, a.dbPool, sessionID)
+		if err != nil {
+			return err
+		}
+		if row != nil && !terminalSessionStatus(row.Status) && onDesktopDaemon(row) {
+			return fmt.Errorf("child daemon disconnected before stop could be delivered")
 		}
 	}
 	if jm := a.hub.JobManager(); jm != nil {
 		if err := jm.DeleteSessionJob(sessionID); err != nil { //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
+			if strict {
+				return err
+			}
 			log.Printf("runner stop: delete job %s: %v", sessionID, err)
 		}
 	}
 	now := time.Now()
 	if a.dbPool != nil {
 		if err := db.EndSessionStatus(ctx, a.dbPool, sessionID, "ended", &now, end); err != nil {
+			if strict {
+				return err
+			}
 			log.Printf("runner stop: mark %s ended: %v", sessionID, err)
 		} else {
 			// Tell open browsers, reason included, rather than leaving the
@@ -1534,6 +1557,7 @@ func (a *API) stopSessionUnlocked(ctx context.Context, sessionID string, end db.
 		}
 		revokeSessionGrants(ctx, a.dbPool, sessionID, "runner stop")
 	}
+	return nil
 }
 
 // HandleRunnerInterrupt cancels the in-flight turn.

@@ -1,4 +1,5 @@
 import { useContext } from 'react'
+import {ChildSessionActions} from './ChildDiscard'
 import { useNavigate } from 'react-router-dom'
 import { OpenSessionContext } from '../lib/openSession'
 import type { SessionInfo, DaemonInfo } from '../types'
@@ -14,6 +15,8 @@ export interface SessionCardProps {
   session: SessionInfo
   daemon: DaemonInfo | undefined
   active?: boolean
+  /** Drawn under its parent's card: the "from {parent}" chip would only repeat what the nesting shows. */
+  nested?: boolean
 }
 
 const STATUS_STYLES: Record<string, { bg: string; border: string; color: string; text: string }> = {
@@ -198,7 +201,7 @@ function backgroundTitle(n: number): string {
   return n === 1 ? '1 background task running' : `${n} background tasks running`
 }
 
-export default function SessionCard({ session, active, childrenCount = 0, childrenExpanded = true, onToggleChildren }: SessionCardProps) {
+export default function SessionCard({ session, active, childrenCount = 0, childrenExpanded = true, onToggleChildren, nested = false }: SessionCardProps) {
   const navigate = useNavigate()
   const openSession = useContext(OpenSessionContext)
   const status = session.status
@@ -292,6 +295,7 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
         />
       )}
 
+      {session.parent_session_id && !session.archived_at && <ChildSessionActions parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'}/>}
       {/* Star toggle — always visible, outline when unstarred, filled orange when starred */}
       <button
         data-testid="star-toggle"
@@ -375,7 +379,7 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
           cron
         </span>
       )}
-      {session.started_by && session.started_by.kind !== 'cron' && !session.cron_id && (
+      {session.started_by && session.started_by.kind !== 'cron' && !session.cron_id && !(nested && session.started_by.kind === 'session') && (
         <span data-testid="started-by-chip" title={`Started by ${startedByLabel(session)}`} style={{ ...chipStyle, color: 'var(--amber)', borderColor: 'var(--amber)' }}>
           {startedByLabel(session)}
         </span>

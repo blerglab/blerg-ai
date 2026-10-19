@@ -196,7 +196,7 @@ func parentResumeProblem(ctx context.Context, pool *pgxpool.Pool, id string) *AP
 		return apiErrorf(http.StatusServiceUnavailable, "session recovery permissions could not be verified")
 	}
 	if blocked {
-		return apiErrorf(http.StatusConflict, "the session's parent ended; this child cannot resume")
+		return apiErrorf(http.StatusConflict, "the session was discarded or its parent ended; this child cannot resume")
 	}
 	return nil
 }

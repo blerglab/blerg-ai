@@ -20,6 +20,15 @@ describe('session tree', () => {
     expect(tree.top.map(s => s.id)).toEqual(['parent'])
     expect(tree.childrenOf.get('parent')?.map(s => s.id)).toEqual(['child'])
   })
+  it('hides archived child cards while preserving the original records for direct navigation', () => {
+    const archived = {...child, archived_at:'2026-10-19T12:00:00Z'}
+    const source=[parent,archived]
+    const tree=nestChildren(source)
+    expect(tree.childrenOf.get('parent')??[]).toEqual([])
+    expect(tree.top).toEqual([parent])
+    expect(source[1]).toBe(archived)
+    expect(nestChildren([archived]).top).toEqual([])
+  })
   it('never loses malformed self/cyclic lineage', () => {
     expect(nestChildren([{ ...parent, parent_session_id: 'parent' }]).top).toHaveLength(1)
     const cycle = nestChildren([{ ...parent, parent_session_id: 'child' }, child])

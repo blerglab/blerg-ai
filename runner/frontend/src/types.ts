@@ -101,6 +101,7 @@ export interface SessionInfo {
   starred?: boolean;
   kind?: string; // "" | "tmux" | "agent"
   parent_session_id?: string | null;
+  archived_at?: string | null;
   runtime?: 'daemon' | 'docker' | 'cluster';
   skip_permissions?: boolean;
   error_reason?: string;
@@ -451,6 +452,13 @@ export interface SessionStarChanged {
   starred: boolean;
 }
 
+export interface SessionArchived {
+  type: 'session_archived';
+  session_id: string;
+  parent_session_id: string;
+  archived_at: string;
+}
+
 export interface SessionEnded {
   type: "session_ended";
   session_id: string;
@@ -578,6 +586,7 @@ export type ServerMessage =
   | SessionNotice
   | SessionTitleChanged
   | SessionEnded
+  | SessionArchived
   | HistoryDone
   | FocusStolen
   | FocusGranted

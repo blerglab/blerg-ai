@@ -8,6 +8,22 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-19
+
+### Upgrade notes
+- Desktop: reinstall the daemon and rebuild the sandbox image (`docs/sandbox-image.md`) so sandboxed
+  child sessions can commit in Git worktrees and have Go; existing containers keep their old image.
+
+### Fixed
+- A child session drawn under its parent in the sidebar no longer repeats "from {parent}".
+- A sandboxed child session reports its runtime as `docker` (it said `daemon`).
+- Child-session rows show the token unit once and one clearly labeled revoke control per engine, runtime and desktop.
+- Allowing child starts for a session covers every repository, including no repository, on the approved engine, runtime and desktop; duplicate permissions are consolidated without losing their audit records.
+
+### Added
+- Explicit child-session discard stops and archives workers from the CLI, panel and sidebar while preserving history, Insights totals and direct URL access. Children stay in a stable list until discarded.
+- Sandboxed coding children can commit in linked Git worktrees and run Go builds/tests with the default image; shared Git metadata is validated and mounted without adding host Git push credentials. The default sandbox now includes Go 1.26.9 alongside Node.js 22.
+
 ## [0.4.1] - 2026-10-19
 
 ### Added
@@ -1196,7 +1212,8 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/blerglab/blerg-ai/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/blerglab/blerg-ai/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/blerglab/blerg-ai/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/blerglab/blerg-ai/compare/v0.3.0...v0.3.1

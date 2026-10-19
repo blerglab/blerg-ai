@@ -176,7 +176,7 @@ func TestDelegationRequestLifecycle(t *testing.T) {
 	}
 }
 
-func TestDelegationGrantMatchesExactly(t *testing.T) {
+func TestDelegationGrantMatchesScope(t *testing.T) {
 	pool := connect(t)
 	ctx := context.Background()
 	daemon := mustDaemon(t, pool)
@@ -201,22 +201,17 @@ func TestDelegationGrantMatchesExactly(t *testing.T) {
 	repoGrant := insert(db.DelegationGrant{Engine: "codex", Runtime: "daemon", DaemonID: daemon, Repo: "blerg"})
 	noRepoGrant := insert(db.DelegationGrant{Engine: "codex", Runtime: "daemon", DaemonID: daemon, NoRepo: true})
 	cases := []struct {
-		name                          string
-		engine, runtime, daemonID, rp string
-		noRepo                        bool
-		want                          string
+		name                            string
+		engine, runtime, daemonID, want string
 	}{
-		{"exact repo", "codex", "daemon", daemon, "blerg", false, repoGrant.ID},
-		{"other repo", "codex", "daemon", daemon, "other", false, ""},
-		{"no repo", "codex", "daemon", daemon, "", true, noRepoGrant.ID},
-		{"empty repo is not no_repo", "codex", "daemon", daemon, "", false, ""},
-		{"other engine", "claude", "daemon", daemon, "blerg", false, ""},
-		{"other runtime", "codex", "docker", daemon, "blerg", false, ""},
-		{"other daemon", "codex", "daemon", otherDaemon, "blerg", false, ""},
+		{"same scope", "codex", "daemon", daemon, repoGrant.ID},
+		{"other engine", "claude", "daemon", daemon, ""},
+		{"other runtime", "codex", "docker", daemon, ""},
+		{"other daemon", "codex", "daemon", otherDaemon, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			g, err := db.FindDelegationGrant(ctx, pool, parent, c.engine, c.runtime, c.daemonID, c.rp, c.noRepo)
+			g, err := db.FindDelegationGrant(ctx, pool, parent, c.engine, c.runtime, c.daemonID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -226,7 +221,7 @@ func TestDelegationGrantMatchesExactly(t *testing.T) {
 		})
 	}
 	live, err := db.ListLiveDelegationGrants(ctx, pool, parent)
-	if err != nil || len(live) != 2 || live[0].ID != repoGrant.ID {
+	if err != nil || len(live) != 1 || live[0].ID != repoGrant.ID || noRepoGrant.ID != repoGrant.ID || live[0].Repo != "blerg" || live[0].NoRepo {
 		t.Fatalf("live: %+v %v", live, err)
 	}
 	if ok, _ := db.RevokeDelegationGrant(ctx, pool, repoGrant.ID, "someone-else"); ok {
@@ -238,9 +233,10 @@ func TestDelegationGrantMatchesExactly(t *testing.T) {
 	if ok, _ := db.RevokeDelegationGrant(ctx, pool, repoGrant.ID, "owner-1"); ok {
 		t.Fatal("revoked twice")
 	}
-	if g, _ := db.FindDelegationGrant(ctx, pool, parent, "codex", "daemon", daemon, "blerg", false); g != nil {
+	if g, _ := db.FindDelegationGrant(ctx, pool, parent, "codex", "daemon", daemon); g != nil {
 		t.Fatalf("a revoked grant matched: %+v", g)
 	}
+	insert(db.DelegationGrant{Engine: "claude", Runtime: "daemon", DaemonID: daemon, Repo: "another"})
 	n, err := db.RevokeDelegationGrantsForParent(ctx, pool, parent)
 	if err != nil || n != 1 {
 		t.Fatalf("revoke for parent: %d %v", n, err)

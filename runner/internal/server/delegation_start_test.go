@@ -415,8 +415,13 @@ func TestDelegationMatchMatrix(t *testing.T) {
 		}, nil, "rule", ""},
 		{"grant matches", sessOpts{}, nil, grantOf("claude", "docker", "app", false), nil, "grant", ""},
 		{"grant no_repo matches no_repo", sessOpts{}, map[string]any{"repo": nil, "no_repo": true}, grantOf("claude", "docker", "", true), nil, "grant", ""},
-		{"grant app, request other repo", sessOpts{}, map[string]any{"repo": "other"}, grantOf("claude", "docker", "app", false), nil, "request", full},
-		{"grant app, request no_repo", sessOpts{}, map[string]any{"repo": nil, "no_repo": true}, grantOf("claude", "docker", "app", false), nil, "request", full},
+		{"grant app, request other repo", sessOpts{}, map[string]any{"repo": "other"}, grantOf("claude", "docker", "app", false), nil, "grant", ""},
+		{"grant app, request no_repo", sessOpts{}, map[string]any{"repo": nil, "no_repo": true}, grantOf("claude", "docker", "app", false), nil, "grant", ""},
+		{"grant no_repo, request app", sessOpts{}, nil, grantOf("claude", "docker", "", true), nil, "grant", ""},
+		{"host grant any repo for host parent", sessOpts{runtime: "daemon"}, map[string]any{"runtime": "daemon", "repo": "other"}, grantOf("claude", "daemon", "app", false), nil, "grant", ""},
+		{"private grant parent", sessOpts{private: true}, map[string]any{"repo": "other"}, grantOf("claude", "docker", "app", false), nil, "request", short},
+		{"cron grant parent", sessOpts{startedByKind: "cron"}, map[string]any{"repo": "other"}, grantOf("claude", "docker", "app", false), nil, "request", short},
+		{"agent grant parent", sessOpts{startedByKind: "agent"}, map[string]any{"repo": "other"}, grantOf("claude", "docker", "app", false), nil, "request", short},
 		{"grant claude, request codex", sessOpts{}, map[string]any{"engine": "codex"}, grantOf("claude", "docker", "app", false), nil, "request", full},
 		{"grant docker, request daemon", sessOpts{}, map[string]any{"runtime": "daemon"}, grantOf("claude", "docker", "app", false), nil, "request", short},
 		{"host grant never widens a docker parent", sessOpts{}, map[string]any{"runtime": "daemon"}, grantOf("claude", "daemon", "app", false), nil, "request", short},
@@ -883,5 +888,54 @@ func TestNoPushForPrivateOrHeadlessParent(t *testing.T) {
 	want := [3]string{"Parent — wants to start a session", "Start a Codex session: Review", "/sessions/" + fx.parent}
 	if len(pushes) != 1 || pushes[0] != want {
 		t.Fatalf("pushes = %v, want [%v]", pushes, want)
+	}
+}
+
+func TestCrossRepoSessionGrantStillEnforcesEveryLimit(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*delegFx)
+	}{
+		{"parent running", func(fx *delegFx) {
+			for range maxRunningChildrenPerParent {
+				fx.childOf(fx.parent)
+			}
+		}},
+		{"parent starts", func(fx *delegFx) {
+			for range maxStartsPerParent {
+				fx.session(sessOpts{owner: "owner-1", parent: fx.parent, status: "stopped"})
+			}
+		}},
+		{"account running", func(fx *delegFx) {
+			for range 2 {
+				p, _ := fx.session(sessOpts{owner: "owner-1"})
+				for range 3 {
+					fx.childOf(p)
+				}
+			}
+		}},
+		{"account hourly starts", func(fx *delegFx) {
+			for range 3 {
+				p, _ := fx.session(sessOpts{owner: "owner-1"})
+				for range 20 {
+					fx.session(sessOpts{owner: "owner-1", parent: p, status: "stopped"})
+				}
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fx := newDelegFx(t)
+			fx.dc.SetCheckedOutRepos([]string{"app", "other"})
+			fx.grant(fx.parent, "codex", "docker", "app", false)
+			c.setup(fx)
+			for _, body := range []map[string]any{{"engine": "codex", "repo": "other", "prompt": "work"}, {"engine": "codex", "no_repo": true, "prompt": "work"}} {
+				code, out, _ := fx.postChild(fx.parent, fx.parentTok, body, newUUID())
+				if code != http.StatusTooManyRequests {
+					t.Fatalf("grant bypassed limit: %d %v", code, out)
+				}
+			}
+			fx.noSpawn()
+		})
 	}
 }

@@ -347,8 +347,9 @@ func codexHomeMountArg(path string) string {
 // sandboxRunExtras are the per-start additions to `docker run` that depend on
 // the host's state at spawn time rather than on the session.
 type sandboxRunExtras struct {
-	network string // --network <name>; "" = default bridge
-	cliPath string // host path of the messaging CLI to mount; "" = none
+	gitMetadata *sandboxGitMetadata
+	network     string // --network <name>; "" = default bridge
+	cliPath     string // host path of the messaging CLI to mount; "" = none
 	// claudeOnly mounts only the claude login (a restricted session runs no other engine).
 	claudeOnly       bool
 	restrictedEngine string
@@ -391,8 +392,11 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 		"--security-opt", "no-new-privileges",
 		"--pids-limit", "512",
 		"--memory", "4g",
-		"-v", hostProjectPath + ":" + sandboxWorkdir,
+		"--mount", sandboxBindMount(hostProjectPath, sandboxWorkdir),
 		"-w", sandboxWorkdir,
+	}
+	if extras.gitMetadata != nil {
+		args = append(args, "--mount", extras.gitMetadata.mountArg())
 	}
 	if extras.network != "" {
 		args = append(args, "--network", extras.network)
@@ -522,6 +526,10 @@ func createDockerSandbox(sessionID, hostProjectPath string, inner, env []string,
 // every start, not once at daemon start: the compose stack that creates it can
 // come up (or be upgraded to declare it) after the daemon did.
 func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred sandboxCredential, opts SandboxOptions) (string, error) {
+	metadata, err := sandboxWorktreeGit(hostProjectPath)
+	if err != nil {
+		return "", err
+	}
 	container := dockerContainerName(sessionID)
 	// A container from an earlier life of this session (a daemon restart that
 	// left one behind, or a resumed session) still owns the name, and `docker
@@ -530,7 +538,7 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	// to a session that is being recreated right now either way.
 	forceRemoveContainer(container)
 	home, _ := os.UserHomeDir()
-	extras := sandboxRunExtras{cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly, restrictedEngine: opts.RestrictedEngine, pluginCache: opts.PluginCache, codexHome: opts.CodexHome, codexSourceHome: opts.CodexSourceHome}
+	extras := sandboxRunExtras{gitMetadata: metadata, cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly, restrictedEngine: opts.RestrictedEngine, pluginCache: opts.PluginCache, codexHome: opts.CodexHome, codexSourceHome: opts.CodexSourceHome}
 	if opts.Network != "" {
 		exists, err := sandboxNetworkState(opts.Network)
 		if err != nil {
@@ -549,6 +557,9 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	// afterwards leaves a window — however short — in which a concurrent
 	// reconnect could `docker rm -f` the container this spawn just created.
 	// Claiming the name first closes it; the failure path below gives it back.
+	if err := metadata.validate(); err != nil {
+		return "", err
+	}
 	registerSandbox(sessionID, container)
 	if err := dockerRunEnv(cred.clientEnv, sandboxRunArgs(container, hostProjectPath, home, env, extras, cred.args...)...); err != nil {
 		// A half-created container (run failed after the name was taken) would

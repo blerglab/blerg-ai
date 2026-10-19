@@ -299,7 +299,8 @@ func ListPendingDelegationRequests(ctx context.Context, pool *pgxpool.Pool, pare
 	return scanDelegationRequests(rows)
 }
 
-// DelegationGrant is the person's "for this session" approval of one kind of start.
+// DelegationGrant approves this parent, engine, runtime and daemon across all repositories.
+// Repo and NoRepo record the original approved request for audit only.
 type DelegationGrant struct {
 	ID, ParentSessionID, AccountID, Engine, Runtime, DaemonID, Repo string
 	NoRepo                                                          bool
@@ -331,30 +332,45 @@ func scanDelegationGrants(rows pgx.Rows) ([]DelegationGrant, error) {
 	return out, rows.Err()
 }
 
-// InsertDelegationGrantTx inserts a grant inside the decision's transaction.
+// InsertDelegationGrantTx returns the one live grant for this scope, preserving its original
+// audit fields. The parent fence serializes renewal with lifetime changes; obsolete or foreign-account grants
+// cannot occupy the unique scope while asynchronous end cleanup is still outstanding.
 func InsertDelegationGrantTx(ctx context.Context, tx pgx.Tx, g DelegationGrant) (DelegationGrant, error) {
+	var cutoff *time.Time
+	var owner string
+	if err := tx.QueryRow(ctx, `SELECT delegation_ended_at, COALESCE(spawning_account_id, '') FROM sessions WHERE id=$1::uuid FOR UPDATE`, g.ParentSessionID).Scan(&cutoff, &owner); err != nil {
+		return DelegationGrant{}, err
+	}
+	if owner == "" || owner != g.AccountID {
+		return DelegationGrant{}, errors.New("delegation grant account does not own the parent")
+	}
+	if _, err := tx.Exec(ctx, `UPDATE delegation_grants SET revoked_at=now()
+		WHERE parent_session_id=$1::uuid AND revoked_at IS NULL
+		  AND (account_id <> $3 OR created_at <= $2)`, g.ParentSessionID, cutoff, owner); err != nil {
+		return DelegationGrant{}, err
+	}
 	return scanDelegationGrant(tx.QueryRow(ctx, `
 		INSERT INTO delegation_grants (parent_session_id, account_id, engine, runtime, daemon_id, repo, no_repo,
 		                               created_from_request)
 		VALUES ($1::uuid, $2, $3, $4, $5::uuid, $6, $7, NULLIF($8, '')::uuid)
+		ON CONFLICT (parent_session_id, engine, runtime, daemon_id) WHERE revoked_at IS NULL
+		DO UPDATE SET id=delegation_grants.id
 		RETURNING `+delegationGrantCols,
 		g.ParentSessionID, g.AccountID, g.Engine, g.Runtime, g.DaemonID, g.Repo, g.NoRepo, g.CreatedFromRequest))
 }
 
-// FindDelegationGrant: a live grant of the parent with exactly this engine, runtime, daemon and repo
-// (or no_repo). Oldest first; nil when none.
-func FindDelegationGrant(ctx context.Context, pool *pgxpool.Pool, parentID, engine, runtime, daemonID, repo string, noRepo bool) (*DelegationGrant, error) {
-	if noRepo {
-		repo = ""
-	}
+// FindDelegationGrant finds a live grant for exactly this parent, engine, runtime and daemon.
+// The requested repository (including no repository) does not affect authorization.
+func FindDelegationGrant(ctx context.Context, pool *pgxpool.Pool, parentID, engine, runtime, daemonID string) (*DelegationGrant, error) {
 	g, err := scanDelegationGrant(pool.QueryRow(ctx, `
 		SELECT `+delegationGrantCols+` FROM delegation_grants
 		 WHERE parent_session_id = $1::uuid AND revoked_at IS NULL AND engine = $2 AND runtime = $3
-		   AND daemon_id = $4::uuid AND no_repo = $6 AND repo = $5
+		   AND account_id = (SELECT spawning_account_id FROM sessions WHERE id=$1)
+		   AND daemon_id = $4::uuid
 		   AND NOT EXISTS (SELECT 1 FROM sessions p WHERE p.id=$1
 		     AND (COALESCE((`+terminallyEndedSQL("p")+`),false)
 		       OR delegation_grants.created_at <= p.delegation_ended_at))
-		 ORDER BY created_at, id LIMIT 1`, parentID, engine, runtime, daemonID, repo, noRepo))
+		 ORDER BY created_at, id LIMIT 1`, parentID, engine, runtime, daemonID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -369,6 +385,7 @@ func ListLiveDelegationGrants(ctx context.Context, pool *pgxpool.Pool, parentID 
 	rows, err := pool.Query(ctx, `
 		SELECT `+delegationGrantCols+` FROM delegation_grants
 		 WHERE parent_session_id = $1::uuid AND revoked_at IS NULL
+		   AND account_id = (SELECT spawning_account_id FROM sessions WHERE id=$1)
 		   AND NOT EXISTS (SELECT 1 FROM sessions p WHERE p.id=$1
 		     AND (COALESCE((`+terminallyEndedSQL("p")+`),false)
 		       OR delegation_grants.created_at <= p.delegation_ended_at))
@@ -511,7 +528,7 @@ func ListChildSessions(ctx context.Context, pool *pgxpool.Pool, parentID string)
 		       (SELECT count(*) FROM messages m WHERE m.session_id = s.id AND m.kind = 'ask' AND m.status = 'open'),
 		       COALESCE(s.spawning_account_id,'')
 		  FROM sessions s
-		 WHERE s.parent_session_id = $1::uuid
+		 WHERE s.parent_session_id = $1::uuid AND s.archived_at IS NULL
 		 ORDER BY s.started_at, s.id`, parentID)
 	if err != nil {
 		return nil, err

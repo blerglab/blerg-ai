@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import SessionCard from './SessionCard'
 import { makeDaemon, makeSession } from '../test/fixtures'
 import * as wsMock from '../test/wsMock'
+
+const apiFetch=vi.hoisted(()=>vi.fn())
+vi.mock('../apiFetch',()=>({apiFetch}))
 
 vi.mock('../ws', () => import('../test/wsMock'))
 
@@ -26,6 +29,23 @@ describe('SessionCard', () => {
     wsMock.resetWsMock()
   })
 
+  it('offers confirmed discard only in a child card menu and waits for authoritative data',async()=>{
+    apiFetch.mockResolvedValue({ok:true})
+    renderCard(makeSession({id:'child /',parent_session_id:'parent /',title:'Review child'}))
+    fireEvent.click(screen.getByRole('button',{name:'Actions for Review child'}))
+    fireEvent.click(screen.getByRole('menuitem',{name:'Discard child session'}))
+    expect(screen.getByRole('dialog',{name:'Discard child session?'})).toBeInTheDocument()
+    expect(screen.getByTestId('location')).toHaveTextContent('/')
+    expect(apiFetch).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button',{name:'Discard child session'}))
+    await waitFor(()=>expect(apiFetch).toHaveBeenCalledWith('/api/sessions/parent%20%2F/children/child%20%2F/discard',{method:'POST'}))
+    expect(screen.getByText('Review child')).toBeInTheDocument()
+    expect(screen.getByTestId('location')).toHaveTextContent('/')
+  })
+  it('does not offer child discard for a parent session',()=>{
+    renderCard(makeSession({title:'Parent'}))
+    expect(screen.queryByRole('button',{name:'Actions for Parent'})).toBeNull()
+  })
   it('renders the session name and does NOT render the project path', () => {
     renderCard(makeSession({ title: 'My task', status: 'waiting', project_path: '/repos/foo' }))
     expect(screen.getByText('My task')).toBeInTheDocument()

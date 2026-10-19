@@ -53,10 +53,10 @@ export type LiveTicketReply = Ticket & { event_id: string; updated_at: string }
 
 export interface LiveChildSession {
   id: string; title: string; engine: string; model: string; effort?: string; status: string
-  started_at: string; ended_at?: string | null; asking: boolean; tokens: number | null; cost_usd?: number
+  started_at: string; ended_at?: string | null; archived_at?: string | null; asking: boolean; tokens: number | null; cost_usd?: number
 }
 export interface LiveDelegationRequest { request_id: string; engine: string; title: string; expires_at: string }
-export interface LiveDelegationGrant { id: string; engine: string; runtime: string; repo?: string; no_repo?: boolean }
+export interface LiveDelegationGrant { id: string; engine: string; runtime: string; daemon_id?: string; daemon_name?: string; repo?: string; no_repo?: boolean }
 export const childIsRunning = (s: LiveChildSession) => !s.ended_at && ['starting', 'running', 'idle', 'waiting'].includes(s.status)
 
 export interface LiveReply {

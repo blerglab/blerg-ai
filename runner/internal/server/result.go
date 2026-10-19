@@ -99,11 +99,15 @@ func runnerLifecycleTerminal(lifecycle string) bool {
 }
 
 // runnerRuntimeAxis reports the hosting layer for a session: where it lives
-// right now, which is not the same question as what state it is in.
+// right now, which is not the same question as what state it is in. Connected
+// daemon sessions retain their stored sandbox/host distinction.
 func (a *API) runnerRuntimeAxis(sessionID, storedRuntime string) string {
 	jm := a.hub.JobManager()
 	switch {
 	case a.hub.FindDaemonForSession(sessionID) != nil:
+		if storedRuntime == "docker" || storedRuntime == "daemon" {
+			return storedRuntime
+		}
 		return "daemon"
 	case storedRuntime != "" && storedRuntime != "cluster":
 		return "none"

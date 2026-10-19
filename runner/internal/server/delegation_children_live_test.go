@@ -270,7 +270,10 @@ func TestChildrenLivePendingRequestsAndOwnerOnlyGrants(t *testing.T) {
 			if err := json.Unmarshal(body.Grants[0], &rawGrant); err != nil {
 				t.Fatal(err)
 			}
-			for _, key := range []string{"id", "engine", "runtime"} {
+			if rawGrant["daemon_id"] != fx.dc.ID || rawGrant["daemon_name"] != "laptop" {
+				t.Fatalf("grant daemon identity missing: %v", rawGrant)
+			}
+			for _, key := range []string{"id", "engine", "runtime", "daemon_id", "daemon_name"} {
 				if _, ok := rawGrant[key]; !ok {
 					t.Fatalf("missing lowercase grant wire key %s", key)
 				}

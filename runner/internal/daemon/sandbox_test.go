@@ -135,7 +135,7 @@ func TestSandboxRunArgsAreHardened(t *testing.T) {
 	joined := " " + strings.Join(args, " ") + " "
 	for _, want := range []string{
 		" run -d --name blerg-sandbox-c1 ", " --cap-drop ALL ", " --security-opt no-new-privileges ",
-		" --pids-limit 512 ", " --memory 4g ", " -v /home/dev/repos/app:/workspace ", " -w /workspace ",
+		" --pids-limit 512 ", " --memory 4g ", " --mount type=bind,src=/home/dev/repos/app,dst=/workspace ", " -w /workspace ",
 		" -v " + home + "/.claude:/home/agent/.claude ", " -e BLERG_RUNNER_SESSION_ID=s1 ",
 		" -e BLERG_BOARD_BOARD=b1 ", " -e BLERG_BOARD_TOKEN=bt ", " sleep infinity ",
 	} {

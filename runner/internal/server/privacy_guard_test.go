@@ -27,13 +27,14 @@ import (
 // routeDecisions: route pattern (as registered, method included) -> the
 // visibility decision that covers it.
 var routeDecisions = map[string]string{
-	"GET /api/sessions/{id}/board-options": "own-session messaging credential only; retained launcher proof and current Core account permission, project-scoped target filtering; names only",
-	"GET /api/sessions/{id}/board-search":  "own-session messaging credential only; current Core proof and selected-board scope; only public duplicate summaries, no body",
-	"POST /api/sessions/{id}/file-ticket":  "own-session messaging credential only; server-derived owner/origin, current target access; private owner-only frozen proposal, no Board write or body fanout",
-	"POST /api/sessions/{id}/filing-tools": "same own-session credential and REST validation as CLI; one fixed built-in tool, no arbitrary upstream or account",
-	"PATCH /api/proposals/{id}/draft":      "human owner only with live sign-in proof and project target scope; pending unexpired built-in filing only, exact prior arguments CAS; origin immutable",
-	"GET /api/session-boards":              "signed-in human only; Core checks live account/session and board access, project-scoped credentials see only their board; no existing session data or credentials returned",
-	"POST /api/sessions/{id}/progress":     "own-session messaging credential or daemon token only; live daemon resolves optional origin; private progress reads use /live visibility",
+	"POST /api/sessions/{id}/children/{child}/discard": "own-parent delegate credential or signed-in human owner; exact parent-child relation and same owner required before stop or archive",
+	"GET /api/sessions/{id}/board-options":             "own-session messaging credential only; retained launcher proof and current Core account permission, project-scoped target filtering; names only",
+	"GET /api/sessions/{id}/board-search":              "own-session messaging credential only; current Core proof and selected-board scope; only public duplicate summaries, no body",
+	"POST /api/sessions/{id}/file-ticket":              "own-session messaging credential only; server-derived owner/origin, current target access; private owner-only frozen proposal, no Board write or body fanout",
+	"POST /api/sessions/{id}/filing-tools":             "same own-session credential and REST validation as CLI; one fixed built-in tool, no arbitrary upstream or account",
+	"PATCH /api/proposals/{id}/draft":                  "human owner only with live sign-in proof and project target scope; pending unexpired built-in filing only, exact prior arguments CAS; origin immutable",
+	"GET /api/session-boards":                          "signed-in human only; Core checks live account/session and board access, project-scoped credentials see only their board; no existing session data or credentials returned",
+	"POST /api/sessions/{id}/progress":                 "own-session messaging credential or daemon token only; live daemon resolves optional origin; private progress reads use /live visibility",
 	// Parent-session child operations: private surface, never authRunner.
 	"GET /api/sessions/{id}/children":                                  "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
 	"GET /api/sessions/{id}/children/{child}":                          "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
@@ -161,6 +162,7 @@ const (
 )
 
 var emitDecisions = map[string]emitDecision{
+	"delegation_discard.go:handleChildDiscard:BroadcastJSON":                    {1, whyScoped + "; parent and child independently scoped"},
 	"delegation_children_live.go:broadcastChildrenChanged:BroadcastJSON":        {1, whyScoped + "; parent and triggering child are independently privacy-scoped"},
 	"agentevents.go:HandleAgentEvent:BroadcastJSON":                             {2, whyScoped},
 	"agentevents.go:HandleAgentEvent:FanOutAgentEvent":                          {1, whySubscribers},

@@ -18,6 +18,15 @@ describe('useSessionStore', () => {
     useToastStore.setState({ toasts: [] })
   })
 
+  it('marks an archived child without deleting its direct-URL/history record',()=>{
+    const child=makeSession({id:'child',parent_session_id:'parent'})
+    useSessionStore.setState({sessions:[child]})
+    wsMock.emit({type:'session_archived',session_id:'child',parent_session_id:'parent',archived_at:'2026-10-19T12:00:00Z'})
+    expect(get().sessions).toHaveLength(1)
+    expect(get().sessions[0]).toMatchObject({...child,archived_at:'2026-10-19T12:00:00Z'})
+    wsMock.emit({type:'session_state_changed',session_id:'child',status:'ended',unread:false})
+    expect(get().sessions[0]?.archived_at).toBe('2026-10-19T12:00:00Z')
+  })
   it('applies initial_state from the server', () => {
     wsMock.emit({
       type: 'initial_state',

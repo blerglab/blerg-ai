@@ -70,7 +70,7 @@ afterEach(() => {
 describe('MarkupMode', () => {
   it('renders the toolbar and the image', () => {
     setup()
-    for (const name of ['Pen', 'Arrow', 'Box', 'Pin', 'Undo', 'Clear']) {
+    for (const name of ['Pen', 'Arrow', 'Box', 'Comment', 'Undo', 'Clear']) {
       expect(screen.getByRole('button', { name })).toBeInTheDocument()
     }
     expect(screen.getByRole('img', { name: 'screenshot-3.png' })).toHaveAttribute('src', 'blob:x')
@@ -80,7 +80,7 @@ describe('MarkupMode', () => {
 
   it('a pin click adds pin 1 at that fraction of the image, with a note box', () => {
     const { canvas } = setup()
-    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
     press(canvas, 100, 150)
     const row = screen.getByTestId('markup-pin-1')
     expect(row).toHaveTextContent('1')
@@ -92,7 +92,7 @@ describe('MarkupMode', () => {
 
   it('typing a note updates the pin that is sent', async () => {
     const { canvas, onSend } = setup()
-    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
     press(canvas, 100, 150)
     press(canvas, 300, 30)
     fireEvent.change(screen.getByRole('textbox', { name: 'Note for pin 2' }), { target: { value: 'this button should be primary' } })
@@ -126,7 +126,7 @@ describe('MarkupMode', () => {
 
   it('removing a pin from the list takes it off the image', () => {
     const { canvas } = setup()
-    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
     press(canvas, 100, 150)
     fireEvent.click(within(screen.getByTestId('markup-pin-1')).getByRole('button', { name: 'Remove pin 1' }))
     expect(screen.queryByTestId('markup-pin-1')).toBeNull()
@@ -137,7 +137,7 @@ describe('MarkupMode', () => {
     const { canvas } = setup()
     const send = screen.getByRole('button', { name: 'Send' })
     expect(send).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
     press(canvas, 10, 10)
     expect(send).toBeEnabled()
   })
@@ -145,7 +145,7 @@ describe('MarkupMode', () => {
   it('Send flattens to <stem>.annotated.png and passes the pins, then closes', async () => {
     vi.useFakeTimers()
     const { canvas, onSend, onClose } = setup()
-    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
     press(canvas, 200, 150)
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     await act(async () => { await Promise.resolve() })
@@ -167,12 +167,73 @@ describe('MarkupMode', () => {
   it('says so inline when nothing was sent', async () => {
     const { canvas, onSend, onClose } = setup()
     onSend.mockResolvedValue(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
     press(canvas, 200, 150)
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     await screen.findByText('Not sent — not connected')
     expect(onClose).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
+  })
+
+  it('selects a drawing layer, edits its style and sends its attached comment at its location', async () => {
+    const {canvas,onSend,img}=setup()
+    fireEvent.click(screen.getByRole('button',{name:'Box'}))
+    drag(canvas,[40,30],[120,90])
+    const layer=screen.getByRole('button',{name:'Select Box annotation 1'})
+    expect(layer).toHaveAttribute('aria-pressed','true')
+    fireEvent.change(screen.getByRole('textbox',{name:'Comment for annotation 1'}),{target:{value:'Align this region'}})
+    fireEvent.click(screen.getByRole('button',{name:'Danger color'}))
+    fireEvent.click(screen.getByRole('button',{name:'Stroke 6'}))
+    expect(screen.getByRole('button',{name:'Stroke 6'})).toHaveAttribute('aria-pressed','true')
+    fireEvent.click(screen.getByRole('button',{name:'Send'}))
+    await waitFor(()=>expect(onSend).toHaveBeenCalledTimes(1))
+    expect(onSend.mock.calls[0][1]).toEqual([{n:1,note:'Align this region',x:0.2,y:0.2}])
+    expect(img).toHaveAttribute('src','blob:x')
+  })
+
+  it.each(['Pen', 'Arrow'])('links a %s drawing comment to a numbered image position', async tool => {
+    const {canvas,onSend}=setup()
+    fireEvent.click(screen.getByRole('button',{name:tool}))
+    drag(canvas,[40,30],[120,90])
+    fireEvent.change(screen.getByRole('textbox',{name:'Comment for annotation 1'}),{target:{value:'Explain this mark'}})
+    fireEvent.click(screen.getByRole('button',{name:'Send'}))
+    await waitFor(()=>expect(onSend).toHaveBeenCalledTimes(1))
+    expect(onSend.mock.calls[0][1]).toEqual([{n:1,note:'Explain this mark',x:0.3,y:0.3}])
+  })
+
+  it('hides a layer without deleting it and omits its drawing and comment from export', async () => {
+    const {canvas,onSend}=setup()
+    fireEvent.click(screen.getByRole('button',{name:'Box'}));drag(canvas,[40,30],[120,90])
+    fireEvent.click(screen.getByRole('button',{name:'Hide annotation 1'}))
+    expect(screen.getByRole('button',{name:'Show annotation 1'})).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Send'})).toBeDisabled()
+    fireEvent.click(screen.getByRole('button',{name:'Comment'}));press(canvas,200,150)
+    calls=[]
+    fireEvent.click(screen.getByRole('button',{name:'Send'}))
+    await waitFor(()=>expect(onSend).toHaveBeenCalledTimes(1))
+    expect(calls.filter(c=>c.name==='strokeRect')).toHaveLength(0)
+    expect(onSend.mock.calls[0][1]).toEqual([{n:2,note:'',x:0.5,y:0.5}])
+  })
+
+  it('deletes the selected layer and undo still removes the actual last remaining annotation', () => {
+    const {canvas}=setup()
+    fireEvent.click(screen.getByRole('button',{name:'Box'}));drag(canvas,[40,30],[120,90])
+    fireEvent.click(screen.getByRole('button',{name:'Arrow'}));drag(canvas,[200,100],[300,200])
+    fireEvent.click(screen.getByRole('button',{name:'Select Box annotation 1'}))
+    fireEvent.click(screen.getByRole('button',{name:'Delete annotation 1'}))
+    expect(screen.queryByRole('button',{name:'Select Box annotation 1'})).toBeNull()
+    fireEvent.click(screen.getByRole('button',{name:'Undo'}))
+    expect(screen.queryByRole('button',{name:'Select Arrow annotation 2'})).toBeNull()
+    expect(screen.getByRole('button',{name:'Send'})).toBeDisabled()
+  })
+
+  it('selects the topmost visible drawing from the canvas in Select mode', () => {
+    const {canvas}=setup()
+    fireEvent.click(screen.getByRole('button',{name:'Box'}));drag(canvas,[40,30],[120,90])
+    fireEvent.click(screen.getByRole('button',{name:'Arrow'}));drag(canvas,[200,100],[300,200])
+    fireEvent.click(screen.getByRole('button',{name:'Select'}));press(canvas,40,60)
+    expect(screen.getByRole('button',{name:'Select Box annotation 1'})).toHaveAttribute('aria-pressed','true')
+    expect(screen.getByRole('button',{name:'Select Arrow annotation 2'})).toHaveAttribute('aria-pressed','false')
   })
 
   it('Esc closes the mode without reaching the dialog around it', () => {
@@ -191,11 +252,11 @@ describe('MarkupMode', () => {
     fireEvent.keyDown(root, { key: 'b' })
     expect(screen.getByRole('button', { name: 'Box' })).toHaveAttribute('aria-pressed', 'true')
     fireEvent.keyDown(root, { key: 'n' })
-    expect(screen.getByRole('button', { name: 'Pin' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Comment' })).toHaveAttribute('aria-pressed', 'true')
     press(canvas, 100, 150)
     // Typing in the note box must not switch tools.
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Note for pin 1' }), { key: 'a' })
-    expect(screen.getByRole('button', { name: 'Pin' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Comment' })).toHaveAttribute('aria-pressed', 'true')
     fireEvent.keyDown(root, { key: 'z' })
     expect(screen.queryByTestId('markup-pin-1')).toBeNull()
     fireEvent.keyDown(root, { key: 'p' })

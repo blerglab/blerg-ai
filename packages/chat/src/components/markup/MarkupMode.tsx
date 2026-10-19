@@ -3,7 +3,7 @@
 // marks. Every mark is a vector shape in image pixels, redrawn from scratch on each change, so
 // undo, a resize of the stage and the flattened copy all come from one drawing routine. Send
 // composes image + marks + pins at the image's natural size, as <stem>.annotated.png.
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ArtifactInfo } from '../../transport/types'
 import type { Pin } from '../../model/feedback'
 import './markup.css'
@@ -17,7 +17,7 @@ export interface MarkupModeProps {
   onClose(): void
 }
 
-type Tool = 'pen' | 'arrow' | 'box' | 'pin'
+type Tool = 'select' | 'pen' | 'arrow' | 'box' | 'pin'
 type Swatch = 'accent' | 'danger' | 'info'
 type Point = { x: number; y: number }
 
@@ -27,13 +27,15 @@ type Shape =
   | { kind: 'box'; from: Point; to: Point; color: Swatch; width: number }
 
 // What undo takes back: the last mark or the last pin, whichever came later.
-type Entry = 'shape' | 'pin'
+type Layer = { n: number; shape: Shape; note: string; hidden: boolean }
+type Entry = { kind: 'shape' | 'pin'; n: number }
 
 const TOOLS: Array<{ id: Tool; label: string; key: string }> = [
+  { id: 'select', label: 'Select', key: 'V' },
   { id: 'pen', label: 'Pen', key: 'P' },
   { id: 'arrow', label: 'Arrow', key: 'A' },
   { id: 'box', label: 'Box', key: 'B' },
-  { id: 'pin', label: 'Pin', key: 'N' },
+  { id: 'pin', label: 'Comment', key: 'N' },
 ]
 const SWATCHES: Array<{ id: Swatch; label: string }> = [
   { id: 'accent', label: 'Accent color' },
@@ -67,7 +69,11 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
   const [tool, setTool] = useState<Tool>('pen')
   const [color, setColor] = useState<Swatch>('accent')
   const [width, setWidth] = useState(4)
-  const [shapes, setShapes] = useState<Shape[]>([])
+  const [layers, setLayers] = useState<Layer[]>([])
+  const [selected, setSelected] = useState<number | null>(null)
+  const nextNumber = useRef(1)
+  const mounted = useRef(false)
+  const closeTimer = useRef<number | undefined>(undefined)
   const [pins, setPins] = useState<Pin[]>([])
   const [history, setHistory] = useState<Entry[]>([])
   const [draft, setDraft] = useState<Shape | null>(null)
@@ -76,10 +82,22 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
   const [sending, setSending] = useState(false)
   const [status, setStatus] = useState<{ kind: 'sent' } | { kind: 'failed'; text: string } | null>(null)
 
-  const nextPin = pins.reduce((m, p) => Math.max(m, p.n), 0) + 1
-  const empty = shapes.length === 0 && pins.length === 0
+  const visible = useMemo(() => layers.filter(layer => !layer.hidden), [layers])
+  const shapes = useMemo(() => visible.map(layer => layer.shape), [visible])
+  const exportPins = useMemo(() => [...pins, ...visible.filter(layer => layer.note.trim()).map(layer => layerPin(layer, natural))].sort((a, b) => a.n - b.n), [pins, visible, natural])
+  const empty = layers.length === 0 && pins.length === 0
+  const exportEmpty = visible.length === 0 && pins.length === 0
+  const selectedLayer = layers.find(layer => layer.n === selected)
+  const frozen = sending || status?.kind === 'sent'
 
-  useEffect(() => rootRef.current?.focus(), [])
+  useEffect(() => {
+    mounted.current = true
+    rootRef.current?.focus()
+    return () => {
+      mounted.current = false
+      window.clearTimeout(closeTimer.current)
+    }
+  }, [])
 
   // Redraw the overlay from the vector state whenever anything that shows on it changes.
   useEffect(() => {
@@ -96,8 +114,9 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, w, h)
     ctx.scale(w / natural.w, h / natural.h)
-    drawMarks(ctx, natural, draft ? [...shapes, draft] : shapes, pins, colorsOf(rootRef.current))
-  }, [natural, shapes, pins, draft, layout])
+    drawMarks(ctx, natural, draft ? [...shapes, draft] : shapes, exportPins, colorsOf(rootRef.current))
+    if (selectedLayer && !selectedLayer.hidden) drawSelection(ctx, selectedLayer.shape, natural, colorsOf(rootRef.current).accent)
+  }, [natural, shapes, exportPins, draft, layout, selectedLayer])
 
   // Follow the stage's size (the dialog resizes, the phone rotates).
   useEffect(() => {
@@ -140,19 +159,27 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
   }, [natural])
 
   function addPin(p: Point) {
+    if (frozen) return
     if (!natural) return
-    const pin: Pin = { n: nextPin, note: '', x: round4(p.x / natural.w), y: round4(p.y / natural.h) }
+    const pin: Pin = { n: nextNumber.current++, note: '', x: round4(p.x / natural.w), y: round4(p.y / natural.h) }
     setPins(ps => [...ps, pin])
-    setHistory(h => [...h, 'pin'])
+    setHistory(h => [...h, {kind: 'pin', n: pin.n}])
+    setSelected(null)
     pendingFocus.current = pin.n
     setStatus(null)
   }
 
   function onPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (frozen) return
     if (e.button !== 0 && e.pointerType === 'mouse') return
     const p = toImage(e)
     if (!p) return
     e.preventDefault()
+    if (tool === 'select') {
+      const layer = [...layers].reverse().find(layer => !layer.hidden && hitShape(layer.shape, p, 10 * natural!.w / e.currentTarget.getBoundingClientRect().width))
+      selectLayer(layer?.n ?? null)
+      return
+    }
     if (tool === 'pin') {
       addPin(p)
       return
@@ -166,6 +193,7 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
   }
 
   function onPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (frozen) return
     if (!draft) return
     const p = toImage(e)
     if (!p) return
@@ -174,62 +202,92 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
   }
 
   function onPointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (frozen) return
     if (!draft) return
     const p = toImage(e)
     const done: Shape = !p ? draft : draft.kind === 'pen' ? { ...draft, points: [...draft.points, p] } : { ...draft, to: p }
     setDraft(null)
     if (isDegenerate(done)) return
-    setShapes(s => [...s, done])
-    setHistory(h => [...h, 'shape'])
+    const n = nextNumber.current++
+    setLayers(layers => [...layers, {n, shape: done, note: '', hidden: false}])
+    setSelected(n)
+    setHistory(h => [...h, {kind: 'shape', n}])
     setStatus(null)
   }
 
   function undo() {
+    if (frozen) return
     const last = history[history.length - 1]
     if (!last) return
     setHistory(h => h.slice(0, -1))
-    if (last === 'shape') setShapes(s => s.slice(0, -1))
-    else setPins(ps => ps.slice(0, -1))
+    if (last.kind === 'shape') setLayers(layers => layers.filter(layer => layer.n !== last.n))
+    else setPins(ps => ps.filter(pin => pin.n !== last.n))
+    if (selected === last.n) setSelected(null)
   }
 
   function clear() {
-    setShapes([])
+    if (frozen) return
+    setLayers([])
+    setSelected(null)
     setPins([])
     setHistory([])
     setDraft(null)
   }
 
   function removePin(n: number) {
+    if (frozen) return
     setPins(ps => ps.filter(p => p.n !== n))
-    // The history entry of a pin removed by hand is spent: drop the newest 'pin' entry.
-    setHistory(h => {
-      const i = h.lastIndexOf('pin')
-      return i < 0 ? h : [...h.slice(0, i), ...h.slice(i + 1)]
-    })
+    setHistory(h => h.filter(entry => entry.n !== n))
   }
 
   function setNote(n: number, note: string) {
+    if (frozen) return
     setPins(ps => ps.map(p => (p.n === n ? { ...p, note } : p)))
+  }
+
+  function selectLayer(n: number | null) {
+    if (frozen) return
+    setSelected(n)
+    setTool('select')
+    const layer = layers.find(layer => layer.n === n)
+    if (layer) { setColor(layer.shape.color); setWidth(layer.shape.width) }
+  }
+
+  function styleLayer(change: {color?: Swatch; width?: number}) {
+    if (frozen) return
+    if (change.color) setColor(change.color)
+    if (change.width) setWidth(change.width)
+    setLayers(layers => layers.map(layer => layer.n === selected ? {...layer, shape: {...layer.shape, ...change}} : layer))
+  }
+
+  function removeLayer(n: number) {
+    if (frozen) return
+    setLayers(layers => layers.filter(layer => layer.n !== n))
+    setHistory(h => h.filter(entry => entry.n !== n))
+    if (selected === n) setSelected(null)
   }
 
   async function send() {
     const img = imgRef.current
-    if (!img || !natural || empty || sending) return
+    if (!img || !natural || exportEmpty || frozen) return
     setSending(true)
     setStatus(null)
     try {
-      const file = await flatten(img, natural, shapes, pins, colorsOf(rootRef.current), annotatedName(artifact.name))
-      const ok = await onSend(file, pins)
+      const file = await flatten(img, natural, shapes, exportPins, colorsOf(rootRef.current), annotatedName(artifact.name))
+      if (!mounted.current) return
+      const ok = await onSend(file, exportPins)
+      if (!mounted.current) return
       if (ok) {
         setStatus({ kind: 'sent' })
-        window.setTimeout(onClose, 700)
+        closeTimer.current = window.setTimeout(onClose, 700)
       } else {
         setStatus({ kind: 'failed', text: 'Not sent — not connected' })
       }
     } catch (e) {
+      if (!mounted.current) return
       setStatus({ kind: 'failed', text: `Not sent — ${e instanceof Error ? e.message : 'something went wrong'}` })
     } finally {
-      setSending(false)
+      if (mounted.current) setSending(false)
     }
   }
 
@@ -240,6 +298,7 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
       onClose()
       return
     }
+    if (frozen) return
     const t = e.target as HTMLElement
     if (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || e.ctrlKey || e.metaKey || e.altKey) return
     const key = e.key.toLowerCase()
@@ -255,6 +314,7 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
 
   return (
     <div ref={rootRef} className="markup" data-testid="markup-mode" tabIndex={-1} onKeyDown={onKeyDown}>
+      <fieldset className="markup-editing" disabled={frozen} aria-label="Image annotations">
       <div className="markup-toolbar" role="toolbar" aria-label="Mark up tools">
         <div className="markup-group">
           {TOOLS.map(t => (
@@ -282,7 +342,7 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
               className={`markup-swatch is-${s.id}`}
               aria-label={s.label}
               aria-pressed={color === s.id}
-              onClick={() => setColor(s.id)}
+              onClick={() => styleLayer({color: s.id})}
             />
           ))}
         </div>
@@ -294,7 +354,7 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
               className="markup-width"
               aria-label={`Stroke ${w}`}
               aria-pressed={width === w}
-              onClick={() => setWidth(w)}
+              onClick={() => styleLayer({width: w})}
             >
               <span className="markup-width-dot" style={{ width: w + 4, height: w + 4 }} />
             </button>
@@ -302,6 +362,8 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
         </div>
       </div>
 
+      <p className="markup-help">{selectedLayer ? `Editing ${selectedLayer.shape.kind} annotation ${selectedLayer.n}: color, stroke and comment.` : 'Draw a mark, or use Comment for a point comment. Select a drawing on the image or in Annotations to edit it.'}</p>
+      <div className="markup-workspace">
       <div className="markup-stage" data-tool={tool}>
         <img ref={imgRef} className="markup-image" src={src} alt={artifact.name} onLoad={onImageLoad} draggable={false} />
         <canvas
@@ -316,8 +378,22 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
         />
       </div>
 
+      <aside className="markup-sidebar" aria-label="Annotations">
+        <h3>Annotations</h3>
+        <p className="markup-help">Hidden annotations stay here and are excluded from Send. The original image is unchanged.</p>
+        {layers.length === 0 && pins.length === 0 && <p className="markup-help">No annotations yet.</p>}
+        <ol className="markup-layers">
+          {layers.map(layer => <li key={layer.n} className={`markup-layer${selected === layer.n ? ' is-selected' : ''}${layer.hidden ? ' is-hidden' : ''}`}>
+            <div className="markup-layer-heading">
+              <button type="button" className="markup-tool" aria-label={`Select ${layer.shape.kind[0].toUpperCase() + layer.shape.kind.slice(1)} annotation ${layer.n}`} aria-pressed={selected === layer.n} onClick={() => selectLayer(layer.n)}>{layer.n}. {layer.shape.kind}</button>
+              <button type="button" className="markup-tool" aria-label={`${layer.hidden ? 'Show' : 'Hide'} annotation ${layer.n}`} onClick={() => setLayers(layers => layers.map(item => item.n === layer.n ? {...item, hidden: !item.hidden} : item))}>{layer.hidden ? 'Show' : 'Hide'}</button>
+              <button type="button" className="markup-tool" aria-label={`Delete annotation ${layer.n}`} onClick={() => removeLayer(layer.n)}>Delete</button>
+            </div>
+            <textarea className="markup-note" rows={2} aria-label={`Comment for annotation ${layer.n}`} placeholder="Comment on this drawing (optional)" value={layer.note} onFocus={() => selectLayer(layer.n)} onChange={event => setLayers(layers => layers.map(item => item.n === layer.n ? {...item, note: event.target.value} : item))} />
+          </li>)}
+        </ol>
       {pins.length > 0 && (
-        <ol className="markup-pins" aria-label="Pins">
+        <ol className="markup-pins" aria-label="Point comments">
           {pins.map(p => (
             <li key={p.n} className="markup-pin" data-testid={`markup-pin-${p.n}`} data-x={p.x} data-y={p.y}>
               <span className="markup-pin-badge" aria-hidden="true">{p.n}</span>
@@ -339,17 +415,53 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
         </ol>
       )}
 
+      </aside>
+      </div>
+      </fieldset>
       <div className="markup-actions">
         <span className="markup-status" role="status" aria-live="polite">
           {status?.kind === 'sent' ? 'Sent' : status?.kind === 'failed' ? status.text : ''}
         </span>
         <button type="button" className="markup-tool" onClick={onClose}>Cancel</button>
-        <button type="button" className="markup-send" disabled={empty || sending || !natural} onClick={() => void send()}>
+        <button type="button" className="markup-send" disabled={exportEmpty || frozen || !natural} onClick={() => void send()}>
           {sending ? 'Sending…' : 'Send'}
         </button>
       </div>
     </div>
   )
+}
+
+function layerPin(layer: Layer, natural: {w: number; h: number} | null): Pin {
+  const shape = layer.shape
+  const point = shape.kind === 'pen' ? shape.points[Math.floor(shape.points.length / 2)] : shape.kind === 'arrow' ? shape.to : {x: (shape.from.x + shape.to.x) / 2, y: (shape.from.y + shape.to.y) / 2}
+  return {n: layer.n, note: layer.note, x: round4(point.x / (natural?.w || 1)), y: round4(point.y / (natural?.h || 1))}
+}
+
+function segmentDistance(point: Point, a: Point, b: Point) {
+  const dx = b.x - a.x, dy = b.y - a.y
+  const t = clamp(((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy || 1), 0, 1)
+  return Math.hypot(point.x - a.x - t * dx, point.y - a.y - t * dy)
+}
+
+function hitShape(shape: Shape, point: Point, tolerance: number) {
+  if (shape.kind === 'pen') return shape.points.some((p, i) => i > 0 && segmentDistance(point, shape.points[i - 1], p) <= tolerance)
+  if (shape.kind === 'arrow') return segmentDistance(point, shape.from, shape.to) <= tolerance
+  const {from, to} = shape
+  return [[from, {x: to.x, y: from.y}], [{x: to.x, y: from.y}, to], [to, {x: from.x, y: to.y}], [{x: from.x, y: to.y}, from]].some(([a, b]) => segmentDistance(point, a, b) <= tolerance)
+}
+
+function drawSelection(ctx: CanvasRenderingContext2D, shape: Shape, natural: {w: number; h: number}, color: string) {
+  const points = shape.kind === 'pen' ? shape.points : [shape.from, shape.to]
+  const bounds = points.reduce((box, point) => ({left: Math.min(box.left, point.x), right: Math.max(box.right, point.x), top: Math.min(box.top, point.y), bottom: Math.max(box.bottom, point.y)}), {left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity})
+  const pad = 7 * unitFor(natural)
+  ctx.save()
+  ctx.setLineDash([4 * unitFor(natural), 4 * unitFor(natural)])
+  for (const [stroke, width] of [[haloFor(color), 4], [color, 2]] as const) {
+    ctx.strokeStyle = stroke
+    ctx.lineWidth = width * unitFor(natural)
+    ctx.strokeRect(bounds.left - pad, bounds.top - pad, bounds.right - bounds.left + 2 * pad, bounds.bottom - bounds.top + 2 * pad)
+  }
+  ctx.restore()
 }
 
 // ─── drawing ──────────────────────────────────────────────────────────────────

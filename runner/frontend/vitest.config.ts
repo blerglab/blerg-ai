@@ -31,6 +31,10 @@ export default defineConfig({
       'react-markdown',
       'remark-gfm',
       'pdfjs-dist',
+      'mermaid',
+      'vega',
+      'vega-lite',
+      'vega-interpreter',
     ],
   },
   test: {

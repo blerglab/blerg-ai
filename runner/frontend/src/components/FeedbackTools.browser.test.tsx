@@ -115,10 +115,12 @@ describe('Image mark-up (real canvas)', () => {
     getByRole('button', { name: /box/i }).click()
     await tick()
     overlay.dispatchEvent(new PointerEvent('pointerdown', at(0.2, 0.2)))
+    await tick()
     overlay.dispatchEvent(new PointerEvent('pointermove', at(0.6, 0.6)))
+    await tick()
     overlay.dispatchEvent(new PointerEvent('pointerup', at(0.6, 0.6)))
     await tick()
-    getByRole('button', { name: /^pin/i }).click()
+    getByRole('button', { name: /^comment$/i }).click()
     await tick()
     overlay.dispatchEvent(new PointerEvent('pointerdown', at(0.8, 0.25)))
     overlay.dispatchEvent(new PointerEvent('pointerup', at(0.8, 0.25)))
@@ -132,7 +134,7 @@ describe('Image mark-up (real canvas)', () => {
     expect(got.file.name).toBe('shot.annotated.png')
     expect(got.file.type).toBe('image/png')
     expect(got.pins).toHaveLength(1)
-    expect(got.pins[0].n).toBe(1)
+    expect(got.pins[0].n).toBe(2)
     expect(got.pins[0].x).toBeGreaterThan(0.7)
 
     // The PNG is the image's own size and the marks are in it (pixels that are no longer grey).

@@ -95,3 +95,16 @@ describe('composeMarkupMessage', () => {
     expect(composeMarkupMessage('s.png', [])).toBe('Marked up s.png (see the attached image).')
   })
 })
+
+
+it('sends the reopening explanation alongside the original request and prior answer', () => {
+  const review: ReviewFile = {version: 1, file: {name: 'report.md', artifactId: 'a1'}, requests: [{
+    id: 'reopened', text: 'Original request', status: 'open', revision: 1, createdAt: '2026-01-01T00:00:00Z', anchor: {kind: 'general'},
+    comments: [{text: 'The original problem still happens', createdAt: '2026-01-02T00:00:00Z', revision: 1}],
+    replies: [{text: 'I thought this was fixed', status: 'done', revision: 0, createdAt: '2026-01-01T00:01:00Z'}],
+  }]}
+  const message = composeReviewMessage(review, {name: 'report.md'})
+  expect(message).toContain('Original request')
+  expect(message).toContain('Person · reopening revision 1:\nThe original problem still happens')
+  expect(message).toContain('Previous agent answer · Resolved · revision 0:\nI thought this was fixed')
+})

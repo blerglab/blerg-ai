@@ -1,9 +1,8 @@
-// useAttachments: the files attached to the message being written. Each file uploads as soon as it
-// is added; a chip is 'uploading', 'done' (it will be named in the message) or 'error' (shown, not
-// sent). Finished chips are kept per session for the life of the page, so leaving a session and
-// coming back does not lose them (the draft text is what model/storage.ts stores; files are not).
-import { useCallback, useEffect, useRef, useState } from 'react'
+// Files upload immediately; local previews are bounded, inert thumbnails/excerpts, never source
+// Files or resource URLs. Completed chips survive session switches within a bounded page cache.
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { formatLimit, MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_BYTES } from '../model/attachments'
+import {createAttachmentPreview, type AttachmentPreview} from '../model/attachmentPreview'
 import { fileErrorText } from '../transport/files'
 import type { TransportFiles } from '../transport/types'
 
@@ -12,113 +11,138 @@ export interface AttachmentItem {
   name: string
   size: number
   status: 'uploading' | 'done' | 'error'
-  /** Bytes sent so far while uploading (`size` is the total). */
   loaded?: number
   id?: string
   error?: string
-  /** The server's id for the failure (the runner logs it too), when it gave one. */
   errorId?: string
+  preview?: AttachmentPreview
 }
-
 const kept = new Map<string, AttachmentItem[]>()
+const previewJobs = new Set<AbortController>()
 let counter = 0
+const EMPTY: AttachmentItem[] = []
 
-/** Forgets every session's remembered chips (for tests). */
+function remember(sessionId: string, items: AttachmentItem[]) {
+  kept.delete(sessionId)
+  if (items.length) kept.set(sessionId, items)
+  // Keep every unsent attachment's metadata; only expensive preview data may be evicted.
+  let sessions = [...kept.values()].filter(list => list.some(item => item.preview)).length
+  let count = [...kept.values()].reduce((total, list) => total + list.filter(item => item.preview).length, 0)
+  for (const [sid, list] of kept) {
+    if (sessions <= 16 && count <= 64) break
+    const previews = list.filter(item => item.preview).length
+    if (!previews) continue
+    kept.set(sid, list.map(item => ({...item, preview: undefined})))
+    count -= previews; sessions--
+  }
+}
+/** Forgets remembered chips and cancels outstanding local preview work. */
 export function resetKeptAttachments() {
   kept.clear()
+  for (const ctl of previewJobs) ctl.abort()
+  previewJobs.clear()
 }
+type State = {sessionId: string; items: AttachmentItem[]}
+type Job = {sessionId: string; ctl: AbortController}
 
-/** maxBytes: the largest file the server takes (the runner advertises it); a larger one is refused
- *  here, before it is sent. Default MAX_ATTACHMENT_BYTES, an older runner's limit. */
 export function useAttachments(sessionId: string, files: TransportFiles | null, maxBytes: number = MAX_ATTACHMENT_BYTES) {
-  const [items, setItems] = useState<AttachmentItem[]>(() => kept.get(sessionId) ?? [])
-  const [notice, setNotice] = useState<string | null>(null)
-  // The list as the handlers see it right now; every change goes through apply() so it never lags.
-  const itemsRef = useRef(items)
-  const aborts = useRef(new Map<string, AbortController>())
+  const [state, setState] = useState<State>(() => ({sessionId, items: kept.get(sessionId) ?? EMPTY}))
+  const [notice, setNotice] = useState<{sessionId: string; text: string} | null>(null)
+  const stateRef = useRef(state)
+  const currentId = useRef(sessionId)
+  useLayoutEffect(() => {currentId.current = sessionId}, [sessionId])
+  const aborts = useRef(new Map<string, Job>())
+  const previews = useRef(new Map<string, Job>())
+  // Do not expose the previous session's chips for even the first render after switching.
+  const items = state.sessionId === sessionId ? state.items : kept.get(sessionId) ?? EMPTY
 
-  // Leaving: in-flight uploads are cancelled, finished ones are remembered.
+  const apply = useCallback((sid: string, f: (cur: AttachmentItem[]) => AttachmentItem[]) => {
+    if (currentId.current !== sid) return
+    const cur = stateRef.current.sessionId === sid ? stateRef.current.items : kept.get(sid) ?? EMPTY
+    stateRef.current = {sessionId: sid, items: f(cur)}
+    setState(stateRef.current)
+  }, [])
+  const patch = useCallback((sid: string, key: string, value: Partial<AttachmentItem>) => {
+    apply(sid, cur => cur.map(item => item.key === key ? {...item, ...value} : item))
+  }, [apply])
+
   useEffect(() => {
-    const live = aborts.current
+    const uploads = aborts.current, local = previews.current
+    stateRef.current = {sessionId, items: kept.get(sessionId) ?? EMPTY}
+    setState(stateRef.current)
     return () => {
-      for (const c of live.values()) c.abort()
-      live.clear()
-      const done = itemsRef.current.filter(i => i.status === 'done')
-      if (done.length > 0) kept.set(sessionId, done)
-      else kept.delete(sessionId)
+      for (const [key, job] of uploads) if (job.sessionId === sessionId) {job.ctl.abort(); uploads.delete(key)}
+      for (const [key, job] of local) if (job.sessionId === sessionId) {job.ctl.abort(); previewJobs.delete(job.ctl); local.delete(key)}
+      const done = stateRef.current.sessionId === sessionId ? stateRef.current.items.filter(item => item.status === 'done') : kept.get(sessionId) ?? EMPTY
+      remember(sessionId, done)
     }
   }, [sessionId])
 
-  const apply = useCallback((f: (cur: AttachmentItem[]) => AttachmentItem[]) => {
-    itemsRef.current = f(itemsRef.current)
-    setItems(itemsRef.current)
+  const cancelPreview = useCallback((key: string) => {
+    const job = previews.current.get(key)
+    if (job) {job.ctl.abort(); previewJobs.delete(job.ctl); previews.current.delete(key)}
   }, [])
-  const patch = useCallback((key: string, p: Partial<AttachmentItem>) => {
-    apply(cur => cur.map(i => (i.key === key ? { ...i, ...p } : i)))
-  }, [apply])
 
   const addFiles = useCallback((list: Iterable<File> | ArrayLike<File>) => {
     if (!files) return
-    const chosen = Array.from(list)
-    if (chosen.length === 0) return
-    let room = MAX_ATTACHMENTS_PER_MESSAGE - itemsRef.current.filter(i => i.status !== 'error').length
+    const current = stateRef.current.sessionId === sessionId ? stateRef.current.items : kept.get(sessionId) ?? EMPTY
+    let room = MAX_ATTACHMENTS_PER_MESSAGE - current.filter(item => item.status !== 'error').length
     setNotice(null)
     const added: AttachmentItem[] = []
-    for (const f of chosen) {
+    for (const file of Array.from(list)) {
       const key = `att${++counter}`
-      if (f.size > maxBytes) {
-        added.push({ key, name: f.name, size: f.size, status: 'error', error: `${f.name} is larger than ${formatLimit(maxBytes)} and can’t be attached.` })
+      if (file.size > maxBytes) {
+        added.push({key, name: file.name, size: file.size, status: 'error', error: `${file.name} is larger than ${formatLimit(maxBytes)} and can’t be attached.`})
         continue
       }
-      if (room <= 0) {
-        setNotice(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`)
-        break
-      }
+      if (room <= 0) {setNotice({sessionId, text: `You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`}); break}
       room--
-      added.push({ key, name: f.name, size: f.size, status: 'uploading' })
+      added.push({key, name: file.name, size: file.size, status: 'uploading'})
       const ctl = new AbortController()
-      aborts.current.set(key, ctl)
-      files.upload(sessionId, f, loaded => patch(key, { loaded }), ctl.signal).then(
+      aborts.current.set(key, {sessionId, ctl})
+      const previewCtl = new AbortController()
+      previews.current.set(key, {sessionId, ctl: previewCtl}); previewJobs.add(previewCtl)
+      void createAttachmentPreview(file, previewCtl.signal).then(preview => {
+        if (previewCtl.signal.aborted || !preview) return
+        apply(sessionId, cur => cur.map(item => item.key === key && item.status !== 'error' ? {...item, preview} : item))
+      }).finally(() => {previews.current.delete(key); previewJobs.delete(previewCtl)})
+      files.upload(sessionId, file, loaded => {if (!ctl.signal.aborted) patch(sessionId, key, {loaded})}, ctl.signal).then(
         up => {
           aborts.current.delete(key)
-          patch(key, { status: 'done', id: up.id, name: up.name, size: up.size })
+          if (!ctl.signal.aborted) patch(sessionId, key, {status: 'done', id: up.id, name: up.name, size: up.size})
         },
-        (e: unknown) => {
+        (error: unknown) => {
           aborts.current.delete(key)
+          cancelPreview(key)
           if (ctl.signal.aborted) return
-          const { message, errorId } = fileErrorText(e, 'upload failed.')
-          patch(key, { status: 'error', error: `${f.name}: ${message}`, ...(errorId ? { errorId } : {}) })
+          const {message, errorId} = fileErrorText(error, 'upload failed.')
+          patch(sessionId, key, {status: 'error', preview: undefined, error: `${file.name}: ${message}`, ...(errorId ? {errorId} : {})})
         },
       )
     }
-    if (added.length > 0) apply(cur => [...cur, ...added])
-  }, [sessionId, files, patch, apply, maxBytes])
+    if (added.length) apply(sessionId, cur => [...cur, ...added])
+  }, [sessionId, files, maxBytes, patch, apply, cancelPreview])
 
-  /** Drops a chip: cancels an upload in flight, deletes one that finished. */
   const remove = useCallback((key: string) => {
-    const it = itemsRef.current.find(i => i.key === key)
-    if (!it) return
-    aborts.current.get(key)?.abort()
-    aborts.current.delete(key)
-    apply(cur => cur.filter(i => i.key !== key))
+    const item = stateRef.current.sessionId === sessionId ? stateRef.current.items.find(item => item.key === key) : undefined
+    if (!item) return
+    aborts.current.get(key)?.ctl.abort(); aborts.current.delete(key); cancelPreview(key)
+    apply(sessionId, cur => cur.filter(item => item.key !== key))
     setNotice(null)
-    if (it.status === 'done' && it.id && files) void files.remove(sessionId, it.id).catch(() => {})
-  }, [sessionId, files, apply])
+    if (item.status === 'done' && item.id && files) void files.remove(sessionId, item.id).catch(() => {})
+  }, [sessionId, files, apply, cancelPreview])
 
-  /** After the message is sent: forget the chips (the files stay with the session). */
+  /** Sending clears local chips and preview data; uploaded files stay with the session. */
   const clear = useCallback(() => {
-    apply(() => [])
-    setNotice(null)
-    kept.delete(sessionId)
-  }, [sessionId, apply])
+    for (const [key, job] of aborts.current) if (job.sessionId === sessionId) {job.ctl.abort(); aborts.current.delete(key)}
+    for (const [key, job] of previews.current) if (job.sessionId === sessionId) cancelPreview(key)
+    apply(sessionId, () => EMPTY)
+    setNotice(null); kept.delete(sessionId)
+  }, [sessionId, apply, cancelPreview])
 
   return {
-    items,
-    notice,
-    addFiles,
-    remove,
-    clear,
-    uploading: items.some(i => i.status === 'uploading'),
-    done: items.filter(i => i.status === 'done' && i.id).map(i => ({ id: i.id as string, name: i.name, size: i.size })),
+    items, notice: notice?.sessionId === sessionId ? notice.text : null, addFiles, remove, clear,
+    uploading: items.some(item => item.status === 'uploading'),
+    done: items.filter(item => item.status === 'done' && item.id).map(item => ({id: item.id as string, name: item.name, size: item.size})),
   }
 }

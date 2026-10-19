@@ -369,7 +369,9 @@ describe('ArtifactViewer: feedback modes', () => {
     await screen.findByRole('heading', { name: 'Title' })
     fireEvent.click(screen.getByRole('button', { name: 'Review' }))
     expect(screen.getByTestId('review-mode')).toBeInTheDocument()
-    expect((screen.getByRole('textbox', { name: 'Source' }) as HTMLTextAreaElement).value).toBe('# Title\n\nsome text')
+    expect(screen.getByRole('textbox', {name: 'Document'})).toHaveTextContent('some text')
+    fireEvent.click(screen.getByRole('button', {name: 'Source'}))
+    expect((screen.getByRole('textbox', {name: 'Source'}) as HTMLTextAreaElement).value).toBe('# Title\n\nsome text')
     expect(screen.queryByRole('button', { name: 'Review' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Mark up' })).toBeNull()
     // Escape inside the review goes back to the file, not out of the dialog.
@@ -519,5 +521,16 @@ describe('ArtifactViewer: markdown body', () => {
     show(art({ name: 'r.md', view: 'markdown', content_type: 'text/markdown' }))
     await screen.findByRole('heading', { name: 'Title' })
     expect(document.querySelector('.md.md-doc')).not.toBeNull()
+  })
+})
+
+describe('ArtifactViewer: diff review entry', () => {
+  it('opens a published patch in review without a source editor', async () => {
+    serve('diff --git a/file.go b/file.go\n--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new\n')
+    showInChat(art({ name: 'change.diff', view: 'diff', content_type: 'text/x-diff' }))
+    expect(await screen.findByTestId('review-mode')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Review' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Select new line 1 in file.go' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Source' })).toBeNull()
   })
 })

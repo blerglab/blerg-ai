@@ -8,6 +8,25 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-19
+
+### Added
+
+- Attachments show local image, first-page PDF and text previews before sending; document formatting uses accessible icons with active states (chat 0.26.0).
+
+- Document reviews support rendered Markdown editing, tracked/clean views, and passage-linked margin comments with Ctrl+Alt+M. Image markup supports selectable annotations with comments, style editing and visibility controls (chat 0.25.0).
+
+- Resolved and rejected code review threads can be collapsed individually or hidden together.
+
+- Code review opens directly beside patch lines, with inline threads, general comments, Markdown previews, code suggestions and resolved/rejected replies carried across revisions (chat 0.24.0).
+- Mermaid diagrams and inline-data Vega-Lite charts render in chat, Markdown and the file viewer, with native chat colors that follow theme changes, source, copy and zoom controls (chat 0.23.1).
+- Request code changes on selected diff lines in a session, with desktop and phone selection and the existing review reply flow (chat 0.23.0).
+
+### Fixed
+- Reopening a document or code review thread requires a new comment, included with the original request and prior answers when sent to the agent (chat 0.26.2).
+- Markdown and PDF reviews support collapse, Hide resolved and Reopen, preserving reply history and original passage anchors (chat 0.26.1).
+- A browser could be signed out after waking with several Blerg tabs open.
+
 ## [0.4.0] - 2026-10-17
 
 ### Upgrade notes
@@ -1177,7 +1196,8 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/blerglab/blerg-ai/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/blerglab/blerg-ai/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/blerglab/blerg-ai/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/blerglab/blerg-ai/compare/v0.2.1...v0.3.0

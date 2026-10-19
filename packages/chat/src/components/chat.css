@@ -2976,3 +2976,27 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   font-size: 11px;
   color: var(--chat-danger);
 }
+
+/* Composer-only local previews. Message chips keep their compact attachment-note layout. */
+.attach-chip.composer-attachment {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  width: 156px;
+  flex: 0 0 156px;
+  min-width: 0;
+  box-sizing: border-box;
+  border-radius: 8px;
+  padding: 6px;
+}
+.attach-chip-preview { grid-column: 1 / -1; height: 80px; overflow: hidden; border-radius: 4px; background: var(--chat-surface-2); }
+.attach-chip-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.attach-chip-excerpt { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; padding: 7px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--chat-font-mono); line-height: 1.4; color: var(--chat-fg); }
+.attach-chip.composer-attachment .attach-chip-name { max-width: 100%; }
+.attach-chip.composer-attachment .attach-chip-meta { grid-column: 1 / 3; }
+.attach-chip.composer-attachment .attach-chip-remove { grid-column: 3; grid-row: 2 / 4; min-width: 28px; min-height: 28px; }
+.attach-chip.composer-attachment .attach-chip-progress, .attach-chip.composer-attachment .attach-chip-error { grid-column: 1 / -1; }
+.attach-chips.composer-attachments { flex-wrap: nowrap; align-items: flex-start; overflow-x: auto; max-width: 100%; box-sizing: border-box; }
+.attach-chip.composer-attachment .attach-chip-error { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+.attach-chip-preview.is-file { display: flex; align-items: center; justify-content: center; }
+.attach-chip-filetype { color: var(--chat-muted); font-family: var(--chat-font-mono); font-size: var(--chat-text-lg); font-weight: 600; }

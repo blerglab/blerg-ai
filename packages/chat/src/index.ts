@@ -131,8 +131,8 @@ export type { TimeOpts } from './model/timeLabel'
 export { safeUrl } from './model/safeUrl'
 
 // ─── Feedback: review of a file (anchored requests, an edited copy) and draw-over of an image ─
-export { emptyReview, mergeReviews, newRequestId, parseReviewFile, reviewFileName } from './model/review'
-export type { Anchor, ReviewFile, ReviewRequest } from './model/review'
+export { emptyReview, mergeReviews, newRequestId, diffAnchorLabel, parseReviewFile, reviewFileName } from './model/review'
+export type { Anchor, DiffAnchor, ReviewFile, ReviewRequest, ReviewReply } from './model/review'
 export { anchorSelection, applyHighlights, describePlace, findQuote } from './model/anchor'
 export type { AnchorOptions } from './model/anchor'
 export { unifiedDiff, wordDiff } from './model/diff'
@@ -221,3 +221,6 @@ export type { ChatFiles, ChatReport, LiveState } from './hooks/useLiveState'
 
 // ─── Transport ──────────────────────────────────────────────────────────────────────────────
 export * from './transport'
+
+export { default as VisualBlock } from './components/VisualBlock'
+export type { VisualKind } from './model/visualKind'

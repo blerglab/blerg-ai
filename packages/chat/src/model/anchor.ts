@@ -31,6 +31,7 @@ function mapText(root: HTMLElement): TextMap {
   const starts: number[] = []
   let raw = ''
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if ((n.parentElement)?.closest('[data-review-deletion]')) continue
     nodes.push(n as Text)
     starts.push(raw.length)
     raw += (n as Text).data
@@ -83,10 +84,12 @@ function occurrenceAt(norm: string, quote: string, before: number): number {
 /** The raw text length from the root's start to a boundary — what the walker's nodes hold up to
  *  there. */
 function rawOffset(root: HTMLElement, container: Node, offset: number): number {
-  const r = document.createRange()
-  r.setStart(root, 0)
-  r.setEnd(container, offset)
-  return r.toString().length
+  const range = document.createRange()
+  range.setStart(root, 0)
+  range.setEnd(container, offset)
+  const fragment = range.cloneContents()
+  fragment.querySelectorAll('[data-review-deletion]').forEach(el => el.remove())
+  return fragment.textContent?.length ?? 0
 }
 
 /** The text node and offset a raw index falls in; `end` asks for the position just after the
@@ -109,7 +112,9 @@ export function anchorSelection(root: HTMLElement, sel: Selection, opts: AnchorO
   if (sel.rangeCount === 0 || sel.isCollapsed) return null
   const range = sel.getRangeAt(0)
   if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return null
-  const quote = collapse(range.toString())
+  const selected = range.cloneContents()
+  selected.querySelectorAll('[data-review-deletion]').forEach(el => el.remove())
+  const quote = collapse(selected.textContent ?? '')
   if (!quote) return null
   const map = mapText(root)
   const start = map.normAt[rawOffset(root, range.startContainer, range.startOffset)]

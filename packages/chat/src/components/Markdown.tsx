@@ -36,6 +36,8 @@ import type { CardRegistry } from '../cards/registry'
 import { langFromInfo } from '../model/codeLang'
 import './markdown.css'
 import CodeBlock, { textOf } from './CodeBlock'
+import VisualBlock from './VisualBlock'
+import { visualFence } from '../model/visualKind'
 import { useChat } from './context'
 
 // What a fence needs from the surrounding render: the registry, and the source
@@ -77,6 +79,8 @@ function FencedBlock({ children, position }: { children?: ReactNode; position?: 
   const code = codeOf(children)
   const closed = fenceClosed(source, position)
   const lang = langFromInfo(code?.className)
+  const visual = visualFence(code?.className)
+  if (code && closed && visual) return <VisualBlock kind={visual} source={code.text.replace(/\n$/, '')} />
   const plain = <CodeBlock lang={lang} closed={closed}>{children}</CodeBlock>
   const kind = cards && code ? cardKind(code.className) : null
   if (!cards || !code || kind === null || !closed) return plain

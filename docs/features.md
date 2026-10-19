@@ -232,6 +232,8 @@ Implementation roots: [runner frontend](../runner/frontend/src/), [shared chat](
 | CHAT-18 | Embedded proxy Chat | Normalized transcript/files/control; optional model/effort forwarding and durable IDs, visible unsupported errors | transport/proxy, proxy/go, board chatproxy |
 | CHAT-19 | Inkhold embedded writer | Dynamic Blerg engine/model/effort discovery, interactive turns, explicit native engine handoff | Separate consumer branch and tests; direct Anthropic backend remains distinct |
 | CHAT-20 | Published artifact links open the existing viewer | Exact trusted session URL plus known viewable artifact; modified/external links preserve navigation | chat model/artifactLinks and Markdown links; authenticated host URL mapping |
+| CHAT-21 | Mermaid diagrams and inline-data Vega-Lite charts | Shared renderer, independent of engine and host | [Visual renderer](../packages/chat/src/components/VisualBlock.tsx); lazy strict Mermaid, inert SVG images, bounded single-plot charts with a deny-all loader and expression interpreter; live chat-token themes, responsive plots, source/copy/fullscreen zoom, Markdown previews/review and file viewer. |
+| CHAT-22 | Anchored code review of published diffs | Shared existing review files, feedback and reply flow | [Diff selection](../packages/chat/src/model/diffSelection.ts), [review surface](../packages/chat/src/components/review/ReviewMode.tsx); direct gutter comments and inline threads, general feedback, Markdown formatting/preview, new-side suggestions, revision-aware resolved/rejected replies and reopening, individual thread collapse and a resolved-thread filter, unambiguous quote carryover with outdated fallback, scoped/mobile selection and one-message submission. |
 
 ## Boards and agent workflows
 
@@ -279,3 +281,15 @@ Implementation roots: [board API](../board/internal/api/), [board DB](../board/i
 This inventory describes all identified feature families in the reviewed baseline. It is not a claim that every line, test, or provider behavior was executed. Keep source-backed uncertainty visible in the parity review. A broad audit needs both static tracing and runtime-specific fixtures; a passing shared test does not establish native-provider parity.
 
 For each change, check the browser, REST/MCP, unattended and embedded entry points; principal and runtime scope; persistence/recovery; usage/capability reporting; installer delivery; and failure paths. New engines should consume shared features through declared capabilities rather than copying lists into each feature.
+
+### Document and image review interactions
+
+Markdown review supports rendered editing, tracked/clean views, explicit source fallback,
+and anchored margin comments (Ctrl+Alt+M). PDF comments share the page-aware margin
+workflow. Image markup supports individually selectable drawings with comments, style
+editing, visibility controls and a flattened annotated export. See
+[review interactions](talking-to-an-agent.md#reviewing-documents-and-images).
+
+Attachment chips offer safe local raster-image thumbnails, first-page PDF thumbnails,
+and bounded plain-text excerpts before send, with file-tile fallbacks. Document editing
+uses icon formatting controls with tooltips, accessible labels and live active states.

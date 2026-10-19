@@ -16,8 +16,11 @@ type sessionGuideLine struct {
 	ManagedSuffix string
 }
 
+const visualGuideLine = "Use mermaid fences for diagrams and vega-lite fences for charts with inline data only; external resources and executable HTML or JavaScript are refused. Publish .mmd or .vl.json files to open them in the same viewer."
+
 func sessionWorkGuideLines() []sessionGuideLine {
 	return []sessionGuideLine{
+		{Text: visualGuideLine, ManagedPrefix: "- Rich output — "},
 		{Text: childSessionGuideLine, ManagedPrefix: "- `blerg-runner session` / `blerg-runner budget` — "},
 		{Text: diffGuideLine, ManagedPrefix: "- `blerg-runner diff` — "},
 		{Text: workGuideLine, ManagedPrefix: "- `blerg-runner checklist` / `blerg-runner pin` — "},

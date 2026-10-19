@@ -53,8 +53,14 @@ function show(fake: Fake, props: Partial<React.ComponentProps<typeof ReviewMode>
   return { ...utils, onClose, outerKey }
 }
 
+function sourceBox() {
+  if (!screen.queryByRole('textbox', {name: 'Source'})) fireEvent.click(screen.getByRole('button', {name: 'Source'}))
+  return screen.getByRole('textbox', {name: 'Source'})
+}
+
 /** Selects `text` inside the rendered page, as a person dragging over it would. */
 function selectInPage(text: string) {
+  if (screen.getByTestId('review-page').querySelector('.review-diff')) fireEvent.click(screen.getByRole('button', {name: 'Show changes'}))
   const page = screen.getByTestId('review-page')
   const walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT)
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
@@ -105,10 +111,10 @@ describe('ReviewMode: an existing review', () => {
     const items = await screen.findAllByTestId('review-request')
     expect(items).toHaveLength(2)
     expect(items[0]).toHaveTextContent('say how many weeks')
-    expect(items[0]).toHaveTextContent('Declined')
+    expect(items[0]).toHaveTextContent('Rejected')
     expect(items[0]).toHaveTextContent('The count is in the appendix.')
     expect(items[1]).toHaveTextContent('median, not mean')
-    expect(items[1]).toHaveTextContent('Done')
+    expect(items[1]).toHaveTextContent('Resolved')
     expect(items[1]).toHaveTextContent('Changed to median.')
     expect(items[1]).toHaveTextContent('Results')
     // Nothing of its own to send: the replies came from the session.
@@ -121,14 +127,15 @@ describe('ReviewMode: an existing review', () => {
 describe('ReviewMode: the source', () => {
   it('renders the edited source on the page and shows the word diff under Changes', async () => {
     show(fakeChat())
-    const source = screen.getByRole('textbox', { name: 'Source' }) as HTMLTextAreaElement
+    const source = sourceBox() as HTMLTextAreaElement
     expect(source.value).toBe(SOURCE)
     expect(screen.queryByRole('button', { name: 'Discard edits' })).toBeNull()
     fireEvent.change(source, { target: { value: SOURCE.replace('We sampled weekly.', 'We sampled daily.') } })
+    fireEvent.click(screen.getByRole('button', {name: 'Show changes'}))
     expect(screen.getByTestId('review-page')).toHaveTextContent('We sampled daily.')
     expect(screen.getByRole('button', { name: 'Discard edits' })).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Changes' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Clean view' }))
     const page = screen.getByTestId('review-page')
     const del = page.querySelectorAll('.diff-del')
     const ins = page.querySelectorAll('.diff-ins')
@@ -137,21 +144,22 @@ describe('ReviewMode: the source', () => {
     expect(screen.getByRole('button', { name: 'Submit' })).toBeEnabled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Discard edits' }))
-    expect((screen.getByRole('textbox', { name: 'Source' }) as HTMLTextAreaElement).value).toBe(SOURCE)
+    expect((sourceBox() as HTMLTextAreaElement).value).toBe(SOURCE)
     expect(screen.getByRole('button', { name: 'Submit' })).toBeDisabled()
   })
 
   it('keeps an edit in localStorage under the artifact id until it is submitted', async () => {
     const { unmount } = show(fakeChat())
-    fireEvent.change(screen.getByRole('textbox', { name: 'Source' }), { target: { value: SOURCE + 'More.\n' } })
+    fireEvent.change(sourceBox(), { target: { value: SOURCE + 'More.\n' } })
     expect(localStorage.getItem('chat.review.edit.a1')).toBe(SOURCE + 'More.\n')
     unmount()
     show(fakeChat())
-    expect((screen.getByRole('textbox', { name: 'Source' }) as HTMLTextAreaElement).value).toBe(SOURCE + 'More.\n')
+    expect((sourceBox() as HTMLTextAreaElement).value).toBe(SOURCE + 'More.\n')
   })
 
   it('numbers the lines in the gutter', () => {
     show(fakeChat())
+    sourceBox()
     const gutter = screen.getByTestId('review-gutter')
     expect(gutter.textContent).toContain('10')
   })
@@ -180,7 +188,7 @@ describe('ReviewMode: requesting a change', () => {
   it('the Request change button does the same, and Cancel drops the form', async () => {
     show(fakeChat())
     selectInPage('sampled weekly')
-    fireEvent.click(screen.getByRole('button', { name: 'Request change' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add comment' }))
     expect(screen.getByRole('textbox', { name: 'Request' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByRole('textbox', { name: 'Request' })).toBeNull()
@@ -189,7 +197,7 @@ describe('ReviewMode: requesting a change', () => {
 
   it('says so when nothing is selected', () => {
     show(fakeChat())
-    fireEvent.click(screen.getByRole('button', { name: 'Request change' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add comment' }))
     expect(screen.queryByRole('textbox', { name: 'Request' })).toBeNull()
     expect(screen.getByText(/Select some text/)).toBeInTheDocument()
   })
@@ -197,7 +205,7 @@ describe('ReviewMode: requesting a change', () => {
   it('N typed into the source does not open the form', () => {
     show(fakeChat())
     selectInPage('sampled weekly')
-    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Source' }), { key: 'n' })
+    fireEvent.keyDown(sourceBox(), { key: 'n' })
     expect(screen.queryByRole('textbox', { name: 'Request' })).toBeNull()
   })
 
@@ -227,7 +235,7 @@ describe('ReviewMode: submit', () => {
   it('uploads the edited source and the review json, and sends the composed message', async () => {
     const fake = fakeChat()
     show(fake)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Source' }), { target: { value: SOURCE.replace('weekly', 'daily') } })
+    fireEvent.change(sourceBox(), { target: { value: SOURCE.replace('weekly', 'daily') } })
     selectInPage('rose by 12%')
     fireEvent.keyDown(screen.getByTestId('review-mode'), { key: 'n' })
     fireEvent.change(screen.getByRole('textbox', { name: 'Request' }), { target: { value: 'median' } })
@@ -258,7 +266,7 @@ describe('ReviewMode: submit', () => {
     expect(screen.getByTestId('review-request')).toHaveTextContent('median')
     expect(screen.queryByRole('button', { name: /Delete request/ })).toBeNull()
     expect(screen.getByRole('button', { name: 'Submit' })).toBeDisabled()
-    expect(screen.getByRole('textbox', { name: 'Source' })).toBeInTheDocument() // the mode stays open
+    expect(sourceBox()).toBeInTheDocument() // the mode stays open
   })
 
   it('sends only the review json when the source is unchanged', async () => {
@@ -279,7 +287,7 @@ describe('ReviewMode: submit', () => {
     const fake = fakeChat(existingReview)
     show(fake)
     await screen.findAllByTestId('review-request')
-    fireEvent.change(screen.getByRole('textbox', { name: 'Source' }), { target: { value: SOURCE + 'x' } })
+    fireEvent.change(sourceBox(), { target: { value: SOURCE + 'x' } })
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
     await waitFor(() => expect(fake.submitted).toHaveLength(1))
     const review = JSON.parse(await fileText(fake.submitted[0].files[1])) as ReviewFile
@@ -290,7 +298,7 @@ describe('ReviewMode: submit', () => {
     const fake = fakeChat()
     fake.submitResult = false
     show(fake)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Source' }), { target: { value: SOURCE + 'x' } })
+    fireEvent.change(sourceBox(), { target: { value: SOURCE + 'x' } })
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
     expect(await screen.findByText('Not sent — not connected')).toBeInTheDocument()
     expect(localStorage.getItem('chat.review.edit.a1')).toBe(SOURCE + 'x')
@@ -317,14 +325,15 @@ describe('ReviewMode: keys and panes', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
-  it('toggles between Source and Page on a narrow screen', () => {
+  it('switches between rendered editing and explicit source without changing the document', () => {
     show(fakeChat())
-    const mode = screen.getByTestId('review-mode')
-    expect(mode).toHaveAttribute('data-pane', 'page')
-    fireEvent.click(screen.getByRole('button', { name: 'Source', pressed: false }))
-    expect(mode).toHaveAttribute('data-pane', 'source')
-    fireEvent.click(screen.getByRole('button', { name: 'Page', pressed: false }))
-    expect(mode).toHaveAttribute('data-pane', 'page')
+    expect(screen.getByRole('textbox', {name: 'Document'})).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', {name: 'Source'}))
+    expect(sourceBox()).toHaveValue(SOURCE)
+    fireEvent.click(screen.getByRole('button', {name: 'Document'}))
+    expect(screen.queryByRole('textbox', {name: 'Source'})).toBeNull()
+    expect(screen.getByRole('textbox', {name: 'Document'})).toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Submit'})).toBeDisabled()
   })
 })
 
@@ -347,7 +356,7 @@ describe('ReviewMode: timers', () => {
     vi.useFakeTimers()
     const fake = fakeChat()
     show(fake)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Source' }), { target: { value: SOURCE + 'x' } })
+    fireEvent.change(sourceBox(), { target: { value: SOURCE + 'x' } })
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(fake.submitted).toHaveLength(1)
@@ -359,12 +368,12 @@ describe('ReviewMode: timers', () => {
   it('a submitted edit is not sent again by a second Submit', async () => {
     const fake = fakeChat()
     show(fake)
-    fireEvent.change(screen.getByRole('textbox', { name: 'Source' }), { target: { value: SOURCE + 'x' } })
+    fireEvent.change(sourceBox(), { target: { value: SOURCE + 'x' } })
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
     await waitFor(() => expect(fake.submitted).toHaveLength(1))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Submit' })).toBeDisabled())
     // A further edit is measured against what was submitted, not the original.
-    fireEvent.change(screen.getByRole('textbox', { name: 'Source' }), { target: { value: SOURCE + 'xy' } })
+    fireEvent.change(sourceBox(), { target: { value: SOURCE + 'xy' } })
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
     await waitFor(() => expect(fake.submitted).toHaveLength(2))
     const review = JSON.parse(await fileText(fake.submitted[1].files[1])) as ReviewFile

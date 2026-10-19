@@ -1,0 +1,17 @@
+.visual-block { position: relative; min-width: 0; max-width: 100%; border: 1px solid var(--chat-border); border-radius: 8px; margin: .75rem 0; background: var(--chat-surface); color: var(--chat-fg); overflow: hidden; font-family: var(--chat-font); }
+.visual-actions { display: flex; align-items: center; gap: .35rem; padding: 4px 6px; font-size: var(--chat-text-xs); }
+.visual-actions > span { margin-right: auto; color: var(--chat-muted); }
+.visual-actions button { opacity: 0; transition: opacity .12s; background: var(--chat-surface-2); color: var(--chat-muted); border: 1px solid var(--chat-border); border-radius: 5px; font: inherit; padding: 1px 7px; cursor: pointer; }
+.visual-block:hover .visual-actions button, .visual-block:focus-within .visual-actions button { opacity: 1; }
+@media (hover: none) { .visual-actions button { opacity: 1; } }
+.visual-dialog button { color: inherit; background: transparent; border: 1px solid var(--chat-border); border-radius: 4px; padding: .25rem .5rem; cursor: pointer; }
+.visual-surface { position: relative; padding: 8px 10px; overflow: auto; min-height: 3rem; }
+.visual-block > .visual-surface { max-height: 32rem; }
+.visual-diagram { display: block; max-width: 100%; height: auto; margin: auto; background: transparent; }
+.visual-chart { width: fit-content; max-width: 100%; margin: auto; }
+.visual-chart canvas { display: block; max-width: 100%; height: auto; }
+.visual-tooltip { position: absolute; z-index: 1; white-space: pre-wrap; max-width: min(25rem, 90%); overflow-wrap: anywhere; background: var(--chat-surface); color: var(--chat-fg); border: 1px solid var(--chat-border); border-radius: 4px; padding: .5rem; box-shadow: 0 2px 10px #0003; pointer-events: none; font-size: var(--chat-text-sm); }
+.visual-full-scroll { overflow: auto; flex: 1; min-height: 0; }
+.visual-dialog { width: min(96vw, 100rem); height: 92vh; background: var(--chat-surface); color: var(--chat-fg); font-family: var(--chat-font); }
+.visual-dialog .visual-surface { min-width: fit-content; }
+.visual-dialog .visual-diagram, .visual-dialog .visual-chart canvas { max-width: none; }

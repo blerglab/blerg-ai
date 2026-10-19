@@ -167,3 +167,16 @@ describe('describePlace', () => {
     expect(describePlace({ x: 0.2, y: 0, w: 0.6, h: 0.2 })).toBe('top')
   })
 })
+
+it('excludes tracked deletion widgets from selected quotes and occurrence offsets', () => {
+  const root = mount('<p>We test <del data-review-deletion="true">weekly</del><span>daily</span>.</p>')
+  const paragraph = root.firstElementChild!
+  const range = document.createRange();range.selectNodeContents(paragraph)
+  const selection = window.getSelection()!;selection.removeAllRanges();selection.addRange(range)
+  expect(anchorSelection(root, selection)).toMatchObject({quote: 'We test daily.', occurrence: 1})
+  const daily = textNode(root.querySelector('span'))
+  const selected = select(daily, 0, 5)
+  const anchor = anchorSelection(root, selected)!
+  expect(anchor.quote).toBe('daily')
+  expect(findQuote(root, anchor)?.toString()).toBe('daily')
+})

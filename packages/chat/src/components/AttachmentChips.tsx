@@ -28,9 +28,14 @@ function uploadText(i: AttachmentItem): string {
 export function ComposerChips({ items, onRemove }: { items: AttachmentItem[]; onRemove: (key: string) => void }) {
   if (items.length === 0) return null
   return (
-    <ul className="attach-chips" aria-label="Attached files">
+    <ul className="attach-chips composer-attachments" aria-label="Attached files">
       {items.map(i => (
-        <li key={i.key} className={`attach-chip ${i.status}`} data-testid="attach-chip">
+        <li key={i.key} className={`attach-chip composer-attachment ${i.status}${i.preview ? ' has-preview' : ''}`} data-testid="attach-chip">
+          <div className={`attach-chip-preview${i.preview ? '' : ' is-file'}`}>
+            {!i.preview ? <span className="attach-chip-filetype" aria-hidden="true">{i.name.includes('.') ? i.name.split('.').pop()?.slice(0, 8).toUpperCase() : 'FILE'}</span>
+              : i.preview.kind === 'text' ? <span className="attach-chip-excerpt">{i.preview.text}</span>
+                : <img src={i.preview.src} alt={`${i.preview.kind === 'pdf' ? 'First page of' : 'Preview of'} ${i.name}`} />}
+          </div>
           <span className="attach-chip-icon" aria-hidden="true">📎</span>
           <span className="attach-chip-name" title={i.name}>{i.name}</span>
           <span className="attach-chip-meta">

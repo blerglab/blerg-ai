@@ -103,7 +103,8 @@ and, for Claude Code, a CLI that takes `--include-partial-messages`.
 ## Pointing at what you mean
 
 When the feedback is about a file the agent published, open the file and use **Review** (a
-markdown or PDF file: select a passage, ask for a change, edit the markdown yourself) or **Mark
+markdown or PDF file: select a passage, ask for a change, edit the markdown yourself;
+a diff: select patch line numbers and request a change) or **Mark
 up** (an image: draw on it, drop numbered pins with notes). Both send one message the agent can
 act on line by line. See [Review and mark-up](artifacts.md#review-and-mark-up).
 
@@ -182,6 +183,15 @@ Text you did not type is not drawn as yours, and a failure is not drawn as the m
   its "Queued" bubble goes away; a delivered one never shows twice.
 
 Code and files are drawn to be read, not to fill the screen:
+
+- A closed `mermaid` code fence draws a diagram; a `vega-lite` fence draws an inline-data chart
+  with tooltips. Use **Source**, **Copy** or **Open** to inspect it or zoom. Invalid or refused
+  visual output stays code. The same renderer works in published Markdown previews, the viewer
+  and review page, and for `.mmd`, `.vl.json` and Vega-Lite schema JSON files in Files.
+  Diagrams and charts use the chat’s colors and fonts, update when its theme changes, and
+  fit the message width; Open provides a larger, zoomable view.
+  External resources and executable HTML or JavaScript are refused. Charts support single plots
+  with `data.values`; custom expressions, transforms and compositions stay as source.
 
 - A code block is colored by its language once the agent has finished writing it (while it is still
   streaming it is plain). A block over 25 lines shows its first 15 with **Show all N lines** and
@@ -657,3 +667,69 @@ After updating your checkout, rebuild and restart it with
 `install/desktop/daemon/install.sh install`. A cluster deployment updates the runner
 server and the image for new pods; already running pods need replacement to use
 updated engine drivers.
+
+### Inline code review
+
+Open a published diff and use **+** beside a line to comment directly below the code.
+Select a range with Shift or the touch-friendly range control before pressing **+**
+to comment on several lines. Comments stay beside their code in either diff layout.
+Use **Add general comment** for feedback on the whole change, then **Submit** to send
+the pending comments together as one review.
+
+Comment boxes support Markdown formatting and **Write / Preview** tabs. On new-side
+code, **Insert suggestion** prefills an editable replacement for the selected lines.
+The suggestion is sent to the agent for checking and applying; the browser does not
+edit source files.
+
+Agent replies show **Resolved** or **Rejected**, with their explanation. **Reopen**
+queues the same thread for another review round and retains previous replies.
+Use **Collapse thread** to keep just its summary, or **Hide resolved** to hide
+resolved and rejected threads together. Open requests stay visible; neither control
+changes the review or deletes replies.
+Publish updated patches under the **same diff title** so the review follows their
+versions. Unchanged, unambiguous passages keep their inline threads; changed or
+ambiguous passages remain under **Earlier revision comments**, marked **Outdated**,
+with the original code and responses intact.
+
+
+### Reviewing documents and images
+
+For Markdown, open **Review** and edit the rendered document. Insertions and deletions
+appear with **Show changes** enabled; **Clean view** hides those marks without undoing
+edits. Formatting or structure changes are noted, and all edits are included in the
+source diff sent to the agent. **Source** remains available for direct Markdown editing.
+Documents with constructs the rich editor cannot preserve (such as embedded HTML,
+images, reference links, frontmatter or visual fences), or over 200,000 characters,
+use source editing with a preview instead. Merely opening a document or changing
+views does not rewrite its Markdown.
+
+Select a passage and click **Add comment**, or press **Ctrl+Alt+M** (Command+Option+M
+on a Mac). The composer opens in the margin beside the passage. Saved comments
+highlight their text; **Show passage** takes you back to it. On narrow screens,
+comments stack below the page. PDF reviews use the same passage and margin workflow,
+with page-aware anchors; PDF text itself is not edited. Comments whose original
+passage is deleted, whose document version changed, or whose positions cannot be
+proved stay visible with **Original passage unavailable**. Source edits conservatively
+leave existing comments unavailable rather than attaching them to a different passage.
+
+For images, open **Mark up**. Each pen stroke, arrow or box becomes a numbered
+annotation in the sidebar. Select it on the image with **Select**, or click its sidebar
+entry, to edit its color, width or comment. Hide/show and delete work per annotation.
+**Comment** places a point comment without a drawing. Sending uploads a flattened
+annotated copy and the numbered comments; hidden annotations and their comments are
+omitted, and the original image is untouched. Editing is paused while sending.
+Annotation layers are editable within the open markup view; the submitted PNG is flat.
+
+
+### Formatting controls and attachment previews
+
+The document formatting bar uses compact icons. Hover for the control name; selected
+formatting is highlighted, and screen readers receive the same labels. It includes
+bold, italic, strikethrough, heading, lists, quote, code, table, link and undo/redo.
+Link editing retains the document selection and accepts HTTP, HTTPS and mail links.
+
+Before sending a message, attached images show thumbnails, PDFs show the first page,
+and Markdown/text files show a short plain-text excerpt. The name, upload progress,
+errors and Remove control stay visible. Previews are generated locally and are
+optional: an unsupported, large or unreadable file keeps its file tile and can still
+be attached. SVG and Office files use file tiles rather than active document previews.

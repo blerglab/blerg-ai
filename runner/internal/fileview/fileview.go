@@ -62,7 +62,7 @@ func buildArtifactExts() map[string]artifactType {
 	add(artifactType{"text/plain; charset=utf-8", Text},
 		"txt", "log", "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "go", "rs", "java", "c", "h", "cpp", "cc", "hpp",
 		"cs", "sh", "bash", "zsh", "yaml", "yml", "toml", "ini", "cfg", "conf", "sql", "css", "scss", "rb", "php",
-		"swift", "kt", "lua", "pl", "r", "tex", "rst", "jsonl", "ndjson", "vue", "svelte", "gradle")
+		"swift", "kt", "lua", "pl", "r", "tex", "rst", "jsonl", "ndjson", "vue", "svelte", "gradle", "mmd", "mermaid")
 	add(artifactType{"application/xml", Text}, "xml")
 	// A page older than the diff view does not know it and offers the file as a download; the
 	// type is still text, so the download is the patch itself.

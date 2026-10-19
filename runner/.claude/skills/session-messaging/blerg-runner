@@ -1969,7 +1969,7 @@ REVIEW_STATE_DIR = os.path.join("attachments", ".reviews")
 REVIEW_STATUSES = ("done", "declined")
 
 REVIEW_GUIDE = """\
-A person can review a markdown or PDF file you published (select a passage, ask for a change) or
+A person can review a markdown, PDF or diff file you published (select a passage, ask for a change) or
 mark up an image, from the chat. A review arrives as an ordinary chat message:
 
   Review of report.md (v3): 2 requests, 1 edit.
@@ -1982,6 +1982,9 @@ The loop:
   2. Then do each request, in the file the review was published from (not a copy).
   3. Publish the file again under the same name (blerg-runner publish <file>).
   4. Answer each request: blerg-runner review reply <id> done|declined "<one line>".
+
+For a reviewed diff, apply requests in the source files named by each patch anchor, then post an
+updated diff with blerg-runner diff <range>. The same review reply command records each answer.
 
 `review list [<file>]` prints the open requests with their ids (`[<id>] <where> "<quote>" — <ask>`);
 without <file>, every reviewed file. `review reply` records the status and your line in
@@ -2007,6 +2010,89 @@ def _review_name(name):
     return None
 
 
+def _review_revision(req):
+    value = req.get("revision", 0)
+    return value if type(value) is int and 0 <= value <= 1000000 else 0
+
+
+def _review_date(value):
+    if not isinstance(value, str):
+        return False
+    import datetime
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).tzinfo is not None
+    except (ValueError, OverflowError):
+        return False
+
+
+def _review_suggestion(req):
+    suggestion, anchor = req.get("suggestion"), req.get("anchor")
+    if not isinstance(suggestion, dict) or not isinstance(anchor, dict):
+        return None
+    if anchor.get("kind") != "text" or not isinstance(anchor.get("diff"), dict):
+        return None
+    if anchor["diff"].get("side") != "new" or _review_diff_where(anchor["diff"]) is None:
+        return None
+    original, replacement = suggestion.get("original"), suggestion.get("replacement")
+    if any(not isinstance(text, str) or len(text) > 32768 or "\0" in text for text in (original, replacement)):
+        return None
+    return suggestion if original == anchor.get("quote") else None
+
+
+def _review_metadata_valid(req):
+    anchor = req.get("anchor")
+    if isinstance(anchor, dict) and anchor.get("kind") == "general":
+        if any(key in anchor for key in ("diff", "quote", "heading", "page", "line", "rect", "pin", "occurrence")):
+            return False
+    if "revision" in req and (type(req["revision"]) is not int or not 0 <= req["revision"] <= 1000000):
+        return False
+    if "suggestion" in req and _review_suggestion(req) is None:
+        return False
+    if "replies" in req:
+        history = req["replies"]
+        if not isinstance(history, list) or len(history) > 100:
+            return False
+        for reply in history:
+            if not isinstance(reply, dict) or reply.get("status") not in REVIEW_STATUSES:
+                return False
+            if not isinstance(reply.get("text"), str) or not _review_date(reply.get("createdAt")):
+                return False
+            if "revision" in reply and (type(reply["revision"]) is not int or not 0 <= reply["revision"] <= 1000000):
+                return False
+    return True
+
+
+def _review_history(*histories):
+    # Canonical keys deduplicate independently of JSON property order; retain insertion order.
+    unique = {}
+    for history in histories:
+        for reply in history:
+            unique[json.dumps(reply, sort_keys=True, ensure_ascii=True)] = reply
+    return list(unique.values())[-100:]
+
+
+def _review_legacy_reply(req, review, now=None, known=()):
+    if not isinstance(req.get("reply"), str):
+        return []
+    revision = _review_revision(req)
+    reopened = req.get("status") == "open"
+    status = req.get("status") if req.get("status") in REVIEW_STATUSES else "done"
+    if any(r.get("text") == req["reply"] and (reopened or
+           (r.get("status") == status and r.get("revision", 0) == revision)) for r in [*req.get("replies", []), *known]):
+        return []
+    when = next((value for value in (review.get("submittedAt"), req.get("createdAt"), now)
+                 if _review_date(value)), None)
+    if when is None:
+        return []
+    # Old browsers reopened legacy replies without preserving their previous status/revision.
+    # Keep their text (matching the browser's historical "done" fallback), without attributing
+    # that answer to the reopened revision. New browsers preserve the exact original record.
+    record = {"status": status, "text": req["reply"], "createdAt": when}
+    if not reopened:
+        record["revision"] = revision
+    return [record]
+
+
 def _parse_review(raw):
     """A ReviewFile from JSON bytes, or None when it is not one."""
     try:
@@ -2016,12 +2102,14 @@ def _parse_review(raw):
     if not isinstance(data, dict) or not isinstance(data.get("requests"), list):
         return None
     data["requests"] = [r for r in data["requests"] if isinstance(r, dict) and isinstance(r.get("id"), str)]
+    if any(not _review_metadata_valid(req) for req in data["requests"]):
+        return None
     return data
 
 
 def _merge_reviews(user, agent):
-    """The person's file is the base; a request also in the session's file takes its status and
-    reply from there. Either side may be None."""
+    """Keep person-authored requests, accepting agent answers only at the current revision.
+    Preserve answer history across reopen and replies. Either side may be None."""
     if user is None and agent is None:
         return None
     if user is None:
@@ -2030,9 +2118,18 @@ def _merge_reviews(user, agent):
     answered = {r["id"]: r for r in (agent or {}).get("requests", [])}
     for req in merged["requests"]:
         mine = answered.get(req["id"])
-        if mine and mine.get("status") in REVIEW_STATUSES:
-            req["status"] = mine["status"]
-            req["reply"] = mine.get("reply", "")
+        if mine:
+            # Prefer a known answer's exact status/revision over old-browser open fallbacks.
+            person_known = [*req.get("replies", []), *(_review_legacy_reply(req, user) if req.get("status") in REVIEW_STATUSES else [])]
+            agent_history = _review_history(mine.get("replies", []), _review_legacy_reply(mine, agent, known=person_known))
+            history = _review_history(req.get("replies", []), _review_legacy_reply(req, user, known=agent_history), agent_history)
+            if history:
+                req["replies"] = history
+            if _review_revision(mine) >= _review_revision(req) and mine.get("status") in REVIEW_STATUSES:
+                req["status"] = mine["status"]
+                req["reply"] = mine.get("reply", "")
+                if "revision" in mine:
+                    req["revision"] = mine["revision"]
     return merged
 
 
@@ -2106,10 +2203,34 @@ def _load_reviews(only=None):
     return out
 
 
+def _review_diff_where(value):
+    """Format optional diff metadata; paths are descriptive text, never opened or executed."""
+    if not isinstance(value, dict):
+        return None
+    name, side = value.get("file"), value.get("side")
+    if not isinstance(name, str) or not name.strip() or len(name) > 4096 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in name):
+        return None
+    if side not in ("old", "new"):
+        return None
+    start, end, hunk, index = (value.get(k) for k in ("start", "end", "hunk", "fileIndex"))
+    if any(type(n) is not int or not 0 < n <= 9007199254740991 for n in (start, end, hunk, index)):
+        return None
+    if end < start or end - start >= 200:
+        return None
+    commit = value.get("commit")
+    if commit is not None and (not isinstance(commit, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", commit)):
+        return None
+    lines = f"line {start}" if start == end else f"lines {start}–{end}"
+    return f"{name}, {side} {lines}, hunk {hunk}, file {index}" + (f", commit {commit[:12].lower()}" if commit else "")
+
+
 def _review_where(anchor):
     """Where a request points: `under "Results", page 2`, `pin 3`, or `(no place)`."""
     anchor = anchor if isinstance(anchor, dict) else {}
-    parts = []
+    if anchor.get("kind") == "general":
+        return "general comment"
+    diff = _review_diff_where(anchor.get("diff"))
+    parts = [diff] if diff else []
     if anchor.get("heading"):
         parts.append(f'under "{anchor["heading"]}"')
     if isinstance(anchor.get("page"), int):
@@ -2132,6 +2253,10 @@ def _review_line(req, quote_max=60):
     where = _review_where(req.get("anchor"))
     quote = req.get("anchor", {}).get("quote") if isinstance(req.get("anchor"), dict) else None
     text = " ".join(str(req.get("text") or "").split())
+    suggestion = _review_suggestion(req)
+    if suggestion is not None:
+        # Suggestions are inert data. JSON escaping prevents terminal control sequences.
+        text += " — suggestion replacement: " + json.dumps(suggestion["replacement"], ensure_ascii=True)
     if isinstance(quote, str) and quote.strip():
         q = " ".join(quote.split())
         if len(q) > quote_max:
@@ -2168,7 +2293,7 @@ def cmd_review_list(file_name=None):
 
 def cmd_review_reply(req_id, status, line):
     """Record a status and a one-line reply on one request and publish the merged review file as
-    `<file>.review.json` (a new version each time; replying again overwrites)."""
+    `<file>.review.json` (a new version each time; earlier replies remain in its history)."""
     if status not in REVIEW_STATUSES:
         _review_fail(f"status must be one of {', '.join(REVIEW_STATUSES)}, not {status!r}")
     line = " ".join(line.split())
@@ -2182,6 +2307,10 @@ def cmd_review_reply(req_id, status, line):
     name, review = hits[0]
     for req in review["requests"]:
         if req["id"] == req_id:
+            import datetime
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            record = {"status": status, "text": line, "createdAt": now, "revision": _review_revision(req)}
+            req["replies"] = _review_history(req.get("replies", []), _review_legacy_reply(req, review, now), [record])
             req["status"] = status
             req["reply"] = line
     review.setdefault("version", 1)

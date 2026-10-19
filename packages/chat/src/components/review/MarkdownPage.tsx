@@ -17,7 +17,7 @@ interface Props {
 }
 
 export default function MarkdownPage({ source, published, showDiff, requests, focusedId, rootRef }: Props) {
-  const diff = useMemo(() => (showDiff ? wordDiff(published, source) : null), [showDiff, published, source])
+  const diff = useMemo(() => (showDiff && source !== published ? wordDiff(published, source) : null), [showDiff, published, source])
 
   useEffect(() => {
     const root = rootRef.current
@@ -32,7 +32,7 @@ export default function MarkdownPage({ source, published, showDiff, requests, fo
           {diff.map((part, i) =>
             part.kind === 'same'
               ? <span key={i}>{part.text}</span>
-              : <span key={i} className={part.kind === 'ins' ? 'diff-ins' : 'diff-del'}>{part.text}</span>,
+              : <span key={i} data-review-deletion={part.kind === 'del' ? 'true' : undefined} className={part.kind === 'ins' ? 'diff-ins' : 'diff-del'}>{part.text}</span>,
           )}
         </pre>
       ) : (

@@ -11,6 +11,7 @@ import (
 	cid "github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/core/internal/db"
 	"github.com/blerglab/blerg-ai/core/internal/identity"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // insertAccount is a small helper to add next to newTestService (the existing tests inline
@@ -465,5 +466,117 @@ func TestNormalAccountCapsUnchangedByMustChangePasswordGate(t *testing.T) {
 	want := identity.PlatformRoleCaps["member"]
 	if len(p.Caps) != len(want) {
 		t.Fatalf("caps = %v, want member's normal caps %v", p.Caps, want)
+	}
+}
+
+// Both refreshes are forced to wait on the same presented row before either can
+// rotate it. The second must follow bookkeeping successors left by the first.
+func TestConcurrentLostRotationsBothSucceed(t *testing.T) {
+	_, original := newTestService(t)
+	// Two blocked refresh transactions, the blocker, observer and signer lookup
+	// need independent connections; ordinary fixture pools intentionally have two.
+	cfg := original.Pool().Config()
+	cfg.MaxConns = 6
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	st := db.NewPgStore(pool)
+	key, err := identity.LoadOrGenerateSigningKey(context.Background(), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := identity.NewService(st, key)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	acct := insertAccount(t, st, "concurrent-lost")
+	raw, err := svc.IssueRefreshToken(ctx, acct, "ua", "ip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.RefreshAccessToken(ctx, raw, "blerg-core"); err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := st.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(ctx)
+	if _, err := blocker.Exec(ctx, `SELECT id FROM human_sessions WHERE token_hash = $1 FOR UPDATE`, hashOf(raw)); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		access, refresh string
+		err             error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			a, r, e := svc.RefreshAccessToken(ctx, raw, "blerg-core")
+			results <- result{a, r, e}
+		}()
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting int
+		err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'SELECT id::text, account_id::text, chain_id::text,%'`).Scan(&waiting)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waiting == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("both refreshes did not wait on the row lock")
+		case <-ticker.C:
+		}
+	}
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var returned []string
+	for range 2 {
+		r := <-results
+		if r.err != nil {
+			t.Errorf("queued refresh failed: %v", r.err)
+			continue
+		}
+		if r.access == "" || r.refresh == "" || r.refresh == raw {
+			t.Error("refresh did not issue fresh credentials")
+		}
+		returned = append(returned, r.refresh)
+	}
+	if t.Failed() {
+		return
+	}
+	if returned[0] == returned[1] {
+		t.Fatal("refreshes returned the same cookie")
+	}
+	var live, revocations int
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM human_sessions WHERE account_id=$1 AND revoked_at IS NULL`, acct).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM revocations WHERE kind='sid'`).Scan(&revocations); err != nil {
+		t.Fatal(err)
+	}
+	if live != 1 || revocations != 0 {
+		t.Fatalf("live=%d revocations=%d, want 1/0", live, revocations)
+	}
+	// Deliver the older response first, then the newer response. Channel sends
+	// need not follow commit order; identify the older cookie from stored state.
+	var firstRevoked bool
+	if err := st.Pool().QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM human_sessions WHERE token_hash=$1`, hashOf(returned[0])).Scan(&firstRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if !firstRevoked {
+		returned[0], returned[1] = returned[1], returned[0]
+	}
+	for _, cookie := range returned {
+		if _, _, err := svc.RefreshAccessToken(ctx, cookie, "blerg-core"); err != nil {
+			t.Fatalf("returned cookie cannot heal: %v", err)
+		}
 	}
 }

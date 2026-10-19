@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 from urllib.parse import urlparse, parse_qs
 
 SCRIPT = os.path.join(os.path.dirname(__file__), "blerg-runner")
@@ -121,16 +122,26 @@ def make_stub_server(message_id="msg-123", answer_text="yes go ahead",
     return server
 
 
+def cli_test_env(overrides=None):
+    """Keep test subprocesses independent of the hosting Blerg/engine session."""
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(("BLERG_", "CLAUDE_CODE_", "CODEX_"))
+        and key != "CLAUDECODE"
+    }
+    # Apply fixtures last so tests can deliberately exercise native attribution,
+    # token rotation and missing/empty environment values.
+    for key, value in (overrides or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return env
+
+
 def run_blerg_runner(args, env_override=None, timeout=10, cwd=None):
     """Run the blerg-runner script with given args and optional env overrides."""
-    # Tests must never inherit the running agent's live token or token-file path.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("BLERG_")}
-    if env_override is not None:
-        for k, v in env_override.items():
-            if v is None:
-                env.pop(k, None)
-            else:
-                env[k] = v
+    env = cli_test_env(env_override)
     result = subprocess.run(
         [sys.executable, SCRIPT] + args,
         capture_output=True,
@@ -150,6 +161,34 @@ def _unused_port():
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
+
+class TestCLIEnvironmentIsolation(unittest.TestCase):
+    def test_inherited_session_markers_are_removed_without_changing_parent(self):
+        inherited = {
+            "BLERG_RUNNER_SESSION_TOKEN": "fixture-inherited-token",
+            "BLERG_RUNNER_SESSION_TOKEN_FILE": "/fixture/inherited-token",
+            "CLAUDECODE": "1",
+            "CLAUDE_CODE_SESSION_ID": "fixture-claude",
+            "CLAUDE_CODE_CHILD_SESSION": "1",
+            "CLAUDE_CODE_ENTRYPOINT": "fixture",
+            "CLAUDE_CODE_FUTURE_MARKER": "fixture",
+            "CODEX_THREAD_ID": "fixture-codex",
+            "CODEX_FUTURE_MARKER": "fixture",
+            "PATH": "/fixture/bin",
+            "LANG": "C.UTF-8",
+        }
+        with mock.patch.dict(os.environ, inherited, clear=True):
+            self.assertEqual(cli_test_env(), {"PATH": "/fixture/bin", "LANG": "C.UTF-8"})
+            self.assertEqual(dict(os.environ), inherited)
+
+    def test_explicit_fixture_markers_empty_values_and_removals_are_preserved(self):
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "inherited", "LANG": "C"}, clear=True):
+            self.assertEqual(cli_test_env({
+                "CLAUDECODE": "fixture", "CODEX_THREAD_ID": "", "LANG": None,
+                "BLERG_RUNNER_PROGRESS_CALL_ID": "fixture-call",
+            }), {"CLAUDECODE": "fixture", "CODEX_THREAD_ID": "",
+                 "BLERG_RUNNER_PROGRESS_CALL_ID": "fixture-call"})
+
 
 class TestNoOpWhenUnconfigured(unittest.TestCase):
     """When Blerg Runner env vars are absent the CLI should exit 0 with a notice."""
@@ -1185,12 +1224,7 @@ class TestFetch(unittest.TestCase):
 
     def _run(self, args, **kw):
         # The CLI writes relative to its working directory.
-        env = os.environ.copy()
-        for k, v in self._env(**kw).items():
-            if v is None:
-                env.pop(k, None)
-            else:
-                env[k] = v
+        env = cli_test_env(self._env(**kw))
         return subprocess.run([sys.executable, SCRIPT, "fetch"] + args, capture_output=True, text=True,
                               timeout=15, env=env, cwd=self.tmp.name)
 
@@ -1386,12 +1420,7 @@ class TestFilesAndUnpublish(TestFetch):
         }
 
     def _cli(self, cmd, args, **kw):
-        env = os.environ.copy()
-        for k, v in self._env(**kw).items():
-            if v is None:
-                env.pop(k, None)
-            else:
-                env[k] = v
+        env = cli_test_env(self._env(**kw))
         return subprocess.run([sys.executable, SCRIPT, cmd] + args, capture_output=True, text=True,
                               timeout=15, env=env, cwd=self.tmp.name)
 
@@ -1488,6 +1517,10 @@ def _req(rid, text, quote=None, heading=None, page=None, status="open", reply=No
     return r
 
 
+# Keep the independent formatter security regressions in the standard CLI suite.
+from test_blerg_runner_review_security import TestDiffAnchorSecurity
+from test_blerg_runner_review_lifecycle import TestReviewLifecycle
+
 class TestReview(unittest.TestCase):
     """`review list` merges the person's review file with the session's replies and shows what is
     still open; `review reply` records an answer and publishes `<file>.review.json`."""
@@ -1520,12 +1553,7 @@ class TestReview(unittest.TestCase):
         self.addCleanup(self._stop)
 
     def _review(self, args, **kw):
-        env = os.environ.copy()
-        for k, v in self._env(**kw).items():
-            if v is None:
-                env.pop(k, None)
-            else:
-                env[k] = v
+        env = cli_test_env(self._env(**kw))
         return subprocess.run([sys.executable, SCRIPT, "review"] + args, capture_output=True, text=True,
                               timeout=15, env=env, cwd=self.tmp.name)
 
@@ -1675,6 +1703,31 @@ class TestReview(unittest.TestCase):
             for needle in ("apply it first", "author's own wording", "each request", "the file the review was published from",
                            "Publish the file again", "review reply <id> done|declined", "review list"):
                 self.assertIn(needle, low, args)
+
+    def test_diff_review_location_and_reply_preserve_the_existing_model(self):
+        req = _req("diffreq", "Use a checked conversion", quote="return int(value)")
+        metadata = {"file": "src/convert.go", "side": "new", "start": 12, "end": 14,
+                    "hunk": 2, "fileIndex": 1, "commit": "a" * 40, "artifactId": "d" * 32}
+        req["anchor"]["diff"] = metadata
+        self.server.files = {"b" * 32: ("change.diff.review.json", _review_file("change.diff", [req]))}
+        result = self._review(["list", "change.diff"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for part in ("src/convert.go", "new lines 12–14", "hunk 2", "file 1", "commit " + "a" * 12):
+            self.assertIn(part, result.stdout)
+        result = self._review(["reply", "diffreq", "done", "Added a checked conversion."])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        published = json.loads(self._published()[0]["body"])
+        self.assertEqual(published["version"], 1)
+        self.assertEqual(published["file"]["name"], "change.diff")
+        self.assertEqual(published["requests"][0]["anchor"]["diff"], metadata)
+        self.assertEqual(published["requests"][0]["status"], "done")
+        self.assertEqual(published["requests"][0]["reply"], "Added a checked conversion.")
+
+    def test_diff_review_help_names_source_changes_and_an_updated_diff(self):
+        result = run_blerg_runner(["review", "--help"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("source files", result.stdout)
+        self.assertIn("updated diff", result.stdout)
 
 
 # ── topic ─────────────────────────────────────────────────────────────────────
@@ -1877,12 +1930,7 @@ class TestWork(unittest.TestCase):
         if stdin is None:
             result = run_blerg_runner(args, env_override=env)
         else:
-            full = os.environ.copy()
-            for k, v in env.items():
-                if v is None:
-                    full.pop(k, None)
-                else:
-                    full[k] = v
+            full = cli_test_env(env)
             result = subprocess.run([sys.executable, SCRIPT] + args, input=stdin, capture_output=True, text=True, env=full, timeout=30)
         while t.is_alive():
             try:
@@ -3026,6 +3074,16 @@ class TestProgress(unittest.TestCase):
         self.assertIn('3/7', result.stdout)
         self.assertIn('Running checks', result.stdout)
 
+    def test_inherited_engine_markers_do_not_change_progress_attribution(self):
+        with mock.patch.dict(os.environ, {
+            "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "fixture-host-session",
+            "CODEX_THREAD_ID": "fixture-host-thread",
+            "BLERG_RUNNER_PROGRESS_CALL_ID": "fixture-host-call",
+        }):
+            result, requests = self._run(['1/2', 'Checks'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(requests[0]['body'], {'completed': 1, 'total': 2, 'label': 'Checks'})
+
     def test_counter_and_unicode_label_boundaries(self):
         for counter in ('0/1', '1000000/1000000'):
             with self.subTest(counter=counter):
@@ -3370,9 +3428,8 @@ class TestSession(unittest.TestCase):
         server.recorded, server.repeat_last = [], True
         server.script = [("POST", "/children", 202, PENDING), ("GET", "/api/delegation-requests/", 200, PENDING)]
         threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
-        env = {k: v for k, v in os.environ.items() if not k.startswith("BLERG_")}
-        env.update({"BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}",
-                    "BLERG_RUNNER_SESSION_ID": "sess-par", "BLERG_RUNNER_SESSION_TOKEN": "sess-tok"})
+        env = cli_test_env({"BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}",
+                            "BLERG_RUNNER_SESSION_ID": "sess-par", "BLERG_RUNNER_SESSION_TOKEN": "sess-tok"})
         proc = subprocess.Popen([sys.executable, SCRIPT, "session", "start", "--no-repo", "p"], env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
@@ -3862,16 +3919,65 @@ signal.setitimer(signal.ITIMER_REAL, 0)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_start_post_and_wait_share_deadline(self):
-        def reply(method, *_):
-            return (202 if method == "POST" else 200), PENDING, {}, 0.7
-        with api_server(reply) as (url, seen):
-            started = time.monotonic()
-            result = call(url, ["session", "start", "--no-repo", "--timeout", "1", "p"], timeout=5)
-            elapsed = time.monotonic() - started
-        self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertLess(elapsed, 1.6)
-        self.assertIn(f"session wait {REQ}", result.stdout)
-        self.assertEqual([r[0] for r in seen], ["POST", "GET"])
+        import io
+        import runpy
+        import types
+        from unittest import mock
+
+        # Test the shared command budget independently of HTTP scheduling. The
+        # neighboring slow-header/body tests exercise the real network deadline.
+        with tempfile.TemporaryDirectory() as folder:
+            env = {"HOME": folder, "PATH": os.defpath, "BLERG_RUNNER_SESSION_ID": "fixture-parent",
+                                "BLERG_RUNNER_SERVER_HTTP": "http://example.invalid",
+                                "BLERG_RUNNER_SESSION_TOKEN": "fixture-token"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                entry = runpy.run_path(SCRIPT, run_name="deadline_fixture")["cmd_session_start"]
+        namespace = entry.__globals__
+        now = [100.0]
+        calls = []
+        sleeps = []
+
+        def sleep(seconds):
+            self.assertGreaterEqual(seconds, 0)
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        def call_full(method, path, payload=None, headers=None, raw=None, timeout=30, deadline=None):
+            calls.append((method, path, deadline, now[0]))
+            self.assertEqual(deadline, 101.0, "start and approval wait must share the original deadline")
+            if method == "POST":
+                self.assertEqual(path, "/api/sessions/fixture-parent/children")
+                self.assertEqual(payload, {"prompt": "p", "no_repo": True})
+                self.assertEqual(headers["Idempotency-Key"], "fixture-deadline-key")
+                now[0] += 0.7
+                return 202, json.dumps(PENDING).encode(), {}
+            self.assertEqual(method, "GET")
+            self.assertEqual(path, f"/api/delegation-requests/{REQ}?wait=0")
+            self.assertAlmostEqual(deadline - now[0], 0.3)
+            # The GET's simulated 0.7s response cannot consume a fresh budget:
+            # its deadline cuts it off at the original command's final 0.3s.
+            now[0] = deadline
+            raise namespace["_RequestError"]("command timeout")
+
+        args = types.SimpleNamespace(prompt_file=None, prompt="p", repo=None, no_repo=True,
+                                     engine=None, model=None, effort=None, runtime=None, title=None,
+                                     keep_running=False, idempotency_key="fixture-deadline-key",
+                                     timeout=1, no_wait=False)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        clock = types.SimpleNamespace(monotonic=lambda: now[0], sleep=sleep)
+        with mock.patch.dict(namespace, {"time": clock, "_call_full": call_full}):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as stopped:
+                    entry(args)
+        self.assertEqual(stopped.exception.code, 3, stderr.getvalue())
+        self.assertEqual([call[0] for call in calls], ["POST", "GET"])
+        self.assertAlmostEqual(calls[1][3] - calls[0][3], 0.7)
+        self.assertEqual(now[0] - 100.0, 1.0)
+        self.assertLess(now[0] - 100.0, 1.6)
+        self.assertEqual(sleeps, [0])
+        self.assertIn(f"request {REQ}", stdout.getvalue())
+        self.assertIn(f"session wait {REQ}", stdout.getvalue())
+        self.assertIn("fixture-deadline-key", stderr.getvalue())
 
     def test_wait_immediate_inflight_polls_do_not_spin(self):
         starting = dict(PENDING, status="allowed")

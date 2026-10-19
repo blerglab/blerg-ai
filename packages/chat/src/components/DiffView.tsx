@@ -7,6 +7,8 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from '
 import { langFromName, type CodeLang } from '../model/codeLang'
 import { HIGHLIGHT_MAX_CHARS, highlightSync, splitTokenLines, useHighlighterReady, type Token } from '../model/highlight'
 import { foldContext, parsePatch, splitRows, patchSummaryText, type PatchFile, type PatchLine, type PatchCommit } from '../model/patch'
+import { createDiffAnchor, diffAnchorContains, type DiffPoint } from '../model/diffSelection'
+import type { Anchor, ReviewRequest } from '../model/review'
 import './diff.css'
 
 /** Lines of one file drawn before "Show more" (and how many more each click adds). */
@@ -73,22 +75,146 @@ function fileTitle(f: PatchFile): string {
   return (f.status === 'renamed' || f.status === 'copied') && f.oldPath && f.newPath ? `${f.oldPath} → ${f.newPath}` : f.path
 }
 
-function FileBlock({ file, index, mode, ready, startOpen, bare = false }: { file: PatchFile; index: number; mode: Mode; ready: boolean; startOpen: boolean; bare?: boolean }) {
+type DiffRange = NonNullable<Anchor['diff']>
+interface RequestRange { id: string; range: DiffRange; request: ReviewRequest }
+interface SelectionPaint {
+  selected?: DiffRange
+  requests?: readonly RequestRange[]
+  focusedId?: string | null
+  onPick?: (point: DiffPoint, extend: boolean) => void
+  onComment?: (point: DiffPoint) => void
+  renderThread?: (request: ReviewRequest) => ReactNode
+  draftAnchor?: Anchor | null
+  renderDraft?: (anchor: Anchor) => ReactNode
+}
+
+function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected, requests = [], focusedId, onPick, onComment, renderThread, draftAnchor, renderDraft }: {
+  file: PatchFile; index: number; mode: Mode; ready: boolean; startOpen: boolean; bare?: boolean
+} & SelectionPaint) {
   const [open, setOpen] = useState(startOpen)
   const [limit, setLimit] = useState(DIFF_FILE_LINES)
   const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(() => new Set())
+  const focused = requests.find(request => request.id === focusedId && request.range.fileIndex === index + 1)
+  const fileDraft = draftAnchor?.diff?.fileIndex === index + 1 ? draftAnchor : null
+  const revealed = open || !!focused || !!fileDraft
+  const focusedLines = new Set<number>()
   const lang = useMemo(() => langFromName(file.path), [file.path])
   const hl = useMemo(() => {
     const m = new Map<PatchLine, Token[]>()
-    if (!open) return m
+    if (!revealed) return m
     for (const h of file.hunks) for (const [k, v] of hunkTokens(lang, h.lines, ready)) m.set(k, v)
     return m
-  }, [file, lang, ready, open])
+  }, [file, lang, ready, revealed])
   const total = lineCount(file)
   const cols = mode === 'split' ? 4 : 3
 
+  function contains(range: DiffRange, side: DiffPoint['side'], line: number | undefined, hunk: number) {
+    return line !== undefined && range.fileIndex === index + 1 && range.hunk === hunk && range.side === side && line >= range.start && line <= range.end
+  }
+  function paint(side: DiffPoint['side'], line: number | undefined, hunk: number): string {
+    const hits = requests.filter(request => contains(request.range, side, line, hunk))
+    return `${selected && contains(selected, side, line, hunk) ? ' diff-selected' : ''}${hits.length ? ' diff-requested' : ''}${hits.some(request => request.id === focusedId) ? ' diff-request-focused' : ''}`
+  }
+  function numberCell(side: DiffPoint['side'], line: number | undefined, hunk: number, tint = '') {
+    const classes = `diff-num${tint}${paint(side, line, hunk)}`
+    const isFocused = requests.some(request => request.id === focusedId && contains(request.range, side, line, hunk))
+    if (isFocused && line !== undefined) focusedLines.add(line)
+    if (line === undefined) return <td className={classes} />
+    const path = side === 'old' ? file.oldPath : file.newPath
+    const point = {fileIndex: index + 1, hunk, side, line}
+    return <td className={classes} data-diff-focused={isFocused || undefined}>
+      {onComment && <button type="button" className="diff-comment-add" aria-label={`Comment on ${side} line ${line} in ${path ?? file.path}`}
+        onClick={() => onComment(point)}>+</button>}
+      {onPick ? <button type="button" className="diff-line-select"
+        aria-label={`Select ${side} line ${line} in ${path ?? file.path}`}
+        aria-pressed={!!selected && contains(selected, side, line, hunk)}
+        data-diff-side={side} data-diff-line={line} data-diff-file={index + 1} data-diff-hunk={hunk}
+        data-diff-focused={isFocused || undefined}
+        onClick={event => onPick(point, event.shiftKey)}
+        onKeyDown={event => {
+          if (event.key === 'Enter' && event.shiftKey) {
+            event.preventDefault()
+            onPick(point, true)
+          }
+        }}>{line}</button> : line}
+    </td>
+  }
+
   let budget = limit
   const body: ReactNode[] = []
+  const renderedThreads = new Set<string>()
+  let renderedDraft = false
+  function appendComments(points: readonly DiffPoint[], hidden?: 'folded' | 'not shown') {
+    const endsHere = (range: DiffRange) => points.some(point => point.fileIndex === range.fileIndex && point.hunk === range.hunk && point.side === range.side && point.line === range.end)
+    const location = (range: DiffRange) => hidden ? <p className="diff-comment-location">{range.file} · {range.side} {range.start === range.end ? `line ${range.start}` : `lines ${range.start}–${range.end}`} · Code {hidden}</p> : null
+    if (renderThread) for (const request of requests) {
+      if (renderedThreads.has(request.id) || !endsHere(request.range)) continue
+      renderedThreads.add(request.id)
+      const content = renderThread(request.request)
+      if (content !== null && content !== undefined && content !== false) body.push(<tr key={`thread:${request.id}`} className="diff-comment-row" data-inline-request={request.id}><td colSpan={cols}>{location(request.range)}{content}</td></tr>)
+    }
+    if (!renderedDraft && fileDraft?.diff && renderDraft && endsHere(fileDraft.diff)) {
+      renderedDraft = true
+      const content = renderDraft(fileDraft)
+      if (content !== null && content !== undefined && content !== false) body.push(<tr key="draft" className="diff-comment-row diff-comment-draft"><td colSpan={cols}>{location(fileDraft.diff)}{content}</td></tr>)
+    }
+  }
+  function pointsFor(lines: readonly PatchLine[], hunk: number): DiffPoint[] {
+    if (!(renderThread && requests.length) && !(fileDraft && renderDraft)) return []
+    if (lines.length > 2) {
+      // This path is a folded run of contiguous context. Match only the bounded
+      // comment endpoints instead of allocating two points per hidden code line.
+      const first = lines[0]
+      const last = lines[lines.length - 1]
+      const ranges = [...requests.map(request => request.range), ...(fileDraft?.diff ? [fileDraft.diff] : [])]
+      return ranges.filter(range => range.fileIndex === index + 1 && range.hunk === hunk &&
+        first[range.side] !== undefined && last[range.side] !== undefined &&
+        range.end >= first[range.side]! && range.end <= last[range.side]!)
+        .map(range => ({fileIndex: index + 1, hunk, side: range.side, line: range.end}))
+    }
+    return lines.flatMap(line => (['old', 'new'] as const).flatMap(side => line[side] === undefined ? [] : [{fileIndex: index + 1, hunk, side, line: line[side]!}]))
+  }
+  function appendRows(lines: readonly PatchLine[], hi: number, key: string) {
+    if (mode === 'split') {
+      splitRows(lines).forEach((r, ri) => {
+        if (r.note !== undefined) {
+          body.push(<tr key={`${key}:${ri}`} className="diff-note-row"><td colSpan={4} className="diff-note">{r.note}</td></tr>)
+          return
+        }
+        const lk = r.left ? (r.left.kind === 'del' ? ' diff-del' : '') : ' diff-empty'
+        const rk = r.right ? (r.right.kind === 'add' ? ' diff-add' : '') : ' diff-empty'
+        body.push(
+          <tr key={`${key}:${ri}`} className="diff-row">
+            {numberCell('old', r.left?.old, hi + 1, lk)}
+            <td className={`diff-code${lk}${paint('old', r.left?.old, hi + 1)}`}>{r.left && <><span className="diff-mark" aria-hidden="true">{r.left.kind === 'del' ? '-' : ' '}</span><Code line={r.left} hl={hl} /></>}</td>
+            {numberCell('new', r.right?.new, hi + 1, rk)}
+            <td className={`diff-code${rk}${paint('new', r.right?.new, hi + 1)}`}>{r.right && <><span className="diff-mark" aria-hidden="true">{r.right.kind === 'add' ? '+' : ' '}</span><Code line={r.right} hl={hl} /></>}</td>
+          </tr>,
+        )
+        appendComments(pointsFor([r.left, r.right].filter((line): line is PatchLine => line !== undefined), hi + 1))
+      })
+    } else {
+      lines.forEach((l, li) => {
+        if (l.kind === 'note') {
+          body.push(<tr key={`${key}:${li}`} className="diff-note-row"><td colSpan={3} className="diff-note">{l.text}</td></tr>)
+          return
+        }
+        const k = l.kind === 'add' ? ' diff-add' : l.kind === 'del' ? ' diff-del' : ''
+        body.push(
+          <tr key={`${key}:${li}`} className={`diff-row${k}`}>
+            {numberCell('old', l.old, hi + 1)}
+            {numberCell('new', l.new, hi + 1)}
+            <td className={`diff-code${paint('old', l.old, hi + 1)}${paint('new', l.new, hi + 1)}`}>
+              <span className="diff-mark" aria-hidden="true">{l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '}</span>
+              <span className="diff-sr">{l.kind === 'add' ? 'added: ' : l.kind === 'del' ? 'deleted: ' : ''}</span>
+              <Code line={l} hl={hl} />
+            </td>
+          </tr>,
+        )
+        appendComments(pointsFor([l], hi + 1))
+      })
+    }
+  }
   for (let hi = 0; hi < file.hunks.length && budget > 0; hi++) {
     const h = file.hunks[hi]
     budget--
@@ -110,62 +236,41 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false }: { file
             </td>
           </tr>,
         )
+        appendComments(pointsFor(piece.lines, hi + 1), 'folded')
         continue
       }
       const lines = piece.lines.slice(0, budget)
       budget -= lines.length
-      if (mode === 'split') {
-        splitRows(lines).forEach((r, ri) => {
-          if (r.note !== undefined) {
-            body.push(<tr key={`${key}:${ri}`} className="diff-note-row"><td colSpan={4} className="diff-note">{r.note}</td></tr>)
-            return
-          }
-          const lk = r.left ? (r.left.kind === 'del' ? ' diff-del' : '') : ' diff-empty'
-          const rk = r.right ? (r.right.kind === 'add' ? ' diff-add' : '') : ' diff-empty'
-          body.push(
-            <tr key={`${key}:${ri}`} className="diff-row">
-              <td className={`diff-num${lk}`}>{r.left?.old ?? ''}</td>
-              <td className={`diff-code${lk}`}>{r.left && <><span className="diff-mark" aria-hidden="true">{r.left.kind === 'del' ? '-' : ' '}</span><Code line={r.left} hl={hl} /></>}</td>
-              <td className={`diff-num${rk}`}>{r.right?.new ?? ''}</td>
-              <td className={`diff-code${rk}`}>{r.right && <><span className="diff-mark" aria-hidden="true">{r.right.kind === 'add' ? '+' : ' '}</span><Code line={r.right} hl={hl} /></>}</td>
-            </tr>,
-          )
-        })
-      } else {
-        lines.forEach((l, li) => {
-          if (l.kind === 'note') {
-            body.push(<tr key={`${key}:${li}`} className="diff-note-row"><td colSpan={3} className="diff-note">{l.text}</td></tr>)
-            return
-          }
-          const k = l.kind === 'add' ? ' diff-add' : l.kind === 'del' ? ' diff-del' : ''
-          body.push(
-            <tr key={`${key}:${li}`} className={`diff-row${k}`}>
-              <td className="diff-num">{l.old ?? ''}</td>
-              <td className="diff-num">{l.new ?? ''}</td>
-              <td className="diff-code">
-                <span className="diff-mark" aria-hidden="true">{l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '}</span>
-                <span className="diff-sr">{l.kind === 'add' ? 'added: ' : l.kind === 'del' ? 'deleted: ' : ''}</span>
-                <Code line={l} hl={hl} />
-              </td>
-            </tr>,
-          )
-        })
-      }
+      appendRows(lines, hi, key)
     }
   }
   const shown = limit - budget
+  if (focused && focusedLines.size < focused.range.end - focused.range.start + 1) {
+    const range = focused.range
+    const hunk = file.hunks[range.hunk - 1]
+    // A focused request can sit beyond a huge fold or file cap. Reveal its bounded
+    // same-side excerpt without drawing thousands of unrelated context lines.
+    const excerpt = hunk?.lines.filter(line => line[range.side] !== undefined && line[range.side]! >= Math.max(1, range.start - 3) && line[range.side]! <= range.end + 3) ?? []
+    if (excerpt.length) {
+      body.push(<tr key="focused-hunk" className="diff-hunk-row"><td colSpan={cols} className="diff-hunk">Focused request · {hunk.header}</td></tr>)
+      appendRows(excerpt, range.hunk - 1, 'focused-request')
+    }
+  }
+
+  appendComments(requests.filter(request => request.range.fileIndex === index + 1).map(request => ({fileIndex: index + 1, hunk: request.range.hunk, side: request.range.side, line: request.range.end})), 'not shown')
+  if (fileDraft?.diff) appendComments([{fileIndex: index + 1, hunk: fileDraft.diff.hunk, side: fileDraft.diff.side, line: fileDraft.diff.end}], 'not shown')
 
   return (
     <section className={`diff-file${bare ? ' diff-file-bare' : ''}`} id={bare ? undefined : `diff-file-${index}`} data-testid="diff-file">
       {!bare && <header className="diff-file-head">
-        <button type="button" className="diff-file-toggle" aria-expanded={open} onClick={() => setOpen(o => !o)}>
-          <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <button type="button" className="diff-file-toggle" aria-expanded={revealed} onClick={() => setOpen(o => !o)}>
+          <span aria-hidden="true">{revealed ? '▾' : '▸'}</span>
         </button>
         <span className={`diff-status diff-status-${file.status}`} title={STATUS_WORD[file.status]}>{STATUS_LABEL[file.status]}</span>
         <span className="diff-file-path">{fileTitle(file)}</span>
         <span className="diff-file-counts"><span className="diff-plus">+{file.adds}</span> <span className="diff-minus">−{file.dels}</span></span>
       </header>}
-      {open && (
+      {revealed && (
         <div className="diff-file-body">
           {file.meta.length > 0 && <p className="diff-meta">{file.meta.join(' · ')}</p>}
           {file.binary && <p className="diff-binary" data-testid="diff-binary">{file.binary}</p>}
@@ -173,8 +278,10 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false }: { file
           {file.hunks.length > 0 && (
             <div className="diff-table-wrap">
               <table className={`diff-table diff-${mode}`} data-testid={`diff-table-${mode}`}>
-                {mode === 'split' && (
+                {mode === 'split' ? (
                   <colgroup><col className="diff-col-num" /><col /><col className="diff-col-num" /><col /></colgroup>
+                ) : (
+                  <colgroup><col className="diff-col-num" /><col className="diff-col-num" /><col /></colgroup>
                 )}
                 <tbody>{body}</tbody>
               </table>
@@ -211,8 +318,66 @@ export function InlineDiff({ file }: { file: PatchFile }) {
 }
 
 /** `commit`: a sha (or the start of one) to open at: its section is scrolled to and marked. */
-export default function DiffView({ text, commit }: { text: string; commit?: string | null }) {
+export default function DiffView({ text, commit, selection, onSelection, requests = [], focusedId, onComment, renderThread, renderDraft, draftAnchor }: {
+  text: string; commit?: string | null
+  selection?: Anchor | null
+  onSelection?: (anchor: Anchor | null) => void
+  requests?: ReviewRequest[]
+  focusedId?: string | null
+  onComment?: (anchor: Anchor) => void
+  renderThread?: (request: ReviewRequest) => ReactNode
+  renderDraft?: (anchor: Anchor) => ReactNode
+  draftAnchor?: Anchor | null
+}) {
   const patch = useMemo(() => parsePatch(text), [text])
+  const startPoint = useRef<DiffPoint | null>(null)
+  const priorPatch = useRef(patch)
+  const [rangeMode, setRangeMode] = useState(false)
+  const [notice, setNotice] = useState('')
+  const selected = useMemo(() => {
+    const range = selection?.diff
+    return range && diffAnchorContains(patch, selection, {fileIndex: range.fileIndex, hunk: range.hunk, side: range.side, line: range.start}) ? range : undefined
+  }, [patch, selection])
+  const requestRanges = useMemo(() => requests.flatMap(request => {
+    const range = request.anchor.diff
+    return range && diffAnchorContains(patch, request.anchor, {fileIndex: range.fileIndex, hunk: range.hunk, side: range.side, line: range.start}) ? [{id: request.id, range, request}] : []
+  }), [patch, requests])
+  const validDraft = useMemo(() => {
+    const range = draftAnchor?.diff
+    return range && diffAnchorContains(patch, draftAnchor, {fileIndex: range.fileIndex, hunk: range.hunk, side: range.side, line: range.start}) ? draftAnchor : null
+  }, [patch, draftAnchor])
+  function comment(point: DiffPoint) {
+    const withinSelection = selected && selected.fileIndex === point.fileIndex && selected.hunk === point.hunk && selected.side === point.side && point.line >= selected.start && point.line <= selected.end
+    const anchor = withinSelection ? selection : createDiffAnchor(patch, point)
+    if (!anchor) return
+    setNotice('')
+    onComment?.(anchor)
+  }
+  useEffect(() => {
+    if (priorPatch.current !== patch) {
+      priorPatch.current = patch
+      startPoint.current = null
+      onSelection?.(null)
+    }
+  }, [patch, onSelection])
+  useEffect(() => { if (selection === null) startPoint.current = null }, [selection])
+  useEffect(() => {
+    if (focusedId) mainRef.current?.querySelector('[data-diff-focused="true"]')?.scrollIntoView({block: 'center'})
+  }, [focusedId, requestRanges])
+
+  function pick(point: DiffPoint, extend: boolean) {
+    const prior = startPoint.current
+    const sameScope = prior && prior.fileIndex === point.fileIndex && prior.hunk === point.hunk && prior.side === point.side
+    const range = (extend || rangeMode) && sameScope ? createDiffAnchor(patch, prior, point.line) : createDiffAnchor(patch, point)
+    if (!range) {
+      setNotice('Select at most 200 lines and 32 KiB of text within one side of one hunk.')
+      return
+    }
+    setNotice('')
+    if (rangeMode && sameScope) startPoint.current = null
+    else if (!extend || !sameScope) startPoint.current = point
+    onSelection?.(range)
+  }
   const want = (commit ?? '').toLowerCase()
   const target = want.length >= 7 ? patch.commits.findIndex(c => c.sha.startsWith(want)) : -1
   const wide = useWide()
@@ -276,6 +441,16 @@ export default function DiffView({ text, commit }: { text: string; commit?: stri
           </button>
         )}
       </div>
+      {onSelection && <div className="diff-selection-toolbar">
+        <button type="button" className="artifact-btn" aria-pressed={rangeMode} onClick={() => {
+          setRangeMode(value => !value); startPoint.current = null; setNotice('')
+        }}>Select range</button>
+        <span>Choose a line number; Shift-click for a range, or enable Select range and tap both ends.</span>
+        {selection && <button type="button" className="artifact-btn" onClick={() => {
+          startPoint.current = null; setNotice(''); onSelection(null)
+        }}>Clear line selection</button>}
+        {notice && <span role="status">{notice}</span>}
+      </div>}
       <div className="diff-layout">
         <nav className="diff-files" aria-label="Files" data-testid="diff-files">
           <ul>
@@ -296,7 +471,9 @@ export default function DiffView({ text, commit }: { text: string; commit?: stri
             return (
               <Fragment key={i}>
                 {startsCommit && <CommitHead commit={patch.commits[f.commit as number]} index={f.commit as number} target={f.commit === target} />}
-                <FileBlock file={f} index={i} mode={effective} ready={ready} startOpen={opens[i]} />
+                <FileBlock file={f} index={i} mode={effective} ready={ready} startOpen={opens[i]}
+                  selected={selected} requests={requestRanges} focusedId={focusedId} onPick={onSelection ? pick : undefined}
+                  onComment={onComment ? comment : undefined} renderThread={renderThread} renderDraft={renderDraft} draftAnchor={validDraft} />
               </Fragment>
             )
           })}

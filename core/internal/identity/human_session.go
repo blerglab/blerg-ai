@@ -195,7 +195,8 @@ func (s *Service) IssueRefreshToken(ctx context.Context, accountID, userAgent, i
 //  1. The browser never got the rotation. The response that carried the successor cookie was
 //     lost (a frame torn down on a timeout, a connection that dropped after core committed, a
 //     second tab that raced the first), so the browser still holds the old token and the
-//     successor has NEVER been presented (its last_used_at is null). The rotation is redone:
+//     successor has NEVER been presented (its last_used_at is null). Bookkeeping-only
+//     superseded successors are followed to the live head. The rotation is redone:
 //     the never-used successor is revoked ('superseded') and a new successor is issued in the
 //     same chain. The browser ends up where it should have been; nobody else loses anything,
 //     and no clock is involved — a tab that wakes an hour later is treated the same.
@@ -224,18 +225,36 @@ func (s *Service) RefreshAccessToken(ctx context.Context, rawRefreshToken, audie
 	}
 
 	if revokedAt != nil && replacedBy != nil {
-		var succRevokedAt, succExpiresAt, succUsedAt *time.Time
-		if err := tx.QueryRow(ctx, `SELECT revoked_at, expires_at, last_used_at FROM human_sessions WHERE id = $1 FOR UPDATE`, *replacedBy).
-			Scan(&succRevokedAt, &succExpiresAt, &succUsedAt); err != nil {
-			return "", "", err
+		successor := *replacedBy
+		seen := map[string]bool{id: true}
+		recoverable := false
+		for !seen[successor] {
+			seen[successor] = true
+			var revoked, expires, used *time.Time
+			var next *string
+			var reason string
+			if err := tx.QueryRow(ctx, `SELECT revoked_at, expires_at, last_used_at, replaced_by::text, COALESCE(revoke_reason, '')
+                FROM human_sessions WHERE id = $1 AND account_id = $2 AND chain_id = $3 FOR UPDATE`, successor, accountID, chainID).
+				Scan(&revoked, &expires, &used, &next, &reason); err != nil {
+				return "", "", err
+			}
+			if revoked == nil {
+				recoverable = expires != nil && expires.After(time.Now()) && used == nil
+				break
+			}
+			// Only bookkeeping replacements can be crossed. A rotated row
+			// proves that a browser presented a successor: the replay boundary.
+			if reason != "superseded" || next == nil {
+				break
+			}
+			successor = *next
 		}
-		succLive := succRevokedAt == nil && succExpiresAt != nil && succExpiresAt.After(time.Now())
-		if succLive && succUsedAt == nil {
+		if recoverable {
 			// Case 1: the rotation never reached the browser. Redo it from the successor the
 			// browser never saw: that row is superseded, a new one takes its place.
 			log.Printf("identity: refresh token presented again %s after a rotation its browser never received (chain %.8s); redoing the rotation",
 				time.Since(*revokedAt).Round(time.Second), chainID)
-			access, newRefresh, err = s.rotateTx(ctx, tx, *replacedBy, accountID, chainID, audience, "superseded")
+			access, newRefresh, err = s.rotateTx(ctx, tx, successor, accountID, chainID, audience, "superseded")
 			if err != nil {
 				return "", "", err
 			}

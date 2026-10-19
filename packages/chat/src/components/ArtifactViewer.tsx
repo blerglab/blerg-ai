@@ -41,6 +41,8 @@ import DataTable from './DataTable'
 import ErrorId from './ErrorId'
 import DiffView from './DiffView'
 import Markdown from './Markdown'
+import VisualBlock from './VisualBlock'
+import { visualFile } from '../model/visualKind'
 import MarkupMode from './markup/MarkupMode'
 import ReviewMode from './review/ReviewMode'
 
@@ -69,7 +71,11 @@ interface Props {
   commit?: string | null
 }
 
-export default function ArtifactViewer({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null }: Props) {
+export default function ArtifactViewer(props: Props) {
+  return <ArtifactViewerSession key={`${props.sessionId}:${props.artifact.id}:${props.artifact.view}:${props.artifact.version ?? ''}`} {...props}/>
+}
+
+function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null }: Props) {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
   useSelectAllIn(dialogRef)
@@ -143,14 +149,15 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
   // Which feedback mode this file takes, once its bytes are here.
   const gone = artifact.missing === true || loaded?.kind === 'gone'
   const ready = loaded !== null && loaded.kind !== 'error' && !gone
+  const inlineReview = view === 'diff' && !!chat && ready
   const feedback: Exclude<Mode, 'view'> | null =
-    !chat || !ready ? null : view === 'markdown' || view === 'pdf' ? 'review' : view === 'image' ? 'markup' : null
+    !chat || !ready ? null : view === 'markdown' || view === 'pdf' || view === 'diff' ? 'review' : view === 'image' ? 'markup' : null
 
   return createPortal(
     <div className="artifact-overlay artifact-overlay-viewer" data-testid="artifact-viewer-overlay" {...backdrop}>
       <div
         ref={dialogRef}
-        className={`artifact-dialog artifact-viewer${mode !== 'view' ? ' is-review' : ''}${view === 'diff' ? ' is-diff' : ''}`}
+        className={`artifact-dialog artifact-viewer${mode !== 'view' || inlineReview ? ' is-review' : ''}${view === 'diff' ? ' is-diff' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -162,7 +169,7 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
             <h2 id={titleId}>{title}</h2>
             <p className="artifact-meta">{[spec?.label, formatSize(artifact.size)].filter(Boolean).join(' · ')}</p>
           </div>
-          {mode !== 'view' ? (
+          {inlineReview ? null : mode !== 'view' ? (
             <button type="button" className="artifact-btn" onClick={() => setMode('view')}>Back</button>
           ) : feedback === 'review' ? (
             <button type="button" className="artifact-btn" onClick={() => setMode('review')}>Review</button>
@@ -184,9 +191,11 @@ export default function ArtifactViewer({ sessionId, files, artifact, onClose, la
             <p className="artifact-status" role="status" data-testid="artifact-gone">
               {FILE_GONE_MESSAGE} Its bytes were not kept on the server, so it can’t be viewed or downloaded.
             </p>
-          ) : mode === 'review' && ready ? (
+          ) : (mode === 'review' || inlineReview) && ready ? (
             <ReviewMode
               artifact={artifact}
+              embedded={inlineReview}
+              commit={commit}
               text={loaded.kind === 'text' ? loaded.text : undefined}
               blob={loaded.kind === 'blob' ? loaded.blob : undefined}
               onClose={() => setMode('view')}
@@ -271,6 +280,9 @@ export function TextView({ artifact, text, showAll, onShowAll, commit }: { artif
   }
   if (artifact.view === 'csv') return <CsvView artifact={artifact} text={text} />
   if (artifact.view === 'diff') return <DiffView text={text} commit={commit} />
+
+  const visual = visualFile(artifact.name, artifact.view, text)
+  if (visual) return <VisualBlock kind={visual} source={text} />
 
   const body = artifact.view === 'json' ? prettyJson(text) : text
   // Code is coloured by its extension, json as json; no known language stays plain wrapped text.

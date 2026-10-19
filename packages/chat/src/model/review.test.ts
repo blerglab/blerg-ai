@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { emptyReview, mergeReviews, newRequestId, parseReviewFile, reviewFileName, type ReviewFile, type ReviewRequest } from './review'
+import { emptyReview, mergeReviews, reopenReviewRequest, reviewReplyHistory, newRequestId, parseReviewFile, reviewFileName, type ReviewFile, type ReviewRequest } from './review'
 
 const req = (over: Partial<ReviewRequest> = {}): ReviewRequest => ({
   id: 'abc12345',
@@ -122,4 +122,95 @@ describe('mergeReviews', () => {
     expect(person.requests[0].status).toBe('open')
     expect(person.requests[0].reply).toBeUndefined()
   })
+})
+
+describe('document anchor provenance', () => {
+  const data = {version: 1, file: {name: 'document.md', artifactId: 'current'}, requests: [{id: 'comment', text: 'Keep this on its original passage', status: 'open', createdAt: '2026-01-01T00:00:00Z', anchor: {kind: 'text', quote: 'A passage', sourceArtifactId: 'original', unavailable: true}}]}
+  it('roundtrips a source artifact and durable unavailable marker', () => {
+    expect(parseReviewFile(JSON.stringify(data))?.requests[0].anchor).toEqual(data.requests[0].anchor)
+  })
+  it.each([{sourceArtifactId: '\nsecret'}, {sourceArtifactId: 42}, {unavailable: 'true'}, {kind: 'general'}, {sourceArtifactId: 'x'.repeat(201)}])('rejects malformed document provenance %j', overrides => {
+    const bad = {...data, requests: [{...data.requests[0], anchor: {...data.requests[0].anchor, ...overrides}}]}
+    expect(parseReviewFile(JSON.stringify(bad))).toBeNull()
+  })
+})
+
+
+describe('reopenReviewRequest', () => {
+  it('keeps provenance and previous answers immutable while advancing the revision', () => {
+    const before = req({status: 'declined', reply: 'Original passage unavailable', revision: 2,
+      anchor: {kind: 'text', quote: 'Original', sourceArtifactId: 'old', unavailable: true}})
+    const reopened = reopenReviewRequest(before, 'Please reconsider')
+    expect(reopened).toEqual({...before, status: 'open', revision: 3,
+      comments: [{text: 'Please reconsider', createdAt: expect.any(String), revision: 3}],
+      replies: [{text: before.reply, status: 'declined', createdAt: before.createdAt, revision: 2}]})
+    expect(before.status).toBe('declined')
+    expect(before.replies).toBeUndefined()
+    expect(reopened.anchor).toEqual(before.anchor)
+  })
+
+  it('does not duplicate archived replies or exceed the bounded history', () => {
+    const reply = {text: 'Fixed', status: 'done' as const, createdAt: '2026-10-06T10:00:00Z', revision: 4}
+    const before = req({status: 'done', revision: 4, reply: 'Fixed', replies: [reply]})
+    expect(reopenReviewRequest(before, 'Please reconsider').replies).toEqual([reply])
+    const history = Array.from({length: 100}, (_, revision) => ({...reply, revision}))
+    const full = req({status: 'done', revision: 100, reply: 'Newest', replies: history})
+    const reopened = reopenReviewRequest(full, 'Please reconsider')
+    expect(reopened.replies).toHaveLength(100)
+    expect(reopened.replies?.[0].revision).toBe(1)
+    expect(reopened.replies?.at(-1)?.text).toBe('Newest')
+    expect(full.replies).toHaveLength(100)
+  })
+
+  it('leaves open threads and exhausted revisions alone', () => {
+    const open = req()
+    const exhausted = req({status: 'done', revision: 1_000_000})
+    expect(reopenReviewRequest(open, 'Please reconsider')).toBe(open)
+    expect(reopenReviewRequest(exhausted, 'Please reconsider')).toBe(exhausted)
+  })
+})
+
+
+describe('reviewReplyHistory', () => {
+  it('shows a current legacy answer alongside previous revision answers without mutation', () => {
+    const old = {text: 'Earlier answer', status: 'done' as const, createdAt: '2026-10-06T10:00:00Z', revision: 0}
+    const request = req({status: 'declined', revision: 1, reply: 'Latest legacy answer', replies: [old]})
+    expect(reviewReplyHistory(request)).toEqual([old, {text: 'Latest legacy answer', status: 'declined', createdAt: request.createdAt, revision: 1}])
+    expect(request.replies).toEqual([old])
+    expect(reviewReplyHistory(reopenReviewRequest(request, 'Please reconsider'))).toEqual(reviewReplyHistory(request))
+  })
+
+  it('does not repeat an archived current answer', () => {
+    const reply = {text: 'Fixed', status: 'done' as const, createdAt: '2026-10-06T10:00:00Z', revision: 1}
+    expect(reviewReplyHistory(req({status: 'done', reply: 'Fixed', revision: 1, replies: [reply]}))).toEqual([reply])
+  })
+})
+
+
+describe('reopen explanations', () => {
+  it('requires a bounded nonblank explanation before changing any thread state', () => {
+    const request = req({status: 'done'})
+    for (const explanation of ['', '  \n ', 'x'.repeat(32769)]) expect(reopenReviewRequest(request, explanation)).toBe(request)
+    const reopened = reopenReviewRequest(request, '  Still incorrect  ')
+    expect(reopened.text).toBe(request.text)
+    expect(reopened.comments?.[0]).toMatchObject({text: 'Still incorrect', revision: 1})
+    expect(parseReviewFile(JSON.stringify(file({requests: [reopened]})))?.requests[0]).toEqual(reopened)
+    const answered = {...reopened, status: 'done' as const, reply: 'Fixed again'}
+    expect(mergeReviews(file({requests: [reopened]}), file({requests: [answered]}))?.requests[0].comments).toEqual(reopened.comments)
+  })
+
+  it.each([null, [{text: ' ', createdAt: '2026-01-01', revision: 1}], [{text: 'why', createdAt: 'bad', revision: 1}], [{text: 'why', createdAt: '2026-01-01', revision: 3}], [{text: 'why', createdAt: '2026-01-01', revision: 0}], Array(101).fill({text: 'why', createdAt: '2026-01-01', revision: 1})])('rejects malformed explanation history %j', comments => {
+    expect(parseReviewFile(JSON.stringify(file({requests: [{...req(), revision: 1, comments} as unknown as ReviewRequest]})))).toBeNull()
+  })
+})
+
+
+it('recovers explanations from a newer agent copy without accepting comments beyond the merged revision', () => {
+  const comment = {text: 'Still broken', createdAt: '2026-01-02T00:00:00Z', revision: 1}
+  const original = req({status: 'done'})
+  const newer = {...original, status: 'done' as const, revision: 1, comments: [comment]}
+  const merged = mergeReviews(file({requests: [original]}), file({requests: [newer]}))!
+  expect(merged.requests[0].comments).toEqual([comment])
+  expect(parseReviewFile(JSON.stringify(merged))).toEqual(merged)
+  expect(mergeReviews(file({requests: [newer]}), file({requests: [newer]}))?.requests[0].comments).toEqual([comment])
 })

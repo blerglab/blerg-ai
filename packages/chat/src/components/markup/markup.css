@@ -230,3 +230,24 @@
     max-height: 55vh;
   }
 }
+
+.markup-help { margin: 0; color: var(--chat-muted); font-size: var(--chat-text-xs); line-height: 1.5; }
+.markup-workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); gap: 16px; min-height: 0; overflow: auto; }
+.markup-stage { align-self: start; }
+.markup-sidebar { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.markup-sidebar h3 { margin: 0; font-size: var(--chat-text-sm); }
+.markup-layers { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.markup-layer { border: 1px solid var(--chat-border); border-radius: var(--chat-radius); padding: 8px; min-width: 0; }
+.markup-layer.is-selected { border-color: var(--chat-accent); }
+.markup-layer.is-hidden { border-style: dashed; }
+.markup-layer-heading { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.markup-layer .markup-note { box-sizing: border-box; width: 100%; }
+.markup-stage[data-tool='select'] .markup-canvas { cursor: pointer; }
+@media (max-width: 699px) {
+  .markup-workspace { display: flex; flex-direction: column; overflow: auto; }
+  .markup-sidebar { width: 100%; }
+}
+
+/* Freeze the complete editing surface until Send resolves and the success view closes. */
+.markup-editing { display: contents; border: 0; padding: 0; margin: 0; min-width: 0; }
+.markup-editing:disabled .markup-canvas { cursor: wait; }

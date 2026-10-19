@@ -1,6 +1,6 @@
 # @blerglab/chat
 
-The chat surface for apps built on Blerg sessions: transcript, composer, files, cards, highlighted code, diffs and a
+The chat surface for apps built on Blerg sessions: transcript, composer, files, cards, highlighted code, diagrams, charts, diffs and a
 token theme, over a pluggable transport. The runner's own web app renders it; your app can too,
 against your own backend, with the runner's agent token never leaving your server.
 
@@ -32,8 +32,8 @@ your core, or the runner's own `GET <runner>/agents`) carries `ui.chat_package`:
   "ui": {
     "chat_package": {
       "name": "@blerglab/chat",
-      "version": "0.22.0",
-      "url": "https://runner.example.test/packages/blerglab-chat-0.22.0.tgz",
+      "version": "0.23.0",
+      "url": "https://runner.example.test/packages/blerglab-chat-0.23.0.tgz",
       "sha512": "…",
       "docs_url": "https://runner.example.test/packages/@blerglab/chat/README.md"
     }
@@ -62,7 +62,13 @@ runner's operator.
 The tarball route is immutable (`Cache-Control: public, max-age=31536000, immutable`) and
 unauthenticated, as `/agents` is; a new version is a new file name. The package needs
 `react` and `react-dom` 19 as peers and brings `react-markdown`, `remark-gfm`, `zustand` and
-`lowlight` (the code highlighter, loaded on demand) with it; nothing else.
+`lowlight` (the code highlighter), Mermaid and Vega-Lite/Vega with it. Renderers are loaded on
+demand. Closed `mermaid` and `vega-lite` fences render in messages and Markdown views; charts
+accept inline data only. `VisualBlock` exposes the same source/copy/zoom surface independently
+of a session or transport. Visuals resolve the surrounding `--chat-*` tokens for colors and
+fonts, remain transparent, fit the message width and redraw when those tokens change.
+Explicit chart mark and encoding colors override the theme defaults; uploaded chart
+configuration and external resources remain disabled.
 
 ## Mount the proxy
 
@@ -620,12 +626,19 @@ Added in 0.12.0; no new props, nothing removed.
 ## Review and mark-up
 
 The file viewer that `ChatView` opens has two feedback modes, with nothing for the app to wire:
-**Review** on a markdown or PDF file (anchored change requests, direct edits of markdown, one
+**Review** on a markdown, PDF or diff file (anchored change requests, direct edits of markdown, one
 submit) and **Mark up** on an image (pen, arrow, box, numbered pins). Both go out through the
 transport's ordinary `files.upload` and `send`, so a transport without `files` shows neither.
 PDF pages are drawn by `pdfjs-dist`, which the package loads on demand in a chunk of its own
 (worker included); the chat bundle does not carry it. The session answers with
 `blerg-runner review reply`; the replies are read back from `<file>.review.json`.
+
+Diff review uses the same version-1 `ReviewFile` and feedback path. Its text anchors carry
+optional `DiffAnchor` metadata: source file, old/new side, start/end lines, file occurrence,
+hunk, full commit when available and the source artifact id. `DiffView` accepts controlled
+`selection` / `onSelection`, existing `requests` and `focusedId`. A saved request highlights only
+when its source metadata and quote still match; the review surface filters older artifacts.
+There is no new review endpoint or agent reply format.
 
 ## Agent procedure
 

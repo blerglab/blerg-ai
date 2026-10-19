@@ -43,10 +43,11 @@ app cannot show is download only.
 
 | Files | Shown as |
 |---|---|
-| Markdown (`.md`, `.markdown`) | Formatted text. Raw HTML in it is shown as text, never run. |
+| Markdown (`.md`, `.markdown`) | Formatted text, including Mermaid diagrams and inline-data Vega-Lite charts. Raw HTML is never run. |
 | Plain text, logs and source code (`.txt .log .py .js .ts .tsx .go .rs .java .c .h .cpp .sh .yaml .yml .toml .ini .xml .sql .css .rb .php` and similar, and a file with an unknown extension whose bytes are text) | Monospace text. The first 200 KB, with **Show all**; over 2 MiB it is download only. |
 | Diffs and patches (`.diff`, `.patch`) | The diff viewer: see [Diffs](#diffs). Over 2 MiB, download only. |
-| JSON (`.json`) | Pretty-printed; the raw text if it does not parse. Same size rules as text. |
+| JSON (`.json`) | Pretty-printed; Vega-Lite schema JSON and `.vl.json` / `.vega-lite.json` draw charts. Same size rules as text. |
+| Mermaid (`.mmd`, `.mermaid`) | A diagram with source, copy and zoom controls; invalid source stays code. External resources are refused. |
 | CSV and TSV | A scrollable table: the first 500 rows and 50 columns, with a note when there is more. |
 | Images: `.png .jpg .jpeg .gif .webp .svg` | The image. An SVG is shown only through `<img>`, where scripts in it never run. |
 | PDF | The browser's PDF viewer, with **Open in new tab**. |
@@ -266,17 +267,32 @@ token, `GET /api/sessions/{id}/attachments` and `GET /api/sessions/{id}/attachme
 A published file can be answered precisely, without quoting by hand. Open it in the viewer:
 
 - **Review** (markdown and PDF). The document is shown as it reads: rendered markdown, or the
-  PDF's real pages. Select a passage and press **N** (or **Request change**) to ask for a change
+  PDF's real pages. Select a passage and press **Ctrl+Alt+M** (or **Add comment**) to ask for a change
   there; the request is anchored to the quote, the heading above it, and for a PDF the page. For a
-  markdown file the source is beside the page and can be edited directly; **Changes** marks your
-  edits on the page. Requests list in the margin and their quotes are highlighted. **Submit** sends
+  Markdown file can be edited on the rendered page; **Show changes** marks insertions and
+  deletions, while **Clean view** hides the marks. **Source** offers direct source editing. Requests list in the margin and their quotes are highlighted. **Submit** sends
   everything to the session in one message: the requests, each with an id, and your edits as a
   diff with the edited copy attached.
-- **Mark up** (images, the session's or your own). Pen, arrow, box, and numbered pins with a note
-  each. **Send** attaches the marked-up image and puts the pins' notes in the message.
+- **Review** (diffs and patches). Select an old or new line number and choose **Request change**.
+  Shift-click another line to select a range, or enable **Select range** and tap the first and last
+  lines on a phone. Ranges stay within one side of one hunk (at most 200 lines and 32 KiB).
+  Save several requests, then **Submit** sends one message and the existing `.review.json` file.
+  Each request records its source artifact, file, side, line range, hunk and commit when present.
+  **Show lines** opens its target, including folded context. Requests from an earlier version stay
+  listed without being pinned onto the new patch. The agent changes the source files, replies
+  with the same review command and posts an updated diff.
+- **Mark up** (images, the session's or your own). Pen, arrow and box drawings become individually
+  selectable annotations with comments, style editing, hide/show and delete. **Comment** adds a
+  numbered point comment. **Send** attaches a flattened copy of visible annotations and puts their
+  numbered notes in the message; the original image stays unchanged.
 
 The session makes the changes, publishes the file again, and answers each request as done or
 declined with a line; the answers show beside your requests the next time you open the review.
+Markdown, PDF and code reviews label these threads **Resolved** or **Rejected**. Collapse a settled
+thread individually, or use **Hide resolved** to hide both kinds together. **Reopen** opens a comment editor and requires an explanation. **Reopen with comment** makes the
+thread pending while keeping its earlier answers; **Cancel** leaves its status unchanged. The
+explanation appears in the thread. **Submit** sends it with the original request, prior answers and any new
+comments or edits. Hidden threads and their anchors remain in the saved review.
 
 What is stored: `<file>.review.json`, uploaded beside the file on every submit (the requests,
 their anchors, and the diff), and the session's copy of the same name with its replies. The viewer

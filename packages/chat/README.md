@@ -250,7 +250,14 @@ createProxyTransport({
 })
 ```
 
-`ChatView` takes a few props for the host's own rules. `describeUserMessage` says how a user
+`ChatView` takes a few props for the host's own rules. Optional `onManageChildApproval` opens
+the host's current parent-session permissions from an allowed delegation card; it only navigates
+and never changes an approval itself. A `proposal_request` event draws a proposal card that reads
+and decides the proposal through the transport's optional `proposal` and `decideProposal` (without
+them the card says it waits for the owner); `onEditProposal(id)` opens the host's draft editor for a
+board card, `onOpenBoardCard(card)` opens a created card in the host's board, `onManagePermissions`
+opens the host's session permissions, and bumping `proposalRevision` has the cards read their
+proposal again (after the host's editor approved one). `describeUserMessage` says how a user
 message is drawn: return `{ author: 'the board' }` for one the app's automation sent rather than
 the person, `{ brief: true }` to fold the long prompt a session was started with into one line
 that opens, or nothing to leave it as the person's. Its third argument says whether the message is the
@@ -633,6 +640,14 @@ PDF pages are drawn by `pdfjs-dist`, which the package loads on demand in a chun
 (worker included); the chat bundle does not carry it. The session answers with
 `blerg-runner review reply`; the replies are read back from `<file>.review.json`.
 
+Since 0.27.0 the session's `<file>.review.json` publishes draw no file card: they are review
+state, not documents. Each round of answers (the publishes of one file's review between two of the
+person's messages) is one line at its newest publish, "✓ 11 requests answered · report.md", which
+opens the reviewed file in Review. The count is the requests the round settled, compared with the
+review before it; until that is read, or when the review before it is on a page not loaded, it is
+the number of publishes. The files stay in the Files panel. `reviewRounds` and `isReviewStateEvent`
+are exported for a host that draws its own transcript.
+
 Diff review uses the same version-1 `ReviewFile` and feedback path. Its text anchors carry
 optional `DiffAnchor` metadata: source file, old/new side, start/end lines, file occurrence,
 hunk, full commit when available and the source artifact id. `DiffView` accepts controlled
@@ -667,3 +682,5 @@ origin; the app is a Go backend with a React frontend. Stop at any failing check
 8. **Open the page.** Load the chat page in a browser (or a headless one) for `SID`. Check: the transcript shows the session's history, typing a message and sending it makes a user bubble appear and the runner's session receive it (`GET /blerg/sessions/$SID/events?limit=1` after a moment shows the new event), the Files panel lists the session's files, and the page renders in both color schemes.
 
 9. **Report.** The package version and sha512 installed, where `chatproxy.go` landed, the prefix, what `Authorize` keys on, and the output of each check.
+
+Model labels are presentation only: `modelDisplayName(id, suppliedName?)` shortens recognized families, while `modelDisplayNames(catalog)` disambiguates collisions using model details and routes. Keep the original ID as the option value and full-ID tooltip; never send a display name to an engine.

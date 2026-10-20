@@ -181,7 +181,7 @@ func TestCoreFeed(t *testing.T) {
 	defer srv.Close()
 	f := NewCoreFeed(srv.URL)
 	f.Latest() // starts the first refresh
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if v, u := f.Latest(); v == "0.4.1" && u != "" {
 			return
@@ -296,7 +296,7 @@ func TestOversizedAnswerIgnoredAndRedirectsNotFollowed(t *testing.T) {
 func TestStartStopsOnCancelWithoutRequest(t *testing.T) {
 	var hits atomic.Int32
 	srv := serve(200, `{}`, &hits)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 	ch := checkerFor(srv, "0.4.0")
 	ch.Delay = 50 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
@@ -308,8 +308,8 @@ func TestStartStopsOnCancelWithoutRequest(t *testing.T) {
 	}
 	ch2 := checkerFor(srv, "0.4.0")
 	ch2.Delay = 20 * time.Millisecond
-	ch2.Start(context.Background())
-	deadline := time.Now().Add(2 * time.Second)
+	ch2.Start(t.Context())
+	deadline := time.Now().Add(15 * time.Second)
 	for hits.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

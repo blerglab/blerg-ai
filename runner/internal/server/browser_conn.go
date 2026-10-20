@@ -190,16 +190,17 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 			continue // a cluster session pod, not a machine the owner picks
 		}
 		daemonInfos = append(daemonInfos, protocol.DaemonInfo{
-			ID:              d.ID,
-			Name:            d.Name,
-			Mode:            d.Mode,
-			ReposRoot:       d.CurrentReposRoot(),
-			Status:          "connected",
-			Version:         d.Version,
-			MCPGateway:      d.CanMCPGateway(),
-			RestrictTools:   d.CanRestrictTools(),
-			CodexRestricted: d.CanCodexRestricted(),
-			PluginEngines:   d.PluginEngines(),
+			ID:                  d.ID,
+			Name:                d.Name,
+			Mode:                d.Mode,
+			ReposRoot:           d.CurrentReposRoot(),
+			Status:              "connected",
+			Version:             d.Version,
+			MCPGateway:          d.CanMCPGateway(),
+			MCPGatewayViaServer: d.CanMCPGatewayViaServer(),
+			RestrictTools:       d.CanRestrictTools(),
+			CodexRestricted:     d.CanCodexRestricted(),
+			PluginEngines:       d.PluginEngines(),
 			// nil (omitted) when no provider has reported.
 			UsageLimits: nilIfEmpty(d.UsageLimits()),
 		})
@@ -419,20 +420,8 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 				log.Printf("browser %s malformed send_input: %v", bc.ID, err)
 				continue
 			}
-			dc := h.FindDaemonForSession(msg.SessionID)
-			if dc == nil {
-				log.Printf("browser %s send_input: no daemon found for session %s", bc.ID, msg.SessionID)
-				continue
-			}
-			fwd, _ := json.Marshal(protocol.SendInput{
-				Type:      "send_input",
-				SessionID: msg.SessionID,
-				Data:      msg.Data,
-			})
-			select {
-			case dc.send <- fwd:
-			default:
-				log.Printf("browser %s send_input: daemon %s send channel full", bc.ID, dc.ID)
+			if err := handleBrowserTerminalInput(ctx, h, bc, dbPool, msg); err != nil {
+				log.Printf("browser %s: terminal input refused", bc.ID)
 			}
 
 		case "resize_session":
@@ -823,7 +812,7 @@ func handleBrowserAgentMessageUnlocked(ctx context.Context, h *Hub, bc *BrowserC
 	}
 	daemonHere := h.FindDaemonForSession(msg.SessionID) != nil
 	if daemonHere && (msg.Source == "" || msg.Source == "chat" || msg.AnswerMessageID != "") &&
-		answerAskFromChat(ctx, h, dbPool, msg.SessionID, msg.Text, msg.ClientID, msg.AnswerMessageID) {
+		answerAskFromChatAs(ctx, h, dbPool, msg.SessionID, msg.Text, msg.ClientID, msg.AnswerMessageID, bc.AccountID) {
 		return
 	}
 	if !daemonHere {
@@ -866,4 +855,19 @@ func handleBrowserAgentMessageUnlocked(ctx context.Context, h *Hub, bc *BrowserC
 	}) {
 		clearPausedOnMessage(ctx, h, dbPool, msg.SessionID) // only once it is on its way
 	}
+}
+
+// Terminal bytes are executable input too. A stale socket cannot bypass discard.
+func handleBrowserTerminalInput(ctx context.Context, h *Hub, bc *BrowserConn, pool *pgxpool.Pool, msg protocol.SendInput) error {
+	return withCancelledLimitResume(ctx, pool, msg.SessionID, func() error {
+		return withParentInputGuard(ctx, pool, msg.SessionID, func() error {
+			if !h.accountCanSee(bc.AccountID, msg.SessionID) {
+				return db.ErrDelegationNotFound
+			}
+			if !forwardToSessionDaemon(h, bc, msg.SessionID, protocol.SendInput{Type: "send_input", SessionID: msg.SessionID, Data: msg.Data}) {
+				return db.ErrDelegationNotFound
+			}
+			return nil
+		})
+	})
 }

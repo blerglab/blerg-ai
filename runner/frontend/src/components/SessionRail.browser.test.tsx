@@ -2,9 +2,9 @@
 // drawer opens over the whole height and closes, and nothing is wider than the screen; and on a
 // desktop, that the panel is a column beside the chat that the chat and its composer give way to.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import '../index.css'
 import { seedRichRail } from '../test/railFixture'
 import { reelReply } from '../test/reelFixture'
@@ -23,6 +23,8 @@ const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch }))
 
 import SessionDetail from './SessionDetail'
+import { useTranscriptStore } from '@blerglab/chat'
+import { useSessionStore } from '../hooks/useSessionStore'
 
 const PHONE = { width: 390, height: 700 }
 const DESKTOP = { width: 1280, height: 800 }
@@ -216,4 +218,95 @@ describe('the session panel on a desktop (1280 px)', () => {
     for (const g of screen.getAllByTestId(/^caps-group-/)) expect(g.getBoundingClientRect().right).toBeLessThanOrEqual(r.right)
     noOverflow(DESKTOP.width)
   })
+})
+
+
+describe('session page long-content width', () => {
+  it.each([390, 1280, 2048])('contains unbroken messages and code at %ipx', async width => {
+    await page.viewport(width, 800)
+    const transcript = useTranscriptStore.getState()
+    transcript.ingest({type: 'agent_event', session_id: 'sess-a', client_event_id: 'long-content', seq: 1000, ts: new Date().toISOString(), kind: 'assistant_text', payload: {text: 'Long identifier: ' + 'x'.repeat(2000) + '\n\n```text\n' + 'y'.repeat(2000) + '\n```'}})
+    transcript.ingest({type: 'agent_event', session_id: 'sess-a', client_event_id: 'long-checklist', seq: 1001, ts: new Date().toISOString(), kind: 'checklist', payload: {op: 'set', items: [{text: 'Long checklist ' + 'w'.repeat(180), done: false}]}})
+    transcript.ingest({type: 'agent_event', session_id: 'sess-a', client_event_id: 'long-command', seq: 1002, ts: new Date().toISOString(), kind: 'tool_call', payload: {tool: 'Bash', call_id: 'long-command', input: {command: 'printf ' + 'z'.repeat(2000)}}})
+    transcript.ingest({type: 'agent_event', session_id: 'sess-a', client_event_id: 'long-artifact', seq: 1003, ts: new Date().toISOString(), kind: 'artifact', payload: {id: 'long-artifact', name: 'artifact-' + 'f'.repeat(180) + '.txt', size: 20, content_type: 'text/plain', view: 'text', version: 1}})
+    renderPage()
+    await waitFor(() => expect(screen.getByText(/Long identifier:/)).not.toBeNull())
+    const shell = document.querySelector<HTMLButtonElement>('[data-call-id="long-command"] button')!
+    await userEvent.click(shell)
+    noOverflow(width)
+    const timeline = document.querySelector<HTMLElement>('.agent-timeline')!
+    expect(timeline.scrollWidth).toBeLessThanOrEqual(timeline.clientWidth)
+    const overflow = [...document.querySelectorAll<HTMLElement>('body *')].filter(el => el.clientWidth > 0 && el.getBoundingClientRect().right > width + 1 && getComputedStyle(el).position !== 'fixed').map(el => el.className)
+    expect(document.documentElement.scrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(width)
+  })
+})
+
+it.each([[390,false],[1280,false],[390,true],[1280,true]] as const)('opens child approval from an allowed card at width %i, delayed %s', async (width, delayed) => {
+  await page.viewport(width, 800)
+  localStorage.setItem(RAIL_PREF_KEY, 'false')
+  localStorage.setItem(RAIL_TAB_KEY, 'history')
+  const base = apiFetch.getMockImplementation()!
+  const runtime = (runtime: string) => ({runtime, enabled:false, partial:false, can_enable:true, reason:'', allowed_engines:['claude','codex','hermes'],granted_engines:[],standing_rule_engines:[],effective_allowed_engines:[]})
+  let finishLoad!: () => void
+  const approvalReply = () => json({revision:'revision-a',daemon_id:'desktop-a',allowed_engines:['claude','codex','hermes'],runtimes:[runtime('docker'),runtime('daemon')]})
+  apiFetch.mockImplementation((url: string, ...rest: unknown[]) => url.endsWith('/permissions') ? json({can_grant:true,reason:'',grants:[],mcp_tools:[]}) : url.endsWith('/child-approval')
+    ? delayed ? new Promise(resolve => { finishLoad = () => resolve(approvalReply()) }) : approvalReply()
+    : base(url,...rest))
+  for (const event of [
+    {seq:100,kind:'delegation_request',payload:{request_id:'request-a',engine:'hermes',runtime:'docker',daemon_name:'Desktop',title:'Review fixture',prompt:'Review code',offered:['once','deny'],expires_at:'2099-01-01T00:00:00Z'}},
+    {seq:101,kind:'delegation_decided',payload:{request_id:'request-a',status:'allowed',choice:'once'}},
+  ]) useTranscriptStore.getState().ingest({...event,session_id:'sess-a',client_event_id:`child-approval-${event.seq}`,ts:new Date().toISOString()} as import('@blerglab/chat').AgentEvent)
+  renderPage()
+  await userEvent.click(await screen.findByRole('button',{name:'Change child approvals'}))
+  // The Permissions modal opens at the children, and the first child toggle takes the focus once loaded.
+  const dialog=await screen.findByRole('dialog',{name:'Permissions'})
+  if (delayed) {
+    await waitFor(()=>expect(document.activeElement).toBe(dialog))
+    finishLoad()
+  }
+  const checkbox=await within(dialog).findByRole('checkbox',{name:'Start sandboxed children without asking'})
+  await waitFor(()=>expect(document.activeElement).toBe(checkbox))
+  expect(screen.getByRole('tab',{name:/Live/})).toHaveAttribute('aria-selected','true')
+  const box=checkbox.getBoundingClientRect()
+  expect(box.top).toBeGreaterThanOrEqual(0)
+  expect(box.bottom).toBeLessThanOrEqual(800)
+  noOverflow(width)
+})
+
+it('does not reopen the Permissions modal by itself after it was closed, across a session switch and back', async () => {
+  await page.viewport(1280, 800)
+  const base = apiFetch.getMockImplementation()!
+  const runtime = (runtime: string) => ({runtime, enabled:false, partial:false, can_enable:true, reason:'', allowed_engines:['claude'],granted_engines:[],standing_rule_engines:[],effective_allowed_engines:[]})
+  apiFetch.mockImplementation((url: string, ...rest: unknown[]) => url.endsWith('/permissions') ? json({can_grant:true,reason:'',grants:[],mcp_tools:[]})
+    : url.endsWith('/child-approval') ? json({revision:'revision-a',daemon_id:'desktop-a',allowed_engines:['claude'],runtimes:[runtime('docker')]})
+      : base(url,...rest))
+  useSessionStore.setState(s => ({ sessions: [...s.sessions, { ...s.sessions[0], id: 'sess-b', name: 'Another session' }] }))
+  for (const event of [
+    {seq:100,kind:'delegation_request',payload:{request_id:'request-a',engine:'claude',runtime:'docker',daemon_name:'Desktop',title:'Review fixture',prompt:'Review code',offered:['once','deny'],expires_at:'2099-01-01T00:00:00Z'}},
+    {seq:101,kind:'delegation_decided',payload:{request_id:'request-a',status:'allowed',choice:'once'}},
+  ]) useTranscriptStore.getState().ingest({...event,session_id:'sess-a',client_event_id:`switch-${event.seq}`,ts:new Date().toISOString()} as import('@blerglab/chat').AgentEvent)
+  function Nav() {
+    const go = useNavigate()
+    return <><button type="button" onClick={() => go('/sessions/sess-b')}>to B</button><button type="button" onClick={() => go('/sessions/sess-a')}>to A</button></>
+  }
+  render(
+    <div style={{ height: '100vh' }}>
+      <MemoryRouter initialEntries={['/sessions/sess-a']}>
+        <Nav />
+        <Routes><Route path="/sessions/:id" element={<SessionDetail />} /></Routes>
+      </MemoryRouter>
+    </div>,
+  )
+  await userEvent.click(await screen.findByRole('button',{name:'Change child approvals'}))
+  const dialog = await screen.findByRole('dialog',{name:'Permissions'})
+  await userEvent.click(within(dialog).getByRole('button',{name:'Cancel'}))
+  expect(screen.queryByRole('dialog')).toBeNull()
+  await userEvent.click(screen.getByRole('button',{name:'to B'}))
+  await userEvent.click(screen.getByRole('button',{name:'to A'}))
+  await screen.findByRole('button',{name:'Manage'})
+  await new Promise(resolve => setTimeout(resolve, 300))
+  expect(screen.queryByRole('dialog')).toBeNull()
+  // The card still opens it on purpose.
+  await userEvent.click(await screen.findByRole('button',{name:'Change child approvals'}))
+  expect(await screen.findByRole('dialog',{name:'Permissions'})).toBeInTheDocument()
 })

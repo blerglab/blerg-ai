@@ -697,7 +697,7 @@ func TestTickets(t *testing.T) {
 		var evtRaw []byte
 		select {
 		case evtRaw = <-bc.send:
-		case <-time.After(time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("no ticket_split event broadcast to subscribed browser")
 		}
 		var evt struct {

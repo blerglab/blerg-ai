@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -24,6 +25,10 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request, p auth.Principal)
 	if id := p.HumanAccountID(); id != "" {
 		out["account_id"] = id
 	}
+	// Whether this install can mint "Run as me" tokens, and whether the create-board form
+	// starts with "Run this board's cards as me" checked (the operator's setting).
+	out["run_as_me_available"] = a.runAsMeAvailable()
+	out["run_as_creator_default"] = a.RunAsCreatorDefault
 	if p.Token != nil {
 		out["token_label"] = p.Token.Label
 		out["board_id"] = p.Token.BoardID
@@ -78,6 +83,9 @@ func (a *API) handleCreateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 	body, err := decode[struct {
 		db.BoardParams
 		Template string `json:"template"`
+		// RunAsMe: the creator's "Run this board's cards as me" box. The board is created
+		// either way; a mint that fails is reported in automation_error, not as a failed create.
+		RunAsMe bool `json:"run_as_me"`
 	}](r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -95,7 +103,24 @@ func (a *API) handleCreateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 		writeDBError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, b)
+	out := struct {
+		db.Board
+		AutomationError string `json:"automation_error,omitempty"`
+	}{Board: b}
+	if body.RunAsMe {
+		if err := a.runAsMe(r, p, b); err != nil {
+			var re *runAsMeError
+			if errors.As(err, &re) {
+				out.AutomationError = re.msg
+			} else {
+				log.Printf("run as me at create: board %s: %v", b.ID, err)
+				out.AutomationError = "could not save the automation token; use Run as me in the board's settings"
+			}
+		} else if fresh, err := db.GetBoard(r.Context(), a.Pool, b.ID); err == nil {
+			out.Board = fresh
+		}
+	}
+	writeJSON(w, http.StatusCreated, out)
 }
 
 // applyTemplate copies a registered template's columns and field schema into
@@ -188,11 +213,13 @@ func (a *API) handleUpdateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 		}
 	}
 	// One write: the token lands with the rest of the PATCH or not at all.
-	b, err := db.UpdateBoardWithAutomation(r.Context(), a.Pool, boardID, body.BoardParams, auto)
+	b, replaced, err := db.UpdateBoardWithAutomation(r.Context(), a.Pool, boardID, body.BoardParams, auto)
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
+	// A token Blerg minted ("Run as me") that this PATCH replaced or removed is revoked in core.
+	a.revokeMinted(r.Context(), boardID, replaced)
 	a.Hub.Broadcast(boardID, "board_changed")
 	writeJSON(w, http.StatusOK, b)
 }
@@ -204,10 +231,17 @@ func (a *API) handleDeleteBoard(w http.ResponseWriter, r *http.Request, p auth.P
 		writeError(w, http.StatusForbidden, "board deletion requires a human with board.admin")
 		return
 	}
+	minted, err := db.BoardMintedAutomation(r.Context(), a.Pool, r.PathValue("id"))
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
 	if err := db.DeleteBoard(r.Context(), a.Pool, r.PathValue("id")); err != nil {
 		writeDBError(w, err)
 		return
 	}
+	// The token Blerg minted for this board has nothing left to run.
+	a.revokeMinted(r.Context(), r.PathValue("id"), minted)
 	w.WriteHeader(http.StatusNoContent)
 }
 

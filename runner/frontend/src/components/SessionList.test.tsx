@@ -825,3 +825,15 @@ describe('nested sessions in sidebar sections', () => {
     expect(screen.getByTestId('nested-sessions')).toHaveTextContent('Nested child')
   })
 })
+
+
+it('keeps discarded parents and their children in History, including a stale running status', () => {
+  localStorage.clear()
+  seed([makeDaemon()], [makeSession({id:'parent', title:'Archived parent', status:'running', archived_at:'2026-10-20T12:00:00Z'}), makeSession({id:'child', title:'Archived worker', parent_session_id:'parent', status:'running', archived_at:'2026-10-20T12:00:00Z'})])
+  renderList()
+  expect(screen.queryByText('Archived parent')).toBeNull()
+  expect(screen.queryByText('Archived worker')).toBeNull()
+  fireEvent.click(screen.getByRole('button',{name:/History/}))
+  expect(screen.getAllByText('Archived parent')).toHaveLength(1)
+  expect(screen.getAllByText('Archived worker')).toHaveLength(1)
+})

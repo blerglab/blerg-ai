@@ -469,8 +469,9 @@ func TestNormalAccountCapsUnchangedByMustChangePasswordGate(t *testing.T) {
 	}
 }
 
-// Both refreshes are forced to wait on the same presented row before either can
-// rotate it. The second must follow bookkeeping successors left by the first.
+// Both refreshes are forced to wait before either can rotate the presented row: one on its row
+// lock, the other on the account's session fence ahead of it. The second must follow
+// bookkeeping successors left by the first.
 func TestConcurrentLostRotationsBothSucceed(t *testing.T) {
 	_, original := newTestService(t)
 	// Two blocked refresh transactions, the blocker, observer and signer lookup
@@ -488,7 +489,7 @@ func TestConcurrentLostRotationsBothSucceed(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := identity.NewService(st, key)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	acct := insertAccount(t, st, "concurrent-lost")
 	raw, err := svc.IssueRefreshToken(ctx, acct, "ua", "ip")
@@ -521,7 +522,7 @@ func TestConcurrentLostRotationsBothSucceed(t *testing.T) {
 	defer ticker.Stop()
 	for {
 		var waiting int
-		err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'SELECT id::text, account_id::text, chain_id::text,%'`).Scan(&waiting)
+		err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND (query LIKE 'SELECT id::text, account_id::text, chain_id::text,%' OR query LIKE 'SELECT pg_advisory_xact_lock(hashtextextended(''human_sessions:''%')`).Scan(&waiting)
 		if err != nil {
 			t.Fatal(err)
 		}

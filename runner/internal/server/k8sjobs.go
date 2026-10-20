@@ -36,6 +36,8 @@ import (
 // using the in-cluster service account. It deliberately speaks plain HTTP to
 // the API server (no client-go dependency) — the two calls we need are tiny.
 type JobManager struct {
+	// Optional owner for start watchers; nil retains process-lifetime defaults.
+	startWatches  *clusterWatchLifetime
 	codexCatalog  clusterCodexCatalogCache
 	NativeHistory NativeHistoryConfig
 	historyPool   *pgxpool.Pool
@@ -122,6 +124,10 @@ type JobManager struct {
 	activeCacheMu  sync.Mutex
 	activeCacheAt  time.Time
 	activeCacheVal int
+
+	// Hermes is the cluster's shared Hermes provider configuration
+	// (hermesproviders.go); zero when none is configured.
+	Hermes HermesSharedConfig
 }
 
 // clusterSecretsCacheTTL bounds how often AvailableEngines re-queries the
@@ -200,6 +206,8 @@ func NewJobManagerFromEnv(gitHubOrg string) *JobManager {
 		MemLimit:                envOr("BLERG_RUNNER_POD_MEM_LIMIT", "4Gi"),
 		TerminationGraceSeconds: int64(envOrInt("BLERG_RUNNER_POD_TERMINATION_GRACE_SECONDS", 120)),
 		TTLSecondsAfterFinished: int64(envOrInt("BLERG_RUNNER_POD_TTL_AFTER_FINISHED_SECONDS", 3600)),
+
+		Hermes: hermesSharedFromEnv(),
 	}
 }
 
@@ -384,7 +392,7 @@ func (j *JobManager) detectAvailableEngines() ([]string, bool) {
 			}
 		}
 	}
-	return out, has("BLERG_RUNNER_GIT_TOKEN")
+	return j.withSharedConfigEngines(out), has("BLERG_RUNNER_GIT_TOKEN")
 }
 
 // gitConfigured reports whether the operator Secret(s) carry a shared git
@@ -1140,6 +1148,11 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 		}
 		sessionData[mcpGatewayEnvVar] = raw
 	}
+	// The cluster's shared Hermes providers: Secret only, Hermes sessions only.
+	hermesEnv, err := j.addHermesSharedSessionEnv(spec, effectiveEngine, sessionData)
+	if err != nil {
+		return err
+	}
 
 	// Personal-credential-first: for the engine actually being spawned, and
 	// for git access, try the spawning account's own credentials (via
@@ -1308,6 +1321,10 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 				},
 			})
 		}
+	}
+
+	if hermesEnv != nil {
+		env = append(env, hermesEnv)
 	}
 
 	// provenance records, per credential env var, where this session's value
@@ -1749,6 +1766,10 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 	if err := db.TouchSessionStatusChanged(ctx, pool, sessionID); err != nil {
 		log.Printf("resume %s: touch status clock: %v", sessionID, err)
 	}
+	// The owner's newest proof is the one a child this session starts is authorized with.
+	if spawningAccountID != "" && !isChildSession(row) {
+		recordLaunchAuthSession(ctx, pool, sessionID, authSessionID)
+	}
 	newRepo := db.GetSessionNewRepo(ctx, pool, sessionID)
 	// A resume is a start too: the browser shows its progress the same way.
 	spec := SessionJobSpec{
@@ -1790,7 +1811,8 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 		AuthSessionID:      authSessionID,
 		// A resumed cron session is still a cron's: it never falls back to the operator credential
 		// (a resume by anyone but the owner has no account, and so no credential, and fails).
-		NoOperatorFallback: automatic || row.CronID != nil,
+		// So is a cron's cluster child (migration 068).
+		NoOperatorFallback: automatic || row.CronID != nil || db.GetSessionNoOperatorFallback(ctx, pool, sessionID),
 		// A resumed session is restricted exactly when it was started so (migration 036): a
 		// cron's, or a board-started grant session. A launch-sheet session with connections
 		// comes back with its tools.

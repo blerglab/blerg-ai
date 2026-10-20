@@ -216,6 +216,29 @@ describe('working line while background tasks run', () => {
     expect(screen.getByTestId('working').textContent).toMatch(/^Working… 0:10 · waiting on Read/)
   })
 
+  it('keeps a native multiline command out of the waiting summary and offers full details', () => {
+    const command = "cat >> src/fixture.test.ts <<'EOF'\n" + 'const fixture = true\n'.repeat(100) + 'EOF'
+    seed(userMsg(NOW - 70 * S), bashCall('c1', NOW - 66 * S, command), result('c1', NOW - 65 * S), started('b1', 'c1', NOW - 65 * S, command), turnDone(NOW - 60 * S))
+    mount('idle')
+    const line = screen.getByTestId('working')
+    const words = within(line).getByTestId('working-words')
+    expect(words.textContent!.length).toBeLessThanOrEqual(120)
+    expect(words.textContent).not.toContain('const fixture')
+    const details = line.querySelector('details')!
+    expect(details).not.toHaveAttribute('open')
+    expect(details.querySelector('pre')).toHaveTextContent('const fixture')
+    expect(details.querySelector('pre')).not.toBeVisible()
+    expect(details.closest('[aria-live]')).toBeNull()
+  })
+
+  it('keeps a supplied human label while exposing the recorded command separately', () => {
+    const command = 'npm test -- --fixture=' + 'x'.repeat(200)
+    seed(userMsg(NOW - 70 * S), ev('background_task_started', {task_id: 'b1', call_id: 'c1', kind: 'bash', description: 'Run focused tests', command}, NOW - 65 * S), turnDone(NOW - 60 * S))
+    mount('idle')
+    expect(screen.getByTestId('working-words').textContent).toBe('Waiting on a background task: Run focused tests')
+    expect(screen.getByLabelText('Background task details').textContent).toBe(command)
+  })
+
   it('goes when the last task finishes', () => {
     seed(userMsg(NOW - 70 * S), bashCall('c1', NOW - 66 * S), result('c1', NOW - 65 * S), started('b1', 'c1', NOW - 65 * S, 'Wait for the deploy'), turnDone(NOW - 60 * S))
     const { t } = mount('idle')

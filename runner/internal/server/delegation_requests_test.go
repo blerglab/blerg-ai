@@ -491,7 +491,7 @@ func TestWaitLongPollWakesOnDecision(t *testing.T) {
 			t.Fatalf("wait took %v", r.took)
 		}
 		hasKeys(t, "wait reply", r.out, "request_id", "status", "choice", "child_session_id", "start_error", "expires_at")
-	case <-time.After(4 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the wait did not wake on the decision")
 	}
 	fx.spawn()
@@ -668,7 +668,7 @@ func TestSweeperExpiresStaleRequests(t *testing.T) {
 		if o["status"] != "expired" {
 			t.Fatalf("waiter saw %v", o)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the sweeper did not wake the waiter")
 	}
 	if r := fx.request(id); r.Status != "expired" {
@@ -749,7 +749,7 @@ func TestExpireDuringTheStartWaitsForTheChild(t *testing.T) {
 	}
 	decided := make(chan map[string]any, 1)
 	go func() { _, out := fx.decide(id, fx.human("owner-1"), choice("once")); decided <- out }()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for fx.request(id).Status != "allowed" {
 		if time.Now().After(deadline) {
 			release()

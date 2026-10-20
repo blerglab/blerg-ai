@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
-	"github.com/blerglab/blerg-ai/runner/internal/coreauth"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -55,9 +54,9 @@ func TestHandleGetReposListsLocalFoldersWithoutGitHubConfigured(t *testing.T) {
 	// Set up test core server for auth
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	coreSrv := newTestCoreServer(t, pub)
-	defer coreSrv.Close()
+	t.Cleanup(coreSrv.Close)
 
-	coreAuth := coreauth.New(coreSrv.URL)
+	coreAuth := ownedCoreAuthClient(t, coreSrv.URL)
 
 	hub := NewHub()
 	dc := &DaemonConn{
@@ -180,9 +179,9 @@ func TestBrowserEndpointsSucceedWithValidAuth(t *testing.T) {
 	// Set up test core server
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	coreSrv := newTestCoreServer(t, pub)
-	defer coreSrv.Close()
+	t.Cleanup(coreSrv.Close)
 
-	coreAuth := coreauth.New(coreSrv.URL)
+	coreAuth := ownedCoreAuthClient(t, coreSrv.URL)
 
 	hub := NewHub()
 	api := NewAPI(hub, nil, "daemon-tok", nil, "")
@@ -246,9 +245,10 @@ func newCredentialsAPI(t *testing.T, credentialsHandler http.HandlerFunc) (*API,
 		mux.HandleFunc("/internal/credentials/list", credentialsHandler)
 	}
 	coreSrv := httptest.NewServer(mux)
+	t.Cleanup(coreSrv.Close)
 
 	api := NewAPI(NewHub(), nil, "daemon-tok", nil, "")
-	api.SetCoreAuth(coreauth.New(coreSrv.URL))
+	api.SetCoreAuth(ownedCoreAuthClient(t, coreSrv.URL))
 	api.SetCoreCredentials(coreSrv.URL, "internal-key")
 
 	token := mintTestToken(t, priv, "k1", identity.Claims{
@@ -278,8 +278,7 @@ func callMyCredentials(t *testing.T, api *API, token string) (*httptest.Response
 }
 
 func TestMyCredentialsRequiresAuth(t *testing.T) {
-	api, _, coreSrv := newCredentialsAPI(t, nil)
-	defer coreSrv.Close()
+	api, _, _ := newCredentialsAPI(t, nil)
 
 	w, _ := callMyCredentials(t, api, "")
 	if w.Code != http.StatusUnauthorized {
@@ -289,7 +288,7 @@ func TestMyCredentialsRequiresAuth(t *testing.T) {
 
 func TestMyCredentialsSplitsGitFromEngines(t *testing.T) {
 	var gotKey, gotAccount string
-	api, token, coreSrv := newCredentialsAPI(t, func(w http.ResponseWriter, r *http.Request) {
+	api, token, _ := newCredentialsAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get("X-Internal-Key")
 		var body struct {
 			AccountID string `json:"account_id"`
@@ -298,7 +297,6 @@ func TestMyCredentialsSplitsGitFromEngines(t *testing.T) {
 		gotAccount = body.AccountID
 		json.NewEncoder(w).Encode(map[string][]string{"engines": {"claude", "github"}})
 	})
-	defer coreSrv.Close()
 
 	w, out := callMyCredentials(t, api, token)
 	if w.Code != http.StatusOK {
@@ -328,10 +326,9 @@ func TestMyCredentialsSplitsGitFromEngines(t *testing.T) {
 // tell a user with several credentials that they have none; it belongs in the
 // "couldn't tell" bucket alongside a down or unconfigured core.
 func TestMyCredentialsNotFoundIsUnavailable(t *testing.T) {
-	api, token, coreSrv := newCredentialsAPI(t, func(w http.ResponseWriter, r *http.Request) {
+	api, token, _ := newCredentialsAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	})
-	defer coreSrv.Close()
 
 	w, out := callMyCredentials(t, api, token)
 	if w.Code != http.StatusOK {
@@ -347,8 +344,7 @@ func TestMyCredentialsNotFoundIsUnavailable(t *testing.T) {
 }
 
 func TestMyCredentialsCoreDownIsUnavailable(t *testing.T) {
-	api, token, coreSrv := newCredentialsAPI(t, nil)
-	defer coreSrv.Close()
+	api, token, _ := newCredentialsAPI(t, nil)
 	api.SetCoreCredentials("http://127.0.0.1:1", "internal-key") // nothing listening
 
 	w, out := callMyCredentials(t, api, token)
@@ -361,10 +357,9 @@ func TestMyCredentialsCoreDownIsUnavailable(t *testing.T) {
 }
 
 func TestMyCredentialsCoreErrorIsUnavailable(t *testing.T) {
-	api, token, coreSrv := newCredentialsAPI(t, func(w http.ResponseWriter, r *http.Request) {
+	api, token, _ := newCredentialsAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom: core detail the browser must not see", http.StatusServiceUnavailable)
 	})
-	defer coreSrv.Close()
 
 	w, out := callMyCredentials(t, api, token)
 	if w.Code != http.StatusOK {
@@ -576,7 +571,6 @@ func postSpawnSessionID(t *testing.T, api *API, daemonID, runtime, kind string) 
 
 func TestMyCredentialsUnconfiguredIsUnavailable(t *testing.T) {
 	api, token, coreSrv := newCredentialsAPI(t, nil)
-	defer coreSrv.Close()
 	api.SetCoreCredentials(coreSrv.URL, "") // internal key unset
 
 	w, out := callMyCredentials(t, api, token)

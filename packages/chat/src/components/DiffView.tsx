@@ -387,6 +387,46 @@ export default function DiffView({ text, commit, selection, onSelection, request
   const anyLang = useMemo(() => patch.files.some(f => langFromName(f.path) !== null), [patch])
   const ready = useHighlighterReady(anyLang)
   const mainRef = useRef<HTMLDivElement | null>(null)
+  const filesRef = useRef<HTMLElement | null>(null)
+  const [currentFile, setCurrentFile] = useState({patch, index: 0})
+  const currentIndex = currentFile.patch === patch ? currentFile.index : 0
+  // The code pane owns the active location; file-list scrolling never changes it.
+  // Section resize notifications keep collapsed files and async highlighting in sync.
+  useEffect(() => {
+    const root = mainRef.current
+    if (!root) return
+    const sections = [...root.children].filter((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains('diff-file'))
+    let frame: number | undefined
+    const measure = () => {
+      frame = undefined
+      if (!root.clientHeight || !sections.length) return
+      const top = root.getBoundingClientRect().top + 8
+      const visible = sections.findIndex(section => section.getBoundingClientRect().bottom > top)
+      let index = visible < 0 ? sections.length - 1 : visible
+      if (root.scrollHeight > root.clientHeight + 1 && root.scrollTop + root.clientHeight >= root.scrollHeight - 1) index = sections.length - 1
+      setCurrentFile(prior => prior.patch === patch && prior.index === index ? prior : {patch, index})
+    }
+    const schedule = () => { if (frame === undefined) frame = requestAnimationFrame(measure) }
+    root.addEventListener('scroll', schedule, {passive: true})
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule)
+    observer?.observe(root)
+    sections.forEach(section => observer?.observe(section))
+    schedule()
+    return () => {
+      root.removeEventListener('scroll', schedule)
+      observer?.disconnect()
+      if (frame !== undefined) cancelAnimationFrame(frame)
+    }
+  }, [patch])
+  useEffect(() => {
+    const nav = filesRef.current
+    const button = nav?.querySelectorAll('button')[currentIndex]
+    if (!nav || !button) return
+    const box = button.getBoundingClientRect()
+    const view = nav.getBoundingClientRect()
+    if (box.top < view.top) nav.scrollTop += box.top - view.top
+    else if (box.bottom > view.bottom) nav.scrollTop += box.bottom - view.bottom
+  }, [patch, currentIndex])
   const canCopy = typeof navigator !== 'undefined' && !!navigator.clipboard
   // Files start open until DIFF_OPEN_LINES lines are on the page; the rest start closed.
   const opens = useMemo(() => {
@@ -412,6 +452,7 @@ export default function DiffView({ text, commit, selection, onSelection, request
   const paths = new Set(patch.files.map(f => f.path))
 
   function jump(i: number) {
+    setCurrentFile({patch, index: i})
     const el = mainRef.current?.querySelector(`#diff-file-${i}`)
     if (el && 'scrollIntoView' in el) (el as HTMLElement).scrollIntoView({ block: 'start' })
   }
@@ -452,11 +493,11 @@ export default function DiffView({ text, commit, selection, onSelection, request
         {notice && <span role="status">{notice}</span>}
       </div>}
       <div className="diff-layout">
-        <nav className="diff-files" aria-label="Files" data-testid="diff-files">
+        <nav ref={filesRef} className="diff-files" aria-label="Files" data-testid="diff-files">
           <ul>
             {patch.files.map((f, i) => (
               <li key={i}>
-                <button type="button" className="diff-files-item" title={fileTitle(f)} onClick={() => jump(i)}>
+                <button type="button" className="diff-files-item" aria-current={currentIndex === i ? 'location' : undefined} title={fileTitle(f)} onClick={() => jump(i)}>
                   <span className={`diff-status diff-status-${f.status}`} aria-label={STATUS_WORD[f.status]}>{STATUS_LABEL[f.status]}</span>
                   <span className="diff-files-name">{f.path}</span>
                   <span className="diff-files-counts"><span className="diff-plus">+{f.adds}</span> <span className="diff-minus">−{f.dels}</span></span>

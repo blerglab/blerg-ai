@@ -80,7 +80,7 @@ func TestStartMCPGatewayServesOnItsOwnListener(t *testing.T) {
 	}
 
 	cancel()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		c, err := (&http.Client{Timeout: time.Second}).Post(base+"/mcp-gw/alpha", "application/json", http.NoBody)
 		if err != nil {

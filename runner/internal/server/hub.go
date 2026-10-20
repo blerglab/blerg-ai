@@ -69,6 +69,7 @@ type DaemonConn struct {
 	gitProviders         []string                       // providers the daemon can clone from (hello); nil = GitHub only
 	cloneFrom            bool                           // honours SpawnSession.CloneFrom (hello)
 	mcpGateway           bool                           // honours SpawnSession.MCPGateway (hello mcp_gateway)
+	mcpGatewayViaServer  bool                           // honours MCPGatewayConfig.ViaServer (hello mcp_gateway_via_server)
 	inputReceipts        bool
 	sessionTokenFile     bool        // handles SessionToken and answers it (hello session_token_file)
 	tokenHealSkipLogged  atomic.Bool // the "too old for a token heal" line was logged for this connection

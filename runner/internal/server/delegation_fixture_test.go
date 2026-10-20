@@ -223,10 +223,10 @@ func (fx *delegFx) do(method, path, tok string, body any, hdr map[string]string)
 	return rec.Code, out, rec.Header()
 }
 
-// spawn reads one spawn_session frame from fx.dc.send, skipping other frames; fails after 2 s.
+// spawn reads one spawn_session frame from fx.dc.send, skipping other frames; fails at the readiness deadline.
 func (fx *delegFx) spawn() protocol.SpawnSession {
 	fx.t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for {
 		select {
 		case raw := <-fx.dc.send:

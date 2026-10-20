@@ -27,6 +27,7 @@ function renderCard(session = makeSession()) {
 describe('SessionCard', () => {
   beforeEach(() => {
     wsMock.resetWsMock()
+    apiFetch.mockReset()
   })
 
   it('offers confirmed discard only in a child card menu and waits for authoritative data',async()=>{
@@ -42,9 +43,20 @@ describe('SessionCard', () => {
     expect(screen.getByText('Review child')).toBeInTheDocument()
     expect(screen.getByTestId('location')).toHaveTextContent('/')
   })
-  it('does not offer child discard for a parent session',()=>{
-    renderCard(makeSession({title:'Parent'}))
-    expect(screen.queryByRole('button',{name:'Actions for Parent'})).toBeNull()
+  it('offers a distinct confirmed parent discard and explains the cascade', async()=>{
+    apiFetch.mockResolvedValue({ok: true,json:async()=>({status:'discarded',session_id:'parent /',archived_at:'2026-10-20T12:00:00Z'})})
+    renderCard(makeSession({id:'parent /',title:'Parent'}))
+    fireEvent.click(screen.getByRole('button',{name:'Actions for Parent'}))
+    expect(screen.queryByRole('menuitem',{name:'Discard child session'})).toBeNull()
+    fireEvent.click(screen.getByRole('menuitem',{name:'Discard session and children'}))
+    expect(screen.getByRole('dialog',{name:'Discard session and all children?'})).toBeInTheDocument()
+    expect(screen.getByText(/including children marked Keep running and work in progress/)).toBeInTheDocument()
+    expect(screen.getByText(/conversations, files, history and insights remain available/)).toBeInTheDocument()
+    expect(apiFetch).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button',{name:'Discard session and children'}))
+    await waitFor(()=>expect(apiFetch).toHaveBeenCalledWith('/api/sessions/parent%20%2F/discard',{method:'POST'}))
+    expect(screen.getByTestId('location')).toHaveTextContent('/')
+    expect(screen.getByText('Parent')).toBeInTheDocument()
   })
   it('renders the session name and does NOT render the project path', () => {
     renderCard(makeSession({ title: 'My task', status: 'waiting', project_path: '/repos/foo' }))

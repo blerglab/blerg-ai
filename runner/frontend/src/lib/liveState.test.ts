@@ -31,7 +31,7 @@ describe('foldLive', () => {
     // Events the reply already covers are not folded again.
     const v = foldLive(r, [ev('subagent_done', { child_id: 'k1' }, 9), ev('ask', { body: 'old', message_id: 'm0' }, 10)], T0)
     expect(v.asks).toEqual([{ eventId: 'a1', messageId: 'm1', question: 'Ship it?', askedAt: T0 }])
-    expect(v.subagents).toEqual([{ key: 'k1', title: 'Implement', type: 'general-purpose', model: 'sonnet', tokens: 10, doing: 'running Bash · npm test', startedAt: T0, background: false }])
+    expect(v.subagents).toEqual([{ key: 'k1', childId: 'k1', title: 'Implement', type: 'general-purpose', model: 'sonnet', tokens: 10, doing: 'running Bash · npm test', startedAt: T0, background: false }])
     expect(v.tasks).toEqual([{ taskId: 't1', callId: 'c1', kind: 'bash', description: 'npm run dev', command: '', startedAt: T0, done: null }])
     expect(v.counts).toEqual({ needsYou: 3, running: 2 })
   })
@@ -39,7 +39,7 @@ describe('foldLive', () => {
   it('folds a subagent start, its updates, its background launch and its end', () => {
     const start = ev('subagent_started', { child_id: 'k2', agent_type: 'Explore', model: 'haiku', summary: '\nFind the bug\nmore' }, 11, 2)
     let v = foldLive(reply(), [start], T0)
-    expect(v.subagents).toEqual([{ key: 'k2', title: 'Find the bug', type: 'Explore', model: 'haiku', tokens: null, doing: '', startedAt: T0 + 2 * 60_000, background: false }])
+    expect(v.subagents).toEqual([{ key: 'k2', childId: 'k2', title: 'Find the bug', type: 'Explore', model: 'haiku', tokens: null, doing: '', startedAt: T0 + 2 * 60_000, background: false }])
     const update = ev('subagent_update', { child_id: 'k2', model: 'claude-haiku', usage: { input_tokens: 5, output_tokens: 7 } }, 12)
     const launch = ev('subagent_done', { child_id: 'k2', background: true }, 13)
     const task = ev('background_task_started', { task_id: 'a5', call_id: 'k2', kind: 'agent' }, 14)
@@ -140,7 +140,7 @@ describe('foldLive: the checklist, the plan and the pins', () => {
       tickets: [{ source: 'jira', key: 'A-1', title: 'T', status: 'Open', url: 'https://x.example/A-1', event_id: 't1', seq: 3, updated_at: iso(0) }],
       ticket: { source: 'jira', key: 'A-1', title: 'T', status: 'Open', description: 'd', event_id: 't1', updated_at: iso(0) },
     }), [], T0)
-    expect(v.checklist).toEqual({ items: items(['a', true], ['b', false]), eventId: 'c1', updatedAt: T0 })
+    expect(v.checklist).toEqual({ items: [{id:'legacy-c1-1',text:'a',done:true},{id:'legacy-c1-2',text:'b',done:false}], eventId: 'c1', updatedAt: T0 })
     expect(v.plan?.items[0].active).toBe('Doing x')
     expect(v.tickets.map(t => t.key)).toEqual(['A-1'])
     expect(v.ticket).toMatchObject({ key: 'A-1', description: 'd', eventId: 't1', updatedAt: T0 })
@@ -246,4 +246,34 @@ it('counts pending child requests and active child sessions separately from suba
   expect(out.counts).toEqual({ needsYou: 1, running: 1 })
   expect(out.children).toHaveLength(2)
   expect(out.delegationGrants?.[0].id).toBe('grant')
+})
+
+it('keeps explicit canonical child identity and checklist IDs through native and reply folds',()=>{
+ const v=foldLive(reply({subagents:[sub('call',{child_id:'native'})],checklist:{items:[{id:'stable',text:'Work',done:false,in_progress:true,assignees:[{kind:'subagent',id:'native'}]}],event_id:'event',updated_at:iso(0)}}),[],T0)
+ expect(v.subagents[0].childId).toBe('native');expect(v.checklist?.items[0]).toMatchObject({id:'stable',in_progress:true,assignees:[{kind:'subagent',id:'native'}]})
+ const malformed=foldLive(reply({checklist:{items:[{text:'Old',done:false}],event_id:'not/an/identity',updated_at:iso(0)}}),[],T0)
+ expect(malformed.checklist?.items[0].id).toBeUndefined()
+})
+
+it('does not attach an old snapshot alias to a newly started worker before authoritative refresh',()=>{
+ const r=reply({checklist:{items:[{id:'work',text:'Original work',done:false,assignees:[{kind:'subagent',id:'collision'}]}],event_id:'c1',updated_at:iso(0)}})
+ const started=ev('subagent_started',{child_id:'collision',call_id:'other-call',summary:'Different worker'},11)
+ const v=foldLive(r,[started],T0)
+ expect(v.checklist?.items[0].assignees).toBeUndefined()
+ const updated=ev('checklist',{op:'assign',items:[{id:'work',text:'Explicit new work',done:false,assignees:[{kind:'subagent',id:'collision'}]}]},12)
+ expect(foldLive(r,[started,updated],T0).checklist?.items[0].assignees).toEqual([{kind:'subagent',id:'collision'}])
+ expect(foldLive({...r,through_seq:11},[started],T0).checklist?.items[0].assignees).toEqual([{kind:'subagent',id:'collision'}])
+})
+
+it('keeps a reaffirmed snapshot worker assignment and promotes an explicitly linked call-only worker',()=>{
+ const checklist={items:[{id:'work',text:'Work',done:false,assignees:[{kind:'subagent' as const,id:'native'}]}],event_id:'c1',updated_at:iso(0)}
+ const duplicate=foldLive(reply({subagents:[sub('native')],checklist}),[ev('subagent_started',{child_id:'native',summary:'Worker'},11)],T0)
+ expect(duplicate.checklist?.items[0].assignees).toEqual([{kind:'subagent',id:'native'}])
+ const after=[ev('subagent_started',{call_id:'call-only',summary:'Original worker'},11),ev('checklist',{op:'assign',items:[{id:'work',text:'Current assignment',done:false,assignees:[{kind:'subagent',id:'call-only'}]}]},12),ev('subagent_update',{child_id:'native',call_id:'call-only',model:'reported-model'},13)]
+ const promoted=foldLive(reply(),after,T0)
+ expect(promoted.subagents).toHaveLength(1)
+ expect(promoted.subagents[0]).toMatchObject({key:'native',childId:'native',title:'Original worker',model:'reported-model'})
+ expect(promoted.checklist?.items[0].assignees).toEqual([{kind:'subagent',id:'native'}])
+ expect(foldLive(reply(),[...after,ev('subagent_done',{child_id:'native',call_id:'call-only'},14)],T0).subagents).toEqual([])
+ expect(foldLive(reply(),[...after,ev('subagent_done',{call_id:'call-only'},14)],T0).subagents).toEqual([])
 })

@@ -361,3 +361,41 @@ func scanBoardExchangeSubs(rows pgx.Rows, who string) ([]BoardExchangeSub, error
 	}
 	return out, rows.Err()
 }
+
+// MarkMCPGrantsPublic marks every grant of a session as issued for the gateway's public route
+// (migration 065), starting its idle clock now.
+func MarkMCPGrantsPublic(ctx context.Context, pool *pgxpool.Pool, sessionID string) error {
+	if _, err := pool.Exec(ctx,
+		`UPDATE session_mcp_grants SET public_route = true, public_used_at = now() WHERE session_id = $1`, sessionID); err != nil {
+		return fmt.Errorf("MarkMCPGrantsPublic: %w", err)
+	}
+	return nil
+}
+
+// UsePublicMCPGrant reports whether the grant with tokenHash may be served on the gateway's public
+// route: issued for it and used (or renewed) within idle. When it may, its idle clock restarts.
+func UsePublicMCPGrant(ctx context.Context, pool *pgxpool.Pool, tokenHash []byte, idle time.Duration) (bool, error) {
+	tag, err := pool.Exec(ctx, `
+		UPDATE session_mcp_grants SET public_used_at = now()
+		 WHERE token_hash = $1 AND public_route AND public_used_at > now() - make_interval(secs => $2)`,
+		tokenHash, idle.Seconds())
+	if err != nil {
+		return false, fmt.Errorf("UsePublicMCPGrant: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// RenewPublicMCPGrants restarts the idle clock of the public-route grants of the given sessions
+// that run on daemonID (the daemon reconnected and reported them running).
+func RenewPublicMCPGrants(ctx context.Context, pool *pgxpool.Pool, daemonID string, sessionIDs []string) error {
+	if len(sessionIDs) == 0 {
+		return nil
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE session_mcp_grants SET public_used_at = now()
+		 WHERE public_route AND session_id::text = ANY($1)
+		   AND session_id IN (SELECT id FROM sessions WHERE daemon_id::text = $2)`, sessionIDs, daemonID); err != nil {
+		return fmt.Errorf("RenewPublicMCPGrants: %w", err)
+	}
+	return nil
+}

@@ -31,6 +31,14 @@ func mintRunnerToken(t *testing.T, priv ed25519.PrivateKey, kid string, c identi
 	return si + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
+// ownedCoreAuthClient joins test-owned pollers before their receiver is closed.
+func ownedCoreAuthClient(t *testing.T, baseURL string) *coreauth.Client {
+	t.Helper()
+	client := coreauth.NewWithContext(t.Context(), baseURL)
+	t.Cleanup(client.Close)
+	return client
+}
+
 // newTestCoreAuthClient starts a fake blerg-core serving jwks/revocations and
 // returns a coreauth.Client wired against it (coreauth.New fetches both
 // synchronously before returning, so the client is immediately usable).
@@ -47,7 +55,7 @@ func newTestCoreAuthClient(t *testing.T, pub ed25519.PublicKey, kid string) *cor
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return coreauth.New(srv.URL)
+	return ownedCoreAuthClient(t, srv.URL)
 }
 
 // TestAuthRunner_CoreTokenWithoutCapabilityRejected is a regression guard for

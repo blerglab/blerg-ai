@@ -12,6 +12,8 @@ import { buildTimeline, parentCallOf, type SubagentEntry, type TimelineItem } fr
 export interface SubagentLive {
   /** Its card's key: the call id the subagent card carries (scrollToCall(key) shows it). */
   key: string
+  /** Canonical native child identity, distinct from its transcript call key. */
+  childId?: string
   /** The task's description, else the start of its prompt. */
   title: string
   /** Its type (general-purpose, Explore, …); '' when not reported. */
@@ -88,6 +90,7 @@ export function liveSubagents(
     if (status !== 'running' && status !== 'background') continue
     out.push({
       key: sub.key,
+      ...(sub.info.child_id ? { childId: sub.info.child_id } : {}),
       title: subagentTitle(sub),
       type: sub.info.agent_type || inputField(sub.call?.call.input, 'subagent_type'),
       model: subagentModel(sub),

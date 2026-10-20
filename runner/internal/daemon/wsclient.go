@@ -422,6 +422,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	hello.CloneFrom = true // SpawnSession.CloneFrom (EnsureClonedTarget)
 	hello.AllowHostCredentialClone = c.config.AllowHostCredentialClone
 	hello.MCPGateway = true                         // SpawnSession.MCPGateway (mcpgateway.go)
+	hello.MCPGatewayViaServer = true                // MCPGatewayConfig.ViaServer, host board grants (mcpgateway.go)
 	hello.CodexRestricted = runtime.GOOS == "linux" // Spawn rechecks the actual CLI version before exposing only rooted dynamic tools.
 	hello.RestrictTools = true                      // SpawnSession.RestrictTools (claudecode.go ccHardeningFlags)
 	hello.PluginEngines = pluginEnginesCapability()

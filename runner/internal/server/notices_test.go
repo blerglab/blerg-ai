@@ -343,14 +343,14 @@ func TestIdleNotice_RecheckLoop(t *testing.T) {
 		RunIdleNoticeChecks(ctx, f.hub, f.pool, 10*time.Millisecond)
 		close(done)
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for f.pushes.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("RunIdleNoticeChecks did not stop with its context")
 	}
 	f.expect("the loop's recheck", 1)

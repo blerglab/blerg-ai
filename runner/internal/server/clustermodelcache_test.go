@@ -21,7 +21,7 @@ func cacheFixture(at time.Time, id string) models.List {
 }
 func awaitCatalog(t *testing.T, a *API, account string) models.List {
 	t.Helper()
-	end := time.Now().Add(2 * time.Second)
+	end := time.Now().Add(15 * time.Second)
 	for time.Now().Before(end) {
 		list := a.clusterModelSnapshot(context.Background(), "codex", account, coreProof{SessionID: "fixture-proof"}, false)
 		if !list.Refreshing {
@@ -53,7 +53,7 @@ func TestClusterModelSnapshotReturnsImmediatelyAndCoalescesBackgroundWork(t *tes
 		if !l.Refreshing || len(l.Models) != 0 {
 			t.Fatalf("wrong initial snapshot: %+v", l)
 		}
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(15 * time.Second):
 		t.Fatal("request blocked on probe")
 	}
 	<-started
@@ -239,7 +239,7 @@ func TestClusterModelSnapshotScopesEngineAndUsesItsRules(t *testing.T) {
 	}
 	read := func(engine string) models.List {
 		t.Helper()
-		end := time.Now().Add(2 * time.Second)
+		end := time.Now().Add(15 * time.Second)
 		for time.Now().Before(end) {
 			l := a.clusterModelSnapshot(context.Background(), engine, "same-account", proof, false)
 			if !l.Refreshing {

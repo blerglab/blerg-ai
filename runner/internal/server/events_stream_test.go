@@ -62,7 +62,7 @@ func openSSEStream(t *testing.T, srv *httptest.Server, path string, hdr map[stri
 // record separator), failing the test if none arrives promptly.
 func (s *sseStream) next(t *testing.T) string {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for {
 		select {
 		case line, ok := <-s.lines:
@@ -105,7 +105,7 @@ func (s *sseStream) expectData(t *testing.T) map[string]any {
 // waitEOF drains the rest of the stream and asserts it ended cleanly.
 func (s *sseStream) waitEOF(t *testing.T) {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for {
 		select {
 		case _, ok := <-s.lines:

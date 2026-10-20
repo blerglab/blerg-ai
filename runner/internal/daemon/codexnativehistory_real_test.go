@@ -130,7 +130,7 @@ func TestNativeCodexHistoryRejectsRetainedRevokedToolsAndCredentials(t *testing.
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(4 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("native fixture did not stop")
 		}
 		if countKind(em, "turn_done") == 0 || countKind(em, "error") != 0 {

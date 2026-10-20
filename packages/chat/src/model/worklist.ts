@@ -4,7 +4,7 @@
 // a field of the wrong type is dropped, never drawn), the words the chat rows say, and the fold
 // of the events into what the session panel shows. The server stores the change in each event, so
 // nothing here compares one event with another.
-import type { AgentEvent, ChecklistItem, ChecklistPayload, Ticket, TicketComment, TicketField, TicketPayload } from '../types'
+import type { AgentEvent, ChecklistAssignee, ChecklistItem, ChecklistPayload, Ticket, TicketComment, TicketField, TicketPayload } from '../types'
 import { parseTs } from './timeLabel'
 import { safeUrl } from './safeUrl'
 
@@ -70,25 +70,109 @@ export function commitsText(n: number): string {
   return `${n} commit${n === 1 ? '' : 's'}`
 }
 
-/** readChecklist: a checklist event's payload, its items checked; null when it is not one. */
-export function readChecklist(payload: unknown): ChecklistPayload | null {
+// IDs are data, never selectors or paths. Conservative legacy fallback stays unlinked when an
+// old event ID cannot be represented; the server can normalize it with its hash-based fallback.
+const WORK_ID = /^[A-Za-z0-9_-]{1,96}$/
+const LEGACY_SEED = /^[A-Za-z0-9_-]{1,48}$/
+const workerId = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && new TextEncoder().encode(v).length <= 256 && v.trim() === v && !/[\p{Cc}\p{Cs}]/u.test(v)
+const workId = (v: unknown): string => typeof v === 'string' && WORK_ID.test(v) ? v : ''
+function readAssignees(value: unknown): ChecklistAssignee[] {
+  const out: ChecklistAssignee[] = []
+  if (Array.isArray(value)) for (const raw of value.slice(0, 32)) {
+    const a = rec(raw)
+    if (!a || (a.kind !== 'subagent' && a.kind !== 'child_session') || !workerId(a.id)) continue
+    if (!out.some(x => x.kind === a.kind && x.id === a.id)) out.push({ kind: a.kind, id: a.id })
+  }
+  return out
+}
+function readItem(r: Rec): ChecklistItem {
+  const commits = readCommits(r.commits)
+  const diff = commits.length ? readDiff(r.diff) : ''
+  const id = workId(r.id)
+  const assignees = readAssignees(r.assignees)
+  return { text: r.text as string, done: r.done === true,
+    ...(id ? { id } : {}), ...(r.in_progress === true && r.done !== true ? { in_progress: true } : {}),
+    ...(assignees.length ? { assignees } : {}), ...(commits.length ? { commits } : {}), ...(diff ? { diff } : {}) }
+}
+
+/** readChecklist: defensively read an event or /live list; old event IDs derive the same ordinary
+ *  legacy identities as the server. No title/index matching across replacements. */
+export function readChecklist(payload: unknown, eventId?: string): ChecklistPayload | null {
   const p = rec(payload)
   if (!p || !Array.isArray(p.items)) return null
   const items: ChecklistItem[] = []
-  for (const it of p.items) {
-    const r = rec(it)
+  const used = new Set<string>()
+  for (const [index, raw] of p.items.slice(0, 50).entries()) {
+    const r = rec(raw)
     if (!r || typeof r.text !== 'string') continue
-    const commits = readCommits(r.commits)
-    const diff = commits.length ? readDiff(r.diff) : ''
-    items.push({ text: r.text, done: r.done === true, ...(commits.length ? { commits } : {}), ...(diff ? { diff } : {}) })
+    const item = readItem(r)
+    const fallback = eventId && LEGACY_SEED.test(eventId) ? `legacy-${eventId}-${index + 1}` : ''
+    if (!item.id && fallback) item.id = fallback
+    // Ambiguous duplicate IDs cannot safely be navigation targets.
+    if (item.id && used.has(item.id)) {
+      for (const previous of items) if (previous.id === item.id) delete previous.id
+      delete item.id
+    } else if (item.id) used.add(item.id)
+    items.push(item)
   }
   const c = rec(p.changed)
-  const cc = c ? readCommits(c.commits) : []
-  const cd = c && cc.length ? readDiff(c.diff) : ''
-  const changed = c && typeof c.text === 'string' && typeof c.index === 'number'
-    ? { index: c.index, text: c.text, done: c.done === true, ...(cc.length ? { commits: cc } : {}), ...(cd ? { diff: cd } : {}) }
+  const changed = c && typeof c.text === 'string' && Number.isSafeInteger(c.index) && (c.index as number) > 0
+    ? { ...readItem(c), index: c.index as number, ...(workId(c.from_item_id) ? { from_item_id: workId(c.from_item_id) } : {}) }
     : undefined
   return { items, op: str(p.op), ...(changed ? { changed } : {}) }
+}
+
+/** Explicit association only. An absent/ambiguous target must not navigate to another row. */
+export function checklistAssignment(items: readonly ChecklistItem[], kind: ChecklistAssignee['kind'], id: string): ChecklistItem | undefined {
+  if (!id) return undefined
+  const found = items.filter(item => item.id && item.assignees?.some(a => a.kind === kind && a.id === id))
+  return found.length === 1 ? found[0] : undefined
+}
+
+/** Resolve explicit native aliases from loaded events and suppress proven identity collisions.
+ *  A host snapshot may know more than the loaded transcript: unknown IDs remain unchanged.
+ *  Return the original references when unchanged so streaming tools/text don't churn the UI. */
+export function safeChecklistAssignments(items: readonly ChecklistItem[], events: readonly AgentEvent[]): readonly ChecklistItem[] {
+  const children = new Set<string>()
+  const callsOnly = new Set<string>()
+  const aliases = new Map<string, Set<string>>()
+  for (const ev of events) {
+    if (!['subagent_started', 'subagent_update', 'subagent_done'].includes(ev.kind)) continue
+    const p = rec(ev.payload)
+    if (!p) continue
+    const child = workerId(p.child_id) ? p.child_id : ''
+    const call = workerId(p.call_id) ? p.call_id : ''
+    if (child) children.add(child)
+    if (call && !child) callsOnly.add(call)
+    if (call && child) {
+      const targets = aliases.get(call) ?? new Set<string>()
+      targets.add(child)
+      aliases.set(call, targets)
+    }
+  }
+  const ambiguous = new Set<string>()
+  for (const id of new Set([...children, ...aliases.keys()])) {
+    const targets = aliases.get(id)
+    if ((targets && (targets.size > 1 || (children.has(id) && [...targets].some(target => target !== id)))) ||
+      (children.has(id) && callsOnly.has(id) && !targets?.size)) ambiguous.add(id)
+  }
+  let changed = false
+  const out = items.map(item => {
+    if (!item.assignees?.length) return item
+    let itemChanged = false
+    const assignees: ChecklistAssignee[] = []
+    for (const a of item.assignees) {
+      if (a.kind !== 'subagent') { assignees.push(a); continue }
+      const id = aliases.get(a.id)?.values().next().value ?? a.id
+      if (ambiguous.has(a.id) || ambiguous.has(id)) { itemChanged = true; continue }
+      if (id !== a.id) { itemChanged = true; assignees.push({ ...a, id }) }
+      else assignees.push(a)
+    }
+    if (!itemChanged) return item
+    changed = true
+    return { ...item, assignees }
+  })
+  return changed ? out : items
 }
 
 /** "3 of 7 done". */
@@ -108,6 +192,12 @@ export function checklistRowText(p: ChecklistPayload): string {
   const c = p.changed
   switch (p.op) {
     case 'tick': return c ? `${head} · ticked “${c.text}”` : head
+    case 'doing': return c ? `${head} · doing “${c.text}”` : head
+    case 'pending': return c ? `${head} · queued “${c.text}”` : head
+    case 'assign': return c ? `${head} · assigned work on “${c.text}”` : head
+    case 'unassign': return c ? `${head} · unassigned work on “${c.text}”` : head
+    case 'rename': return c ? `${head} · renamed “${c.text}”` : head
+    case 'move': return c ? `${head} · moved “${c.text}”` : head
     case 'untick': return c ? `${head} · unticked “${c.text}”` : head
     case 'remove': return c ? `${head} · removed “${c.text}”` : head
     case 'add': return c ? `${head} · added “${c.text}”` : head
@@ -194,7 +284,7 @@ export function checklistFromEvents(events: readonly AgentEvent[]): ChecklistLiv
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i]
     if (ev.kind !== 'checklist') continue
-    const p = readChecklist(ev.payload)
+    const p = readChecklist(ev.payload, ev.client_event_id)
     if (!p) continue
     return p.items.length ? { items: p.items, eventId: ev.client_event_id, updatedAt: parseTs(ev.ts) } : null
   }

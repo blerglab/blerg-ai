@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"io"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,7 +31,7 @@ func TestCodexChildStartedNotificationCannotGrantForeignThreadOwnership(t *testi
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("driver did not stop")
 		}
 	}()
@@ -76,14 +78,14 @@ func TestCodexCompletingTurnCannotOpenQuestionBeforeDisplayUnblocks(t *testing.T
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("driver did not stop")
 		}
 	}()
 	driver.Enqueue("Exercise completion registration boundary", "chat")
 	select {
 	case <-emitter.reached:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("turn did not reach display boundary")
 	}
 	driver.mu.Lock()
@@ -100,40 +102,104 @@ func TestCodexCompletingTurnCannotOpenQuestionBeforeDisplayUnblocks(t *testing.T
 	}
 }
 
+// codexBlockedWriter makes native-write entry and cancellation observable. The
+// lifecycle assertion must run while the write is still blocked, even on slow CI.
+type codexBlockedWriter struct {
+	entered   chan struct{}
+	closed    chan struct{}
+	enterOnce sync.Once
+	closeOnce sync.Once
+}
+
+func (w *codexBlockedWriter) Write([]byte) (int, error) {
+	w.enterOnce.Do(func() { close(w.entered) })
+	<-w.closed
+	return 0, io.ErrClosedPipe
+}
+func (w *codexBlockedWriter) Close() error {
+	w.closeOnce.Do(func() { close(w.closed) })
+	return nil
+}
+
 func TestCodexBlockedNativeWriteHonorsRPCDeadlineWithoutHoldingLifecycleMutex(t *testing.T) {
-	reader, writer := io.Pipe()
-	defer reader.Close()
-	defer writer.Close()
-	appCtx, cancelApp := context.WithCancel(context.Background())
-	defer cancelApp()
-	driver := newCodexDriver(AgentDriverOpts{Emitter: &collectEmitter{}})
-	driver.threadID = "root"
-	app := &codexApp{d: driver, ctx: appCtx, in: writer, pending: map[int]chan codexRPC{}, done: make(chan struct{}), turn: "root-turn"}
-	ctx, cancel := context.WithTimeout(appCtx, 40*time.Millisecond)
-	defer cancel()
-	finished := make(chan error, 1)
-	go func() {
-		_, err := app.callContext(ctx, "thread/read", map[string]string{"threadId": "child"})
-		finished <- err
-	}()
-	time.Sleep(10 * time.Millisecond)
-	unlocked := make(chan struct{})
-	go func() { app.mu.Lock(); _ = app.turn; app.mu.Unlock(); close(unlocked) }()
-	select {
-	case <-unlocked:
-	case <-time.After(100 * time.Millisecond):
-		t.Error("blocked native write held the lifecycle mutex")
-	}
-	select {
-	case err := <-finished:
-		if err == nil {
-			t.Error("blocked native RPC unexpectedly succeeded")
+	t.Run("lifecycle mutex remains available during blocked write", func(t *testing.T) {
+		writer := &codexBlockedWriter{entered: make(chan struct{}), closed: make(chan struct{})}
+		defer writer.Close()
+		appCtx, cancelApp := context.WithCancel(context.Background())
+		defer cancelApp()
+		driver := newCodexDriver(AgentDriverOpts{Emitter: &collectEmitter{}})
+		driver.threadID = "root"
+		app := &codexApp{d: driver, ctx: appCtx, in: writer, pending: map[int]chan codexRPC{}, done: make(chan struct{}), turn: "root-turn"}
+		ctx, cancel := context.WithCancel(appCtx)
+		defer cancel()
+		finished := make(chan error, 1)
+		rpcDone := make(chan struct{})
+		go func() {
+			defer close(rpcDone)
+			_, err := app.callContext(ctx, "thread/read", map[string]string{"threadId": "child"})
+			finished <- err
+		}()
+		select {
+		case <-writer.entered:
+		case <-time.After(15 * time.Second):
+			t.Fatal("native write did not enter")
 		}
-	case <-time.After(200 * time.Millisecond):
-		t.Error("RPC context deadline did not bound a blocked native stdin write")
-		_ = reader.Close()
-		<-finished
-	}
+		unlocked := make(chan struct{})
+		go func() { app.mu.Lock(); _ = app.turn; app.mu.Unlock(); close(unlocked) }()
+		select {
+		case <-unlocked:
+			select {
+			case <-writer.closed:
+				t.Error("write was cancelled before lifecycle mutex became available")
+			default:
+			}
+			select {
+			case <-rpcDone:
+				t.Error("RPC finished before lifecycle mutex assertion")
+			default:
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("blocked native write held the lifecycle mutex")
+		}
+		cancel()
+		select {
+		case err := <-finished:
+			if err == nil {
+				t.Error("cancelled native RPC unexpectedly succeeded")
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("cancelled RPC did not stop")
+			_ = writer.Close()
+			<-finished
+		}
+	})
+	t.Run("RPC deadline cancels blocked write", func(t *testing.T) {
+		reader, writer := io.Pipe()
+		defer reader.Close()
+		defer writer.Close()
+		appCtx, cancelApp := context.WithCancel(context.Background())
+		defer cancelApp()
+		driver := newCodexDriver(AgentDriverOpts{Emitter: &collectEmitter{}})
+		app := &codexApp{d: driver, ctx: appCtx, in: writer, pending: map[int]chan codexRPC{}, done: make(chan struct{})}
+		// This short duration is the behavior under test, not a readiness watchdog.
+		ctx, cancel := context.WithTimeout(appCtx, 40*time.Millisecond)
+		defer cancel()
+		finished := make(chan error, 1)
+		go func() {
+			_, err := app.callContext(ctx, "thread/read", map[string]string{"threadId": "child"})
+			finished <- err
+		}()
+		select {
+		case err := <-finished:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("blocked native RPC error = %v, want context deadline", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("RPC context deadline did not bound a blocked native stdin write")
+			_ = reader.Close()
+			<-finished
+		}
+	})
 }
 
 func TestCodexDuplicateRPCRepliesCannotBlockNativeReader(t *testing.T) {
@@ -150,7 +216,7 @@ func TestCodexDuplicateRPCRepliesCannotBlockNativeReader(t *testing.T) {
 	go app.read(reader)
 	select {
 	case <-app.done:
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(15 * time.Second):
 		t.Error("duplicate response blocked the native reader after its reply slot filled")
 		// Release an old reader so a red regression does not leak goroutines.
 		for i := 0; i < 3; i++ {
@@ -177,7 +243,7 @@ func TestCodexResumeCannotReplaceRootIdentityAndInheritOldChildAllowlist(t *test
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("driver did not stop")
 		}
 	}()

@@ -416,7 +416,7 @@ const workGuideLine = "When you work on a ticket, read it with the tools you hav
 // the session guide, a bullet of the managed CLAUDE.md block, and the first paragraph of
 // `blerg-runner session --help` (SESSION_LINE). The full rules (budgets are per provider, wait after
 // a timeout, never start twice, loopback Hermes from a docker child) live in that help text.
-const childSessionGuideLine = "To hand work to another session, run `blerg-runner budget`, then `blerg-runner session start ...`; " +
+const childSessionGuideLine = "To ask another agent or hand it work (Codex, Claude, Hermes or another engine, e.g. \"ask Codex for ideas\"), start a child session: run `blerg-runner budget`, then `blerg-runner session start --engine <name> ...`; do not look for or install that engine's CLI. " +
 	"`blerg-runner session --help` explains approval, waiting and driving it. Never answer a " +
 	"child's question that asks for something destructive or irreversible: escalate it with " +
 	"`blerg-runner ask`. When raising `--timeout` (seconds), set the Bash tool timeout higher (milliseconds)."

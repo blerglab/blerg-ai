@@ -2,7 +2,7 @@
 // today, no more (docs/design/chat-package.md, "The transport contract"). Two adapters ship with
 // the package (blerg.ts over the runner's own websocket and routes, proxy.ts over an app's proxy
 // of the runner's v1 contract); an app with a backend of its own shape writes a third.
-import type { AgentEvent, DelegationChoice, DelegationDecidedPayload, EndedBy, SessionStatus } from '../types'
+import type { AgentEvent, DelegationChoice, DelegationDecidedPayload, EndedBy, ProposalDetail, ReviewRequestPayload, SessionStatus } from '../types'
 import type { ArtifactInfo } from '../model/artifacts'
 import type { UploadedFile } from '../model/attachments'
 
@@ -170,4 +170,17 @@ export interface Transport {
   decideDelegation?(requestId: string, choice: DelegationChoice): Promise<DelegationDecidedPayload>
   /** The request in full (the whole prompt), for the owner. Absent: no "Show all". */
   delegationRequest?(requestId: string): Promise<{ prompt: string }>
+  /** A proposal the session made, as its owner reads it. Rejects with { status: 404 } for anyone
+   *  else. Absent: a proposal card says it waits for the owner. */
+  proposal?(proposalId: string): Promise<ProposalDetail>
+  /** Approves or rejects a proposal (the owner). expected is the exact stored draft reviewed;
+   *  allowForSession also approves the session's later proposals of exactly this scope. Rejects
+   *  with { status } and the server's message. Absent: a proposal card is read-only. */
+  decideProposal?(proposalId: string, action: 'approve' | 'reject', opts?: { expected?: string; allowForSession?: boolean }): Promise<ProposalDetail>
+  /** The session's review requests (every state) and whether this person, its owner signed in, may
+   *  decide them. Absent: the chat knows the requests its transcript holds, read-only. */
+  reviewRequests?(sessionId: string): Promise<{ requests: ReviewRequestPayload[]; canDecide: boolean }>
+  /** Approves a review request or asks for changes (the session's owner only). Rejects with
+   *  { status } and the server's message. */
+  decideReview?(requestId: string, decision: 'approve' | 'request_changes', note?: string): Promise<ReviewRequestPayload>
 }

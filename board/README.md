@@ -77,6 +77,13 @@ Every env var the server and CLI read — gate backends, the runner, deploy
 URLs, defaults — is documented in [`docs/CONFIG.md`](docs/CONFIG.md).
 Nothing beyond `DATABASE_URL` is required to start.
 
+Boards start sessions as a person: **Run as me** (one click in a board's
+settings, beside **Run this card** on a board with no token, and checked by
+default when a board is created) has blerg-core mint that person's
+`run-sessions` token and stores it, so Run this card works out of the box on a
+single-user install. Pasting a token stays available for service accounts. See
+[Board automation identity](docs/CONFIG.md#board-automation-identity-who-a-boards-sessions-run-as).
+
 Board automation discovers engines, models and efforts through
 `GET /api/boards/{id}/launch-options` (MCP: `blerg_board_launch_options`), using
 that board's stored automation identity and configured runner target. A current

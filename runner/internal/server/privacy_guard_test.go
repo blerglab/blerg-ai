@@ -27,6 +27,7 @@ import (
 // routeDecisions: route pattern (as registered, method included) -> the
 // visibility decision that covers it.
 var routeDecisions = map[string]string{
+	"POST /api/sessions/{id}/discard":                  "signed-in human owner only; account then parent durable discard fence; same-owner children; strict stop delivery before archive",
 	"POST /api/sessions/{id}/children/{child}/discard": "own-parent delegate credential or signed-in human owner; exact parent-child relation and same owner required before stop or archive",
 	"GET /api/sessions/{id}/board-options":             "own-session messaging credential only; retained launcher proof and current Core account permission, project-scoped target filtering; names only",
 	"GET /api/sessions/{id}/board-search":              "own-session messaging credential only; current Core proof and selected-board scope; only public duplicate summaries, no body",
@@ -39,6 +40,7 @@ var routeDecisions = map[string]string{
 	"GET /api/sessions/{id}/children":                                  "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
 	"GET /api/sessions/{id}/children/{child}":                          "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
 	"POST /api/sessions/{id}/children/{child}/message":                 "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
+	"GET /api/sessions/{id}/children/models":                           "delegateParent verifies the own-session token and parent policy; returns only the model catalog the parent's own owner may start children on, no other session's data",
 	"POST /api/sessions/{id}/children/{child}/model":                   "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
 	"POST /api/sessions/{id}/children/{child}/interrupt":               "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
 	"POST /api/sessions/{id}/children/{child}/stop":                    "delegateParent verifies own-session token and parent policy; delegate principal canSee restricts to this parent child relation; files use sessionFilesFor before the common hardened artifact body",
@@ -73,19 +75,30 @@ var routeDecisions = map[string]string{
 	"GET /api/sessions/{id}/plugins":                  "human session owner only, live proof checked by Core; no public viewer or agent token reads",
 	"POST /api/sessions/{id}/plugins":                 "human session owner only; exact approved allowlisted change, Core validates live human proof",
 	"POST /api/sessions/{id}/plugin-requests":         "own session messaging token only; only queues owner-scoped approval, never installs",
+	"GET /api/sessions/{id}/checklist/workers":        "the session's own messaging credential bound to the path, or daemon token; human tokens refused; native records scoped to session and direct child records require same owning account",
 	"POST /api/sessions/{id}/checklist":               "the session's own credential: its messaging token (whose session must equal the path) or the daemon token; a person's token is refused; read back through /live",
 	"POST /api/sessions/{id}/tickets":                 "the session's own credential: its messaging token (whose session must equal the path) or the daemon token; a person's token is refused; read back through /live",
 	"GET /api/sessions/{id}/topics":                   "person only (agent token 403); canSeeAccount, a private session answers the uniform 404",
 	"POST /api/sessions/{id}/children":                "the parent's own session token (board_id NULL) or runtime token for the path's session (delegateParent); daemon, assist, agent and browser credentials refused; owner-less, ended and child parents refused",
+	"POST /api/sessions/{id}/review-requests":         "the session's own token only (its id must equal the path); names only the session's own published files",
+	"GET /api/sessions/{id}/review-requests":          "the session's own token, or a person whose canSeeAccount allows the session (a private one: its owner); anything else the uniform 404",
+	"GET /api/review-requests/{id}":                   "reviewReaderOf on the request's own session: its own token, or a person whose canSeeAccount allows it; anything else the uniform 404",
+	"POST /api/review-requests/{id}/decide":           "the session's owner signed in as themselves (human, no on_behalf_of) only; canSeeAccount first so a private session answers the uniform 404; CAS from pending",
+	"POST /api/review-requests/{id}/withdraw":         "the session's own token, for its own request only (CAS from pending); anything else the uniform 404",
 	"GET /api/delegation-requests/{id}":               "the parent's own session token (its own requests only) or the owner's browser (who alone also gets the stored request); anything else the uniform 404",
 	"POST /api/delegation-requests/{id}/expire":       "the parent's own session token, for its own request only (CAS from pending); anything else the uniform 404",
 	"POST /api/delegation-requests/{id}/decide":       "human with sid, owner of the request only; anything else the uniform 404; CAS from pending; the child starts from the stored request",
+	"GET /api/sessions/{id}/child-approval":           "human owner with sid only; account lock and parent row fence; runtime/agent/delegated credentials refused",
+	"GET /api/sessions/{id}/proposals/{pid}":          "the session's own token only (tokenSID == path id); the proposal must belong to that session and its owner, else a uniform 404; outcome only (card summary, note, error), never the frozen draft",
+	"GET /api/sessions/{id}/permissions":              "human owner with sid only (ownsSession, else uniform 404); grant views omit the login session the grant acts with",
+	"POST /api/sessions/{id}/proposal-grants":         "human owner with sid only (ownsSession, else uniform 404); scope checked against the owner's own board discovery or this session's propose-mode tools; never broader than one board or one connection's tool",
+	"PUT /api/sessions/{id}/child-approval":           "human owner with sid only; exact current revision and parent fence; current daemon/runtime session grants only, never standing rules; session-visible audit carries opaque noncredential grant IDs (also present in child delegation_via), no owner account or credentials",
 	"GET /api/delegation-rules":                       "personAccount: the caller's own rules only; names no session",
 	"POST /api/delegation-rules":                      "person with sid; a rule of the caller's own account; names no session",
 	"DELETE /api/delegation-rules/{id}":               "person with sid; only the caller's own rule, else the uniform 404",
 	"POST /api/delegation-grants/{id}/revoke":         "person with sid; only the caller's own grant, else the uniform 404",
 	"GET /api/sessions/{id}/budget":                   "the session's own token (board_id NULL) or its owner's browser; anything else the uniform 404; reads only the session's own daemon",
-	"GET /api/sessions/{id}/live":                     "person only (agent token 403); canSeeAccount, a private session answers the uniform 404; tokens per the Insights rule; tool changes are the viewer's own; MCP inventory, first-prompt hold and engine plans follow the same session privacy boundary",
+	"GET /api/sessions/{id}/live":                     "person only (agent token 403); canSeeAccount, a private session answers the uniform 404; tokens and nonbilling child-usage snapshots per the Insights rule; child activity requires independent child visibility; tool changes are the viewer's own; MCP inventory, first-prompt hold and engine plans follow the same session privacy boundary",
 	"POST /api/sessions/{id}/uploads":                 "person only (agent token 403); canSeeAccount, a private session answers the uniform 404",
 	"GET /api/sessions/{id}/attachments":              "the session's own credential (its token's session must equal the path) or the daemon token; a person's token is refused",
 	"GET /api/sessions/{id}/attachments/{aid}/file":   "the session's own credential (its token's session must equal the path) or the daemon token; only user-origin files, else the uniform 404",
@@ -130,7 +143,7 @@ var routeDecisions = map[string]string{
 // sessionDataPrefixes are routes that carry session data without having
 // "session" in their pattern. They are held to routeDecisions too.
 var sessionDataPrefixes = []string{
-	"/api/messages", "/api/screenshots", "/api/mockups", "/api/push",
+	"/api/messages", "/api/screenshots", "/api/mockups", "/api/push", "/api/review-requests",
 	"/s/", "/m/", "/mcp", "/ws/",
 }
 
@@ -162,6 +175,7 @@ const (
 )
 
 var emitDecisions = map[string]emitDecision{
+	"session_discard.go:handleSessionDiscard:BroadcastJSONPerAccount":           {1, "owner-only durable archive notification; immutable same-account parent/child ownership checked before mutation"},
 	"delegation_discard.go:handleChildDiscard:BroadcastJSON":                    {1, whyScoped + "; parent and child independently scoped"},
 	"delegation_children_live.go:broadcastChildrenChanged:BroadcastJSON":        {1, whyScoped + "; parent and triggering child are independently privacy-scoped"},
 	"agentevents.go:HandleAgentEvent:BroadcastJSON":                             {2, whyScoped},
@@ -185,11 +199,12 @@ var emitDecisions = map[string]emitDecision{
 	"daemon_conn.go:setSessionStatusEnd:broadcastWithEnd":                       {1, whyScoped},
 	"events_live.go:HandleRunnerEventsLive:Subscribe":                           {1, "requireSessionAccess (canSee) precedes the subscription; the same id is registered as a browser under the principal's account, so MarkPrivate evicts it like any foreign socket"},
 	"jobreconcile.go:broadcastReconciledStatus:broadcastWithEnd":                {1, whyScoped},
-	"messageevents.go:answerAskFromChat:BroadcastJSON":                          {1, whyScoped},
+	"messageevents.go:answerAskFromChatAs:BroadcastJSON":                        {1, whyScoped},
 	"messageevents.go:fanOutServerEvent:FanOutAgentEvent":                       {1, whySubscribers},
 	"messages.go:HandlePostMessageExpire:BroadcastJSON":                         {1, whyScoped},
-	"messages.go:HandlePostMessageReply:BroadcastJSON":                          {1, whyScoped},
+	"messages.go:replyMessageUnlocked:BroadcastJSON":                            {1, whyScoped},
 	"messages.go:HandlePostMessages:BroadcastJSON":                              {1, whyScoped},
+	"reviewrequests.go:pushForReview:SendPush":                                  {1, whyPush},
 	"delegation_start.go:pushForDelegation:SendPush":                            {1, whyPush},
 	"messages.go:pushForMessage:SendPush":                                       {1, whyPush},
 	"notices.go:sendSessionNotice:BroadcastJSON":                                {1, whyScoped},

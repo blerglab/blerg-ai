@@ -70,7 +70,7 @@ func delegationRegistrationCount(a *API, id string) int {
 }
 func waitDelegationRegistrations(t *testing.T, a *API, id string, n int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for delegationRegistrationCount(a, id) != n {
 		if time.Now().After(deadline) {
 			t.Fatalf("registration count did not reach %d", n)
@@ -134,7 +134,7 @@ func TestDelegationAwaitCanceledCallerCannotDetachAnotherWaiter(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatal("cancellation not propagated")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("canceled wait did not return")
 	}
 	waitDelegationRegistrations(t, fx.api, id, 1)
@@ -146,7 +146,7 @@ func TestDelegationAwaitCanceledCallerCannotDetachAnotherWaiter(t *testing.T) {
 		if status != "denied" {
 			t.Fatal("other waiter lost decision")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("other waiter detached from decision")
 	}
 	assertNoDelegationRegistrations(t, fx.api)

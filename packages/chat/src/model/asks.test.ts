@@ -49,6 +49,13 @@ describe('askStates', () => {
     expect(askStates([ask2, ev('user_message', { text: 'ok', source: 'ask_answer' })], NONE, false).open).toBeNull()
   })
 
+  it("a board's or a cron's message is not the person answering; a parent session's is", () => {
+    const ask = ev('ask', { body: 'old?' })
+    expect(askStates([ask, ev('user_message', { text: 'Card #43 moved to Review', source: 'blerg-board' })], NONE, false).open).toBe(ask)
+    expect(askStates([ask, ev('user_message', { text: 'Summarize my inbox', source: 'cron' })], NONE, false).open).toBe(ask)
+    expect(askStates([ask, ev('user_message', { text: 'use the second', source: 'session' })], NONE, false).byEvent.get(ask.client_event_id)).toEqual({ open: false, answer: 'use the second' })
+  })
+
   it('the newest open ask is the one the composer answers', () => {
     const a = ev('ask', { body: 'first', message_id: 'a' })
     const b = ev('ask', { body: 'second', message_id: 'b' })

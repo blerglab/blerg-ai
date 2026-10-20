@@ -77,6 +77,7 @@ func (h *AgentHost) keepRecord(msg protocol.SpawnSession, workDir, model string,
 	}
 	if ad != nil {
 		rec.CodexThreadID = ad.rec.CodexThreadID
+		rec.EngineSession = ad.rec.EngineSession
 		rec.KnownSubagents = ad.rec.KnownSubagents
 		rec.PluginRequests = ad.rec.PluginRequests
 		rec.CreatedAt = ad.rec.CreatedAt
@@ -240,7 +241,7 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 	// removed), the conversation cannot be continued by it.
 	if kind, refusal := h.driverFor(msg); kind == driverNone {
 		return refusal
-	} else if kind != driverClaudeCode && rec.Engine != "codex" {
+	} else if kind != driverClaudeCode && rec.Engine != "codex" && engineRegistry[rec.Engine].NativeSessionVersion == 0 {
 		return "Claude Code is no longer available on this machine"
 	}
 	if rec.Engine == "codex" {
@@ -251,11 +252,19 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 	stopLeftoverEngine(rec)
 
 	ad := &adoptRequest{rec: rec}
-	if rec.Engine == "codex" {
+	switch {
+	case rec.Engine == "codex":
 		if codexTranscriptExists(rec.CodexThreadID) {
 			ad.resumeID = rec.CodexThreadID
 		}
-	} else if rec.ClaudeSessionID != "" && claudeTranscriptExists(rec.ClaudeSessionID) {
+	case rec.EngineSession != nil:
+		if !rec.EngineSession.valid(rec.Engine) {
+			return "its native conversation identity is invalid"
+		}
+		ad.resumeID = rec.EngineSession.ID
+	case engineRegistry[rec.Engine].NativeSessionVersion > 0:
+		return "its native conversation identity was not retained; start a new session explicitly"
+	case rec.ClaudeSessionID != "" && claudeTranscriptExists(rec.ClaudeSessionID):
 		ad.resumeID = rec.ClaudeSessionID
 	}
 	h.spawn(msg, nil, "", ad)
@@ -321,7 +330,26 @@ func (h *AgentHost) hasOpenAsk(sessionID string) bool {
 // server is told it is paused by the restart (session_paused), so the sessions list can count it
 // and offer to resume it.
 func (h *AgentHost) finishAdoption(ad *adoptRequest, sess *agentSession, driver sessionDriver, msg protocol.SpawnSession) {
-	hadConversation := ad.rec.ClaudeSessionID != "" || ad.rec.CodexThreadID != ""
+	if native, ok := driver.(engineSessionDriver); ok {
+		go func() {
+			select {
+			case err := <-native.EngineSessionLoaded():
+				if err != nil {
+					sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: "The native conversation could not be restored. Saved history was not replaced; send a message to retry it.", Retryable: true}})
+					return
+				}
+				if h.get(msg.SessionID) == sess {
+					h.finishAdoptionConfirmed(ad, sess, driver, msg)
+				}
+			case <-sess.workspaceCtx.Done():
+			}
+		}()
+		return
+	}
+	h.finishAdoptionConfirmed(ad, sess, driver, msg)
+}
+func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession, driver sessionDriver, msg protocol.SpawnSession) {
+	hadConversation := ad.rec.ClaudeSessionID != "" || ad.rec.CodexThreadID != "" || ad.rec.EngineSession != nil
 	resumed := ad.resumeID != ""
 	cutOff := ad.rec.TurnActive
 	cont, gaveUp := adoptPlan(ad.rec, resumed, msg.Interaction)
@@ -441,7 +469,7 @@ func (h *AgentHost) finishAdoption(ad *adoptRequest, sess *agentSession, driver 
 			notice += "\n" + adoptAskCutOff
 			if isCC {
 				cc.addAdoptionWork(adoptAskCutOff)
-			} else if cx, ok := driver.(*codexDriver); ok {
+			} else if cx, ok := driver.(interface{ addAdoptionWork(string) }); ok {
 				cx.addAdoptionWork(adoptAskCutOff)
 			}
 			sess.record.update(func(r *AgentRecord) bool {
@@ -471,7 +499,7 @@ func (h *AgentHost) finishAdoption(ad *adoptRequest, sess *agentSession, driver 
 			}
 			if isCC {
 				cc.unlessHeardFromPerson(report)
-			} else if cx, ok := driver.(*codexDriver); ok {
+			} else if cx, ok := driver.(interface{ unlessHeardFromPerson(func()) bool }); ok {
 				cx.unlessHeardFromPerson(report)
 			} else {
 				report()
@@ -485,7 +513,7 @@ func (h *AgentHost) finishAdoption(ad *adoptRequest, sess *agentSession, driver 
 			}
 			return
 		}
-		if cx, ok := driver.(*codexDriver); ok {
+		if cx, ok := driver.(interface{ continueAdopted(string, string) bool }); ok {
 			cx.continueAdopted(adoptContinuePrompt, shown)
 			return
 		}

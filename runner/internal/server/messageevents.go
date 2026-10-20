@@ -66,23 +66,30 @@ func recordServerAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, ses
 // appendServerAgentEvent is recordServerAgentEvent for a caller that must know the event landed
 // (a delegation request whose card is the only way to decide it).
 func appendServerAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, clientEventID, kind string, payload any) error {
+	_, err := appendServerAgentEventOnce(ctx, h, pool, sessionID, clientEventID, kind, payload)
+	return err
+}
+
+// appendServerAgentEventOnce is appendServerAgentEvent that reports whether the event is new (an
+// event with the same client id already recorded is neither stored nor fanned out again).
+func appendServerAgentEventOnce(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, clientEventID, kind string, payload any) (bool, error) {
 	if pool == nil {
-		return errors.New("no database")
+		return false, errors.New("no database")
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return false, err
 	}
 	raw = protocol.StripNUL(raw)
 	at := time.Now()
 	seq, inserted, err := db.AppendAgentEventAt(ctx, pool, sessionID, clientEventID, kind, string(raw), at)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if inserted {
 		fanOutServerEvent(h, sessionID, clientEventID, kind, raw, seq, at)
 	}
-	return nil
+	return inserted, nil
 }
 
 // fanOutServerEvent sends an event the server recorded to the session's subscribers.
@@ -176,13 +183,35 @@ func recordAskAnswer(ctx context.Context, h *Hub, pool *pgxpool.Pool, row db.Mes
 // reply); without one, the newest open ask the transcript holds is answered, if any — an ask of the
 // native loop is left to the loop, which takes the message itself.
 func answerAskFromChat(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, clientID, messageID string) bool {
+	return answerAskFromChatAs(ctx, h, pool, sessionID, text, clientID, messageID, "")
+}
+
+// answerAskFromChatAs is answerAskFromChat for a sender known to be signed in
+// as answerer ("" when the sender is not a signed-in person, or unknown). Only
+// the session's owner answers an owner-only ask (an engine's command approval);
+// anyone else's text is left to reach the session as an ordinary message.
+func answerAskFromChatAs(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, clientID, messageID, answerer string) bool {
 	if pool == nil {
 		return false
+	}
+	ownerKnown, isOwner := false, false
+	owner := func() bool {
+		if !ownerKnown {
+			ownerKnown = true
+			if answerer != "" {
+				row, err := db.GetSession(ctx, pool, sessionID)
+				isOwner = err == nil && ownsSession(answerer, row)
+			}
+		}
+		return isOwner
 	}
 	var target *db.MessageRow
 	if messageID != "" {
 		row, err := db.GetMessage(ctx, pool, messageID)
 		if err != nil || row == nil || row.SessionID != sessionID || row.Kind != "ask" || row.Status != "open" {
+			return false
+		}
+		if row.OwnerOnly && !owner() {
 			return false
 		}
 		target = row
@@ -197,6 +226,9 @@ func answerAskFromChat(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionI
 		}
 		for i := range rows { // newest first
 			r := rows[i]
+			if r.OwnerOnly && !owner() {
+				continue
+			}
 			if ok, err := db.HasAgentEvent(ctx, pool, sessionID, messageEventID(r.ID, "ask")); err == nil && ok {
 				target = &r
 				break

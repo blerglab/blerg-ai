@@ -224,7 +224,7 @@ func TestRunnerEventsLiveAuth(t *testing.T) {
 // liveSubscriberID is the hub registration of the one live stream open on a session.
 func liveSubscriberID(t *testing.T, h *Hub, sessionID string) string {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		h.mu.RLock()
 		for id := range h.subscriptions[sessionID] {

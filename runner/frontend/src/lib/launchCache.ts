@@ -47,6 +47,9 @@ export interface DaemonApiInfo {
   sandbox_available: boolean
   available_engines: string[]
   codex_restricted?: boolean
+  // The daemon dials the MCP gateway through the server's web address, so a
+  // session on its host (This machine) can take a board. Absent from older daemons.
+  mcp_gateway_via_server?: boolean
   plugin_engines?: string[]
   // What the daemon can run a host Claude agent session on: its `claude`
   // CLI (the user's login) or, failing that, an API key. Absent from older

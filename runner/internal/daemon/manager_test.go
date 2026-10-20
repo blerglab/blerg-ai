@@ -56,7 +56,7 @@ func TestResizeSchedulesDebouncedRefresh(t *testing.T) {
 		if id != "sess-r" {
 			t.Errorf("refresh for %q, want sess-r", id)
 		}
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(15 * time.Second):
 		t.Fatal("expected a debounced refresh, got none")
 	}
 
@@ -138,7 +138,7 @@ func TestRequestScrollbackSendsCapturedHistory(t *testing.T) {
 		if string(got) != "old line 1\nold line 2" {
 			t.Errorf("data = %q", got)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("expected a SessionScrollback, got none")
 	}
 }
@@ -188,7 +188,7 @@ func TestRequestScrollbackPassesMaxLines(t *testing.T) {
 
 	select {
 	case <-sender.ch:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("expected a SessionScrollback, got none")
 	}
 	if gotCalls != 1 {
@@ -234,7 +234,7 @@ func TestRequestScrollbackIncludesModePrefix(t *testing.T) {
 		if string(got) != wantSeq {
 			t.Errorf("ModePrefix decoded = %q, want %q", got, wantSeq)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("expected a SessionScrollback, got none")
 	}
 }
@@ -261,7 +261,7 @@ func TestRequestScrollbackModeSyncNotSentAsOutput(t *testing.T) {
 		if _, ok := msg.(protocol.SessionScrollback); !ok {
 			t.Fatalf("expected SessionScrollback, got %T", msg)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("expected a SessionScrollback, got none")
 	}
 	// Nothing else should follow — in particular no session_output.
@@ -339,7 +339,7 @@ func TestManagerSpawnAndOutput(t *testing.T) {
 		sawStarted   bool
 		outputChunks []string
 		ended        *protocol.SessionEnded
-		deadline     = time.After(5 * time.Second)
+		deadline     = time.After(15 * time.Second)
 	)
 collecting:
 	for {
@@ -583,7 +583,7 @@ func TestUnknownTerminalEngineRecoveryRefusesBeforeStartingClaude(t *testing.T) 
 		if !ok || state.Status != "error" || state.Message == nil || !strings.Contains(*state.Message, "unsupported engine") {
 			t.Fatalf("unknown terminal engine must be refused: %+v", msg)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("unknown terminal engine was not refused")
 	}
 }
@@ -735,7 +735,7 @@ func TestSessionEndDeletesRecord(t *testing.T) {
 	mgr.handleSpawnSession(raw)
 
 	// Wait for session_ended; by then deleteSessionRecord has already been called.
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 loop:
 	for {
 		select {

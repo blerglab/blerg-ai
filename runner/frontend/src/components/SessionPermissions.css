@@ -1,0 +1,55 @@
+/* The session panel's Permissions summary, and the small outlined button used wherever a
+   permission is revoked (or a read retried). */
+.perm-group { min-width: 0; overflow-wrap: anywhere; outline: none; }
+.perm-revoke {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--stone);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fog);
+  font: inherit;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  cursor: pointer;
+}
+.perm-revoke:hover:not(:disabled),
+.perm-revoke:focus-visible {
+  border-color: var(--danger);
+  color: var(--chalk);
+}
+.perm-revoke:disabled { opacity: 0.5; cursor: default; }
+.perm-error { color: var(--danger); }
+.perm-why { color: var(--amber); }
+
+/* The compact summary: title, count, Manage; then the active permissions as chips. */
+.perm-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.perm-head .rail-section-head { flex: 1; margin: 0; }
+.perm-active-count { font-size: var(--text-xs); color: var(--fog-dim); white-space: nowrap; }
+.perm-manage {
+  flex: none; padding: 3px 10px; border: 1px solid var(--stone); border-radius: 6px; background: transparent;
+  color: var(--chalk); font: inherit; font-size: var(--text-xs); cursor: pointer;
+}
+.perm-manage:hover:not(:disabled), .perm-manage:focus-visible { border-color: var(--accent); }
+.perm-manage:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.perm-manage:disabled { opacity: 0.5; cursor: default; }
+.perm-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.perm-chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0;
+  padding: 2px 2px 2px 8px; border: 1px solid var(--stone); border-radius: 999px;
+  background: var(--scree-2); font-size: var(--text-xs); color: var(--chalk);
+}
+.perm-chip-glyph { color: var(--fog-dim); flex: none; }
+.perm-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.perm-chip-x {
+  flex: none; width: 22px; height: 22px; display: inline-grid; place-items: center; padding: 0;
+  border: 0; border-radius: 999px; background: none; color: var(--fog); font: inherit; font-size: 14px; line-height: 1; cursor: pointer;
+}
+.perm-chip-x:hover:not(:disabled), .perm-chip-x:focus-visible { background: color-mix(in srgb, var(--danger) 22%, transparent); color: var(--chalk); }
+.perm-chip-x:focus-visible { outline: 2px solid var(--danger); outline-offset: 0; }
+.perm-chip-x:disabled { opacity: 0.5; cursor: default; }
+.perm-chip-dormant { border-style: dashed; border-color: color-mix(in srgb, var(--amber) 60%, transparent); background: transparent; }
+.perm-chip-dormant .perm-chip-text { color: var(--fog); }
+.perm-dormant-list { margin-top: 8px; }
+.perm-dormant-head { margin: 0 0 4px; font-size: var(--text-xs); color: var(--fog-dim); }
+.perm-saved { color: var(--lichen); }

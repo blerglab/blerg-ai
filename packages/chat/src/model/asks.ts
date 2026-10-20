@@ -12,6 +12,7 @@
 //     returns, when its turn ends, or with the person's next message.
 // Pure.
 import type { AgentEvent, MessagingPayload, ToolCallPayload, ToolResultPayload, UserMessagePayload } from '../types'
+import { automationAuthor, isBlergRelaySource } from './userMessages'
 
 export interface AskState {
   open: boolean
@@ -24,6 +25,12 @@ export interface Asks {
   byEvent: Map<string, AskState>
   /** The newest ask still open, or null. */
   open: AgentEvent | null
+}
+
+/** A board's or a cron's message is not the person answering (the server never takes one as an
+ *  answer either: answersAsk). A parent session's message is: it answers its child's ask. */
+function closesNoAsk(source: unknown): boolean {
+  return source !== 'session' && automationAuthor(source) !== undefined
 }
 
 export const NO_ASKS: Asks = { byEvent: new Map(), open: null }
@@ -98,7 +105,7 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
         const id = str(p.message_id)
         const a = id ? asks.find(x => x.id === id) : newestOpen(() => true)
         if (a) close(a, str(p.text))
-      } else if (p.source !== 'system') {
+      } else if (p.source !== 'system' && !isBlergRelaySource(p.source) && !closesNoAsk(p.source)) {
         const a = newestOpen(x => x.id === '')
         if (a) close(a, str(p.text))
       }

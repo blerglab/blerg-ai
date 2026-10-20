@@ -68,6 +68,10 @@ func TestIsPersonMessage(t *testing.T) {
 		{"runner, later", msg("runner", "Ship the release notes"), false, false},
 		{"board, first message (a card's task)", msg("blerg-board", "Card: tidy the docs"), true, true},
 		{"board, later", msg("blerg-board", "moved to Done"), false, false},
+		{"parent session, first message (a child's task)", msg("session", "Port the tests"), true, true},
+		{"parent session, later", msg("session", "also the docs"), false, false},
+		{"cron, first message (its prompt)", msg("cron", "Summarize my inbox"), true, true},
+		{"cron, later", msg("cron", "again"), false, false},
 		{"unknown source", msg("webhook", "hello"), true, false},
 	} {
 		if got := IsPersonMessage(c.p, c.first); got != c.want {

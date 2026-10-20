@@ -160,7 +160,7 @@ on that page explains how to produce the value:
 |---|---|
 | `claude` | The token printed by `claude setup-token` on a machine where they're logged in (starts with `sk-ant-oat`), or an Anthropic console API key to bill an organization instead |
 | `codex` | Prefer Settings → Managed connections and complete the dedicated device login. Pasting `~/.codex/auth.json` remains a snapshot import with no coordinated refresh. |
-| `hermes` | The contents of `~/.hermes/.env` from a machine where Hermes is set up |
+| `hermes` | The contents of `~/.hermes/.env` from a machine where Hermes is set up. Model servers come from the cluster's [shared Hermes providers](#shared-hermes-providers) when the operator set them (`HERMES_PROVIDERS_FILE`); keyless local servers need no `.env` at all |
 | `github` | A fine-grained personal access token with Contents read+write and Metadata read on the repos sessions may touch — sessions clone and push as that user |
 
 A Claude value starting `sk-ant-oat` is treated as an OAuth (subscription)
@@ -212,6 +212,90 @@ actually live before looking anywhere else:
 ```sh
 kubectl -n blerg exec deploy/blerg-runner -- env | grep BLERG_RUNNER_CORE_INTERNAL_KEY
 ```
+
+## Shared Hermes providers
+
+Hermes sessions on the cluster can use the operator's own model servers (for
+example OpenAI-compatible vLLM endpoints on the local network) without anyone
+pasting a `config.yaml` into Settings. On a desktop these live in
+`~/.hermes/config.yaml`; on the cluster the operator sets them once, for every
+Hermes session:
+
+1. Copy [`hermes-providers.example.yaml`](hermes-providers.example.yaml)
+   **outside the repository**, and fill in your servers: a `model` default,
+   named `providers` (and/or a legacy `custom_providers` list), in Hermes's own
+   schema, at most 64 KiB (it travels as one environment variable, and Linux
+   refuses any single one over 128 KiB; `deploy.sh`, the runner and the pods
+   all enforce the limit). It names your network's addresses, so treat it as a
+   secret.
+
+   **Everyone who runs a Hermes session on the cluster can read the whole
+   file**, and so can their agent: it is in that session's
+   `~/.hermes/config.yaml`. Any provider key in it is therefore shared with
+   every cluster user and every agent they start. Use keyless local model
+   servers here; leave paid provider keys out unless every cluster user may
+   use them (each person's own keys belong in their own Hermes `.env` in
+   Settings).
+2. Set `HERMES_PROVIDERS_FILE=/path/to/it` in `install/k8s/.env` (a relative
+   path is relative to `install/k8s`) and run `./deploy.sh`. It writes Secret
+   `blerg/blerg-hermes-providers` (key `config.yaml`) **only when the variable
+   is set**; the runner reads it as `BLERG_RUNNER_HERMES_PROVIDERS` through an
+   optional `secretKeyRef` and is restarted by the same deploy. Without
+   `deploy.sh`: `kubectl -n blerg create secret generic blerg-hermes-providers
+   --from-file=config.yaml=/path/to/it`, then `kubectl -n blerg rollout restart
+   deploy/blerg-runner`.
+
+What it does:
+
+- **Session pods.** Every Hermes session pod, top-level or child, gets the
+  fragment from its per-session Secret (never as a literal in the Job spec)
+  and merges it into `~/.hermes/config.yaml` with mode `0600`, after the
+  image's defaults and any config bundle: `providers` merge by name,
+  `custom_providers` by `name`, and every other key in the fragment (`model`
+  included) replaces the existing value whole. The person's own Hermes `.env`
+  from Settings is still imported as before. Other engines' pods never receive
+  the fragment. Pod logs say only whether it was applied.
+- **Readiness.** The fragment alone makes Hermes available on the cluster for
+  sessions people start: a keyless local model server needs no `.env`. It does
+  not for crons: a cron never runs on operator-supplied material, so it never
+  receives the fragment, and its engine choices come from the person's own
+  credentials only. A Hermes cron on the cluster needs the person's own Hermes
+  credential in Settings; without one it is not offered, and a start is
+  refused with "a cron never runs on the shared operator credential".
+- **Models.** The cluster launch sheet and `GET /api/models/hermes?runtime=cluster`
+  list what each server reports at `GET <base_url>/models`, with the desktop's
+  IDs and names: the default endpoint's models by their raw ID, the others as
+  `custom:<provider>/<model>`. The runner fetches the lists itself (no
+  credentials sent, no redirects or proxies, three-second budget) and caches
+  them like other cluster catalogs; a changed fragment is a new catalog.
+- **Local budget.** Hermes on the cluster counts as local hardware when every
+  endpoint the merged configuration can route to is on loopback or a private
+  network and no provider key is set, the same rule as on a desktop. Before a
+  pod exists the runner checks the fragment, the operator's
+  `HERMES_ENV_CONTENTS`, any uploaded config bundle's `~/.hermes/config.yaml`,
+  and whether the person saved their own Hermes credential (it becomes their
+  pods' `.env`, which may hold a key), asked of core with the session's
+  recorded launch proof: any of those, or a lookup that cannot tell, means
+  "not local". The answer is reused for 30 seconds per person. A running Hermes
+  parent pod can only withhold the claim (it reports "not local" from its own
+  files), never grant it. The same rule decides whether a local-only Hermes
+  rule starts a cluster child without a card. A cron session's cluster
+  children, like the cron itself, never get the shared providers or operator
+  credentials, on their first start or any resume.
+
+**Reachability.** Both the runner pod (for the model list) and the session
+pods (for the turns) must reach the servers. The optional
+[`networkpolicy-sessions.example.yaml`](networkpolicy-sessions.example.yaml)
+blocks private ranges from session pods; it has a commented, opt-in rule 6
+for exactly this: uncomment it with each server's own `/32` and port. Never
+re-open a whole private range for it. The policy selects every session pod
+(pods carry no engine label), so rule 6 lets **all** session pods reach those
+servers, Claude, Codex and cron sessions included, not only Hermes ones. Most
+local model servers have no authentication: accept that, or put an API key on
+the server itself.
+
+To stop using it, `kubectl -n blerg delete secret blerg-hermes-providers` and
+restart the runner; unsetting the variable alone leaves the Secret in place.
 
 ## New repository
 
@@ -487,6 +571,8 @@ token) and `curl` to core, the board (unless opted in) and Postgres times out.
 It is not applied by
 `deploy.sh`; it needs a CNI that enforces NetworkPolicy (MicroK8s' default,
 Calico, does) and CIDRs that match your cluster — read its header first.
+Its opt-in rule 6 lets session pods reach your own model servers for the
+[shared Hermes providers](#shared-hermes-providers), one address at a time.
 
 ### Crons, MCP connections and the gateway
 
@@ -500,6 +586,13 @@ reach their tools through the runner's **MCP gateway**, not directly:
   `blerg-runner`. `ingress.yaml` routes only the web port 8080; nothing routes
   the gateway, and `deploy_test.sh` fails if an Ingress ever references its
   Service or port. Do not add one, and do not change the Service type.
+- Sessions on workstation daemons cannot reach that Service. The runner also
+  serves the gateway on its web port under `/mcp-gw/` (so through the Ingress),
+  only for grants issued for that route to daemon sessions, within seven days of
+  their last use; a session pod's token is refused there like an unknown one. An
+  up-to-date daemon dials it through the address it already uses for the server.
+  Set `BLERG_RUNNER_MCP_GW_PUBLIC: "off"` in `configmap.yaml` if no workstation
+  daemon connects to this install.
 - Session pods dial it at `BLERG_RUNNER_MCP_GW_URL`
   (`http://blerg-runner-mcp-gateway.blerg.svc.cluster.local:8090`, set in
   `configmap.yaml`). Each pod holds only a per-session, per-connection token,
@@ -530,8 +623,10 @@ It carries everything personal or sensitive to that one session: the launching
 account's engine credential (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
 `CODEX_AUTH_JSON`, `HERMES_ENV_CONTENTS`), their personal GitHub or GitLab token
 (whichever matches the clone's host) as `BLERG_RUNNER_GIT_TOKEN`, the session's initial prompt
-(`BLERG_RUNNER_INITIAL_PROMPT`) and every caller-supplied extra env entry
-(runner-brokered session tokens such as `BLERG_BOARD_TOKEN`). The Job spec
+(`BLERG_RUNNER_INITIAL_PROMPT`), every caller-supplied extra env entry
+(runner-brokered session tokens such as `BLERG_BOARD_TOKEN`) and, for a Hermes
+session, the [shared Hermes providers](#shared-hermes-providers)
+(`BLERG_RUNNER_HERMES_PROVIDERS`). The Job spec
 references all of them via `secretKeyRef` rather than as literal env values — a
 literal is visible to anyone who can `kubectl describe job` / `get job -o
 yaml`, which needs only Job read access, not Secret read access. "Personal" is

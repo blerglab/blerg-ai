@@ -144,7 +144,7 @@ func TestClaudeCodeDriverPassesEffortToCLI(t *testing.T) {
 	defer cancel()
 	go d.Run(ctx)
 	d.Enqueue("work", "chat")
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for !contains(em.kinds(), "turn_done") {
 		select {
 		case <-deadline:

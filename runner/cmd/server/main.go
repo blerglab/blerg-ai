@@ -14,6 +14,7 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/secrets"
 	"github.com/blerglab/blerg-ai/contracts/updatenotice"
 	"github.com/blerglab/blerg-ai/runner/internal/coreauth"
+	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcp"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
@@ -195,6 +196,14 @@ func main() {
 	// GET /agents and sent to core on registration.
 	server.SetComponentVersion(version)
 	if jm := server.NewJobManagerFromEnv(cfg.GitHubOrg); jm != nil {
+		// The shared Hermes provider configuration is read with the desktop
+		// daemon's own probe and local rule, so cluster model IDs, names and the
+		// local-hardware claim match a workstation's.
+		jm.Hermes.Probe = daemon.ProbeHermesModelsConfig
+		jm.Hermes.Local = daemon.HermesConfigLocal
+		if jm.Hermes.Config != "" {
+			log.Println("cluster agent runtime: shared Hermes provider configuration loaded")
+		}
 		hub.SetJobManager(jm)
 		log.Println("cluster agent runtime enabled")
 	}
@@ -276,7 +285,7 @@ func main() {
 	mux.HandleFunc("GET /api/me/preferences", api.HandleGetMyPreferences)
 	mux.HandleFunc("PUT /api/me/preferences", api.HandlePutMyPreferences)
 	mux.HandleFunc("GET /api/sessions", api.HandleGetSessions)
-	mux.HandleFunc("POST /api/sessions", api.HandlePostSessions)
+	mux.HandleFunc("POST /api/sessions", api.HandleLaunchSession) // HandlePostSessions plus launch permissions
 	mux.HandleFunc("DELETE /api/sessions/{id}", api.HandleDeleteSession)
 	mux.HandleFunc("POST /api/sessions/{id}/pause", api.HandlePauseSession)
 	mux.HandleFunc("GET /api/sessions/{id}/limit-resume", api.HandleLimitResume)
@@ -293,6 +302,9 @@ func main() {
 	api.RegisterWorklistRoutes(mux)
 	api.RegisterDelegationRoutes(mux)
 	api.RegisterMCPRoutes(mux)
+	// The MCP gateway on the web port too, for sessions on workstation daemons: only grants issued
+	// for it. BLERG_RUNNER_MCP_GW_PUBLIC=off (or the gateway off) leaves the prefix a 404.
+	api.RegisterMCPGatewayRoutes(mux, server.MCPGatewayPublicFromEnv())
 	api.RegisterCronRoutes(mux, cfg.CoreURL, cfg.CoreInternalKey)
 	api.RegisterProposalRoutes(mux)
 	api.RegisterToolChangeRoutes(mux)

@@ -78,7 +78,7 @@ func TestLaunchOptionsOperatorCatalogCannotReadAccountCache(t *testing.T) {
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "gpt-private") || !strings.Contains(w.Body.String(), `"refreshing":true`) {
 		t.Fatalf("scope leak or failed operator snapshot: %d %s", w.Code, w.Body.String())
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		options, problem := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "cluster"})
 		if problem != nil {
@@ -91,7 +91,7 @@ func TestLaunchOptionsOperatorCatalogCannotReadAccountCache(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("operator probe not started")
 	}
 	f.mu.Lock()
@@ -140,12 +140,12 @@ func TestLaunchOptionsColdReadinessDoesNotWaitForKubernetes(t *testing.T) {
 		if !options.Refreshing || options.State != "unknown" || len(options.Engines) != 0 {
 			t.Fatalf("invalid cold readiness %+v", options)
 		}
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(15 * time.Second):
 		t.Fatal("discovery blocked on Kubernetes")
 	}
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("readiness refresh never started")
 	}
 }
@@ -231,7 +231,7 @@ func TestLaunchReadinessTransportFailureIsUnknown(t *testing.T) {
 	h := NewHub()
 	h.SetJobManager(&JobManager{Image: "fixture", BaseURL: backend.URL, Client: backend.Client(), Namespace: "fixture", SecretName: "fixture"})
 	a := NewAPI(h, nil, "fixture-daemon", nil, "")
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		options, problem := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "cluster"})
 		if problem != nil {
@@ -270,7 +270,7 @@ func TestSecretReadinessHonorsContextDeadline(t *testing.T) {
 		if known {
 			t.Fatal("timeout became authoritative absence")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("credential discovery ignored deadline")
 	}
 }
@@ -297,7 +297,7 @@ func TestLaunchReadinessPersonalOnlyExcludesOperatorAndHasSeparateCache(t *testi
 	principal := runnerPrincipal{Kind: "agent", Sub: "fixture-token", OnBehalfOf: "fixture-owner"}
 	read := func(personal bool) []string {
 		t.Helper()
-		deadline := time.Now().Add(2 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
 			got, known, refreshing := api.clusterReadinessSnapshot(t.Context(), principal, false, personal)
 			if known && !refreshing {

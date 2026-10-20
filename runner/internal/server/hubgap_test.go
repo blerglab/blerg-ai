@@ -61,7 +61,7 @@ func TestSubscribeAgentEventsSendsGapNotice(t *testing.T) {
 	for seq := int64(1); seq <= 300; seq++ {
 		h.FanOutAgentEvent("s1", seq, agentEventJSON("s1", seq))
 	}
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	var gapFrom int64
 	var delivered []int64
 	for gapFrom == 0 {

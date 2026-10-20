@@ -32,7 +32,7 @@ func backgroundHelloBarrier(t *testing.T, fx *topicFx, srvURL string, inventory 
 	if err := conn.WriteJSON(protocol.AgentEvent{Type: "agent_event", SessionID: fx.sess, ClientEventID: id, Kind: "fixture_barrier", Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	for {
 		var ack protocol.AgentEventAck
 		if err := conn.ReadJSON(&ack); err != nil {

@@ -168,7 +168,7 @@ func (t *mcpTracker) run(ctx context.Context, engine string, source mcpStatusSou
 		}
 		for _, server := range state.Servers {
 			switch server.Status {
-			case "connected", "failed", "needs-auth", "disabled":
+			case "lazy", "connected", "failed", "needs-auth", "disabled":
 			default:
 				return false
 			}

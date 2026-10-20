@@ -579,6 +579,7 @@ textarea { resize: vertical; }
 }
 
 .spawn-hint { font-size: 12px; color: var(--fog-dim); line-height: 1.5; margin: 8px 0 0; max-width: 52ch; }
+.run-where { font: inherit; font-size: 12px; background: var(--scree); color: var(--chalk); border: 1px solid var(--stone); border-radius: 6px; padding: 3px 6px; max-width: 24ch; }
 
 /* ── board chat drawer ─────────────────────────────────────────────────────── */
 .board-chat {
@@ -698,6 +699,13 @@ textarea { resize: vertical; }
 .settings-pop .automation-form { display: flex; flex-direction: column; gap: 8px; max-width: 40ch; }
 .settings-pop .automation-form .pop-foot { margin-top: 8px; }
 .settings-pop .automation-form .form-error { margin: 0; }
+/* "Run as me": the one-click automation identity, in Board settings and beside a card's Run. */
+.run-as-me-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; max-width: 52ch; }
+.run-as-me-cta.prominent {
+  padding: 8px 10px; border: 1px solid var(--amber); border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+}
+.run-as-me-cta .pop-foot, .run-as-me-cta .spawn-hint { margin: 0; }
 .chip.model-chip .warn-dot {
   width: 6px; height: 6px; border-radius: 50%; background: var(--amber);
   display: inline-block; margin-left: 2px;
@@ -1057,3 +1065,4 @@ textarea { resize: vertical; }
 .board-chat .session-chat { flex: 1; }
 .topbar .build-update { font-family: var(--mono); font-size: 11px; color: var(--blaze); white-space: nowrap; text-decoration: none; }
 .topbar .build-update:hover { text-decoration: underline; }
+.run-where-note { font-size: 12px; color: var(--fog-dim, #8b97a7); align-self: center; max-width: 34ch; line-height: 1.35; }

@@ -38,6 +38,47 @@ describe('text nobody typed', () => {
     expect(notes[1].textContent).toContain('Older daemon.')
   })
 
+  it('a decision Blerg relays to the agent (review, proposal) is a Blerg note, never the person', () => {
+    seed(
+      ev(1, 'user_message', { text: 'start', source: 'chat' }),
+      ev(2, 'user_message', { text: "Proposal p1 approved: Blerg #43 'Live check' created.", source: 'proposal' }),
+      ev(3, 'user_message', { text: 'Review of SECURITY.md v1 (request r1): APPROVED', source: 'review' }),
+    )
+    mount()
+    expect(screen.getAllByText('You')).toHaveLength(1)
+    const notes = screen.getAllByTestId('system-note')
+    expect(notes).toHaveLength(2)
+    expect(notes[0].textContent).toContain('Blerg')
+    expect(notes[0].textContent).toContain('Blerg #43')
+    expect(notes[1].textContent).toContain('APPROVED')
+  })
+
+  it('a prompt a board, a parent session or a cron wrote is drawn under that author, never "You"', () => {
+    seed(
+      ev(1, 'user_message', { text: 'You are working card #43 on the blerg-board board', source: 'blerg-board' }),
+      ev(2, 'user_message', { text: 'Port the tests', source: 'session' }),
+      ev(3, 'user_message', { text: 'Summarize my inbox', source: 'cron' }),
+      ev(4, 'user_message', { text: 'thanks', source: 'chat' }),
+    )
+    mount()
+    expect(screen.getAllByText('You')).toHaveLength(1)
+    for (const [author, text] of [['Board', 'card #43'], ['Parent session', 'Port the tests'], ['Cron', 'Summarize my inbox']]) {
+      const card = screen.getByText(author).closest('.agent-card')
+      expect(card?.className).toContain('other-author')
+      expect(card?.textContent).toContain(text)
+    }
+  })
+
+  it("a host's author wins over the default one", () => {
+    seed(ev(1, 'user_message', { text: 'Port the tests', source: 'session' }))
+    const t = createFakeTransport()
+    render(<ChatView session={SESSION} transport={t.transport} meta={idle}
+      describeUserMessage={(_e, p) => (p.source === 'session' ? { author: 'from Release prep' } : null)} />)
+    expect(screen.getByText('from Release prep')).toBeTruthy()
+    expect(screen.queryByText('Parent session')).toBeNull()
+    expect(screen.queryByText('You')).toBeNull()
+  })
+
   it("a slash command's output is a system card, kept as written", () => {
     const out = 'Total cost:            $0.0123\nTotal duration (API):  4.2s'
     seed(

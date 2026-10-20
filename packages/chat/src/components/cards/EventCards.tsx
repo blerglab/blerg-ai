@@ -1,10 +1,12 @@
+import { modelDisplayName } from '../../model/modelDisplay'
 // One card per kind of event: how each thing the transcript holds is drawn. renderEvent is the
 // switch; the compact timeline and the legacy (one card per call) view both go through it.
 import { memo, useState, type ReactNode } from 'react'
 import type { CardRegistry } from '../../cards/registry'
 import { isRetryNotice } from '../../model/notices'
 import { topicDividerText } from '../../model/topicMarker'
-import { userMessageShape } from '../../model/userMessages'
+import { isReviewStateEvent } from '../../model/reviewRounds'
+import { automationAuthor, userMessageShape } from '../../model/userMessages'
 import { parseTs, turnDuration } from '../../model/timeLabel'
 import type {
   AgentEvent,
@@ -26,8 +28,11 @@ import type {
   UserMessagePayload,
 } from '../../types'
 import ArtifactCard from '../ArtifactCard'
+import { ReviewRoundLine } from '../ReviewRoundLine'
 import AskReply from '../AskReply'
 import DelegationCard from './DelegationCard'
+import ProposalCard from './ProposalCard'
+import ReviewRequestCard from './ReviewRequestCard'
 import { useAsks } from '../askContext'
 import { MessageText } from '../AttachmentChips'
 import CopyMessage from '../CopyMessage'
@@ -55,7 +60,8 @@ export interface UserMessageContext {
   first: boolean
 }
 
-/** Decides how a user message is drawn; null or undefined leaves it as the person's own. */
+/** Decides how a user message is drawn; null or undefined leaves the chat's own look: the person's
+ *  ("You"), or the automation that wrote it (a board, a parent session, a cron: automationAuthor). */
 export type DescribeUserMessage = (ev: AgentEvent, payload: UserMessagePayload, context: UserMessageContext) => UserMessageLook | null | undefined
 
 export interface RenderOptions {
@@ -109,12 +115,11 @@ function AskCard({ ev, cards }: { ev: AgentEvent; cards?: CardRegistry }) {
   )
 }
 
-// A thinking block: an ordinary assistant card, its text plain with the line breaks kept (it is the
-// model's working, not an answer to format), and "thinking" where the time sits.
+// Thinking uses the same safe Markdown renderer as answers, with a distinct footer.
 function ThinkingRow({ ev, text }: { ev: AgentEvent; text: string }) {
   return (
     <div className="agent-card assistant" data-kind="thinking" data-testid="thinking">
-      <div className="thinking-text">{text}</div>
+      <Markdown className="thinking-text" text={text} />
       <div className="card-foot"><span className="card-time">thinking · <TimeLabel ts={ev.ts} /></span></div>
     </div>
   )
@@ -132,7 +137,7 @@ export function ToolCard({ call, result, ts }: { call: ToolCallPayload; result?:
   const ok = result ? !result.is_error : undefined
   const url = (call.tool === 'push_mockup' || call.tool === 'push_screenshot') ? publishedURL(result) : null
   return (
-    <div className={`agent-card tool ${ok === false ? 'tool-error' : ''}`} data-testid="tool-card" data-call-id={call.call_id}>
+    <div className={`agent-card tool ${ok === false ? 'tool-failed' : ''}`} data-testid="tool-card" data-call-id={call.call_id}>
       <button className="tool-header" onClick={() => setOpen(o => !o)}>
         <span className="tool-name">{call.tool}</span>
         <span className="tool-summary">{summarizeInput(call.input)}</span>
@@ -179,7 +184,7 @@ export function turnDoneText(ev: AgentEvent, turnStart?: number) {
   const d = turnDuration(turnStart ?? null, parseTs(ev.ts))
   return (
     <>
-      {p.stop_reason} · {p.model} · {usageCost(p)}
+      {p.stop_reason} · <span title={p.model}>{modelDisplayName(p.model)}</span> · {usageCost(p)}
       {p.check_in_missing ? ' · ⚠ no completion check-in' : ''}
       {' · '}<TimeLabel ts={ev.ts} />
       {d ? ` · ${d}` : ''}
@@ -235,7 +240,7 @@ export function renderEvent(
       if (shape.as === 'notice') {
         return (
           <div key={key} className="agent-card system-note" data-testid="system-note">
-            <span className="system-label">system</span>
+            <span className="system-label">{shape.label ?? 'system'}</span>
             <span className="system-text">{shape.text}</span>
             <TimeLabel ts={ev.ts} className="card-time-end" />
           </div>
@@ -254,9 +259,11 @@ export function renderEvent(
         return <BriefLine key={key} label={typeof look.brief === 'string' ? look.brief : 'session brief'} text={p.text} cards={options.cards} eventId={key} />
       }
       const answer = p.source === 'ask_answer'
+      // A board, a parent session or a cron wrote it: never drawn as "You".
+      const author = look?.author ?? automationAuthor(p.source)
       return (
-        <div key={key} className={`agent-card user source-${p.source}${look?.author ? ' other-author' : ''}`} data-event-id={key}>
-          <span className="card-author">{look?.author ?? 'You'}{answer && <span className="card-author-note"> · answer</span>}</span>
+        <div key={key} className={`agent-card user source-${p.source}${author ? ' other-author' : ''}`} data-event-id={key}>
+          <span className="card-author">{author ?? 'You'}{answer && <span className="card-author-note"> · answer</span>}</span>
           <MessageText text={p.text} cards={options.cards} />
           <CopyMessage text={p.text} />
           <div className="card-foot"><TimeLabel ts={ev.ts} /></div>
@@ -306,6 +313,14 @@ export function renderEvent(
       return <DelegationCard key={key} ev={ev} />
     case 'delegation_decided':
       return null // folded into its request's card
+    case 'proposal_request':
+      return <ProposalCard key={key} ev={ev} />
+    case 'proposal_decided':
+      return null // folded into its request's card
+    case 'review_requested':
+      return <ReviewRequestCard key={key} ev={ev} />
+    case 'review_decided':
+      return null // folded into its request's card
     case 'ask':
       return <AskCard key={key} ev={ev} cards={options.cards} />
     case 'update':
@@ -323,7 +338,7 @@ export function renderEvent(
       const p = ev.payload as ModelChangedPayload
       return (
         <div key={key} className="agent-card marker">
-          model → {p.model}{p.effort ? ` (${p.effort})` : ''}
+          model → <span title={p.model}>{modelDisplayName(p.model)}</span>{p.effort && <span className="model-effort" title="Configured effort">{p.effort}</span>}
         </div>
       )
     }
@@ -331,7 +346,7 @@ export function renderEvent(
       const p = ev.payload as SubagentPayload
       return (
         <div key={key} className="agent-card subagent">
-          ↳ {p.agent_type} [{p.model}]: {p.summary}{p.resumed ? ' (resumed)' : ''}
+          ↳ {p.agent_type} [<span title={p.model}>{modelDisplayName(p.model)}</span>]: {p.summary}{p.resumed ? ' (resumed)' : ''}
         </div>
       )
     }
@@ -379,6 +394,8 @@ export function renderEvent(
     case 'compaction':
       return <div key={key} className="agent-card marker" data-testid="compaction">✂ {compactionText(ev.payload as CompactionPayload)}</div>
     case 'artifact':
+      // A review's state is not a document: its round of answers is one line (model/reviewRounds.ts).
+      if (isReviewStateEvent(ev)) return <ReviewRoundLine key={key} ev={ev} />
       return <ArtifactCard key={key} payload={ev.payload as ArtifactPayload} ts={ev.ts} eventId={key} />
     case 'topic':
       return (

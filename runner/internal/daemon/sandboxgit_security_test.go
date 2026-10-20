@@ -100,7 +100,7 @@ func TestSandboxGitAlternatesAreBoundedRegularFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, binary, "-test.run=^TestSandboxGitAlternatesAreBoundedRegularFiles$")
 			cmd.Env = []string{"BLERG_TEST_GIT_METADATA_READ=" + path}

@@ -362,7 +362,7 @@ func (a *API) maybeSpawnReviewer(ctx context.Context, board db.Board, card db.Ca
 		a.noteNoReviewerFor(ctx, card, roundStart, err)
 		return
 	}
-	if _, _, err := a.spawnSession(ctx, board, card, "reviewer", prompt, ""); err != nil {
+	if _, _, err := a.spawnSession(ctx, board, card, "reviewer", prompt); err != nil {
 		log.Printf("auto-review: spawn reviewer for card #%d: %v", card.Number, err)
 		// A failed spawn writes no runner_sessions row and would otherwise
 		// write no comment either — and the "spawned" comment below is the

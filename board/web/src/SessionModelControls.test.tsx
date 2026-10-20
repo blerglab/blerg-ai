@@ -23,6 +23,16 @@ describe("native session model controls", () => {
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/runner-sessions/fixture-session/model", { json: { model: "gpt-next", effort: "high" } }));
     expect(await screen.findByRole("status")).toHaveTextContent("requested for the next turn");
   });
+  it("shows concise named-provider choices and submits their exact routing IDs", async () => {
+    const id = "custom:local-vision/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4";
+    vi.mocked(api).mockImplementation(async path => path.includes("launch-options") ? { state: "known", engines: [{ id: "hermes", name: "Hermes", models: { models: [{ id, name: id, efforts: [] }] } }] } as never : {} as never);
+    render(<SessionModelControls session={{ ...session, engine: "hermes" }} />);
+    const option = await screen.findByRole("option", { name: "Nemotron Super VL" });
+    expect(option).toHaveAttribute("title", id);
+    fireEvent.change(screen.getByRole("combobox", { name: "Session model" }), { target: { value: id } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply settings" }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/runner-sessions/fixture-session/model", { json: { model: id, effort: "" } }));
+  });
   it("reports rejected controls instead of claiming success", async () => {
     render(<SessionModelControls session={session} />);
     await screen.findByRole("combobox", { name: "Session model" });

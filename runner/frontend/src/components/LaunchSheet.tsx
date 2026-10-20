@@ -6,6 +6,9 @@ import { apiFetch } from '../apiFetch'
 import { coreOrigin } from '../authClient'
 import RunColumn from './RunColumn'
 import McpPicker from './McpPicker'
+import LaunchPermissions from './LaunchPermissions'
+import { NO_LAUNCH_PERMISSIONS, effectiveLaunchPermissions, type LaunchPermissionsValue } from '../lib/launchPermissions'
+import { useToastStore } from '../hooks/useToastStore'
 import type { McpSelectionEntry } from '../types'
 import { useBackdropClose } from '@blerglab/chat'
 import { defaultRuntime, runtimeDisabledReason, ACK_AGENT, ACK_TERMINAL } from '../lib/runtimes'
@@ -232,6 +235,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     saveDefault(LAST_BOARD_KEY, id)
   }
   const [mcp, setMcp] = useState<McpSelectionEntry[]>([])
+  // Permissions given before the session starts (LaunchPermissions); only what still applies is sent.
+  const [permissions, setPermissions] = useState<LaunchPermissionsValue>(NO_LAUNCH_PERMISSIONS)
   // Session kind: the native agent harness (structured chat transcript, no
   // terminal) or the classic tmux-hosted terminal CLI. Agent is the default —
   // it is what this tool is for, and it is what the sandbox now covers.
@@ -708,8 +713,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           : `Checking that ${selectedDaemon.name} is still connected…`
   const mcpEngineAvailable = launchOptions.engines.find(e => e.id === engine)?.restricted === true
   const mcpAvailable = (runtime === 'cluster' || runtime === 'docker') && mcpEngineAvailable && kind === 'agent'
+  // The board alone may also go to a session on This machine, when its daemon dials the
+  // gateway through the server (connections never do).
+  const boardOnHost = runtime === 'daemon' && selectedDaemon?.mcp_gateway_via_server === true && mcpEngineAvailable && kind === 'agent'
   const boardProblem = !boardId ? null
-    : !mcpAvailable ? 'Clear the board or choose an agent session in a supported sandbox to use its tools.'
+    : !mcpAvailable && !boardOnHost ? 'Clear the board or choose an agent session in a supported sandbox to use its tools.'
     : boards.state !== 'ready' ? 'Checking your board access — retry or clear the board to launch without it.'
     : !boards.configured || !boards.boards.some(b => b.id === boardId) ? 'This board is no longer available to you. Choose another board or clear the board.'
     : null
@@ -846,6 +854,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // POSTs the launch: where the repository comes from (repoFields) plus
   // everything else the sheet chose, the same for every kind of repo choice.
   async function postSession(repoFields: Record<string, unknown>) {
+    const granted = kind === 'agent' ? effectiveLaunchPermissions(permissions, { runtime, boards: boards.state === 'ready' && boards.configured ? boards.boards : [], mcp: mcpAvailable ? mcp : [] }) : NO_LAUNCH_PERMISSIONS
+    const launchPermissions = granted.children.length + granted.boards.length + granted.mcp_tools.length > 0 ? granted : undefined
     setSubmitting(true)
     setError(null)
     try {
@@ -875,15 +885,20 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           // Only when something is selected, and only where a grant can run at all.
           board_id: boardId || undefined,
           mcp: mcpAvailable && mcp.length > 0 ? mcp : undefined,
+          permissions: launchPermissions,
         }),
       })
       if (!res.ok) {
         const text = await res.text()
         throw new Error(text || `HTTP ${res.status}`)
       }
-      const json = await res.json() as { session_id: string }
+      const json = await res.json() as { session_id: string; permission_problems?: unknown }
       if (!json.session_id) {
         throw new Error('server response missing session_id')
+      }
+      // The session started; a permission it could not be given is said once, and it asks instead.
+      if (Array.isArray(json.permission_problems) && json.permission_problems.length > 0) {
+        useToastStore.getState().addToast({ title: 'Some permissions were not given', body: json.permission_problems.filter(p => typeof p === 'string').join(' '), url: '/sessions/' + json.session_id })
       }
       addPendingSession(json.session_id)
       onClose()
@@ -1259,7 +1274,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               <textarea
                 value={initialPrompt}
                 onChange={e => setInitialPrompt(e.target.value)}
-                placeholder="What should Claude work on?"
+                placeholder="What should the agent work on?"
                 autoCorrect="off"
                 autoCapitalize="none"
                 autoComplete="off"
@@ -1347,6 +1362,14 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                 </div>
               )}
             </div>
+
+            <LaunchPermissions kind={kind} runtime={runtime}
+              boards={boards.state === 'ready' && boards.configured ? boards.boards : []}
+              boardsLoading={boards.state === 'loading'}
+              engines={onCluster ? [] : selectedDaemon?.available_engines ?? []}
+              mcp={mcpAvailable ? mcp : []}
+              connectionName={id => launchMcpConnections.cached()?.find(c => c.id === id)?.name ?? id.slice(0, 8)}
+              value={permissions} onChange={setPermissions} />
           </div>
 
           {/* Column: Run — every runtime/kind/engine choice, nothing hidden */}

@@ -12,7 +12,7 @@ These features are shared control-plane services, independent of the coding engi
 
 | ID | Feature | Implementation / contract |
 | --- | --- | --- |
-| CORE-01 | Local account login, bootstrap administrator, and required initial password change | [Authentication](../core/internal/api/auth_handlers.go), [local provider](../core/internal/authprovider/local.go) |
+| CORE-01 | Local account login; first-run setup (the first admin chooses a username and password on `/setup`, with a single-use setup link or, on the desktop, from localhost); required password change after an operator-issued one-time password | [Authentication](../core/internal/api/auth_handlers.go), [setup](../core/internal/api/setup_handlers.go), [local provider](../core/internal/authprovider/local.go), [setup codes](../core/internal/authprovider/setup.go) |
 | CORE-02 | External GitHub or OIDC login, callback/state handling, and account resolution | [Auth providers](../core/internal/authprovider/) |
 | CORE-03 | Browser sessions, short-lived audience-specific access tokens, refresh, and single-device logout | [Human sessions](../core/internal/identity/human_session.go), [auth API](../core/internal/api/auth_handlers.go) |
 | CORE-04 | Logout everywhere, account/token revocation, and lineage checks | [Identity](../core/internal/identity/), [shared verifier](../contracts/identity/) |
@@ -27,6 +27,7 @@ These features are shared control-plane services, independent of the coding engi
 | CORE-13 | Signed-in component landing page, bounded health probes, site links/branding, and build identity | [Web app](../core/web/src/App.tsx), [shell](../core/web/src/Shell.tsx), [landing](../core/internal/landing/) |
 | CORE-14 | Browser authentication refresh guard, origin/CSRF checks, login limiting, and safe redirect handling | [API auth](../core/internal/api/auth_handlers.go), [login limiter](../core/internal/api/login_limiter.go), [refresh guard](../core/web/src/refreshGuard.ts) |
 | CORE-15 | Registered engine integration and plugin metadata for credential/settings UI | [Descriptors](../contracts/engines/), [Core endpoint](../core/internal/api/engine_descriptors.go), [Settings](../core/web/src/Settings.tsx) |
+| CORE-16 | "Run as me" mint for boards: a run-sessions token for the person signed in to the board, proved by their live board access token, with its own key, per-account rate limit, `board <id>` source in Settings, and board-scoped revoke | [Board automation mint](../core/internal/api/internal_board_automation.go), [identity](../core/internal/identity/board_automation_tokens.go), migration `022` |
 
 ## Credentials, plugins, and external connections
 
@@ -51,8 +52,9 @@ These features are shared control-plane services, independent of the coding engi
 
 ## Session launching and control plane
 
-Sessions on a desktop can start and drive their own child sessions with owner approval, standing
-rules or session grants. Child controls, files, live status and separate usage totals share the
+Sessions on a desktop or on the cluster can start and drive their own child sessions with owner
+approval, standing rules or session grants; a desktop parent's children run on that desktop, a
+cluster parent's as cluster pods. Child controls, files, live status and separate usage totals share the
 engine-independent runner services; nesting is limited to one generation. See
 [sessions starting sessions](talking-to-an-agent.md#when-the-agent-starts-other-sessions). Children remain in a stable worker list until explicitly discarded through the CLI,
 panel or sidebar. Discard stops and archives the child, preserving searchable History,
@@ -78,7 +80,7 @@ Implementation roots: [server](../runner/internal/server/), [DB](../runner/inter
 | RUN-14 | Live model/effort control | WS/REST/MCP | WS/REST/MCP | `runner_model.go`; one authorized setter, immutable native engine, next-turn dispatch acknowledgement and effective native metadata. |
 | RUN-15 | Session listing/title/star/read/privacy metadata | shared | shared | `api.go`, `db/queries.go`, browser WS mark/read/star, privacy guards; `api_test.go`, `privacy_test.go`, `privacy_scope_test.go`, `privacy_guard_test.go`. |
 | RUN-16 | Start progress and stage diagnostics | shared | shared | `startstages.go`, `startstages_test.go`; ordered persisted start_stage plans, native/pod reports. |
-| RUN-17 | Native conversation recovery on Cluster | supported registered layout | supported registered layout | `nativehistory.go:47,122,218,287`, nativehistory registry; owner/engine/PVC UID/writer fence, opt-in storage/capacity/retention; `nativehistory_test.go`. Workspace is separate, not backed up by conversation PVC. |
+| RUN-17 | Native conversation recovery on Cluster | supported registered layout | supported registered layout | `nativehistory.go:47,122,218,287`, nativehistory registry; owner/engine/PVC UID/writer fence, opt-in storage/capacity/retention; `nativehistory_test.go`. Workspace is separate, not backed up by conversation PVC. The engine home (`~/.codex`, `~/.claude`) is an agent-owned emptyDir prepared by the init container, so logins never reach the PVC; `nativehistory_enginehome_test.go`. |
 | RUN-18 | Daemon reconnect reconciliation and lost-session states | shared | shared | `daemon_conn.go:701-890`, `daemongrace.go`, `sessionpaused.go`, `jobreconcile.go`; actual native restart retention owned by daemon reviewer; [background-task lifetime reconciliation](design/background-task-reconciliation.md) closes abandoned work and repairs counts atomically. |
 | RUN-19 | Pause / restart pause / explicit user continuation | shared | shared | `sessionpaused.go`, browser request handlers, `SessionPaused`; preserved asks; `sessionpaused_test.go`, `jobreconcile_test.go`; no assumption ended sessions can resume. |
 | RUN-20 | Cluster owner-authorized resume and fresh credentials | supported | supported | `session_recovery.go`, `runner.go`, `k8sjobs.go`; fresh caller proof, retained-history checks, native vs legacy transcript reconstruction, visible launch failures. |
@@ -95,7 +97,7 @@ Implementation roots: [server](../runner/internal/server/), [DB](../runner/inter
 | RUN-31 | Native and terminal output + scrollback transport | shared | shared transport | `sessions.go:452`, browser subscribe/output/resize/scrollback; terminal capability/engine behavior delegated daemon. |
 | RUN-32 | Durable agent events / transient stream / ack/replay | shared | shared | `agentevents.go:73`, `ingestorder.go`, `hubgap.go`, `events_live.go`, `events_stream.go`; per-event IDs/seq, missing replay/slow subscriber refill; `ingestorder_test.go`, `events_live_test.go`, `events_stream_test.go`. |
 | RUN-33 | Tail/history paging and child context | shared | shared | `replaycontext.go:16`, `db/replaycontext.go`; includes subagent_update and bounded historical upper fence; `replaycontext_test.go`, `replaytail_test.go`. |
-| RUN-34 | Live session aggregate / Running Now / status-aware subagents | shared | shared consumer | `livestate.go:60,142`, `db/livestate.go`, shared livestate reducer; human-only view intentional; `livestate_test.go`. Correct native child emit coverage daemon scope. |
+| RUN-34 | Live session aggregate / Running Now / status-aware subagents and running child sessions | shared | shared consumer | `livestate.go:60,142`, `db/livestate.go`, shared livestate reducer; human-only view intentional; `livestate_test.go`. Running Now counts and lists running started sessions with the subagents and background tasks (`SessionRail.tsx`). Correct native child emit coverage daemon scope. |
 | RUN-35 | Loaded session capabilities | supported normalized payload | supported normalized payload | `agentevents.go:264`, `protocol/capabilities.go:13-182`; bounded six groups, unknown vs empty; sanitize/persist/replay tests in `capabilities_test.go`. |
 | RUN-36 | Session Insights | shared with settled usage semantics | shared with settled usage semantics | `session_insights.go`, `db/insights.go`; child model/configured-effort updates, validated root/child token partitions, costs and counts; ambiguous attribution stays unknown. |
 | RUN-37 | Install Insights / prices / Prometheus metrics | shared | shared | `insights.go`, `insights_calc.go`, `metrics.go`; configured per-model prices, owner/admin token visibility; `insights_api_test.go`, `insights_calc_test.go`, `metrics_test.go`. Active usage shared settled-usage limitation. |
@@ -119,6 +121,7 @@ Implementation roots: [server](../runner/internal/server/), [DB](../runner/inter
 | RUN-55 | Session artifacts/versioning, uploads, attachments, file visibility/deletion | shared | shared | `routes_artifacts.go`, `artifacts.go`, `uploads.go`, `files.go`, `runner_files.go`; own runtime/session authorization; artifact/upload/runner_files tests. |
 | RUN-56 | Mockup/screenshot publication | shared | shared | `publish.go`; dedicated host separation/path validation; `publish_test.go`. Runtime `checkDaemonAuth`/scope policies, not engine branches. |
 | RUN-57 | History topics/outcomes/commit links | shared | shared | `topics.go:34`, `db/reel.go`, topic/reel reducers; session messaging token and git-provider refs; topics/reel tests. CLI access supplied to both engines. |
+| RUN-70 | Checklist work map: stable item IDs, multiple doing items, explicit session-scoped native/Blerg worker assignments and Plan navigation | shared | shared | [Checklist model](../runner/internal/checklist/), [session work state](../runner/internal/server/worklist.go), [agent guide](talking-to-an-agent.md#tickets-and-checklists); legacy replay, scoped assignment, concurrent mutation and UI identity tests. |
 | RUN-58 | Project memories/knowledge search/rules | shared | shared | `dataplane.go`, `dataplaneauth.go`; exact current repo, unrestricted runtime only; approved rule reads vs admin mutation; `dataplaneauth_test.go`, `dataplane_test.go`. Engine-specific tool exposure daemon scope. |
 | RUN-59 | Runner-integrated boards/columns/tickets/dependencies/events | shared | shared | `boards.go`, `columns.go`, `tickets.go`, `boardauth.go`, DB board/ticket graph/rank/token files; same REST authorization, no engine checks. Legacy Assist also validates and forwards engine/model/effort. |
 | RUN-60 | Push notices/unread/idle/waiting and background completion | shared | shared normalized events | `push.go`, `notices.go`, `sessions.go`, `livestate.go`; suppress headless asks/notices, defer idle with running child work; `notices_test.go`, push/session tests. |
@@ -131,6 +134,8 @@ Implementation roots: [server](../runner/internal/server/), [DB](../runner/inter
 | RUN-67 | Existing-session catalog discovery bound to immutable engine and actual host/runtime | supported | supported | `launch_options.go`, `runner_controls_test.go`; owner authorization, no fallback to another execution host. |
 | RUN-68 | Live native MCP readiness and bounded first-input hold | Persistent Claude Code control protocol | Codex app-server thread status | [Shared tracker](../runner/internal/daemon/mcptracker.go), [live contract](../runner/README.md#mcp); owner-only release, durable snapshots, gateway scope, process restart tracking. Legacy engines without a live source remain explicitly unknown. |
 | RUN-69 | Read a live session's workspace file | Shared host/container/pod primitive | Shared host/container/pod primitive | [Workspace read contract](../runner/README.md#opening-a-session-workspace-file); human owner/admin only, bounded reads, launch-folder identity, no symlink escape, protected names and hardlinks refused; Linux/macOS, other platforms fail closed. |
+| RUN-71 | Workstation sessions reach the MCP gateway through the server's web address (sandbox and, for the board alone, This machine) | Shared | Shared | [Web-port mount](../runner/internal/server/mcpstart.go) (`RegisterMCPGatewayRoutes`: grants issued for it only, uniform 401, address throttle, seven-day idle limit, `BLERG_RUNNER_MCP_GW_PUBLIC`), [daemon](../runner/internal/daemon/mcpgateway.go) (`viaServerGateway`); `mcpgw_web_test.go`, `mcpgatewayvia_test.go`. |
+| RUN-72 | Explicit review requests: a session asks its owner to approve one published file or diff at an exact version; owner-only decide, supersede on a newer version, decision delivered as a message or to a waiting CLI | shared | shared | [Review requests](../runner/internal/server/reviewrequests.go), [storage](../runner/internal/db/reviewrequests.go) (migration 069), [guide](artifacts.md#asking-for-an-approval); `reviewrequests_test.go`, `test_blerg_runner_review_request.py`. |
 
 ## Native engines and execution runtimes
 
@@ -178,7 +183,7 @@ Implementation roots: [daemon](../runner/internal/daemon/), [native loop/tools](
 | EXEC-38 | Cluster native conversation history | nativeHistoryKeeper binds Claude driver | same keeper binds Codex + SQLite + child allowlist | Both owner/engine/claim UID/workdir bound; workspace reconstructed separately. Server storage fences audited elsewhere. |
 | EXEC-39 | Missing native history fallback | Claude reconstruction/resume fallback unless strict native mode | bounded archived transcript context only when no native thread | Explicit notices; native retained history mode refuses mismatched identity. Cannot recreate lost native data. |
 | EXEC-40 | Terminal exact recovery | recorded Claude session ID | private Codex terminal home, bounded cli-source transcript identity | Both supported with real CLI fixtures. Obsolete comments still say Codex cannot resume; implementation does. |
-| EXEC-41 | Session CLI publish/fetch/topic/review | buildSessionEnv + messaging CLI on PATH | same | Engine-neutral tool availability; no separate daemon artifact pipeline needed. |
+| EXEC-41 | Session CLI publish/fetch/topic/review | buildSessionEnv + messaging CLI on PATH | same | Engine-neutral tool availability; no separate daemon artifact pipeline needed. `review reply` answers a round in one call (repeated triples or `--file`). |
 | EXEC-42 | Session token refresh | shared sessiontoken file/sandbox copy | same | Master token excluded from child env; private launch auth fetched separately. |
 | EXEC-43 | Managed refresh authority | Claude existing credential mode, provider-owned refresh outside this Codex broker | Core-owned managed source -> external native login/refresh callback | Codex supported for explicit Cluster enrollment. Imported credential snapshots remain separate. |
 | EXEC-44 | Managed login in workstation sandbox | not this enrollment path | explicitly refused by prepareCodexRestrictedRuntime | Deliberate supported-shape boundary; host credentials use mounted native login. |
@@ -224,11 +229,11 @@ Implementation roots: [runner frontend](../runner/frontend/src/), [shared chat](
 | CHAT-08 | Ask/reply/note/check-in | Shared ask routing; options text only | chat AskReply/model/asks; board proxy message source human |
 | CHAT-09 | Session settings/limit reset resume | Shared runner settings; provider capability needed | UsageLimitResume, SessionRail, UsageMeters |
 | CHAT-10 | Capabilities/skills/plugins/MCP/tools | Data-driven rendering; unknown groups explicitly marked | CapabilitiesPanel.tsx:3,140; lib/capabilities |
-| CHAT-11 | Tool changes/proposals | Shared API contracts | ToolChanges, Proposals and lib/proposals/toolChanges |
+| CHAT-11 | Tool changes/proposals | Shared API contracts | ToolChanges, Proposals and lib/proposals/toolChanges; proposal cards in the chat (chat cards/ProposalCard, model/proposals) with Edit in ProposalEditSheet |
 | CHAT-12 | Terminal sessions/touch/selection/screen | Shared terminal renderer; CLI ability distinct from agent engine | TerminalDOMView, terminalRenderer/terminalKeys tests |
 | CHAT-13 | Usage meters/Insights/cost prices | Both named; estimates/completed work limitations | UsageMeters; Insights, SessionInsights; lib/insights |
 | CHAT-14 | Files/attachments/previews/download/delete | Engine independent artifacts service | runner FilesTab/ArtifactViewer and chat transport/files/FilesPanel |
-| CHAT-15 | Artifact text/Markdown/PDF/image/HTML/CSV/review/markup | Shared publish/review contract | chat ArtifactViewer, components/review, components/markup, model/artifacts |
+| CHAT-15 | Artifact text/Markdown/PDF/image/HTML/CSV/review/markup | Shared publish/review contract | chat ArtifactViewer, components/review, components/markup, model/artifacts; review-state publishes fold into one line per round of answers (model/reviewRounds, ReviewRoundLine) |
 | CHAT-16 | Sound/notifications/theme/auth/version/update | Shared UI infrastructure | runner notify/sound/authClient/UpdateBanner; board corresponding modules |
 | CHAT-17 | Embedded Chat transport direct Blerg WS | Both normalized; host owns model picker | packages/chat transport/blerg, ChatView slots |
 | CHAT-18 | Embedded proxy Chat | Normalized transcript/files/control; optional model/effort forwarding and durable IDs, visible unsupported errors | transport/proxy, proxy/go, board chatproxy |
@@ -236,6 +241,8 @@ Implementation roots: [runner frontend](../runner/frontend/src/), [shared chat](
 | CHAT-20 | Published artifact links open the existing viewer | Exact trusted session URL plus known viewable artifact; modified/external links preserve navigation | chat model/artifactLinks and Markdown links; authenticated host URL mapping |
 | CHAT-21 | Mermaid diagrams and inline-data Vega-Lite charts | Shared renderer, independent of engine and host | [Visual renderer](../packages/chat/src/components/VisualBlock.tsx); lazy strict Mermaid, inert SVG images, bounded single-plot charts with a deny-all loader and expression interpreter; live chat-token themes, responsive plots, source/copy/fullscreen zoom, Markdown previews/review and file viewer. |
 | CHAT-22 | Anchored code review of published diffs | Shared existing review files, feedback and reply flow | [Diff selection](../packages/chat/src/model/diffSelection.ts), [review surface](../packages/chat/src/components/review/ReviewMode.tsx); direct gutter comments and inline threads, general feedback, Markdown formatting/preview, new-side suggestions, revision-aware resolved/rejected replies and reopening, individual thread collapse and a resolved-thread filter, unambiguous quote carryover with outdated fallback, scoped/mobile selection and one-message submission. |
+| CHAT-23 | Session permissions (children, board cards, MCP tools) | Shared server policy; engine independent | runner session_permissions.go, launch_permissions.go, db/proposal_grants.go; frontend SessionPermissions (panel summary + chips), PermissionsModal (search, Select all shown, staged Save), LaunchPermissions (Permissions… button), useChildApproval; created cards as History chips (topics/reel.go card items) |
+| CHAT-24 | Review request card, viewer review bar (Approve / Request changes) and Needs you row | Shared; engine independent | chat ReviewRequestCard, ReviewRequestBar, model/reviewRequests (chat 0.29.0); runner SessionRail ReviewRequestRow; `ChatView.reviewRequests.test.tsx`, `ReviewRequests.browser.test.tsx` |
 
 ## Boards and agent workflows
 
@@ -258,6 +265,9 @@ Implementation roots: [board API](../board/internal/api/), [board DB](../board/i
 | BOARD-13 | In-session model/effort switching and discovery | Shared REST/MCP/proxy controls with actual-session target catalog | api/sessionmodel, api/launchoptions, web/SessionModelControls; effective metadata is separate from dispatch acknowledgement |
 | BOARD-14 | Board metrics/card tokens/model attribution | Shared normalized event usage; no effort/engine dimension | api/cardstats.go:109; boardmetrics.go:65 |
 | BOARD-15 | Board tokens/membership/project scope/MCP | Shared security contracts | auth, corecred, mcp/scope; dynamic discovery checks card.write and current automation authority |
+| BOARD-16 | Live board updates for every card change (UI, REST, MCP, automation) | Shared, engine independent | api/hub.go change pings on every card write; web boardSocket waits for a silently renewed token and only the newest reload lands; api/live_test.go, web api/BoardView tests |
+| BOARD-17 | Run a card on a chosen target (cluster, or a connected daemon's sandbox), kept on respawn | Shared start path | [Run targets](../board/internal/api/runtarget.go) (owner of the automation token only; `GET /api/cards/{id}/run-targets`), card panel `Conversation.tsx`; the runner runs a pinned start in the folder that daemon has for the repository (`repoFolderOn`) |
+| BOARD-18 | Run as me: one-click automation identity (settings panel, create-board default `BLERG_BOARD_DEFAULT_RUN_AS_CREATOR`, card call to action); a minted token is revoked when replaced, removed or its board deleted; pasting stays available | Shared start path, engine independent | [Run as me](../board/internal/api/runasme.go), [core client](../board/internal/coremint/coremint.go), migration `024`; web BoardSettings, App create form, Conversation `RunAsMeCta` |
 
 ## Installation, operations, and distribution
 
@@ -277,6 +287,7 @@ Implementation roots: [board API](../board/internal/api/), [board DB](../board/i
 | OPS-12 | Privacy scrub, documentation link checks, installer checks, and release guard scripts | [Scripts](../scripts/), [Contributing](../CONTRIBUTING.md#tests) |
 | OPS-13 | Unified semantic version/changelog, public release assembly, tags, and release metadata | [Release guide](../CONTRIBUTING.md#versions-and-releases), [release script](../scripts/release-public.sh) |
 | OPS-14 | Security reporting policy and documented trust/containment limits | [Security policy](../SECURITY.md), [MCP security properties](mcp-connections.md#security-properties-and-their-limits) |
+| OPS-15 | Shared Hermes model providers for cluster sessions: install-time fragment, pod config merge, cluster model catalog, local-budget rule, opt-in egress to model servers | [Cluster runtime guide](../install/k8s/CLUSTER-RUNTIME.md#shared-hermes-providers), [template](../install/k8s/hermes-providers.example.yaml), [server](../runner/internal/server/hermesproviders.go), [pod merge](../runner/internal/runner/hermesconfig.go) |
 
 ## Inventory maintenance and completeness
 
@@ -295,3 +306,5 @@ editing, visibility controls and a flattened annotated export. See
 Attachment chips offer safe local raster-image thumbnails, first-page PDF thumbnails,
 and bounded plain-text excerpts before send, with file-tile fallbacks. Document editing
 uses icon formatting controls with tooltips, accessible labels and live active states.
+
+Hermes agent-session protocol coverage and explicit runtime limits are documented in [Hermes gateway support](hermes-gateway.md). Its native tools, steering, questions, plans, children, background inventory and cumulative usage are translated into the shared runner event contracts; this does not enable restricted MCP/cron or managed-plugin gates.

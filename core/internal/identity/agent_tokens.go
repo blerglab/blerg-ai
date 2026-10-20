@@ -108,6 +108,9 @@ type AgentTokenRecord struct {
 	ExpiresAt  time.Time  `json:"expires_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	RevokedAt  *time.Time `json:"revoked_at"`
+	// Source says where the token came from: "" for one the owner created in Settings,
+	// "board <id>" for the automation token a board minted for them ("Run as me").
+	Source string `json:"source"`
 }
 
 // agentTokenIDShape matches a standard 8-4-4-4-12 hex UUID. Every id reaching a query here is
@@ -142,7 +145,7 @@ func (s *Service) CreateAgentToken(ctx context.Context, accountID, name, preset 
 	if !ok {
 		return AgentTokenRecord{}, "", ErrUnknownPreset
 	}
-	return s.createAgentToken(ctx, accountID, name, p.Aud, p.Caps, expiresIn)
+	return s.createAgentToken(ctx, accountID, name, p.Aud, p.Caps, expiresIn, "")
 }
 
 // RemintAgentToken replaces one of accountID's tokens with a fresh one of the same name,
@@ -154,13 +157,13 @@ func (s *Service) RemintAgentToken(ctx context.Context, accountID, id string) (A
 	if !agentTokenIDShape.MatchString(id) || !agentTokenIDShape.MatchString(accountID) {
 		return AgentTokenRecord{}, "", ErrNotFound
 	}
-	var name, aud string
+	var name, aud, source string
 	var caps []string
 	var createdAt, expiresAt time.Time
 	err := s.st.Pool().QueryRow(ctx,
-		`SELECT name, aud, caps, created_at, expires_at FROM agent_tokens
+		`SELECT name, aud, caps, created_at, expires_at, source FROM agent_tokens
 		  WHERE id = $1 AND account_id = $2 AND kind = 'token'`, id, accountID).
-		Scan(&name, &aud, &caps, &createdAt, &expiresAt)
+		Scan(&name, &aud, &caps, &createdAt, &expiresAt, &source)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return AgentTokenRecord{}, "", ErrNotFound
@@ -174,13 +177,13 @@ func (s *Service) RemintAgentToken(ctx context.Context, accountID, id string) (A
 	if lifetime <= 0 || lifetime > MaxAgentTokenDays*24*time.Hour {
 		lifetime = DefaultAgentTokenDays * 24 * time.Hour
 	}
-	return s.createAgentToken(ctx, accountID, name, aud, caps, lifetime)
+	return s.createAgentToken(ctx, accountID, name, aud, caps, lifetime, source)
 }
 
 // createAgentToken is CreateAgentToken after the preset is resolved: the caps asked for are
 // narrowed to the account's role, the live-token cap is checked, and the token is minted and
 // recorded.
-func (s *Service) createAgentToken(ctx context.Context, accountID, name, aud string, wantCaps []string, expiresIn time.Duration) (AgentTokenRecord, string, error) {
+func (s *Service) createAgentToken(ctx context.Context, accountID, name, aud string, wantCaps []string, expiresIn time.Duration, source string) (AgentTokenRecord, string, error) {
 	state, err := s.AccountState(ctx, accountID)
 	if err != nil {
 		return AgentTokenRecord{}, "", err
@@ -228,12 +231,12 @@ func (s *Service) createAgentToken(ctx context.Context, accountID, name, aud str
 		return AgentTokenRecord{}, "", err
 	}
 
-	rec := AgentTokenRecord{ID: id, AccountID: accountID, Name: name, Aud: aud, Caps: caps}
+	rec := AgentTokenRecord{ID: id, AccountID: accountID, Name: name, Aud: aud, Caps: caps, Source: source}
 	if err := s.st.Pool().QueryRow(ctx,
-		`INSERT INTO agent_tokens (id, account_id, name, aud, caps, token_hash, expires_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)
+		`INSERT INTO agent_tokens (id, account_id, name, aud, caps, token_hash, expires_at, source)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		 RETURNING created_at, expires_at`,
-		id, accountID, name, aud, caps, agentTokenHash(raw), expiresAt,
+		id, accountID, name, aud, caps, agentTokenHash(raw), expiresAt, source,
 	).Scan(&rec.CreatedAt, &rec.ExpiresAt); err != nil {
 		return AgentTokenRecord{}, "", err
 	}
@@ -335,7 +338,7 @@ func sleepPastSecondBoundary(ctx context.Context) error {
 // are managed from the runner's crons page.
 func (s *Service) ListAgentTokens(ctx context.Context, accountID string) ([]AgentTokenRecord, error) {
 	rows, err := s.st.Pool().Query(ctx,
-		`SELECT id::text, name, aud, caps, created_at, expires_at, last_used_at, revoked_at
+		`SELECT id::text, name, aud, caps, created_at, expires_at, last_used_at, revoked_at, source
 		   FROM agent_tokens WHERE account_id = $1 AND kind = 'token' ORDER BY created_at DESC, id`, accountID)
 	if err != nil {
 		return nil, err
@@ -346,7 +349,7 @@ func (s *Service) ListAgentTokens(ctx context.Context, accountID string) ([]Agen
 	for rows.Next() {
 		rec := AgentTokenRecord{AccountID: accountID}
 		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Aud, &rec.Caps,
-			&rec.CreatedAt, &rec.ExpiresAt, &rec.LastUsedAt, &rec.RevokedAt); err != nil {
+			&rec.CreatedAt, &rec.ExpiresAt, &rec.LastUsedAt, &rec.RevokedAt, &rec.Source); err != nil {
 			return nil, err
 		}
 		out = append(out, rec)

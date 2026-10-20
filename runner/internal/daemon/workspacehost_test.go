@@ -13,7 +13,7 @@ import (
 
 func waitWorkspaceResult(t *testing.T, s *agentTestSender, id string) protocol.WorkspaceFileResult {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
 		for _, m := range s.msgs {

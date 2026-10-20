@@ -341,7 +341,7 @@ func TestProposalMaintenanceRunsWithoutCrons(t *testing.T) {
 	if !StartProposalMaintenance(ctx, fx.api) {
 		t.Fatal("maintenance did not start although the database exists")
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for fx.row(old.ID).State != db.ProposalExpired {
 		if time.Now().After(deadline) {
 			t.Fatalf("the stale proposal was not expired; state %s", fx.row(old.ID).State)

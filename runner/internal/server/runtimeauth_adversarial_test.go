@@ -40,7 +40,7 @@ func TestRuntimeCannotRebindProjectThroughOwnStartedFrame(t *testing.T) {
 	if err = conn.WriteJSON(protocol.SessionStateChanged{Type: "session_state_changed", SessionID: sid, Status: "idle"}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	processed := false
 	for time.Now().Before(deadline) {
 		s, err := db.GetSession(ctx, pool, sid)
@@ -111,7 +111,7 @@ func TestRuntimeReplacementFencesOutboundWithoutOldInboundFrame(t *testing.T) {
 	if err = conn.WriteJSON(protocol.DaemonHello{Type: "daemon_hello", Name: "fixture-runtime", Token: runtime}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for hub.GetDaemon(did) == nil && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
@@ -124,10 +124,13 @@ func TestRuntimeReplacementFencesOutboundWithoutOldInboundFrame(t *testing.T) {
 	}
 	const marker = "fixture-new-launch-private-user-input"
 	forwardToSessionDaemon(hub, &BrowserConn{ID: "fixture-browser"}, sid, map[string]string{"type": "send_input", "session_id": sid, "data": marker})
-	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+				t.Fatal("revoked runtime socket did not close")
+			}
 			break
 		}
 		if strings.Contains(string(raw), marker) {

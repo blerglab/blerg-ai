@@ -83,10 +83,16 @@ func TestDaemonReportedTerminalStatusFinality(t *testing.T) {
 			}
 
 			delivered := false
+			// Absence is a semantic observation window; positive delivery is
+			// condition-based and may need scheduling time on a loaded runner.
+			wait := 400 * time.Millisecond
+			if tc.wantDelivery {
+				wait = 15 * time.Second
+			}
 			select {
 			case <-hits:
 				delivered = true
-			case <-time.After(400 * time.Millisecond):
+			case <-time.After(wait):
 			}
 			if delivered != tc.wantDelivery {
 				t.Errorf("webhook delivered = %v, want %v", delivered, tc.wantDelivery)

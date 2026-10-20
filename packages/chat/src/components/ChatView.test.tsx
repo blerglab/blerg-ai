@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import ChatView from './ChatView'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
 import { createCardRegistry, defineCard, type CardProps } from '../cards/registry'
@@ -302,7 +302,8 @@ describe('ChatView start and ready', () => {
     const card = screen.getByTestId('ready-card')
     expect(card).toHaveTextContent('Session ready')
     expect(card).toHaveTextContent(/claude/i)
-    expect(card).toHaveTextContent('sonnet-5 · high')
+    expect(within(card).getByTitle('claude-sonnet-5')).toHaveTextContent('sonnet-5')
+    expect(within(card).getByTitle('Configured effort')).toHaveTextContent('high')
     expect(card).toHaveTextContent(/cluster/i)
     expect(card.querySelector('time')?.getAttribute('datetime')).toBe('2026-07-26T00:01:00.000Z')
     // Nothing sent yet: the composer invites the first message.
@@ -359,8 +360,7 @@ describe('ChatView working indicator', () => {
     await sendMessage('go')
     // No server round trip yet: the session is still idle.
     const w = screen.getByTestId('working')
-    expect(w).toHaveAttribute('role', 'status')
-    expect(w).toHaveAttribute('aria-live', 'polite')
+    expect(within(w).getByRole('status')).toHaveAttribute('aria-live', 'polite')
     expect(w).toHaveTextContent('Working… 0:00')
     expect(screen.getByText(/Stop/)).toBeInTheDocument()
     act(() => { vi.advanceTimersByTime(2_000) })

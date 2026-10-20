@@ -392,6 +392,18 @@ type askAcc struct {
 }
 
 // openAsks is the chat's askStates read without the tool calls: an ask the server recorded for
+// answersLegacyAsk reports whether a user_message of this source closes an ask without a message
+// id, as the chat's asks.ts does: not the system's text, not a decision Blerg relays (review,
+// proposal), not a board's or a cron's message. A parent session's message does: it answers its
+// child.
+func answersLegacyAsk(source string) bool {
+	switch source {
+	case "system", "review", "proposal", "blerg-board", "cron":
+		return false
+	}
+	return true
+}
+
 // `blerg-runner ask` is open until it is answered, the server closes it or the session ends; any
 // other (the native loop's, or one without a message id) also closes when its turn ends. A
 // person's message closes the newest open ask without a message id.
@@ -437,7 +449,7 @@ func openAsks(events []Event, opt Options) []Ask {
 				if a != nil {
 					a.open = false
 				}
-			} else if p.Source != "system" {
+			} else if answersLegacyAsk(p.Source) {
 				if a := newestOpen(func(x *askAcc) bool { return x.id == "" }); a != nil {
 					a.open = false
 				}

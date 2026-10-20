@@ -24,6 +24,8 @@ Write a support table for the candidate engine:
 | Local customization | Instruction roots, skills, plugins, settings/config bundle, loaded capability enumeration? |
 | Accounting | Token/cache semantics, per-model changes/reroutes, pricing, usage limits/reset times? |
 
+The [Hermes gateway adapter](hermes-gateway.md) is an example of negotiating native protocol versions and keeping host recovery identity separate from the Blerg session ID.
+
 Mark unsupported, unknown, and intentionally excluded capabilities explicitly. Do not advertise a capability because the CLI accepts a similarly named flag. Inspect the pinned executable/protocol and official provider documentation; do not infer security or recovery semantics from another engine. Never use real terminal captures or credentials as fixtures.
 
 ## 2. Register integration metadata, model rules and catalog sources
@@ -49,12 +51,14 @@ The [readiness cache](../runner/internal/server/launch_readiness.go) keeps trans
 
 Read [EngineSpec and AgentDriverOpts](../runner/internal/daemon/engines.go), [driver selection](../runner/internal/daemon/agentdriver.go), and the daemon's driver interface. Implement typed invocation, argument rendering, availability checks, driver construction, optional model probes, plugin preparation, capability reporting and declared credential paths.
 
+- Use `EngineSpec.TerminalModelProblem` when an interactive CLI cannot safely implement a model selection supported by its agent adapter. The shared manager checks it before terminal launch and recovery; return an actionable refusal instead of dropping the selection or falling back.
+
 Translate the native protocol into [shared agent events](../runner/internal/agent/events.go) and [protocol messages](../runner/internal/protocol/). Shared chat, persistence, Insights and APIs should consume those events without engine-name switches. Required semantic coverage includes:
 
 1. Start/ready/failure and bounded process shutdown.
 2. User input, delivery receipt, mid-turn behavior, cancellation, and turn completion.
 3. Text/reasoning/tool calls/results, safe errors/retries, and compaction where supported.
-4. Actual model/effort changes, normalized token usage, usage limits, and reset times. For roots and children that change models, emit complete `usage_by_model` partitions that sum to aggregate `usage`; consumers expand the partitions instead of counting them again. Keep ambiguous usage under the empty (unknown) model key rather than guessing the final model. Partitions must not multiply logical turn counts.
+4. Actual model/effort changes, normalized token usage, usage limits, and reset times. For roots and children that change models, emit complete `usage_by_model` partitions that sum to aggregate `usage`; consumers expand the partitions instead of counting them again. Keep ambiguous usage under the empty (unknown) model key rather than guessing the final model. Partitions must not multiply logical turn counts. For live progress, use the shared [`usage_updated` replacement snapshot](telemetry.md#live-child-telemetry), clear it on a new or resumed turn, and keep it out of the completed-turn billing ledger. Preserve unknown usage and test a completion arriving between the snapshot and summary read.
 5. Child ownership, start/update/end/resume identity, tool parenting and usage. Carry the child's own configured effort when reported, clear stale settings on authoritative resets/model boundaries, and leave it unknown otherwise. Do not copy the parent's effort.
 6. Background process lifecycle and reconnection without false completion.
 7. Questions/answers/cancellation and stale/duplicate request handling.
@@ -91,6 +95,8 @@ Keep hooks, prompts and customization within the selected engine/runtime boundar
 ## 6. Add native recovery deliberately
 
 For host sessions, persist native conversation IDs and enough private session metadata to adopt after daemon/process restart. Confirm the same thread resumes; merely restoring chat events is insufficient. Separate agent and terminal recovery, and native resume from any limited transcript replay fallback.
+
+- Version private identities with `EngineSpec.NativeSessionVersion`; set `NativeSessionMinVersion` only for explicitly compatible older records (zero accepts only the current version). Write the new version with the first identity when recovery enforcement changes, so older adapters refuse it rather than ignoring new binding metadata. Persist known intended bindings early, then independently verify the native runtime before admitting input.
 
 For Cluster, register an engine-specific [native history layout](../runner/internal/nativehistory/layout.go), then integrate the engine-owned snapshot/restore identity with [daemon history](../runner/internal/daemon/nativehistory.go) and [server lifecycle](../runner/internal/server/nativehistory.go). Retain conversation files only: no login, refresh token, config bundle, plugin cache or old grants. Preserve owner/engine/claim-UID binding, distributed writer fencing, old-pod termination, fresh authorization and retention/deletion tombstones. Missing expected history must not silently become a new conversation.
 

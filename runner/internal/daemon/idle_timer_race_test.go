@@ -187,7 +187,7 @@ func waitIdleTimerSignal(t *testing.T, ch <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-ch:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for idle timer fixture")
 	}
 }

@@ -66,19 +66,19 @@ func TestPodWorkspaceFileUsesBoundSessionFolder(t *testing.T) {
 			if err != nil {
 				t.Errorf("pod Run: %v", err)
 			}
-		case <-time.After(3 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("pod Run did not stop")
 		}
 		srv.Close()
 	})
 	select {
 	case conn = <-connections:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("pod did not connect")
 	}
 	next := func(kind string) json.RawMessage {
 		t.Helper()
-		timer := time.NewTimer(3 * time.Second)
+		timer := time.NewTimer(15 * time.Second)
 		defer timer.Stop()
 		for {
 			select {

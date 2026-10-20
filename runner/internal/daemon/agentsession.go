@@ -434,15 +434,20 @@ type httpMessenger struct {
 	ctx       context.Context     // session lifetime; bounds answer polling
 	onAnswer  func(answer string) // called from the answer-poll goroutine
 	onPollEnd func()              // optional: lets native requests stop waiting when the ask expires
+	ownerOnly bool                // asks are answerable only by the session's signed-in owner (approvals)
 
 	pollMu sync.Mutex
 	polls  map[string]context.CancelFunc // ask id → its answer poll, while it runs
 }
 
 func (m *httpMessenger) post(kind, body string) (string, error) {
-	payload, _ := json.Marshal(map[string]string{
+	fields := map[string]any{
 		"session_id": m.sessionID, "kind": kind, "body": body, "turn_id": m.turnID,
-	})
+	}
+	if m.ownerOnly && kind == "ask" {
+		fields["owner_only"] = true
+	}
+	payload, _ := json.Marshal(fields)
 	ctx := m.ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -528,6 +533,13 @@ func (m *httpMessenger) CloseAsk(id, answer string) {
 		if err != nil {
 			log.Printf("agent session %s: closing ask %s: %v", m.sessionID, id, err)
 			return
+		}
+		// A refused close leaves the card open (it would take the next chat
+		// message as its answer), so it must not pass silently. 409 is a card
+		// that is already closed.
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusConflict {
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			log.Printf("agent session %s: closing ask %s: server answered %d: %s", m.sessionID, id, resp.StatusCode, strings.TrimSpace(string(raw)))
 		}
 		_ = resp.Body.Close()
 	}()
@@ -1107,6 +1119,38 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				cx.adoptionNote = note
 			}
 		}
+
+		if nativeDriver, ok := driver.(engineSessionDriver); ok && h.recordable(msg) {
+			sess.record = h.keepRecord(msg, workDir, model, ad)
+			var state *EngineSessionState
+			if ad != nil {
+				state = ad.rec.EngineSession
+			}
+			if err := nativeDriver.SetEngineSession(state, func(s EngineSessionState) {
+				sess.record.update(func(r *AgentRecord) bool { r.EngineSession = &s; return true })
+			}); err != nil {
+				cancel()
+				fail("The native engine conversation identity is invalid")
+				return
+			}
+			nativeDriver.SetEngineObserver(sess.record.setEngine)
+			if msg.RequireRecoveryReady {
+				nativeDriver.SetNativeResumeGate(h.waitRecoveryReady)
+			}
+		}
+		if hx, ok := driver.(*hermesDriver); ok {
+			if sess.record != nil {
+				hx.onOpenWork = sess.record.setOpenWork
+			}
+			hx.DeveloperInstructions = ccSystemPromptFor(msg.Interaction)
+			if ad != nil {
+				hx.adoptionNote = cutOffNotice(ad.rec.OpenCalls, ad.rec.OpenTasks, ad.rec.OpenSubagents)
+				if hx.adoptionNote != "" {
+					hx.adoptionNote += "\n\n" + h.restartCauseWords(ad.rec)
+				}
+			}
+			hx.AskUser = codexQuestionHandler(h.cfg.ServerHTTP, h.cfg.DaemonToken, msg.SessionID, emitter)
+		}
 	case useClaudeCode:
 		log.Printf("agent session %s: claude-code driver (the engine's own login)", msg.SessionID)
 		cc := newClaudeCodeDriver(workDir, model, msg.Effort, emitter, env, ccOpts...)
@@ -1241,7 +1285,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	case loop != nil:
 		caps.emit(emitter, nativeCapabilities(model, skillList, agentTypes, loop.ToolDefs(), workDir, h.cfg.HomeDir))
 	case cliEngine:
-		if _, runtimeCaps := driver.(*codexDriver); runtimeCaps {
+		_, codexRuntimeCaps := driver.(*codexDriver)
+		_, genericRuntimeCaps := driver.(engineSessionDriver)
+		if codexRuntimeCaps || genericRuntimeCaps {
 			break
 		}
 		if p, ok := engineCapabilities(engineRegistry[msg.Engine], model, CapabilityContext{

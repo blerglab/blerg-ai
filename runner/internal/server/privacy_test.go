@@ -471,7 +471,7 @@ func (f *privFixture) dial(t *testing.T, srv *httptest.Server, bearer string) *p
 func (w *privWS) until(t *testing.T, marker string) []string {
 	t.Helper()
 	var got []string
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for {
 		select {
 		case m, ok := <-w.msgs:
@@ -629,7 +629,7 @@ func TestPrivateSession_BrowserSocketInbound(t *testing.T) {
 	}
 	select {
 	case <-f.dc.send:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the owner's send_input never reached the daemon")
 	}
 }

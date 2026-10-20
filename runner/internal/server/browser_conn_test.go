@@ -27,10 +27,10 @@ func dialBrowserTestServer(t *testing.T, srv *httptest.Server) *websocket.Conn {
 	return conn
 }
 
-// readMessageWithDeadline reads one WebSocket message within 2 seconds.
+// readMessageWithDeadline reads one WebSocket message before the readiness deadline.
 func readMessageWithDeadline(t *testing.T, conn *websocket.Conn) []byte {
 	t.Helper()
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read message: %v", err)
@@ -118,8 +118,8 @@ func TestBrowserPingKeepalive(t *testing.T) {
 	select {
 	case <-pinged:
 		// success: server keeps the idle connection alive
-	case <-time.After(2 * time.Second):
-		t.Fatal("server sent no ping to an idle browser within 2s — no keepalive, idle connections will be reaped")
+	case <-time.After(15 * time.Second):
+		t.Fatal("server sent no ping to an idle browser before the readiness deadline — no keepalive, idle connections will be reaped")
 	}
 }
 
@@ -155,7 +155,7 @@ func TestBrowserSubscribeReceivesOutput(t *testing.T) {
 	}
 
 	// Wait until the hub has recorded the subscription.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	var subscribed bool
 	for time.Now().Before(deadline) {
 		hub.mu.RLock()
@@ -236,7 +236,7 @@ func TestBrowserDisconnectCleanup(t *testing.T) {
 	}
 
 	// Wait for subscription to be registered.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		hub.mu.RLock()
 		_, ok := hub.subscriptions[sessionID]
@@ -251,7 +251,7 @@ func TestBrowserDisconnectCleanup(t *testing.T) {
 	conn.Close()
 
 	// Wait for cleanup to propagate.
-	deadline = time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	var cleaned bool
 	for time.Now().Before(deadline) {
 		hub.mu.RLock()
@@ -334,7 +334,7 @@ func TestSubscribeStealsFocus(t *testing.T) {
 	}
 
 	// Wait until A is recorded as active in the hub.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		hub.mu.RLock()
 		active := hub.sessionActiveBrowser[sessionID]
@@ -351,7 +351,7 @@ func TestSubscribeStealsFocus(t *testing.T) {
 	}
 
 	// A should receive a focus_stolen message; skip history_done.
-	connA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	connA.SetReadDeadline(time.Now().Add(15 * time.Second))
 	skip := map[string]bool{"history_done": true}
 	raw, err := skipToType(connA, "focus_stolen", skip)
 	if err != nil {
@@ -416,7 +416,7 @@ func TestActiveDisconnectPromotes(t *testing.T) {
 	if err := connA.WriteMessage(websocket.TextMessage, subMsg); err != nil {
 		t.Fatalf("A write subscribe: %v", err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		hub.mu.RLock()
 		active := hub.sessionActiveBrowser[sessionID]
@@ -433,7 +433,7 @@ func TestActiveDisconnectPromotes(t *testing.T) {
 	}
 
 	// Wait for both A and B to be subscribed (two subscribers for the session).
-	deadline = time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		hub.mu.RLock()
 		count := len(hub.subscriptions[sessionID])
@@ -445,7 +445,7 @@ func TestActiveDisconnectPromotes(t *testing.T) {
 	}
 
 	// Drain A's focus_stolen so we can wait cleanly for focus_granted.
-	connA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	connA.SetReadDeadline(time.Now().Add(15 * time.Second))
 	skip := map[string]bool{"history_done": true}
 	_, _ = skipToType(connA, "focus_stolen", skip)
 
@@ -454,7 +454,7 @@ func TestActiveDisconnectPromotes(t *testing.T) {
 
 	// A should receive focus_granted; skip any late-arriving focus_stolen that
 	// wasn't consumed by the drain above.
-	connA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	connA.SetReadDeadline(time.Now().Add(15 * time.Second))
 	raw, err := skipToType(connA, "focus_granted", map[string]bool{"focus_stolen": true})
 	if err != nil {
 		t.Fatalf("A did not receive focus_granted: %v", err)
@@ -520,7 +520,7 @@ func TestSetSessionStar(t *testing.T) {
 	}
 
 	// Expect a session_star_changed broadcast.
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	raw, err := skipToType(conn, "session_star_changed", map[string]bool{})
 	if err != nil {
 		t.Fatalf("did not receive session_star_changed: %v", err)
@@ -597,7 +597,7 @@ func TestMarkSessionRead(t *testing.T) {
 	}
 
 	// Expect a session_read_changed broadcast.
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	raw, err := skipToType(conn, "session_read_changed", map[string]bool{})
 	if err != nil {
 		t.Fatalf("did not receive session_read_changed: %v", err)

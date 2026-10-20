@@ -14,4 +14,5 @@ func (a *API) RegisterProposalRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/proposals/{id}/approve", h.approve)
 	mux.HandleFunc("POST /api/proposals/{id}/reject", h.reject)
 	mux.HandleFunc("POST /api/proposals/{id}/resolve", h.resolve)
+	a.RegisterSessionPermissionRoutes(mux)
 }

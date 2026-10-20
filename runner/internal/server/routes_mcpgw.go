@@ -65,6 +65,13 @@ func startMCPGateway(ctx context.Context, env func(string) string, pool *pgxpool
 		MaxResultBytes: envPositiveInt(env, "BLERG_RUNNER_MCP_MAX_RESULT_BYTES"),
 	}
 	gw := mcpgw.New(cfg)
+	// The proxies (an ingress controller) whose forwarding headers the public route believes when
+	// it throttles a client; unset trusts none.
+	if trusted, err := mcpgw.ParseTrustedProxies(env("BLERG_RUNNER_TRUSTED_PROXIES")); err != nil {
+		log.Printf("BLERG_RUNNER_TRUSTED_PROXIES ignored: %v", err)
+	} else {
+		gw.SetTrustedProxies(trusted)
+	}
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 	if err != nil {
 		log.Printf("MCP gateway disabled: listen on %s: %v", addr, err)

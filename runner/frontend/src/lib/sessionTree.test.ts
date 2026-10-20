@@ -35,3 +35,10 @@ describe('session tree', () => {
     expect(cycle.top).toHaveLength(2)
   })
 })
+
+
+it('excludes archived parents and children from the active tree without mutating history', () => {
+  const archived = [parent, child].map(session => ({...session, archived_at:'2026-10-20T12:00:00Z'}))
+  expect(nestChildren(archived)).toEqual({top: [], childrenOf: new Map()})
+  expect(archived.map(s => s.id)).toEqual(['parent','child'])
+})

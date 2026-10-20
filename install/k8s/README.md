@@ -67,22 +67,22 @@ prints are:
 ```
 ==> Done. See README.md for how to reach the landing page and connect the runner daemon.
 ==> Cluster runtime: on (users add their own credentials at https://blerg.example.com/settings)
-==> First login (bootstrap admin password — printed only by the FIRST boot that created the account):
-    kubectl -n blerg logs deploy/blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
+
+==> FINISH SETUP: create the first (admin) account by opening this link and
+    choosing your username and password:
+
+    https://blerg.example.com/setup#code=…
     ...
 ```
 
-### 4. Log in
+On a fresh install only: once an account exists, a re-run prints nothing about
+setup.
 
-```sh
-kubectl -n blerg logs deploy/blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
-```
+### 4. Create your account
 
-The line reads
-`BLERG_BOOTSTRAP_ADMIN_PASSWORD=<password> (username: <username>; you must change the password on first login and can pick your own username then)`.
-Open `https://<DOMAIN>/`, click **Sign in**, log in with that username and
-password, and you are sent to `/change-password`: choose your own username and
-a real password (12–72 characters), then sign in again with them. Details and recovery:
+Open the setup link `deploy.sh` printed. On the **Create your account** page,
+choose your username and a password (12–72 characters). That account is the
+administrator, and you are signed in. Details, a lost link and recovery:
 [First login](#first-login).
 
 ### 5. Add credentials and run a session
@@ -94,6 +94,15 @@ explains how to produce each). Then open `https://runner.<DOMAIN>/`, **+ New**,
 pick one of your repositories (the list is what your tokens can see) or give one
 as `org/name`, and launch — it runs as a Job in
 `blerg-runner-sessions`. See [`CLUSTER-RUNTIME.md`](CLUSTER-RUNTIME.md).
+
+Boards start sessions the same way, as a person. **Run this card works out of
+the box on a single-user install:** a new board has **Run this board's cards as
+me** checked, and a board without a token offers **Run as me** in its settings
+and beside **Run this card**; one click mints your `run-sessions` token in core
+and saves it on the board (`SECRET_BLERG_CORE_BOARD_MINT_KEY` below). On a
+multi-tenant install set `BLERG_BOARD_DEFAULT_RUN_AS_CREATOR: "false"` in
+`configmap.yaml` to start that box unchecked. See
+[`board/docs/CONFIG.md`](../../board/docs/CONFIG.md#board-automation-identity-who-a-boards-sessions-run-as).
 
 Then run the [verification](#verify) checks.
 
@@ -116,6 +125,7 @@ from the environment). `.env.example` lists every one.
 | `BLERG_ASSUME_YES` | unset | `1` (or `true`/`yes`), or the `--yes`/`-y` flag: do not ask "Deploy to this cluster?" before building and applying. Without a terminal on stdin (an agent, CI, ssh without a tty) the run is refused unless one of these is given, so a non-interactive deploy is always a deliberate one. |
 | `RUNNER_DATA_SIZE` | `10Gi` | Size of the runner's data claim `blerg-runner-data` (published and attached files, agent-config bundles, mockups). Applies only when `deploy.sh` creates the claim — see [Runner data volume](#runner-data-volume). |
 | `RUNNER_DATA_STORAGE_CLASS` | unset (the cluster's default StorageClass) | StorageClass for that claim, e.g. when the cluster has no default or you want another. Also applies only at creation. |
+| `HERMES_PROVIDERS_FILE` | unset | Path (absolute, or relative to `install/k8s`) of a Hermes `config.yaml` fragment (at most 64 KiB) naming your model servers, e.g. local keyless OpenAI-compatible endpoints. Every cluster Hermes user, and their agent, can read it whole: keep paid provider keys out. When set, `deploy.sh` stores it in Secret `blerg/blerg-hermes-providers`; every Hermes session pod gets it merged into `~/.hermes/config.yaml` and the cluster launch sheet lists its models. Unset: nothing is created. Template: `hermes-providers.example.yaml`; details in [CLUSTER-RUNTIME.md](CLUSTER-RUNTIME.md#shared-hermes-providers). |
 | `WEBHOOK_ALLOW_PRIVATE` | unset (`false`) | `1` (or `true`/`yes`) renders `BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE: "true"`, allowing completion webhooks to private, loopback and link-local addresses. |
 
 ### Secret pins (`SECRET_*`)
@@ -135,6 +145,7 @@ unless you ask it to. Values land in `blerg-secrets` (namespace `blerg`) or
 | `SECRET_BLERG_RUNNER_KEY` | `blerg-secrets` | live, else random | The board↔runner contract key. |
 | `SECRET_BLERG_RUNNER_DAEMON_TOKEN` | `blerg-secrets` and `blerg-runner-agent` | live, else random | Token daemons and session pods present on `/ws/daemon`. Both Secrets must hold the same value. |
 | `SECRET_BLERG_CORE_INTERNAL_KEY` | `blerg-secrets` | live, else random | Shared by core and runner (`BLERG_RUNNER_CORE_INTERNAL_KEY`) for the personal-credential fetch. |
+| `SECRET_BLERG_CORE_BOARD_MINT_KEY` | `blerg-secrets` | live, else random | Shared by core and board for "Run as me": the board mints a person's run-sessions token through core in one click, so Run this card works without pasting a token. Opens nothing else on core. |
 | `SECRET_BLERG_CORE_LOCAL_KEY` | `blerg-secrets` | live, else `openssl rand -base64 32` | AES-256 key for the credential vault (base64 of 32 bytes). **Losing it loses every stored credential**; changing it makes them unreadable. |
 | `SECRET_ANTHROPIC_API_KEY` | `blerg-secrets` (read by board) and `blerg-runner-agent` | live, else omitted | Optional. In the agent Secret it is a shared fallback Claude key for every cluster session; board uses it for the admission gate unless the gate runs on a person's own credential (`BLERG_BOARD_GATE_ACCOUNT_TOKEN`, see `board/docs/CONFIG.md`). |
 | `SECRET_BLERG_CORE_GITHUB_TOKEN` | `blerg-secrets` | live, else omitted | Optional. Core's own GitHub reconciliation. |
@@ -291,6 +302,21 @@ in"), never authorization — without it every login would be recorded as the
 ingress pod's IP. If you front the ingress with another proxy or a
 controller that appends rather than replaces `X-Forwarded-For`, verify its
 behavior before keeping this on; see `core/docs/CONFIG.md`.
+
+The runner's public MCP gateway route (`/mcp-gw/`, for sessions on workstation
+daemons) limits failed attempts per client. `deploy.sh` renders
+`BLERG_RUNNER_TRUSTED_PROXIES` from `TRUSTED_PROXIES` in `.env` (default: the
+private ranges where pod networks live, RFC 1918 and IPv6 `fc00::/7`), and the
+runner believes `X-Forwarded-For` only from those peers, taking the right-most
+hop that is not one of them. Any pod in a trusted range, session pods included
+(they must reach the runner's port), can claim another client's address. That
+evades the failure limit and costs database lookups; it grants no access. To
+exclude session pods, list only the ingress controller pods' own addresses (or
+the node addresses, if it uses host networking); a range that also holds session
+pods, such as the cluster's pod CIDR on most network plugins, does not. Set
+`TRUSTED_PROXIES=` (empty) to trust none; every client then shares the
+ingress's allowance, and a flood of failures from anywhere can make valid tokens
+wait.
 
 ### Re-running deploy.sh
 
@@ -461,19 +487,33 @@ terminator) or login/refresh will silently fail. See
 
 ## First login
 
+A fresh install has no account. Core is in first-run setup mode until the
+first account exists: the person who will own the install opens the setup
+link and creates the admin by choosing a username and password at
+`https://<DOMAIN>/setup`. Nothing to find in a log, and no forced password
+change afterwards.
+
+The link carries a single-use setup code (in the `#` fragment, so it never
+reaches an access log): it works once, for 24 hours, and only while no
+account exists. `deploy.sh` prints it at the end of a fresh install when its
+output is a terminal; otherwise it prints only the command below and mints
+nothing. Core never logs a link. For a fresh one at any time (the previous
+link stops working):
+
 ```sh
-kubectl -n blerg logs deploy/blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
+kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link
 ```
 
-The line carries both the password and the username
-(`username: <username>` — a random string, not `admin`; you can choose your own
-on the first password change).
+It prints the link alone, or, once an account exists, says setup is complete
+and exits 1. **Until the first account exists, the setup link is the admin
+account:** anyone holding it can create it. Treat it like a password, and treat
+`kubectl exec` access to the `blerg` namespace accordingly. If a link stops
+working (it expired, or someone ran the command again), get a fresh one with
+the command above. Opened without a code, the sign-in page says the install
+isn't set up yet.
 
-`deploy.sh` prints this same command at the end of every run, but the line
-itself is only ever written **once** — on the first boot that creates the
-account. A redeploy, restart, or new pod never prints it again, and the
-password does not change. If the log that had it is gone, mint a fresh
-one-time password instead (this also re-arms the forced change on next login
+Once the first account exists, `/setup` is closed for good. A forgotten
+password: mint a one-time one (this also forces a change at the next sign-in
 and signs the account out everywhere):
 
 ```sh
@@ -487,12 +527,6 @@ no longer know the admin username either, look it up:
 kubectl -n blerg exec postgres-0 -- psql -U blerg -d blerg_core -tAc \
   "select provider_subject from accounts where provider='local' and role='admin' order by created_at limit 1"
 ```
-
-The bootstrap password can only be used to set the admin account's real
-password via `/change-password` (12–72 characters) — once that has been
-changed, the bootstrap password found in old logs no longer works. Until then,
-`kubectl logs` access to the `blerg` namespace is equivalent to admin access
-on the whole stack — treat namespace RBAC accordingly.
 
 **Adding people.** Create an account with a one-time password and hand it
 over; they are asked to change it at first login:
@@ -845,6 +879,8 @@ Secret and restart the three Deployments after each `deploy.sh` run.
 | `CLUSTER-RUNTIME.md` | cluster runtime (on by default) — ephemeral per-session agent Jobs, the operator secrets contract, and how to turn it off |
 | `cluster-runtime.yaml` | namespace + RBAC for cluster runtime; applied by `deploy.sh` directly, not via the kustomization (see CLUSTER-RUNTIME.md) |
 | `cluster-agent-secret.example.yaml` | **template only** — the shape of the `blerg-runner-agent` Secret `deploy.sh` creates |
+| `hermes-providers.example.yaml` | **template only** — a shared Hermes provider fragment for `HERMES_PROVIDERS_FILE`; not a manifest |
+| `networkpolicy-sessions.example.yaml` | **optional, not applied** — session-pod egress policy, with an opt-in rule for local model servers |
 
 Deployment images are referenced as `${REGISTRY}/blerg-core:${TAG}` etc.
 These are placeholders substituted by `deploy.sh` at apply time. Nothing in
@@ -856,7 +892,7 @@ this directory hardcodes a real private registry, hostname, or IP.
   cluster running ingress-nginx and cert-manager, and the login flow has
   been exercised end to end through the Ingress: registering/logging in at
   core, being redirected into board and runner with a working
-  `/auth/refresh`, and the bootstrap-admin first-login path above.
+  `/auth/refresh`, and the first-login path above (at the time, a bootstrap admin password; first-run setup replaced it).
 - `install/k8s/deploy_test.sh` renders the exact set of files
   `kustomization.yaml` lists the way `deploy.sh` does (`envsubst` with
   `REGISTRY`/`TAG`/`DOMAIN`/`SCHEME`/`AGENT_IMAGE`/`WEBHOOK_ALLOW_PRIVATE`),

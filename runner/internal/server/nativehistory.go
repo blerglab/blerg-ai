@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -285,6 +286,12 @@ func (j *JobManager) fenceNativeHistoryWriter(parent context.Context, spec Sessi
 	}
 }
 
+// sessionHomeDir is the agent's HOME in the session image, where it is
+// agent-owned (runner/Dockerfile.devcontainer).
+const sessionHomeDir = "/workspace"
+
+const engineHomeVolume = "engine-home"
+
 func nativeHistoryPod(spec SessionJobSpec, pod map[string]any) error {
 	if spec.nativeHistory == nil {
 		return nil
@@ -292,7 +299,23 @@ func nativeHistoryPod(spec SessionJobSpec, pod map[string]any) error {
 	layout, _ := nativehistory.ForEngine(spec.Engine)
 	mounts := []map[string]any{{"name": "native-history", "mountPath": nativehistory.IdentityPath, "subPath": "identity"}}
 	subdirs := []string{"identity"}
+	// The engine's home (~/.codex, ~/.claude) would otherwise be created as
+	// root by the container runtime, as the parent of the nested history
+	// mountpoints, and the engine could not write its login there. It is an
+	// emptyDir subdirectory the init container creates as the agent (0700):
+	// pod-ephemeral, so auth.json and config never reach the history volume.
+	var homeDir string
+	if layout.Home != "" {
+		homeDir = strings.TrimPrefix(path.Base(layout.Home), ".")
+		if path.Dir(layout.Home) != sessionHomeDir || homeDir == "" {
+			return errNativeHistory
+		}
+		mounts = append(mounts, map[string]any{"name": engineHomeVolume, "mountPath": layout.Home, "subPath": homeDir})
+	}
 	for _, mount := range layout.Mounts {
+		if strings.HasPrefix(mount.Path, sessionHomeDir+"/") && (layout.Home == "" || !strings.HasPrefix(mount.Path, layout.Home+"/")) {
+			return errNativeHistory
+		}
 		mounts = append(mounts, map[string]any{"name": "native-history", "mountPath": mount.Path, "subPath": mount.SubPath})
 		subdirs = append(subdirs, mount.SubPath)
 	}
@@ -305,7 +328,15 @@ func nativeHistoryPod(spec SessionJobSpec, pod map[string]any) error {
 	}
 	containers[0]["volumeMounts"] = mounts
 	volumes, _ := pod["volumes"].([]map[string]any)
-	pod["volumes"] = append(volumes, map[string]any{"name": "native-history", "persistentVolumeClaim": map[string]string{"claimName": spec.nativeHistory.ClaimName}})
+	volumes = append(volumes, map[string]any{"name": "native-history", "persistentVolumeClaim": map[string]string{"claimName": spec.nativeHistory.ClaimName}})
+	prepare := "umask 077; mkdir -p -- " + strings.Join(subdirs, " ")
+	initMounts := []map[string]any{{"name": "native-history", "mountPath": "/native-history"}}
+	if homeDir != "" {
+		volumes = append(volumes, map[string]any{"name": engineHomeVolume, "emptyDir": map[string]any{}})
+		prepare += " && mkdir -p -- " + path.Join("/engine-home", homeDir)
+		initMounts = append(initMounts, map[string]any{"name": engineHomeVolume, "mountPath": "/engine-home"})
+	}
+	pod["volumes"] = volumes
 	security, _ := pod["securityContext"].(map[string]any)
 	if security == nil {
 		security = map[string]any{}
@@ -313,7 +344,7 @@ func nativeHistoryPod(spec SessionJobSpec, pod map[string]any) error {
 	security["fsGroup"], security["fsGroupChangePolicy"] = sessionAgentUID, "OnRootMismatch"
 	pod["securityContext"] = security
 	inits, _ := pod["initContainers"].([]map[string]any)
-	pod["initContainers"] = append(inits, map[string]any{"name": "prepare-native-history", "image": containers[0]["image"], "securityContext": sessionContainerSecurityContext(), "command": []string{"/bin/sh", "-c", "umask 077; mkdir -p -- " + strings.Join(subdirs, " ")}, "workingDir": "/native-history", "volumeMounts": []map[string]any{{"name": "native-history", "mountPath": "/native-history"}}, "resources": map[string]any{"requests": map[string]string{"cpu": "10m", "memory": "16Mi"}, "limits": map[string]string{"cpu": "100m", "memory": "64Mi"}}})
+	pod["initContainers"] = append(inits, map[string]any{"name": "prepare-native-history", "image": containers[0]["image"], "securityContext": sessionContainerSecurityContext(), "command": []string{"/bin/sh", "-c", prepare}, "workingDir": "/native-history", "volumeMounts": initMounts, "resources": map[string]any{"requests": map[string]string{"cpu": "10m", "memory": "16Mi"}, "limits": map[string]string{"cpu": "100m", "memory": "64Mi"}}})
 	return nil
 }
 

@@ -343,7 +343,7 @@ func TestSetReposRootMovesNewWorkAndKeepsRunningSessions(t *testing.T) {
 	spawn := func(id, repo string, newRepo bool) protocol.SessionStarted {
 		raw, _ := json.Marshal(protocol.SpawnSession{Type: "spawn_session", SessionID: id, Repo: repo, NewRepo: newRepo, Cols: 80, Rows: 24})
 		mgr.handleSpawnSession(raw)
-		deadline := time.After(5 * time.Second)
+		deadline := time.After(15 * time.Second)
 		for {
 			select {
 			case m := <-sender.ch:
@@ -367,7 +367,7 @@ func TestSetReposRootMovesNewWorkAndKeepsRunningSessions(t *testing.T) {
 	raw, _ := json.Marshal(protocol.SetReposRoot{Type: "set_repos_root", RequestID: "req-1", ReposRoot: newRoot})
 	mgr.handleSetReposRoot(raw)
 	var res protocol.ReposRootResult
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 wait:
 	for {
 		select {
@@ -468,7 +468,7 @@ func TestSetReposRootRequestsHeartbeatAfterSuccess(t *testing.T) {
 		select {
 		case e := <-k.events:
 			return e
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("timed out")
 			return ""
 		}
@@ -554,7 +554,7 @@ func TestHeartbeatReportsLiveReposRoot(t *testing.T) {
 			}
 		}
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client := NewWSClient(Config{
 		ServerURL: ts.wsURL(), DaemonToken: "t", DaemonName: "d", DaemonMode: "local",

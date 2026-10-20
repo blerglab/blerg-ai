@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/coreauth"
 	"github.com/blerglab/blerg-ai/board/internal/corecred"
+	"github.com/blerglab/blerg-ai/board/internal/coremint"
 	"github.com/blerglab/blerg-ai/board/internal/db"
 	"github.com/blerglab/blerg-ai/board/internal/gate"
 	"github.com/blerglab/blerg-ai/board/internal/localinfer"
@@ -37,6 +40,7 @@ func validateSecrets() error {
 		{"BLERG_BOARD_SERVICE_KEY", true},
 		{"BLERG_RUNNER_KEY", false},
 		{"BLERG_BOARD_CORE_INTERNAL_KEY", false},
+		{"BLERG_CORE_BOARD_MINT_KEY", false},
 	} {
 		v := os.Getenv(c.name)
 		var err error
@@ -56,6 +60,26 @@ func validateSecrets() error {
 // asks the runner for on every start ("" = the runner's default).
 func runnerRuntimeFromEnv() (string, error) {
 	return runner.ParseRuntime(os.Getenv("BLERG_BOARD_RUNNER_RUNTIME"))
+}
+
+// runAsMeFromEnv reads the "Run as me" settings: the mint client, when both BLERG_CORE_URL and
+// BLERG_CORE_BOARD_MINT_KEY are set (nil otherwise: tokens must be pasted), and
+// BLERG_BOARD_DEFAULT_RUN_AS_CREATOR, whether the create-board form starts with "Run this board's
+// cards as me" checked (default true; a multi-tenant operator may set false).
+func runAsMeFromEnv(getenv func(string) string) (*coremint.Client, bool, error) {
+	defaultOn := true
+	if v := strings.TrimSpace(getenv("BLERG_BOARD_DEFAULT_RUN_AS_CREATOR")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, false, fmt.Errorf("BLERG_BOARD_DEFAULT_RUN_AS_CREATOR must be true or false, got %q", v)
+		}
+		defaultOn = b
+	}
+	coreURL, key := getenv("BLERG_CORE_URL"), getenv("BLERG_CORE_BOARD_MINT_KEY")
+	if coreURL == "" || key == "" {
+		return nil, defaultOn, nil
+	}
+	return coremint.New(coreURL, key, nil), defaultOn, nil
 }
 
 func env(key, fallback string) string {
@@ -181,6 +205,17 @@ func main() {
 	}
 
 	apiSrv := api.New(pool, a, g)
+	minter, runAsCreator, err := runAsMeFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	apiSrv.RunAsCreatorDefault = runAsCreator
+	if minter != nil {
+		apiSrv.Minter = minter
+		log.Printf("run as me: boards can mint their automation token through blerg-core (new boards default: %t)", runAsCreator)
+	} else {
+		log.Printf("run as me: off (needs BLERG_CORE_URL and BLERG_CORE_BOARD_MINT_KEY); boards take a pasted automation token")
+	}
 	if dir := os.Getenv("BLERG_BOARD_PROMPTS_DIR"); dir != "" {
 		if err := apiSrv.LoadPrompts(dir); err != nil {
 			log.Fatalf("prompts: %v", err)

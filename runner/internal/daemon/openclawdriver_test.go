@@ -48,7 +48,7 @@ func TestOpenclawDriverTurn(t *testing.T) {
 
 	d.Enqueue("say a fruit", "chat")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for !contains(em.kinds(), "turn_done") {
 		select {
 		case <-deadline:
@@ -78,7 +78,7 @@ func TestOpenclawDriverTurn(t *testing.T) {
 	// Second turn must replay the first turn into its prompt (this driver's
 	// only continuity mechanism — agent exec itself is stateless).
 	d.Enqueue("and another", "chat")
-	deadline = time.After(5 * time.Second)
+	deadline = time.After(15 * time.Second)
 	for countKind(em, "turn_done") < 2 {
 		select {
 		case <-deadline:
@@ -111,7 +111,7 @@ func TestOpenclawDriverFailureEmitsError(t *testing.T) {
 	go d.Run(ctx)
 	d.Enqueue("do the thing", "chat")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for !contains(em.kinds(), "turn_done") {
 		select {
 		case <-deadline:

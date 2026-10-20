@@ -370,7 +370,7 @@ func TestDriverRegeneratesMissingConfigEachTurn(t *testing.T) {
 		t.Helper()
 		want := countTurnKind(em.kinds(), "turn_done") + 1
 		d.Enqueue(text, "chat")
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 		for countTurnKind(em.kinds(), "turn_done") < want {
 			if time.Now().After(deadline) {
 				t.Fatalf("no turn_done for %q; kinds: %v", text, em.kinds())

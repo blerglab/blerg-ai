@@ -78,7 +78,10 @@
 #
 # The MCP gateway (BLERG_RUNNER_MCP_GW_ADDR / _GW_URL in `data` below) is served
 # on its own port (8090), reachable only through the internal-only
-# blerg-runner-mcp-gateway Service. Never route it through the Ingress. Remove
+# blerg-runner-mcp-gateway Service. Never route it through the Ingress. Sessions
+# on workstation daemons reach the gateway through the runner's web port instead
+# (/mcp-gw/, only grants issued to them for it); set BLERG_RUNNER_MCP_GW_PUBLIC
+# to "off" below if no workstation daemon connects to this install. Remove
 # BLERG_RUNNER_MCP_GW_ADDR to turn the gateway off. To let session pods reach it
 # under a default-deny egress policy, see networkpolicy-sessions.example.yaml.
 #
@@ -111,6 +114,9 @@ data:
   # are outside the cluster — the in-cluster Service name is not reachable
   # from either.
   BLERG_BOARD_PUBLIC_URL: "${SCHEME}://board.${DOMAIN}"
+  # New boards run their cards as their creator ("Run as me", minted through core). A
+  # multi-tenant install may set "false": the create form then starts unchecked.
+  BLERG_BOARD_DEFAULT_RUN_AS_CREATOR: "true"
   BLERG_BOARD_AGENT_URL: "${SCHEME}://board.${DOMAIN}"
   RUNNER_UI_BASE: "${SCHEME}://runner.${DOMAIN}/sessions"
   BLERG_RUNNER_DATA_DIR: "/data"
@@ -133,6 +139,11 @@ data:
   # pods dial for it (the internal-only Service in runner-deployment.yaml).
   BLERG_RUNNER_MCP_GW_ADDR: ":8090"
   BLERG_RUNNER_MCP_GW_URL: "http://blerg-runner-mcp-gateway.blerg.svc.cluster.local:8090"
+  BLERG_RUNNER_MCP_GW_PUBLIC: "on"
+  # The proxies whose X-Forwarded-For that route believes, so it throttles each real client rather
+  # than one shared ingress address. TRUSTED_PROXIES in .env; by default the private ranges a pod
+  # network uses (any pod there can claim another client's address). Empty trusts none.
+  BLERG_RUNNER_TRUSTED_PROXIES: "${TRUSTED_PROXIES}"
   # The board as the runner reaches it: a cron's failure card is posted there and
   # the built-in `board` connection's MCP endpoint defaults to <this>/mcp. Empty
   # = crons get no board connection and no failure card.

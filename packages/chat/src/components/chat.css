@@ -173,8 +173,8 @@
   color: var(--chat-success);
 }
 
-.tool-error .tool-name {
-  color: var(--chat-danger);
+.tool-failed .tool-name {
+  color: var(--chat-muted);
 }
 
 .tool-summary {
@@ -302,6 +302,23 @@
 
 .agent-card.marker.turn-done {
   align-self: flex-start;
+}
+
+/* A round of review answers: one muted line that opens the review. */
+.review-round-open {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.review-round-open:hover,
+.review-round-open:focus-visible {
+  text-decoration: underline;
 }
 
 /* A topic the agent marked (▸ its title, ✓ Done: its outcome): a dashed rule across the
@@ -492,13 +509,6 @@
   font-size: 11px;
 }
 
-/* A thinking block is an assistant card; its text is plain, so the line breaks are kept. */
-.thinking-text {
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 /* A subagent's prompt, opened from its card. */
 .subagent-prompt {
   margin-top: 4px;
@@ -510,6 +520,7 @@
 }
 
 .agent-card.error {
+  overflow-wrap: anywhere;
   align-self: stretch;
   background: var(--chat-card-system-bg);
   border-left: 3px solid var(--chat-danger);
@@ -713,6 +724,9 @@
 /* ─── Working indicator ──────────────────────────────────────────────────── */
 
 .agent-working {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
   align-self: flex-start;
   display: inline-flex;
   align-items: center;
@@ -722,6 +736,25 @@
   background: var(--chat-surface);
   font-size: 12px;
   color: var(--chat-muted);
+}
+
+.agent-working-content { min-width: 0; flex: 1; }
+.agent-working-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.agent-working-details { margin-top: 4px; max-width: 100%; }
+.agent-working-details summary { cursor: pointer; }
+.agent-working-details pre {
+  max-height: 12rem;
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre;
+  margin: 6px 0 0;
+  font-family: var(--chat-font-mono);
 }
 
 .agent-working.compact {
@@ -856,10 +889,6 @@
   font-size: 11px;
 }
 
-.tcg-group-bad {
-  border-color: color-mix(in srgb, var(--chat-danger) 50%, var(--chat-surface));
-}
-
 .tcg-summary,
 .tcg-row-head {
   display: flex;
@@ -926,7 +955,12 @@
   color: var(--chat-success);
 }
 
-.tcg-row-bad .tcg-name,
+.tcg-row-failed .tcg-name,
+.tcg-failed {
+  color: var(--chat-muted);
+}
+
+/* Explicit subagent errors still need attention; tool attempts use tcg-failed. */
 .tcg-bad {
   color: var(--chat-danger);
 }
@@ -966,20 +1000,13 @@
   font-style: italic;
 }
 
+.tcg-succeeded { color: var(--chat-muted); white-space: nowrap; }
+.tcg-succeeded-dominant { color: var(--chat-success); font-weight: 600; }
+
+/* Recorded failures are history, not evidence that the run needs attention. */
 .tcg-badge {
   flex: none;
-  color: var(--chat-danger);
-  border: 1px solid color-mix(in srgb, var(--chat-danger) 55%, transparent);
-  border-radius: 8px;
-  padding: 0 6px;
-}
-
-.tcg-fail {
-  padding: 1px 8px 3px 26px;
-  color: var(--chat-danger);
-  font-family: monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--chat-muted-2);
   white-space: nowrap;
 }
 
@@ -1014,8 +1041,8 @@
   overflow-y: auto;
 }
 
-.tcg-out-bad {
-  color: var(--chat-danger);
+.tcg-out-failed {
+  color: var(--chat-muted);
 }
 
 .tcg-showall {
@@ -3000,3 +3027,96 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
 
 .attach-chip-preview.is-file { display: flex; align-items: center; justify-content: center; }
 .attach-chip-filetype { color: var(--chat-muted); font-family: var(--chat-font-mono); font-size: var(--chat-text-lg); font-weight: 600; }
+
+.model-effort { margin-inline-start: 0.5em; color: var(--chat-muted); font-size: 0.85em; }
+
+/* ─── The proposal card: an action the session proposed, decided in the chat ───────────────── */
+.agent-card.proposal-card.status-rejected,
+.agent-card.proposal-card.status-failed {
+  opacity: 0.85;
+}
+
+.agent-card.proposal-card.status-unknown {
+  border-color: color-mix(in srgb, var(--chat-warning) 55%, var(--chat-border));
+}
+
+.delegation-btn.primary {
+  border-color: color-mix(in srgb, var(--chat-accent) 60%, var(--chat-border));
+  color: var(--chat-accent);
+  font-weight: 600;
+}
+
+.proposal-summary {
+  max-height: 4.5em;
+  overflow: hidden;
+}
+
+/* The card a proposal created, drawn like a pinned ticket's summary. */
+.proposal-ticket {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  background: var(--chat-surface-2);
+  min-width: 0;
+}
+
+.proposal-ticket .ticket-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.proposal-ticket .ticket-title {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.proposal-ticket .proposal-open {
+  margin-left: auto;
+}
+
+/* ─── A review request: the session asks its owner to review a file at one version ───────────── */
+.review-request-card .delegation-head { align-items: center; gap: 8px; }
+.review-request-card .review-request-open { flex: none; }
+.review-request-ask { overflow-wrap: anywhere; }
+.review-request-note { color: var(--chat-muted); overflow-wrap: anywhere; }
+.agent-card.review-request-card.status-withdrawn,
+.agent-card.review-request-card.status-superseded { opacity: 0.85; }
+
+/* The bar over a file in the viewer while its explicit review request waits, and after. */
+.review-request-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--chat-border);
+  background: color-mix(in srgb, var(--chat-accent) 8%, var(--chat-surface-2));
+  min-width: 0;
+}
+.review-request-bar.status-approved { background: color-mix(in srgb, var(--chat-success) 10%, var(--chat-surface-2)); }
+.review-request-bar.status-changes_requested { background: color-mix(in srgb, var(--chat-warning) 10%, var(--chat-surface-2)); }
+.review-request-bar-text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 16em; min-width: 0; }
+.review-request-bar-label { font-weight: 600; }
+.review-request-bar-ask,
+.review-request-bar-note { overflow-wrap: anywhere; }
+.review-request-bar-note,
+.review-request-bar-wait { color: var(--chat-muted); }
+.review-request-bar-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.review-request-bar-form { display: flex; flex-direction: column; gap: 6px; flex: 1 1 100%; min-width: 0; }
+.review-request-bar-input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  color: inherit;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  resize: vertical;
+}

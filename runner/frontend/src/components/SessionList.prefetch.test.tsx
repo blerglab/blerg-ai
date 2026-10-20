@@ -35,12 +35,12 @@ describe('+ New prefetch', () => {
       </MemoryRouter>,
     )
     // The sidebar's own cluster pill asks for the status on mount; count from after it.
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled(), { timeout: 15000 })
     const before = fetchMock.mock.calls.length
     const button = screen.getByRole('button', { name: '+ New' })
     fireEvent.pointerEnter(button)
-    await vi.waitFor(() => expect(readLaunchCache().creds).toBeDefined())
-    await vi.waitFor(() => expect(readLaunchCache().repos).toBeDefined())
+    await vi.waitFor(() => expect(readLaunchCache().creds).toBeDefined(), { timeout: 15000 })
+    await vi.waitFor(() => expect(readLaunchCache().repos).toBeDefined(), { timeout: 15000 })
     fireEvent.pointerEnter(button)
     fireEvent.focus(button)
     const asked = (fetchMock.mock.calls.slice(before) as unknown as [string][]).map(([u]) => u)

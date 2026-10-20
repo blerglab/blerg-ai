@@ -146,7 +146,7 @@ func TestServeBrowser_ValidTokenUpgradeSucceeds(t *testing.T) {
 		t.Fatal("server echoed the access token back as the negotiated subprotocol")
 	}
 
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read initial_state: %v", err)

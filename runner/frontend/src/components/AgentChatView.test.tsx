@@ -12,9 +12,10 @@ import { useSessionStore } from '../hooks/useSessionStore'
 const apiFetch = vi.fn()
 vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }))
 vi.mock('../ws', () => ({ send: vi.fn(), onMessage: vi.fn() }))
-vi.mock('@blerglab/chat', () => ({
-  ChatView: ({ slots, maxFileBytes, canOpenWorkspaceFiles, describeUserMessage }: { slots: { header: ReactNode }; maxFileBytes?: number; canOpenWorkspaceFiles?: boolean; describeUserMessage?: DescribeUserMessage }) => (
-    <div data-testid="chat" data-session-author={describeUserMessage?.({} as never, { source: 'session', text: 'fixture' }, { first: false })?.author} data-max-file-bytes={maxFileBytes ?? 'none'} data-workspace-files={String(canOpenWorkspaceFiles)}>{slots.header}</div>
+vi.mock('@blerglab/chat', async () => ({
+  ...await vi.importActual<typeof import('@blerglab/chat')>('@blerglab/chat'),
+  ChatView: ({ slots, maxFileBytes, canOpenWorkspaceFiles, describeUserMessage, readOnly }: { slots: { header: ReactNode }; readOnly?: boolean; maxFileBytes?: number; canOpenWorkspaceFiles?: boolean; describeUserMessage?: DescribeUserMessage }) => (
+    <div data-testid="chat" data-read-only={String(!!readOnly)} data-session-author={describeUserMessage?.({} as never, { source: 'session', text: 'fixture' }, { first: false })?.author} data-max-file-bytes={maxFileBytes ?? 'none'} data-workspace-files={String(canOpenWorkspaceFiles)}>{slots.header}</div>
   ),
   ReadyCard: () => null,
   createBlergTransport: () => ({}),
@@ -95,6 +96,19 @@ describe('AgentChatView model controls', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  it('disambiguates the current missing model against catalog choices and sends exact IDs', async () => {
+    const native = 'nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4'
+    const current = `custom:alpha/${native}`, next = `custom:beta/${native}`
+    apiFetch.mockResolvedValue({ ok: true, json: async () => ({ models: [{ id: next, name: next, section: 'main', efforts: [] }], source: 'live' }) })
+    render(<AgentChatView session={makeSession({ kind: 'agent', runtime: 'cluster', engine: 'hermes', model: current })} thinking={false} compact={false} />)
+    const nextOption = await screen.findByTitle(next)
+    const currentOption = screen.getByRole('option', { selected: true })
+    expect(currentOption.textContent).not.toBe(nextOption.textContent)
+    expect(currentOption).toHaveAttribute('value', current)
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: next } })
+    expect(ws.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'set_session_model', model: next }))
+  })
+
   it('keeps workstation catalogs scoped to their own daemon', async () => {
     render(<AgentChatView session={makeSession({ kind: 'agent', runtime: 'daemon', engine: 'codex', daemon_id: 'workstation' })} thinking={false} compact={false} />)
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/models/codex?daemon_id=workstation', expect.anything()))
@@ -105,4 +119,15 @@ it('labels session-sourced messages with the listed parent title', () => {
   useSessionStore.setState({ sessions: [makeSession({ id: 'parent', title: 'Parent task' })] })
   render(<AgentChatView session={makeSession({ parent_session_id: 'parent', started_by: { kind: 'session', name: 'Old name' } })} thinking={false} compact={false} />)
   expect(screen.getByTestId('chat')).toHaveAttribute('data-session-author', 'from Parent task')
+})
+
+
+it('opens archived sessions read-only without model or approval controls', () => {
+  const manage = vi.fn()
+  render(<AgentChatView session={makeSession({kind:'agent',archived_at:'2026-10-20T12:00:00Z'})} thinking={false} compact={false} canReleasePrompt onManageChildApproval={manage}/>)
+  expect(screen.getByText('Archived session · read only')).toBeInTheDocument()
+  expect(screen.getByTestId('chat')).toHaveAttribute('data-read-only','true')
+  expect(screen.queryByLabelText('Model')).toBeNull()
+  expect(screen.queryByLabelText('Effort')).toBeNull()
+  expect(screen.getByTestId('chat')).toHaveAttribute('data-workspace-files','false')
 })

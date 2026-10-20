@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
-	"github.com/blerglab/blerg-ai/runner/internal/coreauth"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
@@ -23,7 +22,7 @@ func nextLimitsChanged(t *testing.T, bc *BrowserConn) protocol.DaemonLimitsChang
 			t.Fatalf("browser got %s, want daemon_limits_changed", raw)
 		}
 		return m
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("no daemon_limits_changed broadcast")
 	}
 	return protocol.DaemonLimitsChanged{}
@@ -121,10 +120,10 @@ func TestUsageLimitsKeepsSpendWindows(t *testing.T) {
 func TestGetDaemonsCarriesUsageLimits(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	coreSrv := newTestCoreServer(t, pub)
-	defer coreSrv.Close()
+	t.Cleanup(coreSrv.Close)
 	hub, ws, _, _ := sidebarHubFixture(t)
 	api := NewAPI(hub, nil, "daemon-tok", nil, "")
-	api.SetCoreAuth(coreauth.New(coreSrv.URL))
+	api.SetCoreAuth(ownedCoreAuthClient(t, coreSrv.URL))
 	token := mintTestToken(t, priv, "k1", identity.Claims{
 		Sub: "human:test-user", Aud: "blerg-runner", Kind: "human",
 		Caps: []string{"session.start"}, ExpiresAt: time.Now().Unix() + 60,

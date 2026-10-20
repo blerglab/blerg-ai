@@ -2,7 +2,7 @@
 // collapsed, that opens to the list; consecutive changes are folded into the latest by the
 // timeline) and a pinned ticket (a card; an unpin is a marker line). Everything they say is in the
 // event's payload: the server recorded the change, so nothing here compares events.
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { checklistRowText, readChecklist, readTicketEvent, sourceLabel, ticketChanges } from '../../model/worklist'
 import type { PatchSummary } from '../../model/patch'
 import type { AgentEvent, ChecklistItem } from '../../types'
@@ -56,8 +56,13 @@ function ItemCommits({ commits, open, summary }: {
  *  chip, the commit) and `diffSummary` are the host's hooks; they default to the chat's own viewer
  *  (the button shows when the file is listed) and its cached reading of the diff. `commitUrls` is
  *  accepted for compatibility and not used: commits never link out of Blerg. */
-export function ChecklistItems({ items, onViewDiff, diffSummary }: {
+export function ChecklistItems({ items, onViewDiff, diffSummary, highlightedId, onItemElement, renderAssignees, live = false }: {
   items: readonly ChecklistItem[]
+  renderAssignees?: (item: ChecklistItem) => ReactNode
+  highlightedId?: string
+  onItemElement?: (id: string, element: HTMLLIElement | null) => void
+  /** Historical snapshots retain Doing state without suggesting the work is still running. */
+  live?: boolean
   /** @deprecated Not used since 0.19.0. */
   commitUrls?: Readonly<Record<string, string>>
   onViewDiff?: (artifactId: string, commit?: string) => void
@@ -74,11 +79,16 @@ export function ChecklistItems({ items, onViewDiff, diffSummary }: {
     <ul className="checklist-items">
       {items.map((it, i) => {
         const open = opener(it.diff)
+        const assignees = renderAssignees?.(it)
         return (
-          <li key={i} className={it.done ? 'done' : undefined}>
-            <span className="checklist-box" aria-hidden="true">{it.done ? '☑' : '☐'}</span>
+          <li key={it.id ?? i} tabIndex={it.id ? -1 : undefined}
+            ref={it.id && onItemElement ? element => onItemElement(it.id!, element) : undefined}
+            data-checklist-id={it.id}
+            className={[it.done ? 'done' : it.in_progress ? 'doing' : '', it.id && it.id === highlightedId ? 'checklist-highlight' : ''].filter(Boolean).join(' ') || undefined}>
+            <span className="checklist-box" aria-hidden="true">{it.done ? '☑' : it.in_progress ? <span className={`checklist-progress${live ? ' animated' : ''}`} /> : '☐'}</span>
             <span className="checklist-text">{it.text}</span>
-            <span className="worklist-sr">{it.done ? ' (done)' : ' (to do)'}</span>
+            <span className="worklist-sr">{it.done ? ' (done)' : it.in_progress ? ' (doing)' : ' (to do)'}</span>
+            {assignees && <span className="checklist-assignees">{assignees}</span>}
             {((it.commits && it.commits.length > 0) || open) && (
               <ItemCommits commits={it.commits ?? []} open={open} summary={open && it.diff && reader ? summaryOf(reader, it.diff) : undefined} />
             )}

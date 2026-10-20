@@ -1,0 +1,18 @@
+/* The chat's draft editor: the launch sheet's overlay, narrower. */
+.launch-panel.proposal-sheet { max-width: 640px; color: var(--chalk); }
+.proposal-sheet-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.proposal-sheet-head h2 { margin: 0; font-size: var(--text-base); }
+.proposal-sheet-close { background: none; border: 0; color: var(--fog); font: inherit; font-size: 1.2rem; cursor: pointer; }
+.proposal-sheet-review { display: grid; gap: 10px; }
+.proposal-sheet-review dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: var(--text-sm); }
+.proposal-sheet-review dt { color: var(--fog-dim); }
+.proposal-sheet-review dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.proposal-sheet-body { white-space: pre-wrap; max-height: 12em; overflow: auto; }
+.proposal-sheet-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.proposal-sheet-actions button {
+  padding: 6px 12px; border: 1px solid var(--stone); border-radius: 6px;
+  background: transparent; color: var(--chalk); font: inherit; cursor: pointer;
+}
+.proposal-sheet-actions .proposal-sheet-primary { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.proposal-sheet-actions button:disabled { opacity: 0.5; cursor: default; }
+@media (min-width: 900px) { .launch-panel.proposal-sheet { width: 92%; max-width: 640px; } }

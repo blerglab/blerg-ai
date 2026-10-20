@@ -165,7 +165,7 @@ jobs:
         working-directory: runner/.claude/skills/session-messaging
         run: |
           python3 -m pip install pytest
-          python3 -m unittest test_blerg_runner
+          python3 -m unittest test_blerg_runner test_blerg_runner_review_request
           python3 -m pytest -q blerg_runner_board_test.py
       - run: ./scripts/check_lint_pin.sh
       - run: ./scripts/scrub.sh

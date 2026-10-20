@@ -57,5 +57,6 @@ describe('delegation states', () => {
       .toEqual(['Claude', 'Codex', 'Hermes', 'OpenClaw', 'zed'])
     expect(runtimeWords('docker')).toBe('in the desktop sandbox')
     expect(runtimeWords('daemon')).toBe('on your desktop, unsandboxed')
+    expect(runtimeWords('cluster')).toBe('on the cluster')
   })
 })

@@ -91,6 +91,13 @@ type fakeK8s struct {
 	// a GET 200, and a DELETE removes it. A deleted Job answers 404 like the
 	// real API.
 	existingSecrets map[string]bool
+	// deadSessionIDs are browser sessions core no longer accepts as a liveness proof (expired or
+	// signed out): both the credential list and the credential fetch answer 401 for them.
+	deadSessionIDs map[string]bool
+	// credentialKinds is what core's credential list answers: the kinds the account saved.
+	credentialKinds []string
+	// credentialListCalls counts core credential-list requests.
+	credentialListCalls int
 }
 
 // setPod makes the fake report pod (a Pod object) for sessionID.
@@ -269,6 +276,9 @@ func (f *fakeK8s) credentialHandler() http.HandlerFunc {
 			return
 		}
 		if r.URL.Path == "/internal/credentials/list" {
+			f.mu.Lock()
+			f.credentialListCalls++
+			f.mu.Unlock()
 			if r.Header.Get("X-Internal-Key") != testInternalKey {
 				w.WriteHeader(401)
 				return
@@ -281,7 +291,17 @@ func (f *fakeK8s) credentialHandler() http.HandlerFunc {
 				w.WriteHeader(400)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"engines": []string{}})
+			f.mu.Lock()
+			dead := f.deadSessionIDs[proof.SessionID]
+			f.mu.Unlock()
+			if dead {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			f.mu.Lock()
+			kinds := append([]string{}, f.credentialKinds...)
+			f.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"engines": kinds})
 			return
 		}
 		f.mu.Lock()
@@ -307,6 +327,11 @@ func (f *fakeK8s) credentialHandler() http.HandlerFunc {
 			return
 		}
 		f.mu.Lock()
+		if f.deadSessionIDs[body.SessionID] {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		f.credentialFetchTokenIDs = append(f.credentialFetchTokenIDs, body.TokenID)
 		f.credentialFetchSessionIDs = append(f.credentialFetchSessionIDs, body.SessionID)
 		plaintext, ok := f.credentialFetchResponses[body.AccountID+":"+body.Engine]
@@ -327,7 +352,10 @@ func newTestJobManager(t *testing.T, f *fakeK8s) *JobManager {
 	t.Cleanup(srv.Close)
 	credSrv := httptest.NewServer(f.credentialHandler())
 	t.Cleanup(credSrv.Close)
+	life := newClusterWatchLifetime(t.Context())
+	t.Cleanup(life.close) // cancel and join before either fake receiver closes
 	return &JobManager{
+		startWatches: life,
 		mintRuntimeLaunch: func(_ context.Context, _ string, message string) (string, string, error) {
 			if message == "" {
 				message = "test-message-capability"

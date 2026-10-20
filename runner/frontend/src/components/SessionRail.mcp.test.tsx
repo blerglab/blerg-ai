@@ -128,6 +128,23 @@ describe('session panel: MCP servers, the held first message, checklist commits'
   })
   const openCaps = () => fireEvent.click(screen.getByRole('tab', { name: /Capabilities/ }))
 
+  it('reviews a live approval without its transcript event or earlier-history loading', async () => {
+    const request = { request_id: 'request-a', parent_session_id: 'sess-a', status: 'pending', expires_at: iso(60_000), offered: ['once', 'deny'], request: { engine: 'codex', runtime: 'docker', title: 'Offline fixture review', prompt: 'Public fixture instructions' } }
+    stubFetch(0, liveReply({ delegation_requests: [{ request_id: 'request-a', engine: 'codex', title: 'Offline fixture review', expires_at: request.expires_at }] }))
+    const fallback = fetchMock.getMockImplementation() as (url: string, ...args: unknown[]) => unknown
+    fetchMock.mockImplementation((url: string, ...args: unknown[]) => String(url).endsWith('/api/delegation-requests/request-a')
+      ? Promise.resolve({ ok: true, status: 200, json: async () => request }) : fallback(url, ...args))
+    seedSession({ engine: 'codex', status: 'running' })
+    seedEvents(user())
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Review request' }))
+    const needs = screen.getByTestId('rail-needs')
+    expect(await within(needs).findByRole('button', { name: 'Allow once' })).toBeVisible()
+    expect(within(needs).getByText('Public fixture instructions')).toBeVisible()
+    expect(screen.queryByText('Load earlier messages to review this request.')).toBeNull()
+    expect(useTranscriptStore.getState().sessions['sess-a'].events.some(event => event.kind === 'delegation_request')).toBe(false)
+  })
+
   it('Live has no MCP servers section', async () => {
     stubFetch(0, liveReply({ mcp: mcp([srv('jira', 'connected', 12), srv('docs', 'pending')], false) }))
     seedSession({ status: 'running' })
@@ -135,7 +152,7 @@ describe('session panel: MCP servers, the held first message, checklist commits'
     await renderPage()
     await screen.findByTestId('session-rail')
     expect(screen.queryByTestId('rail-mcp')).toBeNull()
-    expect(screen.queryByText('MCP servers')).toBeNull()
+    expect(screen.getByText('MCP servers')).not.toBeVisible()
   })
 
   it('Capabilities shows each server with its live status, over the start-up snapshot', async () => {
@@ -153,6 +170,21 @@ describe('session panel: MCP servers, the held first message, checklist commits'
     expect(within(group).getByText('drive').closest('li')).toHaveTextContent('needs sign-in')
     expect(within(group).getByText('old').closest('li')).toHaveTextContent('disabled')
     expect(group).toHaveTextContent('sent after the wait ran out')
+  })
+
+  it('shows an on-demand server without a connection claim or first-message hold', async () => {
+    stubFetch(0, liveReply({ mcp: mcp([srv('docs', 'lazy')], true) }))
+    seedSession({ status: 'running' })
+    seedEvents(user())
+    await renderPage()
+    await screen.findByTestId('session-rail')
+    openCaps()
+    const group = await screen.findByTestId('caps-group-mcp')
+    const row = within(group).getByText('docs').closest('li')!
+    expect(row).toHaveTextContent('connects on demand')
+    expect(row.querySelector('.status-connected')).toBeNull()
+    expect(row.querySelector('.status-pending')).toBeNull()
+    expect(screen.queryByTestId('mcp-hold')).toBeNull()
   })
 
   it('Capabilities falls back to the snapshot when the live state has no MCP servers', async () => {

@@ -62,6 +62,30 @@ func TestWriteCodexAuthFromEnvWritesFile(t *testing.T) {
 	}
 }
 
+// In a cluster pod with native history, ~/.codex already exists (the
+// agent-owned engine-home mount, 0700) with the history mountpoint
+// "sessions" inside it. The login still lands there, owner-only, beside it.
+func TestWriteCodexAuthFromEnvIntoPreparedEngineHome(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_AUTH_JSON", `{"tokens":{"access_token":"tok"}}`)
+	if err := writeCodexAuthFromEnv(home); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(home, ".codex", "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("auth.json mode = %v, want 0600", info.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "sessions", "auth.json")); !os.IsNotExist(err) {
+		t.Fatal("auth.json written into the history mount")
+	}
+}
+
 func TestWriteCodexAuthFromEnvNoopWhenUnset(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_AUTH_JSON", "")

@@ -61,6 +61,8 @@ type tokenSummaryResponse struct {
 	ExpiresAt  string   `json:"expires_at"`
 	LastUsedAt *string  `json:"last_used_at"`
 	RevokedAt  *string  `json:"revoked_at"`
+	// Source: "" for a token made in Settings, "board <id>" for one a board minted ("Run as me").
+	Source string `json:"source"`
 }
 
 // handleCreateToken is POST /api/tokens. Gated behind requireHumanPrincipal("card.read") in
@@ -260,6 +262,7 @@ func (d Deps) handleListTokens(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:  rec.ExpiresAt.Format(time.RFC3339),
 			LastUsedAt: formatOptionalTime(rec.LastUsedAt),
 			RevokedAt:  formatOptionalTime(rec.RevokedAt),
+			Source:     rec.Source,
 		})
 	}
 	writeJSON(w, out)

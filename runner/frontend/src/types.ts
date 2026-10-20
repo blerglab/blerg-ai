@@ -191,6 +191,7 @@ export type AgentEventKind =
   | 'background_task_started'
   | 'background_task_done'
   | 'turn_done'
+  | 'usage_updated'
   | 'error'
   | 'compaction'
   | 'start_stage'
@@ -201,7 +202,11 @@ export type AgentEventKind =
   | 'ticket'
   | 'mcp_status'
   | 'delegation_request'
-  | 'delegation_decided';
+  | 'delegation_decided'
+  | 'proposal_request'
+  | 'proposal_decided'
+  | 'review_requested'
+  | 'review_decided';
 
 export interface AgentEvent {
   type: 'agent_event';
@@ -455,7 +460,7 @@ export interface SessionStarChanged {
 export interface SessionArchived {
   type: 'session_archived';
   session_id: string;
-  parent_session_id: string;
+  parent_session_id?: string;
   archived_at: string;
 }
 
@@ -827,6 +832,8 @@ export interface ProposalInfo {
   decided_at: string | null
   decided_by: string | null
   result: ProposalResult
+  /** The session permission that approved it without asking (absent on an older server). */
+  approved_by_grant?: string | null
 }
 
 export type ToolChangeKind = 'changed' | 'new' | 'removed'

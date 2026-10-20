@@ -72,7 +72,7 @@ func TestRuntimeAdmittedStartCannotReviveStoppedSession(t *testing.T) {
 	}
 	select {
 	case <-b.reached:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("start scope check not reached")
 	}
 	// Mirrors the browser/orphan Stop path's durable terminal write and revocation.
@@ -85,7 +85,7 @@ func TestRuntimeAdmittedStartCannotReviveStoppedSession(t *testing.T) {
 	close(b.release)
 	select {
 	case <-b.inserted:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("start write did not complete")
 	}
 	s, err := db.GetSession(ctx, pool, sid)

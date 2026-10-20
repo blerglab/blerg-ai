@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode"
 )
 
 // preferredFields are describeInput's fields, in its order: the first with text says what a call does.
@@ -176,4 +177,14 @@ func doingLine(ev Event) string {
 		return "running " + tool + " · " + hint
 	}
 	return "running " + tool
+}
+
+// ToolActivity is the shared bounded one-line description of an observed tool call.
+func ToolActivity(payload json.RawMessage) string {
+	return cut(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, doingLine(Event{Kind: "tool_call", Payload: payload})), 100)
 }

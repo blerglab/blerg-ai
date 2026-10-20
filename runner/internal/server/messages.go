@@ -75,6 +75,9 @@ type postMessageRequest struct {
 	SessionID string `json:"session_id"`
 	Kind      string `json:"kind"`
 	Body      string `json:"body"`
+	// OwnerOnly (asks only): the answer is accepted only from the session's
+	// signed-in owner. The daemon sets it on an engine's command approval.
+	OwnerOnly bool `json:"owner_only,omitempty"`
 }
 
 // HandlePostMessages creates a session→user message (bearer-authed, since the CLI
@@ -117,9 +120,12 @@ func (a *API) HandlePostMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var id string
-	if boardSessionID == "" && req.Kind == "ask" && sess.Kind == "agent" && sess.Engine != nil && *sess.Engine == "codex" {
+	switch {
+	case req.OwnerOnly && req.Kind == "ask":
+		id, err = db.CreateAsk(ctx, a.dbPool, req.SessionID, req.Body, true)
+	case boardSessionID == "" && req.Kind == "ask" && sess.Kind == "agent" && sess.Engine != nil && *sess.Engine == "codex":
 		id, err = a.createCodexQuestion(ctx, req)
-	} else {
+	default:
 		id, err = db.CreateMessage(ctx, a.dbPool, req.SessionID, req.Kind, req.Body)
 	}
 	if err != nil {
@@ -340,6 +346,37 @@ func (a *API) HandlePostMessageReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	row, err := db.GetMessage(ctx, a.dbPool, id)
+	if err != nil {
+		writeError(w, 503, "message unavailable")
+		return
+	}
+	if row == nil {
+		writeError(w, 404, "message not found")
+		return
+	}
+	// The session's own side (the daemon) may still close an owner-only ask it
+	// stopped waiting on, with an empty answer, which is a deny; it never answers one.
+	daemonClose := actor.Daemon && req.Answer == ""
+	if row.OwnerOnly && !daemonClose && !a.actorOwnsMessageSession(ctx, actor, row.SessionID) {
+		writeError(w, http.StatusForbidden, "only the session's owner can answer this approval")
+		return
+	}
+	err = withCancelledLimitResume(ctx, a.dbPool, row.SessionID, func() error {
+		return withParentInputGuard(ctx, a.dbPool, row.SessionID, func() error {
+			a.replyMessageUnlocked(w, r, id, req)
+			return nil
+		})
+	})
+	if errors.Is(err, db.ErrDelegationEnded) {
+		writeError(w, 409, "session was discarded or its parent ended")
+	} else if err != nil {
+		writeError(w, 503, "message reply is busy; retry shortly")
+	}
+}
+
+func (a *API) replyMessageUnlocked(w http.ResponseWriter, r *http.Request, id string, req postMessageReplyRequest) {
+	ctx := r.Context()
 	changed, err := db.AnswerMessage(ctx, a.dbPool, id, req.Answer)
 	if err != nil {
 		log.Printf("api reply AnswerMessage %s: %v", id, err)
@@ -515,4 +552,25 @@ func (a *API) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
 		out = append(out, messageRowToInfo(row))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// actorOwnsMessageSession reports whether the actor is the session's owner,
+// signed in as themselves: an owner-only ask (an engine's command approval)
+// accepts nothing else. The daemon token, board tokens and agent tokens acting
+// for the owner are refused, as is any other person who can see the session.
+func (a *API) actorOwnsMessageSession(ctx context.Context, actor boardActor, sessionID string) bool {
+	if actor.Core == nil || actor.Core.Kind != "human" || actor.Core.OnBehalfOf != "" {
+		return false
+	}
+	return a.accountOwnsSession(ctx, actor.Core.Sub, sessionID)
+}
+
+// accountOwnsSession reports whether account launched the session. A failed
+// read is not ownership (fail closed).
+func (a *API) accountOwnsSession(ctx context.Context, account, sessionID string) bool {
+	if a.dbPool == nil || account == "" {
+		return false
+	}
+	row, err := db.GetSession(ctx, a.dbPool, sessionID)
+	return err == nil && ownsSession(account, row)
 }

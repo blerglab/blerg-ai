@@ -179,7 +179,7 @@ blerg-board purely as a board.
 |---|---|---|
 | `BLERG_RUNNER_URL` | unset | Runner service base URL. Required to enable the runner. |
 | `BLERG_RUNNER_KEY` | unset | Runner service bearer key. Required to enable the runner. Used to follow, message and stop sessions — never to start one (see *Board automation identity*). |
-| `BLERG_BOARD_RUNNER_RUNTIME` | unset | Runtime the board asks for on every session start, sent as `runtime` on `POST /api/runner/start`: `daemon` (the connected daemon's bare host), `docker` (that daemon's local sandbox) or `cluster`. Unset sends no `runtime`, so the runner decides: cluster where one is configured, else the sandbox when the daemon has its image, else the host. Set `daemon` to pin board sessions to the host — e.g. for agents that must `git push`, since the sandbox has no git credentials. Any other value refuses to boot. |
+| `BLERG_BOARD_RUNNER_RUNTIME` | unset | Runtime the board asks for on every session start, sent as `runtime` on `POST /api/runner/start`: `daemon` (the connected daemon's bare host), `docker` (that daemon's local sandbox) or `cluster`. Unset sends no `runtime`, so the runner decides: cluster where one is configured, else the sandbox when the daemon has its image, else the host. Set `daemon` to pin board sessions to the host — e.g. for agents that must `git push`, since the sandbox has no git credentials. Any other value refuses to boot. It is the default of a card's **Run this card**: the owner of the board's automation token can pick another target for a run (the cluster, or a connected daemon's sandbox; never its bare host, since a card's run is unattended); the session still runs as them, and a respawn of that card's worker keeps the choice. |
 | `RUNNER_GIT_BASE` | unset | Git host base (e.g. `https://github.com/your-org`) sessions clone `<repo>.git` from. |
 | `BLERG_BOARD_PUBLIC_URL` | `https://blerg-board.example.com` | Human-facing base URL used in card links. Always set it. |
 | `BLERG_BOARD_AGENT_URL` | `http://blerg-board.blerg-board.svc` | blerg-board's own URL as reachable *from spawned sessions* (in-cluster address). **In-cluster default — override it — the installers set it to the public URL.** |
@@ -195,13 +195,66 @@ blerg-board purely as a board.
 a session it started could only run on an operator-provisioned engine
 credential, and credentials here are self-service. Instead every board
 carries its own **automation token** and **automation engine**, set in the
-board's settings panel (the model chip in the board header → *Automation*):
+board's settings panel (the model chip in the board header → *Automation*).
+
+**Run as me (the default).** One click makes you the board's automation
+identity: the board asks blerg-core to mint a `run-sessions` agent token for
+you and saves it, with nothing copied or pasted. The button is in the
+settings panel, beside **Run this card** on a board that has no token, and the
+create-board form has **Run this board's cards as me** checked (unless the
+operator turned that default off). The token is an ordinary token of yours:
+it is listed in blerg-core **Settings → Agent tokens** as "Board <name>
+automation" (source `board <id>`), lives 90 days, and can be revoked there.
+Make sure the engine you want (Claude, Codex or Hermes) is connected on that
+Settings page.
+
+**Pasting a token** stays available (**Use a different token…**), for a
+service account's token or on an install without the mint key:
 
 1. In blerg-core **Settings → Agent tokens**, create a token with preset
    `run-sessions` (it is yours: `on_behalf_of` is your account).
-2. Make sure the engine you want (Claude, Codex or Hermes) is connected on
-   the same Settings page.
-3. On the board, paste the token, pick the engine, Save.
+2. On the board, paste the token, pick the engine, Save.
+
+Replacing a token Blerg minted (another Run as me, or a pasted token),
+removing it, or deleting its board revokes it in core. A pasted token is
+yours and is never revoked by the board.
+
+| Var | Default | Notes |
+|---|---|---|
+| `BLERG_CORE_BOARD_MINT_KEY` | unset | Same value as core's `BLERG_CORE_BOARD_MINT_KEY`. With `BLERG_CORE_URL`, enables **Run as me**. Unset: boards take a pasted token only. The installers generate it. |
+| `BLERG_BOARD_DEFAULT_RUN_AS_CREATOR` | `true` | Whether the create-board form starts with **Run this board's cards as me** checked. A multi-tenant operator may set `false`. Any value that is not a boolean refuses to boot. |
+
+#### Run as me: design and threat model
+
+- **The board never sees your core credentials.** Core's cookie and refresh
+  token stay with core. The proof the board forwards is the short-lived
+  access token your browser sent the board on that very request (audience
+  `blerg-board`, which core does not accept as a credential for anything
+  else).
+- **Core checks the person, live.** `POST /internal/tokens/board-automation`
+  verifies that access token as its own (signature, audience, expiry,
+  revocations), requires a person's token (not an agent, session or daemon
+  token) carrying a browser session id, requires that session to be live and
+  the account in the request to be the token's own, refuses an account that is
+  disabled or has a password change pending, and counts every attempt against
+  the account (10 an hour). Every refusal is the same `404`.
+- **The board key opens only this.** `BLERG_CORE_BOARD_MINT_KEY` is a third
+  key, distinct from the register and internal keys (core refuses to boot on
+  a shared value). It opens the mint and its revoke route and nothing else: the
+  board still cannot fetch anyone's engine credentials. The key alone mints
+  nothing; it needs a live person's access token. Its revoke route can revoke
+  only a token whose source names that board, of that account.
+- **The token stays out of URLs, logs and the browser.** It travels from core
+  to the board in the body of a direct server-to-server response (no
+  redirects followed), is verified again locally (a live `run-sessions` token
+  of the person who clicked) and stored encrypted exactly like a pasted one.
+  Logs carry ids only. Browser requests carry no token at all: the button is a
+  plain `POST /api/boards/{id}/automation/run-as-me`.
+- **What remains.** Whoever holds the mint key and steals a person's live
+  board access token (minutes long) can mint a token for that person; the
+  same theft already lets them use the board as that person. Run as me does
+  not change who can spend the credential: every card-writer on the board can
+  (see below).
 
 Every session the board starts — **Run board**, the quiet-worker respawn,
 reviewer and conflict-worker spawns, standing agents, and the card
@@ -225,14 +278,17 @@ starts — is `unattended`: the agent decides, finishes and summarizes.
   over `PATCH /api/boards/{id}` and the MCP `blerg_board_update` tool. A
   board's Claude model settings are not sent to a Codex/Hermes session.
 - **No token, no sessions.** With none set (or an expired/revoked one) the
-  board starts nothing and says why: the card/board-chat buttons and **Run
+  board starts nothing and says why (with **Run as me** offered to a board
+  admin): the card/board-chat buttons and **Run
   board** answer 422 with the fix; a run already going stops and comments
   on the card it was about to start; a quiet worker that can't be replaced
   is flagged stuck with the reason; a standing agent records it on its queue
   item. It never falls back to `BLERG_RUNNER_KEY`.
 
 Tokens expire (90 days by default); the panel shows when, and whose token
-it is (the account it acts for, marked "you" for its owner).
+it is (the account it acts for, marked "you" for its owner, and "Run as me"
+when Blerg minted it). An expired or revoked token brings **Run as me** back
+to the panel and beside **Run this card**.
 
 **Anyone who can write cards on this board can spend this credential and
 could get an agent to reveal it.** Every card-writer — people with

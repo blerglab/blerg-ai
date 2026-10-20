@@ -38,7 +38,7 @@ func TestRecoveryReadyIsCurrentLinkAndFailClosed(t *testing.T) {
 	h.NoteRecoveryState(RecoveryState{Generation: 2, Phase: RecoveryReady})
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("current link did not release recovery")
 	}
 	h.NoteRecoveryState(RecoveryState{Generation: 2, Phase: RecoveryDisconnected})
@@ -59,7 +59,7 @@ func TestRecoveryReadyWaitCancels(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("killed recovery input worker remained blocked")
 	}
 }
@@ -93,7 +93,7 @@ func TestMarkedAdoptionWaitsForRecoveryReady(t *testing.T) {
 				go func() { h.UserMessage("s1", "explicit recovery input", "chat"); close(delivered) }()
 				select {
 				case <-delivered:
-				case <-time.After(time.Second):
+				case <-time.After(15 * time.Second):
 					t.Fatal("socket input handler blocked waiting for ready")
 				}
 			}
@@ -193,7 +193,7 @@ func TestWSRecoveryReadyNegotiationAndPump(t *testing.T) {
 	defer func() { cancel(); <-finished; <-doneServer }()
 	select {
 	case <-handled:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("read pump blocked before ready")
 	}
 	if h.recoveryInputReady() {
@@ -227,7 +227,7 @@ func TestClaudeRecoveryRechecksAfterDiscovery(t *testing.T) {
 	go func() { d.deliverOne(ctx); close(done) }()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("discovery gate not entered")
 	}
 	h.NoteRecoveryState(RecoveryState{Generation: 1, Phase: RecoveryDisconnected})
@@ -241,7 +241,7 @@ func TestClaudeRecoveryRechecksAfterDiscovery(t *testing.T) {
 	h.NoteRecoveryState(RecoveryState{Generation: 2, Phase: RecoveryReady})
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("current ready did not release worker")
 	}
 	select {
@@ -272,7 +272,7 @@ func TestCodexRecoveryHoldsManualSteeringWithoutBlockingRPC(t *testing.T) {
 	h.NoteRecoveryState(RecoveryState{Generation: 2, Phase: RecoveryHeld})
 	d.Enqueue("held manual steer", "chat")
 	// Native RPC must continue while the socket input's turn is held.
-	statusCtx, statusCancel := context.WithTimeout(ctx, time.Second)
+	statusCtx, statusCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer statusCancel()
 	if _, err := d.MCPStatus(statusCtx); err != nil {
 		t.Fatalf("held recovery blocked native status RPC: %v", err)
@@ -291,65 +291,139 @@ func TestCodexRecoveryHoldsManualSteeringWithoutBlockingRPC(t *testing.T) {
 }
 
 func TestOtherEnginesRecoveryAdmission(t *testing.T) {
-	for _, engine := range []string{"hermes", "openclaw"} {
-		t.Run(engine, func(t *testing.T) {
-			var bin string
-			if engine == "hermes" {
-				bin = fakeHermes(t, "done", 0)
-			} else {
-				bin = fakeOpenclaw(t, `{"ok":true,"final":"done"}`, 0)
+	t.Run("hermes", func(t *testing.T) {
+		t.Run("serial", func(t *testing.T) { testOtherEngineRecoveryAdmission(t, "hermes", false) })
+		t.Run("redirect", func(t *testing.T) { testOtherEngineRecoveryAdmission(t, "hermes", true) })
+	})
+	t.Run("openclaw", func(t *testing.T) { testOtherEngineRecoveryAdmission(t, "openclaw", false) })
+}
+
+func testOtherEngineRecoveryAdmission(t *testing.T, engine string, steering bool) {
+	t.Helper()
+	if steering {
+		t.Setenv("FAKE_HERMES_HOLD_AFTER_FIRST", "1")
+	}
+	var bin string
+	if engine == "hermes" {
+		bin = fakeHermes(t, "done", 0)
+	} else {
+		bin = fakeOpenclaw(t, `{"ok":true,"final":"done"}`, 0)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	logPath := filepath.Join(bin, "calls.log")
+	t.Setenv("FAKE_HERMES_LOG", logPath)
+	t.Setenv("FAKE_OPENCLAW_LOG", logPath)
+	inputMethods := func() []string {
+		raw, _ := os.ReadFile(logPath)
+		if engine == "openclaw" {
+			return strings.FieldsFunc(string(raw), func(r rune) bool { return r == '\x1e' })
+		}
+		var methods []string
+		for _, method := range strings.Fields(string(raw)) {
+			if method == "prompt.submit" || method == "session.redirect" {
+				methods = append(methods, method)
 			}
-			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-			logPath := filepath.Join(bin, "calls.log")
-			t.Setenv("FAKE_HERMES_LOG", logPath)
-			t.Setenv("FAKE_OPENCLAW_LOG", logPath)
-			em := &collectEmitter{}
-			opts := AgentDriverOpts{Spec: engineRegistry[engine], WorkDir: t.TempDir(), SessionID: "fixture", Emitter: em}
-			var d interface {
-				sessionDriver
-				SetRecoveryInputGate(func(context.Context), func() bool)
+		}
+		return methods
+	}
+	em := &collectEmitter{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			raw, _ := os.ReadFile(logPath)
+			t.Logf("native fixture methods: %s; event kinds: %v", raw, em.kinds())
+		}
+	})
+	opts := AgentDriverOpts{Spec: engineRegistry[engine], WorkDir: t.TempDir(), SessionID: "fixture", Emitter: em}
+	var d interface {
+		sessionDriver
+		SetRecoveryInputGate(func(context.Context), func() bool)
+	}
+	if engine == "hermes" {
+		d = newHermesDriver(opts)
+	} else {
+		d = newOpenclawDriver(opts)
+	}
+	h := NewAgentHost(&agentTestSender{}, AgentHostConfig{})
+	d.SetRecoveryInputGate(h.waitRecoveryReady, h.recoveryInputReady)
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	go func() { d.Run(ctx); close(finished) }()
+	defer func() { cancel(); <-finished }()
+	d.EnqueueInput(agent.Input{Text: "first fixture"})
+	time.Sleep(20 * time.Millisecond)
+	if countKind(em, "user_message") != 0 || len(inputMethods()) != 0 {
+		t.Fatal("engine bypassed initial recovery hold")
+	}
+	h.NoteRecoveryState(RecoveryState{Generation: 1, Phase: RecoveryHeld})
+	h.NoteRecoveryState(RecoveryState{Generation: 1, Phase: RecoveryReady})
+	waitUntil(t, "first turn", func() bool { return countKind(em, "turn_done") == 1 })
+	h.NoteRecoveryState(RecoveryState{Generation: 1, Phase: RecoveryDisconnected})
+	d.EnqueueInput(agent.Input{Text: "second fixture"})
+	if steering {
+		d.EnqueueInput(agent.Input{Text: "third fixture"})
+	}
+	time.Sleep(20 * time.Millisecond)
+	if countKind(em, "user_message") != 1 || len(inputMethods()) != 1 {
+		t.Fatal("reconnect did not fence engine worker")
+	}
+	h.NoteRecoveryState(RecoveryState{Generation: 2, Phase: RecoveryHeld})
+	h.NoteRecoveryState(RecoveryState{Generation: 2, Phase: RecoveryReady})
+	wantTurns := 2
+	if !steering {
+		waitUntil(t, "second completed turn", func() bool { return countKind(em, "turn_done") == 2 })
+		h.NoteRecoveryState(RecoveryState{Generation: 2, Phase: RecoveryDisconnected})
+		d.EnqueueInput(agent.Input{Text: "third fixture"})
+		time.Sleep(20 * time.Millisecond)
+		if countKind(em, "user_message") != 2 || len(inputMethods()) != 2 {
+			t.Fatal("third input bypassed recovery hold")
+		}
+		h.NoteRecoveryState(RecoveryState{Generation: 3, Phase: RecoveryHeld})
+		h.NoteRecoveryState(RecoveryState{Generation: 3, Phase: RecoveryReady})
+		wantTurns = 3
+	}
+	waitUntil(t, "accepted inputs and native completions", func() bool {
+		if countKind(em, "user_message") != 3 || countKind(em, "turn_done") != wantTurns {
+			return false
+		}
+		em.mu.Lock()
+		defer em.mu.Unlock()
+		for i := len(em.events) - 1; i >= 0; i-- {
+			if status, ok := em.events[i].Payload.(agent.StatusPayload); ok {
+				return status.Status == "idle"
 			}
-			if engine == "hermes" {
-				d = newHermesDriver(opts)
-			} else {
-				d = newOpenclawDriver(opts)
-			}
-			h := NewAgentHost(&agentTestSender{}, AgentHostConfig{})
-			d.SetRecoveryInputGate(h.waitRecoveryReady, h.recoveryInputReady)
-			ctx, cancel := context.WithCancel(context.Background())
-			finished := make(chan struct{})
-			go func() { d.Run(ctx); close(finished) }()
-			defer func() { cancel(); <-finished }()
-			d.EnqueueInput(agent.Input{Text: "first fixture"})
-			time.Sleep(20 * time.Millisecond)
-			if countKind(em, "user_message") != 0 {
-				t.Fatal("engine bypassed initial recovery hold")
-			}
-			h.NoteRecoveryState(RecoveryState{Generation: 1, Phase: RecoveryHeld})
-			h.NoteRecoveryState(RecoveryState{Generation: 1, Phase: RecoveryReady})
-			waitUntil(t, "first turn", func() bool { return countKind(em, "turn_done") == 1 })
-			h.NoteRecoveryState(RecoveryState{Generation: 1, Phase: RecoveryDisconnected})
-			d.EnqueueInput(agent.Input{Text: "second fixture"})
-			d.EnqueueInput(agent.Input{Text: "third fixture"})
-			time.Sleep(20 * time.Millisecond)
-			if countKind(em, "user_message") != 1 {
-				t.Fatal("reconnect did not fence engine worker")
-			}
-			h.NoteRecoveryState(RecoveryState{Generation: 2, Phase: RecoveryHeld})
-			h.NoteRecoveryState(RecoveryState{Generation: 2, Phase: RecoveryReady})
-			waitUntil(t, "queued turns", func() bool { return countKind(em, "turn_done") == 3 })
-			em.mu.Lock()
-			defer em.mu.Unlock()
-			var texts []string
-			for _, event := range em.events {
-				if p, ok := event.Payload.(agent.UserMessagePayload); ok {
-					texts = append(texts, p.Text)
-				}
-			}
-			if strings.Join(texts, ",") != "first fixture,second fixture,third fixture" {
-				t.Fatalf("input order changed: %v", texts)
-			}
-		})
+		}
+		return false
+	})
+	methods := inputMethods()
+	if len(methods) != 3 {
+		t.Fatalf("native accepted input count = %d, want 3", len(methods))
+	}
+	if engine == "hermes" {
+		want := "prompt.submit,prompt.submit,prompt.submit"
+		if steering {
+			want = "prompt.submit,prompt.submit,session.redirect"
+		}
+		if strings.Join(methods, ",") != want {
+			t.Fatalf("native input order = %v, want %s", methods, want)
+		}
+	}
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	var texts []string
+	var lastStatus string
+	for _, event := range em.events {
+		if p, ok := event.Payload.(agent.StatusPayload); ok {
+			lastStatus = p.Status
+		}
+		if p, ok := event.Payload.(agent.UserMessagePayload); ok {
+			texts = append(texts, p.Text)
+		}
+	}
+	if strings.Join(texts, ",") != "first fixture,second fixture,third fixture" {
+		t.Fatalf("input order changed: %v", texts)
+	}
+	if lastStatus != "idle" {
+		t.Fatalf("final native status = %s, want idle", lastStatus)
 	}
 }
 

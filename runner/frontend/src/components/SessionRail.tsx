@@ -1,3 +1,4 @@
+import { modelDisplayName } from '@blerglab/chat'
 // SessionRail: the session page's side panel, in four tabs. Live: what needs the person (the agent's
 // open questions, with a box that answers each; tool changes waiting on a decision), what is running
 // (subagents and background tasks, each with a way to its place in the conversation), the session's
@@ -9,12 +10,13 @@
 // It stays mounted while closed (hidden), so the background tasks' state — which failures were
 // dismissed, since when it watches — lives as long as the page shows the session. Render it under
 // a key of the session.
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import {
   AskReply,
   ChecklistItems,
+  checklistAssignment,
   KindIcon,
   commandOf,
   isShell,
@@ -57,6 +59,7 @@ import FilesTab from './FilesTab'
 import HistoryTab from './HistoryTab'
 import CapabilitiesTab from './CapabilitiesTab'
 import {PluginPicker,PluginRequests} from './SessionPlugins'
+import DelegationLiveReview from './DelegationLiveReview'
 import {useSessionPlugins} from '../hooks/useSessionPlugins'
 import { useCapabilities } from '../hooks/useCapabilities'
 import { enabledCapabilityCount, latestCapabilitiesEvent } from '../lib/capabilities'
@@ -64,9 +67,10 @@ import ShowLink from './RailShowLink'
 import type { SessionInfo } from '../types'
 import StatusPill from './StatusPill'
 import UsageLimitResume from './UsageLimitResume'
+import SessionPermissions from './SessionPermissions'
 import { backgroundCount, displayState } from '../lib/displayState'
-import { StartedSessions } from './ChildSessions'
-import { childIsRunning, type LiveChildSession, type LiveDelegationGrant, type LiveDelegationRequest } from '../lib/liveState'
+import { ChildSessionRow, StartedSessions } from './ChildSessions'
+import { childIsRunning, type LiveChildSession, type LiveDelegationGrant, type LiveDelegationRequest, type LiveReviewRequest } from '../lib/liveState'
 import './SessionRail.css'
 
 /** How long a "Show in conversation" that found nothing says so. */
@@ -75,8 +79,14 @@ const MISSING_MS = 4000
 const FOCUSABLE = 'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
 
 export interface SessionRailProps {
+  openChildApproval?: number
+  /** The Permissions modal took the open request: clear it so a remount does not open it again. */
+  onChildApprovalShown?: () => void
+  openChecklistItem?: {id: string; n: number} | null
   childSessions?: LiveChildSession[]
   delegationRequests?: LiveDelegationRequest[]
+  /** The session's pending review requests: one Needs you row each, opening the file at its version. */
+  reviewRequests?: LiveReviewRequest[]
   delegationGrants?: LiveDelegationGrant[]
   /** The element's id (the header toggle's aria-controls). */
   id: string
@@ -112,7 +122,8 @@ export interface SessionRailProps {
 const NO_EVENTS: never[] = []
 
 export default function SessionRail(props: SessionRailProps) {
-  const { session, live, toolChanges, mode, open, onClose } = props
+  const { session, live, toolChanges: pendingToolChanges, mode, open, onClose } = props
+  const toolChanges = session.archived_at ? 0 : pendingToolChanges
   const bg = useBackgroundTasks(session.id)
   // A background subagent is also a background task: its subagent row says more, so the task row goes.
   const subKeys = new Set(live.subagents.map(s => s.key))
@@ -122,7 +133,9 @@ export default function SessionRail(props: SessionRailProps) {
   const runningTasks = tasks.filter(t => !t.done).length
   const children = (props.childSessions ?? []).filter(child => !child.archived_at)
   const runningChildren = children.filter(childIsRunning)
-  const requests = props.delegationRequests ?? []
+  const requests = session.archived_at ? [] : props.delegationRequests ?? []
+  const reviews = session.archived_at ? [] : props.reviewRequests ?? []
+  const openAsks = session.archived_at ? [] : live.openAsks
   // The clock runs only while something timed is on screen.
   const timed = open && (live.subagents.length > 0 || live.openAsks.length > 0 || tasks.length > 0 || runningChildren.length > 0)
   const now = useTicker(timed) - live.clockOffset
@@ -160,6 +173,13 @@ export default function SessionRail(props: SessionRailProps) {
   } else if (!wantLive && liveTaken) {
     setLiveTaken(false)
   }
+  useEffect(() => {
+    if (!props.openChildApproval || !open) return
+    const timer = window.setTimeout(() => {
+      setTab('live')
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [props.openChildApproval, open])
   const { onLiveShown } = props
   useEffect(() => { if (liveTaken) onLiveShown?.() }, [liveTaken, onLiveShown])
   // Plan is there only when the session has a ticket, a list or a diff: otherwise a saved Plan shows Live.
@@ -178,6 +198,64 @@ export default function SessionRail(props: SessionRailProps) {
     document.getElementById(`${props.id}-tab-plan`)?.focus()
   }
 
+  const checklistNodes = useRef(new Map<string, HTMLLIElement>())
+  const nodeKey = (id: string) => JSON.stringify([session.id, id])
+  const [highlight, setHighlight] = useState<{session: string; id: string} | null>(null)
+  const highlightedId = highlight?.session === session.id ? highlight.id : undefined
+  const [checklistNotice, setChecklistNotice] = useState<{session: string; text: string} | null>(null)
+  const [checklistJump, setChecklistJump] = useState<{session: string; id: string} | null>(null)
+  const onChecklistElement = useCallback((id: string, element: HTMLLIElement | null) => {
+    const key = JSON.stringify([session.id, id])
+    if (element) checklistNodes.current.set(key, element)
+    else checklistNodes.current.delete(key)
+  }, [session.id])
+  const jumpChecklist = (id: string) => {
+    if (!checklistNodes.current.has(nodeKey(id))) return
+    setHighlight(null)
+    setChecklistNotice(null)
+    pick('plan')
+    setChecklistJump({session: session.id, id})
+  }
+  const completedJump = useRef<object | null>(null)
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => { if (highlightTimer.current) clearTimeout(highlightTimer.current) }, [session.id])
+  useEffect(() => {
+    if (!checklistJump || checklistJump.session !== session.id || tab !== 'plan' || completedJump.current === checklistJump) return
+    completedJump.current = checklistJump
+    const frame = requestAnimationFrame(() => {
+      const row = checklistNodes.current.get(JSON.stringify([checklistJump.session, checklistJump.id]))
+      if (!row?.isConnected) return
+      row.scrollIntoView({block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'})
+      row.focus({preventScroll: true})
+      setHighlight({session: checklistJump.session, id: checklistJump.id})
+      if (highlightTimer.current) clearTimeout(highlightTimer.current)
+      highlightTimer.current = setTimeout(() => setHighlight(previous => previous?.session === checklistJump.session ? null : previous), 1500)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [checklistJump, tab, session.id])
+  const externalJumpSeen = useRef<{session: string; request: object} | null>(null)
+  useEffect(() => {
+    const request = props.openChecklistItem
+    if (!request || !open || (externalJumpSeen.current?.session === session.id && externalJumpSeen.current.request === request)) return
+    const frame = requestAnimationFrame(() => {
+      externalJumpSeen.current = {session: session.id, request}
+      if (!checklistNodes.current.has(JSON.stringify([session.id, request.id]))) {
+        setChecklistNotice({session: session.id, text: 'This checklist item is no longer available.'})
+        return
+      }
+      setChecklistNotice(null)
+      setHighlight(null)
+      setTab('plan')
+      writeRailTab('plan')
+      setChecklistJump({session: session.id, id: request.id})
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [props.openChecklistItem, open, session.id])
+  const assignmentReference = (kind: 'subagent' | 'child_session', id: string) => {
+    const item = checklistAssignment(live.checklist?.items ?? [], kind, id)
+    return item?.id ? <button type="button" className="rail-link rail-checklist-reference" data-testid="rail-checklist-reference" onClick={() => jumpChecklist(item.id!)}>Plan · {item.text}</button> : null
+  }
+
   const capabilitiesShown = open && tab === 'capabilities'
   const { onCapabilitiesShown } = props
   // Only a switch to Capabilities while the panel is open: opening the panel (on Capabilities, or on mount)
@@ -191,9 +269,12 @@ export default function SessionRail(props: SessionRailProps) {
   // What the session loaded: the newest report in the transcript, and the server's once the tab has
   // been on screen. The tab shows it; the tab's header badge counts what is enabled in it.
   const capEvent = useTranscriptStore(s => latestCapabilitiesEvent(s.sessions[session.id]?.events))
+  // A decided proposal may have added a permission ("Allow for this session" on its card): the
+  // permissions block reads again when one lands.
+  const decidedProposals = useTranscriptStore(s => (s.sessions[session.id]?.events ?? []).reduce((n, e) => n + (e.kind === 'proposal_decided' ? 1 : 0), 0))
   const capEvents = useMemo(() => (capEvent ? [capEvent] : NO_EVENTS), [capEvent])
   const capabilities = useCapabilities(session.id, capEvents, capabilitiesShown)
-  const canManagePlugins = live.canReleasePrompt === true
+  const canManagePlugins = !session.archived_at && live.canReleasePrompt === true
   const plugins = useSessionPlugins(session.id, canManagePlugins && open && (tab === 'live' || tab === 'capabilities'))
   const enabled = enabledCapabilityCount(capabilities?.payload)
   // On a phone the drawer goes first, so the file opens over the chat the person is looking at.
@@ -206,7 +287,7 @@ export default function SessionRail(props: SessionRailProps) {
     const files = blergTransport().files
     return files ? (id: string) => loadDiffSummary(session.id, id, x => files.raw(session.id, x)) : undefined
   }, [session.id])
-  const attach = live.files?.attach
+  const attach = session.archived_at ? undefined : live.files?.attach
   const attachFiles = attach ? () => {
     if (mode === 'drawer') onClose()
     attach()
@@ -219,8 +300,10 @@ export default function SessionRail(props: SessionRailProps) {
   })
 
   const pluginPending = canManagePlugins ? (plugins.data?.requests ?? []).filter(p => p.state === 'pending').length : 0
-  const needsCount = live.openAsks.length + (toolChanges > 0 ? 1 : 0) + pluginPending + requests.length
-  const runningCount = live.subagents.length + runningTasks
+  const needsCount = openAsks.length + (toolChanges > 0 ? 1 : 0) + pluginPending + requests.length + reviews.length
+  // A started session still running is running work too: it counts here and has its row (the same
+  // compact row Started sessions lists it with), beside the subagents and background tasks.
+  const runningCount = live.subagents.length + runningTasks + (session.archived_at ? 0 : runningChildren.length)
   const sessionProgress = readProgress(live.progress)
 
   // A pinned ticket opened over the page (the current one in full, another by its summary).
@@ -245,7 +328,14 @@ export default function SessionRail(props: SessionRailProps) {
         ? (
             <Section title="Checklist" testId="rail-checklist" meta={<ProgressMeta done={doneCount(live.checklist.items)} total={live.checklist.items.length} />}>
               {/* "View diff" opens the diff the CLI published of an item's commits, in the chat's viewer. */}
-              <ChecklistItems items={live.checklist.items} onViewDiff={openFile} diffSummary={diffSummary} />
+              <ChecklistItems items={live.checklist.items} onViewDiff={openFile} diffSummary={diffSummary} live={!session.archived_at && !session.ended_at && ['starting', 'running', 'idle', 'waiting'].includes(session.status)} highlightedId={highlightedId} onItemElement={onChecklistElement} renderAssignees={item => {
+                if (!item.assignees?.length) return null
+                const label = 'Assigned: ' + item.assignees.map(assignee => {
+                  const worker = assignee.kind === 'subagent' ? live.subagents.find(sub => (sub.childId || sub.key) === assignee.id)?.title : children.find(child => child.id === assignee.id)?.title
+                  return worker || `${assignee.kind === 'subagent' ? 'Subagent' : 'Session'} ${assignee.id}`
+                }).join('; ')
+                return <span className="rail-checklist-assignees" title={label}>{label}</span>
+              }} />
             </Section>
           )
         : live.plan && (
@@ -262,17 +352,18 @@ export default function SessionRail(props: SessionRailProps) {
     <>
       {list && <PlanSummary list={list} ticket={tickets[0]} onOpenTicket={() => openTicket(tickets[0])} onOpen={() => goPlan()} />}
 
-      <Section title="Needs you" count={live.openAsks.length + toolChanges + pluginPending + requests.length} tone="attention" testId="rail-needs" empty="Nothing needs you.">
+      <Section title="Needs you" count={openAsks.length + toolChanges + pluginPending + requests.length + reviews.length} tone="attention" testId="rail-needs" empty="Nothing needs you.">
         {needsCount > 0 && (
           <ul className="rail-list">
             {pluginPending > 0 && <li className="rail-item"><PluginRequests model={plugins} pendingOnly /></li>}
-            {requests.map(r => <li key={r.request_id} className="rail-item"><div className="rail-item-title">Approve started session: {r.title || r.engine}</div><button type="button" className="rail-link" onClick={() => jump(`request:${r.request_id}`, () => { const event = useTranscriptStore.getState().sessions[session.id]?.events.find(ev => ev.kind === 'delegation_request' && (ev.payload as { request_id?: string })?.request_id === r.request_id); return event ? scrollToEvent(event.client_event_id) : false })}>Review in conversation</button>{missing === `request:${r.request_id}` && <p role="status">Load earlier messages to review this request.</p>}</li>)}
-            {live.openAsks.map(a => (
+            {reviews.map(r => <ReviewRequestRow key={r.request_id} review={r} onOpen={() => props.onOpenArtifact(r.artifact_id)} />)}
+            {requests.map(r => <li key={r.request_id} className="rail-item"><div className="rail-item-title">Approve started session: {r.title || r.engine}</div><DelegationLiveReview sessionId={session.id} requestId={r.request_id} /></li>)}
+            {openAsks.map(a => (
               <AskRow
                 key={a.eventId}
                 ask={a}
                 now={now}
-                answer={live.answer}
+                answer={session.archived_at ? undefined : live.answer}
                 {...draftFor(a.eventId)}
                 missing={missing === a.eventId}
                 onShow={() => jump(a.eventId, () => scrollToEvent(a.eventId))}
@@ -293,8 +384,8 @@ export default function SessionRail(props: SessionRailProps) {
         )}
       </Section>
 
-      <Section title="Running now" count={runningCount} tone="running" testId="rail-running" empty="Nothing is running.">
-        {(sessionProgress || live.subagents.length + tasks.length > 0) && (
+      {!session.archived_at && <Section title="Running now" count={runningCount} tone="running" testId="rail-running" empty="Nothing is running.">
+        {(sessionProgress || live.subagents.length + tasks.length + runningChildren.length > 0) && (
           <ul className="rail-list">
             {sessionProgress && <li className="rail-item" data-testid="rail-session-progress">
               <div className="rail-item-head"><span className="rail-item-title">Session</span></div>
@@ -304,6 +395,7 @@ export default function SessionRail(props: SessionRailProps) {
               <SubagentRow
                 key={s.key}
                 sub={s}
+                assignment={assignmentReference('subagent', s.childId || s.key)}
                 now={now}
                 missing={missing === `sub:${s.key}`}
                 onShow={() => jump(`sub:${s.key}`, () => scrollToCall(s.key))}
@@ -319,14 +411,16 @@ export default function SessionRail(props: SessionRailProps) {
                 onDismiss={() => bg.dismiss(t.taskId)}
               />
             ))}
+            {runningChildren.map(child => <ChildSessionRow key={child.id} child={child} now={now} compact assignment={assignmentReference('child_session', child.id)} />)}
           </ul>
         )}
-      </Section>
+      </Section>}
 
-      <StartedSessions sessionId={session.id} children={children} grants={props.delegationGrants ?? []} now={now} />
+      <StartedSessions readOnly={!!session.archived_at} sessionId={session.id} children={children} now={now} assignmentFor={id => assignmentReference('child_session', id)} />
+      {!session.archived_at && <SessionPermissions sessionId={session.id} active={open && tab === 'live'} delegationGrants={props.delegationGrants ?? []} refreshKey={[...(props.delegationGrants ?? []).map(g => g.id), String(decidedProposals)].join(',')} openRequest={open && tab === 'live' ? props.openChildApproval : undefined} onOpenRequestTaken={props.onChildApprovalShown} />}
       <Section title="Session" testId="rail-session">
         <SessionFacts session={session} machine={props.machine} now={minute} liveRunning={props.liveRunning ?? null} />
-        {session.limit_resume_supported === true &&
+        {!session.archived_at && session.limit_resume_supported === true &&
           <div className="rail-settings"><UsageLimitResume key={session.id} sessionId={session.id} /></div>}
       </Section>
     </>
@@ -334,7 +428,8 @@ export default function SessionRail(props: SessionRailProps) {
 
   const body = (
     <>
-      <RailTabs idBase={props.id} tab={tab} onPick={pick} plan={planShown ? (planTabLabel(list, tickets.length, diffs.length) ?? '') : null} needs={live.openAsks.length + toolChanges + pluginPending + requests.length} files={live.files ? fileCount(live.files.items) : 0} enabled={enabled} />
+      {checklistNotice?.session === session.id && <p className="rail-checklist-unavailable" role="status">{checklistNotice.text}</p>}
+      <RailTabs idBase={props.id} tab={tab} onPick={pick} plan={planShown ? (planTabLabel(list, tickets.length, diffs.length) ?? '') : null} needs={openAsks.length + toolChanges + pluginPending + requests.length} files={live.files ? fileCount(live.files.items) : 0} enabled={enabled} />
       <div className="rail-tabpanel" role="tabpanel" id={`${props.id}-panel-live`} aria-labelledby={`${props.id}-tab-live`} hidden={tab !== 'live'}>
         {liveBody}
       </div>
@@ -560,7 +655,7 @@ function PlanSummary({ list, ticket, onOpenTicket, onOpen }: { list: PlanList; t
         <span className="rail-plan-summary-text" data-testid="rail-plan-summary-text">
           <span className="rail-plan-summary-head">{head}</span>
           <Progress done={list.done} total={list.total} />
-          {!all && list.next && <span className="rail-plan-summary-next">{` · Next: ${list.next}`}</span>}
+          {!all && (list.doing?.length || list.next) && <span className="rail-plan-summary-next">{list.doing?.length ? ` · Doing: ${list.doing.join('; ')}` : ` · Next: ${list.next}`}</span>}
         </span>
         <span className="rail-plan-summary-go" aria-hidden="true">›</span>
       </button>
@@ -672,8 +767,8 @@ function WorkProgress({ progress }: { progress: LiveProgress }) {
   </div>
 }
 
-function SubagentRow({ sub, now, missing, onShow }: { sub: ProgressSubagent; now: number; missing: boolean; onShow: () => void }) {
-  const model = sub.model.replace(/^claude-/, '')
+function SubagentRow({ sub, now, missing, onShow, assignment }: { sub: ProgressSubagent; now: number; missing: boolean; onShow: () => void; assignment?: ReactNode }) {
+  const model = modelDisplayName(sub.model)
   return (
     // A background subagent is drawn dashed, like its card in the transcript.
     <li className={`rail-item rail-sub${sub.background ? ' background' : ''}`} data-testid="rail-subagent" data-key={sub.key} data-status={sub.background ? 'background' : 'running'}>
@@ -686,10 +781,11 @@ function SubagentRow({ sub, now, missing, onShow }: { sub: ProgressSubagent; now
         <span className="rail-chip status"><span className="rail-spin" aria-hidden="true" />{sub.background ? 'in the background' : 'running'}</span>
         {sub.resumed && <span className="rail-chip" data-testid="rail-sub-resumed">resumed</span>}
         {sub.type && <span className="rail-chip" data-testid="rail-sub-type">{sub.type}</span>}
-        {model && <span className="rail-chip" data-testid="rail-sub-model">{model}</span>}
-        <span className="rail-chip" data-testid="rail-sub-effort" title="Child-reported configured effort; unknown when not reported">effort: {sub.effort || 'unknown'}</span>
+        {model && <span className="rail-chip" data-testid="rail-sub-model" title={sub.model}>{model}</span>}
+        <span className="rail-chip rail-effort" data-testid="rail-sub-effort" title="Child-reported configured effort; unknown when not reported">effort: {sub.effort || 'unknown'}</span>
         {sub.tokens !== null && sub.tokens > 0 && <span className="rail-chip" data-testid="rail-sub-tokens">{tokenLabel(sub.tokens)}</span>}
       </div>
+      {assignment}
       {sub.progress && <WorkProgress progress={sub.progress} />}
       {sub.doing && <div className="rail-item-line doing" data-testid="rail-sub-doing">{sub.doing}</div>}
       <div className="rail-actions"><ShowLink onShow={onShow} missing={missing} /></div>
@@ -771,7 +867,7 @@ function SessionFacts({ session, machine, now, liveRunning }: { session: Session
   const ended = session.ended_at ? Date.parse(session.ended_at) : NaN
   const runtime = RUNTIME_LABELS[session.runtime || 'daemon'] ?? session.runtime
   const engine = ENGINE_LABELS[session.engine || 'claude'] ?? session.engine
-  const model = session.model ? session.model.replace(/^claude-/, '') : 'engine default'
+  const model = session.model ? modelDisplayName(session.model) : 'engine default'
   return (
     <dl className="rail-facts">
       <div>
@@ -780,7 +876,7 @@ function SessionFacts({ session, machine, now, liveRunning }: { session: Session
       </div>
       <div><dt>Runs on</dt><dd>{runtime}{machine ? ` · ${machine}` : ''}</dd></div>
       <div><dt>Engine</dt><dd>{engine}</dd></div>
-      <div><dt>Model</dt><dd>{model}{session.effort ? ` · ${session.effort}` : ''}</dd></div>
+      <div><dt>Model</dt><dd><span title={session.model}>{model}</span>{session.effort && <span className="rail-chip rail-effort" title="Configured effort">{session.effort}</span>}</dd></div>
       {Number.isFinite(started) && (
         <div>
           <dt>Started</dt>
@@ -815,5 +911,18 @@ export function PanelIcon() {
       <line x1="10" y1="2.5" x2="10" y2="13.5" />
       <rect x="10.6" y="3.2" width="3.2" height="9.6" rx="1" fill="currentColor" stroke="none" opacity="0.5" />
     </svg>
+  )
+}
+
+/** A pending review request: "Review: <file>", the ask under it; the row opens the file at the
+ *  requested version, where the viewer's bar has Approve and Request changes. */
+function ReviewRequestRow({ review, onOpen }: { review: LiveReviewRequest; onOpen: () => void }) {
+  return (
+    <li className="rail-item rail-child-item rail-review-item" data-testid="rail-review-request">
+      <button type="button" className="rail-child-button" onClick={onOpen} title={`Open ${review.artifact_name} v${review.artifact_version}`}>
+        <span className="rail-item-title"><span aria-hidden="true">✎</span> Review: {review.artifact_name}</span>
+        <span className="rail-item-line">{review.artifact_version > 1 && <span className="rail-chip">v{review.artifact_version}</span>} <span className="rail-review-ask">{review.ask}</span></span>
+      </button>
+    </li>
   )
 }

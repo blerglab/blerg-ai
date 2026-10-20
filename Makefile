@@ -50,7 +50,7 @@ check-scripts:
 	BLERG_SKIP_KUBECTL=1 ./install/k8s/deploy_test.sh
 	bash ./install/desktop/hostcheck_test.sh
 	bash ./install/desktop/daemon_install_test.sh
-	cd runner/.claude/skills/session-messaging && python3 -m unittest test_blerg_runner && python3 -m pytest -q blerg_runner_board_test.py
+	cd runner/.claude/skills/session-messaging && python3 -m unittest test_blerg_runner test_blerg_runner_review_request && python3 -m pytest -q blerg_runner_board_test.py
 	./scripts/check_lint_pin.sh
 	./scripts/scrub.sh
 	./scripts/scrub_test.sh

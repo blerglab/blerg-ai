@@ -192,7 +192,7 @@ func TestDiscardSecurityRechecksParentAfterCancellationWait(t *testing.T) {
 				code, _, _ := fx.do("POST", childRoute(fx.parent, child, "/discard"), token, nil, nil)
 				done <- code
 			}()
-			until := time.Now().Add(5 * time.Second)
+			until := time.Now().Add(15 * time.Second)
 			for {
 				var waiting bool
 				if err := fx.pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%INSERT INTO session_limit_resume%')`).Scan(&waiting); err != nil {
@@ -221,7 +221,7 @@ func TestDiscardSecurityRechecksParentAfterCancellationWait(t *testing.T) {
 				if code != http.StatusServiceUnavailable {
 					t.Fatalf("stale parent authorization discarded a child: %d", code)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatal("discard did not finish")
 			}
 			if row := fx.row(child); row.ArchivedAt != nil || row.EndedAt != nil {

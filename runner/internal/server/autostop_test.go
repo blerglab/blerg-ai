@@ -174,7 +174,7 @@ func TestTurnDoneEndsAutoStopSessionOnce(t *testing.T) {
 		if got != sessionID {
 			t.Errorf("webhook delivered for %q, want %s", got, sessionID)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("no completion webhook was delivered for the auto-stopped session")
 	}
 	waitForWebhookRecorded(t, pool, sessionID)

@@ -5,11 +5,13 @@ import type { PatchSummary } from '../model/patch'
 import { createContext, useContext } from 'react'
 import type { ReviewFile } from '../model/review'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
-import type { ArtifactPayload } from '../types'
+import type { ArtifactPayload, ChecklistItem } from '../types'
 import type { ArtifactLink } from '../model/artifactLinks'
 
 export interface ChatContextValue {
   sessionId: string
+  checklistItems?: readonly ChecklistItem[]
+  onOpenChecklistItem?: (itemId: string) => void
   /** Absent when the transport has no file operations: cards then show no actions. */
   files: TransportFiles | null
   /** Opens the file in the viewer; autoplay starts a video or audio file at once. */
@@ -25,6 +27,9 @@ export interface ChatContextValue {
   /** The newest review file for `name` of either origin, merged (person's base, agent's replies).
    *  null when none. */
   reviewFor: (name: string) => Promise<ReviewFile | null>
+  /** Opens the review of a file the session published: the reviewed version when the list has it
+   *  (by artifact id), else the newest; absent where the chat cannot open files. */
+  openReview?: (name: string, artifactId?: string) => void
   /** The session is over (stopped, ended or failed): a run with no end recorded is not running. */
   sessionOver?: boolean
   /** Opens a file the agent's text names, from the session's folder; absent: such text stays text. */

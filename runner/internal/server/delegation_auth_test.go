@@ -118,7 +118,7 @@ func TestDelegateParentStateChecks(t *testing.T) {
 		msg      string
 	}{
 		"ended parent":        {ended, endedTok, 409, "the session has ended"},
-		"cluster parent":      {cluster, clusterTok, 422, "children run on the parent's desktop daemon"},
+		"cluster parent":      {cluster, clusterTok, 422, msgClusterNotConfigured}, // no cluster runtime in this fixture
 		"daemon disconnected": {gone, goneTok, 409, "the session's daemon is not connected"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -607,7 +607,8 @@ func TestChildIdempotencyHashCoversKeepRunning(t *testing.T) {
 }
 
 // A runtime token (a cluster pod's) is accepted as a credential and then refused as a parent: its
-// own id → 422 (cluster), another id → 403. A connected daemon that is not a host → 422.
+// own id → 422 (no cluster runtime configured in this fixture), another id → 403. A connected
+// daemon that is not a host → 422.
 func TestDelegateRuntimeTokenAndNonHostDaemon(t *testing.T) {
 	fx := newDelegFx(t)
 	ctx := context.Background()
@@ -617,7 +618,7 @@ func TestDelegateRuntimeTokenAndNonHostDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, out := probe(t, mux, pod, runtimeTok); code != http.StatusUnprocessableEntity || asString(out["error"]) != msgChildrenOnDaemon {
+	if code, out := probe(t, mux, pod, runtimeTok); code != http.StatusUnprocessableEntity || asString(out["error"]) != msgClusterNotConfigured {
 		t.Fatalf("runtime token, own id = %d %v", code, out)
 	}
 	if code, _ := probe(t, mux, fx.parent, runtimeTok); code != http.StatusForbidden {

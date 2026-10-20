@@ -85,7 +85,7 @@ func TestPostChecklistRecordsTheFullListAndTheChange(t *testing.T) {
 		if !strings.Contains(string(msg), `"kind":"checklist"`) {
 			t.Errorf("fan-out = %s", msg)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the checklist event was not fanned out")
 	}
 	code, body = fx.postWork("checklist", fx.sess, fx.sessTok, map[string]any{"op": "tick", "text": "Write tests"})

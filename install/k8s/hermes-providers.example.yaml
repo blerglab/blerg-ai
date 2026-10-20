@@ -1,0 +1,39 @@
+# OPTIONAL example: the cluster's shared Hermes model providers.
+#
+# NOT a Kubernetes manifest and NOT part of kustomization.yaml. It is a fragment of a Hermes
+# ~/.hermes/config.yaml, in Hermes's own schema, at most 64 KiB. Copy it OUTSIDE the repository
+# (it holds your network's addresses), edit it, and point HERMES_PROVIDERS_FILE in
+# install/k8s/.env at the copy. deploy.sh stores it in Secret blerg/blerg-hermes-providers.
+#
+# Every person who runs a Hermes session on the cluster, and their agent, can read this whole
+# file. Use keyless local model servers; do not put a paid provider key here unless every
+# cluster user may use it.
+#
+# What happens with it (CLUSTER-RUNTIME.md, "Shared Hermes providers"):
+#   * every Hermes session pod, top-level or child, gets it merged into ~/.hermes/config.yaml:
+#     `providers` merge by name, `custom_providers` by `name`, and every other key here
+#     (`model` included) replaces the image's default whole;
+#   * the cluster launch sheet lists the models these servers report (GET <base_url>/models,
+#     fetched by the runner, with no credentials), with the same IDs as on a desktop:
+#     the default endpoint's models by their raw ID, the others as custom:<provider>/<model>;
+#   * when every endpoint below is on a private network and none carries a key, Hermes on the
+#     cluster counts as local hardware for budgets.
+#
+# The addresses below are documentation placeholders (RFC 5737); use your servers' addresses.
+# They must be reachable from the runner pod and from session pods: see
+# networkpolicy-sessions.example.yaml if you restrict session egress.
+model:
+  provider: custom
+  default: example-model-a
+  base_url: http://192.0.2.10:8000/v1
+  context_length: 65536
+providers:
+  # The default endpoint again, by name, so it can be chosen explicitly too.
+  local-a:
+    base_url: http://192.0.2.10:8000/v1
+    api_mode: chat_completions
+    context_length: 65536
+  local-b:
+    base_url: http://192.0.2.11:8000/v1
+    api_mode: chat_completions
+    context_length: 65536

@@ -1,3 +1,4 @@
+import { modelDisplayName } from "@blerglab/chat";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { SessionChat, type RunnerSession } from "./SessionChat";
@@ -88,7 +89,7 @@ export function BoardChat({ boardId, onClosed }: { boardId: string; onClosed: ()
         <span className="sign">Board session</span>
         {session && <span className={`convo-state ${session.lifecycle}`}>{session.lifecycle}</span>}
         {session?.model && (
-          <span className="mono" style={{ color: "var(--fog-dim)", fontSize: 11 }}>{session.model}{session.effort ? ` · ${session.effort}` : ""}</span>
+          <span className="mono" style={{ color: "var(--fog-dim)", fontSize: 11 }}><span title={session.model}>{modelDisplayName(session.model || "")}</span>{session.effort && <span className="model-effort" title="Configured effort">{session.effort}</span>}</span>
         )}
         <span className="spacer" />
         <button className="btn ghost small" onClick={() => setMin(true)}

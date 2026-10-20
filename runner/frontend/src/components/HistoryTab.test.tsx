@@ -310,3 +310,29 @@ describe('History tab', () => {
     }
   })
 })
+
+describe('History tab: cards an approved proposal created', () => {
+  const card = { proposal_id: 'p1', id: 'c1', board_id: 'b1', board_name: 'Product', number: 42, title: 'Export button is stale', column: 'Backlog', auto: true }
+  it('shows a chip in its topic that opens the card on its Board page, in Blerg', () => {
+    const reply = reelReply(NOW)
+    reply.topics[0].items.push({ type: 'card', seq: 399, event_id: 'ev-card', ts: NOW.toISOString(), card })
+    reply.topics[0].counts.cards = 1
+    show(ready(reply))
+    expect(within(cards()[0]).getByTestId('reel-counts')).toHaveTextContent('1 card')
+    expand(0)
+    const chip = within(cards()[0]).getByTestId('reel-card-chip')
+    expect(chip).toHaveTextContent('Product #42 Export button is stale')
+    expect(chip.getAttribute('href')).toMatch(/\/boards\/b1\/cards\/42$/)
+    expect(chip.getAttribute('href')).not.toMatch(/^https?:\/\/(?!localhost|board\.)/)
+    expect(chip.getAttribute('title')).toContain('approved by a session permission')
+  })
+  it('lists a card filed outside every topic under Unmarked work', () => {
+    const reply = reelReply(NOW)
+    reply.unmarked = { ...reply.unmarked!, cards: [{ type: 'card', seq: 5, event_id: 'ev-c', ts: NOW.toISOString(), card: { ...card, auto: false } }] }
+    show(ready(reply))
+    const line = screen.getByTestId('reel-unmarked')
+    expect(within(line).getByTestId('reel-unmarked-head')).toHaveTextContent('1 card')
+    fireEvent.click(within(line).getByTestId('reel-unmarked-head'))
+    expect(within(line).getByTestId('reel-filed-card')).toHaveTextContent('#42')
+  })
+})

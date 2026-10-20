@@ -92,6 +92,7 @@ func (a *API) SetRunner(cfg RunnerConfig) { a.runner = &cfg }
 
 func (a *API) runnerRoutes(mux *http.ServeMux, authed func(func(http.ResponseWriter, *http.Request, auth.Principal)) http.HandlerFunc) {
 	mux.HandleFunc("POST /api/cards/{id}/spawn", authed(a.handleSpawnFromCard))
+	mux.HandleFunc("GET /api/cards/{id}/run-targets", authed(a.handleCardRunTargets))
 	mux.HandleFunc("GET /api/cards/{id}/runner-sessions", authed(a.handleCardRunnerSessions))
 	mux.HandleFunc("GET /api/boards/{id}/active-sessions", authed(a.handleBoardActiveSessions))
 	mux.HandleFunc("GET /api/runner-sessions/{id}/events", authed(a.handleRunnerSessionEvents))
@@ -131,6 +132,10 @@ func (a *API) handleSpawnFromCard(w http.ResponseWriter, r *http.Request, p auth
 		Prompt string `json:"prompt"` // optional extra instruction
 		Model  string `json:"model"`
 		Mode   string `json:"mode"` // "run" (default): execute the card | "discuss": talk about it
+		// Runtime and DaemonID: where this run goes, when the person chose
+		// (runTarget). Empty: the board's default, as always.
+		Runtime  string `json:"runtime"`
+		DaemonID string `json:"daemon_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if req.Mode == "" {
@@ -140,6 +145,11 @@ func (a *API) handleSpawnFromCard(w http.ResponseWriter, r *http.Request, p auth
 	board, err := db.GetBoard(r.Context(), a.Pool, card.BoardID)
 	if err != nil {
 		writeDBError(w, err)
+		return
+	}
+	target := runTarget{Runtime: req.Runtime, DaemonID: req.DaemonID}
+	if status, msg := a.checkRunTarget(p, board, target); status != 0 {
+		writeError(w, status, msg)
 		return
 	}
 	// Before the claim below: a board with no usable automation identity
@@ -169,6 +179,10 @@ func (a *API) handleSpawnFromCard(w http.ResponseWriter, r *http.Request, p auth
 						if moved, err := db.MoveCard(r.Context(), a.Pool, card.ID, c.ID, nil, nil,
 							db.EventMeta{Actor: "service"}); err == nil {
 							card = moved
+							// Tell open boards now: if the start below fails,
+							// nothing else would, and the card would sit in its
+							// old column on every other screen.
+							a.Hub.Broadcast(card.BoardID, "card_changed")
 						}
 					}
 					break
@@ -176,7 +190,7 @@ func (a *API) handleSpawnFromCard(w http.ResponseWriter, r *http.Request, p auth
 			}
 		}
 	}
-	rsID, extID, err := a.spawnSession(r.Context(), board, card, role, prompt, req.Model)
+	rsID, extID, err := a.spawnSessionAt(r.Context(), board, card, role, prompt, req.Model, target)
 	if err != nil {
 		writeStartError(w, err)
 		return
@@ -271,9 +285,17 @@ func detached(ctx context.Context, d time.Duration) (context.Context, context.Ca
 // spawnSession mints a board-scoped token, starts a runner session on the
 // card's primary repo in the given role, records it, and links the card.
 //
-// Model precedence: the explicit `model` argument (a caller's per-spawn
-// override) > the card's own model > the board's role override > board.Model.
-func (a *API) spawnSession(ctx context.Context, board db.Board, card db.Card, role, prompt, model string) (rsID, extID string, err error) {
+// It runs on the board's default target with no per-spawn model: the card's
+// own model, else the board's role override, else board.Model.
+func (a *API) spawnSession(ctx context.Context, board db.Board, card db.Card, role, prompt string) (rsID, extID string, err error) {
+	return a.spawnSessionAt(ctx, board, card, role, prompt, "", runTarget{})
+}
+
+// spawnSessionAt is spawnSession on a chosen execution target (runTarget; zero: the board's
+// default). Only a person's own Run of a card chooses one (checkRunTarget). Model precedence:
+// the explicit `model` argument (a per-spawn override) > the card's own model > the board's
+// role override > board.Model.
+func (a *API) spawnSessionAt(ctx context.Context, board db.Board, card db.Card, role, prompt, model string, target runTarget) (rsID, extID string, err error) {
 	if model == "" {
 		model = card.Model
 	}
@@ -310,6 +332,8 @@ func (a *API) spawnSession(ctx context.Context, board db.Board, card db.Card, ro
 		// By role: a discussion has its person in the chat, a run or a
 		// review does not.
 		Interaction: interactionForRole(role),
+		Runtime:     target.Runtime,
+		DaemonID:    target.DaemonID,
 		Env: map[string]string{
 			"BLERG_BOARD_URL":   a.runner.AgentURL,
 			"BLERG_BOARD_TOKEN": rawTok,
@@ -340,9 +364,11 @@ func (a *API) spawnSession(ctx context.Context, board db.Board, card db.Card, ro
 
 	a.noteCapacityAvailable(ctx)
 	err = a.Pool.QueryRow(ctx, `
-		INSERT INTO runner_sessions (card_id, board_id, runner, external_session_id, lifecycle, role, model, engine, effort)
-		VALUES ($1,$2,$3,$4,'starting',$5,$6,$7,$8) RETURNING id`,
-		card.ID, card.BoardID, a.runner.Driver.Name(), extID, role, configured.Model, configured.Engine, configured.Effort).Scan(&rsID)
+		INSERT INTO runner_sessions (card_id, board_id, runner, external_session_id, lifecycle, role, model, engine, effort,
+		                             target_runtime, target_daemon_id, target_account)
+		VALUES ($1,$2,$3,$4,'starting',$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+		card.ID, card.BoardID, a.runner.Driver.Name(), extID, role, configured.Model, configured.Engine, configured.Effort,
+		target.Runtime, target.DaemonID, targetAccount(board, target)).Scan(&rsID)
 	if err != nil {
 		return "", "", err
 	}

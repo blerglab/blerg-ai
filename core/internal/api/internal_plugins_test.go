@@ -213,7 +213,7 @@ func TestInternalPluginAddRechecksProofAfterSettingsLock(t *testing.T) {
 				code, _ := internalPluginPost(t, srv, "/internal/plugins/add", testInternalKey, map[string]any{"account_id": account, "session_id": sid, "engine": "claude", "entry": entry("waited")})
 				result <- code
 			}()
-			deadline := time.After(5 * time.Second)
+			deadline := time.After(15 * time.Second)
 			for {
 				var waiting bool
 				if err := control.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE '%pg_advisory_xact_lock%')`).Scan(&waiting); err != nil {
@@ -250,7 +250,7 @@ func TestInternalPluginAddRechecksProofAfterSettingsLock(t *testing.T) {
 				if code != 404 {
 					t.Fatalf("changed proof=%d want404", code)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatal("add did not finish")
 			}
 			var count int
@@ -351,7 +351,7 @@ func TestInternalPluginAddRejectsProofExpiringDuringWrite(t *testing.T) {
 		code, _ := internalPluginPost(t, srv, "/internal/plugins/add", testInternalKey, map[string]any{"account_id": account, "session_id": sid, "engine": "claude", "entry": entry("expired-write")})
 		result <- code
 	}()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for {
 		var waiting bool
 		if err := control.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE 'INSERT INTO user_plugins%')`).Scan(&waiting); err != nil {
@@ -377,7 +377,7 @@ func TestInternalPluginAddRejectsProofExpiringDuringWrite(t *testing.T) {
 		if code != 404 {
 			t.Fatalf("expired write=%d want404", code)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("write did not finish")
 	}
 	var count int

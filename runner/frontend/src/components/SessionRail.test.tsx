@@ -11,6 +11,7 @@ import { makeDaemon, makeSession } from '../test/fixtures'
 import { RAIL_PREF_KEY, RAIL_TAB_KEY } from '../lib/sessionRail'
 import type { SessionInfo } from '../types'
 import type { LiveReply } from '../lib/liveState'
+import { OpenSessionContext } from '../lib/openSession'
 
 vi.mock('../ws', () => import('../test/wsMock'))
 
@@ -508,7 +509,8 @@ describe('session side panel', () => {
       const facts = within(rail()!).getByTestId('rail-session')
       expect(facts).toHaveTextContent('Runs onLocal sandbox · workstation')
       expect(facts).toHaveTextContent('EngineClaude')
-      expect(facts).toHaveTextContent('Modelopus-5-5 · high')
+      expect(within(facts).getByTitle('claude-opus-5-5')).toHaveTextContent('opus-5-5')
+      expect(within(facts).getByTitle('Configured effort')).toHaveTextContent('high')
       expect(within(facts).getByTestId('rail-lifetime')).toHaveTextContent('2 h 15 min')
       expect(within(facts).getByTestId('rail-status')).toHaveTextContent('idle')
       // Idle with nothing in the background: the header names no state.
@@ -789,14 +791,55 @@ describe('session side panel', () => {
     seedEvents(user())
     stubFetch(0, liveReply({ progress: { completed: 2, total: 5, label: 'Verify integration' }, children: [{ id: 'child', title: 'Codex review', engine: 'codex', model: 'fixture', effort: 'high', status: 'running', started_at: iso(-MIN), ended_at: null, asking: true, tokens: 12000 }], delegation_requests: [{ request_id: 'request', engine: 'codex', title: 'Another review', expires_at: iso(MIN) }] }))
     await renderPage()
-    expect(await screen.findByTestId('rail-child')).toHaveTextContent('Codex review')
+    expect((await screen.findAllByTestId('rail-child'))[0]).toHaveTextContent('Codex review')
     expect(screen.getByTestId('rail-session-progress')).toHaveTextContent('Verify integration')
     expect(within(screen.getByTestId('rail-session-progress')).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '2')
-    expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent('0')
-    expect(within(screen.getByTestId('rail-running')).queryByTestId('rail-child')).toBeNull()
+    // A running child counts toward Running now and has its compact row there, as in Started sessions.
+    expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent('1')
+    expect(within(screen.getByTestId('rail-running')).getByTestId('rail-child')).toHaveTextContent('Codex review')
+    expect(screen.getByTestId('rail-running')).not.toHaveTextContent('Nothing is running.')
     expect(within(screen.getByTestId('rail-started')).getByTestId('rail-child')).toHaveTextContent('Codex review')
     expect(screen.getByTestId('rail-needs-count')).toHaveTextContent('1')
     expect(screen.getByTestId('rail-needs')).toHaveTextContent('Another review')
   })
+
+  it('Running now lists running children only, and a row opens the child', async () => {
+    seedSession({ status: 'idle' })
+    seedEvents(user())
+    const child = (id: string, title: string, status: string, ended: string | null) => ({ id, title, engine: 'codex', model: 'fixture', status, started_at: iso(-MIN), ended_at: ended, asking: false, tokens: null })
+    stubFetch(0, liveReply({ children: [child('c-run', 'Running child', 'running', null), child('c-done', 'Finished child', 'ended', iso(-1000))] }))
+    const opened = vi.fn()
+    render(
+      <OpenSessionContext.Provider value={opened}>
+        <MemoryRouter initialEntries={['/sessions/sess-a']}>
+          <Routes><Route path="/sessions/:id" element={<SessionDetail />} /></Routes>
+        </MemoryRouter>
+      </OpenSessionContext.Provider>,
+    )
+    await act(async () => { for (let k = 0; k < 10; k++) await Promise.resolve() })
+    const running = await screen.findByTestId('rail-running')
+    await waitFor(() => expect(within(running).getByTestId('rail-running-count')).toHaveTextContent('1'))
+    const rows = within(running).getAllByTestId('rail-child')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toHaveTextContent('Running child')
+    expect(within(screen.getByTestId('rail-started')).getAllByTestId('rail-child')).toHaveLength(2)
+    fireEvent.click(within(rows[0]).getByRole('button', { name: /Running child/ }))
+    expect(opened).toHaveBeenCalledWith('c-run')
+  })
+
+it('keeps archived sessions free of live management controls despite stale running flags', async () => {
+  seedSession({archived_at:'2026-10-20T12:00:00Z',status:'running',limit_resume_supported:true})
+  seedEvents(user())
+  stubFetch(3, liveReply({can_release_prompt:true,delegation_requests:[{request_id:'old',engine:'codex',title:'Stale approval',expires_at:iso(MIN)}],delegation_grants:[{id:'grant',engine:'codex',runtime:'docker'}]}))
+  await renderPage()
+  expect(screen.queryByRole('group',{name:'Session permissions'})).toBeNull()
+  expect(screen.queryByRole('checkbox',{name:'Resume when limit resets'})).toBeNull()
+  expect(screen.queryByTitle('Kill session')).toBeNull()
+  expect(screen.queryByRole('button',{name:/Discard/})).toBeNull()
+  expect(fetchCalls().filter(url=>url.endsWith('/limit-resume'))).toEqual([])
+  expect(screen.getByTestId('rail-needs')).toHaveTextContent('Nothing needs you.')
+  expect(screen.queryByText('Stale approval')).toBeNull()
+  expect(screen.queryByRole('button',{name:/Child permissions/})).toBeNull()
+})
 
 })

@@ -1,3 +1,4 @@
+import { modelDisplayName } from '@blerglab/chat'
 // HistoryTab: the session panel's History — the pieces of work the agent marked (topics), newest first.
 // A card opens onto a timeline: the request, each file the topic published with every version, each
 // subagent, how it ended. The work no topic holds is one quiet line after the cards ("Unmarked work ·
@@ -20,8 +21,9 @@ import { apiFetch } from '../apiFetch'
 import { useTopics, type TopicsView } from '../hooks/useTopics'
 import {
   TOPIC_COMMAND, countsLabel, heldFrom, hm, shownVersion, spanLabel, unmarkedLabel, usageTotal,
-  type AgentItem, type AgentStatus, type DocItem, type Topic, type TopicCommit, type TopicItem, type Unmarked,
+  type AgentItem, type AgentStatus, type DocItem, type Topic, type TopicCard, type TopicCommit, type TopicItem, type Unmarked,
 } from '../lib/topics'
+import { boardCardUrl } from '../lib/boardLink'
 import ShowLink from './RailShowLink'
 
 /** The unmarked line's key in the open set (a topic id is tp_…). */
@@ -86,7 +88,7 @@ export function TopicList({ sessionId, view, now, missing, onJump, onOpenArtifac
   if (view.status === 'loading') return <p className="rail-empty reel-note" data-testid="reel-loading">Loading the history…</p>
   if (!view.reply) return <p className="rail-empty reel-note" data-testid="reel-error">Could not load the history. It is read again when something changes.</p>
   const { topics, unmarked } = view.reply
-  const rest = unmarked && (unmarked.agents > 0 || unmarked.documents.length > 0) ? unmarked : null
+  const rest = unmarked && (unmarked.agents > 0 || unmarked.documents.length > 0 || (unmarked.cards?.length ?? 0) > 0) ? unmarked : null
   return (
     <>
       {view.status === 'error' && <p className="rail-missing reel-note" role="status" data-testid="reel-stale">Could not refresh the history; this is the last list read.</p>}
@@ -169,6 +171,7 @@ const UnmarkedLine = memo(function UnmarkedLine({ sessionId, unmarked, open, onT
         <ol className="reel-timeline" id={bodyId}>
           {unmarked.documents.map(d => <DocumentRow key={`document:${d.event_id}`} sessionId={sessionId} item={d} here="published outside a topic" onOpenArtifact={onOpenArtifact} />)}
           {unmarked.subagents.map(a => <AgentLine key={`agent:${a.event_id}`} item={a} />)}
+          {(unmarked.cards ?? []).map(c => <li key={`card:${c.event_id}`} className="reel-row reel-line" data-testid="reel-filed-card"><CardChip card={c.card} /></li>)}
         </ol>
       )}
     </div>
@@ -185,7 +188,7 @@ function Row({ sessionId, item, held, missing, onJump, onOpenArtifact }: {
 }) {
   const rowKey = `reel:${item.event_id}`
   const where = held
-    ? <ShowLink missing={missing === rowKey} onShow={() => onJump(rowKey, () => (item.type === 'agent' ? scrollToCall(item.call_id) : scrollToEvent(item.event_id)))} />
+    ? <ShowLink missing={missing === rowKey} onShow={() => onJump(rowKey, () => (item.type === 'agent' ? scrollToCall(item.call_id) : item.type === 'card' ? scrollToProposal(item.card.proposal_id) : scrollToEvent(item.event_id)))} />
     : <time className="reel-time" dateTime={item.ts} title="Earlier than what is loaded" data-testid="reel-earlier">{hm(item.ts)}</time>
   switch (item.type) {
     case 'request':
@@ -207,7 +210,35 @@ function Row({ sessionId, item, held, missing, onJump, onOpenArtifact }: {
       return <DocumentRow sessionId={sessionId} item={item} where={where} onOpenArtifact={onOpenArtifact} />
     case 'agent':
       return <AgentRow item={item} where={where} />
+    case 'card':
+      return (
+        <li className="reel-row" data-testid="reel-filed-card">
+          <div><span className="reel-who">Filed:</span> <CardChip card={item.card} /></div>
+          <div className="rail-actions">{where}</div>
+        </li>
+      )
   }
+}
+
+/** The proposal's card in the chat (the decision itself draws nothing of its own). */
+function scrollToProposal(id: string): boolean {
+  const el = id ? document.querySelector<HTMLElement>(`[data-proposal-id="${CSS.escape(id)}"]`) : null
+  if (!el) return false
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  return true
+}
+
+/** A card an approved proposal created: board, #number and title, as one chip that opens the card
+ *  on its Board page, in Blerg (never a link out of Blerg). */
+function CardChip({ card }: { card: TopicCard }) {
+  const label = `${card.board_name || 'Board'} #${card.number}${card.title ? ` ${card.title}` : ''}`
+  return (
+    <a className="reel-chip reel-card-chip" href={boardCardUrl(card.board_id, card.number)} target="_blank" rel="noopener"
+      title={`${label}${card.column ? ` · ${card.column}` : ''}${card.auto ? ' · approved by a session permission' : ''}`} data-testid="reel-card-chip">
+      <span className="reel-card-board">{card.board_name || 'Board'}</span> <span className="reel-card-number">#{card.number}</span>
+      {card.title && <> <span className="reel-card-title">{card.title}</span></>}
+    </a>
+  )
 }
 
 /** The commits a done names: the chat's chips in the History classes (a link to the commit's page
@@ -307,7 +338,7 @@ function StatusMark({ status }: { status: AgentStatus }) {
 }
 
 function AgentRow({ item, where }: { item: AgentItem; where: ReactNode }) {
-  const model = item.model.replace(/^claude-/, '')
+  const model = modelDisplayName(item.model)
   const tokens = usageTotal(item.usage)
   return (
     <li className="reel-row rail-sub" data-testid="reel-agent">
@@ -318,7 +349,7 @@ function AgentRow({ item, where }: { item: AgentItem; where: ReactNode }) {
       <div className="rail-chips">
         <span className={`rail-chip status reel-status-${item.status}`} data-testid="reel-agent-status"><StatusMark status={item.status} />{STATUS_WORD[item.status]}</span>
         {item.agent_type && <span className="rail-chip">{item.agent_type}</span>}
-        {model && <span className="rail-chip">{model}</span>}
+        {model && <span className="rail-chip" title={item.model}>{model}</span>}
         {tokens > 0 && <span className="rail-chip" data-testid="reel-agent-tokens">{tokenLabel(tokens)}</span>}
         {item.duration_ms > 0 && <span className="rail-chip">{formatDuration(item.duration_ms)}</span>}
       </div>
@@ -330,14 +361,14 @@ function AgentRow({ item, where }: { item: AgentItem; where: ReactNode }) {
 /** An unmarked subagent on one line: its status mark, its title, its model and tokens. */
 function AgentLine({ item }: { item: AgentItem }) {
   const tokens = usageTotal(item.usage)
-  const meta = [item.model.replace(/^claude-/, ''), tokens > 0 ? tokenLabel(tokens) : ''].filter(Boolean).join(' · ')
+  const meta = [modelDisplayName(item.model), tokens > 0 ? tokenLabel(tokens) : ''].filter(Boolean).join(' · ')
   return (
     <li className="reel-row reel-line" data-testid="reel-unmarked-agent">
       <span className={`reel-line-mark reel-status-${item.status}`} title={STATUS_WORD[item.status]}>
         <StatusMark status={item.status} /><span className="rail-sr">{STATUS_WORD[item.status]} </span>
       </span>
       <span className="reel-line-title" title={item.title}>{item.title}</span>
-      {meta && <span className="reel-line-meta">{meta}</span>}
+      {meta && <span className="reel-line-meta" title={item.model}>{meta}</span>}
     </li>
   )
 }

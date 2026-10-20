@@ -745,6 +745,15 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := writeHermesEnvFromEnv(cfg.Home); err != nil {
 		log.Printf("runner: hermes env: %v (continuing without hermes credentials)", err)
 	}
+	// After the config bundle and .env, so the cluster's shared providers are
+	// laid over whatever those brought. The hello already went out before the
+	// file existed: re-read the local-engine claim and report it now.
+	hermesApplied, hermesErr := materializeHermesConfig(cfg.Home)
+	logHermesConfigResult(hermesApplied, hermesErr)
+	if hermesApplied {
+		daemon.RefreshLocalEngines()
+		client.RequestHeartbeat()
+	}
 
 	wd, wsState, err := PrepareWorkspace(cfg)
 	if err != nil {

@@ -3,12 +3,15 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -80,14 +83,28 @@ func hermesLocal() bool {
 	if home == "" {
 		return false
 	}
-	if hermesConfigKeyPattern.MatchString(readFile(filepath.Join(home, ".hermes", ".env"))) || providerKeyInEnv() {
+	if hermesConfigKeyPattern.MatchString(readFile(filepath.Join(home, ".hermes", ".env"))) || providerKeyInEnv() || hermesProviderCredentialPresent(home) {
 		return false
 	}
-	cfg, err := readHermesModelConfig(filepath.Join(home, ".hermes", "config.yaml"))
-	if err != nil || cfg.BaseURL == "" {
+	cfg, err := readHermesRouteConfig(filepath.Join(home, ".hermes", "config.yaml"))
+	return err == nil && hermesRoutesLocal(cfg)
+}
+
+// hermesRoutesLocal is the configuration half of hermesLocal: the default
+// endpoint and every enabled provider are local, and none carries a key.
+func hermesRoutesLocal(cfg hermesRouteConfig) bool {
+	if cfg.Default.BaseURL == "" || cfg.Fallback || cfg.Unknown || cfg.LocalUnknown || (cfg.Default.Provider != "" && cfg.Default.Provider != "custom") {
 		return false
 	}
-	return endpointIsLocal(cfg.BaseURL)
+	if !endpointIsLocal(cfg.Default.BaseURL) {
+		return false
+	}
+	for _, p := range cfg.Providers {
+		if !p.Disabled && (p.Credential || !endpointIsLocal(p.BaseURL)) {
+			return false
+		}
+	}
+	return true
 }
 
 // providerKeyInEnv reports whether the daemon's own environment holds a provider key (names only;
@@ -234,4 +251,70 @@ func localEngines() []string {
 	}
 	localCache.at, localCache.home, localCache.ids = time.Now(), home, ids
 	return append([]string(nil), ids...)
+}
+
+// A cached native login can fund auxiliary fallback calls even when the main
+// endpoint needs no key. Empty native metadata is harmless; actual or unknown
+// authority withholds the claim. Credential values are never interpreted or reported.
+func hermesProviderCredentialPresent(home string) bool {
+	if hermesAuthStoreHasAuthority(filepath.Join(home, ".hermes", "auth.json")) {
+		return true
+	}
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && value != "" && strings.HasSuffix(name, "_API_KEY") && !strings.HasPrefix(name, "BLERG_") {
+			return true
+		}
+	}
+	return false
+}
+
+func hermesAuthStoreHasAuthority(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // trusted native auth path, nonblocking regular file and bounded read only.
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() > 256<<10 {
+		return true
+	}
+	data, err := io.ReadAll(io.LimitReader(f, (256<<10)+1))
+	if err != nil || len(data) > 256<<10 {
+		return true
+	}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil || root == nil {
+		return true
+	}
+	for key, raw := range root {
+		switch key {
+		case "version", "updated_at":
+			continue
+		case "active_provider":
+			var value *string
+			if json.Unmarshal(raw, &value) != nil || (value != nil && *value != "") {
+				return true
+			}
+		case "providers", "credential_pool":
+			if string(raw) == "null" {
+				continue
+			}
+			var entries map[string]json.RawMessage
+			if json.Unmarshal(raw, &entries) != nil {
+				return true
+			}
+			for _, entry := range entries {
+				if string(entry) != "null" && string(entry) != "[]" && string(entry) != "{}" {
+					return true
+				}
+			}
+		default:
+			return true
+		}
+	}
+	return false
 }

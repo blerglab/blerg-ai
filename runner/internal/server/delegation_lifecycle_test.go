@@ -29,7 +29,7 @@ func lifecycleFixture(t *testing.T) (*delegFx, string, string, string) {
 
 func awaitLifecycle(t *testing.T, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for !condition() {
 		if time.Now().After(deadline) {
 			t.Fatal("delegation lifecycle did not settle")

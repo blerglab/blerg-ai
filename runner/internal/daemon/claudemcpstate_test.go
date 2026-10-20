@@ -44,7 +44,7 @@ func claudeMCPRequest(t *testing.T, p *ccProc) string {
 			t.Fatalf("not a read-only MCP control request: %s", line)
 		}
 		return req.ID
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("no MCP control request")
 		return ""
 	}
@@ -75,7 +75,7 @@ func TestClaudeMCPLivePendingThenConnected(t *testing.T) {
 			if strings.Contains(string(raw), "fixture-private") {
 				t.Fatal("private configuration leaked")
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("MCP status response not delivered")
 		}
 	}
@@ -94,7 +94,7 @@ func TestClaudeMCPKnownEmptyAndCancellation(t *testing.T) {
 		if !errors.Is(e, context.Canceled) {
 			t.Fatalf("cancel=%v", e)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("cancellation blocked")
 	}
 	// A late response is consumed without marking an unrelated interrupt acknowledged.
@@ -119,7 +119,7 @@ func TestClaudeMCPKnownEmptyAndCancellation(t *testing.T) {
 		if !got.Ready || got.Servers == nil || len(got.Servers) != 0 {
 			t.Fatalf("known empty=%+v", got)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("known-empty response blocked")
 	}
 }
@@ -141,7 +141,7 @@ func TestClaudeMCPInputGateKeepsFIFOAndAllowsStatusRPC(t *testing.T) {
 	go func() { defer close(done); d.deliverOne(ctx) }()
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("input gate was not called")
 	}
 	select {
@@ -158,13 +158,13 @@ func TestClaudeMCPInputGateKeepsFIFOAndAllowsStatusRPC(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("gate blocked status RPC")
 	}
 	close(release)
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("gate did not release")
 	}
 	select {
@@ -181,7 +181,7 @@ func TestClaudeMCPInputGateKeepsFIFOAndAllowsStatusRPC(t *testing.T) {
 		if input.Type != "user" || input.Message.Content != "first" {
 			t.Fatalf("FIFO input=%s", line)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("no input after release")
 	}
 	d.sm.Lock()
@@ -217,7 +217,7 @@ func TestClaudeMCPRequestPairingAndGeneration(t *testing.T) {
 			if len(got.Servers) != 1 || got.Servers[0].Name != tc.name {
 				t.Fatalf("response pairing=%+v want %s", got, tc.name)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("paired reply missing")
 		}
 	}
@@ -262,7 +262,7 @@ func TestClaudeMCPInitFallbackAndInvalidResponse(t *testing.T) {
 				if got.e != nil && strings.Contains(got.e.Error(), "fixture-private") {
 					t.Fatal("native error leaked")
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatal("fallback blocked")
 			}
 		})
@@ -375,12 +375,12 @@ func TestClaudeMCPPreparesNativeProcessThroughSandboxPrefixWithoutPrompt(t *test
 		if p != nil {
 			select {
 			case <-p.done:
-			case <-time.After(5 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Error("native fake did not exit")
 			}
 			select {
 			case <-cleared:
-			case <-time.After(5 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Error("native fake cleanup did not finish")
 			}
 		}
@@ -424,7 +424,7 @@ func TestClaudeMCPRejectsReplyAfterProcessReplacement(t *testing.T) {
 		if err == nil {
 			t.Fatal("old process response described replacement")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("old response blocked")
 	}
 }

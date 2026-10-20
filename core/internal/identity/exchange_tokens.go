@@ -194,7 +194,8 @@ func (s *Service) PruneExchangeTokens(ctx context.Context, margin time.Duration)
 	return tag.RowsAffected(), tx.Commit(ctx)
 }
 
-// StartExchangePruneLoop prunes once now and then every interval until ctx ends. Idempotent, so
+// StartExchangePruneLoop prunes expired exchange tokens and ended browser sessions' revocations
+// (PruneSessionRevocations) once now and then every interval until ctx ends. Idempotent, so
 // several core replicas may run it.
 func StartExchangePruneLoop(ctx context.Context, s *Service, interval time.Duration) {
 	run := func() {
@@ -202,6 +203,11 @@ func StartExchangePruneLoop(ctx context.Context, s *Service, interval time.Durat
 			log.Printf("identity: prune exchange tokens: %v", err)
 		} else if n > 0 {
 			log.Printf("identity: pruned %d expired exchange tokens", n)
+		}
+		if n, err := s.PruneSessionRevocations(ctx, SessionRevocationMargin); err != nil {
+			log.Printf("identity: prune session revocations: %v", err)
+		} else if n > 0 {
+			log.Printf("identity: pruned %d expired session revocations", n)
 		}
 	}
 	go func() {

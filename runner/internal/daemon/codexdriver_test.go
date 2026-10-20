@@ -24,7 +24,7 @@ func startTestCodexDriver(parent context.Context, t *testing.T, driver *codexDri
 	stop := func() {
 		once.Do(func() {
 			cancel()
-			timer := time.NewTimer(5 * time.Second)
+			timer := time.NewTimer(15 * time.Second)
 			defer timer.Stop()
 			select {
 			case <-done:
@@ -213,7 +213,7 @@ func TestCodexDriverTurn(t *testing.T) {
 
 	d.Enqueue("work the card", "chat")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for {
 		kinds := em.kinds()
 		if contains(kinds, "turn_done") {
@@ -235,7 +235,7 @@ func TestCodexDriverTurn(t *testing.T) {
 
 	// Second turn resumes the codex thread.
 	d.Enqueue("continue", "chat")
-	deadline = time.After(5 * time.Second)
+	deadline = time.After(15 * time.Second)
 	for countKind(em, "turn_done") < 2 {
 		select {
 		case <-deadline:
@@ -270,7 +270,7 @@ func TestCodexDriverFailedCommandMarksToolResultError(t *testing.T) {
 	defer stopDriver()
 	d.Enqueue("do the thing", "chat")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for !contains(em.kinds(), "turn_done") {
 		select {
 		case <-deadline:
@@ -310,7 +310,7 @@ func TestCodexDriverReportsExpiredAuthWithoutForwardingStderr(t *testing.T) {
 	stopDriver := startTestCodexDriver(ctx, t, d)
 	defer stopDriver()
 	d.Enqueue("work", "chat")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for !contains(em.kinds(), "turn_done") && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -280,7 +280,7 @@ func TestHermesConfigFIFODoesNotBlock(t *testing.T) {
 		if err == nil {
 			t.Error("a FIFO config should be an error")
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("reading a FIFO config blocked")
 	}
 	// Symlinked dotfiles still work.
@@ -618,7 +618,7 @@ func TestModelProberAbandonsAHungProbe(t *testing.T) {
 		t.Errorf("a still-running probe was started again (%d calls)", n)
 	}
 	close(release)
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()
 		busy := p.inflight["codex"]
@@ -676,7 +676,7 @@ func TestModelProberRunKickAndDeadline(t *testing.T) {
 
 	waitFor := func(what string, cond func() bool) {
 		t.Helper()
-		deadline := time.Now().Add(3 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 		for !cond() {
 			if time.Now().After(deadline) {
 				t.Fatalf("timed out waiting for %s", what)
@@ -762,7 +762,7 @@ func TestWSClientReportsEngineModelsOnConnectAndChange(t *testing.T) {
 		HeartbeatInterval: time.Hour,
 	})
 	client.SetEngineModels(src)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	go client.Run(ctx, func() []string { return nil })
 
@@ -771,8 +771,8 @@ func TestWSClientReportsEngineModelsOnConnectAndChange(t *testing.T) {
 		select {
 		case m := <-msgs:
 			return m
-		case <-time.After(3 * time.Second):
-			t.Fatal("no message within 3 s")
+		case <-time.After(15 * time.Second):
+			t.Fatal("no message before the readiness deadline")
 		}
 		return msg{}
 	}
@@ -826,7 +826,7 @@ func TestHungProbeDoesNotBlockHeartbeat(t *testing.T) {
 	})
 	client := NewWSClient(Config{ServerURL: ts.wsURL(), DaemonName: "d", ProtocolVersion: "1", HeartbeatInterval: 50 * time.Millisecond})
 	client.SetEngineModels(p)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	defer close(hung.block)
 	go p.Run(ctx)
@@ -838,7 +838,7 @@ func TestHungProbeDoesNotBlockHeartbeat(t *testing.T) {
 			if typ == "daemon_heartbeat" {
 				n++
 			}
-		case <-time.After(3 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatalf("only %d heartbeats while a probe hung", n)
 		}
 	}

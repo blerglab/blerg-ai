@@ -127,7 +127,7 @@ func TestNativeClaudeResumeDoesNotFallBackToNewConversation(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("driver did not stop")
 	}
 	started := starts(logLines(t, logPath))

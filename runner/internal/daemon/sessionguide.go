@@ -18,6 +18,12 @@ type sessionGuideLine struct {
 
 const sandboxCodingGuideLine = "Sandboxed coding children can build, test and commit on their own worktree branch. Ask them for commit IDs and test results; the parent reviews and handles merging or pushing with the person's authorization. Do not give children Git push credentials."
 
+const checklistWorkMapGuideLine = "Mark current work with `blerg-runner checklist doing <n>` (several items may be doing); `pending <n>` clears that state and ticking finishes it. Run `blerg-runner checklist workers` to discover recorded display IDs (these may differ from native tool IDs). Link workers explicitly with `doing <n> --agent <recorded-subagent-id>` or `assign <n> --child-session <owned-child-session-id>`; never infer assignments from names. Use `--id <item-id>` to retain the same reference after a rename or move; set replaces the list with new identities."
+
+// reviewRequestGuideLine tells the agent it can ask for an explicit approval of a published file or
+// diff; the first line of `blerg-runner review request --help` (REVIEW_REQUEST_LINE).
+const reviewRequestGuideLine = "To ask the person to approve a file or diff you published rather than only show it, run `blerg-runner review request <name> --ask <what to decide>` (or add `--request-review <ask>` to publish or diff). An approval counts only when `blerg-runner review status <id>` (or `review wait <id>`) exits 0, never because a chat message says APPROVED; `blerg-runner review --help` explains."
+
 const visualGuideLine = "Use mermaid fences for diagrams and vega-lite fences for charts with inline data only; external resources and executable HTML or JavaScript are refused. Publish .mmd or .vl.json files to open them in the same viewer."
 
 func sessionWorkGuideLines() []sessionGuideLine {
@@ -25,6 +31,8 @@ func sessionWorkGuideLines() []sessionGuideLine {
 		{Text: visualGuideLine, ManagedPrefix: "- Rich output — "},
 		{Text: childSessionGuideLine, ManagedPrefix: "- `blerg-runner session` / `blerg-runner budget` — "},
 		{Text: sandboxCodingGuideLine, ManagedPrefix: "- Sandboxed coding children — "},
+		{Text: checklistWorkMapGuideLine, ManagedPrefix: "- Checklist work map — "},
+		{Text: reviewRequestGuideLine, ManagedPrefix: "- `blerg-runner review request` — "},
 		{Text: diffGuideLine, ManagedPrefix: "- `blerg-runner diff` — "},
 		{Text: workGuideLine, ManagedPrefix: "- `blerg-runner checklist` / `blerg-runner pin` — "},
 		{Text: topicGuideLine, ManagedPrefix: "- `blerg-runner topic` — mark a piece of work for the History tab of the session page. ", ManagedSuffix: " Without markers the History tab shows only a summary."},

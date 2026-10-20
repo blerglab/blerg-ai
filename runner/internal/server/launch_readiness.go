@@ -53,7 +53,7 @@ func (j *JobManager) discoverCredentialEngines(ctx context.Context) ([]string, b
 			}
 		}
 	}
-	return out, true
+	return j.withSharedConfigEngines(out), true
 }
 
 type launchReadinessCache struct {
@@ -142,7 +142,7 @@ func (a *API) clusterReadinessSnapshot(ctx context.Context, p RunnerPrincipal, f
 			cache.mu.Unlock()
 			if verified && p.Kind == runnerKeyPrincipalKind {
 				for _, engine := range available {
-					if provider, ok := clusterModelProviderFor(engine); ok && provider.probeOperator != nil {
+					if provider, ok := clusterModelProviderOn(engine, j); ok && provider.probeOperator != nil {
 						a.operatorClusterModelSnapshot(background, engine, false)
 					}
 				}

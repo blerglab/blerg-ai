@@ -307,6 +307,13 @@ func (a *API) HandleGetTopics(w http.ResponseWriter, r *http.Request) {
 		writeDatabaseFailure(w, "read the session's history", "topics ListReelEvents "+sid, err)
 		return
 	}
+	// The cards approved proposals created: their chips sit in the topic that was open (else unmarked).
+	cards, err := db.ListProposalDecidedEvents(ctx, a.dbPool, sid, through)
+	if err != nil {
+		writeDatabaseFailure(w, "read the session's history", "topics ListProposalDecidedEvents "+sid, err)
+		return
+	}
+	rows = append(rows, cards...)
 	arts, err := db.ListArtifacts(ctx, a.dbPool, sid)
 	if err != nil {
 		writeDatabaseFailure(w, "read the session's history", "topics ListArtifacts "+sid, err)

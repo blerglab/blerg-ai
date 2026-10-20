@@ -1,3 +1,4 @@
+import { waitFor } from '@testing-library/react'
 // ProxyTransport for an app whose own sign-in is a bearer token rather than a cookie: the host's
 // headers ride on every request (the live stream's among them), and a 401 is reported to it.
 import { describe, expect, it, vi } from 'vitest'
@@ -39,8 +40,7 @@ function handlers(): SubscribeHandlers & { replays: number } {
 }
 
 const until = async (cond: () => boolean) => {
-  for (let i = 0; i < 200 && !cond(); i++) await new Promise(r => setTimeout(r, 5))
-  expect(cond()).toBe(true)
+  await waitFor(() => expect(cond()).toBe(true))
 }
 
 const routes = (): Array<[RegExp, () => Response]> => [

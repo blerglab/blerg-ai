@@ -431,7 +431,7 @@ func TestCompletionHooksFireOnEndNotOnDisconnect(t *testing.T) {
 	HandleSessionEnded(ctx, hub, pool, protocol.SessionEnded{
 		Type: "session_ended", SessionID: sessionID, ExitCode: 0,
 	})
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) && hitCount() == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}

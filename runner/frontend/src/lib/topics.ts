@@ -33,9 +33,18 @@ export type TopicItem =
       tool_uses: number; duration_ms: number; status: AgentStatus
     })
   | (ItemBase & { type: 'done'; outcome: string; commits?: TopicCommit[] })
+  | (ItemBase & { type: 'card'; card: TopicCard })
+
+/** A board card an approved proposal of the session created (never its body); auto: a session
+ *  permission approved it. */
+export interface TopicCard {
+  proposal_id: string; id: string; board_id: string; board_name?: string; number: number
+  title?: string; type?: string; priority?: string; column?: string; auto?: boolean
+}
 
 export type DocItem = Extract<TopicItem, { type: 'document' }>
 export type AgentItem = Extract<TopicItem, { type: 'agent' }>
+export type CardItem = Extract<TopicItem, { type: 'card' }>
 
 /** A piece of work the agent marked (`blerg-runner topic`): the only kind of topic. */
 export interface Topic {
@@ -48,7 +57,7 @@ export interface Topic {
   end_seq: number
   started_at: string
   ended_at: string | null
-  counts: { documents?: number; agents?: number; commits?: number }
+  counts: { documents?: number; agents?: number; commits?: number; cards?: number }
   items: TopicItem[]
 }
 
@@ -58,6 +67,8 @@ export interface Unmarked {
   agents: number
   documents: DocItem[]
   subagents: AgentItem[]
+  /** Absent from a server older than card chips. */
+  cards?: CardItem[]
   first_seq: number
   last_seq: number
   started_at: string
@@ -75,7 +86,7 @@ export interface TopicsReply {
 }
 
 /** Transcript events that change the reel: each one the store takes makes History read it again. */
-export const TRIGGER_KINDS: ReadonlySet<string> = new Set(['topic', 'subagent_started', 'subagent_done', 'artifact', 'turn_done'])
+export const TRIGGER_KINDS: ReadonlySet<string> = new Set(['topic', 'subagent_started', 'subagent_done', 'artifact', 'turn_done', 'proposal_decided'])
 
 /** The marker command, as the empty state shows it. */
 export const TOPIC_COMMAND = 'blerg-runner topic "<title>"'
@@ -106,15 +117,18 @@ export function countsLabel(c: Topic['counts']): string {
   if (c.documents) parts.push(`${c.documents} ${c.documents === 1 ? 'doc' : 'docs'}`)
   if (c.agents) parts.push(`${c.agents} ${c.agents === 1 ? 'agent' : 'agents'}`)
   if (c.commits) parts.push(`${c.commits} ${c.commits === 1 ? 'commit' : 'commits'}`)
+  if (c.cards) parts.push(`${c.cards} ${c.cards === 1 ? 'card' : 'cards'}`)
   return parts.join(' · ')
 }
 
 /** "Unmarked work · 42 agents · 8 files"; a zero is never shown. */
-export function unmarkedLabel(u: Pick<Unmarked, 'agents' | 'documents'>): string {
+export function unmarkedLabel(u: Pick<Unmarked, 'agents' | 'documents' | 'cards'>): string {
   const parts = ['Unmarked work']
   if (u.agents) parts.push(`${u.agents} ${u.agents === 1 ? 'agent' : 'agents'}`)
   const files = u.documents.length
   if (files) parts.push(`${files} ${files === 1 ? 'file' : 'files'}`)
+  const cards = u.cards?.length ?? 0
+  if (cards) parts.push(`${cards} ${cards === 1 ? 'card' : 'cards'}`)
   return parts.join(' · ')
 }
 

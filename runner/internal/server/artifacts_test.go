@@ -286,7 +286,7 @@ func TestArtifactsUploadStoresFileRowAndRecordsOneEvent(t *testing.T) {
 		if ev.Type != "agent_event" || ev.Kind != "artifact" || ev.SessionID != fx.sess || ev.Seq < 1 || ev.Payload.ID != m.ID {
 			t.Errorf("broadcast = %s", raw)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("no broadcast")
 	}
 	select {

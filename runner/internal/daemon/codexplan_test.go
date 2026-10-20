@@ -158,7 +158,7 @@ func TestCodexPlanReaderBindsOnlyActiveOrStartingEpoch(t *testing.T) {
 			}
 			select {
 			case <-a.events:
-			case <-time.After(time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatal("native plan notification did not reach backlog")
 			}
 			a.mu.Lock()

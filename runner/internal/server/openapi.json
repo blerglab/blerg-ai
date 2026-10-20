@@ -14,6 +14,87 @@
     { "name": "sessions", "description": "The session contract: start, drive, follow, collect." },
     { "name": "files", "description": "A session's files: what the agent published and what a person attached." }
   ],
+  "x-session-discard": {
+    "path": "POST /api/sessions/{id}/discard",
+    "authority": "Signed-in human owner with a browser session only; agent, session, daemon and other accounts have no authority.",
+    "description": "Explicitly stops this session and every same-owner child, including keep_running workers, and archives their live listings without deleting conversations, artifacts, History or Insights. Ordinary DELETE and Stop retain their previous semantics.",
+    "success": "200 with status discarded, session_id and archived_at. Repeating a completed discard is idempotent.",
+    "retry": "503 means discard remains pending. Its durable admission fence blocks input, new children and native recovery; reachable workers are still stopped. An unavailable live worker is never falsely archived. Retry the same request after delivery is available. Parent archive waits for every child archive."
+  },
+  "x-session-child-approval": {
+    "path": "/api/sessions/{id}/child-approval",
+    "methods": ["GET", "PUT"],
+    "authentication": "Human owner with a current browser sid only; not part of the agent or MCP contract.",
+    "write": {"runtime": "docker | daemon", "enabled": "boolean", "revision": "current opaque GET revision"},
+    "scope": "Exact currently available registered engine, selected runtime, parent lifetime and current desktop; never a wildcard, global rule or permission for future engines.",
+    "conflict": "409 requires a fresh read and a new explicit choice; never automatically retry.",
+    "revocation": "Revokes this runtime's current-desktop session grants only. Existing children and standing desktop rules remain; effective authority is reported separately."
+  },
+  "x-session-work-checklist": {
+    "path": "/api/sessions/{id}/checklist",
+    "method": "POST",
+    "authentication": "Session messaging token scoped to this session, or daemon token; not a public agent-token operation.",
+    "request": {
+      "$ref": "#/components/schemas/ChecklistMutation"
+    },
+    "response": {
+      "$ref": "#/components/schemas/ChecklistState"
+    },
+    "limits": {
+      "request_bytes": 65536,
+      "state_bytes": 131072,
+      "items": 50,
+      "assignees_per_item": 32,
+      "assignees_total": 128
+    },
+    "workers": {
+      "path": "/api/sessions/{id}/checklist/workers",
+      "method": "GET",
+      "authentication": "Same own session messaging/daemon token and active-session restriction; human tokens refused.",
+      "response": {
+        "type": "object",
+        "properties": {
+          "workers": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "required": [
+                "kind",
+                "id",
+                "title",
+                "status"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "subagent",
+                    "child_session"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "status": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "description": "Recorded display IDs scoped to this session and direct same-account children, current work first. Native tool control IDs may differ."
+    }
+  },
   "paths": {
     "/api/session-boards": {
       "get": {
@@ -950,6 +1031,184 @@
       "DaemonBusy": { "description": "The session's host is not connected (a desktop daemon restarting; Retry-After is set) or is not accepting messages right now. The message was not delivered; retry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
     },
     "schemas": {
+      "ChecklistAssignee": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "subagent",
+              "child_session"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Session-recorded opaque worker ID; native aliases canonicalize to child IDs. UTF-8 byte bound, no controls or surrounding whitespace."
+          }
+        }
+      },
+      "ChecklistItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "text",
+          "done"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,96}$"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "in_progress": {
+            "type": "boolean"
+          },
+          "assignees": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ChecklistAssignee"
+            }
+          },
+          "commits": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,40}$"
+            }
+          },
+          "diff": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          }
+        }
+      },
+      "ChecklistMutation": {
+        "type": "object",
+        "required": [
+          "op"
+        ],
+        "description": "Exactly one of item_id/index/text selects an existing item; set/add/clear do not take selectors. Worker ownership is validated server-side.",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "set",
+              "add",
+              "tick",
+              "untick",
+              "remove",
+              "clear",
+              "doing",
+              "pending",
+              "assign",
+              "unassign",
+              "rename",
+              "move"
+            ]
+          },
+          "item_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,96}$"
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "item": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "assignee": {
+            "$ref": "#/components/schemas/ChecklistAssignee"
+          },
+          "commits": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{7,40}$"
+            }
+          },
+          "diff": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          }
+        }
+      },
+      "ChecklistChange": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ChecklistItem"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              },
+              "from_item_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,96}$"
+              }
+            }
+          }
+        ]
+      },
+      "ChecklistState": {
+        "type": "object",
+        "required": [
+          "items",
+          "op"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/ChecklistItem"
+            }
+          },
+          "op": {
+            "type": "string"
+          },
+          "changed": {
+            "$ref": "#/components/schemas/ChecklistChange"
+          }
+        }
+      },
       "ModelList": {
         "type": "object",
         "required": ["models", "source"],

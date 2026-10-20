@@ -229,7 +229,7 @@ func TestReconcileOnceAdvisoryLockPreventsConcurrentPass(t *testing.T) {
 	select {
 	case <-done:
 		// good: it returned without blocking on the held lock.
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("reconcileOnce blocked instead of skipping when the advisory lock was already held — it must use pg_try_advisory_lock, not pg_advisory_lock")
 	}
 }

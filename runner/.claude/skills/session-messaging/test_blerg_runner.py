@@ -1663,6 +1663,41 @@ class TestReview(unittest.TestCase):
         listed = self._review(["list"])
         self.assertEqual(listed.stdout, "no open requests\n")
 
+    def test_a_batch_reply_answers_a_round_with_one_publish(self):
+        result = self._review(["reply", "k7x2", "done", "Changed mean to median",
+                               "m3q9", "declined", "six weeks is in the appendix"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Replied to [k7x2] in report.md: done — Changed mean to median", result.stdout)
+        self.assertIn("Replied to [m3q9] in report.md: declined — six weeks is in the appendix", result.stdout)
+        self.assertIn("No open requests left in report.md", result.stdout)
+        posts = self._published()
+        self.assertEqual([p["name"] for p in posts], ["report.md.review.json"])
+        by_id = {r["id"]: r for r in json.loads(posts[0]["body"])["requests"]}
+        self.assertEqual((by_id["k7x2"]["status"], by_id["k7x2"]["reply"]), ("done", "Changed mean to median"))
+        self.assertEqual((by_id["m3q9"]["status"], by_id["m3q9"]["reply"]), ("declined", "six weeks is in the appendix"))
+
+    def test_a_batch_reply_from_a_file_answers_a_round_with_one_publish(self):
+        path = os.path.join(self.tmp.name, "replies.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# answers\nk7x2 done Changed mean to median\n\nm3q9 declined six weeks is in the appendix\n")
+        result = self._review(["reply", "--file", "replies.txt"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        posts = self._published()
+        self.assertEqual([p["name"] for p in posts], ["report.md.review.json"])
+        by_id = {r["id"]: r for r in json.loads(posts[0]["body"])["requests"]}
+        self.assertEqual((by_id["k7x2"]["status"], by_id["m3q9"]["status"]), ("done", "declined"))
+        self.assertEqual(by_id["m3q9"]["reply"], "six weeks is in the appendix")
+
+    def test_a_batch_with_any_bad_entry_publishes_nothing(self):
+        for args in (["reply", "k7x2", "done", "ok", "nope", "done", "x"],
+                     ["reply", "k7x2", "done", "ok", "m3q9", "maybe", "x"],
+                     ["reply", "k7x2", "done", "ok", "m3q9", "declined"],
+                     ["reply", "k7x2", "done", "ok", "m3q9", "done", "  "]):
+            result = self._review(args)
+            self.assertNotEqual(result.returncode, 0, args)
+            self.assertIn("blerg-runner review", result.stderr, args)
+        self.assertEqual(self._published(), [])
+
     def test_reply_to_an_unknown_id_fails_and_publishes_nothing(self):
         result = self._review(["reply", "nope", "done", "x"])
         self.assertEqual(result.returncode, 1)
@@ -2816,6 +2851,61 @@ class TestBoardFilingCLI(unittest.TestCase):
         self.assertIn('awaiting approval', result.stdout)
         self.assertNotIn('Private reproduction', result.stdout + result.stderr)
 
+    def test_file_reports_a_card_a_session_permission_filed(self):
+        result, _ = self._run(['file', '--board', 'Fixture board', '--title', 'Fixture bug', '--body', 'Steps'],
+                              {'proposal_id': 'proposal-fixture', 'state': 'done', 'auto_approved': True,
+                               'card': {'number': 7, 'board_name': 'Fixture board'}}, status=200)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Ticket filed: #7 on Fixture board', result.stdout)
+        self.assertIn('session permission', result.stdout)
+
+    def test_file_unknown_outcome_says_not_to_file_again(self):
+        result, _ = self._run(['file', '--board', 'Fixture board', '--title', 'Fixture bug', '--body', 'Steps'],
+                              {'proposal_id': 'proposal-fixture', 'state': 'unknown', 'auto_approved': True}, status=202)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('do not file again', result.stderr)
+
+    def test_file_executing_outcome_says_not_to_file_again(self):
+        result, _ = self._run(['file', '--board', 'Fixture board', '--title', 'Fixture bug', '--body', 'Steps'],
+                              {'proposal_id': 'proposal-fixture', 'state': 'executing', 'auto_approved': True}, status=202)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('do not file again', result.stderr)
+
+    def test_file_reports_why_a_permission_did_not_approve(self):
+        result, _ = self._run(['file', '--board', 'Fixture board', '--title', 'Fixture bug', '--body', 'Steps'],
+                              {'proposal_id': 'proposal-fixture', 'state': 'pending', 'message': 'The session permission reached its limit.'}, status=202)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('awaiting approval', result.stdout)
+        self.assertIn('reached its limit', result.stdout)
+
+    def test_file_pending_says_the_outcome_arrives_as_a_message(self):
+        result, _ = self._run(['file', '--board', 'Fixture board', '--title', 'Fixture bug', '--body', 'Steps'],
+                              {'proposal_id': 'proposal-fixture', 'state': 'pending'}, status=202)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('outcome will arrive as a message', result.stdout)
+        self.assertIn('blerg-runner ticket status proposal-fixture', result.stdout)
+
+    def test_status_reads_the_sessions_own_proposal(self):
+        result, calls = self._run(['status', 'proposal-fixture'],
+                                  {'proposal_id': 'proposal-fixture', 'kind': 'board_file', 'state': 'done',
+                                   'message': "Proposal proposal-fixture approved: Launch Night #6 'Live check' created.",
+                                   'card': {'number': 6, 'board_name': 'Launch Night', 'title': 'Live check'}})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0]['method'], 'GET')
+        self.assertEqual(calls[0]['path'], '/api/sessions/sess-filing/proposals/proposal-fixture')
+        self.assertIn("Launch Night #6 'Live check' created", result.stdout)
+
+    def test_status_pending_exits_3(self):
+        result, _ = self._run(['status', 'proposal-fixture'], {'proposal_id': 'proposal-fixture', 'kind': 'board_file', 'state': 'pending'})
+        self.assertEqual(result.returncode, 3)
+        self.assertIn('waiting for the person', result.stdout)
+
+    def test_status_rejected_and_unknown_exit_nonzero(self):
+        for state, code in (('rejected', 4), ('failed', 4), ('unknown', 5), ('executing', 5)):
+            result, _ = self._run(['status', 'proposal-fixture'], {'proposal_id': 'proposal-fixture', 'kind': 'board_file', 'state': state,
+                                                                   'message': f'Proposal proposal-fixture {state}.'})
+            self.assertEqual(result.returncode, code, (state, result.stdout, result.stderr))
+
     def test_accessible_board_list_is_session_scoped_read(self):
         result, calls = self._run(['boards'], {'configured': True, 'boards': [{'id': 'board-fixture', 'name': 'Other project'}]})
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -3250,6 +3340,16 @@ class SessionStubHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length) if length else b""
         srv = self.server
+        prefix = getattr(srv, "fixture_prefix", "")
+        if prefix:
+            if not self.path.startswith(prefix + "/"):
+                # A closed fixture's port can be reused while unrelated clients
+                # still poll it. Such traffic cannot consume this test's script.
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.path = self.path[len(prefix):]
         srv.recorded.append({"method": self.command, "path": self.path, "headers": dict(self.headers.items()), "raw": raw})
         if not srv.script:
             status, body = 599, b'{"error":"script exhausted"}'
@@ -3291,10 +3391,11 @@ class TestSession(unittest.TestCase):
     def _run(self, args, script, timeout=15, repeat_last=False, extra_env=None, cmd=("session",)):
         server = http.server.HTTPServer(("127.0.0.1", 0), SessionStubHandler)
         server.recorded, server.script, server.repeat_last = [], list(script), repeat_last
+        server.fixture_prefix = "/fixture-" + os.urandom(16).hex()
         t = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         t.start()
         env = {
-            "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}",
+            "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{server.server_address[1]}{server.fixture_prefix}",
             "BLERG_RUNNER_SESSION_ID": "sess-par",
             "BLERG_RUNNER_SESSION_TOKEN": "sess-tok",
             "BLERG_RUNNER_DAEMON_TOKEN": None,
@@ -3307,6 +3408,8 @@ class TestSession(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+            t.join(timeout=5)
+            self.assertFalse(t.is_alive())
         return result, server.recorded
 
     def _body(self, rec):
@@ -3338,6 +3441,12 @@ class TestSession(unittest.TestCase):
         result, rec = self._run(["start", "--no-repo", "--idempotency-key", "k-1", "p"], [("POST", "/children", 201, STARTED)])
         self.assertEqual(rec[0]["headers"]["Idempotency-Key"], "k-1")
         self.assertEqual(self._body(rec[0]), {"prompt": "p", "no_repo": True})
+
+    def test_start_accepts_the_cluster_runtime(self):
+        result, rec = self._run(["start", "--engine", "codex", "--repo", "app", "--runtime", "cluster", "p"],
+                                [("POST", "/children", 201, STARTED)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._body(rec[0]), {"engine": "codex", "repo": "app", "runtime": "cluster", "prompt": "p"})
 
     def test_start_needs_a_repo_choice_and_a_prompt(self):
         result, rec = self._run(["start", "prompt"], [])
@@ -3442,6 +3551,36 @@ class TestSession(unittest.TestCase):
             proc.stderr.close()
             server.shutdown()
             server.server_close()
+
+    def test_scripted_receiver_ignores_stale_nonce_without_consuming_reply(self):
+        import http.client
+        server = http.server.HTTPServer(("127.0.0.1", 0), SessionStubHandler)
+        server.recorded, server.repeat_last = [], False
+        server.fixture_prefix = "/current-fixture"
+        server.script = [("GET", "/reply", 200, {"accepted": True})]
+        worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        worker.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        try:
+            for stale_path in ("/revocations", "/old-fixture/reply", "/current-fixture-other/reply"):
+                connection.request("GET", stale_path)
+                response = connection.getresponse()
+                response.read()
+                self.assertEqual(response.status, 404)
+                self.assertEqual(server.recorded, [])
+                self.assertEqual(len(server.script), 1)
+            connection.request("GET", "/current-fixture/reply")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read()), {"accepted": True})
+            self.assertEqual([request["path"] for request in server.recorded], ["/reply"])
+            self.assertEqual(server.script, [])
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
 
     def test_wait_resumes_an_existing_request(self):
         script = [("GET", f"/api/delegation-requests/{REQ}?wait=", 200, PENDING),
@@ -3591,6 +3730,31 @@ class TestSession(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("the session ended", res.stdout)
 
+    def test_models_lists_display_names_and_routing_ids(self):
+        body = {"engines": [{"engine": "hermes", "runtime": "cluster", "models": [
+            {"id": "nvidia/nemotron-3-super", "name": "Nemotron Super"},
+            {"id": "qwen/qwen3-coder", "name": ""}]},
+            {"engine": "codex", "runtime": "cluster", "models": []}]}
+        res, rec = self._run(["models", "--engine", "hermes", "--runtime", "cluster"],
+                             [("GET", "/api/sessions/sess-par/children/models", 200, body)], cmd=())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("engine=hermes", rec[0]["path"])
+        self.assertIn("runtime=cluster", rec[0]["path"])
+        self.assertEqual(res.stdout.splitlines(), [
+            "hermes (cluster)",
+            "  Nemotron Super  nvidia/nemotron-3-super",
+            "  qwen/qwen3-coder",
+            "codex (cluster)",
+            "  no catalog known: --model is passed as given"])
+
+    def test_start_prints_an_unknown_model_clearly(self):
+        msg = "unknown model nvidia/nemotron-3.5-super-vl for Hermes; available: Nemotron Super (nvidia/nemotron-3-super)"
+        res, _ = self._run(["start", "--engine", "hermes", "--model", "nvidia/nemotron-3.5-super-vl", "--no-repo", "p"],
+                           [("POST", "/children", 422, {"error": msg})])
+        self.assertEqual(res.returncode, 1)
+        self.assertIn(msg, res.stderr)
+        self.assertIn("blerg-runner models", res.stderr)
+
     def test_budget_lines_and_json(self):
         body = {"daemon": "laptop", "fetched_at": "2030-01-01T00:00:00Z", "engines": [
             {"engine": "claude", "available": True, "windows": [
@@ -3625,7 +3789,7 @@ class TestSession(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         for text in ("blerg-runner budget", "session start", "per provider", "destructive or irreversible",
                      "blerg-runner ask", "session wait <request_id>", "never run\n`start` with a NEW key",
-                     "loopback", "--runtime daemon", "exit with code 3", "80%"):
+                     "loopback", "--runtime daemon", "exit with code 3", "80%", "blerg-runner models", "--runtime cluster"):
             self.assertIn(text, res.stdout, text)
 
     def test_the_help_starts_with_the_line_the_daemon_injects(self):
@@ -3663,12 +3827,24 @@ class TestSession(unittest.TestCase):
 
 
 @contextlib.contextmanager
-def api_server(reply):
+def api_server(reply, capture_token=None):
     records = []
+    prefix = "/fixture-" + os.urandom(16).hex()
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
         def serve(self):
+            own_authority = capture_token is not None and self.headers.get("Authorization") == "Bearer " + capture_token
+            scoped_path = self.path.startswith(prefix + "/")
+            if not scoped_path and not own_authority:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if scoped_path:
+                self.path = self.path[len(prefix):]
+            # Security receivers capture this test's credential even on an
+            # unexpected path, so a redirect that strips a prefix cannot hide.
             size = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(size) if size else b""
             records.append((self.command, self.path, dict(self.headers), raw))
@@ -3708,42 +3884,80 @@ def api_server(reply):
                 pass
         do_GET = do_POST = serve
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    worker.start()
     try:
-        yield f"http://127.0.0.1:{server.server_address[1]}", records
+        yield f"http://127.0.0.1:{server.server_address[1]}{prefix}", records
     finally:
         server.shutdown()
         server.server_close()
+        worker.join(timeout=5)
+        if worker.is_alive():
+            raise AssertionError("fixture receiver did not stop")
 
 
-def call(url, args, **kwargs):
+def call(url, args, token="fixture-token", **kwargs):
     return run_blerg_runner(args, env_override={
         "BLERG_RUNNER_SERVER_HTTP": url, "BLERG_RUNNER_SESSION_ID": "fixture-parent",
-        "BLERG_RUNNER_SESSION_TOKEN": "fixture-token", "BLERG_RUNNER_BOARD_TOKEN": None,
+        "BLERG_RUNNER_SESSION_TOKEN": token, "BLERG_RUNNER_BOARD_TOKEN": None,
         "BLERG_RUNNER_DAEMON_TOKEN": None,
     }, **kwargs)
 
 
 class TestSessionReview(unittest.TestCase):
+    def test_redirect_receiver_isolates_foreign_traffic_but_captures_own_auth_on_any_path(self):
+        import urllib.request
+        import urllib.error
+        credential = "redirect-fixture-" + os.urandom(16).hex()
+        with api_server(lambda *_: (200, {}, {}, 0), capture_token=credential) as (target, seen):
+            origin = target[:target.index("/fixture-")]
+            foreign = urllib.request.Request(origin + "/api/v1/namespaces/fixture/pods",
+                headers={"Authorization":"Bearer unrelated-fixture", "User-Agent":"Go-http-client/1.1"})
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                urllib.request.urlopen(foreign, timeout=5)
+            self.assertEqual(refused.exception.code, 404)
+            refused.exception.close()
+            self.assertEqual(seen, [])
+            own = urllib.request.Request(origin + "/unexpected-stripped-path", headers={"Authorization":"Bearer " + credential})
+            with urllib.request.urlopen(own, timeout=5) as response:
+                response.read()
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(seen[0][1], "/unexpected-stripped-path")
+            self.assertEqual(seen[0][2].get("Authorization"), "Bearer " + credential)
+
+    def test_redirect_receiver_observes_deliberate_authenticated_follow(self):
+        import urllib.request
+        credential = "redirect-fixture-" + os.urandom(16).hex()
+        with api_server(lambda *_: (200, {}, {}, 0), capture_token=credential) as (target, seen):
+            with api_server(lambda *_: (302, {}, {"Location":target + "/other"}, 0)) as (source, _):
+                request = urllib.request.Request(source + "/start", headers={"Authorization":"Bearer " + credential})
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    response.read()
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(seen[0][1], "/other")
+            self.assertEqual(seen[0][2].get("Authorization"), "Bearer " + credential)
+
     def test_legacy_authenticated_calls_never_follow_redirects(self):
         for code in (301, 302, 303, 307, 308):
             for args in (["files"], ["update", "fixture update"]):
                 with self.subTest(code=code, command=args[0]):
-                    with api_server(lambda *_: (200, {}, {}, 0)) as (target, seen):
+                    credential = "redirect-fixture-" + os.urandom(16).hex()
+                    with api_server(lambda *_: (200, {}, {}, 0), capture_token=credential) as (target, seen):
                         with api_server(lambda *_: (code, {}, {"Location": target + "/other"}, 0)) as (source, _):
-                            result = call(source, args)
+                            result = call(source, args, token=credential)
                         self.assertEqual(seen, [], "redirect target received a legacy authenticated request")
-                        self.assertNotIn("fixture-token", result.stdout + result.stderr)
+                        self.assertNotIn(credential, result.stdout + result.stderr)
 
     def test_sensitive_calls_never_follow_redirects(self):
         for code in (301, 302, 303, 307, 308):
             with self.subTest(code=code):
-                with api_server(lambda *_: (200, {"children": []}, {}, 0)) as (target, seen):
+                credential = "redirect-fixture-" + os.urandom(16).hex()
+                with api_server(lambda *_: (200, {"children": []}, {}, 0), capture_token=credential) as (target, seen):
                     with api_server(lambda *_: (code, {}, {"Location": target + "/other"}, 0)) as (source, _):
-                        result = call(source, ["session", "list"])
+                        result = call(source, ["session", "list"], token=credential)
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(seen, [], "redirect target received an authenticated request")
-                    self.assertNotIn("fixture-token", result.stdout + result.stderr)
+                    self.assertNotIn(credential, result.stdout + result.stderr)
 
     def test_allowed_without_outcome_keeps_waiting(self):
         starting = dict(PENDING, status="allowed")
@@ -4015,6 +4229,57 @@ signal.setitimer(signal.ITIMER_REAL, 0)
                 elapsed = time.monotonic() - started
             self.assertEqual(result.returncode, 3, result.stderr)
             self.assertLess(elapsed, 1.6)
+
+
+
+
+class TestChecklistWorkMap(unittest.TestCase):
+    _run = TestWork._run
+
+    def test_new_operations_and_opaque_targets(self):
+        cases = [
+            (["doing", "2", "--agent", "native-owned"], {"op":"doing", "index":2, "assignee":{"kind":"subagent", "id":"native-owned"}}),
+            (["pending", "2"], {"op":"pending", "index":2}),
+            (["assign", "2", "--child-session", "child-owned"], {"op":"assign", "index":2, "assignee":{"kind":"child_session", "id":"child-owned"}}),
+            (["unassign", "--id", "item-stable", "--agent", "native-owned"], {"op":"unassign", "item_id":"item-stable", "assignee":{"kind":"subagent", "id":"native-owned"}}),
+            (["tick", "--id", "item-stable"], {"op":"tick", "item_id":"item-stable"}),
+            (["rename", "--id", "item-stable", "New text"], {"op":"rename", "item_id":"item-stable", "item":"New text"}),
+            (["move", "2", "1"], {"op":"move", "index":2, "position":1}),
+        ]
+        for args,want in cases:
+            server = make_topic_server(reply={"items":[], "op":want["op"]})
+            result = self._run(["checklist"] + args, server)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(server.recorded[0]["body"], want)
+
+    def test_invalid_inputs_never_send(self):
+        for args in [["assign","1"], ["unassign","1"], ["pending","1","--agent","native"],
+                     ["doing","--id","bad/id"], ["doing","1","--agent","a\nb"],
+                     ["doing","1","--agent","x"*257], ["doing","1","--id","item-stable"],
+                     ["move","1","0"], ["move","1","2.5"], ["rename","1",""]]:
+            server = make_topic_server()
+            result = self._run(["checklist"] + args, server)
+            self.assertNotEqual(result.returncode, 0, args)
+            self.assertEqual(server.recorded, [], args)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_workers_discovers_recorded_ids_without_mutating(self):
+        result, records = TestSession._run(self, ["workers"], [("GET", "/checklist/workers", 200,
+            {"workers":[{"kind":"subagent","id":"recorded-display-id","title":"Current task","status":"running"},
+                        {"kind":"child_session","id":CHILD,"title":"Child task","status":"waiting"}],"truncated":True})], cmd=("checklist",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["method"], "GET")
+        for value in ["recorded-display-id", "Current task", "running", CHILD, "truncated"]:
+            self.assertIn(value, result.stdout)
+
+    def test_prints_doing_identity_and_assignment(self):
+        server = make_topic_server(reply={"items":[{"id":"item-stable", "text":"Implement", "done":False,
+            "in_progress":True, "assignees":[{"kind":"subagent", "id":"native-owned"}]}]})
+        result = self._run(["checklist","doing","1"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for value in ["doing", "item-stable", "subagent:native-owned"]:
+            self.assertIn(value, result.stdout)
 
 
 if __name__ == "__main__":

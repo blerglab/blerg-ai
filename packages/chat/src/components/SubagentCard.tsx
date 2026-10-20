@@ -1,3 +1,4 @@
+import { modelDisplayName } from '../model/modelDisplay'
 // A subagent drawn as one line, like a tool group's row: the task it was given and one glyph for its
 // state (its type, model and tokens are in the row's tooltip and accessible name; the session panel
 // draws the full card). Opened, it holds the brief it was given, everything it did (drawn with the
@@ -7,6 +8,7 @@ import { memo, useContext, useState } from 'react'
 import { useMinuteClock } from '../hooks/useMinuteClock'
 import { ClockOffsetContext } from '../model/clockOffset'
 import { useChat } from './context'
+import { checklistAssignment } from '../model/worklist'
 import { NO_END_RECORDED } from '../model/stale'
 import type { SubagentEntry, TimelineItem } from '../model/toolGroups'
 import {
@@ -91,11 +93,13 @@ export const SubagentCard = memo(function SubagentCard({ sub, live, options }: {
   // The chat's clock in server time, moving by the minute: a subagent cut off long ago is stopped,
   // not running, and an open card flips at the 12 hour mark.
   const now = useMinuteClock() - offset
-  const sessionOver = useChat()?.sessionOver === true
+  const chat = useChat()
+  const sessionOver = chat?.sessionOver === true
   const status = subagentStatus(sub, live, now, sessionOver)
   const stale = staleSubagent(sub, now)
   const over = status === 'done' || status === 'error'
   const title = subagentTitle(sub)
+  const item = checklistAssignment(chat?.checklistItems ?? [], 'subagent', sub.info.child_id || sub.key)
   const model = subagentModel(sub)
   const tokens = subagentTokens(sub)
   const type = sub.info.agent_type || inputField(sub.call?.call.input, 'subagent_type')
@@ -135,11 +139,16 @@ export const SubagentCard = memo(function SubagentCard({ sub, live, options }: {
         <StatusGlyph status={status} />
         <span className="tcg-chev" aria-hidden="true">{open ? '▾' : '▸'}</span>
       </button>
+      {item && <div className="subagent-checklist" data-testid="subagent-checklist">
+        {chat?.onOpenChecklistItem && item.id
+          ? <button type="button" className="checklist-work-link" onClick={() => chat.onOpenChecklistItem?.(item.id!)}>Plan · {item.text}</button>
+          : <span>Plan · {item.text}</span>}
+      </div>}
       {open && (
         <div className="subagent-body" data-testid="subagent-body">
           {line && <div className={`subagent-line${!over && !stale ? ' doing' : ''}`} data-testid="subagent-line">{line}</div>}
           {gist && <div className="subagent-line subagent-gist" data-testid="subagent-gist">↲ {gist}</div>}
-          <div className="subagent-line" data-testid="subagent-settings">Model: {model || 'unknown'} · Configured effort: {subagentEffort(sub) || 'unknown'}</div>
+          <div className="subagent-line" data-testid="subagent-settings">Model: <span title={model}>{model ? modelDisplayName(model) : 'unknown'}</span> <span className="model-effort">Configured effort: {subagentEffort(sub) || 'unknown'}</span></div>
           {prompt && (
             <details className="subagent-detail">
               <summary>{resumed ? 'Message' : 'Prompt'}</summary>

@@ -10,13 +10,13 @@ export function diffArtifacts(items: ArtifactInfo[] | undefined): ArtifactInfo[]
     .sort((a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? '') || 0)
 }
 
-export interface PlanList { kind: 'Checklist' | 'Plan'; done: number; total: number; next: string | null }
+export interface PlanList { kind: 'Checklist' | 'Plan'; done: number; total: number; next: string | null; doing?: string[] }
 
 /** The checklist, else the engine's plan, as done / total and the next item to do. */
 export function planList(checklist: { items: ChecklistItem[] } | undefined | null, plan: PlanLive | undefined | null): PlanList | null {
   if (checklist) {
     const items = checklist.items
-    return { kind: 'Checklist', done: items.filter(i => i.done).length, total: items.length, next: items.find(i => !i.done)?.text ?? null }
+    return { kind: 'Checklist', done: items.filter(i => i.done).length, total: items.length, next: items.find(i => !i.done)?.text ?? null, doing: items.filter(i => !i.done && i.in_progress).map(i => i.text) }
   }
   if (plan) {
     const items = plan.items
@@ -47,5 +47,5 @@ export function hasPlanTab(list: PlanList | null, tickets: number, diffs: number
 export function planSummary(list: PlanList): string {
   if (list.total > 0 && list.done >= list.total) return `${list.kind} · all ${list.total} done`
   const head = `${list.kind} · ${list.done} of ${list.total}`
-  return list.next ? `${head} · Next: ${list.next}` : head
+  return list.doing?.length ? `${head} · Doing: ${list.doing.join('; ')}` : list.next ? `${head} · Next: ${list.next}` : head
 }

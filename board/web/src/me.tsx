@@ -17,6 +17,10 @@ export interface Me {
   // A signed-in person's own blerg-core account id (absent for tokens).
   account_id?: string;
   capabilities?: string[];
+  // "Run as me": whether this install can mint a board's automation token for the signed-in
+  // person, and whether the create-board form starts with the box checked (operator setting).
+  run_as_me_available?: boolean;
+  run_as_creator_default?: boolean;
 }
 
 const MeContext = createContext<Me | null>(null);

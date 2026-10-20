@@ -41,8 +41,10 @@ type liveReply struct {
 	// The checklist, the engine's plan and the pinned tickets (worklist.go).
 	workState
 	liveDelegation
-	ToolChanges int        `json:"tool_changes"`
-	Counts      liveCounts `json:"counts"`
+	ToolChanges int `json:"tool_changes"`
+	// ReviewRequests are the session's pending review requests (reviewrequests.go): Needs you.
+	ReviewRequests []liveReviewRequest `json:"review_requests"`
+	Counts         liveCounts          `json:"counts"`
 	// CanReleasePrompt says the viewer owns the session, so "Send now" on a held first prompt works
 	// for them (only the owner's release_held_prompt is acted on). Omitted when false.
 	CanReleasePrompt bool `json:"can_release_prompt,omitempty"`
@@ -120,6 +122,11 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 		fail("ReadAskRows", err)
 		return
 	}
+	reviews, err := a.livePendingReviews(ctx, sid)
+	if err != nil {
+		fail("livePendingReviews", err)
+		return
+	}
 	snapshot, err := a.readChildrenSnapshot(ctx, row, p.Sub)
 	if err != nil {
 		fail("readChildrenSnapshot", err)
@@ -134,7 +141,7 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	priceJSON, _ := json.Marshal(prices)
-	etag := liveETag(through, row.Status, toolChanges, asks, showTokens, snapshot.digest()+"."+childrenDigestBytes(priceJSON))
+	etag := liveETag(through, row.Status, toolChanges, asks, showTokens, snapshot.digest()+"."+childrenDigestBytes(priceJSON)+"."+reviewsDigest(reviews))
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-store")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
@@ -171,7 +178,8 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 	a.addChecklistCommitURLs(row, &ws)
 	writeJSON(w, http.StatusOK, liveReply{
 		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, workState: ws, ToolChanges: toolChanges, liveDelegation: liveDelegation{Children: children, DelegationRequests: snapshot.Requests, DelegationGrants: snapshot.Grants},
-		Counts:           liveCounts{NeedsYou: len(st.Asks) + toolChanges + len(snapshot.Requests), Running: len(st.Subagents) + len(st.Tasks) + runningChildren(children)},
+		ReviewRequests:   reviews,
+		Counts:           liveCounts{NeedsYou: len(st.Asks) + toolChanges + len(snapshot.Requests) + len(reviews), Running: len(st.Subagents) + len(st.Tasks) + runningChildren(children)},
 		CanReleasePrompt: ownsSession(p.Sub, row),
 	})
 }

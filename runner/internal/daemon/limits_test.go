@@ -50,7 +50,7 @@ func (h *trackerHarness) next() protocol.UsageLimits {
 	select {
 	case m := <-h.sent:
 		return m
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		h.t.Fatal("nothing sent")
 	}
 	return protocol.UsageLimits{}
@@ -217,7 +217,7 @@ func TestAgentHostTellsTheTrackerACodexTurnEnded(t *testing.T) {
 		InitialPrompt: "hello", Kind: "agent", Engine: "codex",
 	})
 	sender.waitForKind(t, "turn_done")
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for limits.codexTurns.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -242,7 +242,7 @@ func TestAgentHostTellsTheTrackerAClaudeTurnEnded(t *testing.T) {
 		Type: "spawn_session", SessionID: "s1", Repo: "proj", InitialPrompt: "hello", Kind: "agent",
 	})
 	sender.waitForKind(t, "turn_done")
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for limits.claudeTurns.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

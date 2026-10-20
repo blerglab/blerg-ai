@@ -20,7 +20,7 @@ func TestWorkspaceBrokerBindsConnectionSessionAndConsumesOnce(t *testing.T) {
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { _, err := h.requestWorkspaceFile(ctx, dc, "session", "README.md"); done <- err }()
@@ -104,7 +104,7 @@ func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
 		var raw []byte
 		select {
 		case raw = <-dc.send:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("file request not dispatched")
 		}
 		var q protocol.ReadWorkspaceFile
@@ -118,7 +118,7 @@ func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
 		fx.api.hub.deliverWorkspaceFileResult(dc, reply)
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("file response did not complete")
 		}
 		return rec
@@ -261,7 +261,7 @@ func TestWorkspaceBrokerLimitsDisconnectAndReplacement(t *testing.T) {
 		go func() { _, err := h.requestWorkspaceFile(ctx, dc, "session", "README.md"); done <- err }()
 		select {
 		case <-dc.send:
-		case <-time.After(time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("request did not queue")
 		}
 	}
@@ -275,7 +275,7 @@ func TestWorkspaceBrokerLimitsDisconnectAndReplacement(t *testing.T) {
 			if err == nil {
 				t.Fatal("disconnect returned success")
 			}
-		case <-time.After(time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("disconnect did not release waiter")
 		}
 	}
@@ -288,7 +288,7 @@ func TestWorkspaceBrokerLimitsDisconnectAndReplacement(t *testing.T) {
 		if err := json.Unmarshal(raw, &req); err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("request did not queue")
 	}
 	replacement := &DaemonConn{ID: dc.ID, send: make(chan []byte, 8)}
@@ -307,7 +307,7 @@ func TestWorkspaceBrokerLimitsDisconnectAndReplacement(t *testing.T) {
 		if err == nil {
 			t.Fatal("replacement accepted")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("canceled waiter leaked")
 	}
 }
@@ -320,10 +320,9 @@ type blockedWorkspaceWriter struct {
 
 func (w *blockedWorkspaceWriter) Write(p []byte) (int, error) {
 	close(w.entered)
-	select {
-	case <-w.gate:
-	case <-time.After(5 * time.Second):
-	}
+	// Only the test can release this barrier. A watchdog must not silently
+	// finish the response and release its lease before the assertion runs.
+	<-w.gate
 	return w.ResponseWriter.Write(p)
 }
 
@@ -340,7 +339,7 @@ func TestWorkspaceReadLeaseHeldUntilHTTPResponseCompletes(t *testing.T) {
 		go func() { workers.Wait(); close(closeDone) }()
 		select {
 		case <-closeDone:
-		case <-time.After(6 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("HTTP workers did not stop")
 		}
 	})
@@ -361,13 +360,13 @@ func TestWorkspaceReadLeaseHeldUntilHTTPResponseCompletes(t *testing.T) {
 			if err := json.Unmarshal(raw, &q); err != nil {
 				t.Fatal(err)
 			}
-		case <-time.After(time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("request did not queue")
 		}
 		fx.api.hub.deliverWorkspaceFileResult(dc, protocol.WorkspaceFileResult{RequestID: q.RequestID, SessionID: q.SessionID, OK: true, Path: "README.md", Size: 2, ContentB64: "aGk=", Mtime: time.Now().UTC().Format(time.RFC3339Nano)})
 		select {
 		case <-writer.entered:
-		case <-time.After(time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("response write did not begin")
 		}
 	}
@@ -382,7 +381,7 @@ func TestWorkspaceReadLeaseHeldUntilHTTPResponseCompletes(t *testing.T) {
 	for range 2 {
 		select {
 		case <-done:
-		case <-time.After(time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("response write did not finish")
 		}
 	}

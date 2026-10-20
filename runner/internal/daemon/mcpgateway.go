@@ -117,17 +117,85 @@ func mcpConfigJSON(cfg *protocol.MCPGatewayConfig) ([]byte, error) {
 }
 
 // mcpGatewaySpawnProblem is the reason a daemon (as opposed to a cluster pod,
-// which is itself the sandbox) refuses a spawn carrying a grant, or "".
+// which is itself the sandbox) refuses a spawn carrying a grant, or "". The
+// one grant a session directly on this machine may hold is the person's board
+// alone, for an unrestricted (launch-sheet) session, dialled through the
+// server (hostBoardGrant).
 func mcpGatewaySpawnProblem(msg protocol.SpawnSession) string {
 	switch {
 	case msg.MCPGateway == nil && !msg.RestrictTools:
 		return ""
 	case msg.Kind != "agent":
 		return "an MCP gateway grant or tool restriction needs an agent-kind session"
-	case !msg.Sandbox:
+	case !msg.Sandbox && !hostBoardGrant(msg):
 		return "an MCP gateway grant or tool restriction runs only in a sandbox, never directly on this machine"
 	}
 	return ""
+}
+
+// hostBoardGrant reports whether a spawn's grant is one a session on this
+// machine's host may hold: only the built-in board connection, dialled through
+// the server, for a session that is not restricted.
+func hostBoardGrant(msg protocol.SpawnSession) bool {
+	g := msg.MCPGateway
+	return g != nil && !msg.RestrictTools && g.ViaServer &&
+		len(g.Servers) == 1 && g.Servers[0].Name == "board"
+}
+
+// gatewayServerBase is the server address a daemon dials the gateway at for a
+// grant that asks for it (MCPGatewayConfig.ViaServer): its server HTTP base
+// (BLERG_RUNNER_SERVER_HTTP) when set, else derived from the WebSocket URL it
+// connects to (ws://host/ws/daemon → http://host), the blerg-runner CLI's own
+// fallback. "" when neither gives one.
+func gatewayServerBase(serverHTTP, serverURL string) string {
+	if v := strings.TrimRight(strings.TrimSpace(serverHTTP), "/"); v != "" {
+		return v
+	}
+	ws := strings.TrimRight(strings.TrimSpace(serverURL), "/")
+	ws = strings.TrimRight(strings.TrimSuffix(ws, "/ws/daemon"), "/")
+	switch {
+	case strings.HasPrefix(ws, "ws://"):
+		return "http://" + strings.TrimPrefix(ws, "ws://")
+	case strings.HasPrefix(ws, "wss://"):
+		return "https://" + strings.TrimPrefix(ws, "wss://")
+	}
+	return ""
+}
+
+// viaServerGateway is the grant as this daemon dials it: cfg itself, unless the
+// server asked for the gateway to be reached through its own web address
+// (ViaServer); then a copy whose BaseURL is base, the address this daemon
+// already reaches the server at. The server's BaseURL is often an in-cluster
+// address no workstation can reach. cfg is never modified.
+func viaServerGateway(cfg *protocol.MCPGatewayConfig, base string) (*protocol.MCPGatewayConfig, error) {
+	if cfg == nil || !cfg.ViaServer {
+		return cfg, nil
+	}
+	if base == "" {
+		return nil, errors.New("this daemon has no server address to reach the MCP gateway through: set BLERG_RUNNER_SERVER_HTTP")
+	}
+	out := *cfg
+	out.BaseURL = base
+	out.Servers = append([]protocol.MCPGatewayServer(nil), cfg.Servers...)
+	return &out, nil
+}
+
+// sandboxGatewayView is the grant as dialled from inside a sandbox container:
+// a loopback BaseURL names the host, which is the container itself in there,
+// so it becomes the runner's service URL on the sandbox network (the same
+// rewrite sandboxNetworkEnv makes for the messaging CLI). Any other BaseURL is
+// kept. cfg is never modified.
+func sandboxGatewayView(cfg *protocol.MCPGatewayConfig) *protocol.MCPGatewayConfig {
+	if cfg == nil {
+		return nil
+	}
+	u, loop := loopbackURL(cfg.BaseURL)
+	if !loop {
+		return cfg
+	}
+	out := *cfg
+	out.BaseURL = sandboxRunnerURL + strings.TrimRight(u.EscapedPath(), "/")
+	return &out
 }
 
 // sandboxMCPDirBase is the directory, inside the container, that the private
@@ -149,6 +217,10 @@ type mcpConfigFile struct {
 }
 
 func newMCPConfigFile(cfg *protocol.MCPGatewayConfig, prefix sandboxExec) *mcpConfigFile {
+	if prefix.enabled() {
+		// The engine reads this file inside the container and dials from there.
+		cfg = sandboxGatewayView(cfg)
+	}
 	return &mcpConfigFile{cfg: cfg, prefix: prefix}
 }
 

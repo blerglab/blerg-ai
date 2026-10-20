@@ -152,8 +152,14 @@ func (a *API) HandlePostDelegationRule(w http.ResponseWriter, r *http.Request) {
 	if body.LocalOnly != nil {
 		localOnly = *body.LocalOnly
 	}
-	rule, err := db.InsertDelegationRule(r.Context(), a.dbPool, db.DelegationRule{AccountID: account, Engine: desc.ID,
-		Runtime: body.Runtime, DaemonID: body.DaemonID, LocalOnly: localOnly, CreatedVia: ruleCreatedViaSet})
+	ctx := r.Context()
+	var rule db.DelegationRule
+	err = a.withDelegationLock(ctx, account, func() error {
+		var err error
+		rule, err = db.InsertDelegationRule(ctx, a.dbPool, db.DelegationRule{AccountID: account, Engine: desc.ID,
+			Runtime: body.Runtime, DaemonID: body.DaemonID, LocalOnly: localOnly, CreatedVia: ruleCreatedViaSet})
+		return err
+	})
 	if err != nil {
 		writeDatabaseFailure(w, "add the rule", "delegation InsertDelegationRule", err)
 		return
@@ -174,7 +180,13 @@ func (a *API) HandleDeleteDelegationRule(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, msgRuleNotFound)
 		return
 	}
-	done, err := db.RevokeDelegationRule(r.Context(), a.dbPool, id, account)
+	ctx := r.Context()
+	var done bool
+	err := a.withDelegationLock(ctx, account, func() error {
+		var err error
+		done, err = db.RevokeDelegationRule(ctx, a.dbPool, id, account)
+		return err
+	})
 	if err != nil {
 		writeDatabaseFailure(w, "remove the rule", "delegation RevokeDelegationRule", err)
 		return
@@ -199,7 +211,7 @@ func (a *API) HandleRevokeDelegationGrant(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, msgRuleNotFound)
 		return
 	}
-	done, err := db.RevokeDelegationGrant(r.Context(), a.dbPool, id, account)
+	done, err := a.revokeGrantFenced(r.Context(), id, account)
 	if err != nil {
 		writeDatabaseFailure(w, "revoke the grant", "delegation RevokeDelegationGrant", err)
 		return

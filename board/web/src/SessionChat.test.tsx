@@ -12,6 +12,15 @@ describe("SessionChat describeUserMessage", () => {
     expect(look({ text: "a later message from the runner's app", source: "chat" })).toBeNull();
   });
 
+  it("the prompt the board started the session with, recorded as the board's, is still the brief", () => {
+    expect(look({ text: "You are working card #43…", source: "blerg-board" }, true)).toEqual({ brief: true });
+  });
+
+  it("a parent session's or a cron's message keeps the chat's own author for it", () => {
+    expect(look({ text: "Port the tests", source: "session" })).toBeNull();
+    expect(look({ text: "Summarize my inbox", source: "cron" })).toBeNull();
+  });
+
   it("an answer, a note reply and a person's message are the person's", () => {
     expect(look({ text: "yes", source: "ask_answer", message_id: "m1" })).toBeNull();
     expect(look({ text: "[Re: …] ok", source: "note_reply" })).toBeNull();

@@ -15,22 +15,23 @@ import (
 
 // SessionRow is the result of listing sessions (includes joined daemon name).
 type SessionRow struct {
-	ID                string
-	DaemonID          string
-	DaemonName        string
-	Status            string
-	ProjectPath       string
-	Repo              string
-	Title             *string
-	Model             *string
-	Engine            *string
-	Effort            *string
-	StartedAt         time.Time
-	EndedAt           *time.Time
-	DelegationEndedAt *time.Time // durable boundary, populated by GetSession
-	ArchivedAt        *time.Time
-	Unread            bool
-	Starred           bool
+	ID                 string
+	DaemonID           string
+	DaemonName         string
+	Status             string
+	ProjectPath        string
+	Repo               string
+	Title              *string
+	Model              *string
+	Engine             *string
+	Effort             *string
+	StartedAt          time.Time
+	EndedAt            *time.Time
+	DelegationEndedAt  *time.Time // durable boundary, populated by GetSession
+	ArchivedAt         *time.Time
+	DiscardRequestedAt *time.Time // durable admission fence, not process termination
+	Unread             bool
+	Starred            bool
 	// SpawningAccountID is the verified account id (identity.Principal.Sub)
 	// of the human who requested this session, set by HandlePostSessions
 	// right after InsertSession. Nil for sessions created before this column
@@ -75,6 +76,8 @@ type SessionRow struct {
 	// Private (migration 022): the session is visible only to
 	// SpawningAccountID. See internal/server/privacy.go.
 	Private bool
+	// RestrictTools is policy state populated by GetSession and LockDelegationParent.
+	RestrictTools bool
 	// CronID (migration 023) is the cron that started the session, nil for every
 	// other session. The UI badges it and the scheduler counts and stops by it.
 	CronID *string
@@ -199,7 +202,7 @@ func GetDaemonByName(ctx context.Context, conn *pgxpool.Pool, name string) (*Dae
 func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*SessionRow, error) {
 	row := conn.QueryRow(ctx, `
 		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text, started_by_kind, started_by_name, interaction, background_tasks, COALESCE(paused_reason, ''), parent_session_id::text, board_id::text, COALESCE(delegation_via, ''), keep_running
-		       , delegation_ended_at, archived_at FROM sessions
+		       , delegation_ended_at, archived_at, restrict_tools, discard_requested_at FROM sessions
 		 WHERE id = $1
 	`, sessionID)
 	var r SessionRow
@@ -208,7 +211,7 @@ func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*Ses
 		&r.Runtime, &r.SkipPermissions, &r.ErrorReason,
 		&r.TokenID, &r.CallbackURL, &r.CallbackSecret, &r.GitURL, &r.AutoStop, &r.Kind,
 		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID, &r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason,
-		&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.DelegationEndedAt, &r.ArchivedAt)
+		&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.DelegationEndedAt, &r.ArchivedAt, &r.RestrictTools, &r.DiscardRequestedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -394,12 +397,22 @@ func insertSessionAs(ctx context.Context, conn sessionWriteExecutor, id, daemonI
 		      background_tasks  = 0,
 		      paused_reason     = NULL
  WHERE `+runtimeWriteGuard("$14")+`
+   -- A cluster row moves only to its own pod (the runtime authority above names the session's
+   -- token): a daemon without one cannot claim it.
+   AND ($14::text <> '' OR COALESCE(sessions.runtime, '') <> 'cluster')
 	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID, parent, via, o.KeepRunning, runtimeAuthorityToken(ctx))
-	if err == nil && tag.RowsAffected() == 0 && runtimeAuthorityToken(ctx) != "" {
-		return ErrTokenInvalid
+	if err == nil && tag.RowsAffected() == 0 {
+		if runtimeAuthorityToken(ctx) != "" {
+			return ErrTokenInvalid
+		}
+		return ErrClusterSessionClaim
 	}
 	return err
 }
+
+// ErrClusterSessionClaim: a write without runtime authority tried to move a cluster session's row
+// (insertSessionAs). Only the session's own pod may.
+var ErrClusterSessionClaim = errors.New("a cluster session is claimed only by its own pod")
 
 // InsertClusterSession is InsertSession for a cluster-runtime session: it
 // writes runtime='cluster' in the SAME statement as the row.
@@ -421,19 +434,37 @@ func InsertClusterSession(ctx context.Context, conn *pgxpool.Pool, id, daemonID,
 // origin (private, cron, spawning account) in the same statement; see
 // SessionOrigin and InsertSessionAs.
 //
-// The child-session fields of o (ParentSessionID, DelegationVia, KeepRunning) are ignored here:
-// children never run on the cluster, and the start path refuses it.
+// A child session started on the cluster (0.4.3) carries its parent link (ParentSessionID,
+// DelegationVia, KeepRunning) in the same insert, and with RequireParentEpoch the insert is made
+// only while the parent's delegation epoch is still the one the start validated, exactly as
+// InsertSessionAs does for a desktop child.
 func InsertClusterSessionAs(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status, projectPath, repo, title, model string, o SessionOrigin) error {
+	if o.RequireParentEpoch {
+		return withDelegatedParentEpoch(ctx, conn, o, func(tx sessionWriteExecutor) error {
+			return insertClusterSessionAs(ctx, tx, id, daemonID, status, projectPath, repo, title, model, o)
+		})
+	}
+	return insertClusterSessionAs(ctx, conn, id, daemonID, status, projectPath, repo, title, model, o)
+}
+
+func insertClusterSessionAs(ctx context.Context, conn sessionWriteExecutor, id, daemonID, status, projectPath, repo, title, model string, o SessionOrigin) error {
 	account, private, cronID := o.args()
+	parent, via := o.childArgs()
 	_, err := conn.Exec(ctx, `
 		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, model, runtime,
-		                      spawning_account_id, private, cron_id)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), 'cluster', $8, $9, $10::uuid)
+		                      spawning_account_id, private, cron_id,
+		                      parent_session_id, delegation_via, keep_running)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), 'cluster', $8, $9, $10::uuid,
+		        $11::uuid, $12::text, $13::boolean)
 		ON CONFLICT (id) DO UPDATE
 		  SET daemon_id         = EXCLUDED.daemon_id,
 		      spawning_account_id = COALESCE(EXCLUDED.spawning_account_id, sessions.spawning_account_id),
 		      private           = sessions.private OR EXCLUDED.private,
 		      cron_id           = COALESCE(EXCLUDED.cron_id, sessions.cron_id),
+		      -- A revived child keeps its parent, how it was allowed and keep_running (059).
+		      parent_session_id = COALESCE(sessions.parent_session_id, EXCLUDED.parent_session_id),
+		      delegation_via    = COALESCE(sessions.delegation_via, EXCLUDED.delegation_via),
+		      keep_running      = sessions.keep_running OR EXCLUDED.keep_running,
 		      status            = EXCLUDED.status,
 		      runtime           = 'cluster',
 		      ended_at          = NULL,
@@ -446,8 +477,32 @@ func InsertClusterSessionAs(ctx context.Context, conn *pgxpool.Pool, id, daemonI
 		      daemon_lost_at    = NULL,
 		      background_tasks  = 0,
 		      paused_reason     = NULL
-	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID)
+	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID, parent, via, o.KeepRunning)
 	return err
+}
+
+// SetSessionLaunchAuthSession records the browser session (sid) of the owner's launch or resume of
+// a cluster session, or of their approval of a child it asked for (migration 066): a child that
+// session starts on the cluster is authorized with it. An empty sid never erases a known one (a
+// launch by an agent token names none).
+func SetSessionLaunchAuthSession(ctx context.Context, conn *pgxpool.Pool, id, sid string) error {
+	if sid == "" {
+		return nil
+	}
+	_, err := conn.Exec(ctx, `UPDATE sessions SET launch_auth_session_id = $2 WHERE id = $1::uuid`, id, sid)
+	return err
+}
+
+// GetSessionLaunchProof returns what a session was launched with for its owner: the agent token
+// (token_id, migration 013) and the browser session (launch_auth_session_id). Both "" for a
+// session that has neither, or does not exist.
+func GetSessionLaunchProof(ctx context.Context, conn *pgxpool.Pool, id string) (tokenID, sid string, err error) {
+	err = conn.QueryRow(ctx, `SELECT COALESCE(token_id, ''), COALESCE(launch_auth_session_id, '')
+		FROM sessions WHERE id = $1::uuid`, id).Scan(&tokenID, &sid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", nil
+	}
+	return tokenID, sid, err
 }
 
 // DeleteSession removes a session row outright. board_tokens rows cascade
@@ -1096,6 +1151,9 @@ type MessageRow struct {
 	Answer     *string
 	CreatedAt  time.Time
 	AnsweredAt *time.Time
+	// OwnerOnly asks (an engine's command approval) accept an answer only from
+	// the session's signed-in owner.
+	OwnerOnly bool
 }
 
 // MessageBoardID returns the board the message's session is bound to, or ""
@@ -1133,13 +1191,25 @@ func CreateMessage(ctx context.Context, conn *pgxpool.Pool, sessionID, kind, bod
 	return id, err
 }
 
+// CreateAsk inserts an open ask; ownerOnly limits who may answer it to the
+// session's signed-in owner.
+func CreateAsk(ctx context.Context, conn *pgxpool.Pool, sessionID, body string, ownerOnly bool) (string, error) {
+	var id string
+	err := conn.QueryRow(ctx, `
+		INSERT INTO messages (session_id, kind, body, status, owner_only)
+		VALUES ($1, 'ask', $2, 'open', $3)
+		RETURNING id
+	`, sessionID, body, ownerOnly).Scan(&id)
+	return id, err
+}
+
 func scanMessageRows(rows pgx.Rows) ([]MessageRow, error) {
 	defer rows.Close()
 	var out []MessageRow
 	for rows.Next() {
 		var m MessageRow
 		if err := rows.Scan(&m.ID, &m.SessionID, &m.Kind, &m.Body, &m.Status,
-			&m.Answer, &m.CreatedAt, &m.AnsweredAt); err != nil {
+			&m.Answer, &m.CreatedAt, &m.AnsweredAt, &m.OwnerOnly); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -1147,7 +1217,7 @@ func scanMessageRows(rows pgx.Rows) ([]MessageRow, error) {
 	return out, rows.Err()
 }
 
-const messageCols = `id, session_id, kind, body, status, answer, created_at, answered_at`
+const messageCols = `id, session_id, kind, body, status, answer, created_at, answered_at, owner_only`
 
 // GetMessage returns one message, or (nil, nil) if not found.
 func GetMessage(ctx context.Context, conn *pgxpool.Pool, id string) (*MessageRow, error) {
@@ -1673,6 +1743,24 @@ func GetSessionRestrictTools(ctx context.Context, conn *pgxpool.Pool, sessionID 
 	return v
 }
 
+// SetSessionNoOperatorFallback marks a session that must never run on operator-supplied material
+// (migration 068): a cluster child of a cron session.
+func SetSessionNoOperatorFallback(ctx context.Context, conn *pgxpool.Pool, sessionID string) error {
+	_, err := conn.Exec(ctx, `UPDATE sessions SET no_operator_fallback = true WHERE id = $1`, sessionID)
+	return err
+}
+
+// GetSessionNoOperatorFallback reports whether a session must never run on operator-supplied
+// material. It fails closed: any error other than a missing session is true.
+func GetSessionNoOperatorFallback(ctx context.Context, conn *pgxpool.Pool, sessionID string) bool {
+	var v bool
+	err := conn.QueryRow(ctx, `SELECT no_operator_fallback FROM sessions WHERE id = $1`, sessionID).Scan(&v)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	return err != nil || v
+}
+
 // SetSessionNewRepo marks a session as launched as "New repository" (migration 035).
 func SetSessionNewRepo(ctx context.Context, conn *pgxpool.Pool, sessionID string) error {
 	_, err := conn.Exec(ctx, `UPDATE sessions SET new_repo = true WHERE id = $1`, sessionID)
@@ -1705,7 +1793,7 @@ func UpdateSessionModelEffort(ctx context.Context, conn *pgxpool.Pool, sessionID
 		UPDATE sessions
 		   SET model  = NULLIF($2, ''),
 		       effort = NULLIF($3, '')
-		 WHERE id = $1
+		 WHERE id = $1 AND discard_requested_at IS NULL AND archived_at IS NULL
 	`, sessionID, model, effort)
 	return err
 }

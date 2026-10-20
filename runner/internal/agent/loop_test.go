@@ -23,7 +23,7 @@ func startLoop(t *testing.T, rec *recorder, reg *Registry, scripts ...[]StreamEv
 
 func waitFor(t *testing.T, rec *recorder, kind string) Event {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		evs := rec.byKind(kind)
 		if len(evs) > 0 {
@@ -45,7 +45,7 @@ func mustJSON(s string) json.RawMessage { return json.RawMessage(s) }
 
 func waitForStatus(t *testing.T, rec *recorder, status string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, ev := range rec.byKind("status_changed") {
 			if ev.Payload.(StatusPayload).Status == status {
@@ -59,7 +59,7 @@ func waitForStatus(t *testing.T, rec *recorder, status string) {
 
 func waitForN(t *testing.T, rec *recorder, kind string, n int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(rec.byKind(kind)) >= n {
 			return

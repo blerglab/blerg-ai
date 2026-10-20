@@ -6,7 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo "skip: docker compose unavailable"; exit 0; }
 out="$(env -u BLERG_COMMIT BLERG_PORT_CORE=9001 BLERG_PORT_BOARD=9002 BLERG_PORT_RUNNER=9003 \
        BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) \
-       BLERG_BOARD_SECRET_KEY=board-secret-sentinel \
+       BLERG_BOARD_SECRET_KEY=board-secret-sentinel BLERG_CORE_BOARD_MINT_KEY=mint-key-sentinel \
        docker compose --env-file /dev/null config)"
 fail=0
 for want in 'http://localhost:9001,http://localhost:9002,http://localhost:9003' \
@@ -14,9 +14,13 @@ for want in 'http://localhost:9001,http://localhost:9002,http://localhost:9003' 
             'BLERG_CORE_PUBLIC_URL: http://localhost:9001' 'BLERG_BOARD_AGENT_URL: http://localhost:9002' \
             'RUNNER_UI_BASE: http://localhost:9003/sessions' 'BLERG_RUNNER_DATA_DIR: /data' \
             'BLERG_RUNNER_CORE_INTERNAL_KEY: k' 'pg_isready -U blerg -d blerg_core' \
-            'BLERG_CORE_COOKIE_SECURE: "false"' 'BLERG_BOARD_SECRET_KEY: board-secret-sentinel'; do
+            'BLERG_CORE_COOKIE_SECURE: "false"' 'BLERG_BOARD_SECRET_KEY: board-secret-sentinel' \
+            'BLERG_BOARD_DEFAULT_RUN_AS_CREATOR: "true"'; do
   grep -qF -- "$want" <<<"$out" || { echo "FAIL: $want"; fail=1; }
 done
+# Run as me: core and the board both get the mint key, and the board never gets the internal key.
+[ "$(grep -c 'BLERG_CORE_BOARD_MINT_KEY: mint-key-sentinel' <<<"$out")" -eq 2 ] || { echo "FAIL: core and board do not both get BLERG_CORE_BOARD_MINT_KEY"; fail=1; }
+grep -q 'BLERG_BOARD_CORE_INTERNAL_KEY' <<<"$out" && { echo "FAIL: the board must not get the core internal key"; fail=1; }
 if grep -E 'localhost:808[123]' <<<"$out" | grep -qv '^#'; then echo "FAIL: a literal default port survived a port override"; fail=1; fi
 
 # The build args carry the git commit the apps show beside the release version: "dev" unless
@@ -29,6 +33,14 @@ out_commit="$(BLERG_COMMIT=abc1234 BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KE
 grep -qE 'host_ip: 127\.0\.0\.1' <<<"$out" || { echo "FAIL: ports not bound to 127.0.0.1 by default"; fail=1; }
 out_lan="$(BLERG_BIND_ADDR=0.0.0.0 BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) docker compose --env-file /dev/null config)"
 grep -qE 'host_ip: 0\.0\.0\.0' <<<"$out_lan" || { echo "FAIL: BLERG_BIND_ADDR override not applied"; fail=1; }
+# First-run setup without a code is allowed only for core, and core is told the address its port is
+# published on, so a LAN-published stack falls back to the setup link.
+[ "$(grep -c 'BLERG_SETUP_ALLOW_LOCAL: "true"' <<<"$out")" -eq 1 ] || { echo "FAIL: BLERG_SETUP_ALLOW_LOCAL must be set on blerg-core only"; fail=1; }
+grep -qF 'BLERG_SETUP_PUBLISHED_ADDR: 127.0.0.1' <<<"$out" || { echo "FAIL: core is not told its loopback published address"; fail=1; }
+[ "$(grep -c 'BLERG_SETUP_TRUST_DOCKER_GATEWAY: "1"' <<<"$out")" -eq 1 ] || { echo "FAIL: only blerg-core is told to trust the Docker gateway"; fail=1; }
+out_code="$(BLERG_SETUP_ALLOW_LOCAL=false BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) docker compose --env-file /dev/null config)"
+grep -qF 'BLERG_SETUP_ALLOW_LOCAL: "false"' <<<"$out_code" || { echo "FAIL: BLERG_SETUP_ALLOW_LOCAL=false cannot turn code-less setup off"; fail=1; }
+grep -qF 'BLERG_SETUP_PUBLISHED_ADDR: 0.0.0.0' <<<"$out_lan" || { echo "FAIL: BLERG_BIND_ADDR does not reach BLERG_SETUP_PUBLISHED_ADDR"; fail=1; }
 
 # Sandbox network: the daemon attaches sandbox containers to a network it finds by its literal
 # name `blerg-sandbox`, so the name must be pinned (not project-prefixed). Only board and runner
@@ -73,6 +85,10 @@ if grep -qiE '^[A-Z_]+=change-?me' .env.example; then echo "FAIL: .env.example s
 grep -q '^BLERG_BOARD_SECRET_KEY=$(openssl rand -base64 32)' blerg-up.sh || { echo "FAIL: blerg-up.sh does not generate BLERG_BOARD_SECRET_KEY"; fail=1; }
 grep -q "grep -q '^BLERG_BOARD_SECRET_KEY=.' .env" blerg-up.sh || { echo "FAIL: blerg-up.sh must only generate BLERG_BOARD_SECRET_KEY when absent"; fail=1; }
 grep -q 'check_b64_key BLERG_BOARD_SECRET_KEY' blerg-up.sh || { echo "FAIL: blerg-up.sh does not validate BLERG_BOARD_SECRET_KEY"; fail=1; }
+# BLERG_CORE_BOARD_MINT_KEY (Run as me): generated on a fresh .env, added to an existing one, validated.
+grep -q '^BLERG_CORE_BOARD_MINT_KEY=$(gen)' blerg-up.sh || { echo "FAIL: blerg-up.sh does not generate BLERG_CORE_BOARD_MINT_KEY"; fail=1; }
+grep -q "grep -q '^BLERG_CORE_BOARD_MINT_KEY=.' .env" blerg-up.sh || { echo "FAIL: blerg-up.sh does not add BLERG_CORE_BOARD_MINT_KEY to an existing .env"; fail=1; }
+grep -qE 'check_secret "\$k".*' blerg-up.sh && grep -q 'BLERG_CORE_INTERNAL_KEY BLERG_CORE_BOARD_MINT_KEY; do check_secret' blerg-up.sh || { echo "FAIL: blerg-up.sh does not validate BLERG_CORE_BOARD_MINT_KEY"; fail=1; }
 
 for s in blerg-up.sh daemon/install.sh; do grep -q '^umask 077' "$s" || { echo "FAIL: $s lacks umask 077"; fail=1; }; done
 

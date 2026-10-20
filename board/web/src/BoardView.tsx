@@ -205,7 +205,12 @@ export function BoardView({ boardId }: { boardId: string }) {
     } finally { load(); }
   };
 
+  // Change pings arrive in bursts (a card created and moved, a session reporting), and each one
+  // starts a reload. Only the newest reload may land: an older one that answers late would put back
+  // the board as it was before the change, and a card a script created would vanish again.
+  const [loadTicket] = useState(latestOnly);
   const load = useCallback(async () => {
+    const isLatest = loadTicket();
     const [b, cols, cs, act, deps] = await Promise.all([
       api<Board>(`/api/boards/${boardId}`),
       api<Column[]>(`/api/boards/${boardId}/columns`),
@@ -213,10 +218,11 @@ export function BoardView({ boardId }: { boardId: string }) {
       api<Record<string, ActiveInfo>>(`/api/boards/${boardId}/active-sessions`).catch(() => ({})),
       api<Deployment[]>(`/api/boards/${boardId}/deployments`).catch(() => []),
     ]);
+    if (!isLatest()) return;
     setBoard(b); setColumns(cols ?? []);
     setCards((cs ?? []).slice().sort(byRank));
     setActive(act ?? {}); setDeploys(deps ?? []);
-  }, [boardId]);
+  }, [boardId, loadTicket]);
 
   // A board_changed ping refreshes the run status too, not just the cards:
   // concurrency is a board setting the chip renders, so without this a PATCH
@@ -532,4 +538,14 @@ export function BoardView({ boardId }: { boardId: string }) {
       )}
     </>
   );
+}
+
+// latestOnly hands out one ticket per call; a ticket says whether a newer one has been handed out
+// since. A reload holds a ticket and lands only while it is still the newest.
+function latestOnly(): () => () => boolean {
+  let seq = 0;
+  return () => {
+    const mine = ++seq;
+    return () => mine === seq;
+  };
 }

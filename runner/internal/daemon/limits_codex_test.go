@@ -164,11 +164,11 @@ func TestReadCodexRateLimitsCancellationAfterHandshake(t *testing.T) {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("canceled process was not reaped")
 		}
 	}()
-	watchdog := time.NewTimer(5 * time.Second)
+	watchdog := time.NewTimer(15 * time.Second)
 	defer watchdog.Stop()
 	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()

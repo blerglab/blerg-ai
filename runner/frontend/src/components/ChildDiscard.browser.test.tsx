@@ -4,6 +4,7 @@ import {page,userEvent} from 'vitest/browser'
 import {MemoryRouter} from 'react-router-dom'
 import {StartedSessions} from './ChildSessions'
 import SessionCard from './SessionCard'
+import {ParentDiscardAction} from './ChildDiscard'
 import {OpenSessionContext} from '../lib/openSession'
 import {makeDaemon,makeSession} from '../test/fixtures'
 import type {LiveChildSession} from '../lib/liveState'
@@ -21,7 +22,7 @@ describe('human child discard in Chromium',()=>{
   let finish!:(response:{ok:boolean})=>void
   apiFetch.mockImplementation(()=>new Promise(resolve=>{finish=resolve}))
   const children=Array.from({length:7},(_,n)=>({...child,id:`c${n}`,title:`Child ${n}`}))
-  const panel=(items:LiveChildSession[]) => <MemoryRouter><div style={{width:'min(360px, 100%)'}}><StartedSessions sessionId="parent" children={items} grants={[]} now={now}/></div></MemoryRouter>
+  const panel=(items:LiveChildSession[]) => <MemoryRouter><div style={{width:'min(360px, 100%)'}}><StartedSessions sessionId="parent" children={items} now={now}/></div></MemoryRouter>
   const{container,getByRole,rerender}=render(panel(children))
   expect(container.querySelectorAll('[data-testid="rail-child"]')).toHaveLength(7)
   const trigger=getByRole('button',{name:'Discard Child 0'})
@@ -66,7 +67,7 @@ describe('human child discard in Chromium',()=>{
   expect(apiFetch).not.toHaveBeenCalled()
  })
  it('keeps the same child row in place through running, idle and stopped updates',()=>{
-  const panel=(status:string)=> <MemoryRouter><StartedSessions sessionId="parent" children={[{...child,status}]} grants={[]} now={now}/></MemoryRouter>
+  const panel=(status:string)=> <MemoryRouter><StartedSessions sessionId="parent" children={[{...child,status}]} now={now}/></MemoryRouter>
   const{container,rerender}=render(panel('running'))
   const row=container.querySelector('[data-testid="rail-child"]')
   for(const status of ['idle','stopped','running']){
@@ -75,4 +76,29 @@ describe('human child discard in Chromium',()=>{
    expect(row).toHaveTextContent(status)
   }
  })
+})
+
+
+it.each([1280,390])('confirms parent discard including Keep running workers at width %s', async width => {
+ await page.viewport(width,800)
+ const {getByRole,getByText} = render(<ParentDiscardAction sessionId="parent /" title="Parent"/>)
+ apiFetch.mockResolvedValue({ok:true,json:async()=>({status:'discarded',session_id:'parent /',archived_at:'2026-10-20T12:00:00Z'})})
+ const trigger = getByRole('button',{name:'Discard Parent'})
+ await userEvent.click(trigger)
+ const dialog=getByRole('dialog',{name:'Discard session and all children?'})
+ expect(dialog.getBoundingClientRect().left).toBeGreaterThanOrEqual(0)
+ expect(dialog.getBoundingClientRect().right).toBeLessThanOrEqual(innerWidth)
+ expect(getByText(/including children marked Keep running and work in progress/)).toBeVisible()
+ expect(document.activeElement).toBe(getByRole('button',{name:'Cancel'}))
+ await userEvent.keyboard('{Shift>}{Tab}{/Shift}')
+ expect(document.activeElement).toBe(getByRole('button',{name:'Discard session and children'}))
+ await userEvent.keyboard('{Tab}')
+ expect(document.activeElement).toBe(getByRole('button',{name:'Cancel'}))
+ expect(apiFetch).not.toHaveBeenCalled()
+ await userEvent.keyboard('{Escape}')
+ expect(trigger).toHaveFocus()
+ await userEvent.click(trigger)
+ await userEvent.click(getByRole('button',{name:'Discard session and children'}))
+ await waitFor(()=>expect(apiFetch).toHaveBeenCalledWith('/api/sessions/parent%20%2F/discard',{method:'POST'}))
+ expect(trigger).toBeDisabled()
 })

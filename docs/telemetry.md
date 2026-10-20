@@ -174,3 +174,36 @@ person who can see the session; one they cannot see answers 404, like an unknown
 is `null`, with `"tokens_hidden": true`, unless the caller started the session or is an admin.
 `GET /api/insights/prices` lists the prices (any signed-in person);
 `PUT /api/insights/prices` and `DELETE /api/insights/prices?model=...` change them (admin only).
+
+### Live child telemetry
+
+The Live panel's child rows include `tool_calls`, a bounded `activity` line,
+`activity_since`, `last_activity_at`, and `usage_status` (`pending`, `reported`,
+`hidden`). Counts describe recorded tool calls and reported tokens across model
+requests, not context size or a claim that the task succeeded. An idle worker
+remains idle even while its session process is kept alive.
+
+Engines can publish `usage_updated` with `scope: "turn"`, `model`, and a complete
+`usage` object (`input_tokens`, `output_tokens`, `cache_read_tokens`,
+`cache_write_tokens`). This is a replacement snapshot of the current turn,
+**not a billable event**. Explicit `usage: null` clears progress when a new turn
+starts or resumes. Hermes translates the native gateway's lifetime counters to
+this current-turn scope; valid idle lifetime reports establish the next baseline
+without resurrecting a finished turn. Missing native figures remain unknown. An additive `usage_reported: false` on
+completion distinguishes an unreported final usage object from a real zero;
+older producers may omit it. It does not alter ledger sums.
+
+Live display combines the latest eligible snapshot with completed-turn totals
+at one event-sequence boundary. Completion replaces the snapshot instead of
+adding it twice; Insights and billing continue to read only their established
+completed-turn/subagent ledger. An old daemon reports no snapshots: tools and
+completed usage still appear, with pending usage until a report exists. Older
+renderers ignore the unknown event kind.
+
+Child visibility is checked independently from parent visibility. Token/cost
+figures follow the owner/admin Insights rule; other viewers receive hidden
+usage. Activity is the same bounded tool-input summary already available to a
+viewer of that child's transcript; it adds no credential, environment or output
+extraction. `local: true` is the owning daemon's observed endpoint classification,
+not an inferred dollar price or a guarantee about hardware costs. Unknown costs
+remain absent; monetary values, when provided, use configured model prices.

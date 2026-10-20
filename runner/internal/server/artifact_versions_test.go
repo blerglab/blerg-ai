@@ -357,7 +357,7 @@ func TestArtifactVersionsEventPayloadCarriesVersion(t *testing.T) {
 				t.Fatal(err)
 			}
 			last = ev.Payload
-		case <-time.After(time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("no broadcast")
 		}
 	}

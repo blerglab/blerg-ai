@@ -144,7 +144,7 @@ BLERG_SKIP_KUBECTL=1 ./install/desktop/compose_test.sh   # skips without `docker
 BLERG_SKIP_KUBECTL=1 ./install/k8s/deploy_test.sh        # skips the kubectl dry-run; no cluster needed
 bash ./install/desktop/hostcheck_test.sh                 # engine preflight; needs no docker
 bash ./install/desktop/daemon_install_test.sh            # the daemon token check and connection wait; stubs only
-(cd runner/.claude/skills/session-messaging && python3 -m unittest test_blerg_runner && python3 -m pytest -q blerg_runner_board_test.py)
+(cd runner/.claude/skills/session-messaging && python3 -m unittest test_blerg_runner test_blerg_runner_review_request && python3 -m pytest -q blerg_runner_board_test.py)
 ./scripts/scrub.sh && ./scripts/scrub_test.sh            # no hostnames, addresses or personal paths
 ./scripts/check_links_test.sh && ./scripts/check_links.sh   # doc links and stale references
 ```
@@ -168,7 +168,9 @@ export BLERG_CORE_LISTEN=127.0.0.1:8080                    # host:port; keeps th
 make run
 ```
 
-The first boot logs the one-time admin password once (`BLERG_BOOTSTRAP_ADMIN_PASSWORD`).
+A fresh database has no account: `DATABASE_URL=… go run ./core/cmd/blerg-core setup-link`
+prints a one-time setup link (with `BLERG_CORE_PUBLIC_URL` unset, the path alone: open it on
+`http://127.0.0.1:8080`) where you choose the first admin's username and password.
 Every variable is listed in [`core/docs/CONFIG.md`](core/docs/CONFIG.md). Running the board
 and runner servers from source is not covered here.
 

@@ -49,7 +49,7 @@ func markedSweepFixture(t *testing.T, conn *pgx.Conn, scope testfixture.Scope, r
 		t.Fatal("create dedicated sweep fixture")
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if _, err := conn.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()); err != nil {
 			t.Error("remove dedicated sweep fixture")

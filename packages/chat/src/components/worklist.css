@@ -657,3 +657,53 @@ a.ticket-key:focus-visible {
     font-size: 19px;
   }
 }
+
+/* Doing remains recognizable as a partially completed circle without motion. History snapshots
+   stay still; only current work rotates. Navigation briefly pulses the row, never the icon. */
+.checklist-progress {
+  display: inline-block;
+  box-sizing: border-box;
+  width: .85em;
+  height: .85em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -.05em;
+  color: var(--chat-accent, currentColor);
+}
+.checklist-progress.animated { animation: checklist-working 1.2s linear infinite; }
+@keyframes checklist-working { to { transform: rotate(360deg); } }
+/* These rows receive programmatic navigation focus, never replace a keyboard control. */
+.checklist-items li[tabindex="-1"]:focus { outline: none; }
+.checklist-items li.checklist-highlight {
+  border-radius: 3px;
+  outline: none;
+  animation: checklist-locate 700ms ease-in-out 2;
+}
+@keyframes checklist-locate {
+  0%, 100% { background-color: transparent; }
+  50% { background-color: color-mix(in srgb, var(--chat-accent, #7799dd) 10%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .checklist-progress.animated { animation: none; }
+  .checklist-items li.checklist-highlight {
+    animation: none;
+    background-color: color-mix(in srgb, var(--chat-accent, #7799dd) 10%, transparent);
+  }
+}
+
+.subagent-checklist { padding: 2px 10px 6px; font-size: var(--chat-text-sm); overflow-wrap: anywhere; }
+.checklist-work-link { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.checklist-work-link:hover, .checklist-work-link:focus-visible { text-decoration: underline; }
+
+/* Metadata owns a compact row; it must not compete with the item title's width. */
+.checklist-assignees {
+  flex: 0 0 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding-inline-start: calc(1em + 6px);
+}
+.checklist-items > li + li {
+  border-block-start: 1px solid color-mix(in srgb, var(--chat-border, #313d4f) 25%, transparent);
+  padding-block-start: 2px;
+}

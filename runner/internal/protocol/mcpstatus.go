@@ -9,6 +9,7 @@ import (
 const MCPStatusKind = "mcp_status"
 
 // MCPServerStatus is public connection metadata, never an endpoint or credential.
+// Status lazy means callable on demand, with no claim to an open connection.
 type MCPServerStatus struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
@@ -59,7 +60,7 @@ func SanitizeMCPStatus(p MCPStatusPayload) MCPStatusPayload {
 		}
 		status := strings.ToLower(strings.TrimSpace(server.Status))
 		switch status {
-		case "pending", "connected", "failed", "needs-auth", "disabled", "unknown":
+		case "pending", "lazy", "connected", "failed", "needs-auth", "disabled", "unknown":
 		default:
 			status = "unknown"
 		}

@@ -69,7 +69,7 @@ func TestDelegationDelayedPauseDoesNotExpirePostResumeRequest(t *testing.T) {
 	pausedAPI.onParentPaused(fx.parent)
 	select {
 	case <-entered:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		unblock()
 		t.Fatal("pause worker did not reach its controlled database checkout")
 	}
@@ -154,7 +154,7 @@ func TestDelegationCoalescedTerminalAndNewPauseExpireNewRequest(t *testing.T) {
 	delayed.onParentTerminalEnd(fx.parent)
 	select {
 	case <-entered:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("terminal worker never reached its controlled checkout")
 	}
 	if err := db.ReviveSessionAs(t.Context(), fx.pool, fx.parent, fx.dc.ID, "idle", "/repos/app", "app", "Parent", "", db.SessionOrigin{}); err != nil {

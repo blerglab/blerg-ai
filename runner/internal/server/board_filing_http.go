@@ -187,3 +187,50 @@ func (c *httpBoardFiling) Create(ctx context.Context, proof mcpgw.Proof, intent,
 	}
 	return json.Marshal(receipt)
 }
+
+// Describe reads a created card's public summary with the approver's read access: its title,
+// type and priority, and its column's name. Never the body.
+func (c *httpBoardFiling) Describe(ctx context.Context, proof mcpgw.Proof, board, cardID string) (filedCard, error) {
+	if !validSessionID(cardID) {
+		return filedCard{}, errors.New("invalid card id")
+	}
+	ex := &mcpgw.HTTPBoardExchanger{BaseURL: c.core.BaseURL, InternalKey: c.core.InternalKey, HTTP: c.core.httpClient()}
+	tok, err := ex.ExchangeReadOnly(ctx, proof, board, "")
+	if err != nil {
+		return filedCard{}, apiErrorf(503, "Board access could not be verified.")
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		_ = ex.Revoke(cleanup, proof.AccountID, tok.Sub)
+	}()
+	raw, err := c.boardRequest(ctx, "GET", "/api/cards/"+cardID, tok.Token, nil)
+	if err != nil {
+		return filedCard{}, err
+	}
+	var card struct {
+		BoardID  string  `json:"board_id"`
+		Number   int     `json:"number"`
+		Title    string  `json:"title"`
+		Type     string  `json:"type"`
+		Priority string  `json:"priority"`
+		ColumnID *string `json:"column_id"`
+	}
+	if json.Unmarshal(raw, &card) != nil || card.BoardID != board {
+		return filedCard{}, errors.New("board returned an invalid card")
+	}
+	out := filedCard{ID: cardID, BoardID: board, Number: card.Number, Title: card.Title, Type: card.Type, Priority: card.Priority}
+	if card.ColumnID != nil {
+		if cols, err := c.boardRequest(ctx, "GET", "/api/boards/"+board+"/columns", tok.Token, nil); err == nil {
+			var list []struct{ ID, Name string }
+			if json.Unmarshal(cols, &list) == nil {
+				for _, col := range list {
+					if col.ID == *card.ColumnID {
+						out.Column = col.Name
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}

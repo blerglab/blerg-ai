@@ -1,3 +1,4 @@
+import { modelDisplayName } from '@blerglab/chat'
 // SessionInsights: one session's figures (time, work, subagents, tokens and estimated cost) in a dialog
 // opened from the session header. Fetched on open, and every 30 s while the session is live. The dialog
 // shell is the Skills & plugins one (a modal on desktop, a full-screen sheet on narrow screens); the body
@@ -167,7 +168,7 @@ function formatAgo(ms: number): string {
 
 function MetaStrip({ d, ago, refreshing, background }: { d: SessionInsightsResponse; ago: number; refreshing: boolean; background: boolean }) {
   const state = sessionState(d, background)
-  const model = d.model.replace(/^claude-/, '')
+  const model = modelDisplayName(d.model)
   return (
     <div className="si-strip" data-testid="session-insights-meta">
       <ul className="si-chips" aria-label="About this session">
@@ -513,6 +514,6 @@ function StartedSessionsCard({ d }: { d: SessionInsightsResponse }) {
   const started = d.started_sessions
   if (!started?.count) return null
   return <Card testId="si-started-sessions" title="Started sessions" aside={String(started.count)}>
-    <ul>{started.sessions.map(s => <li key={s.id}><EngineBadge engine={s.engine} /> <Link to={`/sessions/${encodeURIComponent(s.id)}`}>{s.title || 'Untitled session'}</Link> · {s.model}{s.tokens !== null ? ` · ${formatTokens(s.tokens)} tokens` : ''}{s.cost_usd !== undefined ? ` · ${formatUSD(s.cost_usd)}` : ''}</li>)}</ul>
+    <ul>{started.sessions.map(s => <li key={s.id}><EngineBadge engine={s.engine} /> <Link to={`/sessions/${encodeURIComponent(s.id)}`}>{s.title || 'Untitled session'}</Link> · <span title={s.model}>{modelDisplayName(s.model)}</span>{s.tokens !== null ? ` · ${formatTokens(s.tokens)} tokens` : ''}{s.cost_usd !== undefined ? ` · ${formatUSD(s.cost_usd)}` : ''}</li>)}</ul>
   </Card>
 }

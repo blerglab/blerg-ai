@@ -146,9 +146,21 @@ outside the working directory (inside the container for the sandbox, from a Kube
 pod), so the tokens do not appear in a process listing, in `docker inspect` or in the Job spec. The
 tokens are deleted when the session ends.
 
+A session on a workstation daemon cannot always reach that listener (on a cluster install it is an
+in-cluster address). An up-to-date daemon therefore dials the gateway through the address it already
+reaches the server at: the runner serves the same gateway on its web port under `/mcp-gw/`. That
+route serves only tokens issued for it to a session that runs on a daemon, and stops serving one
+after seven days without use unless its daemon reconnects with the session running. Every other
+token gets the same refusal (one answer below the failure allowance, one above it), and failed attempts are limited per client address (behind a proxy,
+per real client only when the proxy is listed in `BLERG_RUNNER_TRUSTED_PROXIES`).
+An operator without workstation daemons can switch the route off with
+`BLERG_RUNNER_MCP_GW_PUBLIC=off`.
+
 Only the runtimes that can contain a session carry connections: a **cluster pod** or the **Docker
 sandbox**. A session on the bare host (This machine) is refused, because it has your full shell and
-credentials. Connections also need the `claude` engine and a daemon or cluster that supports them;
+credentials. The one exception is the **board** you pick at launch: it is the gateway's fixed tool
+set over your own board, so a session you launch on This machine may take it, alone, when its
+daemon is up to date. Connections also need the `claude` engine and a daemon or cluster that supports them;
 the launch is refused with a specific message otherwise.
 
 A session with connections is **private** to the account that started it. What else it may do

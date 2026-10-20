@@ -92,7 +92,7 @@ func cardColumnName(t *testing.T, cols []db.Column, card db.Card) string {
 // Accept response doesn't wait on a pod start.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

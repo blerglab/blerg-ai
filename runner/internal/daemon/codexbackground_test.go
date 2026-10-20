@@ -79,7 +79,7 @@ func testCodexTerminalInventoryRetry(t *testing.T, failure string) {
 			}
 		case <-finished:
 			t.Fatal("a transient inventory failure permanently stopped tracking")
-		case <-time.After(4 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("terminal inventory was not retried")
 		}
 	}

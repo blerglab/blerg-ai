@@ -39,6 +39,14 @@ spec:
                 secretKeyRef:
                   name: blerg-secrets
                   key: BLERG_CORE_INTERNAL_KEY
+            # The board presents this to mint "Run as me" automation tokens; it
+            # opens only POST /internal/tokens/board-automation(/revoke).
+            - name: BLERG_CORE_BOARD_MINT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_CORE_BOARD_MINT_KEY
+                  optional: true
             # core's local KMS key (base64 of 32 random bytes) — without it
             # BLERG_CORE_KEYBACKEND defaults away from "local" silently and
             # per-account credential storage never comes up.

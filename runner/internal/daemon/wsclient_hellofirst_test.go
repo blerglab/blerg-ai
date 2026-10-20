@@ -42,7 +42,7 @@ func TestWSClientHelloIsAlwaysTheFirstFrame(t *testing.T) {
 		ReconnectInitial: time.Millisecond, ReconnectMax: time.Millisecond,
 	})
 	client.sleep = func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil }
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	go func() {
 		for ctx.Err() == nil {

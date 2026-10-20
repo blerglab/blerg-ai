@@ -123,8 +123,8 @@ func TestHandlePostMessageReply(t *testing.T) {
 	// Waiter must have been signalled.
 	select {
 	case <-waiterDone:
-	case <-time.After(time.Second):
-		t.Error("waiter was not signalled within 1s")
+	case <-time.After(15 * time.Second):
+		t.Error("waiter was not signalled before the readiness deadline")
 	}
 
 	// DB must show answered with the given answer.

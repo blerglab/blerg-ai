@@ -147,8 +147,9 @@ func personShape(p agent.UserMessagePayload) bool {
 	return !strings.HasPrefix(strings.TrimSpace(p.Text), harness.RestartNote)
 }
 
-// IsPersonMessage is §3.2's four request checks: drawn as the person's; from "chat" or "human" ("runner" and
-// "blerg-board" only when first, the start prompt or a card's task); not a harness command; not
+// IsPersonMessage is §3.2's four request checks: drawn as the person's; from "chat" or "human" ("runner",
+// "blerg-board", "session" and "cron" only when first: the start prompt, a card's task, a parent's task
+// for its child, a cron's prompt); not a harness command; not
 // feedback. first: this is the session's first message drawn as the person's.
 func IsPersonMessage(p agent.UserMessagePayload, first bool) bool {
 	if !personShape(p) {
@@ -156,7 +157,7 @@ func IsPersonMessage(p agent.UserMessagePayload, first bool) bool {
 	}
 	switch p.Source {
 	case "chat", "human":
-	case "runner", "blerg-board":
+	case "runner", "blerg-board", "session", "cron":
 		if !first {
 			return false
 		}

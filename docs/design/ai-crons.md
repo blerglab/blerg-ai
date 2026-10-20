@@ -341,12 +341,30 @@ The gateway implements the MCP Streamable HTTP transport as a proxy and is a str
 The gateway is served on a **separate listener and `http.Server`** in the runner
 process (`BLERG_RUNNER_MCP_GW_ADDR`, default a distinct port), with its own read, write
 and idle timeouts, so a hostile upstream or a looping agent cannot starve the control
-plane and the gateway is never reachable through the public Ingress, which routes only
-the main port. On Kubernetes it is exposed only through an internal Service, the
-session network-policy example allows pod-to-gateway traffic on that port, and a
+plane through it, and that listener is never reachable through the public Ingress, which
+routes only the main port. On Kubernetes it is exposed only through an internal Service,
+the session network-policy example allows pod-to-gateway traffic on that port, and a
 manifest test asserts the Ingress does not route it. On desktop it is published only on
 the sandbox network. Every request is authenticated by the token before any body is
 read, has body-size and stream caps, and the per-grant limits above.
+
+Sessions on workstation daemons cannot reach that listener when the runner is elsewhere
+(a cluster install). For them the runner also serves the gateway on its **main port**
+under `/mcp-gw/` (so through the Ingress), with narrower rules: it accepts only grants
+issued for that route (marked when the grant is sent to a daemon that dials it there) of
+a session that runs on a daemon, and only within seven days of their last use or of their
+daemon reconnecting with the session running; every other token gets the same JSON-RPC
+401, or the same 429 once its address is over its allowance; failed attempts are limited
+per client address (the real client behind a proxy listed in
+`BLERG_RUNNER_TRUSTED_PROXIES`, else the TCP peer, shared by everyone behind an unlisted
+proxy; any peer inside a listed range, an in-cluster pod for example, can claim another
+address, which evades the limit but grants nothing); a well-formed token from an address
+over its allowance is still looked up within a global budget, so a valid token is served
+unless a sustained flood exhausts that budget; and each exchange has a deadline that
+answers in JSON-RPC. Cron sessions and cluster
+pods never use it. `BLERG_RUNNER_MCP_GW_PUBLIC=off` turns it off (the prefix answers
+404). Traffic on this route shares the main server with the control plane, which the
+separate listener otherwise avoids.
 
 ## 6. Selecting connections
 

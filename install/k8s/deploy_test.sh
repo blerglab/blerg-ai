@@ -10,17 +10,27 @@ for f in $(grep -E '^\s+- ' "$here/kustomization.yaml" | sed 's/^\s*- //'); do c
 cp "$here/kustomization.yaml" "$tmp/"
 for f in "$tmp"/*.yaml; do
   REGISTRY=reg.example TAG=t1 DOMAIN=blerg.example SCHEME=https \
-  AGENT_IMAGE=reg.example/blerg-runner-agent:t1 WEBHOOK_ALLOW_PRIVATE=false \
-    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE}' < "$f" > "$f.r" && mv "$f.r" "$f"
+  AGENT_IMAGE=reg.example/blerg-runner-agent:t1 WEBHOOK_ALLOW_PRIVATE=false TRUSTED_PROXIES=192.0.2.0/24 \
+    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES}' < "$f" > "$f.r" && mv "$f.r" "$f"
 done
 fail=0
 if grep -rn '\${' "$tmp"/*.yaml; then echo "FAIL: unsubstituted placeholder"; fail=1; fi
 for want in BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE BLERG_CORE_INTERNAL_KEY BLERG_RUNNER_CORE_INTERNAL_KEY BLERG_CORE_LOCAL_KEY BLERG_BOARD_SECRET_KEY \
+            BLERG_CORE_BOARD_MINT_KEY BLERG_BOARD_DEFAULT_RUN_AS_CREATOR \
             BLERG_CORE_PUBLIC_URL BLERG_BOARD_PUBLIC_URL BLERG_BOARD_AGENT_URL RUNNER_UI_BASE \
             BLERG_RUNNER_DATA_DIR proxy-body-size runAsNonRoot 'path: /healthz' 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; do
   grep -rqF -- "$want" "$tmp" || { echo "FAIL: $want not wired"; fail=1; }
 done
 grep -q 'https://board.blerg.example' "$tmp/configmap.yaml" || { echo "FAIL: SCHEME not applied to public URLs"; fail=1; }
+# Run as me: core and the board both read the mint key; the board never gets the internal key.
+for f in core-deployment.yaml board-deployment.yaml; do
+  grep -qF 'key: BLERG_CORE_BOARD_MINT_KEY' "$tmp/$f" || { echo "FAIL: $f does not read BLERG_CORE_BOARD_MINT_KEY"; fail=1; }
+done
+grep -q 'CORE_INTERNAL_KEY' "$tmp/board-deployment.yaml" && { echo "FAIL: the board must not get the core internal key"; fail=1; }
+grep -q 'secret_add BLERG_CORE_BOARD_MINT_KEY' "$here/deploy.sh" || { echo "FAIL: deploy.sh does not write BLERG_CORE_BOARD_MINT_KEY"; fail=1; }
+# The gateway's public route throttles the real client behind the ingress (TRUSTED_PROXIES).
+grep -qF 'BLERG_RUNNER_TRUSTED_PROXIES: "192.0.2.0/24"' "$tmp/configmap.yaml" || { echo "FAIL: TRUSTED_PROXIES not rendered"; fail=1; }
+grep -qF -- 'key: BLERG_RUNNER_TRUSTED_PROXIES, optional: true' "$tmp/runner-deployment.yaml" || { echo "FAIL: BLERG_RUNNER_TRUSTED_PROXIES not passed to the runner"; fail=1; }
 # The ingress takes a body above the runner's 100 MiB per-file default, and the runner reads its
 # file limits from the ConfigMap.
 grep -qF 'nginx.ingress.kubernetes.io/proxy-body-size: "128m"' "$tmp/ingress.yaml" \
@@ -237,6 +247,100 @@ rc=0; claim_check '10Gi|standard|2026-10-16T10:00:00Z' 0 10Gi || rc=$?
 rc=0; claim_check 'error: You must be logged in to the server (Unauthorized)' 1 10Gi || rc=$?
 [ "$rc" -eq 1 ] || { echo "FAIL: an unreadable claim (not NotFound) does not stop the deploy ($rc)"; fail=1; }
 grep -vE '^\s*#' "$here/deploy.sh" | grep -qE 'delete (pvc|persistentvolumeclaim)|blerg-runner-data.*delete' && { echo "FAIL: deploy.sh deletes the data claim"; fail=1; }
+
+# First-run setup at the end of a deploy, against a stubbed kubectl: a fresh install prints the
+# setup link from `blerg-core setup-link` (on a terminal only — the link is a credential; without
+# one nothing is minted), an install with accounts prints nothing, and a failure says how to get
+# the link by hand.
+grep -qxF 'first_run_setup_notice' "$here/deploy.sh" || { echo "FAIL: deploy.sh does not end with the first-run setup notice"; fail=1; }
+grep -q 'BLERG_BOOTSTRAP_ADMIN_PASSWORD' "$here/deploy.sh" && { echo "FAIL: deploy.sh still points at a bootstrap password in the log"; fail=1; }
+setup_notice() { # $1 = stub stdout, $2 = stub stderr, $3 = stub exit status, $4 = tty (1/0)
+  local o="$1" e="$2" st="$3" tty="$4"
+  : > "$tmp/kubectl.calls"
+  kubectl() {
+    echo "$*" >> "$tmp/kubectl.calls"
+    case "$*" in
+      "-n blerg exec deploy/blerg-core -- /blerg-core setup-link"|"-n blerg exec deploy/blerg-core -- /blerg-core setup-link --check") ;;
+      *) echo "unexpected kubectl $*" >&2; return 9 ;;
+    esac
+    case "$*" in *--check) ;; *) [ -n "$o" ] && echo "$o" ;; esac
+    [ -n "$e" ] && echo "$e" >&2; return "$st"
+  }
+  stdout_is_tty() { [ "$tty" = 1 ]; }
+  local rc=0
+  first_run_setup_notice >"$tmp/setup.out" 2>&1 || rc=$?
+  unset -f kubectl
+  stdout_is_tty() { [ -t 1 ]; }
+  return "$rc"
+}
+link='https://blerg.example/setup#code=abcDEF123'
+setup_notice "$link" '' 0 1 || { echo "FAIL: setup notice failed the deploy"; fail=1; }
+{ grep -qF "$link" "$tmp/setup.out" && grep -q 'FINISH SETUP' "$tmp/setup.out" && grep -q 'credential' "$tmp/setup.out"; } \
+  || { echo "FAIL: a fresh install on a terminal does not print the setup link prominently"; fail=1; }
+setup_notice "$link" '' 0 0 || { echo "FAIL: setup notice failed the deploy"; fail=1; }
+{ ! grep -qF 'code=' "$tmp/setup.out" && grep -q 'FINISH SETUP' "$tmp/setup.out" && grep -qF '/blerg-core setup-link' "$tmp/setup.out"; } \
+  || { echo "FAIL: without a terminal the link must not be printed, only how to get it"; fail=1; }
+# Without a terminal nothing is minted: only the read-only --check runs, so a link the person
+# already has keeps working.
+[ "$(cat "$tmp/kubectl.calls")" = "-n blerg exec deploy/blerg-core -- /blerg-core setup-link --check" ] \
+  || { echo "FAIL: a non-terminal deploy minted a setup code: $(cat "$tmp/kubectl.calls")"; fail=1; }
+for tty in 1 0; do
+  setup_notice '' 'setup is complete: an account already exists.' 1 "$tty" || { echo "FAIL: setup notice failed the deploy"; fail=1; }
+  [ ! -s "$tmp/setup.out" ] || { echo "FAIL: an install with accounts must print nothing new (tty=$tty)"; fail=1; }
+  setup_notice '' 'error: unable to upgrade connection' 1 "$tty" || { echo "FAIL: setup notice failed the deploy"; fail=1; }
+  { grep -qF '/blerg-core setup-link' "$tmp/setup.out" && ! grep -q 'FINISH SETUP' "$tmp/setup.out"; } \
+    || { echo "FAIL: an exec failure does not say how to get the link (tty=$tty)"; fail=1; }
+done
+
+# The cluster's shared Hermes provider configuration: HERMES_PROVIDERS_FILE names a local
+# config.yaml fragment; deploy.sh turns it into Secret blerg/blerg-hermes-providers (key
+# config.yaml) ONLY when the variable is set, the runner reads it through an optional
+# secretKeyRef, and nothing about it is ever on a command line but the file's path.
+grep -qF 'hermes_providers_secret "${HERMES_PROVIDERS_FILE:-}" "$script_dir"' "$here/deploy.sh" \
+  || { echo "FAIL: deploy.sh does not create the shared Hermes provider Secret"; fail=1; }
+grep -qE '^# HERMES_PROVIDERS_FILE=' "$here/.env.example" || { echo "FAIL: .env.example does not document HERMES_PROVIDERS_FILE"; fail=1; }
+grep -qF 'secretKeyRef: { name: blerg-hermes-providers, key: config.yaml, optional: true }' "$tmp/runner-deployment.yaml" \
+  || { echo "FAIL: the runner does not read the shared Hermes providers as an optional Secret"; fail=1; }
+grep -A2 -F -- '- name: BLERG_RUNNER_HERMES_PROVIDERS' "$tmp/runner-deployment.yaml" | grep -qF 'blerg-hermes-providers' \
+  || { echo "FAIL: BLERG_RUNNER_HERMES_PROVIDERS is not wired to blerg-hermes-providers"; fail=1; }
+for doc in README.md CLUSTER-RUNTIME.md; do
+  grep -qF 'HERMES_PROVIDERS_FILE' "$here/$doc" || { echo "FAIL: $doc does not document HERMES_PROVIDERS_FILE"; fail=1; }
+done
+[ -f "$here/hermes-providers.example.yaml" ] || { echo "FAIL: no hermes-providers.example.yaml"; fail=1; }
+grep -qF 'hermes-providers.example.yaml' "$here/kustomization.yaml" && { echo "FAIL: the provider example is in the kustomization"; fail=1; }
+hermes_secret() { # $1 = HERMES_PROVIDERS_FILE value, $2 = base dir; records kubectl calls
+  : > "$tmp/kubectl.calls"
+  kubectl() { echo "$*" >> "$tmp/kubectl.calls"; cat >/dev/null; return 0; }
+  local rc=0
+  hermes_providers_secret "$1" "$2" >"$tmp/hermes.out" 2>&1 </dev/null || rc=$?
+  unset -f kubectl
+  return "$rc"
+}
+hdir="$tmp/hermes"; mkdir -m 700 "$hdir"
+printf 'providers:\n  local-a:\n    base_url: http://192.0.2.10:8000/v1\n    api_key: fixture-provider-secret\n' > "$hdir/providers.yaml"
+hermes_secret '' "$hdir" || { echo "FAIL: an unset HERMES_PROVIDERS_FILE failed the deploy"; fail=1; }
+[ ! -s "$tmp/kubectl.calls" ] || { echo "FAIL: an unset HERMES_PROVIDERS_FILE still touched the cluster: $(cat "$tmp/kubectl.calls")"; fail=1; }
+hermes_secret "$hdir/providers.yaml" / || { echo "FAIL: a valid provider file was refused: $(cat "$tmp/hermes.out")"; fail=1; }
+grep -qF -- "-n blerg create secret generic blerg-hermes-providers --from-file=config.yaml=$hdir/providers.yaml --dry-run=client -o yaml" "$tmp/kubectl.calls" \
+  || { echo "FAIL: the provider Secret is not created from the file: $(cat "$tmp/kubectl.calls")"; fail=1; }
+grep -qxF -- 'apply -f -' "$tmp/kubectl.calls" || { echo "FAIL: the provider Secret is not applied"; fail=1; }
+if grep -q 'fixture-provider-secret\|192.0.2.10' "$tmp/kubectl.calls" "$tmp/hermes.out"; then echo "FAIL: provider file contents reached a command line or the log"; fail=1; fi
+hermes_secret providers.yaml "$hdir" || { echo "FAIL: a path relative to install/k8s was refused"; fail=1; }
+grep -qF -- "--from-file=config.yaml=$hdir/providers.yaml" "$tmp/kubectl.calls" || { echo "FAIL: a relative path is not resolved against install/k8s"; fail=1; }
+: > "$hdir/empty.yaml"
+head -c 65537 /dev/zero | tr '\0' '#' > "$hdir/big.yaml"
+head -c 65536 /dev/zero | tr '\0' '#' > "$hdir/max.yaml"
+hermes_secret "$hdir/max.yaml" / || { echo "FAIL: a 64 KiB provider file was refused"; fail=1; }
+hermes_secret "$hdir/big.yaml" / || true; grep -qF '64 KiB' "$tmp/hermes.out" || { echo "FAIL: an oversized provider file does not say the 64 KiB limit"; fail=1; }
+for bad in "$hdir/missing.yaml" "$hdir/empty.yaml" "$hdir/big.yaml" "$hdir"; do
+  if hermes_secret "$bad" /; then echo "FAIL: HERMES_PROVIDERS_FILE=$bad was accepted"; fail=1; fi
+  [ ! -s "$tmp/kubectl.calls" ] || { echo "FAIL: a refused provider file still touched the cluster ($bad)"; fail=1; }
+done
+# Pods reaching LAN model servers is an opt-in, commented rule naming one placeholder host, never
+# an opening of the private ranges.
+grep -qE '^\s+#\s+cidr: 192\.0\.2\.10/32' "$here/networkpolicy-sessions.example.yaml" \
+  || { echo "FAIL: networkpolicy-sessions.example.yaml has no opt-in rule for local model servers"; fail=1; }
+grep -vE '^\s*#' "$here/networkpolicy-sessions.example.yaml" | grep -qE '192\.0\.2\.' && { echo "FAIL: the model-server rule is active by default"; fail=1; }
 
 if [ -n "${BLERG_SKIP_KUBECTL:-}" ]; then
   echo "skip: BLERG_SKIP_KUBECTL set (dry-run not exercised)"

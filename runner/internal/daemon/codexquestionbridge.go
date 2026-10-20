@@ -32,7 +32,8 @@ func codexQuestionHandler(base, token, sessionID string, emitter agent.Emitter, 
 		if childTurn, ok := ctx.Value(codexQuestionOriginKey{}).(string); ok {
 			turnID = childTurn
 		}
-		messenger := &httpMessenger{base: base, token: token, sessionID: sessionID, turnID: turnID, client: &http.Client{Timeout: 30 * time.Second}, ctx: ctx, onAnswer: func(answer string) {
+		ownerOnly, _ := ctx.Value(ownerOnlyAsk{}).(bool)
+		messenger := &httpMessenger{base: base, token: token, sessionID: sessionID, turnID: turnID, ownerOnly: ownerOnly, client: &http.Client{Timeout: 30 * time.Second}, ctx: ctx, onAnswer: func(answer string) {
 			select {
 			case answers <- result{answer: answer}:
 			case <-ctx.Done():
@@ -65,4 +66,12 @@ func codexQuestionHandler(base, token, sessionID string, emitter agent.Emitter, 
 			return "", errors.New("question interrupted")
 		}
 	}
+}
+
+// ownerOnlyAsk marks a question's context: the server then accepts its answer
+// only from the session's signed-in owner (an approval, not a plain question).
+type ownerOnlyAsk struct{}
+
+func withOwnerOnlyAsk(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ownerOnlyAsk{}, true)
 }

@@ -1,3 +1,4 @@
+import { modelDisplayName } from "@blerglab/chat";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { CodeBlock } from "./CodeBlock";
@@ -121,6 +122,86 @@ export function useCardSessions(cardId: string) {
   };
 }
 
+// Where a person's Run of a card may go (GET /api/cards/{id}/run-targets): the board's default,
+// or, for the owner of the board's automation token, the cluster or a connected desktop.
+interface RunTargetOption { runtime: string; daemon_id?: string; label: string }
+interface RunTargets {
+  default_runtime: string; can_choose: boolean; targets: RunTargetOption[]; reason?: string;
+  // Why the board cannot start sessions at all (no token, or a dead one), and whether this
+  // person may fix it with Run as me (a board admin, on an install that can mint).
+  board_id?: string; automation_problem?: string; can_run_as_me?: boolean;
+}
+
+function useRunTargets(cardId: string): [RunTargets | null, () => void] {
+  const [targets, setTargets] = useState<RunTargets | null>(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let live = true;
+    api<RunTargets>(`/api/cards/${cardId}/run-targets`)
+      .then((t) => { if (live && t && typeof t === "object" && Array.isArray(t.targets)) setTargets(t); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [cardId, tick]);
+  return [targets, useCallback(() => setTick((n) => n + 1), [])];
+}
+
+// RunAsMeCta: on a board that cannot start sessions, the one-click fix beside Run (for a board
+// admin), or the reason and who can fix it (for anyone else).
+function RunAsMeCta({ targets, onDone }: { targets: RunTargets | null; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  if (!targets?.automation_problem) return null;
+  const runAsMe = async () => {
+    if (!targets.board_id) return;
+    setBusy(true); setError("");
+    try {
+      await api(`/api/boards/${targets.board_id}/automation/run-as-me`, { method: "POST" });
+      onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Run as me failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="run-as-me-cta prominent" data-testid="run-as-me-cta">
+      {targets.can_run_as_me ? (
+        <>
+          <button className="btn small" type="button" disabled={busy} onClick={() => void runAsMe()}>
+            {busy ? "Setting up…" : "Run as me"}
+          </button>
+          <span className="spawn-hint">This board can't start sessions yet. Run as me makes its sessions run as you, on your own credentials.</span>
+        </>
+      ) : (
+        <span className="spawn-hint" title={targets.automation_problem}>This board can't start sessions yet: a board admin can choose Run as me in the board's settings.</span>
+      )}
+      {error && <p role="alert" style={{ color: "var(--danger)", fontSize: 13, margin: 0 }}>{error}</p>}
+    </div>
+  );
+}
+
+const runtimeName = (rt: string) => (rt === "docker" ? "Local sandbox" : rt === "daemon" ? "This machine" : rt === "cluster" ? "Cluster" : "runner decides");
+
+// RunWhere: the small choice beside Run. "" is the board's default; anything else is
+// "<runtime>|<daemon id>".
+function RunWhere({ targets, value, onChange }: { targets: RunTargets | null; value: string; onChange: (v: string) => void }) {
+  if (!targets || targets.automation_problem) return null; // RunAsMeCta says what is wrong
+  if (!targets.can_choose || targets.targets.length === 0) {
+    // Say why there's no choice instead of hiding it (e.g. only the automation token's owner may choose).
+    return targets.reason ? <span className="run-where-note" data-testid="run-where-reason">Runs on the board default: {targets.reason}</span> : null;
+  }
+  return (
+    <select className="run-where" aria-label="Where it runs" value={value} onChange={(e) => onChange(e.target.value)}
+      title="Where this run goes. It runs as you, with your credentials.">
+      <option value="">Board default ({runtimeName(targets.default_runtime)})</option>
+      {targets.targets.map((t) => {
+        const key = `${t.runtime}|${t.daemon_id ?? ""}`;
+        return <option key={key} value={key}>{t.label}</option>;
+      })}
+    </select>
+  );
+}
+
 // Conversation: the session panel of a card. The board's part is which session
 // it is and what can be done about the card — run it, discuss it, run it again;
 // the conversation itself is the shared chat (SessionChat), live from the runner
@@ -129,6 +210,8 @@ export function Conversation({ cardId }: { cardId: string }) {
   const { sessions, reload, current } = useCardSessions(cardId);
   const [spawning, setSpawning] = useState(false);
   const [error, setError] = useState("");
+  const [where, setWhere] = useState("");
+  const [runTargets, reloadRunTargets] = useRunTargets(cardId);
   const panelRef = useRef<HTMLDivElement>(null);
 
   // fleet-table clicks (and future hotkeys) land focus in this composer
@@ -150,7 +233,13 @@ export function Conversation({ cardId }: { cardId: string }) {
   const spawn = async (mode: "run" | "discuss" = "run") => {
     setSpawning(true); setError("");
     try {
-      await api(`/api/cards/${cardId}/spawn`, { json: { mode } });
+      const json: Record<string, string> = { mode };
+      if (mode === "run" && where) {
+        const [runtime, daemonId] = where.split("|");
+        json.runtime = runtime;
+        if (daemonId) json.daemon_id = daemonId;
+      }
+      await api(`/api/cards/${cardId}/spawn`, { json });
       await reload();
       window.dispatchEvent(new Event("blerg-board:sessions-changed"));
     } catch (e) {
@@ -168,10 +257,12 @@ export function Conversation({ cardId }: { cardId: string }) {
           <button className="btn small" onClick={() => spawn("run")} disabled={spawning}>
             {spawning ? "Starting…" : "▶ Run this card"}
           </button>
+          <RunWhere targets={runTargets} value={where} onChange={setWhere} />
           <button className="btn ghost small" onClick={() => spawn("discuss")} disabled={spawning}>
             💬 Discuss first
           </button>
         </div>
+        <RunAsMeCta targets={runTargets} onDone={reloadRunTargets} />
         <p className="spawn-hint">
           Run moves the card to in&nbsp;progress and an agent executes it end to end.
           Discuss starts a read-only conversation about the card — nothing is
@@ -191,7 +282,7 @@ export function Conversation({ cardId }: { cardId: string }) {
         </span>
         <span className="mono" style={{ color: "var(--fog-dim)", fontSize: 11 }}>
           {current.role === "discuss" ? "discussion · " : ""}{current.runner} · {current.external_session_id.slice(0, 8)}
-          {current.model ? ` · ${current.model}` : ""}
+          {current.model && <> · <span title={current.model}>{modelDisplayName(current.model)}</span></>}
           {sessions.length > 1 ? ` · attempt ${sessions.length}` : ""}
         </span>
         <span className="spacer" />
@@ -201,10 +292,12 @@ export function Conversation({ cardId }: { cardId: string }) {
             ▶ Run this card
           </button>
         )}
+        {(current.role === "discuss" || over) && <RunWhere targets={runTargets} value={where} onChange={setWhere} />}
         {over && (
           <button className="btn ghost small" onClick={() => spawn("run")} disabled={spawning}>Run again</button>
         )}
       </div>
+      {(current.role === "discuss" || over) && <RunAsMeCta targets={runTargets} onDone={reloadRunTargets} />}
       <SessionChat session={current} placeholder="steer the session… (Shift+Enter for newline)" />
     </div>
   );

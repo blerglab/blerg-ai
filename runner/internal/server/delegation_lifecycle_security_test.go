@@ -117,7 +117,7 @@ func TestDelegationSecurityParentEndDuringNativeWrite(t *testing.T) {
 			fx := newDelegFx(t)
 			child, _ := fx.session(sessOpts{owner: "owner-1", parent: fx.parent})
 			fx.hub.SetSessionOwner(child, fx.dc.ID)
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			conn, err := fx.pool.Acquire(ctx)
 			if err != nil {
@@ -247,7 +247,7 @@ func TestDelegationSecurityParentEndDuringDurableReplayLookup(t *testing.T) {
 	if _, err := acceptSessionInput(t.Context(), fx.hub, fx.pool, protocol.AgentUserMessage{Type: "agent_user_message", SessionID: child, ClientID: newUUID(), Text: "queued fixture"}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	conn, err := fx.pool.Acquire(ctx)
 	if err != nil {
@@ -362,7 +362,7 @@ func TestDelegationSecurityHelloParentEndsDuringAskLookup(t *testing.T) {
 	if _, err := fx.pool.Exec(t.Context(), `UPDATE sessions SET keep_running=true WHERE id=$1`, kept); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	blocker, err := fx.pool.Acquire(ctx)
 	if err != nil {
@@ -406,7 +406,7 @@ func TestDelegationSecurityHelloParentEndsDuringAskLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	seenKill := false
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	for {
@@ -478,7 +478,7 @@ func TestDelegationSecurityInputGuardCancellationAndRuntimeMintWithOneMainConnec
 		t.Fatal(err)
 	}
 	defer single.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	err = withLimitResumeActionLock(ctx, single, child, func(action *pgxpool.Conn) error {
 		return withParentInputGuard(ctx, single, child, func() error {

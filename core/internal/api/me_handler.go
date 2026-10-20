@@ -59,7 +59,7 @@ func (d Deps) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var resp meResponse
-	// accounts.email is nullable (EnsureBootstrapAdmin's own INSERT never sets it — see
+	// accounts.email is nullable (the local provider's own INSERTs never set it — see
 	// authprovider.Local.Callback's own comment on this same nullability). Scanning a SQL
 	// NULL directly into a non-pointer string errors, so scan into *string, mirroring
 	// Callback's convention, and normalize NULL to "" for the response.

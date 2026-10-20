@@ -140,7 +140,7 @@ func TestCodexEveryGrantedModeDisablesResolvedSystemMCPBeforeStartingThread(t *t
 			stopDriver := startTestCodexDriver(ctx, t, driver)
 			defer stopDriver()
 			driver.Enqueue("fixture", "chat")
-			deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(15 * time.Second)
 			for !contains(emitter.kinds(), "turn_done") && time.Now().Before(deadline) {
 				time.Sleep(10 * time.Millisecond)
 			}

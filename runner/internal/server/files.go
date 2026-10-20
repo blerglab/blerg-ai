@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -82,6 +83,7 @@ func (h *artifactsHandler) unpublish(w http.ResponseWriter, r *http.Request) {
 		writeDatabaseFailure(w, "delete the file", "files delete", err)
 		return
 	}
+	h.api.withdrawDeletedReviews(context.WithoutCancel(r.Context()), sid, row.ID)
 	if err := os.RemoveAll(artifactDir(sid, row.ID)); err != nil {
 		log.Printf("files delete files %s/%s: %v", sid, row.ID, err)
 	}

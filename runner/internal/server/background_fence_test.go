@@ -36,7 +36,7 @@ func TestBackgroundBlockedDaemonDoesNotStallOtherDaemonEvents(t *testing.T) {
 	if _, err := tx.Exec(t.Context(), `SELECT id FROM sessions WHERE id=$1 FOR UPDATE`, fx.sess); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
@@ -106,7 +106,7 @@ func TestDaemonWorkFencePinsWaitersAndReclaimsEntries(t *testing.T) {
 	}()
 	releaseWaiter := sync.OnceFunc(func() { close(release) })
 	defer func() { unlock(); releaseWaiter(); <-finished }()
-	deadline := time.NewTimer(5 * time.Second)
+	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()

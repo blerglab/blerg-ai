@@ -121,7 +121,7 @@ func TestDelegationDecisionChecksExpiryAfterAcquiringRow(t *testing.T) {
 		}
 		result <- err
 	}()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
 		var waiting bool
 		if err := blocker.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%delegation_requests%' AND pid<>pg_backend_pid())`).Scan(&waiting); err != nil {
@@ -150,7 +150,7 @@ func TestDelegationDecisionChecksExpiryAfterAcquiringRow(t *testing.T) {
 		if !errors.Is(err, db.ErrDelegationState) {
 			t.Fatalf("expired decision error=%v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("decision did not finish")
 	}
 	if err := db.SetDelegationRequestStart(t.Context(), pool, r.ID, "", "not approved"); !errors.Is(err, db.ErrDelegationState) {

@@ -164,7 +164,11 @@ func TestNativeHistoryPodMountsOnlyConversationSubpaths(t *testing.T) {
 			}
 			mounts := pod["containers"].([]map[string]any)[0]["volumeMounts"].([]map[string]any)
 			for _, m := range mounts {
-				if m["subPath"] == nil || m["mountPath"] == "/workspace/.codex" || m["mountPath"] == "/workspace/.claude" {
+				if m["subPath"] == nil {
+					t.Fatal("a whole volume is mounted")
+				}
+				// The engine home itself is pod-ephemeral (engine-home), never the history volume.
+				if m["name"] == "native-history" && (m["mountPath"] == "/workspace/.codex" || m["mountPath"] == "/workspace/.claude") {
 					t.Fatal("native auth/config parent directory persisted")
 				}
 			}

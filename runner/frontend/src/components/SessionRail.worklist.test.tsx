@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import SessionDetail from './SessionDetail'
+import SessionRail, { type SessionRailProps } from './SessionRail'
+import { makeLive } from '../test/planTabFixture'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { useToastStore } from '../hooks/useToastStore'
 import { useMessageStore } from '../hooks/useMessageStore'
@@ -119,6 +122,97 @@ describe('session panel: ticket, checklist and plan', () => {
   })
 
   const items = (...xs: [string, boolean][]) => xs.map(([text, done]) => ({ text, done }))
+
+  it('opens the exact assigned plan item, focuses it, and never matches a title', async () => {
+    stubFetch(0, liveReply({
+      checklist: {items:[{id:'wrong',text:'Same title',done:false,assignees:[{kind:'subagent',id:'call-key'}]},{id:'native-work',text:'Assigned work',done:false,in_progress:true,assignees:[{kind:'subagent',id:'native-child'}]}],event_id:'c1',updated_at:iso(0)},
+      subagents:[{key:'call-key',child_id:'native-child',title:'Same title',type:'reviewer',model:'',tokens:null,doing:'',started_at:iso(-MIN),active_at:iso(0),background:false,seq:1}],
+    }))
+    seedSession(); seedEvents(user()); await renderPage()
+    const panel = screen.getByTestId('session-rail')
+    const reference = within(within(panel).getByTestId('rail-subagent')).getByTestId('rail-checklist-reference')
+    expect(reference).toHaveTextContent('Assigned work')
+    fireEvent.click(reference)
+    await waitFor(() => expect(document.activeElement).toHaveAttribute('data-checklist-id','native-work'))
+    expect(within(panel).getByRole('tab',{name:/Plan/})).toHaveAttribute('aria-selected','true')
+    const row = document.activeElement as HTMLElement
+    expect(row).toHaveClass('checklist-highlight')
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalled()
+    fireEvent.click(within(panel).getByRole('tab',{name:/Live/}))
+    fireEvent.click(within(within(panel).getByTestId('rail-subagent')).getByTestId('rail-checklist-reference'))
+    await waitFor(() => expect(row).toHaveClass('checklist-highlight'))
+  })
+
+  it('shows every doing item and explicit owned child assignment', async () => {
+    stubFetch(0, liveReply({checklist:{items:[{id:'a',text:'Build',done:false,in_progress:true,assignees:[{kind:'child_session',id:'owned-child'}]},{id:'b',text:'Review',done:false,in_progress:true}],event_id:'c1',updated_at:iso(0)},children:[{id:'owned-child',title:'Worker',engine:'codex',model:'fixture',status:'running',started_at:iso(-MIN),asking:false,tokens:null}]}))
+    seedSession();seedEvents(user());await renderPage()
+    const panel=screen.getByTestId('session-rail')
+    expect(within(panel).getByTestId('rail-plan-summary-text')).toHaveTextContent('Doing: Build; Review')
+    // The running child is listed under Running now and Started sessions; both rows carry the reference.
+    expect(within(within(panel).getByTestId('rail-running')).getByTestId('rail-checklist-reference')).toBeInTheDocument()
+    fireEvent.click(within(within(panel).getByTestId('rail-started')).getByTestId('rail-checklist-reference'))
+    await waitFor(()=>expect(document.activeElement).toHaveAttribute('data-checklist-id','a'))
+  })
+
+  it.each([1280, 700])('opens the rail at %ipx from a keyboard transcript assignment and keeps a reordered identity stable', async width => {
+    viewport(width)
+    const entries=[{id:'a',text:'Assigned work',done:false,in_progress:true,assignees:[{kind:'subagent' as const,id:'native-a'}]},{id:'b',text:'Other',done:false}]
+    stubFetch(0,liveReply({checklist:{items:entries,event_id:'c1',updated_at:iso(0)}}))
+    seedSession();seedEvents(user(),ev('subagent_started',{child_id:'native-a',call_id:'call-a',summary:'Worker'}),ev('checklist',{op:'set',items:entries}))
+    localStorage.setItem(RAIL_PREF_KEY,'0')
+    await renderPage()
+    const reference=within(screen.getByTestId('subagent-card')).getByRole('button',{name:'Plan · Assigned work'})
+    reference.focus();await userEvent.setup().keyboard('{Enter}')
+    await waitFor(()=>expect(document.activeElement).toHaveAttribute('data-checklist-id','a'))
+    const original=document.activeElement
+    seq=100
+    act(()=>useTranscriptStore.getState().ingest(ev('checklist',{op:'set',items:[entries[1],entries[0]]})))
+    expect((original as HTMLElement).isConnected).toBe(true)
+    expect(original).toHaveAttribute('data-checklist-id','a')
+    act(()=>useTranscriptStore.getState().ingest(ev('checklist',{op:'set',items:[entries[1],{id:'replacement',text:'Assigned work',done:false}]})))
+    expect((original as HTMLElement).isConnected).toBe(false)
+    expect(screen.getByTestId('rail-checklist').querySelector('.checklist-highlight')).toBeNull()
+    expect(within(screen.getByTestId('subagent-card')).queryByRole('button',{name:'Plan · Assigned work'})).toBeNull()
+  })
+
+  it('uses steady scroll under reduced motion', async () => {
+    const originalMatch=window.matchMedia
+    window.matchMedia=vi.fn(query=>query==='(prefers-reduced-motion: reduce)'?{...originalMatch(query),matches:true}:originalMatch(query)) as typeof window.matchMedia
+    stubFetch(0,liveReply({checklist:{items:[{id:'a',text:'Work',done:false,assignees:[{kind:'subagent',id:'native'}]}],event_id:'c1',updated_at:iso(0)},subagents:[{key:'native',title:'Worker',type:'',model:'',tokens:null,doing:'',started_at:iso(-MIN),active_at:iso(0),background:false,seq:1}]}))
+    seedSession();seedEvents(user());await renderPage()
+    fireEvent.click(within(screen.getByTestId('rail-subagent')).getByTestId('rail-checklist-reference'))
+    await waitFor(()=>expect(document.activeElement).toHaveAttribute('data-checklist-id','a'))
+    expect(Element.prototype.scrollIntoView).toHaveBeenLastCalledWith({block:'center',behavior:'auto'})
+  })
+
+  it('reports an unavailable target without focusing another item', async () => {
+    stubFetch();const session=seedSession()
+    render(<MemoryRouter><SessionRail id="rail" session={session} live={makeLive({checklist:{items:[{id:'different',text:'Same title',done:false}],eventId:'fresh',updatedAt:null}})} toolChanges={0} mode="panel" open onClose={()=>{}} onOpenArtifact={()=>{}} openChecklistItem={{id:'old',n:1}} /></MemoryRouter>)
+    await waitFor(()=>expect(screen.getByText('This checklist item is no longer available.')).toHaveAttribute('role','status'))
+    expect(vi.mocked(Element.prototype.scrollIntoView).mock.contexts.filter(element=>element instanceof HTMLElement&&element.dataset.checklistId)).toHaveLength(0)
+  })
+
+  it('uses the authoritative canonical live assignment for transcript chips', async () => {
+    stubFetch(0,liveReply({checklist:{items:[{id:'stable',text:'Canonical work',done:false,assignees:[{kind:'subagent',id:'native-a'}]}],event_id:'new',updated_at:iso(0)}}))
+    seedSession();seedEvents(user(),ev('subagent_started',{child_id:'native-a',call_id:'call-a',summary:'Worker'}),ev('checklist',{op:'assign',items:[{id:'stable',text:'Old alias',done:false,assignees:[{kind:'subagent',id:'call-a'}]}]}))
+    await renderPage()
+    const card=screen.getByTestId('subagent-card')
+    expect(within(card).queryByRole('button',{name:'Plan · Old alias'})).toBeNull()
+    fireEvent.click(within(card).getByRole('button',{name:'Plan · Canonical work'}))
+    await waitFor(()=>expect(document.activeElement).toHaveAttribute('data-checklist-id','stable'))
+  })
+
+  it('scopes repeated request numbers and the same opaque ID to each session', async () => {
+    stubFetch();seedSession()
+    const props:SessionRailProps={id:'rail',session:makeSession({id:'session-a'}),live:makeLive({checklist:{items:[{id:'same-id',text:'A work',done:false}],eventId:'a',updatedAt:null}}),toolChanges:0,mode:'panel',open:true,onClose:()=>{},onOpenArtifact:()=>{},openChecklistItem:{id:'same-id',n:1}}
+    const view=render(<MemoryRouter><SessionRail {...props}/></MemoryRouter>)
+    await waitFor(()=>expect(document.activeElement).toHaveTextContent('A work'))
+    const next={...props,session:makeSession({id:'session-b'}),live:makeLive({checklist:{items:[{id:'same-id',text:'B work',done:false}],eventId:'b',updatedAt:null}}),openChecklistItem:null}
+    view.rerender(<MemoryRouter><SessionRail {...next}/></MemoryRouter>)
+    expect(screen.getByTestId('rail-checklist').querySelector('.checklist-highlight')).toBeNull()
+    view.rerender(<MemoryRouter><SessionRail {...next} openChecklistItem={{id:'same-id',n:1}}/></MemoryRouter>)
+    await waitFor(()=>{expect(document.activeElement).toHaveTextContent('B work');expect(document.activeElement).toHaveClass('checklist-highlight')})
+  })
 
   it('shows the pinned tickets first, then the checklist with its count and bar', async () => {
     stubFetch(0, liveReply({

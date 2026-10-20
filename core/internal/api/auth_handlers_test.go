@@ -919,3 +919,61 @@ func TestRefreshFailuresTellTheSilentFrameTheSignInEnded(t *testing.T) {
 		t.Fatalf("unallowed silent return_to = %d, want 400", resp.StatusCode)
 	}
 }
+
+// A refresh that cannot take its session lock in time is a retry, not a sign-out: core answers
+// 503 with Retry-After, keeps the cookie, and the same cookie refreshes once the lock is free.
+func TestRefreshBusySessionIsRetryableNotSignOut(t *testing.T) {
+	deps, pool := newTestDeps(t, []string{"http://board.example.com"}, nil)
+	idSvc := deps.Identity.(*identity.Service)
+	idSvc.SetSessionLockTimeout(200 * time.Millisecond)
+	ctx := context.Background()
+	var acct string
+	if err := pool.QueryRow(ctx, `INSERT INTO accounts (provider, provider_subject, role) VALUES ('local','busy','member') RETURNING id::text`).
+		Scan(&acct); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := idSvc.IssueRefreshToken(ctx, acct, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(api.NewRouter(deps))
+	defer srv.Close()
+	client := srv.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	silent := "http://board.example.com/silent-refresh.html"
+	refresh := func() *http.Response {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/auth/refresh?return_to="+url.QueryEscape(silent), nil)
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+		req.Header.Set("Sec-Fetch-Dest", "iframe")
+		req.AddCookie(&http.Cookie{Name: refreshCookieNameForTest, Value: raw})
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('human_sessions:' || $1::text, 0))`, acct); err != nil {
+		t.Fatal(err)
+	}
+	resp := refresh()
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("busy refresh = %d (Retry-After %q), want 503 with Retry-After", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+	if len(resp.Cookies()) != 0 {
+		t.Fatalf("a busy refresh must not touch the cookie: %v", resp.Cookies())
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	resp = refresh()
+	if resp.StatusCode != http.StatusFound || !strings.Contains(resp.Header.Get("Location"), "access_token=") {
+		t.Fatalf("refresh after the lock freed = %d %q, want a token", resp.StatusCode, resp.Header.Get("Location"))
+	}
+}

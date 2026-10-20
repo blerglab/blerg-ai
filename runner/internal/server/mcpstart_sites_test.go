@@ -313,7 +313,8 @@ func TestSpawnSitesAreEnumerated(t *testing.T) {
 	}
 	// Paths that never carry a grant, by construction: nothing they decode names one.
 	// reclaimNativeHistory builds a label/fencing spec solely to remove an ended writer; it never starts an engine.
-	grantless := map[string]bool{"HandlePostAssist": true, "forwardBrowserSpawn": true, "CreateSessionJob": true, "reclaimNativeHistory": true}
+	// startClusterChild starts a delegate's child, whose allowlisted start never names a grant (startChild).
+	grantless := map[string]bool{"HandlePostAssist": true, "forwardBrowserSpawn": true, "CreateSessionJob": true, "reclaimNativeHistory": true, "startClusterChild": true}
 
 	var found []string
 	for name, info := range funcs {

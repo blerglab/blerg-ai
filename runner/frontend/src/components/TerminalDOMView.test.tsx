@@ -113,3 +113,18 @@ describe('TerminalDOMView', () => {
     expect(container.textContent).not.toContain('AAAAOLD')
   })
 })
+
+
+it('blocks keyboard input when a terminal is archived without remounting its transcript', () => {
+  const {container, rerender} = render(<TerminalDOMView sessionId="sess-a"/>)
+  const textarea = container.querySelector('textarea')!
+  wsMock.send.mockClear()
+  fireEvent.keyDown(textarea, {key:'Enter'})
+  expect(wsMock.send).toHaveBeenCalledWith({type:'send_input',session_id:'sess-a',data:btoa('\r')})
+  rerender(<TerminalDOMView sessionId="sess-a" readOnly/>)
+  expect(container.querySelector('textarea')).toBe(textarea)
+  expect(textarea.readOnly).toBe(true)
+  wsMock.send.mockClear()
+  fireEvent.keyDown(textarea, {key:'Enter'})
+  expect(wsMock.send).not.toHaveBeenCalledWith(expect.objectContaining({type:'send_input'}))
+})

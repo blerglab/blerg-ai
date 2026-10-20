@@ -1,0 +1,7 @@
+.child-approval { margin-top: 12px; min-width: 0; overflow-wrap: anywhere; }
+.child-approval h4 { margin: 0 0 6px; font-size: inherit; font-weight: 600; }
+.child-approval-note { margin: 4px 0; font-size: 12px; line-height: 1.4; color: var(--fog-dim); }
+.child-approval-runtime { padding: 7px 0; border-bottom: 1px solid var(--stone); }
+.child-approval-runtime .rail-check { align-items: flex-start; }
+.child-approval-runtime input { flex-shrink: 0; }
+.child-approval button { font: inherit; }

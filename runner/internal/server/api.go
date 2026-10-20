@@ -99,6 +99,8 @@ type API struct {
 	beforeMarkPrivate func(sessionID string)
 	// delegationPush is a test seam: when set, pushForDelegation calls it instead of SendPush.
 	delegationPush func(heading, body, link string)
+	// reviewPush is the same seam for a review request (reviewrequests.go).
+	reviewPush func(heading, body, link string)
 	// delegLocks serializes delegated starts per account in this process (delegation_start.go).
 	delegLocks     delegationLocks
 	hub            *Hub
@@ -110,8 +112,10 @@ type API struct {
 	waiters        *messageWaiters
 	// delegationWaiters wakes long polls on a delegation request (delegation_requests.go).
 	delegationWaiters *delegationWaiters
-	delegationLife    delegationLifecycle
-	children          childrenNotifier
+	// reviewWaiters wakes long polls on a review request (reviewrequests.go).
+	reviewWaiters  *delegationWaiters
+	delegationLife delegationLifecycle
+	children       childrenNotifier
 	// answerHold overrides the polling cap for deterministic short test timers.
 	// Nonpositive uses maxAnswerHold; configure before serving requests.
 	answerHold time.Duration
@@ -174,7 +178,10 @@ type API struct {
 	// path keeps its own copy on the JobManager, which a desktop install does not have.
 	pluginAllow         pluginspec.Allowlist
 	sessionOriginLookup func(context.Context, string) (string, error)
-	boardFiling         boardFilingUpstream
+	// grantCapOverride, when positive, is the hourly cap of a session permission's automatic
+	// approvals (a test seam; BLERG_RUNNER_GRANT_HOURLY_CAP otherwise).
+	grantCapOverride int
+	boardFiling      boardFilingUpstream
 	// fetchPlugins fetches an account's always-on plugin list for a daemon session. nil = core's
 	// internal endpoint; tests set it.
 	fetchPlugins   func(ctx context.Context, accountID string, proof coreProof) ([]pluginspec.Entry, error)
@@ -277,6 +284,7 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		waiters:        newMessageWaiters(),
 
 		delegationWaiters: newDelegationWaiters(),
+		reviewWaiters:     newDelegationWaiters(),
 	}
 	api.pluginAllow, _ = pluginAllowlistFromEnv()
 	// Several paths that end a session are package functions on the hub side
@@ -422,21 +430,22 @@ func (a *API) HandleGetDaemons(w http.ResponseWriter, r *http.Request) {
 		}
 		claudeCLI, apiKey := d.HostClaude()
 		result = append(result, protocol.DaemonInfo{
-			ID:                 d.ID,
-			Name:               d.Name,
-			Mode:               d.Mode,
-			ReposRoot:          d.CurrentReposRoot(),
-			Status:             "connected",
-			Version:            d.Version,
-			SandboxAvailable:   d.SandboxAvailable(),
-			AvailableEngines:   d.AvailableEngines(),
-			MCPGateway:         d.CanMCPGateway(),
-			RestrictTools:      d.CanRestrictTools(),
-			CodexRestricted:    d.CanCodexRestricted(),
-			PluginEngines:      d.PluginEngines(),
-			ClaudeCLIAvailable: claudeCLI,
-			AnthropicKeySet:    apiKey,
-			CloneFrom:          d.CanCloneTarget(),
+			ID:                  d.ID,
+			Name:                d.Name,
+			Mode:                d.Mode,
+			ReposRoot:           d.CurrentReposRoot(),
+			Status:              "connected",
+			Version:             d.Version,
+			SandboxAvailable:    d.SandboxAvailable(),
+			AvailableEngines:    d.AvailableEngines(),
+			MCPGateway:          d.CanMCPGateway(),
+			MCPGatewayViaServer: d.CanMCPGatewayViaServer(),
+			RestrictTools:       d.CanRestrictTools(),
+			CodexRestricted:     d.CanCodexRestricted(),
+			PluginEngines:       d.PluginEngines(),
+			ClaudeCLIAvailable:  claudeCLI,
+			AnthropicKeySet:     apiKey,
+			CloneFrom:           d.CanCloneTarget(),
 
 			AllowHostCredentialClone: d.AllowsHostCredentialClone(),
 			SandboxClaudeCredential:  d.SandboxClaudeCredential(),
@@ -961,6 +970,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
+			recordLaunchAuthSession(ctx, a.dbPool, sessionID, proofFromPrincipal(principal).SessionID)
 		}
 		if a.dbPool != nil {
 			recordLaunchEffort(ctx, a.dbPool, sessionID, req.Effort)
@@ -1170,6 +1180,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, apiErr)
 			return
 		}
+		msg.MCPGateway = a.forDaemon(ctx, sessionID, msg.MCPGateway, daemon)
 		// A launch-sheet session is watched: it keeps its tools, settings and plugins,
 		// connections or not (docs/design/interactive-mcp-sessions.md).
 	}
@@ -1242,6 +1253,7 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 		}
 		recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
 		recordInteraction(r.Context(), a.dbPool, sessionID, req.Interaction)
+		recordLaunchAuthSession(r.Context(), a.dbPool, sessionID, proof.SessionID)
 	}
 	var gateway *protocol.MCPGatewayConfig
 	if grant != nil {

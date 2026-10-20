@@ -12,6 +12,7 @@ import (
 type ChildLiveRow struct {
 	ChildSession
 	ArchivedAt *time.Time
+	Local      bool // observed daemon classification, filled by the API snapshot
 	Owner      string
 	MaxSeq     int64
 }

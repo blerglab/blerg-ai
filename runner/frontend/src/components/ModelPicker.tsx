@@ -1,3 +1,4 @@
+import { modelDisplayNames } from '@blerglab/chat'
 import type { CSSProperties } from 'react'
 import type { EngineModel } from '../types'
 import { hasAutoEffort } from '../lib/engineModels'
@@ -90,6 +91,7 @@ export default function ModelPicker({
       </div>
     )
   }
+  const modelNames = modelDisplayNames(models)
   const main = models.filter(m => m.section === 'main')
   const overflow = models.filter(m => m.section === 'overflow')
   const selected = models.find(m => m.id === model)
@@ -105,11 +107,11 @@ export default function ModelPicker({
             type="button"
             data-testid={`model-${m.id}`}
             aria-pressed={model === m.id}
-            title={m.description || m.id}
+            title={[m.id, m.description].filter(Boolean).join(' — ')}
             onClick={() => onModelChange(m.id)}
             style={pillStyle(model === m.id)}
           >
-            {m.name}
+            {modelNames.get(m.id)}
           </button>
         ))}
         {overflow.length > 0 && (
@@ -122,8 +124,8 @@ export default function ModelPicker({
           >
             <option value="">More models…</option>
             {overflow.map(m => (
-              <option key={m.id} value={m.id} data-testid={`model-${m.id}`} title={m.description || m.id}>
-                {m.name}
+              <option key={m.id} value={m.id} data-testid={`model-${m.id}`} title={[m.id, m.description].filter(Boolean).join(' — ')}>
+                {modelNames.get(m.id)}
               </option>
             ))}
           </select>

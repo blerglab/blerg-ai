@@ -1,3 +1,5 @@
+import { modelDisplayName } from '@blerglab/chat'
+import type { ChecklistItem } from '@blerglab/chat'
 import { useParams, useNavigate } from 'react-router-dom'
 import { isAutomated, startedByLabel } from '../lib/startedBy'
 import { useCallback, useRef, useState, useEffect, useMemo } from 'react'
@@ -13,6 +15,7 @@ import { arrowSeq, KEY_SEQ, type ArrowDir } from '../terminalKeys'
 import { sessionViewportBox } from '../terminalRenderer'
 import TerminalDOMView, { type TerminalHandle } from './TerminalDOMView'
 import AgentChatView from './AgentChatView'
+import { ParentDiscardAction, ChildDiscardAction } from './ChildDiscard'
 import { MessageThread } from './MessageThread'
 import { apiFetch } from '../apiFetch'
 import { StartProgress, placeholderAttempt, describeSessionEnd } from '@blerglab/chat'
@@ -34,6 +37,8 @@ function PendingStart() {
   const [since] = useState(() => Date.now())
   return <StartProgress attempt={placeholderAttempt(since)} />
 }
+
+const EMPTY_CHECKLIST_ITEMS: readonly ChecklistItem[] = []
 
 export default function SessionDetail() {
   const { id: sessionId } = useParams<{ id: string }>()
@@ -127,6 +132,27 @@ export default function SessionDetail() {
   // changes) is not new.
   const [quiet, setQuiet] = useState<{ id: string; since: number; tools: number | null } | null>(null)
   const [drawerFor, setDrawerFor] = useState<string | null>(null)
+  const [checklistTarget, setChecklistTarget] = useState<{session: string; id: string; n: number} | null>(null)
+  if (checklistTarget && checklistTarget.session !== sessionId) setChecklistTarget(null)
+  const openChecklistItem = useCallback((id: string) => {
+    if (!sessionId) return
+    writeRailPref(true)
+    setRailPref(true)
+    setReopenFor(null)
+    if (narrow) setDrawerFor(sessionId)
+    setChecklistTarget(previous => ({session: sessionId, id, n: (previous?.n ?? 0) + 1}))
+  }, [sessionId, narrow])
+  const [approvalTarget, setApprovalTarget] = useState<{session:string; n:number} | null>(null)
+  const openChildApproval = useCallback(() => {
+    if (!sessionId) return
+    writeRailPref(true)
+    setRailPref(true)
+    setReopenFor(null)
+    if (narrow) setDrawerFor(sessionId)
+    setApprovalTarget(previous => ({session:sessionId, n:(previous?.n ?? 0)+1}))
+  }, [sessionId, narrow])
+  // Taken once the modal opens: the number stays (the next request is a new one), the session clears.
+  const childApprovalShown = useCallback(() => setApprovalTarget(previous => previous && previous.session ? {session:'', n:previous.n} : previous), [])
   // Read again when the person opens the panel or its Capabilities tab comes on screen.
   const [toolsNonce, setToolsNonce] = useState(0)
   const toolsLook = useCallback(() => setToolsNonce(n => n + 1), [])
@@ -159,7 +185,7 @@ export default function SessionDetail() {
   const liveShown = useCallback(() => setLiveAsk(null), [])
   if (liveAsk !== null && liveAsk !== sessionId) setLiveAsk(null)
   // A background subagent is listed (and counted) once, as a subagent.
-  const needsYou = liveState.openAsks.length + toolChanges + (sessionLive.delegationRequests?.length ?? 0)
+  const needsYou = liveState.openAsks.length + toolChanges + (sessionLive.delegationRequests?.length ?? 0) + (sessionLive.reviewRequests?.length ?? 0)
   const runningNow = liveState.subagents.length + liveState.backgroundRunning + (sessionLive.children ?? []).filter(childIsRunning).length
   if (agentSession && sessionId) {
     if (railPref === null && needsYou + runningNow > 0 && autoOpenFor !== sessionId) {
@@ -199,11 +225,13 @@ export default function SessionDetail() {
   const closeRail = () => (narrow ? setDrawerFor(null) : choose(false))
 
   function sendKey(seq: string) {
+    if (session?.archived_at) return
     if (!sessionId) return
     send({ type: 'send_input', session_id: sessionId, data: btoa(seq) })
   }
 
   function sendArrow(dir: ArrowDir) {
+    if (session?.archived_at) return
     const app = !!termRef.current?.applicationCursorKeysMode
     sendKey(arrowSeq(dir, app))
   }
@@ -261,7 +289,7 @@ export default function SessionDetail() {
 
   // disconnected (cluster pod gone) still shows the kill button — the server
   // deletes the Job and marks the session stopped.
-  const isActive = session.status === 'running' || session.status === 'idle' || session.status === 'waiting' || session.status === 'starting' || session.status === 'disconnected'
+  const isActive = !session.archived_at && (session.status === 'running' || session.status === 'idle' || session.status === 'waiting' || session.status === 'starting' || session.status === 'disconnected')
   const isAgent = session.kind === 'agent'
   // The Messages tab exists for terminal sessions only (see the tab toggle below).
   const showMessages = !isAgent && activeTab === 'chat'
@@ -277,7 +305,7 @@ export default function SessionDetail() {
     : null
   const shownState = displayState(session, liveRunning)
   const shownTasks = backgroundCount(session, liveRunning)
-  const canPause = session.runtime === 'cluster' && ['running', 'idle', 'waiting'].includes(session.status)
+  const canPause = !session.archived_at && session.runtime === 'cluster' && ['running', 'idle', 'waiting'].includes(session.status)
 
   async function handlePauseClick() {
     if (!sessionId) return
@@ -388,8 +416,8 @@ export default function SessionDetail() {
               <span data-testid="detail-unattended" title="Started unattended: the agent does not wait for you in the chat">Unattended · </span>
             )}
             {daemon?.name ?? session.daemon_id} · {session.project_path}
-            {session.model ? ` · ${session.model.replace(/^claude-/, '')}` : ''}
-            {session.effort ? ` · ${session.effort}` : ''}
+            {session.model && <> · <span title={session.model}>{modelDisplayName(session.model)}</span></>}
+            {session.effort && <span className="rail-chip rail-effort" title="Configured effort">{session.effort}</span>}
           </div>
         </div>
         <button
@@ -552,6 +580,9 @@ export default function SessionDetail() {
             {killArmed ? '✕ Confirm kill?' : '✕ Kill'}
           </button>
         )}
+        {!session.archived_at && (session.parent_session_id
+          ? <ChildDiscardAction key={session.id} parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'}/>
+          : <ParentDiscardAction key={session.id} sessionId={session.id} title={session.title || 'Untitled session'} onDiscarded={() => navigate('/sessions')}/>)}
         {/* The side panel: what needs you, what runs, this session. The badge counts the first two. */}
         {isAgent && (
           <button
@@ -610,35 +641,6 @@ export default function SessionDetail() {
       {session.status === 'error' && session.error_reason && (
         <div data-testid="error-reason" style={{ color: 'var(--danger)', padding: '6px 12px', fontSize: 12, borderBottom: '1px solid var(--stone)', background: 'color-mix(in srgb, var(--danger) 8%, var(--basalt))', display: 'flex', alignItems: 'center', gap: 12 }}>
           <span style={{ flex: 1, minWidth: 0, overflowWrap: 'break-word' }}>{session.error_reason}</span>
-          <button
-            onClick={async () => {
-              try {
-                const res = await apiFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
-                if (res.ok) {
-                  navigate('/sessions')
-                } else {
-                  addToast({ title: 'Delete failed', body: `Server returned ${res.status}.` })
-                }
-              } catch {
-                addToast({ title: 'Delete failed', body: 'Network error.' })
-              }
-            }}
-            style={{
-              background: 'color-mix(in srgb, var(--danger) 22%, var(--basalt))',
-              border: '1px solid color-mix(in srgb, var(--danger) 35%, var(--scree))',
-              borderRadius: 6,
-              color: 'var(--danger)',
-              cursor: 'pointer',
-              fontSize: 12,
-              fontWeight: 600,
-              padding: '3px 9px',
-              fontFamily: 'inherit',
-              whiteSpace: 'nowrap',
-              flexShrink: 0,
-            }}
-          >
-            Delete session
-          </button>
         </div>
       )}
 
@@ -690,8 +692,8 @@ export default function SessionDetail() {
         {isAgent
           // Keyed by id: draft, pending turn and notices belong to one
           // session and must not carry over when the route switches sessions.
-          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} mcpHold={liveState.mcpHold ?? null} canReleasePrompt={liveState.canReleasePrompt === true} />
-          : <TerminalDOMView sessionId={sessionId ?? ''} ref={termRef} />}
+          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} onOpenChecklistItem={openChecklistItem} onManageChildApproval={openChildApproval} checklistItems={sessionLive.source === 'server' ? (liveState.checklist?.items ?? EMPTY_CHECKLIST_ITEMS) : undefined} mcpHold={liveState.mcpHold ?? null} canReleasePrompt={liveState.canReleasePrompt === true} />
+          : <TerminalDOMView sessionId={sessionId ?? ''} ref={termRef} readOnly={!!session.archived_at}/>}
       </div>
 
       {/* Messages — only rendered when its tab is active */}
@@ -702,7 +704,7 @@ export default function SessionDetail() {
       )}
 
       {/* Docked key row (mobile only) — terminal sessions only */}
-      {isMobile && !isAgent && (
+      {isMobile && !isAgent && !session.archived_at && (
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -772,6 +774,7 @@ export default function SessionDetail() {
           tasks={sessionLive.tasks}
           childSessions={sessionLive.children}
           delegationRequests={sessionLive.delegationRequests}
+          reviewRequests={sessionLive.reviewRequests}
           delegationGrants={sessionLive.delegationGrants}
           liveRunning={liveRunning}
           toolChanges={toolChanges}
@@ -780,6 +783,9 @@ export default function SessionDetail() {
           onClose={closeRail}
           onCapabilitiesShown={toolsLook}
           onOpenArtifact={openArtifact}
+          openChildApproval={approvalTarget?.session === session.id ? approvalTarget.n : undefined}
+          onChildApprovalShown={childApprovalShown}
+          openChecklistItem={checklistTarget?.session === session.id ? checklistTarget : null}
           // A drawer only ever opens from the toggle: it shows the tab the person chose.
           showLive={!narrow && liveAsk === session.id}
           onLiveShown={liveShown}

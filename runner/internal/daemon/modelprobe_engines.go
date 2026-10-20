@@ -205,19 +205,102 @@ func probeHermesModels(ctx context.Context) ([]models.Model, error) {
 }
 
 func probeHermesModelsAt(ctx context.Context, configPath string, client *http.Client) ([]models.Model, error) {
-	cfg, err := readHermesModelConfig(configPath)
+	cfg, err := readHermesRouteConfig(configPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, errNoModelList
 	}
 	if err != nil {
-		// Present but unreadable (not a regular file, too large, a line we
-		// cannot parse): an error worth logging, not a silent "no list".
-		return nil, fmt.Errorf("hermes config: %w", err)
+		return nil, errors.New("hermes model configuration is unreadable or unsupported")
 	}
-	if cfg.Provider != "custom" || cfg.BaseURL == "" {
+	return probeHermesRoutes(ctx, cfg, client)
+}
+
+// probeHermesRoutes lists the models of every probe-able endpoint in an
+// already parsed configuration: the desktop's ~/.hermes/config.yaml or a
+// cluster's shared provider fragment (ProbeHermesModelsConfig). Both name
+// models identically: "custom:<provider>/<model>", shown as
+// "custom:<provider> / <model>".
+func probeHermesRoutes(ctx context.Context, cfg hermesRouteConfig, client *http.Client) ([]models.Model, error) {
+	ctx, cancel := context.WithTimeout(ctx, hermesProbeTimeout)
+	defer cancel()
+	type result struct {
+		models []models.Model
+		index  int
+		key    string
+	}
+	results := make(chan result, len(cfg.Providers)+1)
+	count := 0
+	probe := func(base, preferred, prefix, policy string) {
+		index := count
+		count++
+		go func() {
+			list, err := fetchOpenAIModels(ctx, client, base, preferred)
+			if err != nil {
+				results <- result{index: index}
+				return
+			}
+			for i := range list {
+				if prefix != "" {
+					list[i].ID = prefix + "/" + list[i].ID
+					list[i].Name = prefix + " / " + list[i].Name
+				}
+				if !models.ValidModelFor("hermes", list[i].ID) {
+					list[i].ID = ""
+				}
+			}
+			results <- result{models: list, index: index, key: strings.TrimRight(base, "/") + "\x00" + policy}
+		}()
+	}
+	defaultBound := len(cfg.Providers) == 0 || cfg.Unknown || cfg.Fallback
+	for _, p := range cfg.Providers {
+		if !p.Disabled && !p.Credential && p.BaseURL == cfg.Default.BaseURL && p.policyDigest == cfg.defaultPolicy {
+			defaultBound = true
+		}
+	}
+	if cfg.Default.Provider == "custom" && cfg.Default.BaseURL != "" && defaultBound {
+		probe(cfg.Default.BaseURL, cfg.Default.Default, "", cfg.defaultPolicy)
+	}
+	if !cfg.Fallback && !cfg.Unknown {
+		for _, legacy := range []bool{false, true} {
+			for _, p := range cfg.Providers {
+				if p.legacy == legacy && !p.Disabled && !p.Credential && p.BaseURL != "" {
+					probe(p.BaseURL, p.Default, "custom:"+p.Name, p.policyDigest)
+				}
+			}
+		}
+	}
+	lists := make([]result, count)
+collect:
+	for range count {
+		select {
+		case result := <-results:
+			lists[result.index] = result
+		case <-ctx.Done():
+			break collect
+		}
+	}
+	var out []models.Model
+	seen := map[string]bool{}
+	for _, result := range lists {
+		for _, m := range result.models {
+			rawID := m.ID
+			if strings.HasPrefix(rawID, "custom:") {
+				_, rawID, _ = strings.Cut(rawID, "/")
+			}
+			key := result.key + "\x00" + rawID
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if m.ID != "" {
+				out = append(out, m)
+			}
+		}
+	}
+	if len(out) == 0 {
 		return nil, errNoModelList
 	}
-	return fetchOpenAIModels(ctx, client, cfg.BaseURL, cfg.Default)
+	return out, nil
 }
 
 // newHermesProbeClient: GET only, never follows a redirect (a 3xx is an
@@ -264,8 +347,14 @@ func readHermesModelConfig(path string) (hermesModelConfig, error) {
 	if fi.Size() > hermesConfigMaxRead {
 		return hermesModelConfig{}, fmt.Errorf("%s is larger than %d bytes", path, hermesConfigMaxRead)
 	}
+	return scanHermesModelConfig(f)
+}
+
+// scanHermesModelConfig is readHermesModelConfig's parser over an already
+// opened, bounded source (a file, or a shared fragment held in memory).
+func scanHermesModelConfig(r io.Reader) (hermesModelConfig, error) {
 	var cfg hermesModelConfig
-	sc := bufio.NewScanner(io.LimitReader(f, hermesConfigMaxRead))
+	sc := bufio.NewScanner(io.LimitReader(r, hermesConfigMaxRead))
 	sc.Buffer(make([]byte, 0, 64<<10), 64<<10)
 	inModel := false
 	indent := ""
@@ -421,7 +510,7 @@ func fetchOpenAIModels(ctx context.Context, client *http.Client, baseURL, prefer
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("hermes models: %w", err)
+		return nil, errors.New("hermes models: request failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
@@ -434,7 +523,7 @@ func fetchOpenAIModels(ctx context.Context, client *http.Client, baseURL, prefer
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, hermesProbeMaxBody+1))
 	if err != nil {
-		return nil, fmt.Errorf("hermes models: %w", err)
+		return nil, errors.New("hermes models: request failed")
 	}
 	if len(body) > hermesProbeMaxBody {
 		return nil, fmt.Errorf("hermes models: body larger than %d bytes", hermesProbeMaxBody)
@@ -451,7 +540,7 @@ func parseOpenAIModels(data []byte, preferred string) ([]models.Model, error) {
 		Data []json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("hermes models: %w", err)
+		return nil, errors.New("hermes models: request failed")
 	}
 	if doc.Data == nil {
 		return nil, errors.New("hermes models: no data array")
@@ -469,7 +558,7 @@ func parseOpenAIModels(data []byte, preferred string) ([]models.Model, error) {
 			ID          string          `json:"id"`
 			MaxModelLen json.RawMessage `json:"max_model_len"` // optional, vLLM's; any type
 		}
-		if json.Unmarshal(raw, &m) != nil || m.ID == "" || seen[m.ID] || !models.ValidModelFor("hermes", m.ID) {
+		if json.Unmarshal(raw, &m) != nil || m.ID == "" || seen[m.ID] || !validHermesNativeModel(m.ID) {
 			continue
 		}
 		isPreferred := preferred != "" && m.ID == preferred

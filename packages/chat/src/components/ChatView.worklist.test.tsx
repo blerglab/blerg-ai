@@ -269,3 +269,39 @@ describe('ticket modal', () => {
     expect(dialog).toHaveTextContent('No description.')
   })
 })
+
+
+describe('subagent checklist navigation', () => {
+  it('opens only the explicitly assigned stable item from the subagent card', () => {
+    const open = vi.fn()
+    seed(ev({ seq: 1, kind: 'user_message', payload: { text: 'Go' } }),
+      ev({ seq: 2, kind: 'subagent_started', payload: { child_id: 'native-a', call_id: 'call-a', summary: 'Build' } }),
+      ev({ seq: 3, kind: 'checklist', payload: { op: 'doing', items: [
+        { id: 'item-a', text: 'Write tests', done: false, in_progress: true, assignees: [{ kind: 'subagent', id: 'native-a' }] },
+        { id: 'item-b', text: 'Build', done: false } ] } }))
+    const t = createFakeTransport()
+    render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'running' })} onOpenChecklistItem={open} />)
+    const card = screen.getByTestId('subagent-card')
+    fireEvent.click(within(card).getByRole('button', { name: 'Plan · Write tests' }))
+    expect(open).toHaveBeenCalledWith('item-a')
+    expect(within(card).queryByRole('button', { name: 'Plan · Build' })).toBeNull()
+    expect(within(card).getByTestId('subagent-row')).toHaveAttribute('aria-expanded', 'false')
+  })
+})
+
+
+it('uses the host current checklist over an old transcript snapshot, including explicit removal', () => {
+  const open = vi.fn()
+  seed(ev({ seq: 1, kind: 'subagent_started', payload: { child_id: 'native-a', call_id: 'call-a', summary: 'Worker' } }),
+    ev({ seq: 2, kind: 'checklist', payload: { op: 'assign', items: [
+      { id: 'item-a', text: 'Old alias', done: false, assignees: [{ kind: 'subagent', id: 'call-a' }] } ] } }))
+  const t = createFakeTransport()
+  const item = { id: 'item-a', text: 'Current work', done: false, assignees: [{ kind: 'subagent' as const, id: 'native-a' }] }
+  const view = (items: typeof item[]) => <ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'running' })} checklistItems={items} onOpenChecklistItem={open} />
+  const { rerender } = render(view([item]))
+  const card = screen.getByTestId('subagent-card')
+  fireEvent.click(within(card).getByRole('button', { name: 'Plan · Current work' }))
+  expect(open).toHaveBeenCalledWith('item-a')
+  rerender(view([]))
+  expect(within(card).queryByTestId('subagent-checklist')).toBeNull()
+})

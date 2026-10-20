@@ -1,3 +1,4 @@
+import { waitFor } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import { SseParser, openSseStream, type SseFrame } from './sse'
 
@@ -85,8 +86,7 @@ function scriptedFetch(scripts: Array<{ chunks?: string[]; status?: number; hang
 
 const tick = () => new Promise(r => setTimeout(r, 5))
 const until = async (cond: () => boolean) => {
-  for (let i = 0; i < 200 && !cond(); i++) await tick()
-  expect(cond()).toBe(true)
+  await waitFor(() => expect(cond()).toBe(true))
 }
 
 describe('openSseStream', () => {

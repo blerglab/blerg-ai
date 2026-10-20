@@ -34,6 +34,10 @@
 #      CGNAT ranges listed under `except`. The engine itself needs its model
 #      API, so this cannot simply be removed; on a CNI with FQDN policies
 #      (Cilium, Calico Enterprise) replace it with just the hosts you use.
+#   6. OPT-IN, OFF BY DEFAULT: your own model servers on a private network (the
+#      shared Hermes providers, HERMES_PROVIDERS_FILE), one commented rule per
+#      server below. Rule 5 excludes every private range, so without it a Hermes
+#      session cannot reach a model server on your LAN.
 # Everything else, notably Postgres and every other pod and Service inside the
 # cluster and the node addresses, is unreachable from a session pod.
 #
@@ -156,3 +160,18 @@ spec:
               - ::ffff:0:0/96  # IPv4-mapped: would reach the IPv4 ranges above
               - 64:ff9b::/96   # NAT64: ditto, where the network translates it
               - 64:ff9b:1::/48
+    # 6. OPT-IN, OFF BY DEFAULT: local model servers for the shared Hermes
+    #    providers (HERMES_PROVIDERS_FILE, CLUSTER-RUNTIME.md "Shared Hermes
+    #    providers"). Uncomment and give each server's own address as a /32 and
+    #    its port: never re-open a whole private range, which would put your
+    #    LAN back in reach of every session. 192.0.2.10 is a documentation
+    #    placeholder. The model catalog is fetched by the RUNNER pod, which this
+    #    policy does not restrict. NOTE: like every rule here it applies to ALL
+    #    session pods (they carry no engine label): Claude, Codex and cron
+    #    sessions can reach these servers too, not only Hermes ones.
+    # - to:
+    #     - ipBlock:
+    #         cidr: 192.0.2.10/32
+    #   ports:
+    #     - protocol: TCP
+    #       port: 8000

@@ -45,6 +45,7 @@ import VisualBlock from './VisualBlock'
 import { visualFile } from '../model/visualKind'
 import MarkupMode from './markup/MarkupMode'
 import ReviewMode from './review/ReviewMode'
+import ReviewRequestBar from './ReviewRequestBar'
 
 type Loaded =
   | { kind: 'text'; text: string }
@@ -69,13 +70,15 @@ interface Props {
   autoplay?: boolean
   /** A diff opens at this commit's section (a checklist item's sha chip). */
   commit?: string | null
+  /** Open straight in review (a markdown or PDF file; a diff is always reviewed in place). */
+  review?: boolean
 }
 
 export default function ArtifactViewer(props: Props) {
   return <ArtifactViewerSession key={`${props.sessionId}:${props.artifact.id}:${props.artifact.view}:${props.artifact.version ?? ''}`} {...props}/>
 }
 
-function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null }: Props) {
+function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null, review = false }: Props) {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
   useSelectAllIn(dialogRef)
@@ -83,7 +86,7 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
   const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [showAll, setShowAll] = useState(false)
   const [downloadError, setDownloadError] = useState<{ message: string; errorId?: string } | null>(null)
-  const [mode, setMode] = useState<Mode>('view')
+  const [mode, setMode] = useState<Mode>(review && (artifact.view === 'markdown' || artifact.view === 'pdf') ? 'review' : 'view')
   // The feedback modes send through the chat; a viewer mounted alone has no send path.
   const chat = useChat()
 
@@ -185,6 +188,7 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
             {latest && onOpen && <> <button type="button" className="artifact-link" onClick={() => onOpen(latest)}>View latest</button></>}
           </p>
         )}
+        <ReviewRequestBar artifact={artifact} />
         {downloadError && <div className="artifact-error" role="alert">{downloadError.message}<ErrorId id={downloadError.errorId} /></div>}
         <div className="artifact-body">
           {gone ? (

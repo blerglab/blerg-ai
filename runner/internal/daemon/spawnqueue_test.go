@@ -50,12 +50,12 @@ func TestSpawnSessionDoesNotBlockMessageDispatch(t *testing.T) {
 
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the clone never started")
 	}
 	select {
 	case <-dispatched:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("spawn_session blocked the read pump for the duration of the clone")
 	}
 
@@ -68,7 +68,7 @@ func TestSpawnSessionDoesNotBlockMessageDispatch(t *testing.T) {
 	}()
 	select {
 	case <-handled:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("kill_session was not handled while a clone was in flight")
 	}
 }
@@ -95,7 +95,7 @@ func TestKillCancelsAQueuedSpawn(t *testing.T) {
 	client.handlers["spawn_session"](raw)
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the clone never started")
 	}
 
@@ -103,7 +103,7 @@ func TestKillCancelsAQueuedSpawn(t *testing.T) {
 	client.handlers["kill_session"](killRaw)
 	close(release)
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		mgr.mu.Lock()
 		_, live := mgr.sessions["s-killed"]

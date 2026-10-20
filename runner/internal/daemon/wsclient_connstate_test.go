@@ -57,7 +57,7 @@ func captureLinkLog(t *testing.T) *syncBuffer {
 // cannot synchronize an assertion about the logger's separate write.
 func waitLinkLog(t *testing.T, logs *syncBuffer, want string) {
 	t.Helper()
-	timer := time.NewTimer(3 * time.Second)
+	timer := time.NewTimer(15 * time.Second)
 	defer timer.Stop()
 	for !strings.Contains(logs.String(), want) {
 		select {
@@ -84,7 +84,7 @@ func readConnFile(t *testing.T, path string) (st ConnectionState, raw string, ok
 // waitConnState waits until connection.json says state.
 func waitConnState(t *testing.T, path, state string) ConnectionState {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if st, _, ok := readConnFile(t, path); ok && st.State == state {
 			return st

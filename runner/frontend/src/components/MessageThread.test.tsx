@@ -478,3 +478,13 @@ describe('MessageBubble reply bubble', () => {
     expect(document.body.textContent).not.toMatch(/Invalid Date|NaN/)
   })
 })
+
+
+it('keeps archived-session questions readable without a reply form', () => {
+  useSessionStore.setState({sessions:[makeSession({id:'archived',title:'Archived parent',archived_at:'2026-10-20T12:00:00Z'})]})
+  useMessageStore.setState({messages:[makeMessage({id:'question',session_id:'archived',kind:'ask',status:'open',body:'Keep this question in history'})]})
+  renderThread()
+  expect(screen.getByText('Keep this question in history')).toBeInTheDocument()
+  expect(screen.queryByPlaceholderText('Type your reply…')).toBeNull()
+  expect(screen.queryByRole('button',{name:/Send/})).toBeNull()
+})

@@ -143,9 +143,9 @@ func LockDelegationParent(ctx context.Context, tx pgx.Tx, sid string) (*SessionR
 	var r SessionRow
 	err := tx.QueryRow(ctx, `SELECT id::text,daemon_id::text,status,spawning_account_id,runtime,private,
 		parent_session_id::text,board_id::text,cron_id::text,COALESCE(started_by_kind,''),
-		COALESCE(delegation_via,''),ended_at,end_reason,delegation_ended_at FROM sessions WHERE id=$1::uuid FOR UPDATE`, sid).
+		COALESCE(delegation_via,''),ended_at,end_reason,delegation_ended_at,restrict_tools,discard_requested_at FROM sessions WHERE id=$1::uuid FOR UPDATE`, sid).
 		Scan(&r.ID, &r.DaemonID, &r.Status, &r.SpawningAccountID, &r.Runtime, &r.Private,
-			&r.ParentSessionID, &r.BoardID, &r.CronID, &r.StartedByKind, &r.DelegationVia, &r.EndedAt, &r.EndReason, &r.DelegationEndedAt)
+			&r.ParentSessionID, &r.BoardID, &r.CronID, &r.StartedByKind, &r.DelegationVia, &r.EndedAt, &r.EndReason, &r.DelegationEndedAt, &r.RestrictTools, &r.DiscardRequestedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -381,7 +381,7 @@ func FindDelegationGrant(ctx context.Context, pool *pgxpool.Pool, parentID, engi
 }
 
 // ListLiveDelegationGrants returns the parent's unrevoked grants, oldest first.
-func ListLiveDelegationGrants(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]DelegationGrant, error) {
+func ListLiveDelegationGrants(ctx context.Context, pool Querier, parentID string) ([]DelegationGrant, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT `+delegationGrantCols+` FROM delegation_grants
 		 WHERE parent_session_id = $1::uuid AND revoked_at IS NULL
@@ -397,7 +397,7 @@ func ListLiveDelegationGrants(ctx context.Context, pool *pgxpool.Pool, parentID 
 }
 
 // RevokeDelegationGrant revokes a live grant of the account; false when there was none.
-func RevokeDelegationGrant(ctx context.Context, pool *pgxpool.Pool, id, account string) (bool, error) {
+func RevokeDelegationGrant(ctx context.Context, pool Querier, id, account string) (bool, error) {
 	tag, err := pool.Exec(ctx, `
 		UPDATE delegation_grants SET revoked_at = now()
 		 WHERE id = $1::uuid AND account_id = $2 AND revoked_at IS NULL`, id, account)
@@ -487,7 +487,7 @@ func ListDelegationRules(ctx context.Context, pool *pgxpool.Pool, account string
 
 // CandidateDelegationRules: live rules of the account for engine+runtime+daemon (local_only is the
 // server's to check).
-func CandidateDelegationRules(ctx context.Context, pool *pgxpool.Pool, account, engine, runtime, daemonID string) ([]DelegationRule, error) {
+func CandidateDelegationRules(ctx context.Context, pool Querier, account, engine, runtime, daemonID string) ([]DelegationRule, error) {
 	rows, err := pool.Query(ctx, delegationRuleSelect+`
 		 WHERE r.account_id = $1 AND r.revoked_at IS NULL AND r.engine = $2 AND r.runtime = $3
 		   AND r.daemon_id = $4::uuid
@@ -587,10 +587,12 @@ func CountRunningChildren(ctx context.Context, pool *pgxpool.Pool, parentID stri
 
 // CountParentStarts counts the parent's starts: its children plus its pending requests, and its
 // allowed requests whose child is not recorded yet (between the decision and the start) or never
-// started (start_error), so they cannot be retried past the limit.
+// started (start_error), so they cannot be retried past the limit. A child whose launch failed
+// (end_reason start_failed: nothing ever ran) is not a start.
 func CountParentStarts(ctx context.Context, pool *pgxpool.Pool, parentID string) (int, error) {
 	return countOne(ctx, pool, `
-		SELECT (SELECT count(*) FROM sessions WHERE parent_session_id = $1::uuid)
+		SELECT (SELECT count(*) FROM sessions WHERE parent_session_id = $1::uuid
+		            AND end_reason IS DISTINCT FROM '`+EndReasonStartFailed+`')
 		     + (SELECT count(*) FROM delegation_requests WHERE parent_session_id = $1::uuid
 		            AND (status = 'pending' OR (status = 'allowed' AND child_session_id IS NULL)))`, parentID)
 }
@@ -604,7 +606,8 @@ func CountAccountRunningChildren(ctx context.Context, pool *pgxpool.Pool, accoun
 
 // AccountStartsSince counts the starts for the account since t, and the oldest of them (for
 // Retry-After): its children, plus its requests that are pending, denied or expired, or allowed
-// without a child (an allowed request with a child is already counted as that child).
+// without a child (an allowed request with a child is already counted as that child). A child whose
+// launch failed (end_reason start_failed) is not a start.
 func AccountStartsSince(ctx context.Context, pool *pgxpool.Pool, account string, since time.Time) (int, *time.Time, error) {
 	var n int
 	var oldest *time.Time
@@ -612,6 +615,7 @@ func AccountStartsSince(ctx context.Context, pool *pgxpool.Pool, account string,
 		SELECT count(*)::int, min(at) FROM (
 		  SELECT started_at AS at FROM sessions
 		   WHERE parent_session_id IS NOT NULL AND spawning_account_id = $1 AND started_at >= $2
+		     AND end_reason IS DISTINCT FROM '`+EndReasonStartFailed+`'
 		  UNION ALL
 		  SELECT created_at FROM delegation_requests
 		   WHERE account_id = $1 AND created_at >= $2 AND (status <> 'allowed' OR child_session_id IS NULL)

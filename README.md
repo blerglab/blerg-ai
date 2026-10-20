@@ -1,11 +1,10 @@
 <p align="center">
-  <img src="brand/logo.svg" alt="Blerg" width="96">
+  <img src="brand/blerg-ai-banner.png" alt="blerg[ai]: your coding agents, working together. Claude, Codex and local models, open source." width="100%">
 </p>
 
-<h1 align="center">Blerg</h1>
-
 <p align="center">
-  Run coding agents on your own machine or cluster, under a login, a budget and a sandbox you control.
+  <b>One place to run all your coding agents</b>: Claude Code, Codex, and Hermes on a local model.<br>
+  On your laptop, in sandboxes or on your Kubernetes cluster, under your own login and budget.
 </p>
 
 <p align="center">
@@ -14,14 +13,41 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
-Blerg is a self-hosted home for coding-agent sessions. It starts Claude Code, Codex or Hermes on
-your laptop or in a throwaway pod on your Kubernetes cluster, streams what the agent does into a
-chat you can talk back to, and gives agents a shared kanban board to draft and pick up work. One
-login covers everything; each person's credentials stay their own; sessions run where you say,
-sandboxed by default.
+<table align="center"><tr>
+<td align="center" width="50%"><a href="https://www.youtube.com/watch?v=NKZk2pgB_LA"><img src="docs/media/more-power.jpg" alt="Watch MORE POWER: NVIDIA Nemotron on a DGX Spark commands Claude and Codex (video)"></a><br><b>MORE POWER</b> (1:13)<br>NVIDIA Nemotron on a DGX Spark commands Claude and Codex</td>
+<td align="center" width="50%"><a href="https://www.youtube.com/watch?v=kahpuujFju0"><img src="docs/media/ai-agent-made-this.jpg" alt="Watch An AI agent made this (video)"></a><br><b>An AI agent made this</b> (2:09)<br>A tour of Blerg, recorded and voiced by AI</td>
+</tr></table>
+
+Blerg is a self-hosted, open-source home for coding agents. It starts the agent CLIs you already
+use, streams what each one does into a chat you can talk back to, and puts every session, and every
+session those sessions start, in one live view.
+
+- **Agents share the load.** A Claude session can hand a task to Codex or to a model on your own
+  GPU, with your approval, check whose usage limit has room, and collect the result.
+- **See every agent at once.** A live panel shows sub-agents, child sessions, background work,
+  progress and token spend; the sidebar nests the sessions an agent started under it.
+- **Plan on a board.** Agents draft cards, you curate them, and a card starts a session that pins
+  its ticket and keeps a checklist.
+- **Review anything an agent makes:** code diffs line by line, documents, PDFs and images, with
+  requests the agent answers one by one. Agents can answer with diagrams and charts, too.
+- **Your machines, your rules.** Sessions run sandboxed by default, on your laptop or in a
+  throwaway pod on your cluster. One login covers everything, and each person's credentials stay
+  their own.
+
+<p align="center">
+  <img src="docs/media/ui/hero-crew.jpg" alt="A real Blerg session: NVIDIA Nemotron 3.5 Super VL, running locally, reports back after starting a Claude Fable session and two Codex sessions, listed with their token use in the session panel." width="100%">
+  <br><sub>A real session: NVIDIA Nemotron 3.5 Super VL, running locally, started Claude and Codex as its crew.</sub>
+</p>
+
+<table><tr>
+<td width="33%"><img src="docs/media/ui/approval.jpg" alt="Approval cards: a session asks to start a Claude session and a Codex session."><br><sub><b>Agents start agents, with your approval.</b></sub></td>
+<td width="33%"><img src="docs/media/ui/code-review.jpg" alt="An inline review comment on a diff."><br><sub><b>Code review in place.</b></sub></td>
+<td width="33%"><img src="docs/media/ui/doc-review.jpg" alt="A margin comment on a Markdown document under review."><br><sub><b>Review anything.</b></sub></td>
+</tr></table>
 
 It is for one developer who wants agents working on real repositories without handing a laptop
-over to them, and for a team that wants the same thing on a cluster.
+over to them, and for a team that wants the same thing on a cluster. Blerg is built with Blerg:
+most of it was written by agents running inside it.
 
 > **Are you an AI agent?** Read [`AGENTS.md`](AGENTS.md). It tells you how to find, drive and
 > install a Blerg, and how to work in this repository.
@@ -36,15 +62,9 @@ git clone https://github.com/blerglab/blerg-ai.git blerg && cd blerg/install/des
 ./blerg-up.sh
 ```
 
-The script builds and starts everything, then opens `http://localhost:8081`. Your one-time admin
-password is in core's first-boot log:
-
-```
-docker compose logs blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
-```
-
-Sign in, choose your username and a real password, open **Runner** (`http://localhost:8083`) → **+ New**, pick a
-repository and launch. The rest of the first-day details, day-to-day commands and uninstall are in
+The script builds and starts everything, then opens `http://localhost:8081/setup`: choose your
+username and password there to create your (admin) account, and you are signed in. Then open
+**Runner** (`http://localhost:8083`) → **+ New**, pick a repository and launch. The rest of the first-day details, day-to-day commands and uninstall are in
 [`install/desktop/README.md`](install/desktop/README.md). For a team, use the
 [Kubernetes install](install/k8s/README.md).
 
@@ -96,8 +116,9 @@ attach its results to its card.
 - **A board agents write to.** Cards are drafted by agents and curated by people; an admission
   step rejects duplicates and vague cards; a card can start a session. [`board/README.md`](board/README.md)
 - **Files in and out:** attach files to a message, have the agent publish results (including a
-  diff of its changes, shown in a diff viewer), preview HTML live, review and mark up markdown,
-  PDFs and images from the chat. [`docs/artifacts.md`](docs/artifacts.md)
+  diff of its changes, shown in a diff viewer you can review line by line), preview HTML live,
+  review and mark up markdown, PDFs and images from the chat, and see Mermaid diagrams and
+  Vega-Lite charts drawn in place. [`docs/artifacts.md`](docs/artifacts.md)
 - **Code you can read:** code blocks are highlighted (ten color themes, yours to pick), long ones
   fold into a viewer, files get inline previews, and a file the agent names opens from the
   session's folder. Copy and paste keep their structure: a copy button on every message, copied

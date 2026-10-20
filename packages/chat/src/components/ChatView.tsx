@@ -1,3 +1,4 @@
+import { modelDisplayName } from '../model/modelDisplay'
 // ChatView: a whole chat with one session over a Transport — the toolbar, the transcript, the
 // composer, the Files panel and viewer. The host adds what is its own through slots (a model
 // picker, a rules panel) and themes it through the --chat-* tokens.
@@ -17,6 +18,7 @@ import { ClockOffsetContext } from '../model/clockOffset'
 import { liveTurn, oldestLive } from '../model/liveCalls'
 import { activityLabel, modelRetry } from '../model/workingActivity'
 import { liveSubagents } from '../model/liveState'
+import { checklistFromEvents, readChecklist, safeChecklistAssignments } from '../model/worklist'
 import { sharedTimeline } from '../model/toolGroups'
 import { subagentWaitingOn } from '../model/waitingOnSubagent'
 import { askStates } from '../model/asks'
@@ -27,7 +29,7 @@ import { latestStartAttempt, placeholderAttempt, startPanelVisible, withSessionO
 import { getDraft, loadCompact, localStorageChatStorage, saveCompact, setDraft as saveDraft, type ChatStorage } from '../model/storage'
 import { themeStyle, type ThemeTokens } from '../theme'
 import type { ArtifactInfo, SessionMeta, Transport } from '../transport/types'
-import type { AgentEvent, ArtifactPayload, StatusPayload, UserMessagePayload } from '../types'
+import type { AgentEvent, ArtifactPayload, ChecklistItem, FiledCard, ReviewRequestPayload, StatusPayload, UserMessagePayload } from '../types'
 import ArtifactViewer from './ArtifactViewer'
 import { loadDiffSummary } from '../model/artifactPreview'
 import WorkspaceFileViewer from './WorkspaceFileViewer'
@@ -35,6 +37,10 @@ import Composer from './Composer'
 import { AskContext, type AskContextValue } from './askContext'
 import { DelegationContext, type DelegationContextValue } from './delegationContext'
 import { delegationStates } from '../model/delegations'
+import { proposalStates } from '../model/proposals'
+import { ProposalContext, type ProposalContextValue } from './proposalContext'
+import { ReviewRequestContext, type ReviewRequestContextValue } from './reviewRequestContext'
+import { newerReview, reviewForArtifact, reviewRequestStates } from '../model/reviewRequests'
 import { ChatContext, type ChatContextValue } from './context'
 import FilesPanel from './FilesPanel'
 import Transcript, { WINDOW, type BackgroundLine } from './Transcript'
@@ -48,6 +54,7 @@ import './chat.css'
 const PENDING_ACK_MS = 20_000
 
 const NO_EVENTS: AgentEvent[] = []
+const NO_CHECKLIST_ITEMS: ChecklistItem[] = []
 
 export interface ChatSlots {
   /** Leads the toolbar (the runner's model and effort pickers, its Rules button). */
@@ -63,10 +70,24 @@ export interface ChatSlots {
 }
 
 export interface ChatViewProps {
+  /** Current checklist from an authoritative host live read. Absent: use the loaded transcript. */
+  checklistItems?: readonly ChecklistItem[]
+  /** Opens a stable checklist target in the host's Plan panel, when available. */
+  onOpenChecklistItem?: (itemId: string) => void
   session: string
   /** Opens another session (a child a delegation card names) in the host's app. Absent: the card
    *  shows the child's short id. */
+  onManageChildApproval?: () => void
   onOpenSession?: (sessionId: string) => void
+  /** Opens the host's editor for a board-card proposal's draft (approved from there). Absent: the
+   *  proposal card has no Edit. */
+  onEditProposal?: (proposalId: string) => void
+  /** Opens a card a proposal created, in the host's board. Absent: the ticket card has no Open. */
+  onOpenBoardCard?: (card: FiledCard) => void
+  /** Opens the session's permissions (where an automatic approval's permission is revoked). */
+  onManagePermissions?: () => void
+  /** Bump when a proposal changed outside the chat (the host's editor approved it). */
+  proposalRevision?: number
   /** @deprecated Not used since 0.19.0: commit chips never link out of Blerg (they open the item's
    *  diff at the commit, or copy the sha). Accepted so a host that passes it still compiles. */
   commitUrl?: (sha: string) => string | null | undefined
@@ -156,7 +177,7 @@ function lastRunningSince(events: AgentEvent[]): number | null {
 // ReadyCard heads the timeline once a session is live: what it is running,
 // where, and since when — the answer to "did it start?".
 export function ReadyCard({ meta, readyAt, children }: { meta: SessionMeta; readyAt: number; children?: ReactNode }) {
-  const model = meta.model ? meta.model.replace(/^claude-/, '') : 'engine default'
+  const model = meta.model ? modelDisplayName(meta.model) : 'engine default'
   return (
     <div className="agent-card ready-card" data-testid="ready-card">
       <div className="ready-title">
@@ -168,7 +189,7 @@ export function ReadyCard({ meta, readyAt, children }: { meta: SessionMeta; read
       </div>
       <dl className="ready-facts">
         <div><dt>Engine</dt><dd>{meta.engine || 'claude'}</dd></div>
-        <div><dt>Model</dt><dd>{model}{meta.effort ? ` · ${meta.effort}` : ''}</dd></div>
+        <div><dt>Model</dt><dd><span title={meta.model}>{model}</span>{meta.effort && <span className="model-effort" title="Configured effort">{meta.effort}</span>}</dd></div>
         {children}
         {meta.runtime && <div><dt>Runs on</dt><dd>{meta.runtime}</dd></div>}
       </dl>
@@ -249,6 +270,8 @@ export default function ChatView(props: ChatViewProps) {
   const linkMissing = linked !== null && artifacts.status === 'ready' && !linkedArtifact
   // Whether the viewer was opened from a preview click: a video or audio file then plays at once.
   const [autoplay, setAutoplay] = useState(false)
+  // The file a review line opened, in review rather than view.
+  const [reviewing, setReviewing] = useState<string | null>(null)
   const picked = viewing ?? linkedArtifact
   // The viewer shows the list's own entry for the file when there is one: a card carries only its
   // own version, the list also knows how many versions the file has now.
@@ -262,9 +285,23 @@ export default function ChatView(props: ChatViewProps) {
   const sessionOver = status === 'error' || status === 'stopped' || status === 'ended'
   const publishedSessionUrl = props.transport.publishedSessionUrl?.(sessionId)
   const canOpenWorkspace = props.canOpenWorkspaceFiles === true && !!files?.workspaceFile
+  // Keep the shared context stable while unrelated text/tools stream: a checklist changes only
+  // when its newest valid full snapshot changes, not on every event in a long transcript.
+  const checklistEvent = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].kind === 'checklist' && readChecklist(events[i].payload)) return events[i]
+    }
+    return undefined
+  }, [events])
+  const checklist = useMemo(() => checklistEvent ? checklistFromEvents([checklistEvent]) : null, [checklistEvent])
+  const checklistItems = props.checklistItems ?? checklist?.items ?? NO_CHECKLIST_ITEMS
+  const currentChecklistItems = useMemo(() => safeChecklistAssignments(checklistItems, events), [checklistItems, events])
+  const onOpenChecklistItem = props.onOpenChecklistItem
   const chatContext = useMemo<ChatContextValue>(() => ({
     sessionId,
     sessionOver,
+    checklistItems: currentChecklistItems,
+    onOpenChecklistItem,
     // A checklist item's "View diff" (or one of its sha chips) opens the diff the CLI published of
     // its commits, from the list, at the commit's section when a chip was clicked.
     viewDiff: (id: string) => {
@@ -321,10 +358,17 @@ export default function ChatView(props: ChatViewProps) {
       const [person, agent] = await Promise.all([read('user'), read('agent')])
       return mergeReviews(person, agent)
     },
-  }), [sessionId, sessionOver, canOpenWorkspace, files, latestVersions, artifacts.items, send, refreshArtifacts, publishedSessionUrl])
+    openReview: files ? (name: string, artifactId?: string) => {
+      const a = (artifactId ? artifacts.items.find(x => x.id === artifactId) : undefined) ??
+        findLatest(artifacts.items, { name, origin: 'agent' }) ?? findLatest(artifacts.items, { name, origin: 'user' })
+      if (!a) return
+      setAutoplay(false); setDiffAnchor(null); setReviewing(a.id); setViewing(a)
+    } : undefined,
+  }), [sessionId, sessionOver, currentChecklistItems, onOpenChecklistItem, canOpenWorkspace, files, latestVersions, artifacts.items, send, refreshArtifacts, publishedSessionUrl])
   const consumeLink = props.onLinkedArtifactConsumed
   function closeViewer() {
     setAutoplay(false)
+    setReviewing(null)
     setViewing(null)
     if (linked !== null) consumeLink?.()
     setLinked(null)
@@ -394,10 +438,11 @@ export default function ChatView(props: ChatViewProps) {
   const bgRunning = useMemo(() => runningTasks(bgTasks, live, now), [bgTasks, live, now])
   const bgCount = bgRunning.length
   const bgDescription = bgCount === 1 ? bgRunning[0].description : ''
+  const bgCommand = bgCount === 1 ? bgRunning[0].command : ''
   const bgSince = bgRunning.reduce<number | null>((min, t) => (t.startedAt !== null && (min === null || t.startedAt < min) ? t.startedAt : min), null)
   const backgroundNow = useMemo<BackgroundLine | null>(
-    () => (bgCount > 0 ? { count: bgCount, description: bgDescription, since: bgSince } : null),
-    [bgCount, bgDescription, bgSince],
+    () => (bgCount > 0 ? { count: bgCount, description: bgDescription, command: bgCommand, since: bgSince } : null),
+    [bgCount, bgDescription, bgCommand, bgSince],
   )
   // The working line's suffix and background words are read from the events held, so while a
   // history is still coming in (the replay's pages, an older page) a call whose result, or a task
@@ -527,7 +572,43 @@ export default function ChatView(props: ChatViewProps) {
     states: delegationStates(shownEvents),
     ...delegationFns,
     onOpenSession: props.onOpenSession,
-  }), [shownEvents, delegationFns, props.onOpenSession])
+    onManageChildApproval: props.onManageChildApproval,
+  }), [shownEvents, delegationFns, props.onOpenSession, props.onManageChildApproval])
+  const proposalFns = useMemo(() => ({
+    load: transport.proposal ? transport.proposal.bind(transport) : undefined,
+    decide: transport.decideProposal && !props.readOnly ? transport.decideProposal.bind(transport) : undefined,
+  }), [transport, props.readOnly])
+  const proposalContext = useMemo<ProposalContextValue>(() => ({
+    states: proposalStates(shownEvents),
+    ...proposalFns,
+    onEdit: props.readOnly ? undefined : props.onEditProposal,
+    onOpenCard: props.onOpenBoardCard,
+    onManagePermissions: props.onManagePermissions,
+    revision: props.proposalRevision,
+  }), [shownEvents, proposalFns, props.readOnly, props.onEditProposal, props.onOpenBoardCard, props.onManagePermissions, props.proposalRevision])
+  // Review requests: the transcript's, merged with the server's list (read again whenever a review
+  // event arrives), which also says whether this person may decide them.
+  const reviewEvents = useMemo(() => shownEvents.reduce((n, e) => n + (e.kind === 'review_requested' || e.kind === 'review_decided' ? 1 : 0), 0), [shownEvents])
+  const [reviewList, setReviewList] = useState<{ sessionId: string; requests: ReviewRequestPayload[]; canDecide: boolean } | null>(null)
+  useEffect(() => {
+    if (!transport.reviewRequests) return
+    let cancelled = false
+    transport.reviewRequests(sessionId).then(r => { if (!cancelled) setReviewList({ sessionId, ...r }) }, () => {})
+    return () => { cancelled = true }
+  }, [transport, sessionId, reviewEvents])
+  const reviewContext = useMemo<ReviewRequestContextValue>(() => {
+    const merged = new Map(reviewRequestStates(shownEvents))
+    const list = reviewList?.sessionId === sessionId ? reviewList : null
+    for (const r of list?.requests ?? []) merged.set(r.request_id, newerReview(merged.get(r.request_id), r))
+    return {
+      forArtifact: (id: string) => reviewForArtifact(merged.values(), id),
+      decide: list?.canDecide && transport.decideReview && !props.readOnly ? transport.decideReview.bind(transport) : undefined,
+      open: files ? (r: ReviewRequestPayload) => {
+        const a = artifacts.items.find(x => x.id === r.artifact_id)
+        if (a) { setAutoplay(false); setDiffAnchor(null); setViewing(a) }
+      } : undefined,
+    }
+  }, [shownEvents, reviewList, sessionId, transport, props.readOnly, files, artifacts.items])
   const askOpen = asks.open !== null && !!transport.answersAsks
 
   // What a view beside the chat (useLiveState: the host's side panel) reads about this session:
@@ -639,6 +720,7 @@ export default function ChatView(props: ChatViewProps) {
         />
       )}
       {openArtifact && files && (
+        <ReviewRequestContext.Provider value={reviewContext}>
         <ArtifactViewer
           key={openArtifact.id}
           sessionId={sessionId}
@@ -647,9 +729,11 @@ export default function ChatView(props: ChatViewProps) {
           latest={openLatest}
           autoplay={autoplay}
           commit={viewing ? diffAnchor : props.linkedCommit ?? null}
+          review={reviewing === openArtifact.id}
           onOpen={a => { if (linked !== null) consumeLink?.(); setLinked(null); setAutoplay(false); setDiffAnchor(null); setViewing(a) }}
           onClose={closeViewer}
         />
+        </ReviewRequestContext.Provider>
       )}
       {workspaceFile && files && canOpenWorkspace && (
         <WorkspaceFileViewer
@@ -671,6 +755,8 @@ export default function ChatView(props: ChatViewProps) {
 
       <AskContext.Provider value={askContext}>
       <DelegationContext.Provider value={delegationContext}>
+      <ProposalContext.Provider value={proposalContext}>
+      <ReviewRequestContext.Provider value={reviewContext}>
       <Transcript
         sessionId={sessionId}
         events={shownEvents}
@@ -702,6 +788,8 @@ export default function ChatView(props: ChatViewProps) {
         steers={steers}
         pin={pin}
       />
+      </ReviewRequestContext.Provider>
+      </ProposalContext.Provider>
       </DelegationContext.Provider>
       </AskContext.Provider>
 

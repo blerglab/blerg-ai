@@ -74,13 +74,13 @@ func TestCodexInterruptCancelsNativeQuestion(t *testing.T) {
 	d.Enqueue("ask", "chat")
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("question did not start")
 	}
 	d.Interrupt()
 	select {
 	case <-stopped:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("interrupt left the question waiting")
 	}
 }

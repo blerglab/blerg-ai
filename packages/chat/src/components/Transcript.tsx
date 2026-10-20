@@ -10,6 +10,8 @@ import { HIDDEN_KINDS, isVisibleEvent, parentCallOf, sharedTimeline, timelineBui
 import type { StartAttempt } from '../model/startStages'
 import type { WaitingOn } from '../model/liveCalls'
 import { firstPersonMessage } from '../model/userMessages'
+import { reviewRounds } from '../model/reviewRounds'
+import { ReviewRoundsContext } from './ReviewRoundLine'
 import type { AgentEvent, ToolResultPayload, UserMessagePayload } from '../types'
 import { EventRow, ToolCard, renderEvent, type DescribeUserMessage, type MessageFooter } from './cards/EventCards'
 import { MessageText } from './AttachmentChips'
@@ -91,6 +93,7 @@ function TurnClock({ since, clockOffset, waitingOn, background, activity }: {
 export interface BackgroundLine {
   count: number
   description: string
+  command?: string
   since: number | null
 }
 
@@ -287,9 +290,11 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     }
     return { anchors, folded }
   }, [buildFull, events, compact, sessionId])
+  // Review answers: every publish of a round but its newest draws nothing; that one is the round's line.
+  const rounds = useMemo(() => reviewRounds(events), [events])
   const fullSeq = useMemo(
-    () => (compact ? [] : events.filter(ev => !HIDDEN_KINDS.has(ev.kind) && !fullSubs.folded.has(ev.client_event_id))),
-    [events, compact, fullSubs],
+    () => (compact ? [] : events.filter(ev => !HIDDEN_KINDS.has(ev.kind) && !fullSubs.folded.has(ev.client_event_id) && !rounds.hidden.has(ev.client_event_id))),
+    [events, compact, fullSubs, rounds],
   )
   // When each turn began (the user message before its turn_done), for "took 42 s".
   const turnStarts = useMemo(() => turnStartTimes(events), [events])
@@ -652,7 +657,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     ? <StartProgress attempt={p.attempt} session={p.startSession} onStop={p.onStopSession} clockOffset={p.clockOffset} resuming={resuming} />
     : null
   return (
-    <>
+    <ReviewRoundsContext.Provider value={rounds}>
       {p.showSkeleton && <HistorySkeleton />}
       <div ref={timelineRef} className={`agent-timeline${p.showSkeleton ? ' loading' : ''}${p.loadingOlder ? ' backfilling' : ''}`} onScroll={onScroll}>
         {p.loadingOlder && start === 0 && (
@@ -770,7 +775,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
           </div>
         )}
       </div>
-    </>
+    </ReviewRoundsContext.Provider>
   )
 })
 

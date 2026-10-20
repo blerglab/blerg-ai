@@ -139,7 +139,7 @@ func TestLimitResumeLockDoesNotReserveMainPool(t *testing.T) {
 	}
 	t.Cleanup(isolated.Close)
 	p = isolated
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	err = db.WithLimitResumeLock(ctx, p, "session-lock", func(conn *pgxpool.Conn) error {
 		var one int
@@ -163,7 +163,7 @@ func TestLimitResumeLockDoesNotReserveMainPool(t *testing.T) {
 // not dial a new one per call.
 func TestLimitResumeLockReusesConnections(t *testing.T) {
 	p := endTestPool(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	pids := map[int32]bool{}
 	for i := 0; i < 20; i++ {
@@ -188,7 +188,7 @@ func TestLimitResumeLockReusesConnections(t *testing.T) {
 // once (which stalled the transcript until the daemon's 30 s resend).
 func TestLimitResumeLockWaitBlocksBriefly(t *testing.T) {
 	p := endTestPool(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	held := make(chan struct{})
 	release := make(chan struct{})

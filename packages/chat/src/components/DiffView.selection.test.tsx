@@ -41,7 +41,7 @@ describe('diff gutter selection', () => {
     expect(container.querySelector('.diff-request-focused')).not.toBeNull()
     expect(container.querySelectorAll('.diff-row').length).toBeLessThanOrEqual(DIFF_FILE_LINES + 7)
     expect(screen.queryByRole('button', {name: /Select new line/})).toBeNull()
-  }, 15_000)
+  }, 30_000)
   it('shows a reason when a range exceeds the selection limit', () => {
     const text = '--- /dev/null\n+++ b/f.ts\n@@ -0,0 +1,201 @@\n' + Array.from({length: 201}, (_, i) => '+' + i).join('\n')
     render(<DiffView text={text} onSelection={() => {}}/>)

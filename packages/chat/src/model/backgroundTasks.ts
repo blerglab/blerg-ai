@@ -117,9 +117,16 @@ export function runningTasks(tasks: BackgroundTask[], live: boolean, now: number
   return live ? tasks.filter(t => !t.done && !staleTask(t, now)) : []
 }
 
+/** A compact human description; multiline task payloads are command/details, not a title. */
+export function backgroundSummary(description: string): string {
+  const text = description.trim()
+  return /[\r\n]/.test(text) || Array.from(text).length > 72 ? '' : text
+}
+
 /** backgroundLabel: the working line's words while background tasks run. */
 export function backgroundLabel(count: number, description: string): string {
-  if (count === 1) return description ? `Waiting on a background task: ${description}` : 'Waiting on a background task'
+  const summary = backgroundSummary(description)
+  if (count === 1) return summary ? `Waiting on a background task: ${summary}` : 'Waiting on a background task'
   return `Waiting on ${count} background tasks`
 }
 

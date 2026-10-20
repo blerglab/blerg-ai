@@ -26,7 +26,13 @@ func EditBoardFilingProposal(ctx context.Context, pool *pgxpool.Pool, account, i
 	return p, err
 }
 func BeginBoardFilingExecution(ctx context.Context, pool *pgxpool.Pool, account, id, by, expected string) (*Proposal, error) {
-	return transitionOwnedWhere(ctx, pool, account, id, ProposalPending, ProposalExecuting, `, decided_by=$5,decided_at=now()`, ` AND arguments::text=$6 AND connection_id=$7::uuid AND connection_name='board-file' AND tool='file_ticket' AND tool_hash='board-file-v1' AND created_at>now()-interval '7 days'`, by, expected, BoardFilingConnectionID)
+	return BeginBoardFilingExecutionByGrant(ctx, pool, account, id, by, expected, "")
+}
+
+// BeginBoardFilingExecutionByGrant is BeginBoardFilingExecution for an approval a session
+// permission made (grantID; "" for a person's): recorded with the decision, and only while live.
+func BeginBoardFilingExecutionByGrant(ctx context.Context, pool *pgxpool.Pool, account, id, by, expected, grantID string) (*Proposal, error) {
+	return transitionOwnedWhere(ctx, pool, account, id, ProposalPending, ProposalExecuting, `, decided_by=$5,decided_at=now(),approved_by_grant=NULLIF($8,'')::uuid`, ` AND arguments::text=$6 AND connection_id=$7::uuid AND connection_name='board-file' AND tool='file_ticket' AND tool_hash='board-file-v1' AND created_at>now()-interval '7 days'`+liveGrantGuard("$8"), by, expected, BoardFilingConnectionID, grantID)
 }
 
 func SaveBoardFilingProof(ctx context.Context, pool *pgxpool.Pool, sid, kind, value, project string) error {

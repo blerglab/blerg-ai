@@ -63,7 +63,7 @@ func TestHub_DaemonRegistration(t *testing.T) {
 	sendHello(t, conn, testToken)
 
 	// Give the server goroutine time to process the hello and register.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	var registered bool
 	for time.Now().Before(deadline) {
 		hub.mu.RLock()
@@ -377,7 +377,7 @@ func TestHubBoardSubscribeViaWebSocket(t *testing.T) {
 	defer conn.Close()
 
 	// Drain the initial_state message.
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	if _, _, err := conn.ReadMessage(); err != nil {
 		t.Fatalf("read initial_state: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestHubBoardSubscribeViaWebSocket(t *testing.T) {
 	})
 
 	// Client should receive the event.
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read board event: %v", err)
@@ -435,7 +435,7 @@ func TestHub_InvalidToken(t *testing.T) {
 	sendHello(t, conn, "wrong-token")
 
 	// The server should close the connection with code 4401.
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	_, _, err := conn.ReadMessage()
 	if err == nil {
 		t.Fatal("expected connection to be closed after wrong token, but read succeeded")

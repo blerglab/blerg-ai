@@ -237,6 +237,7 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			dc.SetGitProviders(hello.GitProviders)
 			dc.SetCloneFrom(hello.CloneFrom)
 			dc.SetMCPGateway(hello.MCPGateway)
+			dc.SetMCPGatewayViaServer(hello.MCPGatewayViaServer)
 			dc.SetSessionTokenFile(hello.SessionTokenFile)
 			dc.SetInputReceipts(hello.InputReceipts)
 			dc.SetRestrictTools(hello.RestrictTools)
@@ -267,6 +268,12 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			}
 			// A session it still runs with a dead token gets a fresh one.
 			healSessionTokens(ctx, h, dbPool, dc, boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions))
+			// Their public-route MCP grants are renewed: the daemon is back with them running.
+			if dbPool != nil {
+				if err := db.RenewPublicMCPGrants(ctx, dbPool, dc.ID, boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions)); err != nil {
+					log.Printf("daemon %s: %v", dc.ID, err)
+				}
+			}
 			// Which of them have a question open: a session it hosts again after a restart waits for
 			// its answer instead of continuing by itself (sessionpaused.go).
 			asksSent := sendOpenAsks(ctx, dbPool, dc, boundSessionIDs(hello.Mode, hello.Name, hello.ActiveSessions))
@@ -599,7 +606,7 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 			log.Printf("daemon %s malformed agent_event: %v", dc.ID, err)
 			return true
 		}
-		if msg.Transient && msg.Kind != protocol.MCPStatusKind && msg.Kind != protocol.PlanUpdatedKind && msg.Kind != protocol.ProgressUpdatedKind && msg.Kind != backgroundStartedKind && msg.Kind != backgroundDoneKind && msg.Kind != "subagent_started" && msg.Kind != "subagent_update" && msg.Kind != "subagent_done" {
+		if msg.Transient && msg.Kind != protocol.MCPStatusKind && msg.Kind != protocol.PlanUpdatedKind && msg.Kind != protocol.ProgressUpdatedKind && msg.Kind != protocol.UsageUpdatedKind && msg.Kind != backgroundStartedKind && msg.Kind != backgroundDoneKind && msg.Kind != "subagent_started" && msg.Kind != "subagent_update" && msg.Kind != "subagent_done" {
 			// Streaming deltas: fan out only — no DB, no ack.
 			h.FanOutSessionOutput(msg.SessionID, raw)
 			return true

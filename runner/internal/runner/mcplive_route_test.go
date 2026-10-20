@@ -84,13 +84,13 @@ for line in sys.stdin:
 			if runErr != nil {
 				t.Error(runErr)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("pod did not stop")
 		}
 	}()
 	select {
 	case conn = <-connections:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("pod did not connect")
 	}
 	next := func() protocol.AgentEvent {

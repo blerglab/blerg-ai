@@ -132,6 +132,12 @@ spec:
             - name: BLERG_RUNNER_METRICS_TOKEN
               valueFrom:
                 secretKeyRef: { name: blerg-secrets, key: BLERG_RUNNER_METRICS_TOKEN, optional: true }
+            # Optional — the cluster's shared Hermes provider configuration (a Hermes config.yaml
+            # fragment), written by deploy.sh from HERMES_PROVIDERS_FILE. Absent Secret = Hermes
+            # on the cluster works as before. See CLUSTER-RUNTIME.md, "Shared Hermes providers".
+            - name: BLERG_RUNNER_HERMES_PROVIDERS
+              valueFrom:
+                secretKeyRef: { name: blerg-hermes-providers, key: config.yaml, optional: true }
             # Optional — the Claude model list's source (see configmap.yaml).
             # Absent key = the public Claude Code catalog; "" = built-in only.
             - name: BLERG_RUNNER_MODEL_CATALOG_URL
@@ -155,6 +161,12 @@ spec:
             - name: BLERG_RUNNER_MCP_GW_URL
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_GW_URL, optional: true }
+            - name: BLERG_RUNNER_MCP_GW_PUBLIC
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MCP_GW_PUBLIC, optional: true }
+            - name: BLERG_RUNNER_TRUSTED_PROXIES
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_TRUSTED_PROXIES, optional: true }
             # Optional — the board cron runs use (see configmap.yaml): the failure
             # card's target and the built-in board connection's endpoint.
             - name: BLERG_RUNNER_BOARD_URL

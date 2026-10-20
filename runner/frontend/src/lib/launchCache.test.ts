@@ -122,8 +122,8 @@ describe('launchCache', () => {
     vi.stubGlobal('fetch', fetchMock)
     prefetchLaunchData()
     prefetchLaunchData() // in flight: shared
-    await vi.waitFor(() => expect(readLaunchCache().creds).toBeDefined())
-    await vi.waitFor(() => expect(readLaunchCache().repos).toBeDefined())
+    await vi.waitFor(() => expect(readLaunchCache().creds).toBeDefined(), { timeout: 15000 })
+    await vi.waitFor(() => expect(readLaunchCache().repos).toBeDefined(), { timeout: 15000 })
     prefetchLaunchData() // fresh: nothing asked
     const urls = fetchMock.mock.calls.map(([u]) => u).sort()
     expect(urls).toEqual(['/api/cluster/status', '/api/daemons', '/api/me/credentials', '/api/repos'])

@@ -2,7 +2,7 @@
 // discuss, run again, the drawer's close) around a chat that talks to /api/chat with the board's
 // bearer token, labels the board's own messages as the board's, and folds the kickoff prompt away.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useTranscriptStore } from "@blerglab/chat";
 import { Conversation } from "./Conversation";
 import { BoardChat } from "./BoardChat";
@@ -87,6 +87,65 @@ describe("Conversation (a card's session)", () => {
     expect(screen.getByRole("button", { name: /Discuss first/ })).toBeInTheDocument();
   });
 
+  it("runs a card where the person picks, and on the board's default otherwise", async () => {
+    responses["/api/cards/c1/run-targets"] = {
+      default_runtime: "", can_choose: true,
+      targets: [{ runtime: "cluster", label: "Cluster" }, { runtime: "docker", daemon_id: "d1", label: "laptop · Local sandbox" }],
+    };
+    render(<Conversation cardId="c1" />);
+    const where = await screen.findByLabelText("Where it runs");
+    expect(where).toHaveValue("");
+    fireEvent.change(where, { target: { value: "docker|d1" } });
+    fireEvent.click(screen.getByRole("button", { name: /Run this card/ }));
+    await waitFor(() => expect(apiCalls.some((c) => c.path === "/api/cards/c1/spawn")).toBe(true));
+    const spawn = apiCalls.find((c) => c.path === "/api/cards/c1/spawn")!.init as { json: Record<string, unknown> };
+    expect(spawn.json).toEqual({ mode: "run", runtime: "docker", daemon_id: "d1" });
+  });
+
+  it("offers no choice to someone who may not make one", async () => {
+    responses["/api/cards/c1/run-targets"] = { default_runtime: "", can_choose: false, targets: [], reason: "only the owner" };
+    render(<Conversation cardId="c1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /Run this card/ }));
+    await waitFor(() => expect(apiCalls.some((c) => c.path === "/api/cards/c1/spawn")).toBe(true));
+    expect(screen.queryByLabelText("Where it runs")).not.toBeInTheDocument();
+    expect(screen.getByTestId("run-where-reason")).toHaveTextContent("only the owner");
+    const spawn = apiCalls.find((c) => c.path === "/api/cards/c1/spawn")!.init as { json: Record<string, unknown> };
+    expect(spawn.json).toEqual({ mode: "run" });
+  });
+
+  it("offers Run as me beside Run on a board with no token, then the chooser", async () => {
+    responses["/api/cards/c1/run-targets"] = {
+      default_runtime: "", can_choose: false, targets: [], board_id: "b1", can_run_as_me: true,
+      automation_problem: "this board has no automation token, so it cannot start sessions",
+      reason: "only the owner of this board's automation token can choose where a card runs",
+    };
+    render(<Conversation cardId="c1" />);
+    const cta = await screen.findByRole("button", { name: "Run as me" });
+    expect(screen.getByTestId("run-as-me-cta")).toHaveTextContent("This board can't start sessions yet");
+    // The owner-only note is beside the point until the board has a token at all.
+    expect(screen.queryByTestId("run-where-reason")).not.toBeInTheDocument();
+    // After Run as me the targets are asked for again, and the person (now the owner) may choose.
+    responses["/api/cards/c1/run-targets"] = {
+      default_runtime: "", can_choose: true, board_id: "b1", can_run_as_me: false,
+      targets: [{ runtime: "cluster", label: "Cluster" }],
+    };
+    fireEvent.click(cta);
+    await waitFor(() => expect(apiCalls.some((c) => c.path === "/api/boards/b1/automation/run-as-me")).toBe(true));
+    expect(apiCalls.find((c) => c.path === "/api/boards/b1/automation/run-as-me")!.init).toEqual({ method: "POST" });
+    expect(await screen.findByLabelText("Where it runs")).toBeInTheDocument();
+    expect(screen.queryByTestId("run-as-me-cta")).not.toBeInTheDocument();
+  });
+
+  it("tells a card writer who cannot fix it why the board cannot run", async () => {
+    responses["/api/cards/c1/run-targets"] = {
+      default_runtime: "", can_choose: false, targets: [], board_id: "b1", can_run_as_me: false,
+      automation_problem: "this board has no automation token, so it cannot start sessions",
+    };
+    render(<Conversation cardId="c1" />);
+    expect(await screen.findByTestId("run-as-me-cta")).toHaveTextContent("a board admin can choose Run as me in the board's settings");
+    expect(screen.queryByRole("button", { name: "Run as me" })).not.toBeInTheDocument();
+  });
+
   it("shows the session in the shared chat, through the board's proxy with the board's token", async () => {
     const jwt = signIn();
     responses["/api/cards/c1/runner-sessions"] = [session()];
@@ -99,7 +158,8 @@ describe("Conversation (a card's session)", () => {
 
     // the board's own chrome
     expect(await screen.findByText("running")).toBeInTheDocument();
-    expect(screen.getByText(/blerg-runner · ext-1234 · claude-sonnet-5/)).toBeInTheDocument();
+    expect(screen.getByText(/blerg-runner · ext-1234/)).toBeInTheDocument();
+    expect(within(screen.getByText(/blerg-runner · ext-1234/)).getByTitle("claude-sonnet-5")).toHaveTextContent("sonnet-5");
 
     // the shared chat, fed by the board's proxy
     await waitFor(() => expect(screen.getByText("also fix the title")).toBeInTheDocument());

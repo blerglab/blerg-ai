@@ -51,8 +51,8 @@ describe('thinking', () => {
     seq = 0
   })
 
-  it('is an ordinary assistant card with the text as written and a "thinking" caption', () => {
-    const text = `${LONG}\nSecond line.\n\n**not bold**`
+  it('is an ordinary assistant card with rendered Markdown and a "thinking" caption', () => {
+    const text = `${LONG}\nSecond line.\n\n**important**`
     seed(ev('user_message', { text: 'why?', source: 'chat' }), ev('assistant_thinking', { text }), ev('assistant_text', { text: 'Because.', done: true }))
     mount()
     const row = screen.getByTestId('thinking')
@@ -60,9 +60,9 @@ describe('thinking', () => {
     expect(row).toHaveClass('agent-card', 'assistant')
     expect(row).toHaveAttribute('data-kind', 'thinking')
     expect(row.querySelector('details, summary')).toBeNull()
-    // The full text as written: line breaks kept, Markdown not rendered.
-    expect(row.querySelector('.thinking-text')!.textContent).toBe(text)
-    expect(row.querySelector('strong')).toBeNull()
+    // Thinking retains its content, with the same Markdown formatting as answers.
+    expect(row.querySelector('.thinking-text')!.textContent).toContain(`${LONG}\nSecond line.`)
+    expect(row.querySelector('strong')!.textContent).toBe('important')
     // Where the answer shows its time, the card says "thinking · <time>".
     expect(row.querySelector('.card-foot')!.textContent).toMatch(/^thinking · /)
     // The answer is the assistant card under it.
@@ -275,7 +275,7 @@ describe('subagent card', () => {
     expect(row()).toHaveAccessibleName('Survey the repo · Explore · claude-haiku-5 · configured effort: unknown · 23k tokens · done')
     expand()
     expect(within(card()).getByTestId('subagent-line')).toHaveTextContent('done · 1 tool call · 0 messages · 23k tokens · 1m 4s')
-    expect(within(card()).getByTestId('subagent-settings')).toHaveTextContent('Model: claude-haiku-5 · Configured effort: unknown')
+    expect(within(card()).getByTestId('subagent-settings')).toHaveTextContent('Model: haiku-5 Configured effort: unknown')
   })
 
   it('a background subagent runs in the background until its real end', () => {

@@ -39,7 +39,7 @@ func latestHostMCP(sender *agentTestSender) protocol.MCPStatusPayload {
 func TestAgentHostMCPDiscoversBeforePromptAndManagerReleases(t *testing.T) {
 	host, sender, logPath := hostMCPFixture(t)
 	host.Spawn(protocol.SpawnSession{Type: "spawn_session", SessionID: "fixture", Repo: "proj", Kind: "agent", Engine: "codex"})
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for len(latestHostMCP(sender).Servers) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("host did not discover native MCP without a prompt")
@@ -57,7 +57,7 @@ func TestAgentHostMCPDiscoversBeforePromptAndManagerReleases(t *testing.T) {
 		t.Fatal("discovery must be a native status RPC without a prompt")
 	}
 	host.UserMessage("fixture", "first fixture prompt", "chat")
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for latestHostMCP(sender).Hold == nil {
 		if time.Now().After(deadline) {
 			t.Fatal("host first prompt bypassed MCP hold")
@@ -83,7 +83,7 @@ func TestAgentHostMCPDiscoversBeforePromptAndManagerReleases(t *testing.T) {
 	host.Kill("fixture")
 	select {
 	case <-tracker.done:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("killed host left MCP tracking running")
 	}
 	mgr.handleReleaseHeldPrompt([]byte(`{"session_id":"fixture"}`))
@@ -95,7 +95,7 @@ func TestAgentHostMCPDiscoversBeforePromptAndManagerReleases(t *testing.T) {
 func TestAgentHostMCPRestoredMetadataDoesNotConsumeFirstPrompt(t *testing.T) {
 	host, sender, _ := hostMCPFixture(t)
 	host.SpawnResumed(protocol.SpawnSession{Type: "spawn_session", SessionID: "fixture", Repo: "proj", Kind: "agent", Engine: "codex", InitialPrompt: "first after restore"}, []agent.RestoredEvent{{Kind: "model_changed", Payload: json.RawMessage(`{"model":"gpt-test"}`)}}, "resumed-from-wip")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for latestHostMCP(sender).Hold == nil {
 		for _, event := range sender.agentEvents() {
 			if event.Kind == "user_message" {

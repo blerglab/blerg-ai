@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./Login";
 import Settings from "./Settings";
 import ChangePassword from "./ChangePassword";
+import Setup from "./Setup";
 import Shell, { useSite, type Site } from "./Shell";
 import { getAccessToken, redirectToRefresh } from "./authClient";
 import { apiFetch } from "./apiFetch";
@@ -248,6 +249,7 @@ export default function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="/login" element={<Login />} />
+        <Route path="/setup" element={<Setup />} />
         <Route path="*" element={<Navigate to="/app" replace />} />
       </Routes>
     </BrowserRouter>

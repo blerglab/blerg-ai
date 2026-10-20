@@ -91,7 +91,7 @@ func TestDelegationInterruptedRecoveryWinsBeforeQueuedWorker(t *testing.T) {
 	owner := fx.human("owner-1")
 	done := make(chan map[string]any, 1)
 	go func() { _, out := fx.decide(id, owner, choice("once")); done <- out }()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for fx.request(id).Status != "allowed" {
 		if time.Now().After(deadline) {
 			t.Fatal("allow not committed")
@@ -109,7 +109,7 @@ func TestDelegationInterruptedRecoveryWinsBeforeQueuedWorker(t *testing.T) {
 	var out map[string]any
 	select {
 	case out = <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("queued worker stuck")
 	}
 	if asString(out["child_session_id"]) != "" || out["start_error"] != msgStartInterrupted {
@@ -142,7 +142,7 @@ func TestDelegationSweeperCannotFinalizeAnActiveWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = control.Close(context.Background()) }()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		var acquired bool
 		if err := control.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('delegation:owner-1'))`).Scan(&acquired); err != nil {
@@ -171,7 +171,7 @@ func TestDelegationSweeperCannotFinalizeAnActiveWorker(t *testing.T) {
 	var out map[string]any
 	select {
 	case out = <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("active start stuck")
 	}
 	fx.spawn()

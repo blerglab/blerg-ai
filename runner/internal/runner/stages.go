@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
@@ -167,8 +168,10 @@ func missingEngineCredential(engine string, env func(string) string) (detail, hi
 				"Connect your own Codex login in blerg settings," + operator
 		}
 	case "hermes":
-		if env("HERMES_ENV_CONTENTS") == "" {
-			return "No Hermes configuration reached the pod (HERMES_ENV_CONTENTS is empty)",
+		// The cluster's shared provider configuration alone is enough: keyless
+		// local model servers need no .env.
+		if env("HERMES_ENV_CONTENTS") == "" && env(daemon.HermesProvidersEnvVar) == "" {
+			return "No Hermes configuration reached the pod (neither HERMES_ENV_CONTENTS nor the cluster's shared providers)",
 				"Connect your own Hermes configuration in blerg settings," + operator
 		}
 	}

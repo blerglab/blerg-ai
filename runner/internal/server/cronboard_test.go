@@ -400,7 +400,7 @@ func TestCronFailureCardNeverBlocksOrBreaksTheStart(t *testing.T) {
 		if !isCredential(err) {
 			t.Errorf("Start = %v, want the credential failure", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("Start waited for the card")
 	}
 	<-bf.cards.entered

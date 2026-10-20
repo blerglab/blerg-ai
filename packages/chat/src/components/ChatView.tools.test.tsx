@@ -109,7 +109,7 @@ describe('ChatView compact tool calls', () => {
     expect(screen.getByTestId('tool-preview').textContent).toBe('Read src/App.tsx')
   })
 
-  it('shows a failure badge and reveals the failing line without expanding', () => {
+  it('keeps only outcome totals collapsed and preserves complete failures on expansion', () => {
     seed(
       ...bashRun(2),
       call('f1', 'Bash', { command: 'npm test' }), result('f1', 'FAIL src/a.test.ts\nmore detail', true),
@@ -117,13 +117,82 @@ describe('ChatView compact tool calls', () => {
       ...bashRun(1, 10),
     )
     mount()
-    expect(screen.getByTestId('tool-fail-badge')).toHaveTextContent('✗ 2 failed')
-    const lines = screen.getAllByTestId('tool-fail')
-    expect(lines).toHaveLength(2)
-    expect(lines[0]).toHaveTextContent('FAIL src/a.test.ts')
-    expect(lines[0]).not.toHaveTextContent('more detail')
-    expect(screen.getByTestId('tool-group-toggle')).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByTestId('tool-fail-badge')).toHaveTextContent('2 failed')
+    expect(screen.getByTestId('tool-success-count')).toHaveTextContent('3 succeeded')
+    expect(screen.queryByText(/FAIL src/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/vet: nope/)).not.toBeInTheDocument()
+    const toggle = screen.getByTestId('tool-group-toggle')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryAllByTestId('tool-row')).toHaveLength(0)
+    fireEvent.click(toggle)
+    const failed = screen.getAllByTestId('tool-row').filter(row => row.textContent?.includes('npm test'))[0]
+    fireEvent.click(within(failed).getByRole('button'))
+    expect(within(failed).getByTestId('tool-detail')).toHaveTextContent('FAIL src/a.test.ts')
+    expect(within(failed).getByTestId('tool-detail')).toHaveTextContent('more detail')
+    fireEvent.click(toggle)
+    expect(screen.queryByText(/FAIL src/)).not.toBeInTheDocument()
+
+  })
+
+  it('excludes pending calls from successful outcomes', () => {
+    seed(...bashRun(1), call('failed', 'Bash', { command: 'false' }), result('failed', 'error', true), call('pending', 'Bash', { command: 'sleep 10' }))
+    mount('running')
+    expect(screen.getByTestId('tool-success-count')).toHaveTextContent('1 succeeded')
+    expect(screen.getByTestId('tool-fail-badge')).toHaveTextContent('1 failed')
+  })
+
+  it('shows mixed recorded attempts neutrally while keeping success totals prominent', () => {
+    seed(call('failed', 'Bash', {}), result('failed', 'earlier failure', true), ...bashRun(2))
+    mount()
+    const group = screen.getByTestId('tool-group')
+    expect(group).not.toHaveClass('tcg-group-bad')
+    expect(within(group).getByRole('img', {name: 'mixed outcomes'})).toBeInTheDocument()
+    expect(screen.getByTestId('tool-success-count')).toHaveClass('tcg-succeeded-dominant')
+    expect(screen.getByTestId('tool-fail-badge')).toHaveClass('tcg-badge-quiet')
+    expect(screen.getByTestId('tool-fail-badge')).toHaveTextContent('1 failed')
+  })
+
+  it('keeps the latest failed attempt neutral without hiding its count', () => {
+    seed(...bashRun(2), call('failed', 'Bash', {}), result('failed', 'latest failure', true))
+    mount()
+    const group = screen.getByTestId('tool-group')
+    expect(group).not.toHaveClass('tcg-group-bad')
+    expect(within(group).getByRole('img', {name: 'mixed outcomes'})).toBeInTheDocument()
+    expect(screen.getByTestId('tool-fail-badge')).toHaveClass('tcg-badge-quiet')
+  })
+
+  it.each([false, true])('keeps parallel mixed results neutral regardless of completion order (latest failed: %s)', latestFailed => {
+    seed(call('slow', 'Bash', {}), call('fast', 'Read', {}), call('last-started', 'Bash', {}), result('fast'), result('last-started', 'earlier result', !latestFailed), result('slow', 'latest result', latestFailed))
+    mount()
+    const group = screen.getByTestId('tool-group')
+    expect(group.classList.contains('tcg-group-bad')).toBe(false)
+    expect(within(group).getByRole('img', {name: 'mixed outcomes'})).toBeInTheDocument()
+  })
+
+  it('does not imply recovery while any call has no result', () => {
+    seed(...bashRun(1), call('failed', 'Bash', {}), result('failed', 'failure', true), call('pending', 'Bash', {}))
+    mount()
+    const group = screen.getByTestId('tool-group')
+    expect(group).not.toHaveClass('tcg-group-bad')
+    expect(within(group).getByRole('img', {name: 'no result'})).toBeInTheDocument()
+    expect(screen.getByTestId('tool-success-count')).toHaveClass('tcg-succeeded-dominant')
+  })
+
+  it('keeps a live call dominant over completed failures', () => {
+    seed(...bashRun(1), call('failed', 'Bash', {}), result('failed', 'failure', true), call('live', 'Bash', {}))
+    mount('running')
+    const group = screen.getByTestId('tool-group')
+    expect(group).not.toHaveClass('tcg-group-bad')
+    expect(within(group).getByRole('img', {name: 'running'})).toBeInTheDocument()
+  })
+
+  it('keeps all-failed attempt counts visible with neutral styling', () => {
+    seed(...Array.from({length: 3}, (_, i) => [call(`failed-${i}`, 'Bash', {}), result(`failed-${i}`, 'failure', true)]).flat())
+    mount()
+    expect(screen.getByTestId('tool-group')).not.toHaveClass('tcg-group-bad')
+    expect(screen.getByTestId('tool-success-count')).toHaveTextContent('0 succeeded')
+    expect(screen.getByTestId('tool-fail-badge')).toHaveTextContent('3 failed')
+    expect(screen.getByTestId('tool-fail-badge')).toHaveClass('tcg-badge-quiet')
   })
 
   it('shows the running call in the preview with a spinner', () => {

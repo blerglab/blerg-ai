@@ -35,8 +35,11 @@ var (
 
 // Item is one line of the list.
 type Item struct {
-	Text string `json:"text"`
-	Done bool   `json:"done"`
+	ID         string     `json:"id"`
+	InProgress bool       `json:"in_progress,omitempty"`
+	Assignees  []Assignee `json:"assignees,omitempty"`
+	Text       string     `json:"text"`
+	Done       bool       `json:"done"`
 	// Commits are the commits the agent named when it ticked the item (7 to 40 hex characters).
 	Commits []string `json:"commits,omitempty"`
 	// Diff is the id of the published diff of those commits (the session's artifact), when the
@@ -44,12 +47,16 @@ type Item struct {
 	Diff string `json:"diff,omitempty"`
 }
 
-// Change is the item an add, a tick, an untick or a remove touched: its 1-based index, its text and whether
-// it is done after the change.
+// Change records the stable identity and full state of the touched item, including
+// a retired item on removal. Index remains 1-based for legacy clients.
 type Change struct {
-	Index int    `json:"index"`
-	Text  string `json:"text"`
-	Done  bool   `json:"done"`
+	ID         string     `json:"id"`
+	InProgress bool       `json:"in_progress,omitempty"`
+	Assignees  []Assignee `json:"assignees,omitempty"`
+	FromItemID string     `json:"from_item_id,omitempty"`
+	Index      int        `json:"index"`
+	Text       string     `json:"text"`
+	Done       bool       `json:"done"`
 	// Commits are all the commits the item holds after the change.
 	Commits []string `json:"commits,omitempty"`
 	// Diff is the item's diff after the change.
@@ -64,15 +71,17 @@ type Payload struct {
 	Changed *Change `json:"changed,omitempty"`
 }
 
-// Request is POST /api/sessions/{id}/checklist's body: op is set, add, tick, untick, remove or clear; set
-// takes items, add takes item; tick, untick and remove name the item by index (1-based) or by text (exact,
-// case-sensitive).
+// Request is a session-scoped checklist mutation. Existing-item operations select
+// exactly one item by opaque ID, 1-based index, or exact case-sensitive text.
 type Request struct {
-	Op    string   `json:"op"`
-	Items []string `json:"items"`
-	Item  string   `json:"item"`
-	Index int      `json:"index"`
-	Text  string   `json:"text"`
+	ItemID   string    `json:"item_id"`
+	Position int       `json:"position"`
+	Assignee *Assignee `json:"assignee"`
+	Op       string    `json:"op"`
+	Items    []string  `json:"items"`
+	Item     string    `json:"item"`
+	Index    int       `json:"index"`
+	Text     string    `json:"text"`
 	// Commits (add and tick) are commits to record on the item.
 	Commits []string `json:"commits"`
 	// Diff (with commits) is the artifact id of the diff the CLI published of those commits.
@@ -108,6 +117,12 @@ func Parse(body []byte) (Request, error) {
 }
 
 func kindName(field string) string {
+	if field == "assignee" {
+		return "object"
+	}
+	if field == "position" {
+		return "number"
+	}
 	if field == "index" {
 		return "number"
 	}
@@ -119,7 +134,24 @@ func clean(s string) string { return topics.CleanText(s, MaxText) }
 // Apply returns the payload of the event that applies req to the current list cur (which it does
 // not change), or a refusal.
 func Apply(cur []Item, req Request) (Payload, error) {
-	next := append([]Item{}, cur...)
+	if req.Assignee != nil && !ValidAssignee(*req.Assignee) {
+		return Payload{}, refuse("worker must name a subagent or child_session identifier")
+	}
+	p, err := apply(cur, req)
+	if err != nil {
+		return Payload{}, err
+	}
+	return boundedPayload(p)
+}
+func apply(cur []Item, req Request) (Payload, error) {
+	next := Normalize(cur, "unseeded")
+	if (req.Op == "set" || req.Op == "add" || req.Op == "clear") && (req.ItemID != "" || req.Index != 0 || req.Text != "") {
+		return Payload{}, refuse("set, add and clear do not select an existing item")
+	}
+	if req.Assignee != nil && req.Op != "doing" && req.Op != "assign" && req.Op != "unassign" {
+		return Payload{}, refuse("worker assignments go with doing, assign and unassign")
+	}
+
 	if req.Diff != "" {
 		if len(req.Commits) == 0 || (req.Op != "add" && req.Op != "tick") {
 			return Payload{}, refuse("a diff goes with the commits of add and tick")
@@ -136,7 +168,7 @@ func Apply(cur []Item, req Request) (Payload, error) {
 		out := make([]Item, 0, len(req.Items))
 		for _, s := range req.Items {
 			if t := clean(s); t != "" {
-				out = append(out, Item{Text: t})
+				out = append(out, Item{ID: newItemID(), Text: t})
 			}
 		}
 		if len(out) == 0 {
@@ -155,8 +187,8 @@ func Apply(cur []Item, req Request) (Payload, error) {
 		if len(next) >= MaxItems {
 			return Payload{}, refuse("the checklist already holds %d items, its most", MaxItems)
 		}
-		next = append(next, Item{Text: t, Commits: cs, Diff: req.Diff})
-		return Payload{Items: next, Op: "add", Changed: &Change{Index: len(next), Text: t, Commits: cs, Diff: req.Diff}}, nil
+		next = append(next, Item{ID: newItemID(), Text: t, Commits: cs, Diff: req.Diff})
+		return Payload{Items: next, Op: "add", Changed: changedItem(len(next)-1, next[len(next)-1])}, nil
 	case "tick", "untick":
 		done := req.Op == "tick"
 		i, err := find(next, req, done)
@@ -164,6 +196,9 @@ func Apply(cur []Item, req Request) (Payload, error) {
 			return Payload{}, err
 		}
 		next[i].Done = done
+		if done {
+			next[i].InProgress = false
+		}
 		if len(req.Commits) > 0 {
 			if !done {
 				return Payload{}, refuse("commits go with add and tick, not untick")
@@ -175,7 +210,7 @@ func Apply(cur []Item, req Request) (Payload, error) {
 				next[i].Diff = req.Diff
 			}
 		}
-		return Payload{Items: next, Op: req.Op, Changed: &Change{Index: i + 1, Text: next[i].Text, Done: done, Commits: next[i].Commits, Diff: next[i].Diff}}, nil
+		return Payload{Items: next, Op: req.Op, Changed: changedItem(i, next[i])}, nil
 	case "remove":
 		if len(req.Commits) > 0 || req.Diff != "" {
 			return Payload{}, refuse("commits go with add and tick, not remove")
@@ -186,7 +221,12 @@ func Apply(cur []Item, req Request) (Payload, error) {
 		}
 		gone := next[i]
 		next = append(next[:i], next[i+1:]...)
-		return Payload{Items: next, Op: "remove", Changed: &Change{Index: i + 1, Text: gone.Text, Done: gone.Done, Commits: gone.Commits, Diff: gone.Diff}}, nil
+		return Payload{Items: next, Op: "remove", Changed: changedItem(i, gone)}, nil
+	case "doing", "pending", "assign", "unassign", "rename", "move":
+		if len(req.Commits) > 0 || req.Diff != "" {
+			return Payload{}, refuse("commits go with add and tick")
+		}
+		return applyWorkmap(next, req)
 	case "clear":
 		return Payload{Items: []Item{}, Op: "clear"}, nil
 	default:
@@ -235,6 +275,19 @@ func find(list []Item, req Request, want bool) (int, error) {
 		return 0, refuse("the checklist is empty; set it first")
 	}
 	switch {
+	case req.ItemID != "":
+		if req.Index != 0 || req.Text != "" {
+			return 0, refuse("name the item by its id, number or text, not several")
+		}
+		if !itemIDRe.MatchString(req.ItemID) {
+			return 0, refuse("item_id must be a saved checklist item identifier")
+		}
+		for i, it := range list {
+			if it.ID == req.ItemID {
+				return i, nil
+			}
+		}
+		return 0, refuse("that checklist item is no longer available")
 	case req.Index != 0 && req.Text != "":
 		return 0, refuse("name the item by its number or by its text, not both")
 	case req.Index != 0:
@@ -267,7 +320,7 @@ func find(list []Item, req Request, want bool) (int, error) {
 // findAny is the 0-based index of the item req names, by its number or by its exact text (the
 // first of several matches), whatever state it is in.
 func findAny(list []Item, req Request) (int, error) {
-	if req.Text != "" && req.Index == 0 {
+	if req.Text != "" && req.Index == 0 && req.ItemID == "" {
 		for i, it := range list {
 			if it.Text == req.Text {
 				return i, nil
@@ -289,13 +342,32 @@ func Done(items []Item) int {
 }
 
 // Read decodes a stored checklist payload; ok=false when it is not one.
-func Read(payload []byte) (Payload, bool) {
+func Read(payload []byte) (Payload, bool) { return ReadWithSeed(payload, string(payload)) }
+func ReadWithSeed(payload []byte, seed string) (Payload, bool) {
 	var p Payload
-	if len(payload) == 0 || json.Unmarshal(payload, &p) != nil {
+	if len(payload) == 0 || len(payload) > MaxPayloadBytes || json.Unmarshal(payload, &p) != nil || len(p.Items) > MaxItems {
 		return Payload{}, false
 	}
 	if p.Items == nil {
 		p.Items = []Item{}
+	}
+	p.Items = Normalize(p.Items, seed)
+	assigned := map[string]bool{}
+	assignments := 0
+	for i := range p.Items {
+		if p.Items[i].Done {
+			p.Items[i].InProgress = false
+		}
+		kept := []Assignee{}
+		for _, a := range p.Items[i].Assignees {
+			key := assignmentKey(a)
+			if ValidAssignee(a) && !assigned[key] && len(kept) < MaxAssignees && assignments < MaxAssignments {
+				kept = append(kept, a)
+				assigned[key] = true
+				assignments++
+			}
+		}
+		p.Items[i].Assignees = kept
 	}
 	// An event is input: keep only well-formed, distinct shas, at most MaxCommits per item.
 	for i := range p.Items {

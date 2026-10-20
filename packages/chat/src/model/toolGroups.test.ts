@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTimeline, sharedTimeline, timelineBuilder, type TimelineItem } from './toolGroups'
+import { buildTimeline, groupOutcome, sharedTimeline, timelineBuilder, type TimelineItem } from './toolGroups'
 import { ev as mk } from '../test/chat'
 import type { AgentEvent } from '../types'
 
@@ -225,4 +225,28 @@ it('clears known configured effort on an explicit null observation', () => {
     ev('subagent_update', { child_id: 'effort', model: 'a', effort: null })])
   const child = items.find(i => i.type === 'subagent')
   expect(child?.type === 'subagent' && child.sub.effort).toBe('')
+})
+
+
+describe('recorded tool attempt outcomes', () => {
+  it('never infers resolution from mixed results or their completion order', () => {
+    const entries = groups(buildTimeline([call('a'), call('b'), call('c'), ev('tool_result', {call_id:'a', is_error:true}), result('b'), result('c')]))[0].entries
+    const legacy = entries.map(entry => ({...entry, resultOrder: undefined}))
+    expect(groupOutcome(legacy)).toBe('mixed')
+    expect(groupOutcome(entries)).toBe('mixed')
+    expect(groupOutcome([...entries].reverse())).toBe('mixed')
+    expect(groupOutcome(entries.map(entry => ({...entry, resultOrder: 1})))).toBe('mixed')
+  })
+
+  it('can show uniform completed legacy outcomes without inventing an order', () => {
+    const entries = groups(buildTimeline([call('a'), result('a'), call('b'), result('b'), call('c'), result('c')]))[0].entries.map(entry => ({...entry, resultOrder: undefined}))
+    expect(groupOutcome(entries)).toBe('succeeded')
+    expect(groupOutcome(entries.map(entry => ({...entry, result: {...entry.result!, is_error: true}})))).toBe('failed')
+  })
+})
+
+it('ignores additive nonbilling usage snapshots without breaking legacy tool groups',()=>{
+ const timeline=buildTimeline([call('a'),result('a'),ev('usage_updated',{scope:'turn',usage:null}),call('b'),result('b'),call('c'),result('c')])
+ expect(groups(timeline)).toHaveLength(1)
+ expect(groups(timeline)[0].entries).toHaveLength(3)
 })

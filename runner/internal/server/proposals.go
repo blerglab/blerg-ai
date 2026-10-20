@@ -36,12 +36,15 @@ package server
 // the proposal, account, connection and tool only.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
@@ -101,6 +104,8 @@ type proposalView struct {
 	DecidedAt    *time.Time      `json:"decided_at"`
 	DecidedBy    *string         `json:"decided_by"`
 	Result       json.RawMessage `json:"result"`
+	// ApprovedByGrant is the session permission that approved it without asking, or null.
+	ApprovedByGrant *string `json:"approved_by_grant"`
 }
 
 func viewOfProposal(p *db.Proposal) proposalView {
@@ -120,6 +125,9 @@ func viewOfProposal(p *db.Proposal) proposalView {
 	}
 	if p.SessionID != "" {
 		v.SessionID = &p.SessionID
+	}
+	if p.ApprovedByGrant != "" {
+		v.ApprovedByGrant = &p.ApprovedByGrant
 	}
 	if p.CronID != "" {
 		v.CronID = &p.CronID
@@ -317,12 +325,24 @@ func (h *proposalsHandler) reject(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.owned(w, r, who); !ok {
 		return
 	}
-	p, err := db.RejectProposal(r.Context(), h.api.dbPool, who.Account, r.PathValue("id"), who.Account)
+	// An optional reason, told to the session's agent: {"note": "..."}. Other fields (a client
+	// that sends the reviewed draft along) are ignored, as before.
+	var body struct {
+		Note string `json:"note"`
+	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2*db.MaxProposalArgumentsBytes))
+	if err != nil || len(bytes.TrimSpace(raw)) > 0 && json.Unmarshal(raw, &body) != nil {
+		writeError(w, http.StatusBadRequest, `the body is optional: {"note": "..."}`)
+		return
+	}
+	note := proposalNote(body.Note)
+	p, err := db.RejectProposalWithNote(r.Context(), h.api.dbPool, who.Account, r.PathValue("id"), who.Account, note)
 	if err != nil {
 		transitionError(w, err, "this proposal is no longer pending")
 		return
 	}
 	log.Printf("proposals: rejected id=%s account=%s connection=%s tool=%q", p.ID, p.AccountID, p.ConnectionID, p.Tool)
+	h.api.announceProposalDecision(context.WithoutCancel(r.Context()), p.AccountID, p.ID)
 	writeJSON(w, http.StatusOK, viewOfProposal(p))
 }
 
@@ -349,7 +369,16 @@ func (h *proposalsHandler) resolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("proposals: resolved id=%s account=%s connection=%s tool=%q outcome=%s", p.ID, p.AccountID, p.ConnectionID, p.Tool, p.State)
+	h.api.announceProposalDecision(context.WithoutCancel(r.Context()), p.AccountID, p.ID)
 	writeJSON(w, http.StatusOK, viewOfProposal(p))
+}
+
+// approveBody is what an approval may carry: the exact draft reviewed (board filings), the
+// plugin scope (plugin requests, read by approveSessionPlugin), and allow_for_session, which also
+// lets this session's later proposals of exactly this scope be approved without asking.
+type approveBody struct {
+	Expected        string `json:"expected_arguments_raw"`
+	AllowForSession bool   `json:"allow_for_session"`
 }
 
 func (h *proposalsHandler) approve(w http.ResponseWriter, r *http.Request) {
@@ -361,6 +390,88 @@ func (h *proposalsHandler) approve(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2*db.MaxProposalArgumentsBytes))
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "the approval body is too large")
+		return
+	}
+	if db.IsSessionPluginProposal(p) {
+		if p.State != db.ProposalPending {
+			writeError(w, http.StatusConflict, "this proposal is no longer pending ("+p.State+")")
+			return
+		}
+		if time.Since(p.CreatedAt) >= proposalExpiry {
+			writeError(w, http.StatusConflict, "this proposal has expired (it is older than 7 days) and can no longer be approved: let the agent propose again")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		h.approveSessionPlugin(w, r, who, p, http.StatusOK)
+		return
+	}
+	var body approveBody
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if filingDecode(raw, &body) != nil {
+			if db.IsBoardFilingProposal(p) {
+				writeError(w, 409, "The draft changed; reload it and review it before approving.")
+				return
+			}
+			writeError(w, http.StatusBadRequest, `the body may carry only "expected_arguments_raw" and "allow_for_session"`)
+			return
+		}
+	}
+	if db.IsBoardFilingProposal(p) && (body.Expected == "" || body.Expected != string(p.Arguments)) {
+		writeError(w, 409, "The draft changed; reload it and review it before approving.")
+		return
+	}
+	if body.AllowForSession {
+		if p.State != db.ProposalPending {
+			writeError(w, http.StatusConflict, "this proposal is no longer pending ("+p.State+")")
+			return
+		}
+		// The permission comes first and is exactly this proposal's scope; a refusal approves nothing.
+		g, apiErr := h.api.grantFromProposal(r.Context(), who, p)
+		if apiErr != nil {
+			writeAPIError(w, apiErr)
+			return
+		}
+		// The person asked for the permission as well as the approval: when the approval is then
+		// refused, the permission stands, and the answer says so (and names it, to revoke).
+		capture := &filingToolCapture{header: make(http.Header)}
+		h.execute(r.Context(), capture, who, p, body.Expected, "")
+		h.api.announceProposalDecision(context.WithoutCancel(r.Context()), p.AccountID, p.ID)
+		if capture.status >= 400 {
+			var refusal struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(capture.body.Bytes(), &refusal)
+			if refusal.Error == "" {
+				refusal.Error = "The proposal was not approved."
+			}
+			writeJSON(w, capture.status, map[string]any{"error": strings.TrimSpace(refusal.Error) + " " + msgPermissionKept, "permission_kept": true, "grant_id": g.ID})
+			return
+		}
+		for k, v := range capture.header {
+			w.Header()[k] = v
+		}
+		if capture.status == 0 {
+			capture.status = http.StatusOK
+		}
+		w.WriteHeader(capture.status)
+		_, _ = w.Write(capture.body.Bytes())
+		return
+	}
+	h.execute(r.Context(), w, who, p, body.Expected, "")
+	h.api.announceProposalDecision(context.WithoutCancel(r.Context()), p.AccountID, p.ID)
+}
+
+// msgPermissionKept ends a refused approval that also asked for a session permission.
+const msgPermissionKept = "The permission for this session was kept: later proposals of this scope will be approved without asking. Revoke it in Session permissions if you no longer want it."
+
+// execute is THE approval of a proposal, for a person (grantID "") and for a session permission
+// alike: the same state and expiry checks, snapshot checks, compare-and-set, execution and
+// recording. Only who decided differs: a person's live login, or the login the permission's
+// creator granted it with. The answer is written to w (a recorder for an automatic approval).
+func (h *proposalsHandler) execute(ctx context.Context, w http.ResponseWriter, who grantRequester, p *db.Proposal, expected, grantID string) {
 	if p.State != db.ProposalPending {
 		writeError(w, http.StatusConflict, "this proposal is no longer pending ("+p.State+")")
 		return
@@ -370,11 +481,11 @@ func (h *proposalsHandler) approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if db.IsBoardFilingProposal(p) {
-		h.approveBoardDraft(w, r, who, p)
+		h.approveBoardDraft(ctx, w, who, p, expected, grantID)
 		return
 	}
 	if db.IsSessionPluginProposal(p) {
-		h.approveSessionPlugin(w, r, who, p, http.StatusOK)
+		writeError(w, http.StatusConflict, "a plugin request is approved by a person only")
 		return
 	}
 	cfg := h.api.hub.mcpStart.get()
@@ -390,28 +501,28 @@ func (h *proposalsHandler) approve(w http.ResponseWriter, r *http.Request) {
 
 	// Snapshot checks. A refusal leaves the proposal pending (or, for a connection that no longer
 	// exists, failed: it can never run).
-	if !h.snapshotHolds(w, r, cfg, proof, p) {
+	if !h.snapshotHolds(ctx, w, cfg, proof, p) {
 		return
 	}
 
 	// The compare-and-set and everything after it run on a context that outlives the request: a
 	// client that disconnects as the UPDATE commits must not leave the row executing with nothing
 	// sent, or an action half way.
-	casCtx, cancelCAS := context.WithTimeout(context.WithoutCancel(r.Context()), proposalWriteBudget)
+	casCtx, cancelCAS := context.WithTimeout(context.WithoutCancel(ctx), proposalWriteBudget)
 	defer cancelCAS()
-	if _, err := db.BeginProposalExecution(casCtx, h.api.dbPool, who.Account, p.ID, who.Account); err != nil {
+	if _, err := db.BeginProposalExecutionByGrant(casCtx, h.api.dbPool, who.Account, p.ID, who.Account, grantID); err != nil {
 		transitionError(w, err, "this proposal was already decided by another request, or has expired")
 		return
 	}
-	log.Printf("proposals: approved id=%s account=%s connection=%s tool=%q", p.ID, p.AccountID, p.ConnectionID, p.Tool)
+	log.Printf("proposals: approved id=%s account=%s connection=%s tool=%q grant=%s", p.ID, p.AccountID, p.ConnectionID, p.Tool, grantLabel(grantID))
 
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), proposalExecuteBudget)
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proposalExecuteBudget)
 	defer cancel()
-	res, err := exec.ExecuteApproved(ctx, mcpgw.ApprovedCall{
+	res, err := exec.ExecuteApproved(runCtx, mcpgw.ApprovedCall{
 		Proof: proof, ConnectionID: p.ConnectionID, URLSnapshot: p.URLSnapshot,
 		Tool: p.Tool, ToolHash: p.ToolHash, Arguments: p.Arguments,
 	})
-	rec, cancelRec := context.WithTimeout(context.WithoutCancel(r.Context()), proposalWriteBudget)
+	rec, cancelRec := context.WithTimeout(context.WithoutCancel(ctx), proposalWriteBudget)
 	defer cancelRec()
 	state, result := db.ProposalDone, res.Result
 	var ae *mcpgw.ApprovedError
@@ -441,8 +552,16 @@ func (h *proposalsHandler) approve(w http.ResponseWriter, r *http.Request) {
 			"check the target service, then this proposal shortly")
 		return
 	}
-	log.Printf("proposals: finished id=%s account=%s connection=%s tool=%q state=%s", p.ID, p.AccountID, p.ConnectionID, p.Tool, state)
+	log.Printf("proposals: finished id=%s account=%s connection=%s tool=%q state=%s grant=%s", p.ID, p.AccountID, p.ConnectionID, p.Tool, state, grantLabel(grantID))
 	writeJSON(w, http.StatusOK, viewOfProposal(done))
+}
+
+// grantLabel names who approved in an audit line: a grant id, or "none" for a person.
+func grantLabel(grantID string) string {
+	if grantID == "" {
+		return "none"
+	}
+	return grantID
 }
 
 // releaseUnsent answers an approval that failed before any byte of the call was sent: the proposal
@@ -465,8 +584,8 @@ func (h *proposalsHandler) releaseUnsent(ctx context.Context, w http.ResponseWri
 }
 
 // snapshotHolds checks the approval's preconditions and writes the refusal when one fails.
-func (h *proposalsHandler) snapshotHolds(w http.ResponseWriter, r *http.Request, cfg *mcpStartConfig, proof mcpgw.Proof, p *db.Proposal) bool {
-	conns, err := cfg.Core.ListConnections(r.Context(), proof)
+func (h *proposalsHandler) snapshotHolds(ctx context.Context, w http.ResponseWriter, cfg *mcpStartConfig, proof mcpgw.Proof, p *db.Proposal) bool {
+	conns, err := cfg.Core.ListConnections(ctx, proof)
 	switch {
 	case errors.Is(err, ErrMCPProofInvalid):
 		writeError(w, http.StatusUnauthorized, msgProposalSignIn)
@@ -483,7 +602,7 @@ func (h *proposalsHandler) snapshotHolds(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if conn == nil {
-		h.connectionGone(w, r, p)
+		h.connectionGone(ctx, w, p)
 		return false
 	}
 	if conn.URL != p.URLSnapshot {
@@ -495,10 +614,10 @@ func (h *proposalsHandler) snapshotHolds(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusConflict, "the connection needs attention ("+conn.Status+"): fix it in blerg-core settings, then approve again")
 		return false
 	}
-	live, err := cfg.Hasher.LiveToolHashes(r.Context(), proof, conn.ID, conn.URL)
+	live, err := cfg.Hasher.LiveToolHashes(ctx, proof, conn.ID, conn.URL)
 	switch {
 	case errors.Is(err, mcpgw.ErrConnectionGone):
-		h.connectionGone(w, r, p)
+		h.connectionGone(ctx, w, p)
 		return false
 	case err != nil:
 		// The error can name hosts and addresses: log it, never send it.
@@ -515,8 +634,8 @@ func (h *proposalsHandler) snapshotHolds(w http.ResponseWriter, r *http.Request,
 
 // connectionGone answers an approval whose connection no longer exists for this person: its
 // pending proposals can never run, so they are failed, and the approval is refused.
-func (h *proposalsHandler) connectionGone(w http.ResponseWriter, r *http.Request, p *db.Proposal) {
-	if _, err := db.FailPendingProposals(r.Context(), h.api.dbPool, p.AccountID, []string{p.ConnectionID}, proposalGoneReason); err != nil {
+func (h *proposalsHandler) connectionGone(ctx context.Context, w http.ResponseWriter, p *db.Proposal) {
+	if _, err := db.FailPendingProposals(ctx, h.api.dbPool, p.AccountID, []string{p.ConnectionID}, proposalGoneReason); err != nil {
 		log.Printf("proposals: fail proposals of a deleted connection: %v", err)
 	}
 	writeError(w, http.StatusConflict, "the connection no longer exists, so this proposal can no longer be run")

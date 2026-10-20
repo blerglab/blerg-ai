@@ -1,3 +1,4 @@
+import { modelDisplayName } from "@blerglab/chat";
 import { CardOrigin, RestrictedMarker } from "./CardOrigin";
 import { CardLinks, SafeAnchor } from "./CardLinks";
 import { useCallback, useEffect, useState } from "react";
@@ -338,8 +339,8 @@ export function CardSheet({ card, board, columns, onClose }: {
             {full.size && <span className="chip">{full.size}</span>}
             {full.model && (
               <span className="chip mono"
-                title="this card's sessions run on this model instead of the board's">
-                {full.model}
+                title={`This card's sessions use ${full.model} instead of the board's model`}>
+                {modelDisplayName(full.model)}
               </span>
             )}
             <span className="chip">{colName(full.column_id)}</span>

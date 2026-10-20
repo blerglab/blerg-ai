@@ -61,6 +61,14 @@ describe('the panel line', () => {
   })
 })
 
+it('keeps on-demand servers distinct from connected, pending and future unknown states', () => {
+  const m = readMcp(payload([srv('docs', 'lazy'), srv('issues', 'connected'), srv('future', 'future-state')], { settled: true }))!
+  expect(m.servers.map(s => s.status)).toEqual(['lazy', 'connected', 'unknown'])
+  expect(mcpSummary(m)).toEqual({ text: '1 connected · 1 on demand · 1 unknown', connecting: false, warn: false })
+  expect(mcpFromEvents([{ type: 'agent_event', session_id: 's', client_event_id: 'e-lazy', seq: 1,
+    ts: '2026-10-17T10:00:00Z', kind: 'mcp_status', payload: payload([srv('docs', 'lazy')], { settled: true }) }]).hold).toBeNull()
+})
+
 describe('the hold clock', () => {
   it('is elapsed over the wait, m:ss, clamped', () => {
     const hold = { since: 1000, until: 31_000 }

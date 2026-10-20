@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent } from '../types'
 import {
-  checklistFromEvents, checklistRowText, commitsText, pinnedFromEvents, planLabel, priorityGlyph, readChecklist, readTicket,
+  safeChecklistAssignments, checklistAssignment, checklistFromEvents, checklistRowText, commitsText, pinnedFromEvents, planLabel, priorityGlyph, readChecklist, readTicket,
   readTicketEvent, sourceLabel, statusTone, ticketChanges, ticketHref, ticketMeta,
 } from './worklist'
 
@@ -142,5 +142,71 @@ describe('ticketMeta', () => {
       .toEqual(['Task', 'High', 'Release owner'])
     expect(ticketMeta({ source: 'x', key: 'K', title: 'T', priority: 'Low' })).toEqual(['Low'])
     expect(ticketMeta({ source: 'x', key: 'K', title: 'T' })).toEqual([])
+  })
+})
+
+
+describe('checklist work identity', () => {
+  it('retains explicit identity, Doing and assignments without counting Doing as done', () => {
+    const item = { id: 'item-a', text: 'Build', done: false, in_progress: true,
+      assignees: [{ kind: 'subagent', id: 'native-a' }, { kind: 'child_session', id: 'child-a' }] }
+    const payload = readChecklist({ items: [item], op: 'doing', changed: { ...item, index: 1 } })!
+    expect(payload.items).toEqual([item])
+    expect(payload.changed).toEqual({ ...item, index: 1 })
+    expect(checklistRowText(payload)).toBe('Checklist · 0 of 1 done · doing “Build”')
+    expect(checklistAssignment(payload.items, 'subagent', 'native-a')).toEqual(item)
+    expect(checklistAssignment(payload.items, 'child_session', 'native-a')).toBeUndefined()
+  })
+
+  it('drops malformed identity and assignments and resolves inconsistent completed state safely', () => {
+    const payload = readChecklist({ items: [{ text: 'Done', done: true, in_progress: true, id: '<bad>',
+      assignees: [{ kind: 'subagent', id: 'a' }, { kind: 'subagent', id: 'a' },
+        { kind: 'engine', id: 'b' }, { kind: 'child_session', id: 42 }] }] })!
+    expect(payload.items).toEqual([{ text: 'Done', done: true, assignees: [{ kind: 'subagent', id: 'a' }] }])
+    expect(checklistAssignment(payload.items, 'subagent', 'a')).toBeUndefined() // no stable target
+  })
+
+  it('never guesses assignment from title or index and follows identity after reorder', () => {
+    const a = { id: 'item-a', text: 'Same title', done: false, assignees: [{ kind: 'subagent' as const, id: 'agent-a' }] }
+    const b = { id: 'item-b', text: 'Same title', done: false }
+    expect(checklistAssignment([b, a], 'subagent', 'agent-a')?.id).toBe('item-a')
+    expect(checklistAssignment([b], 'subagent', 'agent-a')).toBeUndefined()
+    expect(checklistAssignment([a, b], 'subagent', 'Same title')).toBeUndefined()
+  })
+
+  it('uses the legacy event identity only when safely representable', () => {
+    const event = ev('checklist', { items: items(['Read', false]), op: 'set' })
+    expect(checklistFromEvents([event])?.items[0].id).toBe(`legacy-${event.client_event_id}-1`)
+    expect(checklistFromEvents([{ ...event, client_event_id: 'x'.repeat(150) }])?.items[0].id).toBeUndefined()
+  })
+})
+
+
+describe('safe current worker associations', () => {
+  const item = (id: string) => [{ id: 'work', text: 'Build', done: false, assignees: [{ kind: 'subagent' as const, id }] }]
+  it('resolves only an explicit call-to-child relationship, without changing history', () => {
+    const original = item('call-a')
+    const events = [ev('subagent_started', { call_id: 'call-a' }), ev('subagent_update', { call_id: 'call-a', child_id: 'native-a' })]
+    expect(safeChecklistAssignments(original, events)[0].assignees?.[0].id).toBe('native-a')
+    expect(original[0].assignees[0].id).toBe('call-a')
+    const canonical = item('native-a')
+    expect(safeChecklistAssignments(canonical, events)).toBe(canonical)
+  })
+  it('omits ambiguous IDs instead of joining a different worker', () => {
+    const events = [ev('subagent_started', { call_id: 'call-a', child_id: 'native-a' }),
+      ev('subagent_started', { call_id: 'call-b', child_id: 'call-a' })]
+    expect(safeChecklistAssignments(item('call-a'), events)[0].assignees).toEqual([])
+    expect(safeChecklistAssignments(item('native-a'), events)[0].assignees?.[0].id).toBe('native-a')
+  })
+  it('does not mistake an unrelated child for a call-only worker lacking a permanent ID', () => {
+    const events = [ev('subagent_started', { call_id: 'call-a' }), ev('subagent_started', { call_id: 'call-b', child_id: 'call-a' })]
+    expect(safeChecklistAssignments(item('call-a'), events)[0].assignees).toEqual([])
+    expect(safeChecklistAssignments(item('call-a'), [ev('subagent_started', { call_id: 'call-a', child_id: 'call-a' })])[0].assignees?.[0].id).toBe('call-a')
+  })
+  it('keeps authoritative identities when no loaded event contradicts them, and leaves owned sessions alone', () => {
+    const original = item('native-a')
+    expect(safeChecklistAssignments(original, [ev('assistant_text', { child_id: 'native-a', call_id: 'fake' })])).toBe(original)
+    const owned = [{ ...original[0], assignees: [{ kind: 'child_session' as const, id: 'call-a' }] }]
+    expect(safeChecklistAssignments(owned, [ev('subagent_started', { call_id: 'call-b', child_id: 'call-a' })])).toBe(owned)
   })
 })

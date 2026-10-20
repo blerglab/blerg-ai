@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { capabilityCount, enabledCapabilityCount, latestCapabilities, matchesQuery, newerReport, normalizeCapabilities, withLiveMcp } from './capabilities'
+import { capabilityCount, enabledCapabilityCount, latestCapabilities, matchesQuery, newerReport, normalizeCapabilities, statusWord, withLiveMcp } from './capabilities'
 import type { AgentEvent, AgentEventKind } from '../types'
 
 const ev = (seq: number, kind: AgentEventKind, payload: unknown): AgentEvent => ({
@@ -85,4 +85,10 @@ describe('withLiveMcp', () => {
     expect(withLiveMcp(base, live([]))).toBe(base)
     expect(withLiveMcp(base, null)).toBe(base)
   })
+})
+
+it('describes on-demand MCP honestly without counting it as connected', () => {
+  expect(statusWord('lazy')).toBe('connects on demand')
+  const p = normalizeCapabilities({ groups: [{ id: 'mcp', items: [{ name: 'docs', status: 'lazy' }] }] })!
+  expect(enabledCapabilityCount(p)).toBe(0)
 })

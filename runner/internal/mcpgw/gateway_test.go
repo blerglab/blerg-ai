@@ -558,7 +558,7 @@ func TestConcurrencyLimitFifthCallErrorsImmediately(t *testing.T) {
 	for range 4 {
 		select {
 		case <-h.up.entered:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("four calls should all reach the upstream")
 		}
 	}
@@ -944,7 +944,7 @@ func TestRunStopsWithContext(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("Run must return when its context ends")
 	}
 }

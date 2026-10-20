@@ -179,3 +179,25 @@ except Exception:
   fi
   return 0
 }
+
+# first_run_setup_url PORT MINT: when core (http://localhost:PORT) has no account yet, prints where
+# the person creates the first one. Core's GET /auth/provider says "setup":"open" when this machine
+# may do that without a setup code (the default loopback-only stack): then it is plain
+# http://localhost:PORT/setup. "setup":"code" (core published beyond loopback) needs a link with a
+# fresh single-use code from `blerg-core setup-link`; that is minted and printed only when MINT is
+# 1 (the caller's output is a terminal: the link is a credential). With MINT 0 it prints nothing
+# and returns 2, and the caller tells the person the command. Prints nothing and returns 1 once
+# core is set up, or when it cannot be asked.
+first_run_setup_url() {
+  local port="$1" mint="${2:-0}" body link
+  body="$(curl -fsS "http://localhost:$port/auth/provider" 2>/dev/null)" || return 1
+  case "$body" in
+    *'"setup":"open"'*) echo "http://localhost:$port/setup" ;;
+    *'"setup":"code"'*)
+      [ "$mint" = 1 ] || return 2
+      link="$(docker compose exec -T blerg-core /blerg-core setup-link 2>/dev/null)" || return 1
+      [ -n "$link" ] || return 1
+      echo "$link" ;;
+    *) return 1 ;;
+  esac
+}

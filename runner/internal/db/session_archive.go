@@ -12,6 +12,7 @@ func ArchiveChildSession(ctx context.Context, pool *pgxpool.Pool, id, parent, ac
 	var at time.Time
 	err := pool.QueryRow(ctx, `UPDATE sessions SET archived_at=COALESCE(archived_at,clock_timestamp())
  WHERE id=$1 AND parent_session_id=$2 AND spawning_account_id=$3
+ AND discard_requested_at IS NULL AND NOT EXISTS(SELECT 1 FROM sessions p WHERE p.id=sessions.parent_session_id AND p.discard_requested_at IS NOT NULL)
  AND ended_at IS NOT NULL AND status IN ('ended','stopped','error','disconnected')
  RETURNING archived_at`, id, parent, account).Scan(&at)
 	return at, err

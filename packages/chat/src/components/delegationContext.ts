@@ -15,6 +15,8 @@ export interface DelegationContextValue {
   /** Where the person decides when this chat cannot (the runner's session page), or null. */
   decideUrl?: string | null
   /** Opens a child session in the app; absent: the card names the child's short id. */
+  /** Opens the current parent session's child approval settings. */
+  onManageChildApproval?: () => void
   onOpenSession?: (sessionId: string) => void
 }
 

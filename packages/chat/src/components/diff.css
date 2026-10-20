@@ -7,6 +7,7 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   gap: 8px;
 }
 .diff-toolbar {
@@ -53,6 +54,10 @@
   cursor: pointer;
 }
 .diff-files-item:hover { background: var(--chat-surface-2); }
+.diff-files-item[aria-current='location'] {
+  background: color-mix(in srgb, var(--chat-accent) 14%, transparent);
+  box-shadow: inset 3px 0 var(--chat-accent);
+}
 .diff-files-name {
   flex: 1;
   min-width: 0;
@@ -207,8 +212,7 @@ td.diff-empty { background: color-mix(in srgb, var(--chat-fg) 4%, transparent); 
 @media (max-width: 699px) {
   .diff-layout { flex-direction: column; }
   .diff-files { flex: none; max-height: 9.5em; }
-  .diff-main { overflow: visible; }
-  .diff-view { overflow: auto; }
+  .diff-main { min-height: 0; }
 }
 
 /* read by a screen reader only: whether a line was added or deleted */

@@ -47,9 +47,12 @@ type DaemonInfo struct {
 	// work instead of a client-side guess with no awareness of the daemon.
 	AvailableEngines []string `json:"available_engines"`
 	MCPGateway       bool     `json:"mcp_gateway"`
-	RestrictTools    bool     `json:"restrict_tools"`
-	CodexRestricted  bool     `json:"codex_restricted"`
-	PluginEngines    []string `json:"plugin_engines,omitempty"`
+	// MCPGatewayViaServer: the daemon dials the gateway at the server's web
+	// address and takes a board for a session on its host (This machine).
+	MCPGatewayViaServer bool     `json:"mcp_gateway_via_server,omitempty"`
+	RestrictTools       bool     `json:"restrict_tools"`
+	CodexRestricted     bool     `json:"codex_restricted"`
+	PluginEngines       []string `json:"plugin_engines,omitempty"`
 	// CloneFrom: the daemon can clone a repository named by owner/name or URL
 	// into its repos root (POST /api/sessions "clone"/"git_url"). False for
 	// an older daemon, which the launch UI then offers only its folders and
@@ -262,6 +265,12 @@ type DaemonHello struct {
 	// built-in tool — so the server never sends a grant to a daemon that does
 	// not say this.
 	MCPGateway bool `json:"mcp_gateway,omitempty"`
+	// MCPGatewayViaServer: this daemon honours MCPGatewayConfig.ViaServer (it
+	// dials the gateway at its own server HTTP base, the address it already
+	// reaches the server at) and accepts a board-only grant for an interactive
+	// session on its host. Absent from older daemons, which would dial
+	// BaseURL, an address only cluster pods may be able to reach.
+	MCPGatewayViaServer bool `json:"mcp_gateway_via_server,omitempty"`
 	// SessionTokenFile: this daemon handles SessionToken (it writes the token
 	// where the session's blerg-runner reads it, and answers with
 	// SessionTokenResult). Absent from older daemons, which would drop the
@@ -690,6 +699,13 @@ type MCPGatewayConfig struct {
 	// server (not derived from the daemon's WebSocket address). The session's
 	// MCP server for connection <name> is <BaseURL>/mcp-gw/<name>.
 	BaseURL string `json:"base_url"`
+	// ViaServer tells a daemon to dial the gateway through the server's own
+	// web address instead of BaseURL: <its server HTTP base>/mcp-gw/<name>,
+	// the same base it reaches the server at (inside the sandbox, the
+	// runner's address on the sandbox network). The server sets it only for
+	// a daemon whose hello set DaemonHello.MCPGatewayViaServer, and never
+	// for a cluster pod, which dials BaseURL.
+	ViaServer bool `json:"via_server,omitempty"`
 	// Servers is one entry per granted connection.
 	Servers []MCPGatewayServer `json:"servers"`
 }

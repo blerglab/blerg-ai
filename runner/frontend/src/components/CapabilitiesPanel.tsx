@@ -103,7 +103,12 @@ export function CapabilitiesView({ report, unavailable, pendingToolChanges, live
   const listBase = useId()
   const [query, setQuery] = useState('')
   const snapshot = report?.payload ?? null
-  const payload = useMemo(() => (snapshot ? withLiveMcp(snapshot, liveMcp) : null), [snapshot, liveMcp])
+  const payload = useMemo(() => {
+    if (snapshot) return withLiveMcp(snapshot, liveMcp)
+    // Live connection state can arrive before the first loaded-tools report.
+    // Keep other groups unreported rather than inventing a loaded snapshot.
+    return liveMcp?.servers.length ? withLiveMcp({ engine: liveMcp.engine, groups: [] }, liveMcp) : null
+  }, [snapshot, liveMcp])
   // Groups the user opened or closed; the rest follow their default (long
   // groups start closed), which also holds for a report that arrives later.
   const [openState, setOpenState] = useState<Record<string, boolean>>({})
@@ -125,8 +130,8 @@ export function CapabilitiesView({ report, unavailable, pendingToolChanges, live
   } else if (!payload) {
     body = (
       <p className="caps-empty" data-testid="caps-none">
-        Nothing reported yet. An engine that reports what it loads (Claude Code does) sends it when a
-        turn starts; this engine may not report capabilities at all.
+        Nothing reported yet. Engines that report what they load send a snapshot when the session
+        starts or its tools become ready. Some engines do not expose this information.
       </p>
     )
   } else {

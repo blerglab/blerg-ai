@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
@@ -26,6 +27,12 @@ import (
 // here shells to its own CLI, billed to its own account/config, and uses
 // that CLI's own configured default when Model is empty.
 type EngineSpec struct {
+	// NativeSessionVersion enables the private typed host-recovery identity hook.
+	NativeSessionVersion int
+	// NativeSessionMinVersion allows explicitly compatible older private identities.
+	// Zero means only NativeSessionVersion is accepted.
+	NativeSessionMinVersion int
+
 	ID          string
 	DisplayName string
 	// Binary is the CLI name resolved via resolveEngineBinary for the
@@ -39,6 +46,8 @@ type EngineSpec struct {
 	// documented per-invocation model flag (OpenClaw's chat/tui) — Model is
 	// then never passed on the command line at all.
 	ModelFlag string
+	// TerminalModelProblem refuses unsupported interactive selections before launch/recovery.
+	TerminalModelProblem func(string) string
 	// AgentModelFlag is the model flag of the headless agent-kind invocation
 	// when it differs from ModelFlag (OpenClaw: its `agent exec` takes
 	// --model although its interactive chat has none). Empty = ModelFlag.
@@ -123,8 +132,7 @@ type AgentDriverOpts struct {
 	// engineModel, which drops anything invalid.
 	Model  string
 	Effort string
-	// SessionID is only used by engines that pin their own conversation
-	// identity upfront (Hermes's --continue <name>); others ignore it.
+	// SessionID is the Blerg session identity, distinct from native conversation IDs.
 	SessionID string
 	Emitter   agent.Emitter
 	// Env is the sanitised environment every engine subprocess starts from
@@ -172,11 +180,17 @@ var engineRegistry = map[string]EngineSpec{
 	// `chat` subcommand, not plain interactive `hermes` — so every tmux-kind
 	// hermes session (including post-crash recovery) starts fresh too.
 	"hermes": {
-		ID: "hermes", DisplayName: "Hermes", SandboxLoginPaths: []string{".hermes/config.yaml", ".hermes/.env"},
+		ID: "hermes", DisplayName: "Hermes", NativeSessionVersion: 2, NativeSessionMinVersion: 1, SandboxLoginPaths: []string{".hermes/config.yaml", ".hermes/.env"},
 		ConfigBundle: &EngineConfigBundle{Directory: ".hermes", Roots: []string{"config.yaml"}},
 		Binary:       "hermes", ModelFlag: "-m", SkipPermsFlag: "--yolo",
-		EffortArgs:      func(effort string) []string { return []string{"--reasoning", effort} },
-		ListModels:      probeHermesModels,
+		EffortArgs: func(effort string) []string { return []string{"--reasoning", effort} },
+		ListModels: probeHermesModels,
+		TerminalModelProblem: func(model string) string {
+			if strings.HasPrefix(model, "custom:") {
+				return "Use agent mode for named-provider model selection; Hermes terminal routing is not verified"
+			}
+			return ""
+		},
 		NewAgentDriver:  func(o AgentDriverOpts) sessionDriver { return newHermesDriver(o) },
 		DetectAvailable: hermesAlreadyConfigured,
 		DetectLocal:     hermesLocal,

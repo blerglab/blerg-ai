@@ -99,6 +99,46 @@ mkbin "$tmp/bin-nocurl"
 out="$(PATH="$tmp/bin-nocurl" ./blerg-up.sh --no-daemon 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "curl isn't installed" <<<"$out" || t "missing curl not reported (rc=$rc)"
 
+# --- first-run setup: where the person creates the first account (stub curl and docker)
+mkbin "$tmp/bin-setup"
+cat > "$tmp/bin-setup/curl" <<'EOS'
+#!/bin/sh
+[ -n "$STUB_PROVIDER" ] || exit 7
+printf '%s' "$STUB_PROVIDER"
+EOS
+cat > "$tmp/bin-setup/docker" <<'EOS'
+#!/bin/sh
+echo "$*" >> "$STUB_DOCKER_LOG"
+[ "$*" = "compose exec -T blerg-core /blerg-core setup-link" ] || exit 9
+[ -n "$STUB_LINK" ] || { echo "setup is complete" >&2; exit 1; }
+echo "$STUB_LINK"
+EOS
+chmod +x "$tmp/bin-setup/curl" "$tmp/bin-setup/docker"
+fsu() { ( export PATH="$tmp/bin-setup" STUB_DOCKER_LOG="$tmp/docker.log"; for kv in "$@"; do export "$kv"; done; first_run_setup_url 9001 "${MINT:-1}" ); }
+: > "$tmp/docker.log"
+out="$(fsu 'STUB_PROVIDER={"id":"local","setup":"open"}')"; rc=$?
+[ "$rc" = 0 ] && [ "$out" = "http://localhost:9001/setup" ] || t "setup open: got '$out' rc=$rc, want the plain /setup page"
+[ -s "$tmp/docker.log" ] && t "setup open must not mint a setup code"
+out="$(fsu 'STUB_PROVIDER={"id":"local","setup":"code"}' 'STUB_LINK=http://localhost:9001/setup#code=abc')"; rc=$?
+[ "$rc" = 0 ] && [ "$out" = "http://localhost:9001/setup#code=abc" ] || t "setup needs a code: got '$out' rc=$rc, want the setup-link output"
+# Not a terminal: nothing minted, nothing printed, 2 so the caller prints the command instead.
+: > "$tmp/docker.log"
+out="$(MINT=0 fsu 'STUB_PROVIDER={"id":"local","setup":"code"}' 'STUB_LINK=http://localhost:9001/setup#code=abc')"; rc=$?
+[ "$rc" = 2 ] && [ -z "$out" ] && [ ! -s "$tmp/docker.log" ] || t "no terminal: a setup code was minted or printed (rc=$rc)"
+out="$(fsu 'STUB_PROVIDER={"id":"local","setup":"code"}')"; rc=$?
+[ "$rc" != 0 ] && [ -z "$out" ] || t "setup-link refused: expected nothing (got '$out' rc=$rc)"
+out="$(fsu 'STUB_PROVIDER={"id":"local"}')"; rc=$?
+[ "$rc" != 0 ] && [ -z "$out" ] || t "set up already: expected nothing (got '$out' rc=$rc)"
+out="$(fsu)"; rc=$?
+[ "$rc" != 0 ] && [ -z "$out" ] || t "core unreachable: expected nothing (got '$out' rc=$rc)"
+# blerg-up.sh sends people to that page, not to a password in the log, and keeps --reset-admin.
+grep -q 'first_run_setup_url "$PORT_CORE"' blerg-up.sh || t "blerg-up.sh does not look for first-run setup"
+grep -q 'open_browser "${SETUP_URL:-http://localhost:$PORT_CORE}"' blerg-up.sh || t "blerg-up.sh does not open the setup page"
+grep -q 'BLERG_BOOTSTRAP_ADMIN_PASSWORD' blerg-up.sh && t "blerg-up.sh still points at a bootstrap password in the log"
+grep -q 'users set-password --subject' blerg-up.sh || t "--reset-admin lost its users set-password call"
+grep -q 'first_run_setup_url "$PORT_CORE" "$SETUP_MINT"' blerg-up.sh && grep -q '\[ -t 1 \] && SETUP_MINT=1' blerg-up.sh \
+  || t "blerg-up.sh does not limit minting a setup link to a terminal"
+
 # --- the question before reinstalling over running agent work
 mkdir -p "$tmp/rw"
 printf '#!/bin/sh\n[ "$1 $2" = "status --open-work" ] || exit 9\nprintf "session s1 (proj): a turn is running, 1 subagent\\n  - subagent Explore: Find the callers\\n"\n' > "$tmp/rw/busy"

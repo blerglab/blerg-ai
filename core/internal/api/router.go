@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -78,6 +79,17 @@ type Deps struct {
 	// style only. When empty, the endpoint is disabled (503) — see handleInternalFetchCredential.
 	InternalKey string
 
+	// BoardMintKey is the shared secret blerg-board presents to POST
+	// /internal/tokens/board-automation(/revoke): "Run as me", where the board asks core to mint a
+	// run-sessions token for the person signed in to it. A THIRD secret, distinct from RegisterKey
+	// and InternalKey (main.go refuses a shared value): it opens only those two routes, so the
+	// board never holds the key that fetches engine credentials. Empty disables the routes (503).
+	BoardMintKey string
+
+	// BoardMintLimiter bounds "Run as me" mints per account (every attempt counts). Nil disables
+	// the limit; main.go always sets one (BoardMintLimit per BoardMintWindow).
+	BoardMintLimiter *LoginLimiter
+
 	// Store gives the internal-only /internal/credentials/fetch handler direct Postgres access
 	// for the human_sessions live-session check and the credential_access_log audit write — the
 	// only handlers in this package that need raw pool access rather than going through a
@@ -140,6 +152,21 @@ type Deps struct {
 	// does not treat http://localhost as a secure context for cookies, so a hardcoded
 	// Secure: true would silently drop the refresh cookie in Safari on the desktop install.
 	CookieSecure bool
+
+	// SetupAllowLocal lets /setup create the first account without a setup code when the browser
+	// addresses core by a loopback name (setup_handlers.go). main.go turns it on only for
+	// BLERG_SETUP_ALLOW_LOCAL=true with a loopback BLERG_SETUP_PUBLISHED_ADDR, which only the
+	// desktop compose file sets.
+	SetupAllowLocal bool
+
+	// SetupLocalGateway is the default gateway of core's container network: with a Docker-published
+	// port, that is the peer address of a connection from the host's own loopback. A code-less
+	// /setup accepts a loopback peer or this one (setupTrustedLocal). Nil accepts loopback only.
+	SetupLocalGateway net.IP
+
+	// App serves core's web app (index.html) for the page routes the mux owns itself (GET /setup,
+	// GET /login), which redirect or serve the app depending on setup mode. Nil answers 404.
+	App http.Handler
 }
 
 // componentLinks inverts OriginAudiences (origin→audience) into the browser-facing URLs the
@@ -336,6 +363,10 @@ func NewRouter(deps Deps) http.Handler {
 	})
 
 	mux.HandleFunc("POST /auth/login", deps.handleLogin)
+	mux.HandleFunc("POST /auth/setup", deps.handleSetup)
+	mux.HandleFunc("GET /setup", deps.handleSetupPage)
+	mux.HandleFunc("GET /setup/", deps.handleSetupSlash)
+	mux.HandleFunc("GET /login", deps.handleLoginPage)
 	mux.HandleFunc("GET /auth/start", deps.handleStart)
 	mux.HandleFunc("GET /auth/provider", deps.handleProvider)
 	mux.HandleFunc("GET /auth/callback", deps.handleCallback)

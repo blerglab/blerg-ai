@@ -46,7 +46,7 @@ func TestAutomationTokenSealedAtRestRoundTrip(t *testing.T) {
 		t.Fatalf("read back = %q, %v", ba.Token, err)
 	}
 	// the PATCH path seals too
-	if _, err := db.UpdateBoardWithAutomation(ctx, pool, b.ID, db.BoardParams{},
+	if _, _, err := db.UpdateBoardWithAutomation(ctx, pool, b.ID, db.BoardParams{},
 		&db.AutomationTokenUpdate{Token: plainTok + "2", AccountID: "a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestAutomationTokenFailsClosed(t *testing.T) {
 	if err := db.SetBoardAutomationToken(ctx, pool, b1.ID, db.AutomationTokenUpdate{Token: "x", AccountID: "a"}); !errors.Is(err, db.ErrAutomationKeyMissing) {
 		t.Fatalf("no key save: %v", err)
 	}
-	if _, err := db.UpdateBoardWithAutomation(ctx, pool, b1.ID, db.BoardParams{},
+	if _, _, err := db.UpdateBoardWithAutomation(ctx, pool, b1.ID, db.BoardParams{},
 		&db.AutomationTokenUpdate{Token: "x", AccountID: "a"}); !errors.Is(err, db.ErrAutomationKeyMissing) {
 		t.Fatalf("no key PATCH: %v", err)
 	}

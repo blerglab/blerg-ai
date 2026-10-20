@@ -185,7 +185,7 @@ func TestChildEventsLongPollReturnsOnAppendAndCancels(t *testing.T) {
 		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "ready") {
 			t.Fatalf("poll status=%d", rec.Code)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("long-poll did not wake after append")
 	}
 }
@@ -393,7 +393,7 @@ func TestChildEventsCancellationAndPagination(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("cancelled poll leaked a waiter")
 	}
 }

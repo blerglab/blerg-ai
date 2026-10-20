@@ -107,6 +107,14 @@ func TestValidModelFor(t *testing.T) {
 	}
 }
 
+func TestHermesModelAcceptance(t *testing.T) {
+	// nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4 is a served-model identifier
+	// that must be accepted under the Hermes engine model rule.
+	if !ValidModelFor("hermes", "nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4") {
+		t.Errorf("hermes: nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4 should be valid, got invalid")
+	}
+}
+
 func TestValidCatalogID(t *testing.T) {
 	if !ValidCatalogID("claude-opus-5-5") || ValidCatalogID("sonnet") || ValidCatalogID("claude-") {
 		t.Error("catalog id rule wrong")

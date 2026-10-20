@@ -176,6 +176,11 @@ func TestAnAskWithoutAMessageIDClosesWithThePersonsNextMessage(t *testing.T) {
 	s.nativeAsk("", "Proceed?")
 	s.msg("system", "harness text")
 	eq(t, "asks after a system line", asks(Build(s.events, s.opts("running"))), []string{":Proceed?"})
+	// As in the chat (asks.ts): a board's, a cron's or a message Blerg relays is not the person answering.
+	for _, src := range []string{"blerg-board", "cron", "review", "proposal"} {
+		s.msg(src, "not an answer")
+		eq(t, "asks after a "+src+" message", asks(Build(s.events, s.opts("running"))), []string{":Proceed?"})
+	}
 	s.msg("chat", "yes")
 	eq(t, "asks after the person's message", asks(Build(s.events, s.opts("running"))), nil)
 }

@@ -3,7 +3,7 @@ import type { SessionInfo } from '../types'
 export interface SessionTree { top: SessionInfo[]; childrenOf: ReadonlyMap<string, SessionInfo[]> }
 
 export function nestChildren(sessions: readonly SessionInfo[]): SessionTree {
-  const visible = sessions.filter(session => !session.parent_session_id || !session.archived_at)
+  const visible = sessions.filter(session => !session.archived_at)
   const listed = new Map(visible.map(s => [s.id, s]))
   const childrenOf = new Map<string, SessionInfo[]>()
   const top: SessionInfo[] = []

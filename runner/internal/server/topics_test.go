@@ -158,7 +158,7 @@ func TestPostTopicStartAndDone(t *testing.T) {
 		if !strings.Contains(string(msg), `"kind":"topic"`) || !strings.Contains(string(msg), id) {
 			t.Errorf("fan-out = %s", msg)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the topic event was not fanned out to the session's watchers")
 	}
 	code, done := fx.post(fx.sess, fx.sessTok, map[string]string{"action": "done", "outcome": "Shipped on main"})

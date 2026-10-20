@@ -1,3 +1,4 @@
+import { modelDisplayNames } from '@blerglab/chat'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
@@ -95,6 +96,7 @@ export default function Insights() {
 
 function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: ModelPrice[]; onPriceChange: () => void }) {
   const narrow = useMediaQuery(NARROW_QUERY)
+  const modelNames = modelDisplayNames(d.tokens.by_model.map(m => ({ id: m.model })))
   const empty = d.sessions.started === 0 && d.tokens.totals.turns === 0
   // the headline startup figure: the runtime that started the most sessions
   const headline = useMemo(() => {
@@ -182,7 +184,7 @@ function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: Mod
               <ul className="stack" data-testid="tokens-stack">
                 {d.tokens.by_model.map((m) => (
                   <li key={m.model}>
-                    <div className="stack-head"><span className="stack-name">{m.model}</span></div>
+                    <div className="stack-head"><span className="stack-name" title={m.model}>{modelNames.get(m.model)}</span></div>
                     <dl className="stack-figs">
                       <Fig k="Turns" v={String(m.turns)} />
                       <Fig k="Input" v={formatTokens(m.input)} />
@@ -200,7 +202,7 @@ function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: Mod
               <tbody>
                 {d.tokens.by_model.map((m) => (
                   <tr key={m.model}>
-                    <td>{m.model}</td><td className="n">{m.turns}</td><td className="n">{formatTokens(m.input)}</td><td className="n">{formatTokens(m.output)}</td>
+                    <td title={m.model}>{modelNames.get(m.model)}</td><td className="n">{m.turns}</td><td className="n">{formatTokens(m.input)}</td><td className="n">{formatTokens(m.output)}</td>
                     <td className="n">{formatTokens(m.cache_read)}</td><td className="n">{formatTokens(m.cache_write)}</td>
                     <td className="n">{m.priced ? formatUSD(m.cost_usd) : <span className="muted" title="No price set for this model">no price</span>}</td>
                   </tr>

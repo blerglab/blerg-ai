@@ -16,10 +16,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// readFirstMessage reads one frame from conn, failing the test after 3 s.
+// readFirstMessage reads one frame from conn, failing at the readiness deadline.
 func readFirstMessage(t *testing.T, conn *websocket.Conn) []byte {
 	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("no message from the server: %v", err)
@@ -61,7 +61,7 @@ func TestDaemonWelcomeNotSentToAnOlderDaemon(t *testing.T) {
 		ProtocolVersion: "1"}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for len(hub.GetAllDaemons()) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the daemon did not register")
@@ -84,7 +84,7 @@ func TestDaemonWelcomeNotSentOnARefusedToken(t *testing.T) {
 		ProtocolVersion: "1", Welcome: true}); err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	_, raw, err := conn.ReadMessage()
 	if err == nil {
 		t.Fatalf("a refused daemon got a message: %s", raw)
@@ -188,7 +188,7 @@ func TestDaemonClientAgainstServeDaemon(t *testing.T) {
 			done := make(chan struct{})
 			go func() { defer close(done); c.Run(ctx, func() []string { return nil }) }()
 			defer func() { cancel(); <-done }()
-			deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(15 * time.Second)
 			for {
 				var st daemon.ConnectionState
 				raw, _ := os.ReadFile(path)

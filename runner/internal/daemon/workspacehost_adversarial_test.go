@@ -78,7 +78,7 @@ func TestWorkspaceWorkerBoundIncludesBlockedResultSend(t *testing.T) {
 		for range 2 {
 			select {
 			case <-sender.done:
-			case <-time.After(5 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Error("workspace worker did not stop")
 			}
 		}
@@ -92,7 +92,7 @@ func TestWorkspaceWorkerBoundIncludesBlockedResultSend(t *testing.T) {
 			if !got.OK {
 				t.Fatalf("initial worker failed: %+v", got)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("workspace worker did not reach send")
 		}
 	}

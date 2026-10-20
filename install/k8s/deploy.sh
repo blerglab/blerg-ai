@@ -89,6 +89,14 @@ case "$(lower "${WEBHOOK_ALLOW_PRIVATE:-}")" in
   1|true|yes) WEBHOOK_ALLOW_PRIVATE=true ;;
   *) WEBHOOK_ALLOW_PRIVATE=false ;;
 esac
+# The proxies whose X-Forwarded-For the runner's public MCP gateway route believes when it
+# throttles a client (BLERG_RUNNER_TRUSTED_PROXIES). Unset: the private ranges a pod network uses
+# (any pod there can then claim another client's address; see install/k8s/README.md). Set it
+# empty to trust none (every client then shares the ingress's allowance).
+TRUSTED_PROXIES="${TRUSTED_PROXIES-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}"  # scrub:allow (the RFC 1918 pod ranges, a default)
+case "$TRUSTED_PROXIES" in
+  *[!0-9A-Fa-f.:/,\ ]*) echo "TRUSTED_PROXIES must be a comma-separated list of CIDRs or addresses" >&2; exit 1 ;;
+esac
 
 if [ "$cluster_runtime" = off ]; then
   AGENT_IMAGE=""
@@ -196,6 +204,9 @@ BLERG_RUNNER_DAEMON_TOKEN="$(pick "${SECRET_BLERG_RUNNER_DAEMON_TOKEN:-}" BLERG_
 # validates it on internal endpoints, runner presents it back. Same shape as
 # every other pick() key: SECRET_* override > live value > random.
 BLERG_CORE_INTERNAL_KEY="$(pick "${SECRET_BLERG_CORE_INTERNAL_KEY:-}" BLERG_CORE_INTERNAL_KEY)"
+# The key the board presents to core to mint "Run as me" automation tokens (core and board hold
+# it; it opens nothing else). Same precedence; a cluster deployed before it existed gets one.
+BLERG_CORE_BOARD_MINT_KEY="$(pick "${SECRET_BLERG_CORE_BOARD_MINT_KEY:-}" BLERG_CORE_BOARD_MINT_KEY)"
 # core's local KMS key: base64 of 32 random bytes, not a hex token.
 BLERG_CORE_LOCAL_KEY="$(pick_b64 "${SECRET_BLERG_CORE_LOCAL_KEY:-}" BLERG_CORE_LOCAL_KEY)"
 # board's at-rest key for automation tokens: base64 of 32 random bytes, same precedence. A redeploy
@@ -225,6 +236,7 @@ secret_add BLERG_BOARD_SERVICE_KEY "$BLERG_BOARD_SERVICE_KEY"
 secret_add BLERG_RUNNER_KEY "$BLERG_RUNNER_KEY"
 secret_add BLERG_RUNNER_DAEMON_TOKEN "$BLERG_RUNNER_DAEMON_TOKEN"
 secret_add BLERG_CORE_INTERNAL_KEY "$BLERG_CORE_INTERNAL_KEY"
+secret_add BLERG_CORE_BOARD_MINT_KEY "$BLERG_CORE_BOARD_MINT_KEY"
 secret_add BLERG_CORE_LOCAL_KEY "$BLERG_CORE_LOCAL_KEY"
 secret_add BLERG_BOARD_SECRET_KEY "$BLERG_BOARD_SECRET_KEY"
 [ -n "$ANTHROPIC_API_KEY" ] && secret_add ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
@@ -235,6 +247,14 @@ secret_add BLERG_BOARD_SECRET_KEY "$BLERG_BOARD_SECRET_KEY"
 kubectl create secret generic blerg-secrets \
   --namespace blerg "${SECRET_ARGS[@]}" \
   --dry-run=client -o yaml | kubectl apply -f -
+
+# The shared Hermes provider configuration (HERMES_PROVIDERS_FILE, a Hermes config.yaml fragment
+# with your model servers): only when set, and only for cluster runtime, which is all that reads it.
+if [ -n "${HERMES_PROVIDERS_FILE:-}" ] && [ "$cluster_runtime" = off ]; then
+  echo "==> Skipping the shared Hermes providers (CLUSTER_RUNTIME=off)"
+else
+  hermes_providers_secret "${HERMES_PROVIDERS_FILE:-}" "$script_dir"
+fi
 
 # The shared Secret cluster-runtime session pods mount. It deliberately needs
 # NO human credential to be useful: BLERG_RUNNER_DAEMON_TOKEN (which the pod
@@ -295,8 +315,8 @@ for f in $(grep -E '^\s+- ' "$script_dir/kustomization.yaml" | sed 's/^\s*- //')
 done
 cp "$script_dir/kustomization.yaml" "$render_dir/"
 for f in "$render_dir"/*.yaml; do
-  REGISTRY="$REGISTRY" TAG="$TAG" DOMAIN="$DOMAIN" SCHEME="$SCHEME" AGENT_IMAGE="$AGENT_IMAGE" WEBHOOK_ALLOW_PRIVATE="$WEBHOOK_ALLOW_PRIVATE" \
-    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE}' < "$f" > "$f.rendered"
+  REGISTRY="$REGISTRY" TAG="$TAG" DOMAIN="$DOMAIN" SCHEME="$SCHEME" AGENT_IMAGE="$AGENT_IMAGE" WEBHOOK_ALLOW_PRIVATE="$WEBHOOK_ALLOW_PRIVATE" TRUSTED_PROXIES="$TRUSTED_PROXIES" \
+    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES}' < "$f" > "$f.rendered"
   mv "$f.rendered" "$f"
 done
 
@@ -356,7 +376,4 @@ if [ "$cluster_runtime" = off ]; then
 else
   echo "==> Cluster runtime: on (users add their own credentials at ${SCHEME}://${DOMAIN}/settings)"
 fi
-echo "==> First login (bootstrap admin password — printed only by the FIRST boot that created the account):"
-echo "    kubectl -n blerg logs deploy/blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD"
-echo "    If that log is gone, mint a fresh one-time password instead:"
-echo "    kubectl -n blerg exec deploy/blerg-core -- /blerg-core users set-password --subject <username>"
+first_run_setup_notice

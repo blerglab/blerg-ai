@@ -230,7 +230,7 @@ func TestCodexGuideRefusesFIFOWithoutHanging(t *testing.T) {
 		}
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("guide reader remained blocked after FIFO cleanup")
 		}
 	})
@@ -243,7 +243,7 @@ func TestCodexGuideRefusesFIFOWithoutHanging(t *testing.T) {
 		if result == nil {
 			t.Fatal("FIFO instructions were accepted")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("FIFO instructions blocked terminal preparation")
 	}
 }

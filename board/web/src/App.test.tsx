@@ -207,6 +207,56 @@ describe("New board template", () => {
     }
   });
 
+  it("pre-checks Run this board's cards as me and sends it", async () => {
+    responses["/api/me"] = { kind: "human", is_admin: true, is_human: true, run_as_me_available: true, run_as_creator_default: true };
+    render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
+    fireEvent.click(await screen.findByText("New board"));
+    const box = await screen.findByLabelText("Run this board's cards as me") as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "mine" } });
+    fireEvent.click(screen.getByText("Create board"));
+    await waitFor(() => expect(postedBody()).toBeDefined());
+    expect(postedBody()).toEqual({ name: "mine", require_repo: false, run_as_me: true });
+  });
+
+  it("leaves the box unchecked when the operator turns the default off, and honors a change", async () => {
+    responses["/api/me"] = { kind: "human", is_admin: true, is_human: true, run_as_me_available: true, run_as_creator_default: false };
+    render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
+    fireEvent.click(await screen.findByText("New board"));
+    const box = await screen.findByLabelText("Run this board's cards as me") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "team" } });
+    fireEvent.click(screen.getByText("Create board"));
+    await waitFor(() => expect(postedBody()).toBeDefined());
+    expect(postedBody()).toEqual({ name: "team", require_repo: false, run_as_me: false });
+  });
+
+  it("has no Run as me box when the install cannot mint", async () => {
+    responses["/api/me"] = { kind: "human", is_admin: true, is_human: true, run_as_me_available: false, run_as_creator_default: true };
+    render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
+    fireEvent.click(await screen.findByText("New board"));
+    await screen.findByPlaceholderText("board name");
+    expect(screen.queryByLabelText("Run this board's cards as me")).toBeNull();
+  });
+
+  it("says when the board was created but Run as me did not take", async () => {
+    responses["/api/me"] = { kind: "human", is_admin: true, is_human: true, run_as_me_available: true, run_as_creator_default: true };
+    const real = vi.mocked(api).getMockImplementation()!;
+    vi.mocked(api).mockImplementation((path: string, init?: unknown) =>
+      path === "/api/boards" && (init as { json?: unknown })?.json
+        ? Promise.resolve({ id: "b9", name: "mine", automation_token_set: false, automation_error: "blerg-core did not accept your sign-in as live: sign in again and retry" })
+        : real(path, init as never));
+    try {
+      render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
+      fireEvent.click(await screen.findByText("New board"));
+      fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "mine" } });
+      fireEvent.click(screen.getByText("Create board"));
+      expect(await screen.findByRole("status")).toHaveTextContent(/created, but it can't start sessions yet: blerg-core did not accept your sign-in/);
+    } finally {
+      vi.mocked(api).mockImplementation(real);
+    }
+  });
+
   it("opens the create form with the template chosen from ?new=focus-board", async () => {
     render(<MemoryRouter initialEntries={["/?new=focus-board"]}><MeProvider><Boards /></MeProvider></MemoryRouter>);
     const select = (await screen.findByLabelText("Template")) as HTMLSelectElement;

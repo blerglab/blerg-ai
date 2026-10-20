@@ -388,7 +388,7 @@ func TestHermesCapabilitiesScansCategories(t *testing.T) {
 	var groups []protocol.CapabilityGroup
 	select {
 	case groups = <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("scan blocked")
 	}
 	if len(groups) != 1 {

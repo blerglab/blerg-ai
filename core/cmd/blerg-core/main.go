@@ -42,6 +42,7 @@ func validateSecrets() error {
 	}{
 		{"BLERG_CORE_REGISTER_KEY", false},
 		{"BLERG_CORE_INTERNAL_KEY", false},
+		{"BLERG_CORE_BOARD_MINT_KEY", false},
 	} {
 		v := os.Getenv(c.name)
 		var err error
@@ -52,6 +53,15 @@ func validateSecrets() error {
 		}
 		if err != nil {
 			return err
+		}
+	}
+	// The board mint key opens only the "Run as me" routes. Sharing a value with the internal
+	// key (credential fetches) or the register key would silently hand the board those too.
+	if mint := os.Getenv("BLERG_CORE_BOARD_MINT_KEY"); mint != "" {
+		for _, other := range []string{"BLERG_CORE_INTERNAL_KEY", "BLERG_CORE_REGISTER_KEY"} {
+			if os.Getenv(other) == mint {
+				return fmt.Errorf("BLERG_CORE_BOARD_MINT_KEY must differ from %s", other)
+			}
 		}
 	}
 	return nil
@@ -454,6 +464,8 @@ func buildDeps(ctx context.Context, st *db.PgStore) (api.Deps, *identity.Service
 		Audience:             "blerg-core",
 		RegisterKey:          os.Getenv("BLERG_CORE_REGISTER_KEY"),
 		InternalKey:          os.Getenv("BLERG_CORE_INTERNAL_KEY"),
+		BoardMintKey:         os.Getenv("BLERG_CORE_BOARD_MINT_KEY"),
+		BoardMintLimiter:     api.NewLoginLimiter(api.BoardMintLimit, api.BoardMintWindow),
 		Store:                st,
 		AuthProvider:         authProvider,
 		AllowedReturnOrigins: parseAllowedReturnOrigins(),
@@ -483,6 +495,11 @@ func main() {
 	// "the server won't boot, I need to reset a password" situation this subcommand exists for.
 	if len(os.Args) > 1 && os.Args[1] == "users" {
 		os.Exit(runUsers(os.Args[2:], os.Stdout))
+	}
+	// `setup-link` is the same kind of operator path: it needs only DATABASE_URL (and
+	// BLERG_CORE_PUBLIC_URL for a full link), so installers can run it in the pod.
+	if len(os.Args) > 1 && os.Args[1] == "setup-link" {
+		os.Exit(runSetupLink(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
 	if err := validateSecrets(); err != nil {
@@ -522,13 +539,22 @@ func serve(ctx context.Context) error {
 	deps.LatestRelease = updates.Latest
 	updates.Start(ctx)
 
-	// Seed the bootstrap admin account (idempotent no-op once accounts exist) only when the
-	// local password provider is actually active — an OIDC/GitHub deployment (Tasks 10/11)
-	// has no use for a local password account and must not get one seeded underneath it.
+	// First run (setup.go): only under the local password provider (an OIDC/GitHub deployment
+	// creates accounts at first sign-in). Code-less setup for the desktop needs the published
+	// address check and the container's gateway; then, while no account exists, one log line says
+	// how to finish setup. No setup code is minted or logged at boot.
 	if authProviderName() == "local" {
+		allowLocal, why := setupAllowLocal(os.Getenv)
+		if why != "" {
+			log.Print(why)
+		}
+		deps.SetupAllowLocal = allowLocal
+		if allowLocal {
+			deps.SetupLocalGateway = setupGateway(os.Getenv, containerGateway)
+		}
 		if local, ok := deps.AuthProvider.(*authprovider.Local); ok {
-			if err := local.EnsureBootstrapAdmin(ctx); err != nil {
-				return fmt.Errorf("ensure bootstrap admin: %w", err)
+			if err := firstRun(ctx, local, os.Getenv("BLERG_CORE_PUBLIC_URL"), allowLocal, log.Printf); err != nil {
+				return fmt.Errorf("first-run setup: %w", err)
 			}
 		}
 	}
@@ -554,7 +580,9 @@ func serve(ctx context.Context) error {
 	identity.StartExchangePruneLoop(ctx, identitySvc, time.Hour)
 
 	log.Printf("blerg-core listening on %s", addr)
-	handler := withSPAFallback(api.NewRouter(deps), spaHandler(webDistDir()))
+	app := spaHandler(webDistDir())
+	deps.App = app
+	handler := withSPAFallback(api.NewRouter(deps), app)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           handler,

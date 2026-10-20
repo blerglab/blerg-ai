@@ -1,7 +1,6 @@
 package coreauth
 
 import (
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -165,10 +164,10 @@ func TestClientRevocationScopedByIssuedAt(t *testing.T) {
 		})
 	})
 	core := httptest.NewServer(mux)
-	defer core.Close()
+	t.Cleanup(core.Close)
 
 	c := NewClient(core.URL)
-	c.Start(context.Background())
+	c.Start(t.Context())
 
 	exp := time.Now().Add(time.Hour).Unix()
 	verify := func(sub string, iat int64) error {

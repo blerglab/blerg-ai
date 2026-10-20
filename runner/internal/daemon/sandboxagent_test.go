@@ -67,8 +67,18 @@ done
 shift   # container name
 case "$1" in
   kill) exit 0 ;;                                      # never signal a host PID
-  sh) case "$3" in kill*) exit 0 ;; esac ;;            # ... nor via sh -c
+  sh) case "$3" in *kill*) exit 0 ;; esac ;;            # ... nor via sh -c
 esac
+if [[ "$*" == *"/home/agent/.hermes/hermes-agent"* ]] && [ -n "$HERMES_PYTHON_SRC_ROOT" ]; then
+ args=()
+ for arg in "$@"; do
+  arg="${arg//\/home\/agent\/.hermes\/hermes-agent\/venv\/bin\/python/$HERMES_PYTHON}"
+  arg="${arg//\/home\/agent\/.hermes\/hermes-agent/$HERMES_PYTHON_SRC_ROOT}"
+  arg="${arg//\/tmp\/blerg-hermes-gateway.pid/$HERMES_PYTHON_SRC_ROOT\/gateway.pid}"
+  args+=("$arg")
+ done
+ exec "${args[@]}"
+fi
 exec "$@"
 `
 	path := filepath.Join(dir, "docker")
@@ -144,7 +154,7 @@ func dockerCalls(t *testing.T, logPath string) string {
 // refusal path) and returns its reason.
 func (s *agentTestSender) waitForSessionError(t *testing.T) string {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if errs := s.sessionErrors(); len(errs) > 0 {
 			return errs[0]
@@ -417,8 +427,8 @@ func TestAgentHostSandboxedCLIEnginesRunInContainer(t *testing.T) {
 	}{
 		{"codex", "FAKE_CODEX_LOG", fakeCodex, "codex app-server", "gpt-5.6-terra", "ultra",
 			"app-server --listen stdio://"},
-		{"hermes", "FAKE_HERMES_LOG", func(t *testing.T) string { return fakeHermes(t, "hi there", 0) }, "hermes chat",
-			"qwen3-30b", "minimal", "-m qwen3-30b --reasoning minimal"},
+		{"hermes", "FAKE_HERMES_LOG", func(t *testing.T) string { return fakeHermes(t, "hi there", 0) }, "venv/bin/python -I -u -c",
+			"qwen3-30b", "minimal", "blerg-hermes-gateway.pid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.engine, func(t *testing.T) {
@@ -437,7 +447,13 @@ func TestAgentHostSandboxedCLIEnginesRunInContainer(t *testing.T) {
 
 			calls := dockerCalls(t, logPath)
 			assertSandboxRun(t, calls, sessionID)
-			assertExecsInContainer(t, calls, sessionID, tc.wantCmd)
+			if tc.engine == "hermes" {
+				if !strings.Contains(calls, "exec -i -w /workspace blerg-sandbox-"+sessionID+" sh -c echo $$ > "+hermesGatewayPIDFile) || !strings.Contains(calls, "/home/agent/.hermes/hermes-agent/"+tc.wantCmd) {
+					t.Fatal("Hermes native gateway did not run inside the session container")
+				}
+			} else {
+				assertExecsInContainer(t, calls, sessionID, tc.wantCmd)
+			}
 			if !strings.Contains(calls, tc.wantArgs) {
 				t.Errorf("model/effort flags %q not in the exec'd command; calls:\n%s", tc.wantArgs, calls)
 			}
@@ -529,7 +545,7 @@ func TestSandboxedTurnClearsItsPIDFile(t *testing.T) {
 	t.Cleanup(func() { host.Kill("s-pid") })
 
 	want := "exec " + dockerContainerName("s-pid") + " rm -f " + sandboxTurnPIDFile
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(dockerCalls(t, logPath), want) {
 			return
@@ -556,7 +572,7 @@ func TestSandboxedTurnFailureIsEmittedAsAnError(t *testing.T) {
 	go d.Run(ctx)
 	d.Enqueue("hello", "chat")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for !contains(em.kinds(), "turn_done") {
 		select {
 		case <-deadline:

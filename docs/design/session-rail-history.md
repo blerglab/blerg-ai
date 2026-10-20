@@ -90,8 +90,9 @@ request):
    pods recorded as `chat` (`<task-notification>`, `<system-reminder>`, …), no restart note. Go
    reads the markers from `topics/testdata/harness_markers.json`; a chat test checks `isHarnessText`
    against it.
-2. Its source is `chat` or `human`. `runner` and `blerg-board` count only on the first message (the
-   start prompt or a card's task), since Insights excludes `runner` too.
+2. Its source is `chat` or `human`. `runner`, `blerg-board`, `session` and `cron` count only on the
+   first message (the start prompt, a card's task, a parent's task for its child, a cron's prompt),
+   since Insights excludes `runner` too.
 3. It is not a `harnessCommand` (`/model`, `/effort`).
 4. It is not feedback. Feedback is a message whose whole first line matches the chat's header
    (`model/feedback.ts`): `Review of <name>[ (v<N>)]: <n> request(s)[, 1 edit].`, `Marked up <name>:

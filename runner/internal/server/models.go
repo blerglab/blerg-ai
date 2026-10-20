@@ -125,7 +125,7 @@ func (a *API) modelRegistry() *models.Registry {
 func (a *API) HandleGetModels(w http.ResponseWriter, r *http.Request) {
 	// Cluster catalogs are private to the launching account. A shared runner
 	// key or another workstation's list cannot authorise this lookup.
-	if _, supported := clusterModelProviderFor(r.PathValue("engine")); r.URL.Query().Get("runtime") == "cluster" && supported {
+	if _, supported := clusterModelProviderOn(r.PathValue("engine"), a.hub.JobManager()); r.URL.Query().Get("runtime") == "cluster" && supported {
 		a.handleClusterModels(w, r)
 		return
 	}

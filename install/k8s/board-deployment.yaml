@@ -54,6 +54,18 @@ spec:
                 secretKeyRef:
                   name: blerg-secrets
                   key: BLERG_CORE_REGISTER_KEY
+            # "Run as me": the board mints a person's run-sessions token through
+            # core in one click (the same key core holds; it opens nothing else).
+            - name: BLERG_CORE_BOARD_MINT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blerg-secrets
+                  key: BLERG_CORE_BOARD_MINT_KEY
+                  optional: true
+            # New boards run their cards as their creator unless this is "false".
+            - name: BLERG_BOARD_DEFAULT_RUN_AS_CREATOR
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_BOARD_DEFAULT_RUN_AS_CREATOR, optional: true }
             - name: BLERG_RUNNER_URL
               valueFrom:
                 configMapKeyRef:

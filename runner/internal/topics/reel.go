@@ -55,9 +55,11 @@ type Reel struct {
 // every window), and the span from the first such row to the last. nil when everything is inside a
 // window.
 type Unmarked struct {
-	Agents    int       `json:"agents"`
-	Documents []Item    `json:"documents"`
-	Subagents []Item    `json:"subagents"`
+	Agents    int    `json:"agents"`
+	Documents []Item `json:"documents"`
+	Subagents []Item `json:"subagents"`
+	// Cards are the board cards the session's approved proposals created outside every window.
+	Cards     []Item    `json:"cards"`
 	FirstSeq  int64     `json:"first_seq"`
 	LastSeq   int64     `json:"last_seq"`
 	StartedAt time.Time `json:"started_at"`
@@ -84,10 +86,12 @@ type Counts struct {
 	Documents int `json:"documents,omitempty"`
 	Agents    int `json:"agents,omitempty"`
 	Commits   int `json:"commits,omitempty"`
+	Cards     int `json:"cards,omitempty"`
 }
 
-// Item is one timeline row; exactly one of the embedded parts is set, by Type
-// (request | document | agent | done), and its fields sit beside type/seq/event_id/ts.
+// Item is one timeline row; exactly one of the parts is set, by Type (request | document | agent |
+// done | card). The embedded parts' fields sit beside type/seq/event_id/ts; a card is under "card"
+// (its title would collide with an agent's).
 type Item struct {
 	Type    string    `json:"type"`
 	Seq     int64     `json:"seq"`
@@ -97,6 +101,41 @@ type Item struct {
 	*Document
 	*Agent
 	*Done
+	Card *Card `json:"card,omitempty"`
+}
+
+// Card is a board card an approved proposal of the session created (a proposal_decided event):
+// where it is (board, number) and what it says (title, type, priority, column), never its body.
+// Auto: a session permission approved it.
+type Card struct {
+	ProposalID string `json:"proposal_id"`
+	ID         string `json:"id"`
+	BoardID    string `json:"board_id"`
+	BoardName  string `json:"board_name,omitempty"`
+	Number     int    `json:"number"`
+	Title      string `json:"title,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Priority   string `json:"priority,omitempty"`
+	Column     string `json:"column,omitempty"`
+	Auto       bool   `json:"auto,omitempty"`
+}
+
+// cardOf reads a proposal_decided event's created card, or nil (another outcome, or not a card).
+func cardOf(ev Event) *Card {
+	var p struct {
+		ProposalID string `json:"proposal_id"`
+		State      string `json:"state"`
+		Auto       bool   `json:"auto"`
+		Card       *Card  `json:"card"`
+	}
+	if json.Unmarshal(ev.Payload, &p) != nil || p.State != "done" || p.Card == nil || p.Card.ID == "" || p.Card.BoardID == "" || p.Card.Number < 1 {
+		return nil
+	}
+	c := *p.Card
+	c.ProposalID, c.Auto = p.ProposalID, p.Auto
+	c.Title, c.BoardName = Cut(c.Title, 200), Cut(c.BoardName, 200)
+	c.Type, c.Priority, c.Column = Cut(c.Type, 64), Cut(c.Priority, 64), Cut(c.Column, 200)
+	return &c
 }
 
 // Request is the opening message, or the marker itself (Marker) when no message comes before it.
@@ -208,15 +247,18 @@ func unmarked(rest *Topic) *Unmarked {
 	}
 	finish(rest)
 	first, last := rest.Items[0], rest.Items[len(rest.Items)-1]
-	u := &Unmarked{Agents: rest.Counts.Agents, Documents: []Item{}, Subagents: []Item{},
+	u := &Unmarked{Agents: rest.Counts.Agents, Documents: []Item{}, Subagents: []Item{}, Cards: []Item{},
 		FirstSeq: first.Seq, LastSeq: last.Seq, StartedAt: first.Ts, EndedAt: last.Ts}
 	if rest.EndSeq > u.LastSeq { // a file republished after the last row
 		u.LastSeq, u.EndedAt = rest.EndSeq, *rest.EndedAt
 	}
 	for _, it := range rest.Items {
-		if it.Type == "document" {
+		switch it.Type {
+		case "document":
 			u.Documents = append(u.Documents, it)
-		} else {
+		case "card":
+			u.Cards = append(u.Cards, it)
+		default:
 			u.Subagents = append(u.Subagents, it)
 		}
 	}
@@ -486,6 +528,11 @@ func collect(wins []*Topic, rest *Topic, events []Event, arts []Artifact, opt Op
 			}
 			shown[k], shownP[k] = ev, p
 			inTopic[k][p.ID] = true
+		case "proposal_decided":
+			if c := cardOf(ev); c != nil {
+				t := at(ev.Seq)
+				t.Items = append(t.Items, Item{Type: "card", Seq: ev.Seq, EventID: ev.ID, Ts: ev.Ts, Card: c})
+			}
 		case "subagent_started":
 			var p agent.SubagentPayload
 			if json.Unmarshal(ev.Payload, &p) != nil || p.ChildID == "" {
@@ -600,6 +647,8 @@ func finish(t *Topic) {
 			t.Counts.Agents++
 		case "done":
 			t.Counts.Commits += len(it.Commits)
+		case "card":
+			t.Counts.Cards++
 		}
 	}
 	if t.Items == nil {

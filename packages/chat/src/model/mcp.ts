@@ -4,7 +4,7 @@
 import type { AgentEvent } from '../types'
 import { parseTs } from './timeLabel'
 
-export type McpServerStatus = 'pending' | 'connected' | 'failed' | 'needs-auth' | 'disabled' | 'unknown'
+export type McpServerStatus = 'pending' | 'connected' | 'failed' | 'needs-auth' | 'disabled' | 'lazy' | 'unknown'
 export interface McpServer { name: string; status: McpServerStatus; source: string; tools: number }
 export type McpReleased = 'settled' | 'timeout' | 'person'
 export interface McpLive {
@@ -19,7 +19,7 @@ export interface McpLive {
 /** The first prompt is held while servers connect: server-time ms. */
 export interface McpHold { since: number; until: number }
 
-const STATUSES: readonly McpServerStatus[] = ['pending', 'connected', 'failed', 'needs-auth', 'disabled', 'unknown']
+const STATUSES: readonly McpServerStatus[] = ['pending', 'connected', 'failed', 'needs-auth', 'disabled', 'lazy', 'unknown']
 type Rec = Record<string, unknown>
 const rec = (v: unknown): Rec | null => (typeof v === 'object' && v !== null && !Array.isArray(v) ? v as Rec : null)
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
@@ -75,6 +75,7 @@ export function mcpSummary(m: McpLive): McpSummary | null {
   const parts: string[] = []
   const add = (st: McpServerStatus, word: string) => { if (count(st)) parts.push(`${count(st)} ${word}`) }
   add('connected', 'connected')
+  add('lazy', 'on demand')
   add('failed', 'failed')
   add('needs-auth', 'needs sign-in')
   add('disabled', 'disabled')

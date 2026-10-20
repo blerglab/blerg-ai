@@ -33,6 +33,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -116,6 +118,9 @@ type runnerPrincipal struct {
 	// Sid is the browser session a human token came from (its `sid` claim), the proof core
 	// wants for the launcher's credentials. Empty for agent tokens and the runner key.
 	Sid string `json:"sid,omitempty"`
+	// delegateProof is a cluster parent's delegate's proof (delegatePrincipalFor): the owner's,
+	// never anything a request carried. Zero for every other principal.
+	delegateProof coreProof
 }
 
 // RunnerPrincipal is runnerPrincipal under a name other packages can write
@@ -434,6 +439,9 @@ func (p runnerPrincipal) proof() coreProof {
 	if p.Kind == runnerKeyPrincipalKind {
 		return coreProof{}
 	}
+	if p.Kind == sessionDelegateKind {
+		return p.delegateProof
+	}
 	if id := p.tokenID(); id != "" {
 		return coreProof{TokenID: id}
 	}
@@ -702,11 +710,15 @@ func startRequestHash(req runnerStartRequest) (string, error) {
 // startRunnerSession dispatches a validated start to the chosen runtime,
 // reporting the failure the caller should be told about (nil = started).
 func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, principal runnerPrincipal, sessionID string) *APIError {
-	// A parent session's child runs on the parent's own desktop daemon, never the cluster, and
-	// carries nothing outside the allowlist; refused before anything is recorded.
+	// A parent session's child runs where its parent does: on the parent's own desktop daemon, or
+	// for a cluster parent on the cluster; it carries nothing outside the allowlist, and is refused
+	// before anything is recorded.
 	if principal.Kind == sessionDelegateKind {
 		if apiErr := delegateStartProblem(req, principal); apiErr != nil {
 			return apiErr
+		}
+		if req.Runtime == runnerRuntimeCluster {
+			return a.startClusterChild(ctx, req, principal, sessionID)
 		}
 		return a.startBoardSessionOnDaemon(ctx, req, principal, sessionID)
 	}
@@ -779,6 +791,7 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 				log.Printf("runner SetSessionTokenID %s: %v", sessionID, err)
 			}
 		}
+		recordLaunchAuthSession(ctx, a.dbPool, sessionID, principal.proof().SessionID)
 		a.recordStartedBy(ctx, sessionID, principal, req.CronID)
 		if req.CallbackURL != "" || req.CallbackSecret != "" {
 			if err := db.SetSessionCallback(ctx, a.dbPool, sessionID, req.CallbackURL, req.CallbackSecret); err != nil {
@@ -822,12 +835,13 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 		Interaction:          req.Interaction,
 		SessionID:            sessionID, Repo: req.Repo, Title: req.Title,
 		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.Prompt,
-		ExtraEnv:          withClusterSessionToken(ctx, a.dbPool, sessionID, req.Env),
-		GitURL:            gitURL,
-		NoRepo:            req.NoRepo,
-		SpawningAccountID: spawningAccount,
-		TokenID:           tokenID,
-		AuthSessionID:     principal.proof().SessionID,
+		InitialPromptSource: initialPromptSource(principal, req),
+		ExtraEnv:            withClusterSessionToken(ctx, a.dbPool, sessionID, req.Env),
+		GitURL:              gitURL,
+		NoRepo:              req.NoRepo,
+		SpawningAccountID:   spawningAccount,
+		TokenID:             tokenID,
+		AuthSessionID:       principal.proof().SessionID,
 		// A cron never runs on the shared operator credential (spec 7.4).
 		NoOperatorFallback: req.NoOperatorFallback,
 	}
@@ -928,6 +942,11 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		req.Repo = scratch.NewName()
 	case req.DaemonID != "":
 		dc = a.hub.GetHostDaemon(req.DaemonID)
+		if dc != nil {
+			// A pinned host (a card run on a chosen desktop) names the repository as its caller
+			// knows it; it runs in the folder this daemon has for it.
+			req.Repo = repoFolderOn(dc, req.Repo, req.Provider)
+		}
 	default:
 		dc = a.hub.DaemonForRepo(req.Repo, HostSelection{Engine: req.Engine, Runtime: req.Runtime, Restricted: req.Grant != nil || req.CronID != ""})
 	}
@@ -1051,6 +1070,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 			a.abortGrantSession(ctx, sessionID)
 			return apiErr
 		}
+		gateway = a.forDaemon(ctx, sessionID, gateway, dc)
 	}
 	restricted := req.Grant != nil || req.CronID != ""
 	// Always-on plugins for a board-started Claude session on a daemon, as for a launch-sheet one.
@@ -1078,6 +1098,9 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		// true on a daemon older than NoRepo).
 		NoRepo: req.NoRepo, NewRepo: req.NoRepo,
 		Cols: 80, Rows: 24, InitialPrompt: req.Prompt, Model: req.Model, Effort: req.Effort, Kind: "agent",
+		// Who wrote the prompt: a board, a parent session or a cron, never drawn as the person's.
+		// A daemon that predates the field records it as "chat", as it always has.
+		InitialPromptSource:        initialPromptSource(principal, req),
 		Engine:                     req.Engine,
 		DangerouslySkipPermissions: skipPerms,
 		// The one flag that decides host vs container on the daemon — the same
@@ -1108,6 +1131,30 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	// resolve the session through the hub.
 	a.hub.SetSessionOwner(sessionID, dc.ID)
 	return nil
+}
+
+// repoFolderOn is the folder under dc's repos root that holds repo: repo itself when the daemon
+// has a folder of that name; else the folder whose origin is repo (owner/name, on provider when
+// one is named); else, for owner/name, a folder named name whose origin the daemon did not report.
+// Anything else is returned unchanged for the daemon to judge, as before.
+func repoFolderOn(dc *DaemonConn, repo, provider string) string {
+	folders := dc.CheckedOutRepos()
+	if slices.Contains(folders, repo) {
+		return repo
+	}
+	sorted := append([]string(nil), folders...)
+	sort.Strings(sorted)
+	for _, folder := range sorted {
+		if o, ok := dc.RepoOrigin(folder); ok && strings.EqualFold(o.FullName, repo) && (provider == "" || o.Provider == provider) {
+			return folder
+		}
+	}
+	if _, name, ok := strings.Cut(repo, "/"); ok && slices.Contains(folders, name) {
+		if _, known := dc.RepoOrigin(name); !known {
+			return name
+		}
+	}
+	return repo
 }
 
 // resolveDaemonRuntime decides which of the two daemon-hosted runtimes a start
@@ -1374,7 +1421,11 @@ func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	if err := cancelPending(); err != nil {
 		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry shortly")
 	}
-	if dc != nil && answersAsk(source) && answerAskFromChat(ctx, a.hub, a.dbPool, sessionID, text, clientID, "") {
+	answerer := "" // only a person signed in as themselves may answer an owner-only ask
+	if principal.Kind == "human" && principal.OnBehalfOf == "" {
+		answerer = principal.Sub
+	}
+	if dc != nil && answersAsk(source) && answerAskFromChatAs(ctx, a.hub, a.dbPool, sessionID, text, clientID, "", answerer) {
 		return map[string]any{"ok": true, "answered_ask": true, "client_id": clientID}, nil
 	}
 	if dc != nil {

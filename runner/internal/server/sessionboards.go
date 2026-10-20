@@ -154,7 +154,7 @@ func (a *API) resolveLaunchGrant(ctx context.Context, who grantRequester, select
 	if !a.boardSelectionConfigured() {
 		return nil, apiErrorf(http.StatusServiceUnavailable, "the runner has no board configured (set %s or %s)", envBoardURL, envBoardMCPURL)
 	}
-	if apiErr = a.checkGrantTarget(target); apiErr != nil {
+	if apiErr = a.checkBoardGrantTarget(target); apiErr != nil {
 		return nil, apiErr
 	}
 	proof := mcpgw.Proof{AccountID: who.Account, SessionID: who.Sid}
@@ -169,6 +169,49 @@ func (a *API) resolveLaunchGrant(ctx context.Context, who grantRequester, select
 	}
 	return nil, apiErrorf(http.StatusNotFound, "board not found")
 }
+
+// checkBoardGrantTarget is checkGrantTarget for the board a person selects at launch. Beyond the
+// placements any grant may have, the board alone may also go to a session on a daemon's host
+// (This machine): the board connection is the gateway's fixed tool set over the person's own
+// board, and the launch-sheet session it rides on is the person's own, watched and unrestricted.
+// The daemon must say it can (CanMCPGatewayViaServer), which also means it dials the gateway at
+// the server's web address. Connections the person selects are still refused there (resolveGrant
+// runs checkGrantTarget first).
+func (a *API) checkBoardGrantTarget(t grantTarget) *APIError {
+	if t.Runtime != daemonRuntimeName {
+		return a.checkGrantTarget(t)
+	}
+	if a.dbPool == nil {
+		return apiErrorf(http.StatusServiceUnavailable, "%s", msgMCPNoDB)
+	}
+	if !restrictedEngineSupported(t.Engine) {
+		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPEngine)
+	}
+	if t.Kind != "agent" {
+		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPKind)
+	}
+	if t.Daemon == nil || !t.Daemon.CanMCPGateway() || !t.Daemon.CanMCPGatewayViaServer() {
+		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgBoardHostDaemonOld)
+	}
+	if t.Engine == "codex" && !t.Daemon.CanCodexRestricted() {
+		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgCodexRestrictOld)
+	}
+	cfg := a.hub.mcpStart.get()
+	switch {
+	case cfg == nil || cfg.Hasher == nil:
+		return apiErrorf(http.StatusServiceUnavailable, "%s", msgMCPNoGateway)
+	case cfg.GatewayURL == "":
+		return apiErrorf(http.StatusServiceUnavailable, "%s", msgMCPNoGatewayURL)
+	case !cfg.ServedOnWeb:
+		return apiErrorf(http.StatusServiceUnavailable, "%s", msgBoardHostNoWebGateway)
+	}
+	return nil
+}
+
+const (
+	msgBoardHostDaemonOld    = "this daemon does not report mcp_gateway_via_server: update it to give a session on This machine board access, or use the Local sandbox"
+	msgBoardHostNoWebGateway = "board access on This machine needs the MCP gateway on the runner's web port, which this server does not serve"
+)
 
 // Shared with cron starts. All callers have already checked their placement and
 // verified proof; the fixed grant never inherits user-selected tool modes.

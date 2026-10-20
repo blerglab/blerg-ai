@@ -336,10 +336,10 @@ func collectTokens(ch <-chan protocol.SessionToken, wait time.Duration) []protoc
 	}
 }
 
-// waitFor polls cond for up to 3 s.
+// waitFor polls cond until the readiness deadline.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)

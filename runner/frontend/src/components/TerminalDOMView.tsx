@@ -29,10 +29,13 @@ export interface TerminalHandle {
 
 interface Props {
   sessionId: string
+  readOnly?: boolean
   ref?: React.Ref<TerminalHandle | null>
 }
 
-export default function TerminalDOMView({ sessionId, ref }: Props) {
+export default function TerminalDOMView({ sessionId, ref, readOnly = false }: Props) {
+  const readOnlyRef = useRef(readOnly)
+  useLayoutEffect(() => { readOnlyRef.current = readOnly }, [readOnly])
   const scrollRef      = useRef<HTMLDivElement>(null)   // scrollable outer
   const historyRef     = useRef<HTMLDivElement>(null)   // tmux-sourced scrollback (rendered from session_scrollback)
   const primaryViewRef = useRef<HTMLDivElement>(null)   // (reserved; kept empty)
@@ -628,6 +631,7 @@ export default function TerminalDOMView({ sessionId, ref }: Props) {
     // ── Keyboard input ────────────────────────────────────────────────────────
 
     function sendInputSeq(data: string) {
+      if (readOnlyRef.current) return
       const bytes = new Uint8Array(data.length)
       for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff
       send({ type: 'send_input', session_id: sessionId, data: btoa(String.fromCharCode(...bytes)) })
@@ -844,6 +848,7 @@ export default function TerminalDOMView({ sessionId, ref }: Props) {
       <textarea
         ref={taRef}
         aria-hidden="true"
+        readOnly={readOnly}
         autoComplete="off"
         autoCorrect="off"
         autoCapitalize="none"

@@ -85,6 +85,10 @@ func TestSessionInsightsCountsOneSession(t *testing.T) {
 	seedEvent(t, f.pool, id, at(7), "user_message", map[string]string{"text": "yes", "source": "ask_answer"})
 	seedEvent(t, f.pool, id, at(9), "user_message", map[string]string{"text": "<task-notification>", "source": "system"})
 	seedEvent(t, f.pool, id, at(9), "user_message", map[string]string{"text": "from another agent", "source": "runner"})
+	// Nor is what a board, a parent session or a cron wrote, or a decision Blerg relayed.
+	for _, src := range []string{"blerg-board", "session", "cron", "review", "proposal"} {
+		seedEvent(t, f.pool, id, at(9), "user_message", map[string]string{"text": "not the person", "source": src})
+	}
 	// Tool calls: three of the main agent's, two of a subagent's (they carry parent_call_id).
 	for _, tool := range []string{"Bash", "Bash", "Read"} {
 		seedEvent(t, f.pool, id, at(2), "tool_call", map[string]any{"tool": tool, "call_id": newUUID(), "input": map[string]any{}})

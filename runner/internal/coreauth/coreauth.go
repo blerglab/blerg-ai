@@ -39,8 +39,10 @@ type revocationEntry struct {
 // Client polls blerg-core for its signing keys and revocation list, and
 // implements identity.RevocationChecker for use with identity.Verify.
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL   string
+	http      *http.Client
+	cancel    context.CancelFunc
+	refreshes sync.WaitGroup
 
 	mu            sync.RWMutex
 	keys          identity.KeySet
@@ -54,27 +56,62 @@ type Client struct {
 // New creates a client against blerg-core at baseURL (e.g. $BLERG_CORE_URL)
 // and starts its background refresh loops. Returns nil if baseURL is empty.
 func New(baseURL string) *Client {
+	return NewWithContext(context.Background(), baseURL)
+}
+
+// NewWithContext owns the refresh loops and in-flight requests with ctx.
+// Close cancels and joins them; cached verification remains available afterward.
+// New retains its process-lifetime refresh behavior for existing callers.
+func NewWithContext(ctx context.Context, baseURL string) *Client {
+	return newClient(ctx, baseURL, jwksRefreshInterval, revocationsRefreshInterval, httpTimeout)
+}
+
+func newClient(parent context.Context, baseURL string, jwksInterval, revocationsInterval, requestTimeout time.Duration) *Client {
 	if baseURL == "" {
 		return nil
 	}
+	ctx, cancel := context.WithCancel(parent)
 	c := &Client{
 		baseURL: baseURL,
-		http:    &http.Client{Timeout: httpTimeout},
+		http:    &http.Client{Timeout: requestTimeout},
+		cancel:  cancel,
 		keys:    identity.KeySet{},
 		revoked: identity.RevocationSet{},
 	}
-	c.refreshJWKS()
-	c.refreshRevocations()
-	go c.loop(jwksRefreshInterval, c.refreshJWKS)
-	go c.loop(revocationsRefreshInterval, c.refreshRevocations)
+	c.refreshJWKS(ctx)
+	c.refreshRevocations(ctx)
+	c.refreshes.Add(2)
+	go c.loop(ctx, jwksInterval, c.refreshJWKS)
+	go c.loop(ctx, revocationsInterval, c.refreshRevocations)
 	return c
 }
 
-func (c *Client) loop(interval time.Duration, fn func()) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for range t.C {
-		fn()
+// Close stops background refreshes and waits for their requests to finish.
+// It is safe to call more than once, concurrently, or on a nil Client.
+func (c *Client) Close() {
+	if c == nil {
+		return
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.refreshes.Wait()
+}
+
+func (c *Client) loop(ctx context.Context, interval time.Duration, fn func(context.Context)) {
+	defer c.refreshes.Done()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
+			fn(ctx)
+		}
 	}
 }
 
@@ -90,9 +127,9 @@ func (c *Client) KeySet() identity.KeySet {
 	return out
 }
 
-func (c *Client) refreshJWKS() {
+func (c *Client) refreshJWKS(ctx context.Context) {
 	var raw map[string]string
-	if err := c.getJSON("/.well-known/jwks", &raw); err != nil {
+	if err := c.getJSON(ctx, "/.well-known/jwks", &raw); err != nil {
 		if !c.jwksErrLogged {
 			log.Printf("coreauth: jwks fetch failed (will retry): %v", err)
 			c.jwksErrLogged = true
@@ -115,9 +152,9 @@ func (c *Client) refreshJWKS() {
 	c.mu.Unlock()
 }
 
-func (c *Client) refreshRevocations() {
+func (c *Client) refreshRevocations(ctx context.Context) {
 	var entries []revocationEntry
-	if err := c.getJSON("/revocations", &entries); err != nil {
+	if err := c.getJSON(ctx, "/revocations", &entries); err != nil {
 		if !c.revErrLogged {
 			log.Printf("coreauth: revocations fetch failed (will retry): %v", err)
 			c.revErrLogged = true
@@ -135,8 +172,8 @@ func (c *Client) refreshRevocations() {
 	c.mu.Unlock()
 }
 
-func (c *Client) getJSON(path string, v any) error {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, c.baseURL+path, nil)
+func (c *Client) getJSON(ctx context.Context, path string, v any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return err
 	}

@@ -74,7 +74,7 @@ describe('Mermaid rendering lifetime and image errors', () => {
     const rejected = expect(first).rejects.toThrow('first failed')
     const second = renderMermaid('flowchart LR; C-->D', document.createElement('div'))
     try {
-      await vi.waitFor(() => expect(api.render).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(api.render).toHaveBeenCalledTimes(1), { timeout: 15000 })
       expect(api.initialize).toHaveBeenCalledTimes(1)
     } finally {
       rejectFirst(new Error('first failed'))

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -115,6 +116,27 @@ type Gateway struct {
 
 	statesMu sync.Mutex
 	states   map[string]*grantState
+
+	// trusted are the proxies whose forwarding headers the public route believes
+	// (SetTrustedProxies); lookups bounds its database lookups for throttled addresses.
+	trustedMu sync.RWMutex
+	trusted   []netip.Prefix
+	lookups   *lookupBudget
+}
+
+// SetTrustedProxies sets the proxies (BLERG_RUNNER_TRUSTED_PROXIES) whose X-Forwarded-For and
+// X-Real-IP the public route believes when it throttles a client. nil trusts none: every client
+// behind a proxy then shares the proxy's allowance.
+func (g *Gateway) SetTrustedProxies(p []netip.Prefix) {
+	g.trustedMu.Lock()
+	g.trusted = p
+	g.trustedMu.Unlock()
+}
+
+func (g *Gateway) trustedProxies() []netip.Prefix {
+	g.trustedMu.RLock()
+	defer g.trustedMu.RUnlock()
+	return g.trusted
 }
 
 // New builds a Gateway.
@@ -155,6 +177,7 @@ func New(cfg Config) *Gateway {
 	g := &Gateway{cfg: cfg, sink: cfg.Sink, refresher: cfg.Refresher, states: map[string]*grantState{}}
 	g.limiter = newFailLimiter(cfg.FailedAuthLimit, cfg.FailedAuthWindow, cfg.Now)
 	g.ipLimiter = newFailLimiter(cfg.FailedAuthLimit*10, cfg.FailedAuthWindow, cfg.Now)
+	g.lookups = newLookupBudget(publicLookupsPerSecond, publicLookupBurst, cfg.Now)
 	// The overall client timeout is a backstop; the per-call context is what normally ends a call.
 	g.client = cfg.Policy.Client(cfg.CallTimeout+30*time.Second, maxUpstreamBytes)
 	g.boardClient = BoardHTTPClient(cfg.BoardMCPURL, cfg.CallTimeout+30*time.Second, maxUpstreamBytes)
@@ -168,6 +191,9 @@ func (g *Gateway) SetProposalSink(s ProposalSink) {
 	g.sinkMu.Unlock()
 }
 
+// ProposalSink returns the installed sink (nil when none), so a caller can wrap it.
+func (g *Gateway) ProposalSink() ProposalSink { return g.proposalSink() }
+
 func (g *Gateway) proposalSink() ProposalSink {
 	g.sinkMu.RLock()
 	defer g.sinkMu.RUnlock()
@@ -176,13 +202,51 @@ func (g *Gateway) proposalSink() ProposalSink {
 
 func (g *Gateway) now() time.Time { return g.cfg.Now() }
 
+// CallTimeout is the per-call upstream timeout the gateway applies.
+func (g *Gateway) CallTimeout() time.Duration { return g.cfg.CallTimeout }
+
 // Handler is the gateway's HTTP handler: POST /mcp-gw/{name}. It belongs on its own
 // listener, never on the runner's main mux.
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(PathPrefix+"{name}", g.serve)
+	mux.HandleFunc(PathPrefix+"{name}", func(w http.ResponseWriter, r *http.Request) { g.serve(w, r, nil) })
 	return mux
 }
+
+// PublicHandler is the gateway as mounted on the runner's public web port, for sessions on
+// workstation daemons that cannot reach its own listener. It differs from Handler in three ways:
+//
+//   - accept is asked about each authenticated grant before anything else of the request is read;
+//     the runner accepts only grants issued for this route, of a live daemon session, within their
+//     idle limit.
+//   - Every refusal before a grant is accepted (no token, a malformed, unknown or stale one, a grant
+//     accept refuses, a path that does not name the grant's connection) is the same JSON-RPC 401,
+//     so the route never tells whether a token exists.
+//   - A client is the real one behind a trusted proxy (SetTrustedProxies). A malformed token from
+//     an address over its failure allowance is turned away; a well-formed one is still looked up,
+//     within a global budget, so a valid token is served.
+func (g *Gateway) PublicHandler(accept func(context.Context, *db.MCPGrant) bool) http.Handler {
+	mux := http.NewServeMux()
+	m := &mount{accept: accept, public: true}
+	mux.HandleFunc(PathPrefix+"{name}", func(w http.ResponseWriter, r *http.Request) { g.serve(w, r, m) })
+	return mux
+}
+
+// mount is how the gateway is mounted: nil is its own listener (Handler).
+type mount struct {
+	accept func(context.Context, *db.MCPGrant) bool
+	public bool
+}
+
+// publicLookupsPerSecond and publicLookupBurst bound the database lookups the public route makes
+// for well-formed tokens from addresses over their failure allowance (lookupBudget).
+const (
+	publicLookupsPerSecond = 100
+	publicLookupBurst      = 200
+)
+
+// codeUnauthorized is the JSON-RPC error code of the public route's uniform refusal.
+const codeUnauthorized = -32001
 
 // Run prunes the call log now and then hourly, and drops idle per-grant state, until ctx ends.
 func (g *Gateway) Run(ctx context.Context) {
@@ -321,36 +385,60 @@ func plausibleToken(tok string) bool {
 // shares it). A failure is counted against the (address, token) pair, so one container repeating a
 // stale token blocks only itself, and against the address as a whole with a much larger allowance
 // (spraying random or missing tokens).
-func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) *db.MCPGrant {
+//
+// On the public route (m.public) the client is the real one behind a trusted proxy, a well-formed
+// token from an address over its allowance is still looked up within a global budget, and every
+// refusal is JSON-RPC shaped.
+func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, m *mount) (*db.MCPGrant, string) {
 	ip := clientIP(r)
-	tooMany := func() *db.MCPGrant {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "too many failed attempts", http.StatusTooManyRequests)
-		return nil
+	public := m != nil && m.public
+	if public {
+		ip = publicClientIP(r, g.trustedProxies())
 	}
-	unauthorized := func(keys ...string) *db.MCPGrant {
+	tooMany := func() {
+		w.Header().Set("Retry-After", "60")
+		if public {
+			writeRPCError(w, http.StatusTooManyRequests, nil, codeUnauthorized, "too many failed attempts")
+			return
+		}
+		http.Error(w, "too many failed attempts", http.StatusTooManyRequests)
+	}
+	unauthorized := func(keys ...string) {
 		g.ipLimiter.fail(ip)
 		for _, k := range keys {
 			g.limiter.fail(k)
 		}
 		w.Header().Set("WWW-Authenticate", "Bearer")
+		if public {
+			writeRPCError(w, http.StatusUnauthorized, nil, codeUnauthorized, "unauthorized")
+			return
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return nil
 	}
 	tok := bearer(r)
 	if !plausibleToken(tok) {
 		// Nothing to look up: a missing or malformed token only ever counts against the address.
 		if g.ipLimiter.blocked(ip) {
-			return tooMany()
+			tooMany()
+			return nil, ""
 		}
-		return unauthorized()
+		unauthorized()
+		return nil, ""
 	}
 	sum := sha256.Sum256([]byte(tok))
 	key := ip + "|" + hex.EncodeToString(sum[:6])
 	if g.limiter.blocked(key) {
 		// This very token already failed too often from this address: it is stale, and a
 		// stale token does not become valid, so skip the lookup.
-		return tooMany()
+		tooMany()
+		return nil, ""
+	}
+	if public && g.ipLimiter.blocked(ip) && !g.lookups.take() {
+		// The public route: an address over its allowance still has a well-formed token looked
+		// up, so a valid one is served, but only within a global budget that bounds the lookups
+		// a flood can cause.
+		tooMany()
+		return nil, ""
 	}
 	gr, err := db.MCPGrantByTokenHash(r.Context(), g.cfg.DB, sum[:])
 	if errors.Is(err, db.ErrMCPGrantNotFound) {
@@ -358,25 +446,50 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) *db.MCPGr
 		// and past the address allowance is turned away with 429, so spraying distinct plausible
 		// tokens is bounded too. A valid token never reaches here, so it is never turned away.
 		if g.ipLimiter.blocked(ip) {
-			return tooMany()
+			tooMany()
+			return nil, ""
 		}
-		return unauthorized(key)
+		unauthorized(key)
+		return nil, ""
 	}
 	if err != nil {
 		log.Printf("mcpgw: grant lookup: %v", err)
+		if public {
+			writeRPCError(w, http.StatusServiceUnavailable, nil, codeGateway, "unavailable")
+			return nil, ""
+		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-		return nil
+		return nil, ""
 	}
 	if subtle.ConstantTimeCompare(gr.TokenHash, sum[:]) != 1 {
-		return unauthorized(key)
+		unauthorized(key)
+		return nil, ""
 	}
-	return gr
+	return gr, key
 }
 
-func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
-	gr := g.authenticate(w, r)
+func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, m *mount) {
+	gr, key := g.authenticate(w, r, m)
 	if gr == nil {
 		return
+	}
+	if m != nil && m.public {
+		// Refused exactly like an unknown token, and counted the same way.
+		if (m.accept != nil && !m.accept(r.Context(), gr)) || r.PathValue("name") != gr.Name {
+			ip := publicClientIP(r, g.trustedProxies())
+			if g.ipLimiter.blocked(ip) {
+				// From a throttled address every unsuccessful token gets the same 429, a token
+				// that exists but is refused here included.
+				w.Header().Set("Retry-After", "60")
+				writeRPCError(w, http.StatusTooManyRequests, nil, codeUnauthorized, "too many failed attempts")
+				return
+			}
+			g.ipLimiter.fail(ip)
+			g.limiter.fail(key)
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeRPCError(w, http.StatusUnauthorized, nil, codeUnauthorized, "unauthorized")
+			return
+		}
 	}
 	// One token per (session, connection): the path names the connection and must agree.
 	if r.PathValue("name") != gr.Name {

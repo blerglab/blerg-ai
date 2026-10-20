@@ -21,8 +21,12 @@ or `http`, `<REGISTRY>` the registry, `<TAG>` the image tag. Examples use
    `kubectl get secret ... -o yaml` or `-o json` to the terminal, no
    `base64 -d` to the terminal, no `echo` of a variable that holds a secret,
    no `cat` of `install/k8s/.env` once it contains `SECRET_*` lines, and no
-   grepping the bootstrap-password line out of core's log for display. The
-   commands in this runbook are written to comply; keep them that way.
+   setup link: never run `blerg-core setup-link` (without `--check`) and never
+   run `deploy.sh` on a terminal; the human runs `setup-link` in their own
+   terminal. Core's log never contains the link. Until the
+   first account exists, the setup link is the admin account — whoever opens
+   it first creates it. It is for the human only. The commands in this runbook
+   are written to comply; keep them that way.
 4. **Read secrets from the cluster only when a step needs them**, into a shell
    variable or a pipe, inside the same command that uses them, and `unset`
    them afterwards. Compare secrets by comparing variables, never by showing
@@ -213,21 +217,31 @@ It builds four images (three with `CLUSTER_RUNTIME=off`), pushes them, creates
 the Secrets, applies the manifests and waits up to 180 s for the Deployments.
 Image builds take several minutes; run it in the background if your shell
 tool has a short timeout, and wait for it to exit. Its output contains no
-secret values.
+secret values as long as its stdout is not a terminal: on a terminal, a fresh
+install ends with the **setup link**, which is a credential (whoever opens it
+first creates the admin account). Your shell tool's output is normally not a
+terminal; if yours gives commands one, send the output to a file
+(`... > /tmp/blerg-deploy.log 2>&1; echo "exit=$?"`) and read that.
 
 **Checkpoint:** exit status `0`, and the output ends with:
 
 ```
 ==> Done. See README.md for how to reach the landing page and connect the runner daemon.
 ==> Cluster runtime: on (users add their own credentials at <SCHEME>://<DOMAIN>/settings)
-==> First login (bootstrap admin password — printed only by the FIRST boot that created the account):
-    kubectl -n blerg logs deploy/blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
-    If that log is gone, mint a fresh one-time password instead:
-    kubectl -n blerg exec deploy/blerg-core -- /blerg-core users set-password --subject <username>
+
+==> FINISH SETUP: this install has no account yet. The person who will own it runs this in their
+    own terminal to get the setup link (a credential, so it is not printed here):
+    kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link
+    then opens it and chooses their username and password.
 ```
 
-(`Cluster runtime: off (CLUSTER_RUNTIME=off)` if decision 6 turned it off.) Do
-not run the printed `grep` command yourself — it is for the human.
+(`Cluster runtime: off (CLUSTER_RUNTIME=off)` if decision 6 turned it off.) The
+`FINISH SETUP` block appears only on a fresh install; an upgrade of an install
+that already has an account ends after the `Cluster runtime` line. Without a
+terminal, `deploy.sh` mints nothing (it only checks with `setup-link --check`),
+so a re-run never invalidates a link the human already has. Do not run the
+printed `setup-link` command yourself: it prints the setup link, which is for
+the human only. Hand the command to the human (handoff message, step 1).
 
 ### Step 4 — pods are running
 
@@ -248,8 +262,8 @@ migrations). `ImagePullBackOff`, `Pending` or `CrashLoopBackOff`: stop, see
 kubectl -n blerg get secret blerg-secrets -o jsonpath='{.data}' | jq -r 'keys[]'
 ```
 
-**Checkpoint:** at least these eleven keys — `BLERG_BOARD_SECRET_KEY`,
-`BLERG_BOARD_SERVICE_KEY`, `BLERG_CORE_INTERNAL_KEY`, `BLERG_CORE_LOCAL_KEY`, `BLERG_CORE_REGISTER_KEY`,
+**Checkpoint:** at least these twelve keys — `BLERG_BOARD_SECRET_KEY`,
+`BLERG_BOARD_SERVICE_KEY`, `BLERG_CORE_BOARD_MINT_KEY`, `BLERG_CORE_INTERNAL_KEY`, `BLERG_CORE_LOCAL_KEY`, `BLERG_CORE_REGISTER_KEY`,
 `BLERG_RUNNER_DAEMON_TOKEN`, `BLERG_RUNNER_DATABASE_URL`, `BLERG_RUNNER_KEY`,
 `DATABASE_URL_BOARD`, `DATABASE_URL_CORE`, `POSTGRES_PASSWORD` (plus
 `ANTHROPIC_API_KEY`, `BLERG_CORE_GITHUB_TOKEN`, `BLERG_RUNNER_GITHUB_TOKEN`
@@ -342,41 +356,18 @@ if [ "$CLUSTER_RUNTIME" = on ]; then
   [ "$n" -ge 1 ] && echo "ok   cluster runtime enabled in runner" || { echo "FAIL cluster runtime not enabled"; fail=1; }
 fi
 
-# 5. Login smoke test with the bootstrap credentials, read from the log into
-#    variables and never printed. Proves login works and the password change is forced.
-line="$(kubectl -n blerg logs deploy/blerg-core | grep -m1 'BLERG_BOOTSTRAP_ADMIN_PASSWORD=')"
-if [ -z "$line" ]; then
-  echo "skip login smoke test: bootstrap line not in core's current log"
-else
-  pw="${line#*BLERG_BOOTSTRAP_ADMIN_PASSWORD=}"; pw="${pw%% *}"
-  sub="${line#*username: }"; sub="${sub%%;*}"
-  unset line
-  jar="$(mktemp)"
-  code="$(curl -s -o /dev/null -w '%{http_code}' -c "$jar" \
-    --data-urlencode "provider_subject=$sub" --data-urlencode "password=$pw" "$core/auth/login")"
-  unset pw sub
-  if [ "$code" = 401 ]; then
-    echo "skip login smoke test: bootstrap password no longer valid (already changed?)"
-  else
-    check "login with bootstrap credentials" "$code" 200
-    if [ "$SCHEME" = https ]; then
-      loc="$(curl -s -o /dev/null -b "$jar" -c "$jar" -w '%{redirect_url}' "$core/auth/refresh?return_to=$core/")"
-      loc="${loc%%#*}"   # drop the access token in the fragment
-      case "$loc" in
-        "$core/change-password"*) echo "ok   first login is forced to /change-password" ;;
-        *) echo "FAIL forced password change: redirected to '$loc'"; fail=1 ;;
-      esac
-      unset loc
-    else
-      echo "skip forced-password-change check: the Secure refresh cookie is not sent over http"
-    fi
-    # End the test session. Over http curl never stored the Secure cookie, so
-    # there is nothing to send: that session ends at its TTL or when the human
-    # changes the password (which signs the account out everywhere).
-    curl -s -o /dev/null -b "$jar" -X POST "$core/auth/logout"
-  fi
-  rm -f "$jar"
-fi
+# 5. First-run setup: open and refusing made-up codes on a fresh install, closed on
+#    an upgrade. Uses no credential and creates nothing.
+setup="$(curl -sS "$core/auth/provider" | jq -r '.setup // "done"')"
+case "$setup" in
+  code)
+    check "setup refuses a made-up code" \
+      "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+         --data '{"code":"not-a-real-code","provider_subject":"probe","password":"not-a-real-password"}' \
+         "$core/auth/setup")" 403 ;;
+  done) echo "skip setup check: this install already has an account" ;;
+  *) echo "FAIL setup mode: got '$setup', want code (or done on an upgrade)"; fail=1 ;;
+esac
 
 [ "$fail" -eq 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"
 ```
@@ -413,31 +404,27 @@ Blerg is installed on <cluster context> and all checks passed.
   Runner        <SCHEME>://runner.<DOMAIN>/
   Image tag     <TAG>   (settings: <summary of the decisions>)
 
-1. Your first login (run this yourself — the output is the admin password):
-     kubectl -n blerg logs deploy/blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
-   The line shows the username (username: ...) and a one-time password.
-   It is printed only once, by the first boot. If it is gone:
-     kubectl -n blerg exec postgres-0 -- psql -U blerg -d blerg_core -tAc "select provider_subject from accounts where provider='local' and role='admin' order by created_at limit 1"
-     kubectl -n blerg exec deploy/blerg-core -- /blerg-core users set-password --subject <username>
+1. Create your account (run this yourself — the output is a one-time setup
+   link, a credential: whoever opens it first becomes the administrator):
+     kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link
+   Open the link and choose your username and a password of 12–72
+   characters; you are signed in as the administrator. The link works once,
+   for 24 hours, and running the command again replaces it.
 
-2. Open <SCHEME>://<DOMAIN>/, click Sign in, and log in. You will be sent to
-   /change-password: choose your own username and a password of 12–72
-   characters, then sign in again with them.
-
-3. Add your credentials at <SCHEME>://<DOMAIN>/settings: a Claude, Codex or
+2. Add your credentials at <SCHEME>://<DOMAIN>/settings: a Claude, Codex or
    Hermes credential and a GitHub token. Sessions run as you, with these.
 
-4. Start a session: Runner → + New → repository as org/name → Launch.
+3. Start a session: Runner → + New → repository as org/name → Launch.
 
-5. For tools and agents: Settings → Agent tokens → preset "run-sessions".
+4. For tools and agents: Settings → Agent tokens → preset "run-sessions".
    The token is shown once; tools send it as "Authorization: Bearer <token>"
    and start from <SCHEME>://<DOMAIN>/agents.
 
-6. Add teammates:
+5. Add teammates:
      kubectl -n blerg exec deploy/blerg-core -- /blerg-core users create --subject <name> --role member
    and give them the printed one-time password.
 
-7. Back up the Postgres volume and the blerg-secrets Secret (install/k8s/README.md,
+6. Back up the Postgres volume and the blerg-secrets Secret (install/k8s/README.md,
    "Backup, restore and uninstall"). Losing BLERG_CORE_LOCAL_KEY in blerg-secrets
    loses every stored credential.
 ```
@@ -531,7 +518,7 @@ More rows, with background, are in README's "Troubleshooting".
 | `postgres-0` `Pending`; `rollout status` times out | `kubectl -n blerg get pvc` shows `Pending`; P5 | No default StorageClass. The human installs or marks one. On Kubernetes ≥ 1.28 a class-less `Pending` claim then picks up the new default by itself — wait a minute and check again. If it is still `Pending`, with the human's approval (it holds no data yet) delete both so the StatefulSet recreates the claim: `kubectl -n blerg delete pvc/postgres-data-postgres-0 pod/postgres-0`. If the new `postgres-0` stays `Pending` because it caught the old claim while it was terminating, delete `pod/postgres-0` once more. |
 | `blerg-runner-…` `Pending`; `rollout status` times out on the runner | `kubectl -n blerg get pvc blerg-runner-data` shows `Pending`; `kubectl -n blerg describe pvc blerg-runner-data` | No default StorageClass, or `RUNNER_DATA_STORAGE_CLASS` names one that does not exist. With the human's approval: set `RUNNER_DATA_STORAGE_CLASS` (Step 1); stop the runner and delete the still-`Pending` claim (it holds no data yet), waiting until it is gone — `kubectl -n blerg scale deploy/blerg-runner --replicas=0`, `kubectl -n blerg delete pvc blerg-runner-data --wait=false`, `kubectl -n blerg wait --for=delete pvc/blerg-runner-data --timeout=120s` — then re-run `deploy.sh` (it recreates the claim and the runner). Never delete a `Bound` one: it holds the published files. |
 | Pods `CrashLoopBackOff`, log says `exec format error` | P8 | Architecture mismatch. Build on a machine matching the nodes; deploy with a new `TAG`. |
-| `rollout status` times out, board or runner restarting | `kubectl -n blerg logs deploy/blerg-core` | `jwks fetch failed` / `register ... 401` for ~15 s is normal. Longer: look for a migration or database error in core's log. |
+| `rollout status` times out, board or runner restarting | `kubectl -n blerg logs deploy/blerg-core` (core never logs a setup code or link; on a fresh install it logs only that setup is pending) | `jwks fetch failed` / `register ... 401` for ~15 s is normal. Longer: look for a migration or database error in core's log. |
 | Components log Postgres `password authentication failed` | Was `SECRET_POSTGRES_PASSWORD` set on an existing install, or `blerg-secrets` deleted? | The data directory keeps its first password. The human restores the original value (`SECRET_POSTGRES_PASSWORD` from their backup) and you re-run `deploy.sh`. |
 | Every host answers `404` from the ingress | P6; `kubectl -n blerg get ingress blerg` | Wrong ingress class. Install step 2. |
 | Browser or daemon reconnects in a loop; uploads fail `413` | `kubectl -n blerg get ingress blerg -o yaml` annotations | Controller ignores nginx annotations; set its own 3600 s timeouts and 100m body limit. |
@@ -545,4 +532,5 @@ More rows, with background, are in README's "Troubleshooting".
 | Session pods start but sessions never reach `running` | Step 5 daemon-token comparison | Mismatch: with `AGENT_SECRET_EXTERNAL` unset, re-run `deploy.sh`; otherwise the human fixes their external Secret. |
 | Completion webhooks never arrive; runner logs `callback address refused (private or loopback)` | decision 7 | Set `WEBHOOK_ALLOW_PRIVATE=1`, re-run `deploy.sh`. |
 | A re-deploy changed nothing | `kubectl -n blerg get deploy -o wide` shows the old tag | `TAG` was not changed. Use a new `TAG`. |
-| Human lost the bootstrap password | — | Give them the two commands from the handoff message, step 1. Do not run `users set-password` yourself: it prints the new password. |
+| Human lost the setup link, or it says "not valid" | — | Give them the command from the handoff message, step 1, to run in their own terminal (each run replaces the code, so an older link stops working). Do not run `setup-link` yourself: it prints the link. To see whether setup is still open without minting anything: `kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link --check`. |
+| Human lost the admin password | — | Give them `kubectl -n blerg exec deploy/blerg-core -- /blerg-core users set-password --subject <username>` (the username: `kubectl -n blerg exec postgres-0 -- psql -U blerg -d blerg_core -tAc "select provider_subject from accounts where provider='local' and role='admin' order by created_at limit 1"`). Do not run `users set-password` yourself: it prints the new password. |

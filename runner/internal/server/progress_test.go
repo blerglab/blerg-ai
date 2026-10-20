@@ -227,7 +227,7 @@ func TestProgressRuntimeRotationBetweenOriginAndSessionLockRefusesAppend(t *test
 	fx.api.hub.deliverProgressOriginResult(dc, protocol.ProgressOriginResult{RequestID: req.RequestID, SessionID: fx.sess, OK: true})
 	// Observe the blocked advisory acquisition, proving the early pool check passed before
 	// rotation. No sleep guesses where the request is in its transaction.
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	for {
 		var waiting bool

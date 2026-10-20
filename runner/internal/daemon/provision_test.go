@@ -708,6 +708,24 @@ func TestGuideNamesChecklistAndPin(t *testing.T) {
 	}
 }
 
+// The session guide and the managed block carry the review request line, the one
+// `blerg-runner review request --help` starts with (REVIEW_REQUEST_LINE in blerg-runner).
+func TestGuideNamesReviewRequest(t *testing.T) {
+	if !strings.Contains(ccSessionGuide, reviewRequestGuideLine) {
+		t.Errorf("the session guide lacks the review request line")
+	}
+	if !strings.Contains(managedBlock, "- `blerg-runner review request` — "+reviewRequestGuideLine) {
+		t.Errorf("managed block lacks the review request bullet:\n%s", managedBlock)
+	}
+	cli, err := os.ReadFile("../../.claude/skills/session-messaging/blerg-runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cli), `REVIEW_REQUEST_LINE = "`+reviewRequestGuideLine+`"`) {
+		t.Errorf("the CLI's REVIEW_REQUEST_LINE differs from reviewRequestGuideLine")
+	}
+}
+
 // The session guide and the managed block carry the diff line, the one `blerg-runner diff --help`
 // starts with (DIFF_LINE in blerg-runner).
 func TestGuideNamesDiff(t *testing.T) {

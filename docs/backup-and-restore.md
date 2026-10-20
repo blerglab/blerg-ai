@@ -33,7 +33,7 @@ There is no recovery. The key exists only in `install/desktop/.env` (desktop) or
 `blerg-secrets` Secret (Kubernetes); it is never stored in the database. Core still starts and
 everything else works, but every stored credential (engine logins, GitHub and GitLab tokens)
 is unreadable. Each person must sign in and enter them again on the **Settings** page, and any
-board automation token has to be minted and pasted again. Generating a replacement key
+board automation token has to be set again (**Run as me** in the board's settings, or paste one). Generating a replacement key
 (`openssl rand -base64 32`) is enough to make credentials storable again, but it does not bring
 the old ones back. Rotating the key is equally destructive in this version, so do not do it on a
 whim ([`core/docs/CONFIG.md`](../core/docs/CONFIG.md)).
@@ -233,8 +233,9 @@ date you last did it.
 1. Take a backup as above and copy the backup directory to the scratch machine.
 2. On the scratch machine, with nothing running (`docker compose down -v` in `install/desktop`,
    or a new namespace), restore with the steps above.
-3. Sign in with an existing account and password. **Expect** success, not a first-boot admin
-   prompt: if core prints a fresh `BLERG_BOOTSTRAP_ADMIN_PASSWORD` the database did not load.
+3. Sign in with an existing account and password. **Expect** success, not the first-run
+   **Create your account** page: if `/login` sends you to `/setup`, or says the install isn't set
+   up yet, or core logs that it is not set up yet, the database did not load.
 4. Open **Settings**. **Expect** your stored credentials to show as connected. If they do not,
    the key in the restored `.env` or Secret is not the one they were encrypted with.
 5. Open a board and check that cards and columns are there.

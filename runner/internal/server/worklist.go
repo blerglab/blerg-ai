@@ -46,11 +46,13 @@ func (a *API) RegisterWorklistRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sessions/{id}/board-options", a.HandleFilingBoards)
 	mux.HandleFunc("GET /api/sessions/{id}/board-search", a.HandleFilingSearch)
 	mux.HandleFunc("POST /api/sessions/{id}/file-ticket", a.HandleFileTicket)
+	mux.HandleFunc("GET /api/sessions/{id}/proposals/{pid}", a.HandleSessionProposalStatus)
 	mux.HandleFunc("POST /api/sessions/{id}/filing-tools", a.HandleFilingTools)
 	mux.HandleFunc("GET /api/sessions/{id}/plugins", a.HandleSessionPlugins)
 	mux.HandleFunc("POST /api/sessions/{id}/plugins", a.HandleAddSessionPlugin)
 	mux.HandleFunc("POST /api/sessions/{id}/plugin-requests", a.HandleSessionPluginRequest)
 	mux.HandleFunc("POST /api/sessions/{id}/checklist", a.HandlePostChecklist)
+	mux.HandleFunc("GET /api/sessions/{id}/checklist/workers", a.HandleChecklistWorkers)
 	mux.HandleFunc("POST /api/sessions/{id}/progress", a.HandlePostProgress)
 	mux.HandleFunc("POST /api/sessions/{id}/tickets", a.HandlePostTickets)
 }
@@ -94,7 +96,7 @@ func (a *API) agentSessionWrite(w http.ResponseWriter, r *http.Request, what str
 		writeError(w, http.StatusNotFound, "session not found")
 		return "", nil, false
 	}
-	if terminalSessionStatus(sess.Status) {
+	if sess.DiscardRequestedAt != nil || sess.ArchivedAt != nil || terminalSessionStatus(sess.Status) {
 		writeError(w, http.StatusConflict, fmt.Sprintf("This session has ended; its %s can change only while it runs.", what))
 		return "", nil, false
 	}
@@ -153,9 +155,41 @@ func (a *API) HandlePostChecklist(w http.ResponseWriter, r *http.Request) {
 	}
 	var cur []checklist.Item
 	if latest != nil {
-		if p, ok := checklist.Read([]byte(latest.Payload)); ok {
+		if p, ok := checklist.ReadWithSeed([]byte(latest.Payload), latest.ClientEventID); ok {
 			cur = p.Items
 		}
+	}
+	// Resolve native aliases in one bounded batch, including existing references.
+	nativeIDs := checklistNativeIDs(cur)
+	if req.Assignee != nil && req.Assignee.Kind == "subagent" {
+		nativeIDs = append(nativeIDs, req.Assignee.ID)
+	}
+	resolved, resolveErr := checklistNativeWorkers(ctx, tx, sid, nativeIDs, 1<<62)
+	if resolveErr != nil {
+		writeDatabaseFailure(w, "check checklist workers", "checklist workers "+sid, resolveErr)
+		return
+	}
+	checklistCanonicalAssignments(cur, resolved)
+	if req.Assignee != nil {
+		worker, workerErr := *req.Assignee, error(nil)
+		if worker.Kind == "subagent" {
+			if id, ok := resolved[worker.ID]; ok && checklist.ValidAssignee(worker) {
+				worker.ID = id
+			} else {
+				workerErr = errChecklistWorker
+			}
+		} else {
+			worker, workerErr = checklistWorker(ctx, tx, sid, worker)
+		}
+		if workerErr != nil {
+			if errors.Is(workerErr, errChecklistWorker) {
+				writeError(w, http.StatusBadRequest, workerErr.Error())
+			} else {
+				writeDatabaseFailure(w, "check the checklist worker", "checklist worker "+sid, workerErr)
+			}
+			return
+		}
+		req.Assignee = &worker
 	}
 	p, err := checklist.Apply(cur, req)
 	if err != nil {
@@ -350,7 +384,12 @@ func readWorkState(ctx context.Context, q db.Querier, sid string, through int64)
 		return ws, err
 	}
 	if latest != nil {
-		if p, ok := checklist.Read([]byte(latest.Payload)); ok && len(p.Items) > 0 {
+		if p, ok := checklist.ReadWithSeed([]byte(latest.Payload), latest.ClientEventID); ok && len(p.Items) > 0 {
+			resolved, resolveErr := checklistNativeWorkers(ctx, q, sid, checklistNativeIDs(p.Items), through)
+			if resolveErr != nil {
+				return ws, resolveErr
+			}
+			checklistCanonicalAssignments(p.Items, resolved)
 			ws.Checklist = &liveChecklist{Items: p.Items, EventID: latest.ClientEventID, UpdatedAt: latest.Ts}
 		}
 	}

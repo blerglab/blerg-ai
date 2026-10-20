@@ -66,14 +66,21 @@ func NewProposalSink(pool *pgxpool.Pool, publicURL string, maxPending int) *DBPr
 // the connection URL and tool hash the grant pinned, and returns the text the agent receives.
 // The upstream is never called.
 func (s *DBProposalSink) Propose(ctx context.Context, req ProposalRequest) (string, error) {
+	_, text, err := s.ProposeRow(ctx, req)
+	return text, err
+}
+
+// ProposeRow is Propose that also returns the stored proposal (nil when it was refused), for a
+// caller that acts on it next (a session permission that approves it on its own).
+func (s *DBProposalSink) ProposeRow(ctx context.Context, req ProposalRequest) (*db.Proposal, string, error) {
 	args := strings.TrimSpace(string(req.Arguments))
 	switch {
 	case args == "" || args == "null":
 		args = "{}"
 	case len(args) > db.MaxProposalArgumentsBytes:
-		return "", &ProposalRefusal{Msg: fmt.Sprintf("this call was not queued: its arguments exceed the %d KiB limit for a proposal", db.MaxProposalArgumentsBytes>>10)}
+		return nil, "", &ProposalRefusal{Msg: fmt.Sprintf("this call was not queued: its arguments exceed the %d KiB limit for a proposal", db.MaxProposalArgumentsBytes>>10)}
 	case !json.Valid([]byte(args)) || args[0] != '{':
-		return "", &ProposalRefusal{Msg: "this call was not queued: its arguments are not a JSON object"}
+		return nil, "", &ProposalRefusal{Msg: "this call was not queued: its arguments are not a JSON object"}
 	}
 	p, err := db.InsertProposalLimited(ctx, s.pool, db.Proposal{
 		AccountID: req.AccountID, SessionID: req.SessionID, ConnectionID: req.ConnectionID,
@@ -82,25 +89,29 @@ func (s *DBProposalSink) Propose(ctx context.Context, req ProposalRequest) (stri
 	}, db.ProposalLimits{Account: s.maxPending, Session: s.perSession, Cron: s.perCron})
 	switch {
 	case errors.Is(err, db.ErrProposalSessionCap):
-		return "", &ProposalRefusal{Msg: fmt.Sprintf("this call was not queued: this session already has %d proposals waiting for the person's approval. "+
+		return nil, "", &ProposalRefusal{Msg: fmt.Sprintf("this call was not queued: this session already has %d proposals waiting for the person's approval. "+
 			"Do not retry; put what you could not do in your card and stop", s.perSession)}
 	case errors.Is(err, db.ErrProposalCronCap):
-		return "", &ProposalRefusal{Msg: fmt.Sprintf("this call was not queued: this cron already has %d proposals waiting for the person's approval. "+
+		return nil, "", &ProposalRefusal{Msg: fmt.Sprintf("this call was not queued: this cron already has %d proposals waiting for the person's approval. "+
 			"Do not retry; put what you could not do in your card and stop", s.perCron)}
 	case errors.Is(err, db.ErrProposalCap):
-		return "", &ProposalRefusal{Msg: fmt.Sprintf("this call was not queued: %d proposals are already pending the person's approval. "+
+		return nil, "", &ProposalRefusal{Msg: fmt.Sprintf("this call was not queued: %d proposals are already pending the person's approval. "+
 			"Do not retry; put what you could not do in your card and stop", s.maxPending)}
 	case errors.Is(err, db.ErrProposalArguments):
-		return "", &ProposalRefusal{Msg: "this call was not queued: its arguments cannot be stored (too large, or they contain a character that cannot be kept)"}
+		return nil, "", &ProposalRefusal{Msg: "this call was not queued: its arguments cannot be stored (too large, or they contain a character that cannot be kept)"}
 	case err != nil:
-		return "", err
+		return nil, "", err
 	}
 	where := "Proposal id: " + p.ID + "."
 	if s.publicURL != "" {
 		where = "Proposal id: " + p.ID + ". Review link: " + s.publicURL + "/proposals?id=" + p.ID + "."
 	}
-	return "This action was NOT performed. It was queued for the person's approval and runs only if they approve it. " +
-		where + " Do not repeat the call; mention the proposal (id and link) in your report.", nil
+	outcome := ""
+	if req.SessionID != "" {
+		outcome = " The person's decision is sent to this session as a message that starts \"Proposal " + p.ID + "\"."
+	}
+	return p, "This action was NOT performed. It was queued for the person's approval and runs only if they approve it. " +
+		where + " Do not repeat the call; mention the proposal (id and link) in your report." + outcome, nil
 }
 
 // summarizeProposal is a short one-line rendering of a call built only from data the gateway

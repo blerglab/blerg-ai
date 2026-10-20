@@ -140,6 +140,8 @@ type TokenSummary = {
   expires_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
+  // "" for a token made here; "board <id>" for one a board minted with Run as me.
+  source?: string;
 };
 
 // POST /api/tokens' 201 body (api.createdTokenResponse) — the only shape with a `token` field.
@@ -499,7 +501,15 @@ function AgentTokens({ site }: { site: Site | null }) {
                 const status = statusOf(t, now);
                 return (
                   <tr key={t.id}>
-                    <td>{t.name}</td>
+                    <td>
+                      {t.name}
+                      {t.source?.startsWith("board ") && (
+                        <>
+                          <br />
+                          <span className="muted token-source">Minted by {t.source} (Run as me)</span>
+                        </>
+                      )}
+                    </td>
                     <td>
                       {presetForAud(t.aud)}
                       <br />

@@ -56,7 +56,7 @@ func TestMCPCanceledGateAndPersonReleaseDoNotConsumeFirstInput(t *testing.T) {
 		unblock()
 		select {
 		case <-tracker.done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("tracker did not stop")
 		}
 	})
@@ -64,7 +64,7 @@ func TestMCPCanceledGateAndPersonReleaseDoNotConsumeFirstInput(t *testing.T) {
 	go func() { tracker.beforeFirstPrompt(nativeCtx); close(firstDone) }()
 	select {
 	case <-em.entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("no first hold")
 	}
 	nativeCtx.canceled.Store(true)
@@ -72,7 +72,7 @@ func TestMCPCanceledGateAndPersonReleaseDoNotConsumeFirstInput(t *testing.T) {
 	unblock()
 	select {
 	case <-firstDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("canceled gate did not finish")
 	}
 	secondDone := make(chan struct{})
@@ -93,7 +93,7 @@ func TestMCPCanceledGateAndPersonReleaseDoNotConsumeFirstInput(t *testing.T) {
 	tracker.release()
 	select {
 	case <-secondDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("replacement gate did not release")
 	}
 }

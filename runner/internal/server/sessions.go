@@ -82,6 +82,9 @@ func sessionLabel(title, repo, id string) string {
 // It inserts a new session row, appends a state_change event, and broadcasts
 // to all browsers.
 func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, daemonID string, msg protocol.SessionStarted) {
+	if pool != nil && clusterSessionClaimRefused(ctx, hub, pool, daemonID, msg.SessionID) {
+		return
+	}
 	if pool != nil {
 		if blocked, err := db.DelegationResumeBlocked(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("session_started %s: recovery policy unavailable", msg.SessionID)
@@ -498,4 +501,28 @@ func HandleSessionOutput(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg 
 		return
 	}
 	hub.FanOutSessionOutput(msg.SessionID, data)
+}
+
+// clusterSessionClaimRefused reports (and logs) a session_started for a cluster session from any
+// connection but that session's own pod. A cluster row is the server's (runtime 'cluster', only it
+// writes that), and its pod connects with the session's per-session runtime token, bound to the
+// session, so the frame carries that runtime authority. A daemon on the install-wide daemon token
+// (a desktop) must not move such a row to itself: that would make it a cluster parent it drives
+// (onClusterParent), route the session's controls to it and heal it a token. Checked before the
+// upsert, the routing change and the token heal; insertSessionAs refuses it in SQL too.
+func clusterSessionClaimRefused(ctx context.Context, hub *Hub, pool *pgxpool.Pool, daemonID, sessionID string) bool {
+	prev, err := db.GetSession(ctx, pool, sessionID)
+	if err != nil {
+		log.Printf("session_started %s from daemon %s: could not read the session; refused", sessionID, daemonID)
+		return true
+	}
+	if prev == nil || derefOrEmpty(prev.Runtime) != runnerRuntimeCluster {
+		return false
+	}
+	dc := hub.GetDaemon(daemonID)
+	if db.HasRuntimeAuthority(ctx) && dc != nil && dc.RuntimeTokenID != "" && dc.BoundSessionID == sessionID {
+		return false
+	}
+	log.Printf("session_started %s from daemon %s refused: a cluster session is claimed only by its own pod", sessionID, daemonID)
+	return true
 }

@@ -3,7 +3,7 @@
 // says so in one line. Typing in the composer never decides: there is no reply box here.
 import { useEffect, useRef, useState } from 'react'
 import type { AgentEvent, DelegationChoice, DelegationDecidedPayload, DelegationRequestPayload } from '../../types'
-import { budgetLine, decidedLine, engineLabel, runtimeWords, type DelegationState } from '../../model/delegations'
+import { alwaysAllowWords, budgetLine, decidedLine, engineLabel, runtimeWords, type DelegationState } from '../../model/delegations'
 import { parseTs } from '../../model/timeLabel'
 import { useDelegations } from '../delegationContext'
 import { TimeLabel } from '../TimeLabel'
@@ -40,6 +40,7 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
   const decide = ctx?.decide
   const offered = new Set<DelegationChoice>(Array.isArray(p.offered) ? p.offered : [])
   const unsandboxed = p.runtime === 'daemon'
+  const always = alwaysAllowWords(engine, p.runtime, p.daemon_name)
 
   async function choose(choice: DelegationChoice) {
     if (!decide || inFlight.current || conflict) return
@@ -107,10 +108,10 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
               type="button"
               className={`delegation-btn${unsandboxed ? ' warn' : ''}`}
               disabled={busy || conflict}
-              title={`Applies to ${engine} ${unsandboxed ? 'on' : 'through'} ${p.daemon_name}`}
+              title={always.title}
               onClick={() => void choose('always')}
             >
-              {unsandboxed ? `Always allow ${engine} on this desktop (unsandboxed)` : `Always allow ${engine} in the desktop sandbox`}
+              {always.label}
             </button>
           )}
           {offered.has('deny') && <button type="button" className="delegation-btn" disabled={busy || conflict} onClick={() => void choose('deny')}>Deny</button>}
@@ -127,6 +128,7 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
       {line && (
         <div className="delegation-decided" data-testid="delegation-decided">
           <span>{line}</span>
+          {state.decided?.status === 'allowed' && ctx?.onManageChildApproval && <button type="button" className="delegation-link" onClick={ctx.onManageChildApproval}>Change child approvals</button>}
           {child && (ctx?.onOpenSession
             ? <button type="button" className="delegation-link" onClick={() => ctx.onOpenSession?.(child)}>Open the session</button>
             : <span className="delegation-child">{child.slice(0, 8)}</span>)}

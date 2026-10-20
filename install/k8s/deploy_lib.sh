@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Helpers sourced by deploy.sh (and exercised without a cluster by deploy_test.sh).
-# Nothing here calls kubectl, so it can be tested anywhere.
+# kubectl is only ever called as a plain command, so deploy_test.sh can stub it and run anywhere.
 
 # --- Confirmation before touching a cluster -------------------------------------------
 
 # True when stdin is a terminal. A function so tests can override it.
 stdin_is_tty() { [ -t 0 ]; }
+stdout_is_tty() { [ -t 1 ]; }
 
 # deploy_assumes_yes [--yes|-y ...]: succeeds when the operator already said yes, by
 # --yes/-y or BLERG_ASSUME_YES=1/true/yes.
@@ -138,4 +139,90 @@ runner_data_claim_check() {
     echo "    warning: RUNNER_DATA_STORAGE_CLASS=$want_class differs from the claim's ${class:-none}; a bound claim's class cannot change" >&2
   fi
   return 0
+}
+
+# first_run_setup_notice: the end of a deploy. A fresh install has no account yet: core is in
+# first-run setup mode, and the person creates the first (admin) account by opening a single-use
+# setup link and choosing a username and password. An install that already has an account prints
+# nothing. Always returns 0: the deploy itself succeeded either way.
+#
+# On a terminal the link is fetched (`blerg-core setup-link`, run in the core pod; it mints a
+# fresh code) and printed prominently. Without a terminal (an agent, a log file) nothing is minted
+# and no link is printed: `setup-link --check` only asks whether setup is open, and the output
+# tells the person the command to run in their own terminal. So a non-terminal re-run never
+# invalidates a link the person already has.
+first_run_setup_notice() {
+  local out err rc=0
+  err="$(mktemp)"
+  if ! stdout_is_tty; then
+    kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link --check >/dev/null 2>"$err" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      rm -f "$err"
+      cat <<NOTICE
+
+==> FINISH SETUP: this install has no account yet. The person who will own it runs this in their
+    own terminal to get the setup link (a credential, so it is not printed here):
+    kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link
+    then opens it and chooses their username and password.
+NOTICE
+      return 0
+    fi
+  else
+    out="$(kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link 2>"$err")" || rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+      rm -f "$err"
+      cat <<NOTICE
+
+==> FINISH SETUP: create the first (admin) account by opening this link and
+    choosing your username and password:
+
+    $out
+
+    The link is a credential until it is used: anyone holding it can create
+    the admin account. It works once, for 24 hours. Do not paste it into chats
+    or tickets. For a fresh one (the old one stops working):
+    kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link
+NOTICE
+      return 0
+    fi
+  fi
+  if grep -q 'setup is complete' "$err" 2>/dev/null; then
+    rm -f "$err"
+    return 0
+  fi
+  rm -f "$err"
+  cat <<NOTICE
+==> Could not ask core whether first-run setup is still open. If this is a fresh install, get
+    the setup link with:
+    kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link
+NOTICE
+  return 0
+}
+
+# --- The cluster's shared Hermes provider configuration ---------------------------------------
+#
+# hermes_providers_secret FILE BASE_DIR: when FILE (HERMES_PROVIDERS_FILE) is set, writes it into
+# Secret blerg/blerg-hermes-providers under the key config.yaml; the runner reads that key through
+# an optional secretKeyRef and hands it to every Hermes session pod (CLUSTER-RUNTIME.md, "Shared
+# Hermes providers"). A relative FILE is taken relative to BASE_DIR (install/k8s). Unset: nothing
+# is done, and an existing Secret is left as it is. The file goes to kubectl by path, never on a
+# command line, and nothing from it is printed. Returns 1 for a missing, empty or over-64-KiB file.
+hermes_providers_secret() {
+  local file="${1:-}" base="${2:-.}" size
+  [ -n "$file" ] || return 0
+  case "$file" in /*) ;; *) file="$base/$file" ;; esac
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    echo "HERMES_PROVIDERS_FILE is not a readable file: $file" >&2
+    return 1
+  fi
+  size="$(wc -c < "$file" | tr -d ' ')"
+  # 64 KiB: the runner and every Hermes pod receive it as one environment entry, and Linux
+  # refuses to start a process with any single entry over 128 KiB.
+  if [ "$size" -eq 0 ] || [ "$size" -gt 65536 ]; then
+    echo "HERMES_PROVIDERS_FILE must be a Hermes config.yaml fragment of 1 byte to 64 KiB ($size bytes): $file" >&2
+    return 1
+  fi
+  echo "==> Writing blerg/blerg-hermes-providers from HERMES_PROVIDERS_FILE"
+  kubectl -n blerg create secret generic blerg-hermes-providers --from-file=config.yaml="$file" --dry-run=client -o yaml \
+    | kubectl apply -f -
 }

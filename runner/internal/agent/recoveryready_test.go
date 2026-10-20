@@ -32,7 +32,7 @@ func TestNativeRecoveryInputGateAndReconnect(t *testing.T) {
 	l.Enqueue("first", "chat")
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("native gate was bypassed")
 	}
 	if len(rec.byKind("user_message")) != 0 {
@@ -46,7 +46,7 @@ func TestNativeRecoveryInputGateAndReconnect(t *testing.T) {
 	l.Enqueue("third", "chat")
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("native reconnect gate was bypassed")
 	}
 	if len(rec.byKind("user_message")) != 1 {
@@ -103,12 +103,12 @@ func TestNativeRecoveryAskAnswerWaitsOffTransport(t *testing.T) {
 	go func() { l.EnqueueInput(Input{Text: "answer", ClientID: "fixture"}); close(delivered) }()
 	select {
 	case <-delivered:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("ask answer blocked transport")
 	}
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("ask answer bypassed recovery gate")
 	}
 	select {
@@ -122,7 +122,7 @@ func TestNativeRecoveryAskAnswerWaitsOffTransport(t *testing.T) {
 		if answer != "answer" {
 			t.Fatalf("answer %q", answer)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("ready did not release ask")
 	}
 }

@@ -383,9 +383,9 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
 
   // Separate active from done sessions.
   const activeSessions = ownSessions.filter(s => ACTIVE_STATUSES.has(s.status))
-  // Discarded children leave the active tree but remain directly accessible in History.
-  const archivedChildren = sessions.filter(session => session.parent_session_id && session.archived_at && (!q || `${session.title} ${session.repo}`.toLowerCase().includes(q)))
-  const doneSessions = [...ownSessions.filter(s => !ACTIVE_STATUSES.has(s.status)), ...archivedChildren]
+  // Discarded sessions leave the active tree but remain directly accessible in History.
+  const archivedSessions = sessions.filter(session => session.archived_at && (!q || `${session.title} ${session.repo}`.toLowerCase().includes(q)))
+  const doneSessions = [...ownSessions.filter(s => !ACTIVE_STATUSES.has(s.status)), ...archivedSessions]
 
   // When a query is active, filter active sessions by title or repo (case-insensitive).
   // An empty query leaves all sessions through so focus logic applies normally.

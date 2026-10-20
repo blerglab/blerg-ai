@@ -326,7 +326,7 @@ func TestPrivacyLoadFailureRecovers(t *testing.T) {
 	}
 	hub.notePrivate("noted-while-down", privAcctA)
 	// Still down: it keeps retrying (with a backoff) and stays closed.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for calls.Load() < 3 && time.Now().Before(deadline) {
 		hub.privateOwners(nil)
 		time.Sleep(time.Millisecond)

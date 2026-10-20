@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"io"
 	"net/http"
 
@@ -36,7 +38,28 @@ func (a *API) HandleRunnerModel(w http.ResponseWriter, r *http.Request) {
 
 // SetSessionModel is the authorized control shared by REST, MCP and browser WS.
 // The engine comes from the session row; callers cannot change native engines.
-func (a *API) SetSessionModel(ctx context.Context, principal RunnerPrincipal, sessionID, model, effort string) (map[string]any, *APIError) {
+func (a *API) SetSessionModel(ctx context.Context, principal RunnerPrincipal, id, model, effort string) (map[string]any, *APIError) {
+	if a.dbPool == nil {
+		return nil, apiErrorf(503, "session controls require a database")
+	}
+	if _, problem := a.requireSessionAccess(ctx, principal, id); problem != nil {
+		return nil, problem
+	}
+	var body map[string]any
+	var problem *APIError
+	err := withCancelledLimitResume(ctx, a.dbPool, id, func() error {
+		return withParentInputGuard(ctx, a.dbPool, id, func() error { body, problem = a.setSessionModelUnlocked(ctx, principal, id, model, effort); return nil })
+	})
+	if errors.Is(err, db.ErrDelegationEnded) {
+		return nil, apiErrorf(409, "session was discarded or its parent ended")
+	}
+	if err != nil {
+		return nil, apiErrorf(503, "session controls are busy; retry shortly")
+	}
+	return body, problem
+}
+
+func (a *API) setSessionModelUnlocked(ctx context.Context, principal RunnerPrincipal, sessionID, model, effort string) (map[string]any, *APIError) {
 	if a.dbPool == nil {
 		return nil, apiErrorf(http.StatusServiceUnavailable, "session controls require a database")
 	}

@@ -34,25 +34,37 @@ What that does, once: generates `install/desktop/.env` with random secrets, buil
 service images, builds the local-sandbox session image (`blerg-runner-sandbox:latest`, roughly
 6–7 GB; this step takes several minutes, longer on a slow connection), installs the runner daemon
 as a background service (systemd on Linux, launchd on macOS), then prints the next steps and opens
-`http://localhost:8081`. It exits back to your shell when everything's up; that is success.
+`http://localhost:8081/setup` on a fresh install (`http://localhost:8081` once you have an account).
+It exits back to your shell when everything's up; that is success.
 
 ## First login
 
 `blerg-core` issues the login every component accepts (board and runner have no passwords of
-their own). The one-time admin credentials are in core's first-boot log:
+their own). A fresh install has no account yet: `./blerg-up.sh` opens
+`http://localhost:8081/setup`, the **Create your account** page, where you choose your username
+(lowercase letters, digits, `.`, `_` and `-`) and a password of 12–72 characters. That account is
+the administrator, and you are signed in straight away. There is no password to look for in a
+log. You can change the username later under **Settings → Account**.
 
-```
-docker compose logs blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
-```
+The page needs no setup code because the desktop stack publishes core on `127.0.0.1` only
+(`BLERG_SETUP_ALLOW_LOCAL` in `docker-compose.yml`). That also means that **until setup is done,
+any user, process or container on this machine can claim the admin account** (including a
+host-network container, and on Docker Desktop any container through `host.docker.internal`), so
+finish setup right after installing.
 
-That line shows both the username (`username: …`, a random string) and the password. It is
-printed exactly once, on the boot that creates the account; a restart or rebuild never prints it
-again. If the log has rotated away, mint a fresh one-time password instead: `./blerg-up.sh
---reset-admin` (or `docker compose exec blerg-core /blerg-core users set-password --subject
-<username>`). Click **Sign in** on the landing page and sign in with that username and password
-the first time. You'll be sent to `/change-password`, where you choose your own username and a
-real password (12–72 characters); then sign in again with them. You can change the username
-later under **Settings → Account**.
+Until then, do not put a relay in front of core: anything that forwards to `localhost:8081`
+from this machine (nginx's default `proxy_pass`, an `ssh -L`/`-R` tunnel, socat, a tunnel
+service) lets anyone the relay reaches create the admin without a code, and so does publishing
+core's port any way other than `BLERG_BIND_ADDR` (a compose override, an edited `ports:` line).
+A proxy that adds `Forwarded` or `X-Forwarded-*` headers is refused, but many add none. If you
+need a relay before setup, set `BLERG_SETUP_ALLOW_LOCAL=false` in `.env` and re-run
+`./blerg-up.sh`: then `/setup` always needs a setup link, as on a cluster.
+
+If you set `BLERG_BIND_ADDR` to publish core beyond this machine, the page asks for a setup link: `./blerg-up.sh` prints a fresh one when run in a terminal, or run
+`docker compose exec blerg-core /blerg-core setup-link`. Once the first account exists,
+`/setup` is closed for good; forgot the password later? `./blerg-up.sh --reset-admin` prints a
+one-time one (or `docker compose exec blerg-core /blerg-core users set-password --subject
+<username>`).
 
 Log in at exactly `http://localhost:8081`. The desktop stack turns the cookie `Secure` flag off for
 that origin so every browser (Safari included) works; `127.0.0.1` or a LAN IP will not.
@@ -79,13 +91,20 @@ doesn't, or when you opt out (below).
 
 ## Before the Board can start sessions
 
-Give each board an automation token; the Board starts nothing without one, and says so. In core
-**Settings → Agent tokens**, create a token with preset `run-sessions`; on the board, open the
-settings panel (the **model** chip in the header) → **Automation**, paste it, pick the engine
-(Claude, Codex or Hermes), and Save. Every session that board starts then runs as you: on a
-cluster install on the engine credential you connected in Settings (for Hermes, your own
-endpoint), on the desktop on your daemon's engine login. It must be your own token; it is never
-shown again, and it expires (90 days by default; the panel says when). Anyone who can write cards
+**Run this card works out of the box on a single-user install.** A board starts sessions as the
+person whose automation token it holds, and the board gets that token for you: a new board has
+**Run this board's cards as me** checked when you create it, and a board without a token offers
+**Run as me** in its settings panel (the **model** chip in the header → **Automation**) and next
+to **Run this card**. One click mints a `run-sessions` agent token for you in core and saves it on
+the board; nothing is copied or pasted, and the token never reaches your browser. It shows up in
+core **Settings → Agent tokens** as "Board <name> automation", where you can revoke it like any
+other. Pick the engine (Claude, Codex or Hermes) in the same panel. To use a token of a service
+account instead, choose **Use a different token…** and paste one with preset `run-sessions`.
+
+Every session that board starts then runs as you: on a cluster install on the engine credential
+you connected in Settings (for Hermes, your own endpoint), on the desktop on your daemon's engine
+login. The token expires (90 days by default; the panel says when, and offers **Run as me**
+again). Anyone who can write cards
 on that board can spend your credential and could get an agent to reveal it, so only connect a
 token you're comfortable with every card-writer effectively having. Details:
 [`board/docs/CONFIG.md`](../../board/docs/CONFIG.md#board-automation-identity-who-a-boards-sessions-run-as).

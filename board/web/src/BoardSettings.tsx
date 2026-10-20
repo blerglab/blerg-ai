@@ -1,3 +1,4 @@
+import { modelDisplayName } from "@blerglab/chat";
 import { FormEvent, Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, ApiError, Board } from "./api";
 import { coreOrigin } from "./authClient";
@@ -20,9 +21,15 @@ function expiryNote(iso: string | null): string {
 // Run/Discuss/chat buttons — goes to the runner under this token, so it runs
 // on the token owner's own engine credential. The token is write-only: the
 // server never sends it back, so this only ever shows whether one is set.
+//
+// "Run as me" is the one-click way to set it: the board asks blerg-core to
+// mint a run-sessions token for the signed-in person and stores it, with no
+// copy and paste. Pasting stays available ("Use a different token…") for
+// service accounts, and is the only way on an install that cannot mint.
 function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () => void }) {
   const me = useMe();
   const canEdit = !!me?.is_admin && !!me?.is_human;
+  const canRunAsMe = canEdit && !!me?.run_as_me_available;
   const discovery = useBoardLaunchOptions(board.id, canEdit && board.automation_token_set);
   const label = (id: string) => discovery.engines.find(e => e.id === id)?.name ?? id;
 
@@ -30,6 +37,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
   const [engine, setEngine] = useState(board.automation_engine || "claude");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pasting, setPasting] = useState(false);
   // follow the server's value when it changes (after a save, a refetch): the
   // "adjust state during render" pattern, not an effect
   const [seenEngine, setSeenEngine] = useState(board.automation_engine);
@@ -40,6 +48,11 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
 
   const selected = discovery.state === "known" ? (discovery.engines.find(e => e.id === engine)?.id ?? discovery.engines[0]?.id ?? "") : "";
   const expiry = expiryNote(board.automation_token_expires_at);
+  const mine = !!board.automation_account_id && me?.account_id === board.automation_account_id;
+  // Run as me is offered unless the board already runs on a live token Blerg minted for you.
+  const offerRunAsMe = canRunAsMe && !(board.automation_token_set && mine && board.automation_token_minted && expiry !== "expired");
+  // With Run as me on offer, pasting is the secondary path, behind "Use a different token…".
+  const showPaste = !canRunAsMe || pasting;
 
   const save = async (body: Record<string, string>) => {
     setError("");
@@ -51,6 +64,20 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
       onChanged?.();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "save failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const runAsMe = async () => {
+    setError("");
+    setBusy(true);
+    try {
+      await api(`/api/boards/${board.id}/automation/run-as-me`, { method: "POST" });
+      setPasting(false);
+      discovery.retry();
+      onChanged?.();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Run as me failed");
     } finally {
       setBusy(false);
     }
@@ -74,8 +101,9 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
               <span className="mono" title="the blerg-core account this token acts for">
                 {board.automation_account_id ? `account ${board.automation_account_id}` : "token set"}
               </span>
-              {board.automation_account_id && me?.account_id === board.automation_account_id && (
-                <span className="inherit"> (you)</span>
+              {mine && <span className="inherit"> (you)</span>}
+              {board.automation_token_minted && (
+                <span className="inherit" title="minted by Run as me; listed in blerg-core Settings → Agent tokens"> · Run as me</span>
               )}
             </>
           ) : (
@@ -86,6 +114,20 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
         <dt title="the engine every session this board starts runs">engine</dt>
         <dd><span className="mono">{label(board.automation_engine || "claude")}</span></dd>
       </dl>
+      {offerRunAsMe && (
+        <div className={`run-as-me-cta${board.automation_token_set ? "" : " prominent"}`}>
+          <button className="btn small" type="button" disabled={busy} onClick={() => void runAsMe()}>
+            {busy && !pasting ? "Setting up…" : "Run as me"}
+          </button>
+          <p className="pop-foot">
+            {board.automation_token_set
+              ? "Make this board's sessions run as you instead, on your own credentials."
+              : "One click: sessions this board starts run as you, on your own credentials."}{" "}
+            A run-sessions token is created for you in blerg-core and saved here; you can revoke it in{" "}
+            <a href={`${coreOrigin()}/settings`} target="_blank" rel="noopener noreferrer">Settings → Agent tokens</a>.
+          </p>
+        </div>
+      )}
       <p className="pop-foot warn">
         Anyone who can write cards on this board can spend this credential and could get an
         agent to reveal it. Only connect a token you're comfortable with every card-writer
@@ -93,16 +135,18 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
       </p>
       {canEdit && (
         <form className="automation-form" onSubmit={submit}>
-          <p className="pop-foot">
-            Sessions this board starts run as the person whose token this is, on their
-            own {label(selected || engine)} credential. To set it: in{" "}
-            <a href={`${coreOrigin()}/settings`} target="_blank" rel="noopener noreferrer">
-              blerg-core Settings → Agent tokens
-            </a>
-            , create a token with preset <code className="mono">run-sessions</code>, copy it
-            and paste it here. It must be your own; it is never shown again. Make sure your{" "}
-            {label(selected || engine)} credential is connected on the same Settings page.
-          </p>
+          {showPaste && (
+            <p className="pop-foot">
+              Sessions this board starts run as the person whose token this is, on their
+              own {label(selected || engine)} credential. To set it: in{" "}
+              <a href={`${coreOrigin()}/settings`} target="_blank" rel="noopener noreferrer">
+                blerg-core Settings → Agent tokens
+              </a>
+              , create a token with preset <code className="mono">run-sessions</code>, copy it
+              and paste it here. It must be your own; it is never shown again. Make sure your{" "}
+              {label(selected || engine)} credential is connected on the same Settings page.
+            </p>
+          )}
           {(discovery.state === "loading" || (discovery.refreshing && discovery.state !== "known")) && <p role="status">Loading available engines…</p>}
           {discovery.error && <p role="alert">{discovery.error} <button type="button" onClick={discovery.retry}>Retry engine discovery</button></p>}
           {board.automation_token_set && discovery.state === "known" && discovery.engines.length === 0 && <p role="status">No engines are available for this board's automation account and target.</p>}
@@ -116,14 +160,23 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
           {discovery.engines.length === 1 && <p>Available engine: {discovery.engines[0].name}</p>}
           {selected && selected !== (board.automation_engine || "claude") && <p role="status">Save to use {label(selected)} for new sessions. Changing engines clears model and effort overrides for this board and its cards. Existing sessions keep their engine.</p>}
           {token.trim() && <p>Save the token first, then choose from its available engines.</p>}
-          <label className="field">
-            Automation token {board.automation_token_set && "(leave empty to keep the current one)"}
-            <input type="password" autoComplete="off" spellCheck={false} value={token}
-              placeholder="paste a run-sessions agent token" disabled={busy}
-              onChange={(e) => setToken(e.target.value)} />
-          </label>
+          {showPaste && (
+            <label className="field">
+              Automation token {board.automation_token_set && "(leave empty to keep the current one)"}
+              <input type="password" autoComplete="off" spellCheck={false} value={token}
+                placeholder="paste a run-sessions agent token" disabled={busy}
+                onChange={(e) => setToken(e.target.value)} />
+            </label>
+          )}
           <div className="row">
-            <button className="btn small" type="submit" disabled={busy || (!selected && !token.trim())}>Save</button>
+            {(showPaste || selected) && (
+              <button className="btn small" type="submit" disabled={busy || (!selected && !token.trim())}>Save</button>
+            )}
+            {canRunAsMe && !pasting && (
+              <button className="btn ghost small" type="button" disabled={busy} onClick={() => setPasting(true)}>
+                Use a different token…
+              </button>
+            )}
             {board.automation_token_set && (
               <button className="btn ghost small" type="button" disabled={busy}
                 onClick={() => void save({ automation_token: "" })}>
@@ -131,17 +184,11 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
               </button>
             )}
           </div>
-          {error && <p className="form-error">{error}</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
         </form>
       )}
     </>
   );
-}
-
-// shortModel: "claude-opus-5" → "opus-5". Only for the header chip, which has
-// one line of space; the panel and the tooltip always show the full id.
-function shortModel(m: string): string {
-  return m.replace(/^claude-/, "");
 }
 
 function ComponentVersionSetting({ board, onChanged }: { board: Board; onChanged?: () => void }) {
@@ -228,7 +275,7 @@ export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: 
   const reviewer = board.reviewer_model || worker;
   // The chip carries the worker model; the reviewer only earns space when it
   // actually differs (the common case is one model for the whole board).
-  const chipLabel = worker ? shortModel(worker) : "runner default";
+  const chipLabel = worker ? modelDisplayName(worker) : "runner default";
   const reviewerDiffers = reviewer !== worker;
 
   return (
@@ -246,7 +293,7 @@ export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: 
         <span className="mono">{chipLabel}</span>
         {!board.automation_token_set && <span className="warn-dot" aria-label="no automation token" />}
         {reviewerDiffers && (
-          <span className="mono rev">rev {shortModel(reviewer) || "runner default"}</span>
+          <span className="mono rev">rev {modelDisplayName(reviewer) || "runner default"}</span>
         )}
       </button>
       {open && (

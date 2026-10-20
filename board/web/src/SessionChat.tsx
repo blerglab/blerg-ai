@@ -65,15 +65,18 @@ function boardTransport(): Transport {
 }
 
 // Who a user message is from. The prompt the board started the session with (its first message,
-// recorded as "chat") is its brief, not conversation; any later "chat" message is a person's,
-// typed in the runner's own app. What a signed-in person typed here, an answer to the agent's
-// question and a reply to its note are theirs; everything else the board sent on its own — a
-// review's findings relayed to the worker, a dispatcher's nudge — and it says so. Text nobody
-// typed (the restart note, a command's output) never reaches this: the chat draws it as a
-// system card.
+// recorded as "blerg-board", or as "chat" by a runner that predates that) is its brief, not
+// conversation; any later "chat" message is a person's, typed in the runner's own app. What a
+// signed-in person typed here, an answer to the agent's question and a reply to its note are
+// theirs; a parent session's or a cron's message keeps the chat's own author for it; everything
+// else the board sent on its own — a review's findings relayed to the worker, a dispatcher's
+// nudge — and it says so. Text nobody typed (the restart note, a command's output) never reaches
+// this: the chat draws it as a system card.
 export const describeUserMessage: DescribeUserMessage = (_ev, p, ctx) => {
   if (p.source === "chat") return ctx.first ? { brief: true } : null;
+  if (p.source === "blerg-board" && ctx.first) return { brief: true };
   if (p.source === "human" || p.source === "ask_answer" || p.source === "note_reply") return null;
+  if (p.source === "session" || p.source === "cron") return null;
   return { author: "blerg-board" };
 };
 

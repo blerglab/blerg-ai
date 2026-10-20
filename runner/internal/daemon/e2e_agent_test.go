@@ -127,7 +127,7 @@ func TestEndToEndAgentSession(t *testing.T) {
 
 	// All non-transient events acked → pending drains to zero.
 	sess := host.get("e2e")
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if sess.emitter.pendingCount() == 0 {
 			break

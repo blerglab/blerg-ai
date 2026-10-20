@@ -143,6 +143,11 @@ func (a *API) repairDelegationLifecycle(ctx context.Context, id string, terminal
 	if err != nil || parent == nil {
 		return err
 	}
+	// Explicit discard owns strict stop delivery for all children. Ordinary
+	// best-effort end cleanup must not manufacture terminal proof for its retries.
+	if parent.DiscardRequestedAt != nil {
+		return nil
+	}
 	lockCtx, cancel := context.WithTimeout(ctx, lockWait)
 	defer cancel()
 	account := firstNonEmpty(derefOrEmpty(parent.SpawningAccountID), "parent:"+id)
@@ -214,6 +219,20 @@ func withParentInputGuard(ctx context.Context, pool *pgxpool.Pool, id string, en
 // endOrphanedSession is used before native upsert/token healing or input replay.
 // It persists policy first, so a later hello can repeat a dropped kill.
 func endOrphanedSession(ctx context.Context, h *Hub, pool *pgxpool.Pool, id string, dc *DaemonConn) error {
+	row, err := db.GetSession(ctx, pool, id)
+	if err != nil {
+		return err
+	}
+	if row != nil && row.DiscardRequestedAt != nil {
+		// A reconnecting worker is retained only as a verified cleanup target.
+		// Never fabricate process-end proof or heal tokens while discard is pending.
+		if dc != nil && dc.ID == row.DaemonID && h.GetDaemon(dc.ID) == dc && (dc.BoundSessionID == "" || dc.BoundSessionID == id) {
+			h.SetSessionOwner(id, dc.ID)
+			killStoppedSessions(dc, []string{id})
+		}
+		revokeSessionTokens(ctx, pool, id, "discard pending")
+		return nil
+	}
 	now := time.Now()
 	if err := db.EndSessionStatus(ctx, pool, id, "ended", &now, systemEnd(db.EndReasonParentEnded)); err != nil {
 		return err

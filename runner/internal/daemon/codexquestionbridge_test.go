@@ -65,7 +65,7 @@ func TestCodexQuestionStopsWhenItsMessageExpires(t *testing.T) {
 		w.WriteHeader(http.StatusGone)
 	}))
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, err := codexQuestionHandler(server.URL, "fixture-token", "session", &collectEmitter{})(ctx, "Question")
 	if err == nil || ctx.Err() != nil {

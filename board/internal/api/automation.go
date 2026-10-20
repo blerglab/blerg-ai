@@ -49,8 +49,8 @@ const maxAutomationTokenLen = 8 << 10
 
 // automationHowTo is the one sentence every refusal ends with, so a human
 // reading a card comment or a 422 knows exactly what to do.
-const automationHowTo = "a board admin must mint a run-sessions agent token for themselves " +
-	"(blerg-core Settings → Agent tokens) and save it in this board's settings under Automation"
+const automationHowTo = "a board admin can choose Run as me in this board's settings under Automation " +
+	"(or save a run-sessions agent token minted in blerg-core Settings → Agent tokens)"
 
 // automationError is a board-level start-identity problem: nothing about the
 // card being started, everything about the board's configuration. The

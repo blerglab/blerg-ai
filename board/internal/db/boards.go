@@ -66,10 +66,13 @@ type Board struct {
 	// AutomationAccountID is the blerg-core account the token acts for — whose
 	// engine credential every session this board starts spends (nil when none
 	// is set). Shown so an admin knows whose credential card-writers can use.
-	AutomationAccountID *string  `json:"automation_account_id"`
-	CreatedAt           string   `json:"created_at"`
-	UpdatedAt           string   `json:"updated_at"`
-	Repos               []string `json:"repos"`
+	AutomationAccountID *string `json:"automation_account_id"`
+	// AutomationTokenMinted reports whether Blerg minted the saved token ("Run as me") rather
+	// than a person pasting it. A minted token is revoked when it is replaced or removed.
+	AutomationTokenMinted bool     `json:"automation_token_minted"`
+	CreatedAt             string   `json:"created_at"`
+	UpdatedAt             string   `json:"updated_at"`
+	Repos                 []string `json:"repos"`
 }
 
 type Column struct {
@@ -101,6 +104,7 @@ const boardCols = `effort, reviewer_effort, discuss_effort, chat_effort, id, nam
 	discuss_model, chat_model, field_schema, require_repo,
 	gate_enabled, gate_on_unavailable, gate_on_dispute, driven_by, concurrency, ci_policy,
 	automation_engine, automation_token <> '', automation_token_expires_at, automation_account_id,
+	automation_token_minted_id IS NOT NULL,
 	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), include_component_version`
 
 func scanBoard(row pgx.Row) (Board, error) {
@@ -109,7 +113,7 @@ func scanBoard(row pgx.Row) (Board, error) {
 		&b.DiscussModel, &b.ChatModel, &b.FieldSchema,
 		&b.RequireRepo, &b.GateEnabled, &b.GateOnUnavailable, &b.GateOnDispute, &b.DrivenBy, &b.Concurrency,
 		&b.CIPolicy, &b.AutomationEngine, &b.AutomationTokenSet, &b.AutomationTokenExpiresAt, &b.AutomationAccountID,
-		&b.CreatedAt, &b.UpdatedAt, &b.IncludeComponentVersion)
+		&b.AutomationTokenMinted, &b.CreatedAt, &b.UpdatedAt, &b.IncludeComponentVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, ErrNotFound
 	}
@@ -250,41 +254,105 @@ type AutomationTokenUpdate struct {
 	Token     string
 	ExpiresAt *time.Time
 	AccountID string
+	// MintedID is core's id for a token Blerg minted ("Run as me"); "" for a pasted one.
+	MintedID string
 }
 
-// columns returns what the three automation columns are set to: the token
-// SEALED for boardID (or "" to clear), its expiry and its account.
-func (u AutomationTokenUpdate) columns(boardID string) (token string, expiresAt *time.Time, account *string, err error) {
+// MintedAutomation names a token Blerg minted for a board: the account it acts for and its id
+// in core. It is what the caller revokes when the token is replaced or removed.
+type MintedAutomation struct {
+	AccountID string
+	TokenID   string
+}
+
+// columns returns what the automation columns are set to: the token SEALED for boardID (or ""
+// to clear), its expiry, its account and, for a minted token, core's id for it.
+func (u AutomationTokenUpdate) columns(boardID string) (token string, expiresAt *time.Time, account, minted *string, err error) {
 	if u.Token == "" {
-		return "", nil, nil, nil
+		return "", nil, nil, nil, nil
 	}
 	sealed, err := sealAutomationToken(boardID, u.Token)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
 	a := u.AccountID
-	return sealed, u.ExpiresAt, &a, nil
+	if u.MintedID != "" {
+		m := u.MintedID
+		minted = &m
+	}
+	return sealed, u.ExpiresAt, &a, minted, nil
+}
+
+// lockedMintedAutomation reads the minted token a board holds now (nil when its token was
+// pasted or there is none), inside tx after the board row is locked.
+func lockedMintedAutomation(ctx context.Context, tx pgx.Tx, boardID string) (*MintedAutomation, error) {
+	var account, minted *string
+	err := tx.QueryRow(ctx, `SELECT automation_account_id, automation_token_minted_id FROM boards WHERE id = $1`, boardID).
+		Scan(&account, &minted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil || minted == nil || *minted == "" || account == nil {
+		return nil, err
+	}
+	return &MintedAutomation{AccountID: *account, TokenID: *minted}, nil
+}
+
+// BoardMintedAutomation is the minted token boardID holds now, or nil.
+func BoardMintedAutomation(ctx context.Context, pool *pgxpool.Pool, boardID string) (*MintedAutomation, error) {
+	var account, minted *string
+	err := pool.QueryRow(ctx, `SELECT automation_account_id, automation_token_minted_id FROM boards WHERE id = $1`, boardID).
+		Scan(&account, &minted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil || minted == nil || *minted == "" || account == nil {
+		return nil, err
+	}
+	return &MintedAutomation{AccountID: *account, TokenID: *minted}, nil
 }
 
 // SetBoardAutomationToken writes only the automation token (tests, tools).
 // The PATCH path goes through UpdateBoardWithAutomation so the token lands in
 // the same statement as the rest of the update, or not at all.
 func SetBoardAutomationToken(ctx context.Context, pool *pgxpool.Pool, boardID string, u AutomationTokenUpdate) error {
-	token, exp, account, err := u.columns(boardID)
+	_, err := ReplaceBoardAutomationToken(ctx, pool, boardID, u)
+	return err
+}
+
+// ReplaceBoardAutomationToken writes the automation token (Run as me's write) and returns the
+// minted token it replaced, if the board held one, for the caller to revoke in core.
+func ReplaceBoardAutomationToken(ctx context.Context, pool *pgxpool.Pool, boardID string, u AutomationTokenUpdate) (*MintedAutomation, error) {
+	token, exp, account, minted, err := u.columns(boardID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	tag, err := pool.Exec(ctx, `
-		UPDATE boards SET automation_token = $2, automation_token_expires_at = $3,
-			automation_account_id = $4, updated_at = now()
-		WHERE id = $1`, boardID, token, exp, account)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
+	if err := lockBoard(ctx, tx, boardID); err != nil {
+		return nil, err
+	}
+	replaced, err := lockedMintedAutomation(ctx, tx, boardID)
+	if err != nil {
+		return nil, err
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE boards SET automation_token = $2, automation_token_expires_at = $3,
+			automation_account_id = $4, automation_token_minted_id = $5, updated_at = now()
+		WHERE id = $1`, boardID, token, exp, account, minted)
+	if err != nil {
+		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
-	return nil
+	if replaced != nil && minted != nil && *minted == replaced.TokenID {
+		replaced = nil // the same token written again replaces nothing
+	}
+	return replaced, tx.Commit(ctx)
 }
 
 // CreateBoard creates a board with its repos and initial columns.
@@ -439,53 +507,63 @@ func ListBoards(ctx context.Context, pool *pgxpool.Pool) ([]Board, error) {
 
 // UpdateBoard patches board settings. Nil pointers leave fields unchanged.
 func UpdateBoard(ctx context.Context, pool *pgxpool.Pool, id string, p BoardParams) (Board, error) {
-	return UpdateBoardWithAutomation(ctx, pool, id, p, nil)
+	b, _, err := UpdateBoardWithAutomation(ctx, pool, id, p, nil)
+	return b, err
 }
 
 // UpdateBoardWithAutomation is UpdateBoard that also writes the automation
 // token (auto != nil) in the SAME statement and transaction: every field is
 // validated before anything is written, so a PATCH refused for any field
 // leaves the stored token exactly as it was.
-func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id string, p BoardParams, auto *AutomationTokenUpdate) (Board, error) {
+//
+// When auto is set and the board held a token Blerg minted, that token is returned as replaced
+// so the caller can revoke it in core once the write has landed.
+func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id string, p BoardParams, auto *AutomationTokenUpdate) (Board, *MintedAutomation, error) {
 	if len(p.FieldSchema) > 0 {
 		if _, err := ParseFieldSchema(p.FieldSchema); err != nil {
-			return Board{}, err
+			return Board{}, nil, err
 		}
 	}
 	if err := checkBoardEfforts(&p); err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
 	if err := checkConcurrency(p.Concurrency); err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
 	if err := checkCIPolicy(p.CIPolicy); err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
 	if err := checkAutomationEngine(p.AutomationEngine); err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
 	var tokenCol string
 	var expCol *time.Time
-	var accountCol *string
+	var accountCol, mintedCol *string
 	if auto != nil {
 		// Sealed before anything is written: no key, no PATCH.
 		var err error
-		if tokenCol, expCol, accountCol, err = auto.columns(id); err != nil {
-			return Board{}, err
+		if tokenCol, expCol, accountCol, mintedCol, err = auto.columns(id); err != nil {
+			return Board{}, nil, err
 		}
 	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
 
 	if err := lockBoard(ctx, tx, id); err != nil {
-		return Board{}, err
+		return Board{}, nil, err
+	}
+	var replaced *MintedAutomation
+	if auto != nil {
+		if replaced, err = lockedMintedAutomation(ctx, tx, id); err != nil {
+			return Board{}, nil, err
+		}
 	}
 	var previousEngine, previousModel, previousReviewer, previousDiscuss, previousChat string
 	if err := tx.QueryRow(ctx, `SELECT automation_engine,model,reviewer_model,discuss_model,chat_model FROM boards WHERE id=$1`, id).Scan(&previousEngine, &previousModel, &previousReviewer, &previousDiscuss, &previousChat); err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
 	// An effort is a setting of its model. A model-only change starts at the
 	// replacement model's native policy, while an explicit paired effort wins.
@@ -518,7 +596,7 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 			p.DiscussEffort = &empty
 			p.ChatEffort = &empty
 			if _, err := tx.Exec(ctx, `UPDATE cards SET model='',effort='',version=version+1,updated_at=now() WHERE board_id=$1 AND (model<>'' OR effort<>'')`, id); err != nil {
-				return Board{}, err
+				return Board{}, nil, err
 			}
 		}
 	}
@@ -602,28 +680,32 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 		add("automation_token", tokenCol)
 		add("automation_token_expires_at", expCol)
 		add("automation_account_id", accountCol)
+		add("automation_token_minted_id", mintedCol)
 	}
 	args = append(args, id)
 	b, err := scanBoard(tx.QueryRow(ctx,
 		`UPDATE boards SET `+joinSet(set)+fmt.Sprintf(` WHERE id = $%d RETURNING `, len(args))+boardCols,
 		args...))
 	if err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
 
 	if p.Repos != nil {
 		if _, err := tx.Exec(ctx, `DELETE FROM board_repos WHERE board_id = $1`, id); err != nil {
-			return Board{}, err
+			return Board{}, nil, err
 		}
 		for _, repo := range p.Repos {
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO board_repos (board_id, repo) VALUES ($1,$2)`, id, repo); err != nil {
-				return Board{}, err
+				return Board{}, nil, err
 			}
 		}
 		b.Repos = p.Repos
 	}
-	return b, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return Board{}, nil, err
+	}
+	return b, replaced, nil
 }
 
 func joinSet(parts []string) string {

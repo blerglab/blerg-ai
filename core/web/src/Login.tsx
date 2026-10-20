@@ -12,7 +12,12 @@ import { Wordmark } from "./Shell";
 // GET /auth/refresh) when there is no live session, and board/runner bounce here the same
 // way. So the screen carries the wordmark and a one-line reason when there is one — it IS the
 // front door, not a form hidden behind a "Sign in" button.
-type ProviderInfo = { id: string };
+//
+// While core is in first-run setup mode (no account yet), "setup" is set: "open" means this
+// browser can create the first account right away, so the page moves on to /setup (core's GET
+// /login does the same server-side); "code" means it needs the setup link the installer printed,
+// and the page says so instead of offering a form nobody can sign in with.
+type ProviderInfo = { id: string; setup?: string };
 
 // noticeFor turns the query string GET /auth/refresh (writeSignInRequired) and
 // ChangePassword.tsx leave behind into the single line shown above the form, or null. user=1
@@ -82,8 +87,29 @@ export default function Login() {
     }
   };
 
-  if (provider === null) {
+  useEffect(() => {
+    if (provider?.setup === "open") location.replace("/setup");
+  }, [provider]);
+
+  if (provider === null || provider.setup === "open") {
     return null;
+  }
+
+  if (provider.setup === "code") {
+    return (
+      <main className="auth">
+        <div className="auth-card">
+          <Wordmark as="span" />
+          <h1 className="auth-title">Not set up yet</h1>
+          <p className="auth-notice">
+            This Blerg isn't set up yet — open the setup link from the installer output to create the first account.
+          </p>
+          <p className="auth-hint">
+            Lost it? An operator can print a fresh one with <code>blerg-core setup-link</code>.
+          </p>
+        </div>
+      </main>
+    );
   }
 
   const notice = noticeFor(location.search);
@@ -137,7 +163,7 @@ export default function Login() {
           {submitting ? "Signing in…" : "Sign in"}
         </button>
         <p className="auth-hint">
-          First time here? Your username is printed next to BLERG_BOOTSTRAP_ADMIN_PASSWORD in core's log (first boot only). You choose your own username when you first change the password.
+          First time here? Ask an administrator of this Blerg for an account.
         </p>
       </form>
     </main>

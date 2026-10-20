@@ -24,4 +24,5 @@ func (a *API) registerArtifactRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sessions/{id}/attachments/{aid}/file", h.attachmentFile)
 	mux.HandleFunc("GET /api/sessions/{id}/files", h.files)
 	mux.HandleFunc("DELETE /api/sessions/{id}/files/{aid}", h.unpublish)
+	a.registerReviewRequestRoutes(mux)
 }

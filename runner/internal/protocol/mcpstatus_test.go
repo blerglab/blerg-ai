@@ -45,3 +45,16 @@ func TestMCPStatusReleaseClearsHoldAndRejectsMalformedTimes(t *testing.T) {
 		t.Fatalf("engine extension/invalidhold: %+v", clean)
 	}
 }
+
+func TestMCPStatusPreservesOnDemandAndNormalizesFutureValues(t *testing.T) {
+	for _, status := range []string{"pending", "connected", "failed", "needs-auth", "disabled", "unknown", "lazy"} {
+		got := SanitizeMCPStatus(MCPStatusPayload{Servers: []MCPServerStatus{{Name: "fixture", Status: status}}})
+		if got.Servers[0].Status != status {
+			t.Errorf("%s became %s", status, got.Servers[0].Status)
+		}
+	}
+	got := SanitizeMCPStatus(MCPStatusPayload{Servers: []MCPServerStatus{{Name: "fixture", Status: "future-status"}}})
+	if got.Servers[0].Status != "unknown" {
+		t.Fatal("future status must remain unknown")
+	}
+}

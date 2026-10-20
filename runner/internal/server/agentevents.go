@@ -72,7 +72,26 @@ const (
 // the daemon, fan out to subscribed browsers, and apply side effects
 // (model/effort mirroring, status transitions).
 func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *DaemonConn, msg protocol.AgentEvent) {
+	if pool != nil {
+		blocked, err := db.SessionDiscardBlocked(ctx, pool, msg.SessionID)
+		if err != nil {
+			return
+		} // retryable storage failure; never guess permission
+		if blocked {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+	}
 	progressChild := ""
+	if msg.Kind == protocol.UsageUpdatedKind {
+		usage, ok := protocol.DecodeUsageUpdated(msg.Payload)
+		if !ok {
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+		msg.Payload, _ = json.Marshal(usage)
+		msg.Transient = false
+	}
 	if msg.Kind == protocol.PlanUpdatedKind {
 		plan, ok := protocol.DecodePlanUpdated(msg.Payload)
 		if !ok {
@@ -243,7 +262,7 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 
 	// Fan out to subscribed browsers with the assigned seq.
 	switch msg.Kind {
-	case "turn_done", "subagent_done", "ask", "user_message":
+	case "turn_done", "subagent_done", "ask", "user_message", "tool_call", "tool_result", protocol.UsageUpdatedKind:
 		h.ChildActivity(msg.SessionID)
 	}
 	msg.Seq = seq

@@ -55,3 +55,11 @@ func (w *delegationWaiters) signal(id string) {
 		delete(w.m, id)
 	}
 }
+
+// waiting reports whether a poll is registered on id right now.
+func (w *delegationWaiters) waiting(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	registration := w.m[id]
+	return registration != nil && registration.refs > 0
+}

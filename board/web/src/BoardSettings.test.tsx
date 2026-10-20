@@ -6,11 +6,17 @@ import { api, Board } from "./api";
 
 let catalog: unknown = { state: "known", engines: [] };
 let me: unknown = { kind: "service", is_admin: true, is_human: true };
+let runAsMeRefusal: string | null = null;
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
   return {
     ...actual,
-    api: vi.fn((path: string) => Promise.resolve(path === "/api/me" ? me : path.includes("/launch-options") ? catalog : {})),
+    api: vi.fn((path: string) => {
+      if (path.endsWith("/automation/run-as-me") && runAsMeRefusal) {
+        return Promise.reject(new actual.ApiError(403, { error: runAsMeRefusal }));
+      }
+      return Promise.resolve(path === "/api/me" ? me : path.includes("/launch-options") ? catalog : {});
+    }),
   };
 });
 
@@ -127,6 +133,67 @@ describe("BoardSettings automation", () => {
   it("warns that every card-writer can spend and extract the credential", () => {
     open(board({ automation_token_set: true, automation_account_id: "acct-7" }));
     expect(screen.getByText(/Anyone who can write cards on this board can spend this credential/)).toBeInTheDocument();
+  });
+
+  it("offers Run as me as the one-click way to give a board a token", async () => {
+    me = { kind: "human", is_admin: true, is_human: true, account_id: "acct-7", run_as_me_available: true };
+    const onChanged = open(board());
+    const button = await screen.findByRole("button", { name: "Run as me" });
+    expect(button.closest(".run-as-me-cta")).toHaveClass("prominent");
+    // Pasting is the secondary path, out of the way until asked for.
+    expect(screen.queryByPlaceholderText("paste a run-sessions agent token")).toBeNull();
+    fireEvent.click(button);
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(api).toHaveBeenCalledWith("/api/boards/b1/automation/run-as-me", { method: "POST" });
+    // Nothing about a token ever travels through the browser.
+    expect(vi.mocked(api).mock.calls.some(([, init]) => JSON.stringify(init ?? {}).includes("automation_token"))).toBe(false);
+  });
+
+  it("keeps pasting a token available behind Use a different token…", async () => {
+    me = { kind: "human", is_admin: true, is_human: true, account_id: "acct-7", run_as_me_available: true };
+    open(board());
+    fireEvent.click(await screen.findByRole("button", { name: "Use a different token…" }));
+    const input = await screen.findByPlaceholderText("paste a run-sessions agent token");
+    fireEvent.change(input, { target: { value: "svc-account-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/boards/b1", { method: "PATCH", json: { automation_token: "svc-account-token" } }));
+  });
+
+  it("offers Run as me over someone else's token, not over your own minted one", async () => {
+    me = { kind: "human", is_admin: true, is_human: true, account_id: "acct-7", run_as_me_available: true };
+    open(board({ automation_token_set: true, automation_account_id: "acct-other" }));
+    expect(await screen.findByRole("button", { name: "Run as me" })).toBeInTheDocument();
+  });
+
+  it("does not offer Run as me again while the board runs on your live minted token", async () => {
+    me = { kind: "human", is_admin: true, is_human: true, account_id: "acct-7", run_as_me_available: true };
+    open(board({
+      automation_token_set: true, automation_account_id: "acct-7", automation_token_minted: true,
+      automation_token_expires_at: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+    }));
+    expect(await screen.findByText("(you)")).toBeInTheDocument();
+    expect(screen.getByText(/Run as me$/)).toBeInTheDocument(); // the "· Run as me" marker
+    expect(screen.queryByRole("button", { name: "Run as me" })).toBeNull();
+  });
+
+  it("shows why Run as me was refused", async () => {
+    me = { kind: "human", is_admin: true, is_human: true, account_id: "acct-7", run_as_me_available: true };
+    runAsMeRefusal = "blerg-core did not accept your sign-in as live: sign in again and retry";
+    try {
+      open(board());
+      fireEvent.click(await screen.findByRole("button", { name: "Run as me" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("sign in again");
+    } finally {
+      runAsMeRefusal = null;
+    }
+  });
+
+  it("offers no Run as me on an install that cannot mint", async () => {
+    me = { kind: "human", is_admin: true, is_human: true, account_id: "acct-7", run_as_me_available: false };
+    open(board());
+    expect(await screen.findByPlaceholderText("paste a run-sessions agent token")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run as me" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use a different token…" })).toBeNull();
   });
 
   it("hides the form from a non-admin", async () => {

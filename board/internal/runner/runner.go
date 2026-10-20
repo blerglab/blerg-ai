@@ -35,6 +35,13 @@ type StartRequest struct {
 	// for the session's life. "" sends nothing and leaves the runner's
 	// default, which for a contract start is unattended.
 	Interaction string
+	// Runtime and DaemonID are where this ONE start runs, when its caller
+	// chose (a person picked a target for a card's Run): a runtime of the
+	// runner contract ("cluster", "docker" or "daemon") and, for the last two,
+	// the connected daemon. Empty leaves the board's configured runtime and
+	// the runner's own placement, as before.
+	Runtime  string
+	DaemonID string
 	// Token is the credential this ONE start is made with: the board's
 	// automation token, a blerg-core agent token its owner minted for
 	// themselves. The runner resolves it to that person's account and runs the
@@ -141,6 +148,10 @@ func NewBlergRunner(url, key, gitBase string) *BlergRunner {
 // SetRuntime pins the runtime every start asks for (a value ParseRuntime
 // accepted); "" leaves it to the runner's default.
 func (k *BlergRunner) SetRuntime(runtime string) { k.runtime = runtime }
+
+// DefaultRuntime is the runtime every start asks for unless it names its own
+// ("" = the runner decides).
+func (k *BlergRunner) DefaultRuntime() string { return k.runtime }
 
 // ParseRuntime validates BLERG_BOARD_RUNNER_RUNTIME: empty (the runner
 // decides) or one of the runner contract's runtimes. Anything else is refused
@@ -251,8 +262,13 @@ func (k *BlergRunner) Start(ctx context.Context, r StartRequest) (string, error)
 	if r.Interaction != "" {
 		body["interaction"] = r.Interaction
 	}
-	if k.runtime != "" {
+	if r.Runtime != "" {
+		body["runtime"] = r.Runtime
+	} else if k.runtime != "" {
 		body["runtime"] = k.runtime
+	}
+	if r.DaemonID != "" {
+		body["daemon_id"] = r.DaemonID
 	}
 	if r.GitURL != "" {
 		body["git_url"] = r.GitURL

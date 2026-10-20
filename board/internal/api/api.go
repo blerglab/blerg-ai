@@ -40,6 +40,13 @@ type API struct {
 	// re-run and when. See mayAttemptRerun.
 	ciRerunMu   sync.Mutex
 	ciRerunLast map[string]ciRerunAttempt
+
+	// Minter mints and revokes "Run as me" automation tokens through blerg-core (runasme.go).
+	// Nil: this install cannot mint, and a board's token must be pasted.
+	Minter AutomationMinter
+	// RunAsCreatorDefault pre-checks "Run this board's cards as me" in the create-board form
+	// (BLERG_BOARD_DEFAULT_RUN_AS_CREATOR, default true).
+	RunAsCreatorDefault bool
 }
 
 func New(pool *pgxpool.Pool, a *auth.Auth, g *gate.Gate) *API {
@@ -95,6 +102,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/boards/{id}", authed(a.handleGetBoard))
 	mux.HandleFunc("GET /api/boards/{id}/launch-options", authed(a.handleBoardLaunchOptions))
 	mux.HandleFunc("PATCH /api/boards/{id}", authed(a.handleUpdateBoard))
+	mux.HandleFunc("POST /api/boards/{id}/automation/run-as-me", authed(a.handleRunAsMe))
 	mux.HandleFunc("DELETE /api/boards/{id}", authed(a.handleDeleteBoard))
 
 	mux.HandleFunc("GET /api/boards/{id}/columns", authed(a.handleListColumns))

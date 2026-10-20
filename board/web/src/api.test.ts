@@ -167,18 +167,62 @@ describe("boardSocket", () => {
     cleanup();
   });
 
-  it("returns a no-op cleanup and opens no socket without an access token", async () => {
+  // A plain reload holds no token in memory: the first request's 401 renews it silently. The socket
+  // used to give up right there, so the open board never heard about a card a script or agent
+  // created, until the next reload. It must wait for the renewed token and then dial.
+  it("waits for a renewed token and then dials when the page has none yet", async () => {
     vi.resetModules();
+    let token: string | null = null;
+    let renewed!: (ok: boolean) => void;
     vi.doMock("./authClient", () => ({
-      getAccessToken: () => null,
+      getAccessToken: () => token,
+      ensureFreshToken: () => new Promise<boolean>((resolve) => { renewed = resolve; }),
       redirectToRefresh: vi.fn(),
       consumeAccessTokenFromFragment: () => {},
       coreOrigin: () => "http://core.test",
     }));
     const { boardSocket: boardSocketNoToken } = await import("./api");
-    const cleanup = boardSocketNoToken("board-1", () => {});
+    const pings: number[] = [];
+    const cleanup = boardSocketNoToken("board-1", () => pings.push(1));
     expect(FakeWebSocket.instances.length).toBe(0);
-    expect(() => cleanup()).not.toThrow();
+    token = "tok-renewed";
+    renewed(true);
+    await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    expect(lastArgs![1]).toEqual(["bearer", "tok-renewed"]);
+    FakeWebSocket.instances[0].onmessage?.({} as MessageEvent);
+    expect(pings.length).toBe(1);
+    cleanup();
+    expect(FakeWebSocket.instances[0].closed).toBe(true);
+    vi.doUnmock("./authClient");
+    vi.resetModules();
+  });
+
+  it("opens no socket when no token can be had, and none after cleanup", async () => {
+    vi.resetModules();
+    let renewed!: (ok: boolean) => void;
+    let token: string | null = null;
+    vi.doMock("./authClient", () => ({
+      getAccessToken: () => token,
+      ensureFreshToken: () => new Promise<boolean>((resolve) => { renewed = resolve; }),
+      redirectToRefresh: vi.fn(),
+      consumeAccessTokenFromFragment: () => {},
+      coreOrigin: () => "http://core.test",
+    }));
+    const { boardSocket: boardSocketNoToken } = await import("./api");
+    // The board left before the token came back: nothing may dial for it.
+    const cleanup = boardSocketNoToken("board-1", () => {});
+    cleanup();
+    token = "tok-late";
+    renewed(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(FakeWebSocket.instances.length).toBe(0);
+    // No token at all: no socket, and no bounce from here (api() owns that).
+    token = null;
+    const cleanup2 = boardSocketNoToken("board-1", () => {});
+    renewed(false);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(FakeWebSocket.instances.length).toBe(0);
+    expect(() => cleanup2()).not.toThrow();
     vi.doUnmock("./authClient");
     vi.resetModules();
   });

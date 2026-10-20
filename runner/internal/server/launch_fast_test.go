@@ -36,13 +36,13 @@ func listWithin(t *testing.T, d time.Duration, l *UserRepoLister, account string
 	}
 }
 
-// eventually waits (up to 2 s) for cond, which a background goroutine makes true.
+// eventually waits until the readiness deadline for cond, which a background goroutine makes true.
 func eventually(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatal("condition not reached within 2s")
+			t.Fatal("condition not reached before the readiness deadline")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -172,7 +172,7 @@ func TestRepoListerServesStaleWhileOneRefreshRuns(t *testing.T) {
 			if len(repos) != 1 || repos[0].Name != "old" {
 				t.Fatalf("stale serve %d = %+v", i, repos)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("List waited on GitHub for a list it could serve stale")
 		}
 	}

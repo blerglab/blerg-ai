@@ -111,6 +111,7 @@ func main() {
 		DaemonName:       cfg.DaemonName,
 		DaemonToken:      cfg.DaemonToken,
 		ServerHTTP:       serverHTTP,
+		ServerURL:        cfg.ServerURL,
 
 		SandboxNetwork: sandboxNetworkSetting(),
 		RepoRoot:       repoRoot,

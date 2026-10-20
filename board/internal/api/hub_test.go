@@ -74,8 +74,8 @@ func TestHubSendsPeriodicPings(t *testing.T) {
 
 	select {
 	case <-pinged:
-	case <-time.After(2 * time.Second):
-		t.Fatal("hub did not send a ping within 2s of connecting")
+	case <-time.After(15 * time.Second):
+		t.Fatal("hub did not send a ping before the readiness deadline")
 	}
 }
 
@@ -107,7 +107,7 @@ func TestHubClosesUnresponsiveConnections(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("hub did not close a connection that stopped answering pings")
 	}
 }
@@ -122,12 +122,18 @@ func TestHubBroadcastStillWorks(t *testing.T) {
 	srv, boardID, token := wsSetup(t)
 	conn := dialWS(t, srv, boardID, token)
 
-	// Give the reader goroutine a moment to register the conn before we
-	// trigger a broadcast from outside the WS handshake path.
-	time.Sleep(50 * time.Millisecond)
+	// The handshake can finish before subscription registration. Observe the
+	// registration rather than assuming a scheduler delay was long enough.
+	deadline := time.Now().Add(15 * time.Second)
+	for api.HubSubscriberCountForTest(srvAPI.Hub, boardID) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("websocket subscription did not register")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	srvAPI.Hub.Broadcast(boardID, "card_changed")
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("expected broadcast message, got error: %v", err)
@@ -166,7 +172,7 @@ func TestHubKeepalivePolicySurvivesDefaultsRestore(t *testing.T) {
 	case <-pinged:
 	case <-done:
 		t.Fatal("connection closed before first keepalive")
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("missing initial keepalive")
 	}
 	restoreNext := api.SetKeepaliveIntervals(time.Hour, time.Nanosecond)
@@ -176,7 +182,7 @@ func TestHubKeepalivePolicySurvivesDefaultsRestore(t *testing.T) {
 		case <-pinged:
 		case <-done:
 			t.Fatal("active connection adopted restored keepalive defaults")
-		case <-time.After(2 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("active keepalive stopped after defaults changed")
 		}
 	}

@@ -6,13 +6,15 @@
 // that churns.
 import { useMemo } from 'react'
 import { useChatReportStore, useLiveState, type BackgroundTask, type ChatReport } from '@blerglab/chat'
-import type { SessionPanelLiveState, LiveChildSession, LiveDelegationGrant, LiveDelegationRequest } from '../lib/liveState'
+import type { SessionPanelLiveState, LiveChildSession, LiveDelegationGrant, LiveDelegationRequest, LiveReviewRequest } from '../lib/liveState'
 import { useLiveStateServer } from './useLiveStateServer'
 
 export interface SessionLive {
   children?: LiveChildSession[]
   delegationRequests?: LiveDelegationRequest[]
   delegationGrants?: LiveDelegationGrant[]
+  /** Pending review requests (Needs you). */
+  reviewRequests?: LiveReviewRequest[]
   /** The panel's lists, in the chat's LiveState shape (answer, openFiles, filesKey and files are the chat's). */
   live: SessionPanelLiveState
   /** The background tasks still running, by the server; null when the chat's list is used. */
@@ -68,7 +70,7 @@ export function useSessionLive(sessionId: string, enabled: boolean, refresh: unk
         canReleasePrompt: view.canReleasePrompt,
       }
     : null), [view, report.answer, report.openFiles, report.filesKey, report.files, clockOffset, generatedAt])
-  if (fromServer && view) return { live: fromServer, tasks: view.tasks, toolChanges: view.toolChanges, children: view.children, delegationRequests: view.delegationRequests, delegationGrants: view.delegationGrants, source: 'server' }
+  if (fromServer && view) return { live: fromServer, tasks: view.tasks, toolChanges: view.toolChanges, children: view.children, delegationRequests: view.delegationRequests, delegationGrants: view.delegationGrants, reviewRequests: view.reviewRequests, source: 'server' }
   if (fallback) return { live: client, tasks: null, toolChanges: null, source: 'client' }
   // Loading: the chat's reading of no session, which lists nothing.
   return { live: client, tasks: [], toolChanges: null, source: 'loading' }

@@ -77,10 +77,10 @@ describe('ChatView: describeUserMessage', () => {
     expect(screen.getByText('a later message')).toBeInTheDocument()
   })
 
-  it('without the hook every user message is the person’s, as before', () => {
+  it('without the hook a user message is the person’s, except one a board wrote', () => {
     const { container } = render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={live} />)
     expect(screen.queryByTestId('message-brief')).toBeNull()
-    expect([...container.querySelectorAll('.agent-card.user .card-author')].map(n => n.textContent)).toEqual(['You', 'You', 'You'])
+    expect([...container.querySelectorAll('.agent-card.user .card-author')].map(n => n.textContent)).toEqual(['You', 'Board', 'You'])
   })
 })
 

@@ -172,7 +172,7 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 			continue
 		}
 		var list models.List
-		if _, native := clusterModelProviderFor(descriptor.ID); runtime == runnerRuntimeCluster && native {
+		if _, native := clusterModelProviderOn(descriptor.ID, a.hub.JobManager()); runtime == runnerRuntimeCluster && native {
 			if p.Kind == runnerKeyPrincipalKind {
 				list = a.operatorClusterModelSnapshot(parent, descriptor.ID, req.Refresh)
 			} else {

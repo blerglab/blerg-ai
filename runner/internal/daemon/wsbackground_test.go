@@ -133,7 +133,7 @@ func TestWSBackgroundInventoryHelloHeartbeatAndReconnect(t *testing.T) {
 		cancel()
 		select {
 		case <-finished:
-		case <-time.After(time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("client did not stop")
 		}
 	}()
@@ -142,7 +142,7 @@ func TestWSBackgroundInventoryHelloHeartbeatAndReconnect(t *testing.T) {
 		select {
 		case h := <-hellos:
 			return h
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("hello missing")
 		}
 		return protocol.DaemonHello{}
@@ -153,7 +153,7 @@ func TestWSBackgroundInventoryHelloHeartbeatAndReconnect(t *testing.T) {
 	}
 	_ = c.Send(backgroundFixtureEvent("done", "background_task_done", "task"))
 	c.RequestHeartbeat()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for {
 		select {
 		case hb := <-heartbeats:

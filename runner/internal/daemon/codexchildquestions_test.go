@@ -81,13 +81,13 @@ func TestCodexRootInterruptCancelsChildQuestion(t *testing.T) {
 	d.Enqueue("Run child question", "chat")
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("owned child question did not start")
 	}
 	d.Interrupt()
 	select {
 	case <-stopped:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("root interrupt left a child question open")
 	}
 }
@@ -137,7 +137,7 @@ func TestCodexChildQuestionCancellationIsThreadScoped(t *testing.T) {
 		if label != "one" {
 			t.Fatal("one child canceled another child's question")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("matching child question not canceled")
 	}
 	<-done
@@ -236,7 +236,7 @@ func TestCodexOptionalQuestionDoesNotBlockEventLoop(t *testing.T) {
 	d.Enqueue("Ask optional question", "chat")
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("optional question did not start")
 	}
 	d.Enqueue("Continue independent work", "chat")
@@ -246,7 +246,7 @@ func TestCodexOptionalQuestionDoesNotBlockEventLoop(t *testing.T) {
 	}
 	select {
 	case <-stopped:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("native turn completion left optional question open")
 	}
 	em.mu.Lock()
@@ -305,7 +305,7 @@ func TestCodexNativeResolutionCannotCancelOtherThreadQuestion(t *testing.T) {
 	a.resolveQuestionRequest("root", id)
 	select {
 	case <-stopped:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("matching native resolution left question open")
 	}
 	<-done

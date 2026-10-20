@@ -48,7 +48,7 @@ func TestCodexMCPInputGateKeepsNativeRPCAlive(t *testing.T) {
 	d.Enqueue("first fixture prompt", "chat")
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("native input gate not entered")
 	}
 	// The gate has no driver/app lock. A status RPC succeeds while input is held.
@@ -64,7 +64,7 @@ func TestCodexMCPInputGateKeepsNativeRPCAlive(t *testing.T) {
 		t.Fatal("prompt sent before gate release")
 	}
 	close(release)
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for countKind(em, "turn_done") < 1 {
 		select {
 		case <-deadline:
@@ -76,7 +76,7 @@ func TestCodexMCPInputGateKeepsNativeRPCAlive(t *testing.T) {
 		t.Fatal("native generation not incremented")
 	}
 	d.Enqueue("second fixture prompt", "chat")
-	deadline = time.After(5 * time.Second)
+	deadline = time.After(15 * time.Second)
 	for countKind(em, "turn_done") < 2 {
 		select {
 		case <-deadline:

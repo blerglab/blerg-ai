@@ -1,20 +1,37 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import Login from "./Login";
 
 describe("Login", () => {
   afterEach(() => vi.unstubAllGlobals());
-  it("tells a first-time user where the username comes from", async () => {
+  it("offers the sign-in form once the install is set up, with no word of a bootstrap password", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ id: "local" }) })));
+    render(<Login />);
+    expect(await screen.findByText("First time here? Ask an administrator of this Blerg for an account.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Username")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("BLERG_BOOTSTRAP_ADMIN_PASSWORD");
+    // The internal column name never reaches a person.
+    expect(document.body.textContent).not.toContain("provider_subject");
+  });
+
+  it("tells a person on an install that is not set up yet to open the setup link", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ id: "local", setup: "code" }) })));
     render(<Login />);
     expect(
       await screen.findByText(
-        "First time here? Your username is printed next to BLERG_BOOTSTRAP_ADMIN_PASSWORD in core's log (first boot only). You choose your own username when you first change the password.",
+        "This Blerg isn't set up yet — open the setup link from the installer output to create the first account.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Username")).toBeInTheDocument();
-    // The internal column name never reaches a person.
-    expect(document.body.textContent).not.toContain("provider_subject");
+    expect(screen.queryByLabelText("Username")).toBeNull();
+  });
+
+  it("goes on to /setup when this browser can create the first account", async () => {
+    const replace = vi.fn();
+    vi.stubGlobal("location", { ...window.location, search: "", replace });
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ id: "local", setup: "open" }) })));
+    render(<Login />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/setup"));
+    expect(screen.queryByLabelText("Username")).toBeNull();
   });
 });
 

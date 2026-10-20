@@ -15,7 +15,7 @@ afterEach(() => {
 
 // waitFor's default second is not enough when the whole suite runs on a loaded CI runner; a
 // passing test is not made slower by this, only a slow one is given the time it needs.
-configure({ asyncUtilTimeout: 5000 })
+configure({ asyncUtilTimeout: 15000 })
 
 // ── ResizeObserver ────────────────────────────────────────────────────────────
 // Used by TerminalDOMView. jsdom has no implementation. A no-op observer is

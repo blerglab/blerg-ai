@@ -251,6 +251,9 @@ type BackgroundTaskDonePayload struct {
 
 // TurnDonePayload — kind "turn_done".
 type TurnDonePayload struct {
+	// UsageReported distinguishes an explicitly unknown engine report from actual
+	// zero counters. Absent on older producers; it never changes billing sums.
+	UsageReported  *bool  `json:"usage_reported,omitempty"`
 	StopReason     string `json:"stop_reason"`
 	Model          string `json:"model"`
 	Usage          Usage  `json:"usage"`

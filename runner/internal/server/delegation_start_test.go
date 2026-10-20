@@ -151,7 +151,7 @@ func TestChildrenCredentialTable(t *testing.T) {
 		"owner-less parent":       {ownerless, ownerlessTok, 403, "delegation needs a session owned by a person"},
 		"revoked session token":   {revoked, revokedTok, 401, "revoked or expired"},
 		"ended parent":            {ended, endedTok, 409, "the session has ended"},
-		"cluster parent":          {cluster, clusterTok, 422, "children run on the parent's desktop daemon"},
+		"cluster parent":          {cluster, clusterTok, 422, msgClusterNotConfigured}, // no cluster runtime in this fixture
 		"daemon disconnected":     {gone, goneTok, 409, "the session's daemon is not connected"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -215,7 +215,7 @@ func TestChildrenBodyValidation(t *testing.T) {
 		"no repo at all":      {map[string]any{"prompt": "x"}, "k", 422, "repo is required"},
 		"bad repo name":       {map[string]any{"repo": "../etc", "prompt": "x"}, "k", 422, "repo must be a folder name"},
 		"repo not on daemon":  {map[string]any{"repo": "other", "prompt": "x"}, "k", 422, "the parent's daemon has no repo other"},
-		"runtime cluster":     {map[string]any{"repo": "app", "prompt": "x", "runtime": "cluster"}, "k", 422, `runtime must be "docker" or "daemon"`},
+		"runtime cluster":     {map[string]any{"repo": "app", "prompt": "x", "runtime": "cluster"}, "k", 422, msgDesktopChildCluster},
 		"title too long":      {map[string]any{"repo": "app", "prompt": "x", "title": long}, "k", 422, "title is longer"},
 		"engine cannot run":   {map[string]any{"repo": "app", "prompt": "x", "engine": "openclaw", "runtime": "docker"}, "k", 422, "the parent's daemon cannot run OpenClaw in docker"},
 		"unknown engine":      {map[string]any{"repo": "app", "prompt": "x", "engine": "nope"}, "k", 422, "cannot run"},
@@ -230,7 +230,8 @@ func TestChildrenBodyValidation(t *testing.T) {
 			if code != c.want || !strings.Contains(asString(out["error"]), c.msg) {
 				t.Fatalf("%d %v, want %d %q", code, out, c.want, c.msg)
 			}
-			if strings.Contains(asString(out["error"]), "cluster") {
+			// Only the cluster request itself is told about cluster children.
+			if name != "runtime cluster" && strings.Contains(asString(out["error"]), "cluster") {
 				t.Fatalf("the refusal mentions the cluster: %q", out["error"])
 			}
 			fx.storedNothing(fx.parent)

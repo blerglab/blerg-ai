@@ -70,7 +70,7 @@ func dialDaemon(t *testing.T, hub *Hub) *websocket.Conn {
 // waitClosed reads until the server closes the socket.
 func waitClosed(t *testing.T, conn *websocket.Conn) {
 	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
 			if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
@@ -89,9 +89,9 @@ func TestDaemonOversizedHelloClosesTheConnection(t *testing.T) {
 	conn := dialDaemon(t, hub)
 	hello := protocol.DaemonHello{Type: "daemon_hello", Name: "box", Token: "tok-1234567890", ProtocolVersion: "1",
 		CheckedOutRepos: []string{strings.Repeat("x", 8<<10)}}
-	if err := conn.WriteJSON(hello); err != nil {
-		t.Fatal(err)
-	}
+	// The oversized hello can be rejected while its remaining bytes are still
+	// being written. The peer close and lack of registration are the assertions.
+	_ = conn.WriteJSON(hello)
 	waitClosed(t, conn)
 	if n := len(hub.GetAllDaemons()); n != 0 {
 		t.Errorf("an oversized hello registered a daemon (%d)", n)
@@ -112,7 +112,7 @@ func TestDaemonOversizedMessageClosesTheConnection(t *testing.T) {
 	if err := conn.WriteJSON(protocol.DaemonHeartbeat{Type: "daemon_heartbeat", ActiveSessions: []string{}, CheckedOutRepos: []string{"app"}}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if ds := hub.GetAllDaemons(); len(ds) == 1 && len(ds[0].CheckedOutRepos()) == 1 {
 			break
@@ -127,7 +127,7 @@ func TestDaemonOversizedMessageClosesTheConnection(t *testing.T) {
 	// peer"); that is the outcome under test, not an error. What must hold is the close below.
 	_ = conn.WriteJSON(protocol.DaemonHeartbeat{Type: "daemon_heartbeat", CheckedOutRepos: []string{strings.Repeat("x", 16<<10)}})
 	waitClosed(t, conn)
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for len(hub.GetAllDaemons()) != 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the daemon stayed registered after an oversized frame")

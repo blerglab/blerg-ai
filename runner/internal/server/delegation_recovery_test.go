@@ -43,7 +43,7 @@ func TestRecoveryReadyKillsMissingDelegatedRecordsButKeepsLegacyDiscovery(t *tes
 func TestChildStartRefusesOldRecoveryPeer(t *testing.T) {
 	fx := newDelegFx(t)
 	fx.dc.RecoveryReadyCapable = false
-	err := fx.api.validateChildStart(t.Context(), childStart{Engine: "codex", Runtime: "docker", Repo: "app"}, fx.dc)
+	err := fx.api.validateChildStart(t.Context(), childStart{Engine: "codex", Runtime: "docker", Repo: "app"}, childHost{dc: fx.dc}, delegatePrincipal(fx.row(fx.parent)))
 	if err == nil || err.Status != 409 {
 		t.Fatalf("old peer was not refused: %+v", err)
 	}

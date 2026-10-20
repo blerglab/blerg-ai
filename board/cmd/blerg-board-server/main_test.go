@@ -40,3 +40,31 @@ func TestRunnerRuntimeFromEnv(t *testing.T) {
 		t.Fatalf("unknown value must fail naming the variable, got %v", err)
 	}
 }
+
+// Run as me: the mint client needs both core's URL and the mint key; the create form's box is
+// checked unless the operator turns it off, and a value that is not a boolean refuses to boot.
+func TestRunAsMeFromEnv(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	key := "0123456789abcdef0123456789abcdef"
+	m, on, err := runAsMeFromEnv(env(map[string]string{"BLERG_CORE_URL": "http://core", "BLERG_CORE_BOARD_MINT_KEY": key}))
+	if err != nil || m == nil || !on {
+		t.Fatalf("configured: minter %v on %v err %v", m != nil, on, err)
+	}
+	for name, vars := range map[string]map[string]string{
+		"no key":  {"BLERG_CORE_URL": "http://core"},
+		"no core": {"BLERG_CORE_BOARD_MINT_KEY": key},
+	} {
+		if m, _, err := runAsMeFromEnv(env(vars)); err != nil || m != nil {
+			t.Errorf("%s: minter %v err %v, want none and no error", name, m != nil, err)
+		}
+	}
+	for v, want := range map[string]bool{"": true, "true": true, "1": true, "false": false, "0": false, "FALSE": false} {
+		_, on, err := runAsMeFromEnv(env(map[string]string{"BLERG_BOARD_DEFAULT_RUN_AS_CREATOR": v}))
+		if err != nil || on != want {
+			t.Errorf("BLERG_BOARD_DEFAULT_RUN_AS_CREATOR=%q: on %v err %v, want %v", v, on, err, want)
+		}
+	}
+	if _, _, err := runAsMeFromEnv(env(map[string]string{"BLERG_BOARD_DEFAULT_RUN_AS_CREATOR": "sometimes"})); err == nil {
+		t.Error("a non-boolean BLERG_BOARD_DEFAULT_RUN_AS_CREATOR must refuse to boot")
+	}
+}

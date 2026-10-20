@@ -1,5 +1,6 @@
+import { modelDisplayName } from '@blerglab/chat'
 import { useContext } from 'react'
-import {ChildSessionActions} from './ChildDiscard'
+import {ChildSessionActions, ParentSessionActions} from './ChildDiscard'
 import { useNavigate } from 'react-router-dom'
 import { OpenSessionContext } from '../lib/openSession'
 import type { SessionInfo, DaemonInfo } from '../types'
@@ -30,11 +31,6 @@ const STATUS_STYLES: Record<string, { bg: string; border: string; color: string;
   error:    { bg: 'color-mix(in srgb, var(--danger) 16%, var(--scree-2))', border: 'color-mix(in srgb, var(--danger) 40%, var(--stone))', color: 'var(--danger)', text: 'error' },
   // cluster pod died; the session resumes when you send it a message
   disconnected: { bg: 'var(--scree-2)', border: 'var(--stone)', color: 'var(--fog-dim)', text: 'paused' },
-}
-
-// Abbreviates a model ID to a compact display name, e.g. "claude-sonnet-4-6" → "sonnet-4-6"
-function shortModel(model: string): string {
-  return model.replace(/^claude-/, '')
 }
 
 // Where the session runs, in one word. Sessions created before the runtime
@@ -295,7 +291,7 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
         />
       )}
 
-      {session.parent_session_id && !session.archived_at && <ChildSessionActions parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'}/>}
+      {!session.archived_at && (session.parent_session_id ? <ChildSessionActions parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'}/> : <ParentSessionActions sessionId={session.id} title={session.title || 'Untitled session'}/>)}
       {/* Star toggle — always visible, outline when unstarred, filled orange when starred */}
       <button
         data-testid="star-toggle"
@@ -399,6 +395,7 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
       {session.model && (
         <span
           data-testid="model-chip"
+          title={session.model}
           style={{
             color: 'var(--fog-dim)',
             fontSize: '0.62rem',
@@ -410,7 +407,7 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
             padding: '0 4px', lineHeight: '15px',
           }}
         >
-          {shortModel(session.model)}
+          {modelDisplayName(session.model)}
         </span>
       )}
 

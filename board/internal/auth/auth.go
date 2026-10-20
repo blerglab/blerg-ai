@@ -166,20 +166,24 @@ func (a *Auth) EnsureServiceToken(ctx context.Context) error {
 
 var ErrUnauthenticated = errors.New("unauthenticated")
 
+// BearerToken is the credential a request presents, exactly as Resolve reads it: the
+// Authorization bearer, else X-Blerg-Board-Token. "Run as me" forwards it to core as the
+// person's proof, so it must be the very value Resolve verified.
+func BearerToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); h != "" {
+		if t, ok := strings.CutPrefix(h, "Bearer "); ok && t != "" {
+			return t
+		}
+	}
+	return r.Header.Get("X-Blerg-Board-Token")
+}
+
 // Resolve identifies the request's principal from
 // bearer/`X-Blerg-Board-Token`: board's own service key or agent tokens, or
 // (additively) a blerg-core-issued token, including for humans — see
 // corePrincipal. No credential → error.
 func (a *Auth) Resolve(r *http.Request) (Principal, error) {
-	raw := ""
-	if h := r.Header.Get("Authorization"); h != "" {
-		if t, ok := strings.CutPrefix(h, "Bearer "); ok {
-			raw = t
-		}
-	}
-	if raw == "" {
-		raw = r.Header.Get("X-Blerg-Board-Token")
-	}
+	raw := BearerToken(r)
 	if raw == "" {
 		return Principal{}, ErrUnauthenticated
 	}

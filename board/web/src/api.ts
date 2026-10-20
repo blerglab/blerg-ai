@@ -99,6 +99,9 @@ export interface Board {
   // Whose token it is: the blerg-core account every session this board starts
   // runs as (and whose credential any card-writer can spend).
   automation_account_id: string | null;
+  // Whether Blerg minted the token ("Run as me") rather than a person pasting it.
+  // Replacing or removing a minted token revokes it in blerg-core.
+  automation_token_minted?: boolean;
   repos: string[] | null;
 }
 
@@ -230,17 +233,31 @@ export interface Token {
 // The socket is authenticated via the "bearer" WebSocket subprotocol (a
 // browser cannot set Authorization on an upgrade request) — see
 // board/internal/api/wsauth.go's wsBearerToken.
+//
+// A page loaded without a token in memory (any plain reload: the token is
+// never stored) gets one when its first request's 401 renews it silently.
+// The socket waits for that same renewal and then dials. It used to give up
+// at once instead, so the open board never heard about a change it did not
+// make itself — a card a script, an agent or another tab created appeared only
+// on the next reload. When no token can be had the socket stays shut: api()
+// owns sending the page to sign in, and the sign-in banner's recovery remounts
+// the board, which subscribes again.
 export function boardSocket(boardId: string, onPing: () => void): () => void {
-  const token = getAccessToken();
-  if (!token) return () => {};
-
   const proto = location.protocol === "https:" ? "wss" : "ws";
   let ws: WebSocket | null = null;
   let closed = false;
   const connect = () => {
-    let opened = false;
+    if (closed) return;
     // The token in memory may have been renewed since the socket was first opened.
-    ws = new WebSocket(`${proto}://${location.host}/ws?board=${boardId}`, ["bearer", getAccessToken() ?? token]);
+    const token = getAccessToken();
+    if (!token) {
+      void ensureFreshToken().then((ok) => {
+        if (ok && getAccessToken()) connect();
+      });
+      return;
+    }
+    let opened = false;
+    ws = new WebSocket(`${proto}://${location.host}/ws?board=${boardId}`, ["bearer", token]);
     ws.onopen = () => {
       opened = true;
       clearSignInStuck();
@@ -250,7 +267,7 @@ export function boardSocket(boardId: string, onPing: () => void): () => void {
       if (closed) return;
       // A socket that closed without ever opening was almost certainly
       // refused at the handshake — most likely an expired access token, since
-      // the token is captured once here and the socket outlives it.
+      // the socket outlives the token it was opened with.
       // Reconnecting with the same dead token would just loop forever, so go
       // get a new one instead — but only once per page load (the guard is
       // shared with api.ts's 401 handling), so an unreachable server can
@@ -258,6 +275,7 @@ export function boardSocket(boardId: string, onPing: () => void): () => void {
       if (!opened && !refreshAlreadyAttempted()) {
         // Renew quietly first; only when that fails send the page away to do it.
         void ensureFreshToken().then((ok) => {
+          if (closed) return;
           if (ok) {
             connect();
             return;

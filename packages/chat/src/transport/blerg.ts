@@ -12,6 +12,8 @@ import type {
   AgentEvent, AgentEventsGap, AgentEventsReplayDone, DelegationDecidedPayload, AgentUserMessage, AssistantTextPayload, InterruptSession, SessionInfo,
   SessionStatus, SetSessionModel, SubscribeAgentEvents, UnsubscribeSession,
 } from '../types'
+import { readProposalView } from '../model/proposals'
+import { readReviewRequest } from '../model/reviewRequests'
 import { createFiles } from './files'
 import { createBrowserSocket } from './socket'
 import type { OlderPage, SessionMeta, SubscribeHandlers, SubscribeOptions, Transport } from './types'
@@ -485,6 +487,53 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       if (!r.ok) throw new Error(await errorText(r))
       const body = (await r.json()) as { prompt?: unknown }
       return { prompt: typeof body.prompt === 'string' ? body.prompt : '' }
+    },
+
+    // A proposal the session made: owner only (404 for anyone else).
+    async proposal(proposalId) {
+      const r = await request(`/api/proposals/${enc(proposalId)}`)
+      if (!r.ok) throw Object.assign(new Error(await errorText(r)), { status: r.status })
+      return readProposalView(await r.json())
+    },
+
+    async decideProposal(proposalId, action, opts) {
+      const body = action === 'approve'
+        ? { ...(opts?.expected !== undefined ? { expected_arguments_raw: opts.expected } : {}), ...(opts?.allowForSession ? { allow_for_session: true } : {}) }
+        : undefined
+      const r = await request(`/api/proposals/${enc(proposalId)}/${action}`, {
+        method: 'POST',
+        ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
+      })
+      if (!r.ok) {
+        // A refused approval that also asked for a session permission says the permission stands.
+        const raw = await r.text().catch(() => '')
+        let parsed: { error?: unknown; permission_kept?: unknown } = {}
+        try { parsed = JSON.parse(raw) as typeof parsed } catch { /* not JSON: the text is the message */ }
+        const message = typeof parsed.error === 'string' && parsed.error ? parsed.error : raw.trim() || `HTTP ${r.status}`
+        throw Object.assign(new Error(message), { status: r.status, permissionKept: parsed.permission_kept === true })
+      }
+      return readProposalView(await r.json())
+    },
+
+    // The session's explicit review requests; only its owner may decide them.
+    async reviewRequests(sessionId) {
+      const r = await request(`/api/sessions/${enc(sessionId)}/review-requests`)
+      if (!r.ok) throw Object.assign(new Error(await errorText(r)), { status: r.status })
+      const body = (await r.json()) as { review_requests?: unknown; can_decide?: unknown }
+      const list = Array.isArray(body.review_requests) ? body.review_requests : []
+      return { requests: list.map(readReviewRequest).filter((x): x is NonNullable<typeof x> => x !== null), canDecide: body.can_decide === true }
+    },
+
+    async decideReview(requestId, decision, note) {
+      const r = await request(`/api/review-requests/${enc(requestId)}/decide`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision, ...(note ? { note } : {}) }),
+      })
+      if (!r.ok) throw Object.assign(new Error(await errorText(r)), { status: r.status })
+      const out = readReviewRequest(await r.json())
+      if (!out) throw new Error('Invalid review request.')
+      return out
     },
 
     connected,

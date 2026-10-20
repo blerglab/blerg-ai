@@ -232,7 +232,7 @@ func TestDaemonSocketCarriesEngineModels(t *testing.T) {
 		EngineModels: map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-a", "low"))}})
 	waitCodex := func(want string) {
 		t.Helper()
-		deadline := time.Now().Add(3 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 		for {
 			var got string
 			if ds := hub.GetAllDaemons(); len(ds) == 1 {

@@ -12,17 +12,23 @@ import (
 )
 
 type liveChild struct {
-	ID        string     `json:"id"`
-	Title     string     `json:"title"`
-	Engine    string     `json:"engine"`
-	Model     string     `json:"model"`
-	Effort    string     `json:"effort"`
-	Status    string     `json:"status"`
-	StartedAt time.Time  `json:"started_at"`
-	EndedAt   *time.Time `json:"ended_at"`
-	Asking    bool       `json:"asking"`
-	Tokens    *int64     `json:"tokens"`
-	CostUSD   *float64   `json:"cost_usd,omitempty"`
+	UsageStatus    string     `json:"usage_status"`
+	ToolCalls      int64      `json:"tool_calls"`
+	Activity       string     `json:"activity,omitempty"`
+	ActivitySince  *time.Time `json:"activity_since,omitempty"`
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
+	Local          bool       `json:"local,omitempty"`
+	ID             string     `json:"id"`
+	Title          string     `json:"title"`
+	Engine         string     `json:"engine"`
+	Model          string     `json:"model"`
+	Effort         string     `json:"effort"`
+	Status         string     `json:"status"`
+	StartedAt      time.Time  `json:"started_at"`
+	EndedAt        *time.Time `json:"ended_at"`
+	Asking         bool       `json:"asking"`
+	Tokens         *int64     `json:"tokens"`
+	CostUSD        *float64   `json:"cost_usd,omitempty"`
 }
 
 type liveDelegationRequest struct {
@@ -62,6 +68,7 @@ func (a *API) readChildrenSnapshot(ctx context.Context, parent *db.SessionRow, a
 	visible := rows[:0]
 	for _, row := range rows {
 		if row.ArchivedAt == nil {
+			row.Local = a.hub.FindDaemonForSession(row.ID).LocalEngine(row.Engine)
 			visible = append(visible, row)
 		}
 	}
@@ -120,17 +127,39 @@ func (a *API) liveChildren(ctx context.Context, rows []db.ChildLiveRow, account 
 	for _, row := range rows {
 		c := liveChild{ID: row.ID, Title: row.Title, Engine: row.Engine, Model: row.Model, Effort: row.Effort, Status: row.Status,
 			StartedAt: row.StartedAt, EndedAt: row.EndedAt, Asking: row.OpenAsks > 0}
+		snapshot, err := db.ReadChildTelemetry(ctx, a.dbPool, row.ID, row.MaxSeq)
+		if err != nil {
+			return nil, nil, err
+		}
+		progress := childTelemetry(&c, snapshot)
+		c.UsageStatus = "hidden"
 		if showTokens && (admin || account != "" && account == row.Owner) {
-			usage, err := db.ListSessionTokenUsage(ctx, a.dbPool, row.ID)
+			usage, err := db.ListSessionTokenUsageThrough(ctx, a.dbPool, row.ID, row.MaxSeq)
 			if err != nil {
 				return nil, nil, err
 			}
-			summary := summariseSessionTokens(usage, prices)
+			c.UsageStatus = "pending"
+			displayUsage := append([]db.SessionTokenRow(nil), usage...)
+			if len(usage) > 0 {
+				c.UsageStatus = "reported"
+			}
+			if progress != nil {
+				c.UsageStatus = "pending"
+				if progress.Usage != nil {
+					u := progress.Usage
+					c.UsageStatus = "reported"
+					displayUsage = append(displayUsage, db.SessionTokenRow{Model: progress.Model, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite})
+				}
+			}
+			summary := summariseSessionTokens(displayUsage, prices)
 			tokens := summary.Totals.Input + summary.Totals.Output + summary.Totals.CacheRead + summary.Totals.CacheWrite
-			c.Tokens = &tokens
-			if len(summary.UnpricedModels) == 0 {
+			if len(displayUsage) > 0 && (c.UsageStatus != "pending" || tokens != 0) {
+				c.Tokens = &tokens
+			}
+			if len(summary.UnpricedModels) == 0 && c.Tokens != nil {
 				c.CostUSD = summary.Totals.CostUSD
 			}
+			c.Local = row.Local
 			allUsage = append(allUsage, usage...)
 		}
 		out = append(out, c)

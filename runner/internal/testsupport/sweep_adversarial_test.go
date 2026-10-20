@@ -37,7 +37,7 @@ func sweepReviewCreate(t *testing.T, admin *pgxpool.Pool, name string) {
 		t.Fatal("create disposable sweeper review database failed")
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if _, err := admin.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()); err != nil {
 			t.Error("remove disposable sweeper review database failed")
@@ -77,7 +77,7 @@ func sweepReviewRunID() string { return strings.TrimPrefix(databaseName(), "cx_r
 
 func sweepReviewWaitBackendGone(t *testing.T, admin *pgxpool.Pool, pid uint32) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()

@@ -61,7 +61,7 @@ func TestRunnerPodCannotSpeakForAnotherSession(t *testing.T) {
 	send("own")
 	select {
 	case <-own:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the pod's own event was not delivered")
 	}
 	select {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -16,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/blerglab/blerg-ai/core/internal/authprovider"
 	"github.com/blerglab/blerg-ai/core/internal/identity"
@@ -173,13 +176,19 @@ func hashState(state string) string {
 }
 
 // handleProvider tells the login page which provider is active so it can render a password
-// form (local) or a "Sign in with …" button (github/oidc).
-func (d Deps) handleProvider(w http.ResponseWriter, _ *http.Request) {
+// form (local) or a "Sign in with …" button (github/oidc). While first-run setup is open it adds
+// "setup": "open" (this browser may create the first account without a code) or "code" (it needs
+// the setup link) — see setup_handlers.go.
+func (d Deps) handleProvider(w http.ResponseWriter, r *http.Request) {
 	id := "local"
 	if d.AuthProvider != nil {
 		id = d.AuthProvider.ID()
 	}
-	writeJSON(w, map[string]string{"id": id})
+	resp := map[string]string{"id": id}
+	if mode := d.setupMode(r); mode != "" {
+		resp["setup"] = mode
+	}
+	writeJSON(w, resp)
 }
 
 // handleCallback is the IdP redirect target for OAuth-style providers (GitHub/OIDC). The local
@@ -312,6 +321,15 @@ func (d Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		dest = d.changePasswordURL(r, returnTo)
 	}
 	access, newRefresh, err := svc.RefreshAccessToken(r.Context(), cookie.Value, audience)
+	if errors.Is(err, identity.ErrSessionBusy) {
+		// Nothing was written and the cookie is still good: a retry, not a sign-out. The cookie
+		// is left alone, and a hidden renewal frame reads core's own error page as "no answer"
+		// and tries again shortly.
+		log.Printf("auth: refresh busy: %v", err)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "session busy, try again", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		// The presented cookie is dead (revoked/expired/replayed) — clear it rather than
 		// leaving a known-dead value sitting in the browser for a future request to retry.
@@ -682,11 +700,32 @@ func (d Deps) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	_, err := local.ChangePasswordAndSubject(r.Context(), p.Sub, body.OldPassword, body.NewPassword, body.ProviderSubject)
+	// The sign-out everywhere (RevokeAccountEverywhereTx, below) runs in the same transaction as
+	// the password update: both stand or neither does. When its locks stay busy the change is
+	// retried a few times and then refused as retryable (503): the old password still works, so
+	// the person can simply submit again.
+	var revoke func(ctx context.Context, tx pgx.Tx) error
+	if svc, ok := d.identitySvc(); ok {
+		revoke = func(ctx context.Context, tx pgx.Tx) error { return svc.RevokeAccountEverywhereTx(ctx, tx, p.Sub) }
+	} else {
+		log.Printf("handleChangePassword: identity service unavailable, sessions not revoked")
+	}
+	var err error
+	for range 3 {
+		_, err = local.ChangePasswordAndSubjectWith(r.Context(), p.Sub, body.OldPassword, body.NewPassword, body.ProviderSubject, revoke)
+		if err = identity.AsSessionBusy(err); !errors.Is(err, identity.ErrSessionBusy) {
+			break
+		}
+	}
 	if writeUsernameError(w, err) {
 		return
 	}
 	switch {
+	case errors.Is(err, identity.ErrSessionBusy):
+		log.Printf("handleChangePassword: %v", err)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "busy signing out your other sessions; nothing was changed, try again", http.StatusServiceUnavailable)
+		return
 	case errors.Is(err, authprovider.ErrWeakPassword):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -706,17 +745,13 @@ func (d Deps) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.LoginLimiter.Reset(ip, p.Sub)
-	// RevokeAccountEverywhere (not just RevokeAllSessions): a password change is presumed to
-	// follow a compromise, so an access token already minted on some OTHER device must stop
-	// verifying immediately (via the shared revocations table's "sub" entry), not merely fail
-	// its next refresh. This browser's own cookie is cleared below so the current caller
-	// re-authenticates immediately too. A subsequent successful login clears the "sub"
-	// revocation (startHumanSession's Unrevoke call) — it is not a permanent lockout.
-	if svc, ok := d.identitySvc(); ok {
-		if err := svc.RevokeAccountEverywhere(r.Context(), p.Sub); err != nil {
-			log.Printf("handleChangePassword: RevokeAccountEverywhere: %v", err)
-		}
-	}
+	// The change above also revoked the account everywhere (RevokeAccountEverywhereTx, not just
+	// the sessions): a password change is presumed to follow a compromise, so an access token
+	// already minted on some OTHER device must stop verifying immediately (via the shared
+	// revocations table's "sub" entry), not merely fail its next refresh. This browser's own
+	// cookie is cleared below so the current caller re-authenticates immediately too. A
+	// subsequent successful login clears the "sub" revocation (startHumanSession's Unrevoke call)
+	// — it is not a permanent lockout.
 	http.SetCookie(w, d.cookie(refreshCookieName, "", http.SameSiteStrictMode, -1))
 	w.WriteHeader(http.StatusOK)
 }

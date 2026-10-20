@@ -95,19 +95,19 @@ for line in sys.stdin:
 			if runErr != nil {
 				t.Error(runErr)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("scoped runner failed to stop")
 		}
 	}()
 	var conn *websocket.Conn
 	select {
 	case conn = <-connections:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("scoped runner never connected")
 	}
 	next := func(typ, kind string) {
 		t.Helper()
-		deadline := time.NewTimer(5 * time.Second)
+		deadline := time.NewTimer(15 * time.Second)
 		defer deadline.Stop()
 		for {
 			select {

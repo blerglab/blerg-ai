@@ -535,13 +535,13 @@ func TestInsertSessionAsKeepsParentOnRevive(t *testing.T) {
 	if plain.ParentSessionID != nil || plain.DelegationVia != "" || plain.KeepRunning {
 		t.Fatalf("plain session: %+v", plain)
 	}
-	// The cluster insert ignores the child fields.
+	// The cluster insert carries the child fields too (0.4.3: children on the cluster).
 	cl := newUUID(t, pool)
 	if err := db.InsertClusterSessionAs(ctx, pool, cl, daemon, "starting", "/x", "x", "t", "m", db.SessionOrigin{ParentSessionID: parent, DelegationVia: "rule:r", KeepRunning: true}); err != nil {
 		t.Fatal(err)
 	}
-	if row, _ := db.GetSession(ctx, pool, cl); row.ParentSessionID != nil || row.DelegationVia != "" || row.KeepRunning {
-		t.Fatalf("cluster session carried child fields: %+v", row)
+	if row, _ := db.GetSession(ctx, pool, cl); row.ParentSessionID == nil || *row.ParentSessionID != parent || row.DelegationVia != "rule:r" || !row.KeepRunning {
+		t.Fatalf("cluster child lost its child fields: %+v", row)
 	}
 	// parent_session_id is a real foreign key.
 	err = db.InsertSessionAs(ctx, pool, newUUID(t, pool), daemon, "running", "/x", "x", "t", "m", db.SessionOrigin{ParentSessionID: newUUID(t, pool)})

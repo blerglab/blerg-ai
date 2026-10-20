@@ -172,7 +172,13 @@ function Boards() {
   const [name, setName] = useState("");
   const [template, setTemplate] = useState(linked ?? "");
   const [createError, setCreateError] = useState<string | null>(null);
+  const [createNote, setCreateNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // "Run this board's cards as me": checked by default unless the operator turned it off
+  // (BLERG_BOARD_DEFAULT_RUN_AS_CREATOR). null = not touched yet, so it follows that default.
+  const offerRunAsMe = !!me?.is_human && !!me?.run_as_me_available;
+  const [runAsMeChoice, setRunAsMeChoice] = useState<boolean | null>(null);
+  const runAsMe = runAsMeChoice ?? (me?.run_as_creator_default ?? true);
   const load = () => Promise.all([
     api<Board[]>("/api/boards").then((b) => setBoards(b ?? [])),
     api<BoardOverview[]>("/api/overview").then((os) => {
@@ -191,11 +197,20 @@ function Boards() {
     e.preventDefault();
     if (!name.trim() || saving) return;
     setCreateError(null);
+    setCreateNote(null);
     setSaving(true);
     try {
-      await api("/api/boards", {
-        json: { name: name.trim(), require_repo: false, ...(template ? { template } : {}) },
+      const created = await api<{ name?: string; automation_error?: string }>("/api/boards", {
+        json: {
+          name: name.trim(), require_repo: false, ...(template ? { template } : {}),
+          ...(offerRunAsMe ? { run_as_me: runAsMe } : {}),
+        },
       });
+      // The board exists either way; if Run as me did not take, say so and how to finish.
+      if (created?.automation_error) {
+        setCreateNote(`“${created.name ?? name.trim()}” was created, but it can't start sessions yet: ${created.automation_error}. ` +
+          "Open its settings and choose Run as me to try again.");
+      }
     } catch (err) {
       // Keep the form and what was typed; say why the server refused.
       setCreateError(err instanceof Error ? err.message : "Could not create the board.");
@@ -203,7 +218,7 @@ function Boards() {
       return;
     }
     setSaving(false);
-    setName(""); setTemplate(""); setCreating(false); load().catch(() => {});
+    setName(""); setTemplate(""); setRunAsMeChoice(null); setCreating(false); load().catch(() => {});
   };
 
   if (!boards) return null;
@@ -229,10 +244,24 @@ function Boards() {
             {BOARD_TEMPLATES.find((t) => t.id === template)?.description
               ?? "The default columns (inbox, ready, in progress, done) and no custom fields."}
           </p>
+          {offerRunAsMe && (
+            <label className="run-as-creator" style={{ display: "flex", gap: 8, fontSize: 13, alignItems: "center" }}>
+              <input type="checkbox" checked={runAsMe} onChange={(e) => setRunAsMeChoice(e.target.checked)} />
+              Run this board's cards as me
+            </label>
+          )}
+          {offerRunAsMe && (
+            <p style={{ margin: 0, color: "var(--fog-dim)", fontSize: 13 }}>
+              {runAsMe
+                ? "Sessions this board starts run as you, on your own credentials: a run-sessions token is created for you in blerg-core (revocable in its Settings → Agent tokens)."
+                : "The board starts no sessions until someone sets who they run as, in the board's settings."}
+            </p>
+          )}
           {createError && <p role="alert" style={{ color: "var(--danger)", fontSize: 13, margin: 0 }}>{createError}</p>}
           <button className="btn" type="submit" disabled={saving}>Create board</button>
         </form>
       )}
+      {createNote && <p role="status" className="warn" style={{ fontSize: 13 }}>{createNote}</p>}
       {boards.length === 0 && !creating ? (
         <div className="empty">
           <p className="sign">No boards yet</p>

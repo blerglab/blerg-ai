@@ -18,6 +18,15 @@ var ErrDelegationEnded = errors.New("the session's parent ended")
 // Parent SHARE makes the insert precede the next end, or refuses an obsolete
 // start even when the person has already resumed that same parent ID.
 func insertDelegatedSessionAs(ctx context.Context, pool *pgxpool.Pool, id, daemonID, status, projectPath, repo, title, model string, origin SessionOrigin) error {
+	return withDelegatedParentEpoch(ctx, pool, origin, func(tx sessionWriteExecutor) error {
+		return insertSessionAs(ctx, tx, id, daemonID, status, projectPath, repo, title, model, origin)
+	})
+}
+
+// withDelegatedParentEpoch runs insert (a child row's insert, desktop or cluster) in a transaction
+// that holds the parent's row FOR SHARE and only while the parent's delegation epoch is the one
+// the start validated; ErrDelegationEnded otherwise.
+func withDelegatedParentEpoch(ctx context.Context, pool *pgxpool.Pool, origin SessionOrigin, insert func(sessionWriteExecutor) error) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -25,7 +34,7 @@ func insertDelegatedSessionAs(ctx context.Context, pool *pgxpool.Pool, id, daemo
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var valid bool
 	err = tx.QueryRow(ctx, `SELECT delegation_ended_at IS NOT DISTINCT FROM $2::timestamptz
-		AND NOT COALESCE((`+terminallyEndedSQL("sessions")+`),false)
+		AND discard_requested_at IS NULL AND NOT COALESCE((`+terminallyEndedSQL("sessions")+`),false)
 		FROM sessions WHERE id=$1 FOR SHARE`, origin.ParentSessionID, origin.ParentEpoch).Scan(&valid)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !valid) {
 		return ErrDelegationEnded
@@ -33,7 +42,7 @@ func insertDelegatedSessionAs(ctx context.Context, pool *pgxpool.Pool, id, daemo
 	if err != nil {
 		return err
 	}
-	if err := insertSessionAs(ctx, tx, id, daemonID, status, projectPath, repo, title, model, origin); err != nil {
+	if err := insert(tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -74,7 +83,7 @@ func ChildrenToStopThrough(ctx context.Context, pool *pgxpool.Pool, id string, c
 		JOIN sessions p ON p.id=c.parent_session_id
 		WHERE c.parent_session_id=$1 AND NOT c.keep_running
 		AND (c.started_at <= $2 OR COALESCE((`+terminallyEndedSQL("p")+`),false))
-		AND NOT COALESCE((`+terminallyEndedSQL("c")+`),false) ORDER BY c.started_at,c.id`, id, cutoff)
+		AND c.discard_requested_at IS NULL AND NOT COALESCE((`+terminallyEndedSQL("c")+`),false) ORDER BY c.started_at,c.id`, id, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +110,7 @@ func WithDelegationRecoveryGuard(ctx context.Context, pool *pgxpool.Pool, ids []
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	rows, err := tx.Query(ctx, `SELECT p.id FROM sessions p WHERE p.id IN
-		(SELECT c.parent_session_id FROM sessions c WHERE c.id=ANY($1::uuid[]) AND NOT c.keep_running)
+		(SELECT c.parent_session_id FROM sessions c WHERE c.id=ANY($1::uuid[]))
 		ORDER BY p.id FOR SHARE`, ids)
 	if err != nil {
 		return err
@@ -114,14 +123,25 @@ func WithDelegationRecoveryGuard(ctx context.Context, pool *pgxpool.Pool, ids []
 	if err != nil {
 		return err
 	}
+	rows, err = tx.Query(ctx, `SELECT id FROM sessions WHERE id=ANY($1::uuid[]) ORDER BY id FOR SHARE`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
 	blockedByParent := delegationResumeBlockedSQL("c", "p")
 	rows, err = tx.Query(ctx, `SELECT c.id::text,
-		(`+blockedByParent+`) AND NOT COALESCE((`+terminallyEndedSQL("c")+`),false)
+		(`+blockedByParent+`) AND c.discard_requested_at IS NULL AND NOT COALESCE((`+terminallyEndedSQL("c")+`),false)
 		FROM sessions c LEFT JOIN sessions p ON p.id=c.parent_session_id
 		WHERE c.id=ANY($1::uuid[]) AND ((`+blockedByParent+`) OR
 		(c.status IN ('ended','stopped','error') AND (c.end_reason IN
 		('stopped_by_user','stopped_by_agent','auto_stopped','parent_ended')
-		OR (c.end_reason='daemon_lost' AND c.status='stopped')))) ORDER BY c.id`, ids)
+		OR (c.end_reason='daemon_lost' AND c.status='stopped')))) ORDER BY c.id FOR SHARE OF c`, ids)
 	if err != nil {
 		return err
 	}
@@ -213,7 +233,7 @@ func WithDelegationInputGuard(ctx context.Context, source interface {
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
-	if parent != nil && !keep {
+	if parent != nil {
 		if _, err := tx.Exec(ctx, `SELECT id FROM sessions WHERE id=$1 FOR SHARE`, *parent); err != nil {
 			return err
 		}
@@ -247,7 +267,7 @@ func withDelegationResumeGuard(ctx context.Context, pool *pgxpool.Pool, id strin
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
-	if parent != nil && !keep {
+	if parent != nil {
 		if _, err := tx.Exec(ctx, `SELECT id FROM sessions WHERE id=$1 FOR SHARE`, *parent); err != nil {
 			return err
 		}
@@ -260,7 +280,7 @@ func withDelegationResumeGuard(ctx context.Context, pool *pgxpool.Pool, id strin
 	}
 	// The relation is immutable during ordinary recovery. A concurrent delete
 	// clears its FK; the marker still refuses non-kept children below.
-	if !currentKeep && currentParent != nil && (parent == nil || *currentParent != *parent) {
+	if currentParent != nil && (parent == nil || *currentParent != *parent) {
 		return ErrDelegationEnded
 	}
 	blocked, err := DelegationResumeBlocked(ctx, tx, id)
@@ -301,7 +321,7 @@ func terminallyEndedSQL(alias string) string {
 }
 
 func delegationResumeBlockedSQL(child, parent string) string {
-	return `(` + child + `.archived_at IS NOT NULL) OR COALESCE(` + child + `.end_reason='parent_ended',false) OR (NOT ` + child + `.keep_running AND (
+	return `(` + child + `.discard_requested_at IS NOT NULL) OR (` + parent + `.discard_requested_at IS NOT NULL) OR (` + child + `.archived_at IS NOT NULL) OR COALESCE(` + child + `.end_reason='parent_ended',false) OR (NOT ` + child + `.keep_running AND (
 		COALESCE((` + terminallyEndedSQL(parent) + `),false) OR
 		COALESCE(` + child + `.started_at <= ` + parent + `.delegation_ended_at,false) OR
 		(` + parent + `.id IS NULL AND (COALESCE(` + child + `.delegation_via,'')<>'' OR COALESCE(` + child + `.started_by_kind,'')='session'))))`

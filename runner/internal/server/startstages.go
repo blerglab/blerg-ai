@@ -412,6 +412,38 @@ const (
 	startWatchLimit = 20 * time.Minute
 )
 
+// clusterWatchLifetime lets an explicit owner cancel and join start watchers.
+// A nil JobManager.startWatches retains the normal 20-minute start lifetime.
+// Registration and cancellation share the lock so Add cannot race a final Wait.
+type clusterWatchLifetime struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	done   sync.WaitGroup
+}
+
+func newClusterWatchLifetime(parent context.Context) *clusterWatchLifetime {
+	ctx, cancel := context.WithCancel(parent)
+	return &clusterWatchLifetime{ctx: ctx, cancel: cancel}
+}
+
+func (l *clusterWatchLifetime) start() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.ctx.Err() != nil {
+		return false
+	}
+	l.done.Add(1)
+	return true
+}
+
+func (l *clusterWatchLifetime) close() {
+	l.mu.Lock()
+	l.cancel()
+	l.mu.Unlock()
+	l.done.Wait()
+}
+
 func (a *API) startWatchEvery() time.Duration {
 	if a.startWatchInterval > 0 {
 		return a.startWatchInterval
@@ -431,17 +463,28 @@ func watchClusterStart(h *Hub, pool *pgxpool.Pool, sessionID string, every time.
 	if every <= 0 {
 		every = startWatchInterval
 	}
+	parent := context.Background()
+	finish := func() {}
+	if life := jm.startWatches; life != nil {
+		if !life.start() {
+			h.starts.releaseWatch(sessionID)
+			return
+		}
+		parent = life.ctx
+		finish = life.done.Done
+	}
 	go func() {
+		defer finish()
 		defer h.starts.releaseWatch(sessionID)
-		ctx, cancel := context.WithTimeout(context.Background(), startWatchLimit)
+		ctx, cancel := context.WithTimeout(parent, startWatchLimit)
 		defer cancel()
 		ticker := time.NewTicker(every)
 		defer ticker.Stop()
 		for {
-			if !h.starts.isOpen(sessionID) {
+			if ctx.Err() != nil || !h.starts.isOpen(sessionID) {
 				return
 			}
-			pod, err := jm.sessionPod(sessionID)
+			pod, err := jm.sessionPod(ctx, sessionID)
 			if errors.Is(err, errPodsForbidden) {
 				// No RBAC for pods: nothing to watch, and asking again every
 				// two seconds for twenty minutes would change nothing. The
@@ -611,9 +654,9 @@ var errPodsForbidden = errors.New("pods not readable")
 // sessionPod returns the newest live pod of the session's Job, or nil when
 // none exists yet. An error means the API could not be asked (no RBAC for
 // pods, API down) — the caller says nothing rather than guessing.
-func (j *JobManager) sessionPod(sessionID string) (*k8sPod, error) {
-	resp, err := j.do(http.MethodGet, "/api/v1/namespaces/"+j.Namespace+"/pods?labelSelector="+
-		url.QueryEscape("app=blerg-runner-agent,session="+sessionID), nil)
+func (j *JobManager) sessionPod(ctx context.Context, sessionID string) (*k8sPod, error) {
+	resp, err := j.doWithContentType(ctx, http.MethodGet, "/api/v1/namespaces/"+j.Namespace+"/pods?labelSelector="+
+		url.QueryEscape("app=blerg-runner-agent,session="+sessionID), nil, "application/json")
 	if err != nil {
 		return nil, err
 	}

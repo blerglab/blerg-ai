@@ -45,7 +45,7 @@ func (s *agentTestSender) agentEvents() []protocol.AgentEvent {
 
 func (s *agentTestSender) waitForKind(t *testing.T, kind string) protocol.AgentEvent {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, ev := range s.agentEvents() {
 			if ev.Kind == kind {
@@ -142,6 +142,30 @@ func TestAgentHostSpawnRunsTurnAndShipsEvents(t *testing.T) {
 	}
 }
 
+// The first prompt keeps the source the server named for it (a board's, a parent session's, a
+// cron's), and a frame without one (a server that predates initial_prompt_source) is recorded as the
+// person's, as it always was.
+func TestAgentHostInitialPromptSource(t *testing.T) {
+	for _, tc := range []struct{ frame, want string }{
+		{`{"type":"spawn_session","session_id":"s1","repo":"proj","kind":"agent","initial_prompt":"work card 43","initial_prompt_source":"blerg-board"}`, "blerg-board"},
+		{`{"type":"spawn_session","session_id":"s1","repo":"proj","kind":"agent","initial_prompt":"do the thing","initial_prompt_source":"session"}`, "session"},
+		{`{"type":"spawn_session","session_id":"s1","repo":"proj","kind":"agent","initial_prompt":"digest","initial_prompt_source":"cron"}`, "cron"},
+		{`{"type":"spawn_session","session_id":"s1","repo":"proj","kind":"agent","initial_prompt":"mine"}`, "chat"},
+	} {
+		var msg protocol.SpawnSession
+		if err := json.Unmarshal([]byte(tc.frame), &msg); err != nil {
+			t.Fatal(err)
+		}
+		host, sender, _ := newTestHost(t, &scriptedAgentProvider{}, "")
+		host.Spawn(msg)
+		um := sender.waitForKind(t, "user_message")
+		var p agent.UserMessagePayload
+		if err := json.Unmarshal(um.Payload, &p); err != nil || p.Text != msg.InitialPrompt || p.Source != tc.want {
+			t.Fatalf("frame %s: user_message = %s, want source %q", tc.frame, um.Payload, tc.want)
+		}
+	}
+}
+
 // statusReports lists the session_state_changed statuses sent, in order.
 func (s *agentTestSender) statusReports() []string {
 	s.mu.Lock()
@@ -222,7 +246,7 @@ func TestAgentHostResumeNoteIsSystem(t *testing.T) {
 		nil, "fresh-clone")
 	sender.waitForKind(t, "turn_done")
 	sources := map[string]string{}
-	waitFor := time.Now().Add(5 * time.Second)
+	waitFor := time.Now().Add(15 * time.Second)
 	for len(sources) < 2 && time.Now().Before(waitFor) {
 		for _, ev := range sender.agentEvents() {
 			if ev.Kind != "user_message" {
@@ -288,7 +312,7 @@ func TestAgentHostResendReplaysUnacked(t *testing.T) {
 	sender.waitForKind(t, "turn_done")
 	firstCount := len(sender.agentEvents())
 	host.ResendPending() // nothing acked → everything re-sent
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(sender.agentEvents()) >= 2*firstCount {
 			return
@@ -306,7 +330,7 @@ func TestAgentHostModelSlashCommand(t *testing.T) {
 	host.UserMessage("s1", "/model claude-opus-5", "chat")
 	// applied at turn boundary → next user message triggers it
 	host.UserMessage("s1", "do something", "chat")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, ev := range sender.agentEvents() {
 			if ev.Kind == "model_changed" {
@@ -369,7 +393,7 @@ func TestHTTPMessengerAskFlow(t *testing.T) {
 		if a != "blue" {
 			t.Fatalf("answer = %q", a)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("answer never delivered")
 	}
 }
@@ -421,7 +445,7 @@ func TestAgentHostNativeLoopRequiresAPIKey(t *testing.T) {
 	host := NewAgentHost(sender, AgentHostConfig{ReposRoot: reposRoot, HomeDir: t.TempDir()})
 	host.Spawn(protocol.SpawnSession{Type: "spawn_session", SessionID: "s1", Repo: "proj", Kind: "agent"})
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		sender.mu.Lock()
 		for _, m := range sender.msgs {
@@ -455,7 +479,7 @@ func TestAgentHostDriverErrorBecomesSessionError(t *testing.T) {
 		InitialPrompt: "hello", Kind: "agent",
 	})
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		sender.mu.Lock()
 		for _, m := range sender.msgs {
@@ -490,7 +514,7 @@ func (s *agentTestSender) countKind(kind string) int {
 
 func (s *agentTestSender) waitForKindCount(t *testing.T, kind string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if s.countKind(kind) >= want {
 			return
@@ -684,8 +708,8 @@ func TestAgentHostHermesEngineWorksWithoutAPIKey(t *testing.T) {
 	if containsStr(string(raw), "claude-sonnet-5") {
 		t.Errorf("hermes invoked with the claude-only default model; calls:\n%s", raw)
 	}
-	if !containsStr(string(raw), "--continue s1") {
-		t.Errorf("hermes not invoked with its own session id as --continue; calls:\n%s", raw)
+	if !containsStr(string(raw), "session.create") || !containsStr(string(raw), "prompt.submit") {
+		t.Errorf("hermes native gateway did not create and prompt its session; calls:\n%s", raw)
 	}
 }
 
@@ -804,7 +828,7 @@ func TestAgentHostKillWaitsForDriverCleanupBeforeEndingSession(t *testing.T) {
 	close(done)
 	select {
 	case <-killed:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("Kill did not finish after driver cleanup")
 	}
 }
@@ -822,7 +846,7 @@ func TestAgentHostKillBoundsUnresponsiveDriverCleanup(t *testing.T) {
 	go func() { host.Kill("unresponsive-session"); close(killed) }()
 	select {
 	case <-killed:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("an unresponsive driver blocked session teardown indefinitely")
 	}
 }

@@ -44,7 +44,7 @@ their messages attach to the same parent session automatically.
 
 ## Commands
 
-Before filing on another board, run `blerg-runner ticket boards` and `blerg-runner ticket search --board <name|id> --query "<keywords>"` to check duplicates; `blerg-runner ticket file --board <name|id> --title "<title>" --body "<details>" [--type bug] [--sensitive] [--repo <target-repo>]` queues a proposal for the person to approve before any board write.
+Before filing on another board, run `blerg-runner ticket boards` and `blerg-runner ticket search --board <name|id> --query "<keywords>"` to check duplicates; `blerg-runner ticket file --board <name|id> --title "<title>" --body "<details>" [--type bug] [--sensitive] [--repo <target-repo>]` queues a proposal for the person to approve before any board write. If the person allowed filing on that board for this session, the card is filed at once and the command prints its number; an unknown outcome means do not file again. Otherwise the person's decision (the card's number, or why not) arrives later as a message that starts "Proposal <id>"; `blerg-runner ticket status <id>` confirms it (exit 0 done, 3 waiting, 4 not done, 5 not known yet). Never file the same ticket again while one is waiting.
 
 ### `blerg-runner request-plugin <name> "<why>"`
 
@@ -301,11 +301,42 @@ The loop:
 3. Publish the file again under the same name.
 4. Answer each request: `blerg-runner review reply <id> done "<what you did>"`, or `declined`
    with why. The user sees the replies beside their requests the next time they open the review.
+   Answer a whole round in one call: repeat `<id> done|declined "<line>"` for each request, or
+   put one answer per line in a file (`<id> done|declined <line>`) and pass `--file <path>`. Each
+   call publishes a new version of `<file>.review.json`, and a file keeps at most 20 versions.
 
 `review list` prints the requests still open, with their ids, for one file or for every reviewed
 file. A marked-up image needs no reply: its numbered pins and their notes are in the message, and
 the image is an attachment (`blerg-runner fetch --all`). `blerg-runner review --help` has the same
 guide.
+
+### `blerg-runner review request <name|id> --ask "<what to decide>" [--wait]`
+
+To ask the user to approve a file or diff you published, rather than only showing it:
+
+```bash
+blerg-runner publish SECURITY.md --request-review "OK to publish this policy?"
+blerg-runner diff main..HEAD --request-review "Merge this?"
+blerg-runner review request SECURITY.md --ask "OK to publish this policy?" --wait
+blerg-runner review status <request id>     # the decision as the server has it; exit 0 = approved
+blerg-runner review wait <request id>       # wait again after exit code 3
+blerg-runner review withdraw <request id>   # take a request back
+```
+
+The request is pinned to one version (a name means its newest version, an id that exact file). The
+user sees "Review: SECURITY.md" under Needs you and a card in the chat; the file opens with
+**Approve** and **Request changes**. Only the session's owner decides. Without `--wait` the command
+returns at once and the decision arrives as a message naming the request: `Review of SECURITY.md v2
+(request <id>): APPROVED`, or `…: CHANGES REQUESTED: <note>`, followed by the comments they made on
+that version (answer those with `review reply`).
+
+**An approval counts only when the CLI confirms it.** Before acting on an approval, run
+`blerg-runner review status <id>` (or `review wait <id>`): only exit code 0 is an approval. Anyone
+who can write in the chat can type "APPROVED"; a chat message is never an approval. Publishing a newer version supersedes a pending request:
+request a review of the new one. `--wait` waits at most `--timeout` seconds (default 100, at most
+540), then prints `still waiting — run: blerg-runner review wait <id>` and exits 3, which is not a
+failure. Exit codes: 0 approved, 2 changes requested, 3 still waiting, 1 failed, withdrawn or
+superseded.
 
 ## Usage pattern
 

@@ -23,6 +23,8 @@ type fixtureFiling struct {
 	draft   boardfiling.Draft
 	board   string
 	err     error
+	receipt json.RawMessage // what Create answers; empty: the legacy fixture receipt
+	proofs  []mcpgw.Proof   // the proof of every Create
 }
 
 func (f *fixtureFiling) SnapshotURL() string { return "https://board.example.test" }
@@ -32,12 +34,16 @@ func (f *fixtureFiling) Prepare(_ context.Context, _ mcpgw.Proof, _ string, d bo
 func (f *fixtureFiling) Search(context.Context, mcpgw.Proof, string, string) (json.RawMessage, error) {
 	return json.RawMessage(`{"cards":[],"truncated":false}`), nil
 }
-func (f *fixtureFiling) Create(_ context.Context, _ mcpgw.Proof, _ string, b string, d boardfiling.Draft) (json.RawMessage, error) {
+func (f *fixtureFiling) Create(_ context.Context, p mcpgw.Proof, _ string, b string, d boardfiling.Draft) (json.RawMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.creates++
 	f.draft = d
 	f.board = b
+	f.proofs = append(f.proofs, p)
+	if len(f.receipt) > 0 {
+		return f.receipt, f.err
+	}
 	return json.RawMessage(`{"id":"fixture-card","title":"Approved"}`), f.err
 }
 
@@ -86,8 +92,12 @@ func TestBoardFilingQueuesOnlyAndApprovalUsesSavedDraft(t *testing.T) {
 	if up.creates != 0 {
 		t.Fatal("board write happened before approval")
 	}
-	if len(fx.events) != 0 {
-		t.Fatal("private draft entered shared session fanout")
+	// The chat's card is announced by id and kind only: no draft text enters shared session fanout.
+	for len(fx.events) > 0 {
+		ev := string(<-fx.events)
+		if strings.Contains(ev, "Private reproduction fixture") || strings.Contains(ev, "Original") || !strings.Contains(ev, `"proposal_request"`) {
+			t.Fatalf("private draft entered shared session fanout: %s", ev)
+		}
 	}
 	var args filingArguments
 	if json.Unmarshal(p.Arguments, &args) != nil || args.Origin.Repo != "app" || args.Origin.Commit != strings.Repeat("a", 40) || args.Origin.Engine != "claude" || args.Origin.SessionURL != "https://runner.example.test/sessions/"+fx.sess {

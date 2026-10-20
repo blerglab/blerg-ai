@@ -15,6 +15,7 @@ import (
 )
 
 func (a *API) registerDelegationChildRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/sessions/{id}/discard", a.handleSessionDiscard)
 	mux.HandleFunc("GET /api/sessions/{id}/children", a.handleChildList)
 	mux.HandleFunc("GET /api/sessions/{id}/children/{child}", a.handleChildStatus)
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/message", a.handleChildMessage)
@@ -36,7 +37,7 @@ func (a *API) delegateChild(w http.ResponseWriter, r *http.Request) (*db.Session
 	if !ok {
 		return nil, runnerPrincipal{}, "", false
 	}
-	p := delegatePrincipal(parent)
+	p := a.delegatePrincipalFor(r.Context(), parent, "")
 	child := r.PathValue("child")
 	if !validSessionID(child) {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -158,6 +159,19 @@ func (a *API) handleChildModel(w http.ResponseWriter, r *http.Request) {
 	}
 	if !decodeChildBody(w, r, &request) {
 		return
+	}
+	if request.Model != "" {
+		row, err := db.GetSession(r.Context(), a.dbPool, child)
+		if err != nil || row == nil {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		resolved, problem := a.resolveChildModel(r.Context(), derefOrEmpty(row.Engine), request.Model, a.childHostOfChild(row), p)
+		if problem != nil {
+			writeAPIError(w, problem)
+			return
+		}
+		request.Model = resolved
 	}
 	body, problem := a.SetSessionModel(r.Context(), p, child, request.Model, request.Effort)
 	if problem != nil {

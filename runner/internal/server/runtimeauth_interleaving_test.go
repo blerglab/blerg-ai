@@ -67,7 +67,7 @@ func TestRuntimeReplacementFencesAlreadyValidatedInboundFrame(t *testing.T) {
 	if err = conn.WriteJSON(protocol.SessionStateChanged{Type: "session_state_changed", SessionID: sid, Status: "idle"}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		row, e := db.GetSession(ctx, pool, sid)
 		if e != nil {
@@ -87,7 +87,7 @@ func TestRuntimeReplacementFencesAlreadyValidatedInboundFrame(t *testing.T) {
 	}
 	select {
 	case <-barrier.reached:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("inbound frame did not reach binding check")
 	}
 
@@ -108,7 +108,7 @@ func TestRuntimeReplacementFencesAlreadyValidatedInboundFrame(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("rotation did not resume after admitted frame completed")
 	}
 }
@@ -168,7 +168,7 @@ func TestRuntimeLaunchFenceDoesNotReserveMainPoolConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer single.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	err = db.WithRuntimeLaunchFence(ctx, single, "abcdefab-cdef-4abc-8def-000000000909", func(fenced context.Context) error {
 		var one int

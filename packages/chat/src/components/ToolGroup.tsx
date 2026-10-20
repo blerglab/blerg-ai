@@ -5,9 +5,9 @@ import { memo, useContext, useState } from 'react'
 import {
   OUTPUT_LINE_CAP,
   describeInput,
-  failureLine,
   formatDuration,
   groupStats,
+  groupOutcome,
   outputText,
   previewLine,
   safeJSON,
@@ -50,8 +50,6 @@ function RunClock({ ms, text }: { ms: number; text?: string }) {
   )
 }
 
-const MAX_REVEALED_FAILURES = 5
-
 function Status({ result, running }: { result?: ToolResultPayload; running: boolean }) {
   if (!result) {
     return running
@@ -59,7 +57,7 @@ function Status({ result, running }: { result?: ToolResultPayload; running: bool
       : <span className="tcg-glyph" role="img" aria-label="no result">…</span>
   }
   return result.is_error
-    ? <span className="tcg-glyph tcg-bad" role="img" aria-label="failed">✗</span>
+    ? <span className="tcg-glyph tcg-failed" role="img" aria-label="failed">✗</span>
     : <span className="tcg-glyph tcg-ok" role="img" aria-label="succeeded">✓</span>
 }
 
@@ -74,7 +72,7 @@ function ToolDetail({ entry }: { entry: ToolEntry }) {
     <div className="tcg-detail" data-testid="tool-detail">
       <pre>{safeJSON(entry.call.input)}</pre>
       {result && (
-        <pre className={result.is_error ? 'tcg-out tcg-out-bad' : 'tcg-out'}>
+        <pre className={result.is_error ? 'tcg-out tcg-out-failed' : 'tcg-out'}>
           {`─── result${typeof result.duration_ms === 'number' ? ` (${result.duration_ms}ms)` : ''} ───\n${shown}`}
         </pre>
       )}
@@ -103,7 +101,7 @@ function ToolRow({ entry, open, onToggle, live }: {
   const ms = useRunningFor(entry, live && !entry.result)
   const { summary, shell } = describeInput(call.input)
   return (
-    <div className={`tcg-row ${result?.is_error ? 'tcg-row-bad' : ''}`} data-testid="tool-row" data-call-id={call.call_id}>
+    <div className={`tcg-row ${result?.is_error ? 'tcg-row-failed' : ''}`} data-testid="tool-row" data-call-id={call.call_id}>
       <button type="button" className="tcg-row-head" aria-expanded={open} onClick={onToggle} title={rowTitle(entry)}>
         <Status result={result} running={live} />
         <span className="tcg-name">{call.tool}</span>
@@ -128,7 +126,7 @@ interface ToolGroupProps {
 function sameGroup(a: ToolGroupProps, b: ToolGroupProps): boolean {
   if (a.entries.length !== b.entries.length) return false
   return a.entries.every((e, i) =>
-    e.ev === b.entries[i].ev && e.result === b.entries[i].result &&
+    e.ev === b.entries[i].ev && e.result === b.entries[i].result && e.resultOrder === b.entries[i].resultOrder &&
     a.live.has(e.call.call_id) === b.live.has(e.call.call_id))
 }
 
@@ -165,10 +163,11 @@ export const ToolGroup = memo(function ToolGroup({ entries, live }: ToolGroupPro
   }
 
   const stats = groupStats(entries)
-  const failures = entries.filter(e => e.result?.is_error)
+  const outcome = inFlight ? 'running' : groupOutcome(entries)
   return (
     <div
-      className={`tcg-group ${stats.failed > 0 ? 'tcg-group-bad' : ''}`}
+      className="tcg-group"
+      data-outcome={outcome}
       data-testid="tool-group"
       // Every call the group holds, so a link to one finds the group while it is folded.
       data-call-ids={entries.map(e => e.call.call_id).join(' ')}
@@ -181,15 +180,16 @@ export const ToolGroup = memo(function ToolGroup({ entries, live }: ToolGroupPro
         onClick={() => setOpen(o => !o)}
       >
         <span className="tcg-line">
-          {inFlight
+          {outcome === 'running'
             ? <span className="tcg-spin" role="img" aria-label="running" />
-            : stats.failed > 0
-              ? <span className="tcg-glyph tcg-bad" role="img" aria-label="failed">✗</span>
-              : stats.pending > 0
-                ? <span className="tcg-glyph" role="img" aria-label="no result">…</span>
-                : <span className="tcg-glyph tcg-ok" role="img" aria-label="succeeded">✓</span>}
+            : outcome === 'failed'
+              ? <span className="tcg-glyph tcg-failed" role="img" aria-label="failed">✗</span>
+              : outcome === 'succeeded'
+                ? <span className="tcg-glyph tcg-ok" role="img" aria-label="succeeded">✓</span>
+                : <span className="tcg-glyph" role="img" aria-label={outcome === 'pending' ? 'no result' : 'mixed outcomes'}>…</span>}
           <span className="tcg-title">{summaryText(stats)}</span>
-          {stats.failed > 0 && <span className="tcg-badge" data-testid="tool-fail-badge">✗ {stats.failed} failed</span>}
+          {stats.failed > 0 && <span className={`tcg-succeeded${stats.total - stats.pending - stats.failed > 0 ? ' tcg-succeeded-dominant' : ''}`} data-testid="tool-success-count">{stats.total - stats.pending - stats.failed} succeeded</span>}
+          {stats.failed > 0 && <span className="tcg-badge tcg-badge-quiet" data-testid="tool-fail-badge">{stats.failed} failed</span>}
           {ms !== null
             ? <RunClock ms={ms} text={`${runningLabel(ms)} running`} />
             : stats.hasDuration && <span className="tcg-dur">{formatDuration(stats.durationMs)}</span>}
@@ -203,14 +203,6 @@ export const ToolGroup = memo(function ToolGroup({ entries, live }: ToolGroupPro
           </span>
         )}
       </button>
-      {!open && failures.slice(0, MAX_REVEALED_FAILURES).map(e => (
-        <div key={e.ev.client_event_id} className="tcg-fail" data-testid="tool-fail">
-          <span className="tcg-name">{e.call.tool}</span> {failureLine(e.result)}
-        </div>
-      ))}
-      {!open && failures.length > MAX_REVEALED_FAILURES && (
-        <div className="tcg-fail">+{failures.length - MAX_REVEALED_FAILURES} more failed</div>
-      )}
       {open && <div className="tcg-rows">{rows}</div>}
     </div>
   )

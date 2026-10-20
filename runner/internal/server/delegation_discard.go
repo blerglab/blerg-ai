@@ -1,12 +1,15 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
+
+var errDiscardPending = errors.New("parent discard is pending")
 
 // Discard accepts either the own-parent delegate credential or the signed-in owner.
 // Other users, agent credentials and unrelated children have no authority here.
@@ -61,6 +64,10 @@ func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "session not found")
 		return
 	}
+	if row.ArchivedAt == nil && (parent.DiscardRequestedAt != nil || row.DiscardRequestedAt != nil) {
+		writeError(w, 409, "this child is part of a pending parent discard; retry discarding the parent")
+		return
+	}
 	if row.ArchivedAt == nil {
 		// The same action fence as message/recovery admission covers stop AND archive.
 		// A concurrent input cannot restart a stopped worker between these writes.
@@ -73,7 +80,10 @@ func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
 			if !ownsSession(account, currentParent) {
 				return db.ErrDelegationNotFound
 			}
-			if actor.Kind == sessionDelegateKind && (db.TerminallyEnded(currentParent) || isChildSession(currentParent) || !onDesktopDaemon(currentParent)) {
+			if currentParent.DiscardRequestedAt != nil {
+				return errDiscardPending
+			}
+			if actor.Kind == sessionDelegateKind && (db.TerminallyEnded(currentParent) || isChildSession(currentParent) || !onDesktopDaemon(currentParent) && !onClusterParent(currentParent)) {
 				return db.ErrDelegationEnded
 			}
 			current, err := db.GetSession(ctx, a.dbPool, child)
@@ -83,8 +93,12 @@ func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
 			if current == nil || derefOrEmpty(current.ParentSessionID) != parent.ID || !ownsSession(account, current) {
 				return db.ErrDelegationNotFound
 			}
+			if current.DiscardRequestedAt != nil {
+				return errDiscardPending
+			}
 			if !db.TerminallyEnded(current) {
-				if !terminalSessionStatus(current.Status) && a.hub.FindDaemonForSession(child) == nil {
+				// A cluster child is stopped through its Job, connected or not.
+				if !terminalSessionStatus(current.Status) && a.hub.FindDaemonForSession(child) == nil && derefOrEmpty(current.Runtime) != runnerRuntimeCluster {
 					return db.ErrDelegationNotFound
 				}
 				if err := a.stopSessionWithDelivery(ctx, child, stopEndByRunner(actor), true); err != nil {
@@ -98,6 +112,10 @@ func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
 			row.ArchivedAt = &at
 			return nil
 		})
+		if errors.Is(err, errDiscardPending) {
+			writeError(w, 409, "this child is part of a pending parent discard; retry discarding the parent")
+			return
+		}
 		if err != nil {
 			writeError(w, 503, "could not stop and archive the child; retry discard")
 			return

@@ -33,7 +33,15 @@ export function engineLabel(engine: string): string {
 }
 
 export function runtimeWords(runtime: string): string {
+  if (runtime === 'cluster') return 'on the cluster'
   return runtime === 'daemon' ? 'on your desktop, unsandboxed' : 'in the desktop sandbox'
+}
+
+/** The "Always allow …" button's label and title for a request's engine and runtime. */
+export function alwaysAllowWords(engine: string, runtime: string, daemonName: string): { label: string; title: string } {
+  if (runtime === 'cluster') return { label: `Always allow ${engine} on the cluster`, title: `Applies to ${engine} on the cluster` }
+  if (runtime === 'daemon') return { label: `Always allow ${engine} on this desktop (unsandboxed)`, title: `Applies to ${engine} on ${daemonName}` }
+  return { label: `Always allow ${engine} in the desktop sandbox`, title: `Applies to ${engine} through ${daemonName}` }
 }
 
 function clock(ts: string | number | null | undefined): string {

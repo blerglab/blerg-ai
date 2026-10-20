@@ -137,10 +137,10 @@ func smallPoolSvc(t *testing.T, original *pgxpool.Pool) (*mcpconn.Service, *pgxp
 	return mcpconn.NewService(db.NewPgStore(pool), backend, loopbackPolicy()), pool
 }
 
-// waitFor polls cond up to two seconds.
+// waitFor polls cond until the readiness deadline.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

@@ -268,6 +268,8 @@ func loopbackURL(raw string) (*url.URL, bool) {
 //
 //   - BLERG_BOARD_URL pointing at loopback becomes the board's service URL
 //     (path kept).
+//   - BLERG_RUNNER_BOARD_GATEWAY_URL pointing at loopback becomes the
+//     runner's service URL (path kept): the gateway is on the runner's port.
 //   - When the daemon's own server URL (BLERG_RUNNER_SERVER_URL) is loopback —
 //     the daemon talks to the local desktop stack — it is dropped (a host-side
 //     websocket URL, meaningless inside) and BLERG_RUNNER_SERVER_HTTP is set to
@@ -298,6 +300,12 @@ func sandboxNetworkEnv(env []string) []string {
 				if u.RawQuery != "" {
 					kv += "?" + u.RawQuery
 				}
+			}
+		case strings.HasPrefix(kv, "BLERG_RUNNER_BOARD_GATEWAY_URL="):
+			// The selected board's gateway address, dialled through the server
+			// (MCPGatewayConfig.ViaServer): the runner's own port on the host.
+			if u, loop := loopbackURL(strings.TrimPrefix(kv, "BLERG_RUNNER_BOARD_GATEWAY_URL=")); loop {
+				kv = "BLERG_RUNNER_BOARD_GATEWAY_URL=" + sandboxRunnerURL + u.EscapedPath()
 			}
 		}
 		out = append(out, kv)

@@ -87,3 +87,23 @@ func TopicState(ctx context.Context, tx pgx.Tx, sessionID string) (*AgentEventRo
 func AppendAgentEventTx(ctx context.Context, tx pgx.Tx, sessionID, clientEventID, kind, payload string, ts time.Time) (int64, bool, error) {
 	return appendAgentEvent(ctx, tx, sessionID, clientEventID, kind, payload, ts)
 }
+
+// ListProposalDecidedEvents returns a session's proposal_decided events with seq <= throughSeq, in
+// seq order: the History tab's card chips (migration 067's index).
+func ListProposalDecidedEvents(ctx context.Context, pool *pgxpool.Pool, sessionID string, throughSeq int64) ([]AgentEventRow, error) {
+	rows, err := pool.Query(ctx, `SELECT session_id, seq, client_event_id, kind, payload::text, ts FROM agent_events
+		WHERE session_id = $1 AND seq <= $2 AND kind = 'proposal_decided' ORDER BY seq`, sessionID, throughSeq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentEventRow
+	for rows.Next() {
+		var r AgentEventRow
+		if err := rows.Scan(&r.SessionID, &r.Seq, &r.ClientEventID, &r.Kind, &r.Payload, &r.Ts); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

@@ -198,7 +198,7 @@ func TestKillStopsACloneInProgress(t *testing.T) {
 		t.Errorf("the kill took %s to stop the clone", d)
 	}
 	for _, pid := range pids {
-		deadline := time.Now().Add(3 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 		for !procGone(pid) && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
 		}

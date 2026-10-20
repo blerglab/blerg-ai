@@ -71,10 +71,11 @@ type AgentRecord struct {
 
 	// ClaudeSessionID is Claude Code's own session id as last reported by the engine ("" until
 	// the first turn). It can change: a refused resume starts a fresh conversation.
-	ClaudeSessionID string `json:"claude_session_id,omitempty"`
-	Engine          string `json:"engine,omitempty"`
-	CodexThreadID   string `json:"codex_thread_id,omitempty"`
-	CurrentTurnID   string `json:"current_turn_id,omitempty"`
+	ClaudeSessionID string              `json:"claude_session_id,omitempty"`
+	Engine          string              `json:"engine,omitempty"`
+	CodexThreadID   string              `json:"codex_thread_id,omitempty"`
+	EngineSession   *EngineSessionState `json:"engine_session,omitempty"`
+	CurrentTurnID   string              `json:"current_turn_id,omitempty"`
 	// TurnActive: a turn was running when this was last written.
 	TurnActive bool `json:"turn_active,omitempty"`
 	// ToolRunning: one of the agent's own tool calls had started and not returned when this was

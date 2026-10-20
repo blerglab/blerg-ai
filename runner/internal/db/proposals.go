@@ -80,11 +80,15 @@ type Proposal struct {
 	CreatedAt      time.Time
 	DecidedAt      *time.Time
 	DecidedBy      *string
+	// ApprovedByGrant is the session permission that approved it on its own ("" for a person's
+	// decision or no decision).
+	ApprovedByGrant string
 }
 
 const proposalColumns = `id::text, account_id, COALESCE(session_id::text, ''), COALESCE(cron_id::text, ''),
 	connection_id::text, connection_name, url_snapshot, tool, tool_hash, arguments::text,
-	COALESCE(agent_summary, ''), state, result::text, created_at, decided_at, decided_by`
+	COALESCE(agent_summary, ''), state, result::text, created_at, decided_at, decided_by,
+	COALESCE(approved_by_grant::text, '')`
 
 func scanProposal(row pgx.Row) (*Proposal, error) {
 	var p Proposal
@@ -92,7 +96,7 @@ func scanProposal(row pgx.Row) (*Proposal, error) {
 	var result *string
 	if err := row.Scan(&p.ID, &p.AccountID, &p.SessionID, &p.CronID, &p.ConnectionID, &p.ConnectionName,
 		&p.URLSnapshot, &p.Tool, &p.ToolHash, &args, &p.AgentSummary, &p.State, &result,
-		&p.CreatedAt, &p.DecidedAt, &p.DecidedBy); err != nil {
+		&p.CreatedAt, &p.DecidedAt, &p.DecidedBy, &p.ApprovedByGrant); err != nil {
 		return nil, err
 	}
 	p.Arguments = json.RawMessage(args)
@@ -346,15 +350,47 @@ func transitionOwnedWhere(ctx context.Context, pool *pgxpool.Pool, accountID, id
 // rest get ErrProposalState. A proposal older than ProposalExpiry is refused even when the
 // sweeper has not expired it yet.
 func BeginProposalExecution(ctx context.Context, pool *pgxpool.Pool, accountID, id, decidedBy string) (*Proposal, error) {
+	return BeginProposalExecutionByGrant(ctx, pool, accountID, id, decidedBy, "")
+}
+
+// BeginProposalExecutionByGrant is BeginProposalExecution for an approval a session permission
+// made (grantID; "" for a person's). The grant is recorded with the decision, and the
+// compare-and-set wins only while that grant is live for the proposal's session and owner, so a
+// revoke that commits first stops the approval.
+func BeginProposalExecutionByGrant(ctx context.Context, pool *pgxpool.Pool, accountID, id, decidedBy, grantID string) (*Proposal, error) {
 	return transitionOwnedWhere(ctx, pool, accountID, id, ProposalPending, ProposalExecuting,
-		`, decided_by = $5, decided_at = now()`,
-		fmt.Sprintf(` AND created_at > now() - make_interval(secs => %d)`, int64(ProposalExpiry.Seconds())), decidedBy)
+		`, decided_by = $5, decided_at = now(), approved_by_grant = NULLIF($6, '')::uuid`,
+		fmt.Sprintf(` AND created_at > now() - make_interval(secs => %d)`, int64(ProposalExpiry.Seconds()))+liveGrantGuard("$6"), decidedBy, grantID)
+}
+
+// liveGrantGuard is the CAS condition that the grant named by param (or none) still covers this
+// proposal: live (not revoked; its session still the owner's, not discarded, archived or ended for
+// good, and no discard of its parent) and of exactly the proposal's scope (its board, or its
+// connection, tool and pinned definition).
+func liveGrantGuard(param string) string {
+	return ` AND (` + param + ` = '' OR EXISTS (SELECT 1` + proposalGrantFrom + `
+		WHERE g.id = NULLIF(` + param + `, '')::uuid AND g.account_id = mcp_proposals.account_id AND g.session_id = mcp_proposals.session_id
+		  AND ((g.kind = 'board_file' AND mcp_proposals.connection_id = '` + BoardFilingConnectionID + `'::uuid AND g.board_id = mcp_proposals.arguments->>'board_id')
+		    OR (g.kind = 'mcp_tool' AND g.connection_id = mcp_proposals.connection_id AND g.tool = mcp_proposals.tool AND g.tool_hash = mcp_proposals.tool_hash))
+		  AND ` + proposalGrantLiveSQL + `))`
 }
 
 // RejectProposal moves a pending proposal to rejected.
 func RejectProposal(ctx context.Context, pool *pgxpool.Pool, accountID, id, decidedBy string) (*Proposal, error) {
+	return RejectProposalWithNote(ctx, pool, accountID, id, decidedBy, "")
+}
+
+// RejectProposalWithNote is RejectProposal with the person's reason, kept as the result
+// ({"note": …}) so the session's agent is told why.
+func RejectProposalWithNote(ctx context.Context, pool *pgxpool.Pool, accountID, id, decidedBy, note string) (*Proposal, error) {
+	var result *string
+	if note != "" {
+		raw, _ := json.Marshal(map[string]string{"note": note})
+		s := string(raw)
+		result = &s
+	}
 	return transitionOwned(ctx, pool, accountID, id, ProposalPending, ProposalRejected,
-		`, decided_by = $5, decided_at = now()`, decidedBy)
+		`, decided_by = $5, decided_at = now(), result = $6::jsonb`, decidedBy, result)
 }
 
 // ResolveProposal records a human's decision about a proposal whose outcome was unknown: what
@@ -410,7 +446,7 @@ func ReleaseProposal(ctx context.Context, pool *pgxpool.Pool, id string) (*Propo
 	if !proposalUUID.MatchString(id) {
 		return nil, ErrProposalNotFound
 	}
-	p, err := scanProposal(pool.QueryRow(ctx, `UPDATE mcp_proposals SET state = 'pending', decided_at = NULL, decided_by = NULL, result = NULL
+	p, err := scanProposal(pool.QueryRow(ctx, `UPDATE mcp_proposals SET state = 'pending', decided_at = NULL, decided_by = NULL, result = NULL, approved_by_grant = NULL
 		WHERE id = $1::uuid AND state = 'executing' RETURNING `+proposalColumns, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProposalState

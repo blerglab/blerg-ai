@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { usePrefersReducedMotion } from '../hooks/useTicker'
 import { formatElapsed } from '../model/timeLabel'
 import { WAITING_ON_INITIAL, nextWaitingOn, runningLabel, type WaitingOn } from '../model/liveCalls'
-import { backgroundLabel } from '../model/backgroundTasks'
+import { backgroundLabel, backgroundSummary } from '../model/backgroundTasks'
 
 interface Props {
   since: number
@@ -20,7 +20,7 @@ interface Props {
   activity?: string | null
   /** Background tasks running: unless the line names a call, it names them instead of a bare
    *  "Working…". */
-  background?: { count: number; description: string } | null
+  background?: { count: number; description: string; command?: string } | null
 }
 
 export default function WorkingIndicator({ since, now, compact, waitingOn, background, activity }: Props) {
@@ -31,34 +31,41 @@ export default function WorkingIndicator({ since, now, compact, waitingOn, backg
   const next = nextWaitingOn(held, waitingOn ?? null, now)
   if (next !== held) setHeld(next)
   const shownOn = next.shown
+  const description = background?.count === 1 && !shownOn && !activity ? background.description : ''
+  const command = background?.count === 1 && !shownOn && !activity ? background.command : ''
+  const details = command || (description && description !== backgroundSummary(description) ? description : '')
   return (
     <div
       className={`agent-working${compact ? ' compact' : ''}${reduced ? ' static' : ''}`}
-      role="status"
-      aria-live="polite"
       data-testid={compact ? 'working-compact' : 'working'}
       data-reduced-motion={reduced ? 'true' : 'false'}
       data-background={background && !shownOn && !activity ? 'true' : undefined}
       data-activity={activity ? 'true' : undefined}
     >
       <span className="agent-dots" aria-hidden="true"><i /><i /><i /></span>
-      <span className="agent-working-text">
-        <span data-testid="working-words">
-          {activity || (background && !shownOn ? backgroundLabel(background.count, background.description) : 'Working…')}
-        </span>{' '}
-        {/* The clock is visible but not re-announced every second. */}
-        <span className="agent-working-time" aria-hidden="true">{elapsed}</span>
-        {shownOn && (
-          <span
-            key={`${shownOn.tool}@${shownOn.startedAt}`}
-            className="agent-working-time agent-waiting-on"
-            aria-hidden="true"
-            data-testid="waiting-on"
-          >
-            {' · '}waiting on {shownOn.tool}{shownOn.detail ? ` · ${shownOn.detail}` : ''} {runningLabel(now - shownOn.startedAt)}
-          </span>
-        )}
-      </span>
+      <div className="agent-working-content">
+        <span className="agent-working-text" role="status" aria-live="polite">
+          <span data-testid="working-words">
+            {activity || (background && !shownOn ? backgroundLabel(background.count, background.description) : 'Working…')}
+          </span>{' '}
+          {/* The clock is visible but not re-announced every second. */}
+          <span className="agent-working-time" aria-hidden="true">{elapsed}</span>
+          {shownOn && (
+            <span
+              key={`${shownOn.tool}@${shownOn.startedAt}`}
+              className="agent-working-time agent-waiting-on"
+              aria-hidden="true"
+              data-testid="waiting-on"
+            >
+              {' · '}waiting on {shownOn.tool}{shownOn.detail ? ` · ${shownOn.detail}` : ''} {runningLabel(now - shownOn.startedAt)}
+            </span>
+          )}
+        </span>
+        {details && <details key={details} className="agent-working-details">
+          <summary>Task details</summary>
+          <pre tabIndex={0} aria-label="Background task details">{details}</pre>
+        </details>}
+      </div>
     </div>
   )
 }

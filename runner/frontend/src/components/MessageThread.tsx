@@ -27,7 +27,7 @@ function MessageBubble({ message, hideSessionLabel }: MessageBubbleProps) {
   const [sending, setSending] = useState(false)
   const addToast = useToastStore(s => s.addToast)
 
-  const isOpen = message.status === 'open'
+  const isOpen = !session?.archived_at && message.status === 'open'
   const kindColor = KIND_COLORS[message.kind] ?? 'var(--fog-dim)'
   // A real reply: answered + non-empty string (not null, not '')
   const hasReply = typeof message.answer === 'string' && message.answer.length > 0

@@ -9,6 +9,7 @@ change. The wire contract and configuration are in [the Runner guide](../../runn
 | Engine | Source | Evidence and limits |
 |---|---|---|
 | Claude Code | Persistent stream-json control request `request.subtype: mcp_status`; response `response.mcpServers` | Installed CLI 2.1.302: an isolated local MCP fixture moved from pending/tools 0 to connected/tools 1 without initialize or any user prompt. Bundled native SDK and handler confirm this reads current clients. Sandbox images currently pin 2.1.284; the actual installed-CLI probe does not claim to verify that older binary. Synthetic tests exercise sandbox command routing. |
+| Hermes | Native cached `mcp.servers.status` and loaded `session.info.mcp_servers` | Desktop gateway contracts 6 and 8. Reads never connect/probe/start auth. `connecting`/`configured` remain pending; `lazy` stays explicitly on demand and settles without claiming a live connection. Native process generations invalidate prior inventory. |
 | Codex | App-server `mcpServerStatus/list`, current `threadId`, paginated `data` and `runtimeStatus` | Installed CLI 0.162.1 generated protocol types. Synthetic native app-server fixtures verify pending → connected, pagination, initialization and native process replacement. Global pre-thread inventory remains provisional, even when empty. No provider/model call was used. |
 
 Legacy Claude per-turn mode has no persistent read-only control source. An explicit

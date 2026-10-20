@@ -41,9 +41,10 @@ func newTestCore(t *testing.T, pub ed25519.PublicKey, revocations []revocationEn
 func TestClientVerifiesCoreIssuedToken(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	srv := newTestCore(t, pub, nil)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
-	c := New(srv.URL)
+	c := NewWithContext(t.Context(), srv.URL)
+	t.Cleanup(c.Close)
 	if c == nil {
 		t.Fatal("New returned nil for non-empty baseURL")
 	}
@@ -71,9 +72,10 @@ func TestClientVerifiesCoreIssuedToken(t *testing.T) {
 func TestClientHonorsRevocations(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	srv := newTestCore(t, pub, []revocationEntry{{Kind: "sub", Value: "svc:blerg-board"}})
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
-	c := New(srv.URL)
+	c := NewWithContext(t.Context(), srv.URL)
+	t.Cleanup(c.Close)
 	notSensitive := func(string) bool { return false }
 	now := time.Now().Unix()
 
@@ -105,9 +107,10 @@ func TestClientRevocationScopedByIssuedAt(t *testing.T) {
 		{Kind: "sub", Value: "legacy"},
 		{Kind: "kid", Value: "k-dead", RevokedAt: revokedAt},
 	})
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
-	c := New(srv.URL)
+	c := NewWithContext(t.Context(), srv.URL)
+	t.Cleanup(c.Close)
 	notSensitive := func(string) bool { return false }
 	exp := time.Now().Add(time.Hour).Unix()
 	verify := func(sub string, iat int64) error {

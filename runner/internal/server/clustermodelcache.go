@@ -93,7 +93,7 @@ func (a *API) clusterModelSnapshotFor(ctx context.Context, engine, accountID str
 		empty.Error = "Cluster runtime is unavailable"
 		return empty
 	}
-	key := clusterModelCacheKey{accountID, engine, jm.Image}
+	key := clusterModelCacheKey{accountID, engine, jm.catalogImageKey(engine)}
 	c := &a.clusterModels
 	c.mu.Lock()
 	if c.entries == nil {

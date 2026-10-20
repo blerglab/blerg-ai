@@ -29,3 +29,13 @@ func TestDescriptorsAreIndependentAndCapabilitiesExplicit(t *testing.T) {
 		t.Fatal("unknown engine accepted")
 	}
 }
+
+func TestHermesAdvertisesOnlyImplementedOptionalFeatures(t *testing.T) {
+	d, ok := Lookup("hermes")
+	if !ok || !d.Steering {
+		t.Fatal("native steering missing")
+	}
+	if d.Restricted || d.Plugins || d.LimitResume || len(d.UsageWindows) > 0 {
+		t.Fatal("unsupported Hermes authority or billing features advertised")
+	}
+}

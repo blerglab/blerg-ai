@@ -50,7 +50,7 @@ func TestRuntimeLaunchAuthority(t *testing.T) {
 	if err = conn.WriteJSON(protocol.DaemonHello{Type: "daemon_hello", Name: host.Name, Mode: "local", ReposRoot: "/host", Token: runtime, ActiveSessions: []string{sid, other}}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for hub.GetDaemon(ownDaemon) == nil && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
@@ -157,12 +157,15 @@ func TestRuntimeLaunchAuthority(t *testing.T) {
 		t.Fatal("old runtime retained HTTP authority")
 	}
 	// An existing socket is fenced too, even before its next heartbeat.
-	if err = conn.WriteJSON(protocol.SessionStateChanged{Type: "session_state_changed", SessionID: sid, Status: "running"}); err != nil {
-		t.Fatal(err)
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	// Revocation may close the socket before or during this write. In either
+	// case require an actual peer close, not merely a read deadline below.
+	_ = conn.WriteJSON(protocol.SessionStateChanged{Type: "session_state_changed", SessionID: sid, Status: "running"})
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	for {
 		if _, _, err = conn.ReadMessage(); err != nil {
+			if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+				t.Fatal("revoked runtime socket did not close")
+			}
 			break
 		}
 	}

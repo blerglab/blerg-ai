@@ -73,6 +73,8 @@ services:
       # and the local (JWT signing) key. Generated once by blerg-up.sh into .env.
       BLERG_CORE_INTERNAL_KEY: ${BLERG_CORE_INTERNAL_KEY:-}
       BLERG_CORE_LOCAL_KEY: ${BLERG_CORE_LOCAL_KEY:-}
+      # The key the board presents to mint "Run as me" automation tokens (opens nothing else).
+      BLERG_CORE_BOARD_MINT_KEY: ${BLERG_CORE_BOARD_MINT_KEY:-}
       # The public URL humans and browsers use to reach core (host-side, not
       # the in-cluster name — matters for links/redirects core emits).
       BLERG_CORE_PUBLIC_URL: http://localhost:${BLERG_PORT_CORE:-8081}
@@ -86,6 +88,17 @@ services:
       BLERG_CORE_ALLOWED_RETURN_ORIGINS: ${BLERG_CORE_ALLOWED_RETURN_ORIGINS:-http://localhost:${BLERG_PORT_CORE:-8081},http://localhost:${BLERG_PORT_BOARD:-8082},http://localhost:${BLERG_PORT_RUNNER:-8083}}
       BLERG_CORE_ORIGIN_AUDIENCES: ${BLERG_CORE_ORIGIN_AUDIENCES:-http://localhost:${BLERG_PORT_CORE:-8081}=blerg-core,http://localhost:${BLERG_PORT_BOARD:-8082}=blerg-board,http://localhost:${BLERG_PORT_RUNNER:-8083}=blerg-runner}
       BLERG_CORE_COOKIE_SECURE: "false"  # desktop only: Safari drops Secure cookies on http://localhost. Never on a public host.
+      # First-run setup: on a fresh install the first account is created at
+      # http://localhost:<core port>/setup. With core published on loopback only (the default
+      # above) nobody else can reach it, so that page needs no setup code when opened on
+      # localhost. Core ignores the flag unless the published address below is a loopback one:
+      # with BLERG_BIND_ADDR=0.0.0.0 the setup link from `blerg-core setup-link` is required.
+      # Set BLERG_SETUP_ALLOW_LOCAL=false in .env to require a setup code even here.
+      BLERG_SETUP_ALLOW_LOCAL: ${BLERG_SETUP_ALLOW_LOCAL:-true}
+      BLERG_SETUP_PUBLISHED_ADDR: ${BLERG_BIND_ADDR:-127.0.0.1}
+      # Core runs in this container, so a connection from the host's own loopback arrives from
+      # the container network's gateway; trust that peer for the code-less setup above.
+      BLERG_SETUP_TRUST_DOCKER_GATEWAY: "1"
       # GitHub owner/repo marketplaces an account may register always-on
       # plugins from (comma-separated, "*" = any). Empty = the official
       # anthropics/claude-plugins-official only. Keep equal to the runner's.
@@ -135,6 +148,10 @@ services:
       # Register with, and validate tokens against, the control plane.
       BLERG_CORE_URL: http://blerg-core:8080
       BLERG_CORE_REGISTER_KEY: ${BLERG_CORE_REGISTER_KEY:-}
+      # "Run as me": the board mints a person's run-sessions token through core in one click,
+      # so Run this card works out of the box. New boards run as their creator unless set false.
+      BLERG_CORE_BOARD_MINT_KEY: ${BLERG_CORE_BOARD_MINT_KEY:-}
+      BLERG_BOARD_DEFAULT_RUN_AS_CREATOR: ${BLERG_BOARD_DEFAULT_RUN_AS_CREATOR:-true}
       BLERG_CORE_PUBLIC_URL: http://localhost:${BLERG_PORT_CORE:-8081}
       BLERG_BOARD_SELF_URL: http://blerg-board:8080
       BLERG_BOARD_PUBLIC_URL: http://localhost:${BLERG_PORT_BOARD:-8082}
@@ -244,6 +261,7 @@ services:
       # Never add a published port for it. Unset GW_ADDR to turn the gateway off.
       BLERG_RUNNER_MCP_GW_ADDR: ${BLERG_RUNNER_MCP_GW_ADDR-:8090}
       BLERG_RUNNER_MCP_GW_URL: ${BLERG_RUNNER_MCP_GW_URL-http://blerg-runner:8090}
+      BLERG_RUNNER_MCP_GW_PUBLIC: ${BLERG_RUNNER_MCP_GW_PUBLIC-on}
       # Hostnames an MCP connection may reach over plain http, or although they resolve to a
       # private/loopback address (comma-separated). Empty = https and public addresses only.
       # Core reads its own pair (below, on blerg-core). List only hosts you run yourself.

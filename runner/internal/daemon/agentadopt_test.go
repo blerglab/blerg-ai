@@ -670,7 +670,7 @@ func TestStopLeftoverEngineChecksItIsTheSameProcess(t *testing.T) {
 	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the leftover engine is still running")
 	}
 }

@@ -441,6 +441,8 @@ func TestReelJSONShape(t *testing.T) {
 		s.sub("toolu_1", "Implement task 3")
 		s.subEnd(agent.SubagentPayload{ChildID: "toolu_1", AgentType: "general-purpose", Model: "claude-sonnet-5", Summary: "ok",
 			Usage: &agent.Usage{InputTokens: 1, OutputTokens: 2}, ToolUses: 37, DurationMs: 412000})
+		s.add("proposal_decided", map[string]any{"proposal_id": "p1", "kind": "board_file", "state": "done", "auto": true,
+			"card": map[string]any{"id": "c1", "board_id": "b1", "board_name": "Fixture board", "number": 12, "title": "Badge is stale", "type": "bug", "priority": "high", "column": "Backlog"}})
 		s.doneWith("tp_5f1c2a9e", "Build the History tab", "Shipped on main", "1a2b3c4", "9f8e7d6")
 	})
 	s.turn("Thanks, and check the badge", func() {
@@ -475,8 +477,8 @@ func TestReelJSONShape(t *testing.T) {
 		t.Errorf("unmarked = %v", m["unmarked"])
 	}
 	counts := m["topics"].([]any)[0].(map[string]any)["counts"].(map[string]any)
-	if counts["commits"] != float64(2) || len(counts) != 3 {
-		t.Errorf("counts = %v, want documents, agents and commits", counts)
+	if counts["commits"] != float64(2) || counts["cards"] != float64(1) || len(counts) != 4 {
+		t.Errorf("counts = %v, want documents, agents, commits and cards", counts)
 	}
 }
 
@@ -712,4 +714,39 @@ func TestAResumedSubagentIsARowOfItsOwn(t *testing.T) {
 	}
 	s.subEnd(agent.SubagentPayload{ChildID: "S1", Summary: "fixed", Resumed: true, ResumedFrom: "A1"})
 	eq(t, "after its end", rows(s.live().Topics[0])[0], "S1|Implement task 3 (resumed)|done")
+}
+
+// A card an approved proposal created is a chip of the topic that was open, else of the unmarked
+// summary; other outcomes (rejected, failed, unknown) and malformed cards are no chip.
+func TestReelCardsFromApprovedProposals(t *testing.T) {
+	card := func(state string, number int) map[string]any {
+		return map[string]any{"proposal_id": "p-" + state, "kind": "board_file", "state": state,
+			"card": map[string]any{"id": "c", "board_id": "b", "board_name": "Board", "number": number, "title": "T"}}
+	}
+	s := newScript()
+	s.add("proposal_decided", card("done", 3)) // before any topic: unmarked
+	s.turn("Do the thing", func() {
+		s.start("tp_1", "Do the thing")
+		s.add("proposal_decided", card("done", 4))
+		s.add("proposal_decided", card("rejected", 5))
+		s.add("proposal_decided", card("unknown", 6))
+		s.add("proposal_decided", card("done", 0))
+		s.done("tp_1", "Do the thing", "Done")
+	})
+	r := s.live()
+	if len(r.Topics) != 1 || r.Topics[0].Counts.Cards != 1 {
+		t.Fatalf("topic cards = %+v", r.Topics)
+	}
+	var got *Card
+	for _, it := range r.Topics[0].Items {
+		if it.Type == "card" {
+			got = it.Card
+		}
+	}
+	if got == nil || got.Number != 4 || got.BoardName != "Board" || got.ProposalID != "p-done" {
+		t.Fatalf("topic card = %+v", got)
+	}
+	if r.Unmarked == nil || len(r.Unmarked.Cards) != 1 || r.Unmarked.Cards[0].Card.Number != 3 || len(r.Unmarked.Subagents) != 0 {
+		t.Fatalf("unmarked = %+v", r.Unmarked)
+	}
 }

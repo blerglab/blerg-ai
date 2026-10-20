@@ -50,7 +50,9 @@ func mcpCoreAuth(t *testing.T, pub ed25519.PublicKey, kid string) *coreauth.Clie
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return coreauth.New(srv.URL)
+	client := coreauth.NewWithContext(t.Context(), srv.URL)
+	t.Cleanup(client.Close)
+	return client
 }
 
 // One agent token's tools cannot touch another owner's session, and say so

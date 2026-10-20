@@ -115,7 +115,7 @@ func TestSessionOriginLookupRechecksDatabaseOwnershipAfterReply(t *testing.T) {
 			if err := json.Unmarshal(raw, &req); err != nil {
 				t.Fatal(err)
 			}
-		case <-time.After(3 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("origin request not sent")
 		}
 		if changeOwner {

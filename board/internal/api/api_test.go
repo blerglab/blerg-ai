@@ -70,7 +70,7 @@ func wireFakeCore(t *testing.T, a *auth.Auth) {
 	core := httptest.NewServer(mux)
 	t.Cleanup(core.Close)
 	c := coreauth.NewClient(core.URL)
-	c.Start(context.Background()) // synchronous initial fetch before backgrounding refreshes
+	c.Start(t.Context()) // synchronous fetch; pollers stop before test server cleanup
 	a.SetCore(c)
 }
 

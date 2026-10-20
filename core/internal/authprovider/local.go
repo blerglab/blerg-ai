@@ -6,8 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -19,7 +19,12 @@ import (
 // Local is the "local" (password) auth provider: it validates credentials
 // submitted via a same-origin form POST against bcrypt hashes stored in the
 // accounts table.
-type Local struct{ st db.Store }
+type Local struct {
+	st db.Store
+	// setupClosed latches once an account is seen to exist: nothing in core deletes accounts, so
+	// first-run setup can never reopen while the process runs (setup.go).
+	setupClosed atomic.Bool
+}
 
 // NewLocal constructs a Local provider backed by st.
 func NewLocal(st db.Store) *Local { return &Local{st: st} }
@@ -64,44 +69,6 @@ func mustGenerateDummyHash() string {
 	return string(h)
 }
 
-// EnsureBootstrapAdmin seeds exactly one admin account, with a random
-// password, the first time the accounts table is empty. Idempotent: a
-// non-empty table is a no-op. The password is logged once with a distinct,
-// greppable prefix (not written to a local file — see spec §3: this
-// process's container filesystem in the k8s deployment path is ephemeral
-// and won't survive a restart before an operator reads it).
-func (l *Local) EnsureBootstrapAdmin(ctx context.Context) error {
-	var count int
-	if err := l.st.Pool().QueryRow(ctx, `SELECT count(*) FROM accounts`).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-	pw := make([]byte, 18)
-	if _, err := rand.Read(pw); err != nil {
-		return err
-	}
-	password := base64.RawURLEncoding.EncodeToString(pw)
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-	subjectBytes := make([]byte, 9)
-	if _, err := rand.Read(subjectBytes); err != nil {
-		return err
-	}
-	subject := base64.RawURLEncoding.EncodeToString(subjectBytes)
-	_, err = l.st.Pool().Exec(ctx,
-		`INSERT INTO accounts (provider, provider_subject, role, must_change_password, password_hash)
-		 VALUES ('local', $1, 'admin', true, $2)`, subject, string(hash))
-	if err != nil {
-		return err
-	}
-	log.Printf("BLERG_BOOTSTRAP_ADMIN_PASSWORD=%s (username: %s; you must change the password on first login and can pick your own username then)", password, subject)
-	return nil
-}
-
 // Callback checks a submitted provider_subject/password form against the
 // bcrypt hash stored for that account. It fails closed: any error (missing
 // account, malformed form, wrong password) is reported as
@@ -119,11 +86,11 @@ func (l *Local) Callback(ctx context.Context, r *http.Request) (Account, error) 
 	password := r.FormValue("password")
 
 	var acc Account
-	// accounts.email is nullable (EnsureBootstrapAdmin's own INSERT never
-	// sets it), so scan into a *string rather than Account.Email directly —
+	// accounts.email is nullable (the local provider's own INSERTs never
+	// set it), so scan into a *string rather than Account.Email directly —
 	// scanning a SQL NULL into a non-pointer Go string errors, which would
 	// otherwise fail every login for an account with no email, including
-	// the bootstrap admin, before the password comparison ever ran.
+	// the first admin, before the password comparison ever ran.
 	var email *string
 	var hash string
 	err := l.st.Pool().QueryRow(ctx,
@@ -174,6 +141,17 @@ func (l *Local) ChangePassword(ctx context.Context, accountID, oldPassword, newP
 // here to check). The password is checked, and the new hash computed, before the row lock is
 // taken (see lockUnchanged).
 func (l *Local) ChangePasswordAndSubject(ctx context.Context, accountID, oldPassword, newPassword, newSubject string) (string, error) {
+	return l.ChangePasswordAndSubjectWith(ctx, accountID, oldPassword, newPassword, newSubject, nil)
+}
+
+// ChangePasswordAndSubjectWith is ChangePasswordAndSubject with first, when non-nil, run as the
+// first statement of the change's transaction, before the account row is locked. Whatever first
+// writes commits with the new password or not at all: the password-change endpoint passes the
+// identity service's RevokeAccountEverywhereTx, so a new password never stands while the old
+// sessions and tokens still work, and a failed revocation leaves the old password in place for a
+// retry. An error from first is returned as is (after the transaction is rolled back).
+func (l *Local) ChangePasswordAndSubjectWith(ctx context.Context, accountID, oldPassword, newPassword, newSubject string,
+	first func(ctx context.Context, tx pgx.Tx) error) (string, error) {
 	if len(newPassword) < 12 || len(newPassword) > 72 {
 		return "", ErrWeakPassword
 	}
@@ -205,6 +183,11 @@ func (l *Local) ChangePasswordAndSubject(ctx context.Context, accountID, oldPass
 		return "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if first != nil {
+		if err := first(ctx, tx); err != nil {
+			return "", err
+		}
+	}
 	if err := lockUnchanged(ctx, tx, accountID, acc); err != nil {
 		return "", err
 	}
@@ -240,7 +223,7 @@ var ErrUsernameFromProvider = errors.New("username comes from your sign-in provi
 // lowercase letters, digits, '.', '_' and '-', starting with a letter or digit. Uppercase is
 // refused rather than folded, so what is stored is exactly what was typed. It applies to a new
 // name only — a self-chosen one, or one an operator passes to `users create` — not to a name
-// already stored (the random bootstrap one, or one created before the rule existed).
+// already stored (one created before the rule existed, such as an old random bootstrap name).
 func ValidateUsername(s string) error {
 	if len(s) < 3 || len(s) > 64 {
 		return ErrInvalidUsername
@@ -384,8 +367,7 @@ func oneTimePassword() (string, error) {
 // once to stdout and discards it). role must be "admin" or "member"; any other value is
 // rejected without touching the database, and so is a subject that fails ValidateUsername
 // (ErrInvalidUsername), so operator-created names follow the same rules as self-chosen ones
-// (EnsureBootstrapAdmin's random subject does not go through here; it is replaced at first
-// login). A duplicate provider_subject is reported as
+// (a name stored before the rules existed is not re-checked). A duplicate provider_subject is reported as
 // ErrSubjectExists via the ON CONFLICT DO NOTHING + RowsAffected check below, relying on the
 // UNIQUE (provider, provider_subject) constraint from migration 005_identity_accounts.sql
 // (verified present) rather than a separate existence check, so the create is a single atomic

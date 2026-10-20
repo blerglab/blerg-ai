@@ -108,6 +108,76 @@ in that session are listed without a badge. Changes expire after 7 days. See
 [`mcp-connections.md`](mcp-connections.md#tools-are-off-by-default) for the per-connection
 setting that accepts them automatically.
 
+## In the chat
+
+A proposal from a session also shows in that session's chat, as a card like the one a session's
+request to start another session gets: what the session wants (file a card on a board, or run an
+MCP tool), the board or connection, and the title and a short summary. Only you, the session's
+owner, can read the proposal and decide; anyone else who can see the session sees only that it waits
+for you. Once a card is created, though, everyone who can see the session sees its compact ticket
+(board, number, title, type, priority and column, never the body) in the chat and in History. A
+private session is visible to you alone. The card offers:
+
+- **Approve**: the same approval as on the Proposals page, of exactly the draft or arguments shown.
+- **Edit** (board cards): the Proposals page's draft editor in a sheet over the session. Save the
+  draft, review it, then approve it from the sheet.
+- **Reject**: nothing is written or run.
+- **Allow for this session**: approves this one and lets this session's later proposals of exactly
+  the same scope be approved without asking: for a board card, cards on that one board; for an MCP
+  call, that one tool of that one connection. Another board or another tool still asks.
+
+Once decided, the card says how: approved, rejected, failed, unknown, or approved by a session
+permission. A card that was created follows as a compact ticket (board, number, title, type and
+priority, column) with **Open**, which opens it on its Board page. The card also appears as a chip
+in the session panel's History tab, in the topic that was open when it was filed. Approving or
+rejecting in the chat or on the Proposals page is the same decision: whichever comes first wins and
+the other shows it.
+
+## Session permissions
+
+A session permission is what **Allow for this session** creates; you can also give one in the
+session panel (**Live → Permissions → Manage**) or before the session starts (the launch sheet's
+**Permissions…**). It is narrow and short-lived on purpose:
+
+- One scope: one board, or one connection's one tool, in one session. It is never broader than the
+  proposal or toggle that created it.
+- Only you, signed in, can create or revoke it; the agent cannot, and neither can a token.
+- It ends with the session, and discarding a parent session ends its children's permissions too.
+  **Revoke** (the × on its chip under Live → Permissions, or Revoke in the Permissions dialog) stops it at once, also for a proposal already queued.
+- An automatic approval is your approval, made with the sign-in you gave the permission from: every
+  check above still runs (your access to the board, the connection's address and the tool's
+  definition), and a refusal leaves the proposal pending for you. Signing out stops automatic
+  approvals for permissions given from that sign-in. Each automatic approval records the permission
+  that allowed it, and the Proposals page says "Approved by a session permission".
+- Cron sessions, restricted sessions, board sessions and sessions an agent token started cannot hold
+  one: their proposals always wait for you. Plugin requests are never allowed for a session.
+- A permission for an MCP tool holds the tool's definition it was given on. If the server changes
+  the tool (even when the session accepts the change), the permission stops approving and the panel
+  says "tool changed": allow it again to approve the new version.
+- One permission approves at most 20 proposals an hour (`BLERG_RUNNER_GRANT_HOURLY_CAP` changes
+  the number). Past that, proposals wait for you, and the card and the agent say why.
+- The panel lists a permission whose sign-in has ended under **Not approving now** ("Needs you signed
+  in"); allow it again to renew it from your current sign-in.
+- If you choose **Allow for this session** and the approval itself is then refused, the permission
+  still stands; the card says so and links to where you revoke it.
+
+The same draft filed again from the same session within 15 minutes is the same filing: the agent
+gets the earlier proposal and where it stands (pending, filed, or not known yet), never a second
+card.
+
+When a permission approves an agent's filing at once, `blerg-runner ticket file` prints the card it
+filed instead of "Ticket proposed", and an MCP call returns the tool's result.
+
+## The agent hears the outcome
+
+When a proposal from a session is decided (by you, by a session permission, or when an approval ends
+failed or not known), the session's agent gets a message that starts "Proposal <id>": approved, with
+the card it created ("Launch Night #6 'Live check' created"); rejected, with your note when you gave
+one; failed; or could not be confirmed (do not file it again). The agent can check at any time with
+`blerg-runner ticket status <id>` (exit 0 done, 3 still waiting, 4 not done, 5 not known yet), which
+reads only its own session's proposals. An MCP tool's result is not put in the message; the status
+shows it.
+
 ## Where to manage them
 
 The runner UI has a **Proposals** page, with a count badge in the sidebar that counts proposals

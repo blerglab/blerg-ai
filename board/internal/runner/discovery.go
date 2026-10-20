@@ -40,6 +40,17 @@ type LaunchOptions struct {
 	Runtime    string         `json:"runtime"`
 	Engines    []LaunchEngine `json:"engines"`
 	Error      string         `json:"error,omitempty"`
+	// Targets are where a session can run: the cluster and each connected
+	// daemon with the runtimes it offers.
+	Targets []LaunchTarget `json:"targets,omitempty"`
+}
+
+// LaunchTarget is one execution target the runner offers: a daemon (by id)
+// or, without one, the cluster.
+type LaunchTarget struct {
+	DaemonID string   `json:"daemon_id,omitempty"`
+	Name     string   `json:"name"`
+	Runtimes []string `json:"runtimes"`
 }
 type Discoverer interface {
 	Discover(context.Context, string, string, bool) (LaunchOptions, error)

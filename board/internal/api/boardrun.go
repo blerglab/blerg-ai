@@ -403,7 +403,7 @@ func (a *API) dispatchBoardLocked(ctx context.Context, runID int64, boardID stri
 			_, _ = a.Pool.Exec(ctx, `UPDATE cards SET stuck_at = now() WHERE id = $1`, card.ID)
 			continue
 		}
-		if _, _, spawnErr := a.spawnSession(ctx, board, card, "worker", prompt, ""); spawnErr != nil {
+		if _, _, spawnErr := a.spawnSession(ctx, board, card, "worker", prompt); spawnErr != nil {
 			log.Printf("board run: spawn for card #%d: %v", card.Number, spawnErr)
 			if isAutomationErr(spawnErr) {
 				// The board cannot start ANY session (no automation token,
@@ -569,7 +569,8 @@ func (a *API) reapQuietWorkers(ctx context.Context, runID int64, board db.Board,
 			prompt, err := a.buildCardPrompt(board, card,
 				"A previous session on this card went quiet without finishing. Read the card's comments and any existing branch/PR first, continue from where it left off, and finish the card.")
 			if err == nil {
-				_, _, spawnErr := a.spawnSession(ctx, board, card, "worker", prompt, "")
+				// A respawn keeps where the person chose to run the card.
+				_, _, spawnErr := a.spawnSessionAt(ctx, board, card, "worker", prompt, "", a.cardRunTarget(ctx, board, card.ID))
 				if spawnErr == nil {
 					// detached for the same reason as the claim in dispatch:
 					// the attempt is spent whatever happens to this context,
@@ -1932,7 +1933,7 @@ func (a *API) wakeWorkerForConflict(ctx context.Context, board db.Board, card db
 		a.noteNoWorkerOnConflict(ctx, card, "blerg-board could not render the worker prompt")
 		return
 	}
-	if _, _, err := a.spawnSession(ctx, board, card, "worker", prompt, ""); err != nil {
+	if _, _, err := a.spawnSessionAt(ctx, board, card, "worker", prompt, "", a.cardRunTarget(ctx, board, card.ID)); err != nil {
 		log.Printf("conflict bounce: spawn for card #%d: %v", card.Number, err)
 		a.noteNoWorkerOnConflict(ctx, card, "the worker session would not start ("+err.Error()+")")
 		return

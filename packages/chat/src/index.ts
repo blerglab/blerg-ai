@@ -41,6 +41,7 @@ export type {
   SubscribeAgentEvents,
   ToolCallPayload,
   TopicPayload,
+  ChecklistAssignee,
   ChecklistItem,
   ChecklistPayload,
   Ticket,
@@ -57,6 +58,14 @@ export type {
   DelegationChoice,
   DelegationDecidedPayload,
   DelegationRequestPayload,
+  FiledCard,
+  ProposalDecidedPayload,
+  ProposalDetail,
+  ProposalKind,
+  ProposalRequestPayload,
+  ProposalState,
+  ReviewRequestPayload,
+  ReviewRequestState,
 } from './types'
 
 // ─── Model: events → groups → what to draw; no React in it ──────────────────────────────────
@@ -87,7 +96,7 @@ export { isHarnessText } from './model/harnessText'
 export { topicDividerText } from './model/topicMarker'
 export {
   checklistFromEvents, checklistRowText, doneCount, foldTicketEvent, pinnedFromEvents, planLabel, progressText,
-  priorityGlyph, readChecklist, readTicket, readTicketEvent, sourceLabel, statusTone, ticketChanges, ticketHref, ticketMeta,
+  checklistAssignment, safeChecklistAssignments, priorityGlyph, readChecklist, readTicket, readTicketEvent, sourceLabel, statusTone, ticketChanges, ticketHref, ticketMeta,
 } from './model/worklist'
 export type { ChecklistLive, PinnedLive, PlanItemLive, PlanLive, PlanStatus, StatusTone, TicketLive, TicketSummaryLive } from './model/worklist'
 export { McpHoldLine } from './components/McpHoldLine'
@@ -96,7 +105,7 @@ export type { McpHold, McpLive, McpReleased, McpServer, McpServerStatus, McpSumm
 export { CommitChips, type CommitRef } from './components/CommitChips'
 export { ChecklistItems, ChecklistRow, TicketCard } from './components/cards/WorkCards'
 export { SourceBadge, StatusChip, TicketChips, TicketDetails, TicketHead, TicketKey, TicketModal, TicketSummary } from './components/TicketView'
-export { firstPersonMessage, isShownUserMessage, userMessageShape } from './model/userMessages'
+export { automationAuthor, firstPersonMessage, isShownUserMessage, userMessageShape } from './model/userMessages'
 export type { UserMessageShape } from './model/userMessages'
 export { droppedMessageId, isRetryNotice, isTurnError } from './model/notices'
 export { askStates } from './model/asks'
@@ -132,6 +141,7 @@ export { safeUrl } from './model/safeUrl'
 
 // ─── Feedback: review of a file (anchored requests, an edited copy) and draw-over of an image ─
 export { emptyReview, mergeReviews, newRequestId, diffAnchorLabel, parseReviewFile, reviewFileName } from './model/review'
+export { reviewRounds, isReviewStateEvent, reviewedFileName, answeredInRound, type ReviewRound, type ReviewRounds } from './model/reviewRounds'
 export type { Anchor, DiffAnchor, ReviewFile, ReviewRequest, ReviewReply } from './model/review'
 export { anchorSelection, applyHighlights, describePlace, findQuote } from './model/anchor'
 export type { AnchorOptions } from './model/anchor'
@@ -224,3 +234,10 @@ export * from './transport'
 
 export { default as VisualBlock } from './components/VisualBlock'
 export type { VisualKind } from './model/visualKind'
+
+export { DelegationReview } from './components/DelegationReview'
+export { FiledTicket } from './components/cards/ProposalCard'
+export { outcomeLine, proposalStates, readCard, readProposalView } from './model/proposals'
+export { readReviewRequest, reviewForArtifact, reviewOutcomeLine, reviewRequestStates } from './model/reviewRequests'
+
+export { modelDisplayName, modelDisplayNames } from "./model/modelDisplay"

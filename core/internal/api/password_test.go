@@ -511,3 +511,85 @@ func TestChangeUsername(t *testing.T) {
 		t.Fatal("the refused rename must not have changed anything")
 	}
 }
+
+// A password change whose sign-out of the account's other sessions cannot get its locks in time
+// must not report success: it answers 503 with Retry-After and changes nothing, so the same
+// request succeeds in full once the locks are free.
+func TestChangePasswordBusyRevocationChangesNothingAndRetries(t *testing.T) {
+	deps, pool := newTestDeps(t, nil, nil)
+	ctx := context.Background()
+	insertLocalAccount(t, pool, "busy-pw", "old-password-123")
+	var accountID string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM accounts WHERE provider_subject='busy-pw'`).Scan(&accountID); err != nil {
+		t.Fatal(err)
+	}
+	idSvc := deps.Identity.(*identity.Service)
+	idSvc.SetSessionLockTimeout(200 * time.Millisecond)
+	srv := httptest.NewTLSServer(api.NewRouter(deps))
+	defer srv.Close()
+
+	otherDevice, err := idSvc.IssueRefreshToken(ctx, accountID, "ua", "ip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := idSvc.MintHumanAccessToken(ctx, accountID, "blerg-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := func() *http.Response {
+		body := `{"old_password":"old-password-123","new_password":"a-long-enough-new-password"}`
+		req, _ := http.NewRequest("POST", srv.URL+"/auth/password", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+	state := func() (hash string, liveSessions, revocations int) {
+		if err := pool.QueryRow(ctx, `SELECT password_hash,
+			(SELECT count(*) FROM human_sessions WHERE account_id = a.id AND revoked_at IS NULL),
+			(SELECT count(*) FROM revocations WHERE value = a.id::text AND kind IN ('sub','lineage'))
+			FROM accounts a WHERE a.id = $1`, accountID).Scan(&hash, &liveSessions, &revocations); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	hashBefore, liveBefore, _ := state()
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('human_sessions:' || $1::text, 0))`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	resp := change()
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("busy password change = %d (Retry-After %q), want 503 with Retry-After", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+	if len(resp.Cookies()) != 0 {
+		t.Fatalf("a failed change must not touch the cookie: %v", resp.Cookies())
+	}
+	if hash, live, revs := state(); hash != hashBefore || live != liveBefore || revs != 0 {
+		t.Fatalf("a failed change left work half done: hashChanged=%v live=%d (was %d) revocations=%d",
+			hash != hashBefore, live, liveBefore, revs)
+	}
+
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if resp := change(); resp.StatusCode != http.StatusOK {
+		t.Fatalf("retried change = %d, want 200", resp.StatusCode)
+	}
+	if hash, live, revs := state(); hash == hashBefore || live != 0 || revs != 2 {
+		t.Fatalf("after the retry: hashChanged=%v live=%d revocations=%d, want changed/0/2", hash != hashBefore, live, revs)
+	}
+	if _, _, err := idSvc.RefreshAccessToken(ctx, otherDevice, "blerg-core"); err == nil {
+		t.Fatal("the other device's session must be ended by the password change")
+	}
+}

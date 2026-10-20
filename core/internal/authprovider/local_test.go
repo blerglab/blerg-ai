@@ -30,52 +30,25 @@ func freshStore(t *testing.T) (*pgxpool.Pool, db.Store) {
 	return pool, db.NewPgStore(pool)
 }
 
-func TestEnsureBootstrapAdminSeedsOnceOnEmptyTable(t *testing.T) {
-	pool, st := freshStore(t)
-	ctx := context.Background()
-	local := authprovider.NewLocal(st)
-	if err := local.EnsureBootstrapAdmin(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var count int
-	pool.QueryRow(ctx, `SELECT count(*) FROM accounts WHERE role='admin'`).Scan(&count)
-	if count != 1 {
-		t.Fatalf("expected exactly 1 admin account, got %d", count)
-	}
-	var mustChange bool
-	if err := pool.QueryRow(ctx, `SELECT must_change_password FROM accounts WHERE role='admin'`).Scan(&mustChange); err != nil {
-		t.Fatal(err)
-	}
-	if !mustChange {
-		t.Error("expected seeded admin to have must_change_password=true")
-	}
-
-	// Idempotent: calling again on a non-empty table must not seed a second one.
-	if err := local.EnsureBootstrapAdmin(ctx); err != nil {
-		t.Fatal(err)
-	}
-	pool.QueryRow(ctx, `SELECT count(*) FROM accounts WHERE role='admin'`).Scan(&count)
-	if count != 1 {
-		t.Fatalf("expected still exactly 1 admin account after second call, got %d", count)
-	}
+func loginRequest(subject, password string) *http.Request {
+	form := url.Values{"provider_subject": {subject}, "password": {password}}
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
 }
 
 func TestLocalCallbackRejectsWrongPassword(t *testing.T) {
 	pool, st := freshStore(t)
 	ctx := context.Background()
 	local := authprovider.NewLocal(st)
-	if err := local.EnsureBootstrapAdmin(ctx); err != nil {
+	hash, err := bcrypt.GenerateFromPassword([]byte("the-real-password"), bcrypt.MinCost)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	var providerSubject string
-	pool.QueryRow(ctx, `SELECT provider_subject FROM accounts WHERE role='admin'`).Scan(&providerSubject)
-	wrongPW := "definitely-not-the-real-password"
-
-	form := url.Values{"provider_subject": {providerSubject}, "password": {wrongPW}}
-	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if _, err := local.Callback(ctx, req); err == nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO accounts (provider, provider_subject, role, password_hash) VALUES ('local', 'admin', 'admin', $1)`, string(hash)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := local.Callback(ctx, loginRequest("admin", "definitely-not-the-real-password")); err == nil {
 		t.Error("expected wrong password to fail")
 	}
 }
@@ -85,9 +58,7 @@ func TestLocalCallbackAcceptsCorrectPassword(t *testing.T) {
 	ctx := context.Background()
 	local := authprovider.NewLocal(st)
 
-	// Insert a test account with a KNOWN bcrypt hash directly via SQL,
-	// since the bootstrap admin's randomly-generated password can't be
-	// recovered in a test.
+	// Insert a test account with a KNOWN bcrypt hash directly via SQL.
 	const knownPassword = "correct-horse-battery-staple"
 	hash, err := bcrypt.GenerateFromPassword([]byte(knownPassword), bcrypt.DefaultCost)
 	if err != nil {
@@ -123,8 +94,8 @@ func TestLocalCallbackAcceptsCorrectPassword(t *testing.T) {
 }
 
 // TestLocalCallbackAcceptsCorrectPasswordWithNoEmailSet is a regression test
-// for a bug where accounts.email (nullable; EnsureBootstrapAdmin's own
-// INSERT never sets it) being NULL made Callback's Scan fail before the
+// for a bug where accounts.email (nullable; the local provider's own
+// INSERTs never set it) being NULL made Callback's Scan fail before the
 // password comparison ever ran — meaning the bootstrap admin, and any other
 // local-provider account with no email, could never log in even with the
 // correct password.
@@ -139,8 +110,8 @@ func TestLocalCallbackAcceptsCorrectPasswordWithNoEmailSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	const subject = "no-email-test-user"
-	// Deliberately omit the email column, exactly as EnsureBootstrapAdmin's
-	// INSERT does, so this account's row has email = NULL.
+	// Deliberately omit the email column, exactly as the local provider's
+	// INSERTs do, so this account's row has email = NULL.
 	_, err = pool.Exec(ctx,
 		`INSERT INTO accounts (provider, provider_subject, role, must_change_password, password_hash)
 		 VALUES ('local', $1, 'admin', true, $2)`, subject, string(hash))

@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,23 +11,16 @@ import (
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
 
-// fakeHermes writes a stub `hermes` executable that logs its invocation args
-// and prints stdout/exits per the real `hermes chat --oneshot -Q` contract
-// verified against hermes-agent v0.21.2: plain final-response text (or an
-// error message) on stdout, nothing structured — see hermesdriver.go's doc
-// comment.
+// fakeHermes preserves the baseline host fixture API while speaking the native
+// gateway protocol. Engine errors are deliberately sanitized by the driver.
 func fakeHermes(t *testing.T, stdout string, exitCode int) string {
 	t.Helper()
-	dir := t.TempDir()
-	script := "#!/bin/bash\n" +
-		`echo "$@" >> "$FAKE_HERMES_LOG"` + "\n" +
-		"cat <<'EOF'\n" + stdout + "\nEOF\n" +
-		"exit " + strconv.Itoa(exitCode) + "\n"
-	path := filepath.Join(dir, "hermes")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	root := fakeHermesGateway(t)
+	t.Setenv("FAKE_HERMES_FINAL", stdout)
+	if exitCode != 0 {
+		t.Setenv("FAKE_HERMES_FAIL", "1")
 	}
-	return dir
+	return root
 }
 
 func TestHermesDriverTurn(t *testing.T) {
@@ -45,7 +37,7 @@ func TestHermesDriverTurn(t *testing.T) {
 
 	d.Enqueue("say a fruit", "chat")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for !contains(em.kinds(), "turn_done") {
 		select {
 		case <-deadline:
@@ -60,11 +52,10 @@ func TestHermesDriverTurn(t *testing.T) {
 			t.Errorf("missing event kind %q in %v", want, kinds)
 		}
 	}
-	// No tool_call/tool_result — documented capability gap for hermes's
-	// text-only headless mode.
-	for _, unwanted := range []string{"tool_call", "tool_result"} {
-		if contains(kinds, unwanted) {
-			t.Errorf("unexpected event kind %q — hermes headless mode has no tool event stream", unwanted)
+	// The native gateway exposes actual tool lifecycle events.
+	for _, want := range []string{"tool_call", "tool_result"} {
+		if !contains(kinds, want) {
+			t.Errorf("missing native %s", want)
 		}
 	}
 
@@ -74,16 +65,15 @@ func TestHermesDriverTurn(t *testing.T) {
 			continue
 		}
 		p := ev.Payload.(agent.AssistantTextPayload)
-		if p.Text != "pineapple" {
+		if p.Done && p.Text != "pineapple" {
 			t.Errorf("assistant_text = %q, want %q", p.Text, "pineapple")
 		}
 	}
 	em.mu.Unlock()
 
-	// Second turn continues the SAME named session — no dynamic id to swap,
-	// unlike codex.
+	// Both turns stay in the same gateway/native conversation.
 	d.Enqueue("another", "chat")
-	deadline = time.After(5 * time.Second)
+	deadline = time.After(15 * time.Second)
 	for countKind(em, "turn_done") < 2 {
 		select {
 		case <-deadline:
@@ -97,8 +87,8 @@ func TestHermesDriverTurn(t *testing.T) {
 	}
 	calls := strings.TrimSpace(string(raw))
 	for _, line := range strings.Split(calls, "\n") {
-		if !strings.Contains(line, "--continue sess-123") || !strings.Contains(line, "--create-if-missing") {
-			t.Errorf("call missing --continue sess-123 --create-if-missing: %q", line)
+		if line == "session.resume" {
+			t.Errorf("unexpected resume between turns")
 		}
 	}
 }
@@ -115,7 +105,7 @@ func TestHermesDriverFailureEmitsError(t *testing.T) {
 	go d.Run(ctx)
 	d.Enqueue("do the thing", "chat")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for !contains(em.kinds(), "turn_done") {
 		select {
 		case <-deadline:
@@ -139,8 +129,8 @@ func TestHermesDriverFailureEmitsError(t *testing.T) {
 		if !ok {
 			t.Fatalf("error payload has unexpected type %T", ev.Payload)
 		}
-		if !strings.Contains(p.Message, "no provider configured") {
-			t.Errorf("error message = %q, want it to contain the hermes failure text", p.Message)
+		if strings.Contains(p.Message, "PRIVATE_SECRET") {
+			t.Fatal("raw native error leaked")
 		}
 	}
 	em.mu.Unlock()

@@ -84,6 +84,7 @@ var routeScopes = map[string]routeScope{
 
 	"GET /api/boards/{id}":                        {scopeBoard, "board read"},
 	"PATCH /api/boards/{id}":                      {scopeBoard, "board update"},
+	"POST /api/boards/{id}/automation/run-as-me":  {scopeBoard, "Run as me; handler additionally requires a human board admin"},
 	"DELETE /api/boards/{id}":                     {scopeBoard, "board delete"},
 	"GET /api/boards/{id}/columns":                {scopeBoard, "columns of the board"},
 	"POST /api/boards/{id}/columns":               {scopeBoard, "create column"},
@@ -119,6 +120,7 @@ var routeScopes = map[string]routeScope{
 	"GET /api/cards/{id}/stats":                   {scopeCard, "card stats"},
 	"GET /api/cards/{id}/doc":                     {scopeCard, "card doc"},
 	"POST /api/cards/{id}/spawn":                  {scopeCardStart, "spawn session from card"},
+	"GET /api/cards/{id}/run-targets":             {scopeCardStart, "where a person's Run of a card may go; lists the runner's targets"},
 	"GET /api/cards/{id}/runner-sessions":         {scopeCard, "card runner sessions"},
 	"POST /api/cards/{id}/accept":                 {scopeCard, "accept card (admin)"},
 	"GET /api/reviews/{id}":                       {scopeReview, "review read"},

@@ -212,7 +212,7 @@ describe('RunColumn', () => {
     const pill = screen.getByTestId('model-claude-opus-5-5')
     expect(pill.tagName).toBe('BUTTON')
     expect(pill).toHaveTextContent('Opus 5.5')
-    expect(pill).toHaveAttribute('title', 'Most capable for ambitious work')
+    expect(pill).toHaveAttribute('title', 'claude-opus-5-5 — Most capable for ambitious work')
     expect(screen.getByTestId('model-claude-sonnet-5')).toHaveAttribute('aria-pressed', 'true')
     // Overflow models are options of the disclosure, not pills.
     expect(screen.getByTestId('model-claude-opus-4-7').tagName).toBe('OPTION')

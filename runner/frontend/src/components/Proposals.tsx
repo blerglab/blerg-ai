@@ -117,6 +117,7 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
         <span>Proposed <TimeLabel ts={p.created_at} /></span>
         {p.state === 'pending' && <span>Expires <TimeLabel ts={p.expires_at} /></span>}
         {p.decided_at && <span>Decided <TimeLabel ts={p.decided_at} /></span>}
+        {p.approved_by_grant && <span data-testid="proposal-by-grant">Approved by a session permission</span>}
       </div>
 
       {result && (

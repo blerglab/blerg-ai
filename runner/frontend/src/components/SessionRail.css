@@ -956,3 +956,68 @@
   outline: 2px solid var(--amber);
   outline-offset: 2px;
 }
+
+.rail-checklist-reference {
+  display: block;
+  max-width: 100%;
+  margin-block: .35rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.rail-checklist-assignees {
+  display: block;
+  font-size: .8rem;
+  color: var(--fog-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* One bounded current-activity line; long commands stay in the full child chat. */
+.rail-child-activity { display:flex; align-items:center; gap:5px; min-width:0; margin-top:6px; color:var(--fog-dim); font-size:0.72rem; }
+.rail-child-activity > span:not(.rail-clock):not(.rail-child-pulse) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.rail-child-activity .rail-clock { flex:none; }
+.rail-child-pulse { width:5px; height:5px; flex:none; border-radius:50%; background:var(--lichen); animation:rail-child-pulse 1.8s ease-in-out infinite; }
+@keyframes rail-child-pulse { 50% { opacity:0.3; } }
+@media (prefers-reduced-motion:reduce) { .rail-child-pulse { animation:none; } }
+
+.rail-chip.rail-effort { color: var(--fog-dim); background: transparent; border-color: transparent; font-size: 0.85em; }
+
+/* Permissions take one row until the person asks to manage them. */
+.rail-child-permissions .rail-section-head { margin-bottom: 0; }
+.rail-permissions-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0;
+  padding: 0; border: 0; background: none; color: inherit; font: inherit;
+  letter-spacing: inherit; text-transform: inherit; text-align: left; cursor: pointer;
+}
+.rail-permissions-toggle .rail-count { white-space: nowrap; letter-spacing: normal; text-transform: none; }
+.rail-permissions-details { margin-top: 8px; }
+.rail-permissions-note { margin: 0 0 8px; color: var(--fog-dim); font-size: var(--text-xs); }
+.rail-permission-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; }
+.rail-permission-scope { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: var(--text-xs); color: var(--fog); }
+.rail-permission-revoke { flex: none; color: var(--fog-dim); }
+.rail-permission-revoke:hover, .rail-permission-revoke:focus-visible { color: var(--fog); }
+
+/* A card an approved proposal created (History): board, number and title on one chip. */
+.reel-card-chip {
+  display: inline-flex;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+  white-space: nowrap;
+}
+.reel-card-board { color: var(--fog-dim); }
+.reel-card-number { font-weight: 600; }
+.reel-card-title { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.reel-card-chip:hover,
+.reel-card-chip:focus-visible { border-color: var(--accent); }
+
+/* A pending review request in Needs you: the ask as the subtitle, wrapped, at most three lines. */
+.rail-review-ask {
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--fog);
+}

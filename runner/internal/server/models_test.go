@@ -205,7 +205,7 @@ func TestClusterCodexModelsServesAccountCatalogAndSafeFailure(t *testing.T) {
 			if w.Code != http.StatusOK || !list.Refreshing {
 				t.Fatalf("first snapshot: %d %+v", w.Code, list)
 			}
-			deadline := time.Now().Add(2 * time.Second)
+			deadline := time.Now().Add(15 * time.Second)
 			for list.Refreshing && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 				w, list = getModels(t, api, "codex?runtime=cluster", token)

@@ -38,8 +38,9 @@ Blerg is pre-1.0. Only the current `main` receives security fixes.
 - A session, its events or its output being visible to an account other than the one that
   started it, when that session is private (see below).
 - A session with MCP connections or an unattended cron run reaching a connection, a tool or a
-  credential that was not selected for it, or the gateway being reachable outside the session
-  network.
+  credential that was not selected for it; the gateway's own listener being reachable outside the
+  session network; or the gateway's public `/mcp-gw/` route serving a token that was not issued
+  for that route (a cluster session's token, for example).
 - Getting the runner's gateway or a connection URL to fetch an internal address (a bypass of
   the network policy in [`docs/mcp-connections.md`](docs/mcp-connections.md#network-policy)).
 - An installer default that exposes a service or a secret.
@@ -114,7 +115,8 @@ deploy, but they are not bugs:
   file's content as untrusted, as its author is an agent that may have read hostile text.
 - **Gateway tokens** are valid until the session ends rather than for a fixed time; core checks that
   the session is still live on every credential fetch (a live answer is cached for up to five
-  minutes).
+  minutes). A token issued for the public `/mcp-gw/` route also stops working there after seven
+  days without use, unless its daemon reconnects with the session running.
 - The gateway proxies your MCP server's responses as text. It cannot vouch for what a server
   says, and a compromised server can attack the agent through its tool results.
 - Membership of the `docker` group is equivalent to root on that machine.
@@ -149,9 +151,21 @@ deploy, but they are not bugs:
   server: only a signed-in human can add one, the stored value is encrypted like your other
   credentials and is never returned, and every fetch of it is audited. A session never holds it: it
   holds a per-session, per-connection gateway token that is revoked when the session ends. The
-  gateway runs on its own listener that the public ingress does not route; on Kubernetes apply the
-  default-deny egress example so session pods can reach only DNS, the gateway and the in-cluster
-  services they need. Sessions with connections and every cron session are **private** to the
+  gateway runs on its own listener that the public ingress does not route. Sessions on workstation
+  daemons cannot reach that listener, so the runner also serves the gateway on its web port under
+  `/mcp-gw/`, and therefore through the ingress, for those sessions only: it accepts only tokens
+  issued for that route to a session that runs on a daemon; it answers every other token (unknown,
+  malformed, a cluster session's, or one past its idle limit) the same way: the same 401, or, once
+  the client's address is over its allowance of failed attempts, the same 429. Behind a proxy, that
+  address is the client's own only when the proxy is listed in `BLERG_RUNNER_TRUSTED_PROXIES`;
+  otherwise every client shares the proxy's allowance. The Kubernetes install lists the private
+  ranges a pod network uses, so any pod in them, session pods included, can claim another client's
+  address: that evades the failure limit and costs lookups, but grants no access. A well-formed
+  token is looked up even from an address over its allowance, within a global budget of lookups,
+  so a valid token is served unless a sustained flood exhausts that budget. An install without
+  workstation daemons can switch the route off with `BLERG_RUNNER_MCP_GW_PUBLIC=off`. On
+  Kubernetes apply the default-deny egress example so session pods can reach only DNS, the gateway
+  and the in-cluster services they need. Sessions with connections and every cron session are **private** to the
   account that started them: other accounts, administrators included, cannot list, read or receive
   events from them. Connection URLs are `https` only and refused if they resolve to an internal
   address, unless an operator lists the host in the `BLERG_*_MCP_ALLOW_*_HOSTS` variables; list

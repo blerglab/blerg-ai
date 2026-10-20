@@ -5,6 +5,10 @@ const item = (text: string, done: boolean) => ({ text, done })
 const art = (id: string, view: string, at: string, extra = {}) => ({ id, name: `${id}.diff`, size: 1, content_type: 'text/x-diff', view, created_at: at, version: 1, latest_version: 1, ...extra })
 
 describe('railPlan', () => {
+  it('summarises all explicitly doing items before next', () => {
+    const l = planList({items:[{text:'Next',done:false},{text:'Build',done:false,in_progress:true},{text:'Review',done:false,in_progress:true}]} as never,null)!
+    expect(planSummary(l)).toBe('Checklist · 0 of 3 · Doing: Build; Review')
+  })
   it('summarises a checklist with its next item', () => {
     const l = planList({ items: [item('a', true), item('b', false), item('c', false)] }, null)!
     expect(planSummary(l)).toBe('Checklist · 1 of 3 · Next: b')

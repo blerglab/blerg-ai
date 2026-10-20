@@ -1,3 +1,4 @@
+import { waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, type Mock } from 'vitest'
 import { createProxyTransport } from './proxy'
 import type { SubscribeHandlers } from './types'
@@ -50,8 +51,7 @@ function handlers(): MockHandlers {
 
 const tick = () => new Promise(r => setTimeout(r, 5))
 const until = async (cond: () => boolean) => {
-  for (let i = 0; i < 200 && !cond(); i++) await tick()
-  expect(cond()).toBe(true)
+  await waitFor(() => expect(cond()).toBe(true))
 }
 
 const frame = (event: string, data: unknown, id?: number) =>

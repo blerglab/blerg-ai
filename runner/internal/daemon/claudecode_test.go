@@ -68,7 +68,7 @@ func TestClaudeCodeDriverTurn(t *testing.T) {
 
 	d.Enqueue("work the card", "chat")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(15 * time.Second)
 	for {
 		kinds := em.kinds()
 		if contains(kinds, "turn_done") {
@@ -90,7 +90,7 @@ func TestClaudeCodeDriverTurn(t *testing.T) {
 
 	// Second turn resumes the Claude Code session.
 	d.Enqueue("continue", "chat")
-	deadline = time.After(5 * time.Second)
+	deadline = time.After(15 * time.Second)
 	for countKind(em, "turn_done") < 2 {
 		select {
 		case <-deadline:

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
-	"github.com/blerglab/blerg-ai/runner/internal/coreauth"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
@@ -41,7 +40,7 @@ func newReposRootFixture(t *testing.T) *reposRootFixture {
 	hub.Register(dc)
 
 	api := NewAPI(hub, nil, "", nil, "")
-	api.SetCoreAuth(coreauth.New(core.URL))
+	api.SetCoreAuth(ownedCoreAuthClient(t, core.URL))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/daemons", api.HandleGetDaemons)
 	mux.HandleFunc("PUT /api/daemons/{id}/repos-root", api.HandlePutDaemonReposRoot)
@@ -69,7 +68,17 @@ func (f *reposRootFixture) put(t *testing.T, daemonID, body string, auth bool) *
 func (f *reposRootFixture) answer(t *testing.T, dc *DaemonConn, reply func(protocol.SetReposRoot) protocol.ReposRootResult) <-chan protocol.SetReposRoot {
 	t.Helper()
 	got := make(chan protocol.SetReposRoot, 1)
+	done := make(chan struct{})
+	ctx := t.Context()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("fake repos-root responder did not stop")
+		}
+	})
 	go func() {
+		defer close(done)
 		select {
 		case raw := <-dc.send:
 			var msg protocol.SetReposRoot
@@ -80,7 +89,7 @@ func (f *reposRootFixture) answer(t *testing.T, dc *DaemonConn, reply func(proto
 			res := reply(msg)
 			res.Type = "repos_root_result"
 			handleReposRootResult(context.Background(), f.hub, nil, dc, res)
-		case <-time.After(5 * time.Second):
+		case <-ctx.Done():
 		}
 	}()
 	return got

@@ -31,7 +31,7 @@ func TestDaemonHelloRecordsTheMCPGatewayCapability(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			deadline := time.Now().Add(3 * time.Second)
+			deadline := time.Now().Add(15 * time.Second)
 			for len(hub.GetAllDaemons()) == 0 {
 				if time.Now().After(deadline) {
 					t.Fatal("the daemon never registered")

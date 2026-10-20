@@ -6,10 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	cid "github.com/blerglab/blerg-ai/contracts/identity"
 )
@@ -20,6 +23,47 @@ const humanAccessTokenTTL = 10 * time.Minute
 // matches the migration's own DEFAULT for expires_at (30 days), kept here as the fallback used
 // by IssueRefreshToken/rotation for a Service built without an explicit call to SetSessionTTL.
 const defaultSessionTTL = 720 * time.Hour
+
+// defaultSessionLockTimeout bounds how long a session write waits for the account's session fence
+// (lockAccountSessions) or a session row when SetSessionLockTimeout was never called. The fence
+// holders are short transactions with no outside I/O, so a wait this long means something is
+// wrong, and giving up beats tying up a pooled connection indefinitely.
+const defaultSessionLockTimeout = 5 * time.Second
+
+// SessionRevocationMargin is how long past the access-token lifetime a browser session's "sid"
+// revocation is kept (PruneSessionRevocations): slack for clock skew between core and the
+// components that verify its tokens.
+const SessionRevocationMargin = time.Hour
+
+// ErrSessionBusy is returned when a session write could not take its locks within the session
+// lock timeout. Nothing was written and the presented token is unchanged: it is a retry, not a
+// sign-out.
+var ErrSessionBusy = errors.New("identity: session busy; try again")
+
+// sessionBusy maps a Postgres lock timeout to ErrSessionBusy and leaves any other error as is.
+func sessionBusy(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "55P03" { // lock_not_available
+		return fmt.Errorf("%w: %s", ErrSessionBusy, pgErr.Message)
+	}
+	return err
+}
+
+// AsSessionBusy is sessionBusy for callers outside the package that ran session work on their own
+// transaction (RevokeAccountEverywhereTx): a lock timeout there is ErrSessionBusy too.
+func AsSessionBusy(err error) error { return sessionBusy(err) }
+
+// retryBusy runs an idempotent session revocation, trying again a few times when it was only
+// busy: an end the person or theft detection asked for should not be dropped for a lock wait.
+func retryBusy(f func() error) error {
+	var err error
+	for range 3 {
+		if err = sessionBusy(f()); !errors.Is(err, ErrSessionBusy) {
+			return err
+		}
+	}
+	return err
+}
 
 // ErrSessionRevoked is returned by RefreshAccessToken when the raw refresh token doesn't
 // match any live (non-revoked, non-expired) human_sessions row.
@@ -44,11 +88,20 @@ type AccountState struct {
 	MustChangePassword bool
 }
 
+// rowQuerier is what both a pool and a transaction offer for a single-row read.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // AccountState reads the current role/disabled/must-change-password state for accountID.
 func (s *Service) AccountState(ctx context.Context, accountID string) (AccountState, error) {
+	return accountState(ctx, s.st.Pool(), accountID)
+}
+
+func accountState(ctx context.Context, q rowQuerier, accountID string) (AccountState, error) {
 	var a AccountState
 	var disabledAt *time.Time
-	err := s.st.Pool().QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT role, disabled_at, must_change_password FROM accounts WHERE id = $1`, accountID).
 		Scan(&a.Role, &disabledAt, &a.MustChangePassword)
 	if err != nil {
@@ -91,7 +144,13 @@ func (s *Service) MintHumanAccessToken(ctx context.Context, accountID, audience 
 // credential/plugin endpoints; see HumanSessionLive). An empty sessionID mints a token with no
 // `sid`, which those endpoints refuse.
 func (s *Service) MintHumanAccessTokenForSession(ctx context.Context, accountID, audience, sessionID string) (string, error) {
-	a, err := s.AccountState(ctx, accountID)
+	return s.mintHumanAccessToken(ctx, s.st.Pool(), accountID, audience, sessionID)
+}
+
+// mintHumanAccessToken is MintHumanAccessTokenForSession reading the account through q, so a
+// refresh rotation mints on its own transaction rather than a second pooled connection.
+func (s *Service) mintHumanAccessToken(ctx context.Context, q rowQuerier, accountID, audience, sessionID string) (string, error) {
+	a, err := accountState(ctx, q, accountID)
 	if err != nil {
 		return "", err
 	}
@@ -208,11 +267,31 @@ func (s *Service) IssueRefreshToken(ctx context.Context, accountID, userAgent, i
 //
 // Any other revoked, expired, or unknown token returns ErrSessionRevoked.
 func (s *Service) RefreshAccessToken(ctx context.Context, rawRefreshToken, audience string) (access, newRefresh string, err error) {
+	defer func() {
+		if err != nil {
+			err = sessionBusy(err)
+		}
+	}()
 	tx, err := s.st.Pool().Begin(ctx)
 	if err != nil {
 		return "", "", err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // a rollback after a successful commit is a no-op; on failure the original error is returned
+
+	// Take the account's session fence before any row lock (see lockAccountSessions). A row's
+	// account never changes, so reading it unlocked first is safe; everything that decides
+	// whether the token is still good is read again below, under the fence.
+	var owner string
+	if err := tx.QueryRow(ctx, `SELECT account_id::text FROM human_sessions WHERE token_hash = $1`,
+		hashToken(rawRefreshToken)).Scan(&owner); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", ErrSessionRevoked
+		}
+		return "", "", err
+	}
+	if err := s.lockAccountSessions(ctx, tx, owner); err != nil {
+		return "", "", err
+	}
 
 	var id, accountID, chainID string
 	var revokedAt, expiresAt *time.Time
@@ -220,8 +299,11 @@ func (s *Service) RefreshAccessToken(ctx context.Context, rawRefreshToken, audie
 	err = tx.QueryRow(ctx, `SELECT id::text, account_id::text, chain_id::text, revoked_at, expires_at, replaced_by::text
 		FROM human_sessions WHERE token_hash = $1 FOR UPDATE`, hashToken(rawRefreshToken)).
 		Scan(&id, &accountID, &chainID, &revokedAt, &expiresAt, &replacedBy)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrSessionRevoked
+	}
+	if err != nil {
+		return "", "", err
 	}
 
 	if revokedAt != nil && replacedBy != nil {
@@ -289,6 +371,7 @@ func (s *Service) RefreshAccessToken(ctx context.Context, rawRefreshToken, audie
 	if err != nil {
 		return "", "", err
 	}
+	s.sessionHook("rotate")
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", err
 	}
@@ -315,23 +398,131 @@ func (s *Service) rotateTx(ctx context.Context, tx pgx.Tx, fromID, accountID, ch
 	if _, err := tx.Exec(ctx, `UPDATE human_sessions SET revoked_at = now(), revoke_reason = $3, replaced_by = $2, last_used_at = now() WHERE id = $1`, fromID, newID, reason); err != nil {
 		return "", "", err
 	}
-	access, err = s.MintHumanAccessTokenForSession(ctx, accountID, audience, chainID)
+	access, err = s.mintHumanAccessToken(ctx, tx, accountID, audience, chainID)
 	if err != nil {
 		return "", "", err
 	}
 	return access, newRaw, nil
 }
 
-// RevokeChain ends one browser session: every row of the rotation chain is revoked with the
-// reason, and a "sid" entry in the shared revocations table stops the access tokens it minted
-// from verifying anywhere. The scope of a detected refresh-token reuse.
-func (s *Service) RevokeChain(ctx context.Context, chainID, reason string) error {
-	if _, err := s.st.Pool().Exec(ctx,
+// sessionHook runs the test-only beforeSessionCommit hook, if one is set.
+func (s *Service) sessionHook(point string) {
+	if s.beforeSessionCommit != nil {
+		s.beforeSessionCommit(point)
+	}
+}
+
+// lockAccountSessions takes the account's session fence for the rest of tx: a
+// transaction-scoped advisory lock that every refresh rotation and every multi-row session
+// revocation of that account takes BEFORE it locks or updates any human_sessions row. It makes
+// those writers take turns, so a revocation can never run against a snapshot that misses the
+// successor of a rotation committing at the same moment, and a rotation that waited on a
+// revocation re-reads its row and finds it revoked. One lock, always first, so no two of these
+// paths can wait on each other in opposite orders.
+//
+// It also sets lock_timeout for the rest of tx, so neither the fence nor a later row lock is waited
+// on for longer than the session lock timeout; a wait that runs out fails with SQLSTATE 55P03,
+// which sessionBusy turns into ErrSessionBusy. Every fence holder does all of its work on tx, so
+// it never needs a second pooled connection while waiters hold theirs.
+func (s *Service) lockAccountSessions(ctx context.Context, tx pgx.Tx, accountID string) error {
+	// At least 1ms: Postgres reads lock_timeout = 0 as "wait forever".
+	ms := strconv.FormatInt(max(s.sessionLockTimeout().Milliseconds(), 1), 10)
+	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, ms); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('human_sessions:' || $1::text, 0))`, accountID)
+	return err
+}
+
+// SetSessionLockTimeout sets how long a session write waits for its locks before giving up with
+// ErrSessionBusy. Like SetSessionTTL, set it once at startup (or in a test) before serving.
+func (s *Service) SetSessionLockTimeout(d time.Duration) {
+	s.sessionLockTimeoutValue = d
+}
+
+func (s *Service) sessionLockTimeout() time.Duration {
+	if s.sessionLockTimeoutValue <= 0 {
+		return defaultSessionLockTimeout
+	}
+	return s.sessionLockTimeoutValue
+}
+
+// revokeChainTx ends the chain inside tx, under the account's session fence: every live row of
+// the chain is revoked with reason, and the chain's sid is revoked in the shared table.
+func (s *Service) revokeChainTx(ctx context.Context, tx pgx.Tx, accountID, chainID, reason string) error {
+	if err := s.lockAccountSessions(ctx, tx, accountID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
 		`UPDATE human_sessions SET revoked_at = now(), revoke_reason = $2 WHERE chain_id = $1 AND revoked_at IS NULL`,
 		chainID, reason); err != nil {
 		return err
 	}
-	return s.Revoke(ctx, "sid", chainID)
+	return revokeSid(ctx, tx, chainID)
+}
+
+// revokeSid writes (or refreshes) the chain's "sid" entry in the shared revocations table, so
+// access tokens minted for that browser session stop verifying.
+func revokeSid(ctx context.Context, tx pgx.Tx, chainID string) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO revocations(kind, value, revoked_at) VALUES ('sid', $1, now())
+		 ON CONFLICT (kind, value) DO UPDATE SET revoked_at = now()`, chainID)
+	return err
+}
+
+// RevokeChain ends one browser session: every row of the rotation chain is revoked with the
+// reason, and a "sid" entry in the shared revocations table stops the access tokens it minted
+// from verifying anywhere. The scope of a detected refresh-token reuse. It runs under the
+// account's session fence, so a rotation of the chain in flight either commits first (and its
+// successor is revoked here too) or waits and is then refused.
+//
+// A lock wait that runs out is retried a few times (retryBusy) before ErrSessionBusy is returned.
+func (s *Service) RevokeChain(ctx context.Context, chainID, reason string) error {
+	return retryBusy(func() error { return s.revokeChainOnce(ctx, chainID, reason) })
+}
+
+func (s *Service) revokeChainOnce(ctx context.Context, chainID, reason string) error {
+	tx, err := s.st.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // a rollback after a successful commit is a no-op
+
+	var accountID string
+	err = tx.QueryRow(ctx, `SELECT account_id::text FROM human_sessions WHERE chain_id = $1 LIMIT 1`, chainID).Scan(&accountID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// No rows to revoke; the sid entry still ends any access token naming the chain.
+		if err := revokeSid(ctx, tx, chainID); err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	default:
+		if err := s.revokeChainTx(ctx, tx, accountID, chainID, reason); err != nil {
+			return err
+		}
+	}
+	s.sessionHook("revoke")
+	return tx.Commit(ctx)
+}
+
+// PruneSessionRevocations deletes "sid" revocations whose browser session has ended and whose
+// access tokens have all expired: written more than the access-token lifetime plus margin ago,
+// with no live row left in the chain (once a chain has none, nothing can mint for it again). It
+// returns how many rows went. Every logout writes one, and GET /revocations serves the whole table
+// to every verifier, so without this the list grows for good. Other kinds are untouched.
+func (s *Service) PruneSessionRevocations(ctx context.Context, margin time.Duration) (int64, error) {
+	tag, err := s.st.Pool().Exec(ctx,
+		`DELETE FROM revocations r WHERE r.kind = 'sid'
+		   AND r.revoked_at < now() - make_interval(secs => $1)
+		   AND NOT EXISTS (SELECT 1 FROM human_sessions h
+		                    WHERE h.chain_id::text = r.value AND h.revoked_at IS NULL AND h.expires_at > now())`,
+		(humanAccessTokenTTL + margin).Seconds())
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 // SessionExpiresAt looks up the (absolute, login-anchored) expires_at of the live human_sessions
@@ -368,23 +559,66 @@ func (s *Service) SessionMustChangePassword(ctx context.Context, rawRefreshToken
 	return must, nil
 }
 
-// RevokeHumanSession marks one refresh token's session revoked ("log out this device").
+// RevokeHumanSession ends the browser session the refresh token belongs to ("log out this
+// device"): every live row of its rotation chain is revoked as 'logout' and the chain's sid is
+// revoked, whichever row of the chain the token names. It runs under the account's session fence,
+// so a refresh of the same cookie committing at the same moment cannot leave a live successor.
+// The account's other browser sessions (other chains) are untouched. An unknown token is a no-op.
+//
+// A lock wait that runs out is retried a few times (retryBusy) before ErrSessionBusy is returned.
 func (s *Service) RevokeHumanSession(ctx context.Context, rawRefreshToken string) error {
-	_, err := s.st.Pool().Exec(ctx,
-		`UPDATE human_sessions SET revoked_at = now(), revoke_reason = 'logout' WHERE token_hash = $1 AND revoked_at IS NULL`,
-		hashToken(rawRefreshToken))
-	return err
+	return retryBusy(func() error { return s.revokeHumanSessionOnce(ctx, rawRefreshToken) })
+}
+
+func (s *Service) revokeHumanSessionOnce(ctx context.Context, rawRefreshToken string) error {
+	tx, err := s.st.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // a rollback after a successful commit is a no-op
+	var accountID, chainID string
+	err = tx.QueryRow(ctx, `SELECT account_id::text, chain_id::text FROM human_sessions WHERE token_hash = $1`,
+		hashToken(rawRefreshToken)).Scan(&accountID, &chainID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := s.revokeChainTx(ctx, tx, accountID, chainID, "logout"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // RevokeAllSessions marks every live (non-revoked) human_sessions row for accountID revoked —
 // "log out everywhere", sessions only. It does not touch the shared revocations table; callers
 // that also need already-minted access tokens to stop verifying should use
 // RevokeAccountEverywhere instead.
+//
+// It runs under the account's session fence (lockAccountSessions), so a refresh rotation in
+// flight cannot leave a live successor behind it.
+//
+// A lock wait that runs out is retried a few times (retryBusy) before ErrSessionBusy is returned.
 func (s *Service) RevokeAllSessions(ctx context.Context, accountID string) error {
-	_, err := s.st.Pool().Exec(ctx,
+	return retryBusy(func() error { return s.revokeAllSessionsOnce(ctx, accountID) })
+}
+
+func (s *Service) revokeAllSessionsOnce(ctx context.Context, accountID string) error {
+	tx, err := s.st.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // a rollback after a successful commit is a no-op
+	if err := s.lockAccountSessions(ctx, tx, accountID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
 		`UPDATE human_sessions SET revoked_at = now(), revoke_reason = 'logout_all' WHERE account_id = $1 AND revoked_at IS NULL`,
-		accountID)
-	return err
+		accountID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // RevokeAccountEverywhere kills every live session for accountID (RevokeAllSessions), marks
@@ -411,18 +645,50 @@ func (s *Service) RevokeAllSessions(ctx context.Context, accountID string) error
 // minutes, so clearing its entry is harmless, but a user-minted agent token lives up to a
 // year, and "I revoked everything, then signed back in, and the leaked token started working
 // again" is exactly the failure this entry exists to prevent.
+//
+// All four writes are one transaction under the account's session fence (RevokeAccountEverywhereTx):
+// they happen together or not at all. A lock wait that runs out is retried a few times before
+// ErrSessionBusy is returned.
 func (s *Service) RevokeAccountEverywhere(ctx context.Context, accountID string) error {
-	if err := s.RevokeAllSessions(ctx, accountID); err != nil {
-		return err
+	return retryBusy(func() error {
+		tx, err := s.st.Pool().Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck // a rollback after a successful commit is a no-op
+		if err := s.RevokeAccountEverywhereTx(ctx, tx, accountID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
+}
+
+// RevokeAccountEverywhereTx is RevokeAccountEverywhere inside the caller's transaction, so the
+// revocation commits (or not) together with the caller's own change, all or nothing: a password
+// change uses it so a new password never stands while the old sessions and tokens still work. It
+// takes the account's session fence, so it must run before the transaction locks the account's
+// row or any human_sessions row (the order every fenced path keeps). A lock wait that runs out
+// returns ErrSessionBusy and the caller should roll back and may retry.
+func (s *Service) RevokeAccountEverywhereTx(ctx context.Context, tx pgx.Tx, accountID string) error {
+	if err := s.lockAccountSessions(ctx, tx, accountID); err != nil {
+		return sessionBusy(err)
 	}
-	if err := s.Revoke(ctx, "sub", accountID); err != nil {
-		return err
+	if _, err := tx.Exec(ctx,
+		`UPDATE human_sessions SET revoked_at = now(), revoke_reason = 'logout_all' WHERE account_id = $1 AND revoked_at IS NULL`,
+		accountID); err != nil {
+		return sessionBusy(err)
 	}
-	if err := s.Revoke(ctx, "lineage", accountID); err != nil {
-		return err
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO revocations(kind, value, revoked_at) VALUES ('sub', $1, now()), ('lineage', $1, now())
+		 ON CONFLICT (kind, value) DO UPDATE SET revoked_at = now()`, accountID); err != nil {
+		return sessionBusy(err)
 	}
 	// The lineage entry is what actually stops those tokens verifying; this marks the ROWS
 	// revoked too, so the owner's token list says what is true instead of showing a page of
 	// "Active" credentials that no component will accept.
-	return s.RevokeAllAgentTokens(ctx, accountID)
+	if _, err := tx.Exec(ctx,
+		`UPDATE agent_tokens SET revoked_at = now() WHERE account_id = $1 AND revoked_at IS NULL`, accountID); err != nil {
+		return sessionBusy(err)
+	}
+	return nil
 }

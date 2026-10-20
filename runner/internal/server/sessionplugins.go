@@ -63,7 +63,7 @@ func (a *API) sessionPluginOwner(w http.ResponseWriter, r *http.Request) (*db.Se
 	return row, p, true
 }
 func (a *API) sessionPluginEligibility(ctx context.Context, row *db.SessionRow) (bool, string) {
-	if row == nil || terminalSessionStatus(row.Status) || row.Kind != "agent" {
+	if row == nil || row.DiscardRequestedAt != nil || row.ArchivedAt != nil || terminalSessionStatus(row.Status) || row.Kind != "agent" {
 		return false, "This session cannot reload plugins; always-on changes apply to new sessions."
 	}
 	if !pluginspec.SupportsEngine(sessionPluginEngine(row)) {
@@ -351,7 +351,7 @@ func (h *Hub) dispatchSessionPlugin(ctx context.Context, pool *pgxpool.Pool, p *
 		return
 	}
 	row, err := db.GetSession(ctx, pool, p.SessionID)
-	if err != nil || row == nil || !ownsSession(p.AccountID, row) || terminalSessionStatus(row.Status) {
+	if err != nil || row == nil || !ownsSession(p.AccountID, row) || row.DiscardRequestedAt != nil || row.ArchivedAt != nil || terminalSessionStatus(row.Status) {
 		return
 	}
 	dc := h.FindDaemonForSession(p.SessionID)

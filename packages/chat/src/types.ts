@@ -26,6 +26,7 @@ export type AgentEventKind =
   | 'background_task_started'
   | 'background_task_done'
   | 'turn_done'
+  | 'usage_updated'
   | 'error'
   | 'compaction'
   | 'start_stage'
@@ -38,6 +39,10 @@ export type AgentEventKind =
   | 'mcp_status'
   | 'delegation_request'
   | 'delegation_decided'
+  | 'proposal_request'
+  | 'proposal_decided'
+  | 'review_requested'
+  | 'review_decided'
 
 export interface AgentEvent {
   type: 'agent_event'
@@ -52,7 +57,9 @@ export interface AgentEvent {
 
 // source: chat (the person, in the app) | human (a person through an app's proxy) | ask_answer (an
 // answer to an ask) | note_reply | system (text the daemon, engine or harness wrote: never the
-// person) | runner | blerg-board | ….
+// person) | runner | blerg-board (a board's automation, a card's task included) | session (a parent
+// session, its child's task included) | cron (a cron's prompt) | review | proposal (decisions Blerg
+// relays) | ….
 // client_id: the id the sender gave the message (a queued bubble's), echoed by the daemon; absent
 // from a daemon older than the field and on messages no browser sent.
 // message_id: on an ask_answer, the ask (messages API id) it answers.
@@ -102,11 +109,21 @@ export interface TopicPayload { id: string; title: string; action: 'start' | 'do
 // kind "checklist" (`blerg-runner checklist`; the server records it): the FULL list after the change,
 // the operation, and the item it touched (index 1-based; absent for set and clear).
 /** diff: the id of the session's published diff of the item's commits (`checklist tick --commit`). */
-export interface ChecklistItem { text: string; done: boolean; commits?: string[]; diff?: string }
+export interface ChecklistAssignee { kind: 'subagent' | 'child_session'; id: string }
+export interface ChecklistItem {
+  /** Opaque identity, retained across rename/reorder; absent on old peers. */
+  id?: string
+  text: string
+  done: boolean
+  in_progress?: boolean
+  assignees?: ChecklistAssignee[]
+  commits?: string[]
+  diff?: string
+}
 export interface ChecklistPayload {
   items: ChecklistItem[]
   op: 'set' | 'add' | 'tick' | 'untick' | 'remove' | 'clear' | string
-  changed?: { index: number; text: string; done: boolean; commits?: string[]; diff?: string }
+  changed?: ChecklistItem & { index: number; from_item_id?: string }
 }
 // kind "ticket" (`blerg-runner pin` / `unpin`): a tracker's ticket the agent pinned, in one
 // source-neutral shape (the server caps every field). Untrusted tracker data: drawn as text, the url
@@ -387,7 +404,7 @@ export interface DelegationRequestPayload {
   effort?: string
   repo?: string
   no_repo?: boolean
-  runtime: 'docker' | 'daemon'
+  runtime: 'docker' | 'daemon' | 'cluster'
   daemon_name: string
   title: string
   /** The first 500 characters; the whole prompt is Transport.delegationRequest. */
@@ -411,4 +428,79 @@ export interface DelegationDecidedPayload {
   choice?: 'once' | 'session' | 'always'
   child_session_id?: string
   start_error?: string
+}
+
+// kinds proposal_request | proposal_decided: the session proposed an action that waits for the
+// person (a board card it wants to file, or a call to an MCP tool in approval mode), and how it was
+// decided. The events carry no draft or arguments: the card reads those through
+// Transport.proposal, which only the session's owner can.
+export type ProposalKind = 'board_file' | 'mcp'
+export interface ProposalRequestPayload {
+  proposal_id: string
+  kind: ProposalKind
+  /** Why a session permission that covers it did not approve it (its hourly limit). */
+  note?: string
+}
+/** A board card a decided proposal created: where it is and what it says, never its body. */
+export interface FiledCard {
+  id: string
+  board_id: string
+  board_name?: string
+  number: number
+  title?: string
+  type?: string
+  priority?: string
+  column?: string
+}
+export type ProposalState = 'pending' | 'executing' | 'done' | 'rejected' | 'expired' | 'failed' | 'unknown'
+export interface ProposalDecidedPayload {
+  proposal_id: string
+  kind: ProposalKind
+  state: ProposalState
+  /** A session permission approved it, without asking. */
+  auto?: boolean
+  grant_id?: string
+  card?: FiledCard
+}
+/** A proposal as its owner reads it (Transport.proposal). */
+export interface ProposalDetail {
+  id: string
+  kind: ProposalKind | 'plugin_request'
+  state: ProposalState
+  /** The board's name, or the connection's. */
+  target: string
+  /** The MCP tool; empty for a board card. */
+  tool: string
+  /** A board card's title; an MCP call's one-line summary. */
+  title: string
+  /** The start of a board card's body; empty for an MCP call. */
+  summary: string
+  /** The exact stored draft, sent back with an approval so only what was reviewed is approved. */
+  argumentsRaw: string
+  approvedByGrant: string | null
+  /** A created card (state done, board), from the stored result. */
+  card: FiledCard | null
+  /** The recorded error of a failed or unknown outcome. */
+  error: string
+}
+
+// ─── Review requests: the session asks its owner to approve a file or diff at one version ──────
+// (blerg-runner review request). review_requested is the card; review_decided its outcome.
+export type ReviewRequestState = 'pending' | 'approved' | 'changes_requested' | 'withdrawn' | 'superseded'
+export interface ReviewRequestPayload {
+  request_id: string
+  artifact_id: string
+  artifact_name: string
+  artifact_version: number
+  /** The file's view (markdown, diff, pdf, image, ...). */
+  artifact_view: string
+  /** What the person should decide. */
+  ask: string
+  state: ReviewRequestState
+  /** The person's note with the decision. */
+  note?: string
+  /** The version that superseded a pending request. */
+  superseded_by?: number
+  decided_at?: string
+  created_at?: string
 }

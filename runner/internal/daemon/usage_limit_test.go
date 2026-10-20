@@ -132,7 +132,7 @@ func TestCodexDriverCorrelatesUsageRefusal(t *testing.T) {
 	stopDriver := startTestCodexDriver(ctx, t, d)
 	defer stopDriver()
 	d.Enqueue("continue", "chat")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for !contains(em.kinds(), "turn_done") {
 		if time.Now().After(deadline) {
 			t.Fatal("turn did not finish")

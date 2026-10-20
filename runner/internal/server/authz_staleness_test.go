@@ -32,7 +32,7 @@ func newStaleCoreAuthClient(t *testing.T, pub ed25519.PublicKey, kid string) *co
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	c := coreauth.New(srv.URL)
+	c := ownedCoreAuthClient(t, srv.URL)
 	if !c.StaleBeyondCeiling() {
 		t.Fatal("test setup: client is not stale past the ceiling")
 	}

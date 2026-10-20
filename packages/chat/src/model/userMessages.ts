@@ -14,7 +14,7 @@ import { isHarnessText } from './harnessText'
 export type UserMessageShape =
   | { as: 'person' }
   | { as: 'hidden' }
-  | { as: 'notice'; text: string }
+  | { as: 'notice'; text: string; label?: string }
   | { as: 'output'; text: string }
 
 const NOTE_PREFIX = '[system] '
@@ -24,12 +24,33 @@ const RESTART_NOTE = '[system] Session resumed after a restart'
 const ADOPT_PROMPT = 'Continue the task you were working on.'
 const ADOPT_NOTE = 'Session recovered: the agent was asked to continue the task it was working on.'
 
+/** Sources whose messages Blerg wrote on its own behalf (decisions relayed to the agent). */
+export function isBlergRelaySource(source: unknown): boolean {
+  return source === 'review' || source === 'proposal'
+}
+
+/** Who wrote a message that some automation, not the person, sent: a board's (a card's task, a
+ *  board session's brief), a parent session's for its child, a cron's prompt. Drawn like the
+ *  person's card under this author instead of "You" (a host may name it better through
+ *  describeUserMessage, e.g. the parent's title); undefined for the person's own sources. */
+export function automationAuthor(source: unknown): string | undefined {
+  switch (source) {
+    case 'blerg-board': return 'Board'
+    case 'session': return 'Parent session'
+    case 'cron': return 'Cron'
+  }
+  return undefined
+}
+
 export function userMessageShape(payload: unknown): UserMessageShape {
   if (!payload || typeof payload !== 'object') return { as: 'person' }
   const p = payload as Partial<UserMessagePayload>
   const text = typeof p.text === 'string' ? p.text : ''
   if (isHarnessText(text)) return { as: 'hidden' }
   const trimmed = text.trim()
+  // Blerg itself telling the agent how something it asked for was decided (a review request, a
+  // proposal): never the person's words, so never drawn as theirs.
+  if (isBlergRelaySource(p.source)) return { as: 'notice', text: trimmed, label: 'Blerg' }
   if (p.source !== 'system') {
     return trimmed.startsWith(RESTART_NOTE) ? { as: 'notice', text: trimmed.slice(NOTE_PREFIX.length) } : { as: 'person' }
   }

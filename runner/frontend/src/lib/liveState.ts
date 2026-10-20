@@ -5,7 +5,7 @@
 // ask and its answer. Anything else (a turn's end, a status
 // change) brings a new read. Pure.
 import {
-  STALE_RUNNING_MS, foldTicketEvent, parseTs, readChecklist, readMcp, readMcpHold,
+  STALE_RUNNING_MS, foldTicketEvent, parseTs, readChecklist, safeChecklistAssignments, readMcp, readMcpHold,
   type AgentEvent, type AskLive, type BackgroundTask, type ChecklistItem, type ChecklistLive, type PinnedLive, type McpHold, type McpLive, type PlanLive,
   type LiveState, type PlanStatus, type SubagentLive, type Ticket, type TicketLive, type TicketSummaryLive,
 } from '@blerglab/chat'
@@ -28,6 +28,7 @@ export interface LiveAskReply { event_id: string; message_id: string; question: 
 
 export interface LiveSubagentReply {
   key: string
+  child_id?: string
   title: string
   type: string
   model: string
@@ -54,8 +55,13 @@ export type LiveTicketReply = Ticket & { event_id: string; updated_at: string }
 export interface LiveChildSession {
   id: string; title: string; engine: string; model: string; effort?: string; status: string
   started_at: string; ended_at?: string | null; archived_at?: string | null; asking: boolean; tokens: number | null; cost_usd?: number
+  /** Reported current-turn telemetry, separate from the completed-turn billing ledger. */
+  usage_status?: 'pending' | 'reported' | 'hidden'; tool_calls?: number; activity?: string
+  activity_since?: string; last_activity_at?: string; local?: boolean
 }
 export interface LiveDelegationRequest { request_id: string; engine: string; title: string; expires_at: string }
+/** A pending review request (blerg-runner review request): Needs you shows one row per request. */
+export interface LiveReviewRequest { request_id: string; artifact_id: string; artifact_name: string; artifact_version: number; artifact_view: string; ask: string; created_at: string }
 export interface LiveDelegationGrant { id: string; engine: string; runtime: string; daemon_id?: string; daemon_name?: string; repo?: string; no_repo?: boolean }
 export const childIsRunning = (s: LiveChildSession) => !s.ended_at && ['starting', 'running', 'idle', 'waiting'].includes(s.status)
 
@@ -63,6 +69,7 @@ export interface LiveReply {
   children?: LiveChildSession[]
   delegation_requests?: LiveDelegationRequest[]
   delegation_grants?: LiveDelegationGrant[]
+  review_requests?: LiveReviewRequest[]
   session_id: string
   through_seq: number
   generated_at: string
@@ -91,6 +98,7 @@ export interface LiveReply {
 export const LIVE_TRIGGER_KINDS: ReadonlySet<string> = new Set([
   'ask', 'subagent_started', 'subagent_done', 'background_task_started', 'background_task_done', 'turn_done',
   'checklist', 'ticket', 'mcp_status', 'plan_updated', 'progress_updated', 'children_changed', 'delegation_request', 'delegation_decided',
+  'review_requested', 'review_decided',
 ])
 
 /** The engine's task tools whose calls change the plan (the server's livestate.PlanTools). */
@@ -114,6 +122,7 @@ export interface LiveView {
   children?: LiveChildSession[]
   delegationRequests?: LiveDelegationRequest[]
   delegationGrants?: LiveDelegationGrant[]
+  reviewRequests?: LiveReviewRequest[]
   asks: AskLive[]
   subagents: ProgressSubagent[]
   /** Background tasks still running (a background subagent's own task left out). */
@@ -177,10 +186,12 @@ function firstAfter(events: readonly AgentEvent[], through: number): number {
 /** foldLive: the reply with the events after it folded in, at server time now (ms): a subagent or
  *  task with no sign of life for STALE_RUNNING_MS is left out, as the server would. */
 export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: number): LiveView {
+  const assignmentFences = new Set<string>()
   const subs = new Map<string, SubAcc>()
+  const promotedAliases = new Map<string, string>()
   for (const s of reply.subagents ?? []) {
     subs.set(s.key, {
-      key: s.key, title: s.title, type: s.type, model: s.model, ...(typeof s.effort === 'string' ? { effort: s.effort } : {}), tokens: s.tokens, doing: s.doing,
+      key: s.key, childId: s.child_id || s.key, title: s.title, type: s.type, model: s.model, ...(typeof s.effort === 'string' ? { effort: s.effort } : {}), tokens: s.tokens, doing: s.doing,
       startedAt: parseTs(s.started_at), background: s.background, activeAt: parseTs(s.active_at),
       ...(s.resumed ? { resumed: true } : {}),
       ...(readProgress(s.progress) ? { progress: readProgress(s.progress)! } : {}),
@@ -190,9 +201,10 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   for (const t of reply.tasks ?? []) {
     tasks.set(t.task_id, { taskId: t.task_id, callId: t.call_id, kind: t.kind, description: t.description, command: t.command ?? '', startedAt: parseTs(t.started_at), done: null })
   }
-  let checklist: ChecklistLive | null = reply.checklist && reply.checklist.items.length
+  const initialChecklist = reply.checklist ? readChecklist(reply.checklist, reply.checklist.event_id) : null
+  let checklist: ChecklistLive | null = reply.checklist && initialChecklist?.items.length
     ? {
-        items: reply.checklist.items, eventId: reply.checklist.event_id, updatedAt: parseTs(reply.checklist.updated_at),
+        items: initialChecklist.items, eventId: reply.checklist.event_id, updatedAt: parseTs(reply.checklist.updated_at),
         ...(reply.checklist.commit_urls ? { commitUrls: reply.checklist.commit_urls } : {}),
       }
     : null
@@ -205,6 +217,18 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   }
   const asks: AskLive[] = (reply.asks ?? []).map(a => ({ eventId: a.event_id, messageId: a.message_id, question: a.question, askedAt: parseTs(a.asked_at) }))
 
+  const promote = (native: string, call: string) => {
+    if (!native || !call || native === call || subs.has(native)) return
+    const previous = subs.get(call)
+    if (!previous || previous.childId) return
+    subs.delete(call)
+    if (assignmentFences.delete(call)) assignmentFences.add(native)
+    previous.key = native
+    previous.childId = native
+    subs.set(native, previous)
+    promotedAliases.set(call, native)
+  }
+
   for (let i = firstAfter(events, reply.through_seq); i < events.length; i++) {
     const ev = events[i]
     const p = rec(ev.payload)
@@ -212,9 +236,12 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
     switch (ev.kind) {
       case 'checklist': {
         // Each event holds the whole list: the latest wins.
-        const c = readChecklist(ev.payload)
+        const c = readChecklist(ev.payload, ev.client_event_id)
         // The pages of the commits the reply knew stay; a newer commit has none until the next read.
-        if (c) checklist = c.items.length ? { items: c.items, eventId: ev.client_event_id, updatedAt: at, ...(checklist?.commitUrls ? { commitUrls: checklist.commitUrls } : {}) } : null
+        if (c) {
+          assignmentFences.clear()
+          checklist = c.items.length ? { items: c.items, eventId: ev.client_event_id, updatedAt: at, ...(checklist?.commitUrls ? { commitUrls: checklist.commitUrls } : {}) } : null
+        }
         break
       }
       case 'mcp_status': {
@@ -230,13 +257,16 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         pinned = foldTicketEvent(pinned, ev)
         break
       case 'subagent_started': {
-        const key = str(p.child_id)
+        const native = str(p.child_id)
+        const key = native || str(p.call_id)
+        promote(native, str(p.call_id))
         if (!key || subs.has(key)) break
+        assignmentFences.add(key)
         // A resumed run (a finished subagent resumed with SendMessage) is not tied to a call: it
         // runs until its own end, in the background when its original did.
         const resumed = p.resumed === true
         subs.set(key, {
-          key, title: firstLine(str(p.summary)) || 'Subagent · started earlier', type: str(p.agent_type), model: str(p.model), ...(typeof p.effort === 'string' ? { effort: p.effort } : {}),
+          key, ...(native ? {childId:native} : {}), title: firstLine(str(p.summary)) || 'Subagent · started earlier', type: str(p.agent_type), model: str(p.model), ...(typeof p.effort === 'string' ? { effort: p.effort } : {}),
           tokens: null, doing: '', startedAt: at, background: resumed && p.background === true, activeAt: at,
           ...(resumed ? { resumed: true } : {}),
         })
@@ -244,10 +274,16 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
       }
       case 'subagent_update':
       case 'subagent_done': {
-        const s = subs.get(str(p.child_id))
+        const native = str(p.child_id)
+        const call = str(p.call_id)
+        promote(native, call)
+        const alias = promotedAliases.get(call)
+        const ambiguous = !native && alias && alias !== call && subs.has(call)
+        const s = ambiguous ? undefined : subs.get(native || alias || call)
         if (!s) break
         if (ev.kind === 'subagent_done' && p.background !== true) {
           subs.delete(s.key)
+          for (const [key, target] of promotedAliases) if (target === s.key) promotedAliases.delete(key)
           break
         }
         if (ev.kind === 'subagent_done') s.background = true
@@ -297,12 +333,24 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
     }
   }
 
+  if (checklist) {
+    const safe = safeChecklistAssignments(checklist.items, events)
+    if (safe !== checklist.items) checklist = {...checklist, items: [...safe]}
+  }
+  if (checklist && assignmentFences.size) checklist = {...checklist, items: checklist.items.map(item => {
+    const assignees = item.assignees?.filter(worker => worker.kind !== 'subagent' || !assignmentFences.has(worker.id))
+    const next = {...item}
+    if (assignees?.length) next.assignees = assignees
+    else delete next.assignees
+    return next
+  })}
+
   const stale = (t: number | null) => t !== null && Number.isFinite(now) && now - t > STALE_RUNNING_MS
   const subagents: ProgressSubagent[] = []
   for (const s of subs.values()) {
     if (stale(s.activeAt)) continue
     subagents.push({
-      key: s.key, title: s.title, type: s.type, model: s.model, ...(typeof s.effort === 'string' ? { effort: s.effort } : {}), tokens: s.tokens, doing: s.doing, startedAt: s.startedAt, background: s.background,
+      key: s.key, ...(s.childId ? {childId:s.childId}:{}), title: s.title, type: s.type, model: s.model, ...(typeof s.effort === 'string' ? { effort: s.effort } : {}), tokens: s.tokens, doing: s.doing, startedAt: s.startedAt, background: s.background,
       ...(s.resumed ? { resumed: true } : {}),
       ...(s.progress ? { progress: s.progress } : {}),
     })
@@ -313,7 +361,8 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   return {
     asks, subagents, tasks: running, toolChanges,
     children: reply.children ?? [], delegationRequests: reply.delegation_requests ?? [], delegationGrants: reply.delegation_grants ?? [],
-    counts: { needsYou: asks.length + toolChanges + (reply.delegation_requests?.length ?? 0), running: subagents.length + running.length + (reply.children ?? []).filter(childIsRunning).length },
+    reviewRequests: reply.review_requests ?? [],
+    counts: { needsYou: asks.length + toolChanges + (reply.delegation_requests?.length ?? 0) + (reply.review_requests?.length ?? 0), running: subagents.length + running.length + (reply.children ?? []).filter(childIsRunning).length },
     checklist, plan, progress: readProgress(reply.progress), tickets: pinned.tickets, ticket: pinned.ticket,
     mcp: mcp && mcp.servers.length ? mcp : null,
     mcpHold: mcpHold && Number.isFinite(now) && mcpHold.until <= now ? null : mcpHold,

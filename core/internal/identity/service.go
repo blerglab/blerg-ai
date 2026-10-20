@@ -28,6 +28,15 @@ type Service struct {
 	// sessionTTLValue backs SetSessionTTL/sessionTTL (human_session.go). Zero means "never
 	// configured" — sessionTTL() then falls back to defaultSessionTTL (720h).
 	sessionTTLValue time.Duration
+
+	// beforeSessionCommit, when set (tests only), runs just before a refresh rotation or a
+	// chain revocation commits, with the name of that point. Tests use it to hold a
+	// transaction open and force an interleaving deterministically.
+	beforeSessionCommit func(point string)
+
+	// sessionLockTimeoutValue backs SetSessionLockTimeout/sessionLockTimeout (human_session.go).
+	// Zero means "never configured": defaultSessionLockTimeout.
+	sessionLockTimeoutValue time.Duration
 }
 
 type AgentTokenInput struct {

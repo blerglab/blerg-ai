@@ -129,7 +129,7 @@ const MCP_RELEASED_NOTES: Record<string, string> = {
 
 /** The words a status chip says ("needs-auth" reads "needs sign-in"; "pending" is "connecting"). */
 export function statusWord(status: string): string {
-  return status === 'needs-auth' ? 'needs sign-in' : status === 'pending' ? 'connecting' : status
+  return status === 'needs-auth' ? 'needs sign-in' : status === 'pending' ? 'connecting' : status === 'lazy' ? 'connects on demand' : status
 }
 
 /** withLiveMcp: the payload with its MCP servers group read from the live state (each server's status

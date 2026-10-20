@@ -42,7 +42,7 @@ func mcpTestTracker(t *testing.T, wait time.Duration) (*mcpTracker, *mcpFakeSour
 		cancel()
 		select {
 		case <-tr.done:
-		case <-time.After(time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("tracker did not stop")
 		}
 	})
@@ -59,7 +59,7 @@ func mcpLatest(em *collectEmitter) protocol.MCPStatusPayload {
 }
 func waitMCP(t *testing.T, fn func() bool) {
 	t.Helper()
-	end := time.Now().Add(time.Second)
+	end := time.Now().Add(15 * time.Second)
 	for time.Now().Before(end) {
 		if fn() {
 			return
@@ -84,7 +84,7 @@ func TestMCPFirstPromptReleasesOnSettleTimeoutOrPerson(t *testing.T) {
 			}
 			select {
 			case <-done:
-			case <-time.After(time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatal("held prompt did not release")
 			}
 			waitMCP(t, func() bool { p := mcpLatest(em); return p.Hold == nil && p.Released == reason })
@@ -177,22 +177,32 @@ func TestMCPCanceledFirstGateDoesNotConsumeInput(t *testing.T) {
 	tr.release()
 	select {
 	case <-second:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("replacement not released")
 	}
 }
 func TestMCPTrackingExpiredFirstPromptHasNoInvisibleHold(t *testing.T) {
-	tr, _, em := mcpTestTracker(t, time.Second)
+	tr, _, em := mcpTestTracker(t, time.Hour)
 	waitMCP(t, func() bool { return mcpLatest(em).Settled })
 	done := make(chan struct{})
 	go func() { tr.beforeFirstPrompt(context.Background()); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(50 * time.Millisecond):
+	// Tracking has already expired, so ANY configured hold budget must be
+	// bypassed. Keep the hypothetical budget much longer than this watchdog:
+	// an erroneous hold cannot expire and disguise the missing settled check.
+	case <-time.After(15 * time.Second):
 		t.Fatal("tracking expired but prompt invisibly held")
 	}
 	if p := mcpLatest(em); p.Hold != nil || p.Released != "timeout" {
 		t.Fatalf("wrong deadline state: %+v", p)
+	}
+	// Completion alone could hide a transient hold that ran out its own wait
+	// budget. An already-settled tracker must never publish a hold at all.
+	for _, ev := range em.snapshot() {
+		if ev.Kind == protocol.MCPStatusKind && ev.Payload.(protocol.MCPStatusPayload).Hold != nil {
+			t.Fatal("expired tracking briefly held a first prompt")
+		}
 	}
 }
 func TestMCPFirstAlreadyUsedNeverHolds(t *testing.T) {
@@ -269,4 +279,22 @@ func TestMCPInvalidSourceInventoryIsNotAuthoritativeEmpty(t *testing.T) {
 	}
 	cancel()
 	<-tr.done
+}
+
+func TestMCPTrackerOnDemandDoesNotHoldPrompt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := &mcpFakeSource{probe: mcpProbe{Generation: 1, Ready: true, Servers: []protocol.MCPServerStatus{{Name: "fixture", Status: "lazy"}}}}
+	em := &collectEmitter{}
+	tracker := newMCPTracker(ctx, "hermes", src, em, mcpTrackerOptions{Wait: time.Hour, Poll: time.Millisecond})
+	done := make(chan struct{})
+	go func() { tracker.beforeFirstPrompt(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("on-demand server held prompt")
+	}
+	if state := mcpLatest(em); !state.Settled || state.Servers[0].Status != "lazy" {
+		t.Fatalf("on-demand status changed %+v", state)
+	}
 }

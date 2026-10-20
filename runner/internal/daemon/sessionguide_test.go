@@ -12,7 +12,7 @@ import (
 
 func assertSessionWorkGuide(t *testing.T, text string) {
 	t.Helper()
-	for _, line := range []string{childSessionGuideLine, workGuideLine, topicGuideLine} {
+	for _, line := range []string{childSessionGuideLine, workGuideLine, topicGuideLine, checklistWorkMapGuideLine} {
 		if !strings.Contains(text, line) {
 			t.Fatalf("missing shared guidance: %s", line)
 		}
@@ -95,7 +95,7 @@ func TestCodexNativeGuideScope(t *testing.T) {
 			}
 			stop := startTestCodexDriver(context.Background(), t, d)
 			defer stop()
-			deadline := time.NewTimer(5 * time.Second)
+			deadline := time.NewTimer(15 * time.Second)
 			defer deadline.Stop()
 			tick := time.NewTicker(time.Millisecond)
 			defer tick.Stop()

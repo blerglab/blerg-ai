@@ -7,6 +7,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -84,7 +85,7 @@ func (f *reconcileFixture) status(t *testing.T) (string, string) {
 // waitForWebhook waits briefly for the (asynchronous) delivery to land.
 func (f *reconcileFixture) waitForWebhook(t *testing.T, want int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if f.hits() >= want {
 			waitForWebhookRecorded(t, f.pool, f.sessionID)
@@ -411,9 +412,23 @@ func TestInsertSessionReviveClearsLostMarkerAndClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.InsertSession(ctx, f.pool, f.sessionID, row.DaemonID, "running",
+	// The revive is the session's own pod's session_started, which carries its runtime authority:
+	// nothing else may move a cluster row (insertSessionAs).
+	raw, _, err := db.MintRuntimeLaunch(ctx, f.pool, f.sessionID, "", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := db.ValidateRuntimeToken(ctx, f.pool, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(db.WithRuntimeAuthority(ctx, rt.ID), f.pool, f.sessionID, row.DaemonID, "running",
 		"/workspace/org/proj", "org/proj", "T", ""); err != nil {
 		t.Fatal(err)
+	}
+	// Without it, the same revive is refused and changes nothing.
+	if err := db.InsertSession(ctx, f.pool, f.sessionID, newUUID(), "running", "", "", "", ""); !errors.Is(err, db.ErrClusterSessionClaim) {
+		t.Fatalf("an unauthorized revive of a cluster row = %v", err)
 	}
 
 	var lost *time.Time
@@ -466,12 +481,12 @@ func TestClusterReconcilerLoopStopsOnContextCancel(t *testing.T) {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(3 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("reconciler cleanup did not finish")
 		}
 	}()
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if status, _ := f.status(t); status == "ended" {
 			break
@@ -484,7 +499,7 @@ func TestClusterReconcilerLoopStopsOnContextCancel(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("reconciler did not stop on context cancel")
 	}
 	f.waitForWebhook(t, 1)

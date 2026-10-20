@@ -272,6 +272,27 @@ func TestValidateSecrets(t *testing.T) {
 	}
 }
 
+// The board mint key ("Run as me") must be its own secret: sharing a value with the internal key
+// would hand the board credential fetches, and with the register key, registration.
+func TestValidateSecretsBoardMintKeyIsDistinct(t *testing.T) {
+	t.Setenv("BLERG_CORE_REGISTER_KEY", "register-0123456789abcdef0123456789")
+	t.Setenv("BLERG_CORE_INTERNAL_KEY", "internal-0123456789abcdef0123456789")
+	for _, shared := range []string{"BLERG_CORE_INTERNAL_KEY", "BLERG_CORE_REGISTER_KEY"} {
+		t.Setenv("BLERG_CORE_BOARD_MINT_KEY", os.Getenv(shared))
+		if err := validateSecrets(); err == nil || !strings.Contains(err.Error(), shared) {
+			t.Errorf("mint key equal to %s: err %v, want a refusal naming it", shared, err)
+		}
+	}
+	t.Setenv("BLERG_CORE_BOARD_MINT_KEY", "change-me-board-mint-key")
+	if err := validateSecrets(); err == nil || !strings.Contains(err.Error(), "BLERG_CORE_BOARD_MINT_KEY") {
+		t.Errorf("placeholder mint key: err %v", err)
+	}
+	t.Setenv("BLERG_CORE_BOARD_MINT_KEY", "mint-0123456789abcdef0123456789abcd")
+	if err := validateSecrets(); err != nil {
+		t.Errorf("distinct mint key: %v", err)
+	}
+}
+
 // TestUsersCLI exercises `blerg-core users create` and `users set-password` end-to-end against
 // a real, migrated database — the operator recovery path this task adds (R8): a lost bootstrap
 // admin password, or a second account, must be recoverable without psql or a hand-made bcrypt

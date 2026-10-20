@@ -324,6 +324,27 @@ Terminal sessions have no panel.
   what is in progress ("Writing tests · 3 of 7"). Hidden when there is neither. An item the agent
   ticked with commits (`--commit`) shows a chip ("2 commits") that opens to the short shas: a link to
   the commit when the session's repository is known, otherwise a button that copies the sha.
+- **Permissions**: what this session may do without asking, in short: how many are active, a
+  **Manage** button, and each active permission as a chip (↳ children, ▦ a board, ⚙ an MCP tool)
+  with × to revoke it at once. A permission given from a card in the chat is one more chip. One that
+  no longer approves (its sign-in ended, or the tool changed) shows apart with why. **Manage** opens
+  the Permissions dialog (a full-screen sheet on a phone), with a search over everything in it:
+  - **Child sessions**: start sandboxed or unsandboxed children (or children on the cluster)
+    without asking, with the engines each covers; a control the session cannot use says why.
+  - **Board filing**: your boards, each checkable, with how many are selected and **Select all
+    shown**, which takes only the boards the search leaves.
+  - **MCP write tools**: grouped by connection, each tool you set to approval mode checkable; a tool
+    whose definition changed since you allowed it says so.
+  - **Active**: everything given now, with how and when (a card in the chat, the panel, launch),
+    each with Revoke.
+
+  Nothing changes until **Save**, which applies it and says what it did ("Grant 2, revoke 1");
+  Cancel or Esc throws the changes away. Rows Save would change are marked. The dialog works from the
+  keyboard: arrows, Home and End move in a list, Space ticks, Tab stays inside, Esc closes. See
+  [When the agent starts other sessions](#when-the-agent-starts-other-sessions) and
+  [Session permissions](proposals.md#session-permissions). The launch sheet's **Permissions…** opens
+  the same dialog to choose them before the session starts (the button counts them); they are given
+  as it starts, and one that cannot be given is reported after launch and the session asks as usual.
 - **Needs you**: the agent's open questions, each with how long it has been waiting and a box that
   answers it (the same answer as the ask card's), and the MCP tool changes waiting on your decision
   for this session, with a link to the Proposals page showing that session's proposals and tool
@@ -449,6 +470,24 @@ ticked “Write tests”") that opens to the list; changes one after another wit
 are one row, the latest. The session guide asks the agent for both. A session reloaded later shows the
 same ticket and checklist: each event holds the whole state and what changed.
 
+Use `blerg-runner checklist doing <n>` to mark current work (more than one item can be doing),
+`pending <n>` to return it to pending, and `tick <n>` to finish it. Each item has an opaque stable `id`;
+`--id <id>` selects it through a `rename` or `move`, while `set` replaces the list with new identities.
+Legacy items receive deterministic IDs from their original event and position when read, then retain
+those IDs in later events; long or malformed event IDs are hashed whole rather than truncated.
+
+First run `blerg-runner checklist workers` to list recorded worker IDs (current work first, at most
+100). These display IDs may differ from IDs returned by native engine tools. explicitly connect work with `doing <n> --agent <recorded-subagent-id>` or
+`assign <n> --child-session <owned-child-session-id>`; `unassign` removes that connection. The server
+accepts only native workers recorded in this session or its directly owned Blerg child sessions,
+canonicalizing an unambiguous native call ID to its child ID. Current live state follows a later
+canonical ID without changing the original event; unknown or ambiguous native references are omitted
+from live state and the next mutation rather than retargeted. Titles are never matched. An item can
+have several workers; assigning a worker elsewhere transfers it. Completion retains the connection,
+and removal retires the item without rewriting history. The panel's worker reference opens Plan and
+highlights the same item, including after reorder or rename. Each item supports 32 assignments and
+the list supports 128; the full event is bounded to 128 KiB.
+
 Name the commits that finished an item with `blerg-runner checklist tick <n> --commit <sha>` (or
 `add … --commit`; repeat the flag or comma-separate the shas; 7 to 40 hex characters, at most 20 on one
 item, the same check as `topic --done --commit`). Ticking again adds more; a repeat is dropped. The
@@ -566,7 +605,7 @@ them, up to about an hour; after that the process is closed and the tasks are ma
 
 ## When the agent starts other sessions
 
-An agent on your desktop can ask another session to do part of its work. The approval card shows
+An agent on your desktop or on the cluster can ask another session to do part of its work. The approval card shows
 the engine, model, repository, runtime, prompt, and whether the child should keep running after its
 parent ends. A host request warns that it runs outside the sandbox. You can deny it, allow it once,
 allow matching starts for this parent session, or create a standing rule for that engine, runtime,
@@ -576,14 +615,53 @@ in the audit record; it does not restrict later starts. There is one live sessio
 engine, runtime and desktop, and Revoke removes it for future starts. Standing rules cover any
 repository too. Choices that would widen the parent's permissions always ask again.
 
+The child's model is checked against the models its engine actually has where the child will run
+(on the cluster, the cluster's catalog; on a desktop, what that desktop reports). The agent can
+name it by routing id, by display name, or by a part of an id that matches exactly one model, and
+the card and the child record the routing id. A name that matches no model, or several, is refused
+with the list of available models; `blerg-runner models` prints that list. Changing a running
+child's model resolves the name the same way.
+
+You can also allow child starts under **Live → Permissions → Manage** before the agent asks to start a
+child. It covers the engines currently available on this desktop for the selected runtime during
+this parent session's life. Sandboxed children and unsandboxed children are separate choices;
+unsandboxed approval is unavailable to a sandboxed parent. Enabling this permission can use the
+selected engines' provider budgets. Newly installed engines do not acquire permission automatically.
+You can change or revoke the session permission later without rewriting earlier approval decisions
+or stopping children already running. Turning it off does not remove standing desktop rules;
+the controls show those separately, and you can remove them in Settings. A partial state can come
+from an earlier **Allow for this session** for one engine. Only your own current browser login can
+edit this permission; the agent cannot turn it on for you.
+
 Only sessions you launched directly can use preapproval. Board, cron, private, and agent-started
 parents ask for each start; a child cannot start another generation of children. New child starts
-need an updated, connected desktop daemon. Cluster children are not supported in this release.
+need an updated, connected desktop daemon.
+
+### Children on the cluster
+
+A session running on the cluster starts its children on the cluster, as cluster pods; that is the
+default there, and `--runtime cluster` asks for it explicitly. The approval card says **on the
+cluster**, and its **Always allow** button creates a standing rule for that engine on the cluster.
+Cluster rules and session permissions are separate from desktop ones: a rule for your desktop never
+starts a cluster child, nor the reverse. The Permissions dialog shows one cluster control instead of the
+sandboxed and unsandboxed pair. The child's repository is cloned into its pod the way any cluster
+launch clones it, and its engines are the ones the cluster has credentials for. A child pod runs
+with your engine credentials, as your own cluster sessions do. A rule or session permission can
+start one only while your sign-in behind the parent is still valid; otherwise the agent's start
+asks you on the card, and your decision authorizes it. Limits, Live, the sidebar, discard and the
+parent's end treat cluster children as they treat desktop ones; a child whose pod could not be
+launched does not count toward the start limits. A desktop session cannot start a
+cluster child, and a cluster session cannot start a desktop child. Hermes on the cluster counts as
+local, for the budget and for local-only Hermes rules, when the operator's
+[shared Hermes providers](../install/k8s/CLUSTER-RUNTIME.md#shared-hermes-providers) point only at
+keyless private-network model servers and you have not saved a Hermes credential of your own (it
+could hold a provider key); otherwise a local-only Hermes rule asks you on the card. A child of a
+cron session never gets operator-supplied credentials or the shared providers.
 
 The parent's Live tab lists its children and pending requests. Open a child to read its conversation;
 Started sessions shows the temporary permissions and their Revoke buttons. Revoking permission
 prevents future starts; it does not stop existing children. Settings lists standing rules and lets
-you add or remove them. The sidebar groups children under their parent, and Insights shows child
+you add or remove them; a cluster rule is added from the card's **Always allow** button. The sidebar groups children under their parent, and Insights shows child
 usage separately from the parent's own usage.
 
 A parent can have three running children and make twenty starts. Across your account, the limits

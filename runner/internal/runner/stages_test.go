@@ -77,6 +77,7 @@ func TestMissingEngineCredential(t *testing.T) {
 		{"codex", map[string]string{"CODEX_AUTH_JSON": "{}"}, false},
 		{"hermes", nil, true},
 		{"hermes", map[string]string{"HERMES_ENV_CONTENTS": "X=1"}, false},
+		{"hermes", map[string]string{"BLERG_RUNNER_HERMES_PROVIDERS": "model: {}"}, false}, // shared providers alone: keyless local models
 		{"openclaw", nil, false}, // not a cluster engine; nothing to check here
 	}
 	for _, tc := range cases {

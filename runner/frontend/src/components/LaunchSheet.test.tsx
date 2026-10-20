@@ -559,6 +559,42 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     expect(captureBody.value!.kind).toBe('agent')
   })
 
+  it('pre-authorizes the permissions chosen in the Permissions modal, and only those that still apply', async () => {
+    await renderSheet({ sessionBoards: { configured: true, boards: [{ id: 'b1', name: 'Product' }] } })
+    fireEvent.click(screen.getByText('myrepo'))
+    fireEvent.click(screen.getByRole('button', { name: 'Permissions…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Permissions' })
+    // The local sandbox can only pre-approve sandboxed children: the other row says why it is off.
+    const unsandboxed = within(dialog).getByRole('checkbox', { name: 'Start unsandboxed children without asking' })
+    expect(unsandboxed).toBeDisabled()
+    expect(within(dialog).getByTestId('pm-children-daemon')).toHaveTextContent("A sandboxed session can't pre-approve unsandboxed children.")
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Start sandboxed children without asking' }))
+    fireEvent.click(await within(dialog).findByRole('checkbox', { name: 'File cards on Product without asking' }))
+    expect(within(dialog).getByTestId('pm-summary')).toHaveTextContent('Grant 2')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByRole('button', { name: 'Permissions… (2)' })).toBeInTheDocument()
+    // Held until launch: reopening shows them selected, and Cancel keeps them.
+    fireEvent.click(screen.getByRole('button', { name: 'Permissions… (2)' }))
+    const again = screen.getByRole('dialog', { name: 'Permissions' })
+    expect(within(again).getByRole('checkbox', { name: 'File cards on Product without asking' })).toBeChecked()
+    expect(within(again).getAllByTestId('pm-active-row')).toHaveLength(2)
+    fireEvent.click(within(again).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
+    fireEvent.click(screen.getByText(/Launch/))
+    await waitFor(() => expect(captureBody.value).toBeDefined())
+    expect(captureBody.value!.permissions).toEqual({ children: ['docker'], boards: ['b1'], mcp_tools: [] })
+  })
+
+  it('sends no permissions when none are ticked', async () => {
+    await renderSheet()
+    fireEvent.click(screen.getByText('myrepo'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
+    fireEvent.click(screen.getByText(/Launch/))
+    await waitFor(() => expect(captureBody.value).toBeDefined())
+    expect(captureBody.value!.permissions).toBeUndefined()
+  })
+
   it('sends docker + tmux', async () => {
     await renderSheet()
     fireEvent.click(screen.getByTestId('kind-tmux'))
@@ -2261,6 +2297,15 @@ describe('LaunchSheet board access', () => {
     expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('Clear the board')
     fireEvent.change(screen.getByLabelText('Board'), { target: { value: '' } })
     expect((await submit()).board_id).toBeUndefined()
+  })
+  it('offers a board on This machine when its daemon dials the gateway through the server', async () => {
+    await open({ daemon: { mcp_gateway_via_server: true } })
+    fireEvent.change(await screen.findByLabelText('Board'), { target: { value: 'board-1' } })
+    fireEvent.click(screen.getByTestId('runtime-daemon'))
+    fireEvent.click(screen.getByTestId('agent-ack'))
+    const body = await submit()
+    expect(body.runtime).toBe('daemon')
+    expect(body.board_id).toBe('board-1')
   })
   it('supports a Codex board session only when its sandbox advertises grants', async () => {
     await open({ daemon: { codex_restricted: true } })

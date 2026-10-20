@@ -540,6 +540,32 @@ holding the full list after the change: `{items:[{text, done}], op, changed?:{in
 the reply is that payload (`201`). A refusal is a `400` with a sentence, an ended session a `409`,
 the 501st checklist event of a session a `429`.
 
+`GET /api/sessions/{id}/checklist/workers` uses that same own-session credential and active-session
+restriction, returns `{workers:[{kind,id,title,status}],truncated}`, and never reads another session's
+native workers or non-owned children. At most 100 are returned, current work first; titles are plain
+text bounded to 200 characters. `blerg-runner checklist workers` discovers these recorded display IDs
+before explicit assignment. A native tool's control/thread ID can differ from Blerg's recorded ID.
+
+The additive work-map contract gives every item an `id`; `in_progress` marks current work, and
+`assignees:[{kind:"subagent"|"child_session",id}]` links explicitly recorded workers. `doing` clears
+done and marks current work (multiple items allowed), `pending` clears both flags, and `tick` clears
+current work. Select with `item_id` instead of `index` or `text` for stable references. `rename` takes
+`item`, `move` takes 1-based `position`; both retain identity. `set` creates new IDs; removal retires
+one without rewriting history. Legacy IDs derive from the original event ID and position, hashing
+long/malformed event IDs whole. New IDs are `item-` plus 32 random lowercase hex characters.
+
+`assign`/`unassign` require `assignee`; `doing` optionally accepts it. Native IDs must have appeared
+in this session's subagent events; an unambiguous call-ID alias resolves to its child ID. A Blerg
+child must be a direct agent child with the same non-null owning account. Assigning a worker to a
+new item transfers it atomically; completion preserves its recorded connection. Current live state
+resolves later canonical native IDs without rewriting history; ambiguous or unknown native references
+are omitted from live state and the next mutation instead of guessed. At most 32 workers
+per item and 128 per list; worker IDs are bounded to 256 UTF-8 bytes without controls; the full saved
+payload is at most 128 KiB. `changed` includes the item's ID/state/assignments and, on transfer,
+`from_item_id`. Existing session-token auth and event limits are unchanged; none of these fields
+creates authority over the assigned worker. This session-internal contract is described by
+`x-session-work-checklist` and the checklist schemas in `openapi.json`, outside the public route set.
+
 **Pinned tickets.** `blerg-runner pin` / `unpin` post `POST /api/sessions/{id}/tickets` (the session's
 own token; at most 256 KiB): `{"action":"pin","ticket":{…}}` or `{"action":"unpin","source"?,"key"?}`
 (neither: the current pin; a key alone when one pin has it). The ticket is `{source, key, title, url?,
@@ -582,6 +608,13 @@ summaries `{source, key, title, status, url, event_id, seq, updated_at}`, curren
 (the current pin in full, with `event_id` and `updated_at`, or `null`); migration 055 indexes the three
 reads.
 
+The `children` list additionally carries recorded `tool_calls`, bounded `activity`,
+`activity_since`, `last_activity_at`, `usage_status` (`pending|reported|hidden`),
+reported `tokens` and optional price estimates. A `local` flag describes the
+owning daemon's endpoint classification; it does not invent a zero dollar cost.
+Current-turn `usage_updated` snapshots are nonbilling display telemetry and are
+replaced at completion. See [Live child telemetry](../docs/telemetry.md#live-child-telemetry).
+
 **Background tasks.** When a Claude Code agent leaves something running (a `Bash` call with
 `run_in_background`, a `Monitor`, a background subagent), the runner records
 `background_task_started` `{task_id, call_id, kind, description, started_at}` once the call's result
@@ -606,7 +639,12 @@ so a client closes a card that carries a `message_id` on `message_answered`, on 
 command returns, since the ask can outlive both. `POST …/message` (REST and the MCP `send_message`)
 with source `human`, `chat` or `runner` answers the newest open ask too (the response says
 `answered_ask: true`); a message from a board (`blerg-board`) never does. An update or note is
-reached the same way, and a reply to a note arrives as `user_message` with `source: "note_reply"`.
+reached the same way, and a reply to a note arrives as `user_message` with `source: "note_reply"`. An
+engine's command approval is an owner-only ask (posted with `"owner_only": true`): only the session's
+owner, signed in as themselves, answers it, by any of those routes. The reply endpoint answers 403 to
+the daemon token, board tokens, agent tokens and other people, and their chat messages are not taken
+as its answer; the board's chat relays with the board's automation token, so an approval is answered
+in Runner. The daemon may still close one it stopped waiting on with an empty answer (a deny).
 
 **Errors, retries and system text.** `user_message` carries `source`, an optional `client_id` (the id
 the sender gave the message, echoed so a client can match its queued bubble; a message dropped
@@ -754,6 +792,8 @@ sessions all return the same `404`.
 | `GET /api/delegation-rules` | Human owner's standing rules. |
 | `POST /api/delegation-rules` | Human owner creates a rule for an engine, desktop and runtime across repositories, optionally restricted to a local endpoint. |
 | `DELETE /api/delegation-rules/{id}` | Owner removes a rule; existing children continue. |
+| `GET /api/sessions/{id}/child-approval` | Human owner with a live browser login only. Current-parent session permissions, eligible engines per runtime, standing desktop rules, effective authority and an opaque revision. |
+| `PUT /api/sessions/{id}/child-approval` | Same owner login only: `{runtime:"docker"|"daemon",enabled:boolean,revision}` atomically sets or revokes exact current-daemon session grants. A stale revision returns `409`; reload before explicitly trying again. |
 | `POST /api/delegation-grants/{id}/revoke` | Owner revokes a session grant; existing children continue. |
 | `GET /api/sessions/{id}/children` | `{children:[...]}` with status, lifecycle, model, effort, runtime, asking, delegation and keep-running fields. |
 | `GET /api/sessions/{id}/children/{child}` | Session status plus authoritative `open_asks:[{message_id,body}]`. |
@@ -766,6 +806,31 @@ sessions all return the same `404`.
 | `POST /api/sessions/{id}/children/{child}/uploads` | Raw bytes and artifact-name header, with normal upload caps; `201`. Stored as an owner upload and announced as `session_upload`, preserving the parent's attribution without ending the child's working state. |
 | `GET /api/sessions/{id}/children/{child}/artifacts` | `{artifacts:[...]}` using ordinary artifact visibility checks. |
 | `GET /api/sessions/{id}/children/{child}/artifacts/{aid}/download` | File bytes with the normal artifact hardening headers. |
+
+The proactive approval controls are for the person's browser, never a session, agent, delegated,
+or daemon credential. The GET and PUT response is `{revision,daemon_id,allowed_engines,runtimes}`.
+Each runtime reports `enabled`, `partial`, `allowed_engines`, `granted_engines`,
+`standing_rule_engines`, `effective_allowed_engines`, `can_enable`, and a string `reason` (empty
+when enabling is available). Arrays are never null. An offline or ineligible parent can still
+revoke existing scopes; it cannot enable new ones. A direct personal parent must be unrestricted,
+active, and on a connected desktop that advertises recovery-ready and available engines.
+
+Enabling applies only to the engines currently registered and available for that runtime on the
+parent's current desktop. It does not cover later installations or change another runtime. Host
+execution needs a separate explicit change and is unavailable to a sandboxed parent. The opaque
+revision binds the parent lifetime, desktop, eligibility, current session grants and applicable
+standing-rule state. After an engine upgrade, concurrent edit, revocation or lifetime change,
+reload and make a new explicit choice; do not automatically retry a stale write. Repeating a set
+with the current revision is idempotent. Ending the parent invalidates its grants, including when
+the same session ID is later resumed. Recovery within the same lifetime retains valid grants.
+
+Disabling revokes session grants for this runtime and desktop, including an earlier **Allow for
+this session**, while preserving its decision audit. It leaves existing children running and
+never removes a standing desktop rule. `standing_rule_engines` and `effective_allowed_engines`
+make that distinction explicit. Changed scopes are recorded atomically as a
+`delegation_permissions_changed` audit event with runtime, desktop and opaque grant
+IDs (also present in child delegation metadata); the owner account remains in the private grant rows; proactive grants have no fabricated approval-request ID. No production permission is enabled
+by an upgrade or by reading this endpoint.
 
 | CLI | Purpose |
 |---|---|
@@ -1010,6 +1075,58 @@ same provider and `base_url` the list was probed from. The one case that differs
 `localhost`/`127.0.0.1` (a model server on the same machine) means the container itself inside the
 sandbox, so the list appears (the probe runs on the host) but a sandboxed session cannot reach it —
 use the host's LAN address in the config, or run on **This machine**.
+
+### Run Hermes on a local model (vLLM)
+
+Serve a tool-capable model from an OpenAI-compatible vLLM endpoint on your LAN. Use the
+model's documented tool-call and reasoning parsers; a successful `/v1/models` response alone
+only proves discovery, not that an agent can call tools correctly. Start with a context and
+concurrency limit that fit your machine, then test a complete tool call and its response.
+
+In the desktop daemon account's `~/.hermes/config.yaml`, set the `model:` block:
+
+```yaml
+model:
+  provider: custom
+  base_url: http://model-server.local:8000/v1
+  default: your-served-model-name
+  context_length: 65536
+```
+
+Replace the example address with your server's LAN address and use exactly the model id returned
+by its `/v1/models`. Current Hermes versions require at least 64,000 tokens of context; the
+example uses 65,536. Match `context_length` to the context the vLLM server actually supports;
+changing this client setting does not enlarge the server's context.
+
+The hostname must resolve only to private or loopback addresses for Blerg
+to classify the endpoint as local. Use a LAN address for a Docker child: loopback inside its
+container points to the container itself.
+
+For local classification, Hermes's `~/.hermes/.env` must contain no nonempty provider key/token
+assignment, and the daemon environment must contain no nonempty `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY`. Do not put a dummy provider key into these
+locations: even a placeholder makes the budget conservative. Keep credentials for other engines
+in their own supported credential stores. Never print credential files to check this.
+
+Multiple Hermes children share the same inference server's concurrency and memory capacity:
+starting more Blerg sessions does not reserve independent GPU capacity, and the server may queue
+requests.
+
+From a Blerg session on that desktop, run `blerg-runner budget`: Hermes should say
+`local (runs on your hardware)`. Blerg classifies the endpoint and recognized credentials; the
+label is not a billing guarantee. Make sure the server really runs your model and has no paid
+provider fallback. Confirm that **New session**, with that
+desktop selected, offers Hermes and the served model. Discovery is cached and refreshed by the
+daemon; a configuration change may require its owner to reload the daemon. A missing model list
+still allows a model name to be entered manually.
+
+For delegation, first request a Hermes child with **Local sandbox** (`--engine hermes --runtime docker`) and approve it once. Check a real tool-using turn and the child's reported
+runtime before granting broader permission. The approval card can create a standing rule for
+Hermes, the Docker runtime, and that desktop; Settings lists the rule and lets you revoke it.
+Standing rules cover repositories on that desktop, not only the repository in the first request.
+Hermes standing rules default to local-only, so the desktop must still report Hermes as local
+(the local-status cache lasts up to five minutes). A later matching request can start without
+another card, subject to the parent's permissions and account limits. See [child-session permissions](../docs/talking-to-an-agent.md#when-the-agent-starts-other-sessions).
 
 In-session changes (`/model`, `/effort` in the chat, or the chat's Model/Effort selectors) are
 checked against the session engine's rules by the daemon before any engine sees them; a refused
@@ -1422,9 +1539,12 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official` | comma-separated GitHub `owner/repo` marketplaces **always-on plugins** may come from (`*` = any valid `owner/repo`). When a cluster session starts for an account, the server reads that account's list from core (`POST /internal/plugins/list`, see `core/docs/CONFIG.md`), drops entries whose marketplace is not allowed here, and hands the rest to the pod as `BLERG_RUNNER_PLUGINS` (non-secret JSON) together with this allow-list, which the pod checks again before running `claude plugin marketplace add` / `claude plugin install <plugin>@<marketplace> --scope user` (no shell, 90 s per command, 4 min overall, one after another). If core cannot be reached the session still starts without plugins and its start panel says so. Claude and Codex agent sessions. Codex installs through its native `plugin marketplace add` / `plugin add` commands in a credential-free installer home, then loads copied plugin caches and frozen catalogs from a private session `CODEX_HOME`; its existing login/config/rollouts are linked, never copied. A Local sandbox or This machine session gets the same list through `SpawnSession.plugins`, sent only to a daemon whose hello advertised that engine in `plugin_engines` (legacy `plugins` permits Claude only); the daemon re-checks its own `BLERG_RUNNER_PLUGIN_MARKETPLACES`, installs into its plugin workshop under its state dir with `CLAUDE_CONFIG_DIR` (never the person's `~/.claude`) and starts Claude with one `--plugin-dir=` per plugin (`install/desktop/DAEMON.md`). Restricted sessions never load any. Keep equal to core's `BLERG_CORE_PLUGIN_MARKETPLACES` |
 
 | `BLERG_RUNNER_METRICS_TOKEN` | no | — (endpoint off) | the bearer token a Prometheus scraper presents to `GET /metrics`. Unset: the endpoint answers `404`. Set: a missing or wrong token is `401`. Metrics are aggregates only; no session, account or title appears in them. See [`docs/telemetry.md`](../docs/telemetry.md) |
-| `BLERG_RUNNER_MCP_GW_ADDR` | no | — (gateway off) | listen address of the **MCP gateway**, a second listener and `http.Server` separate from the main port (for example `:8090`). Unset disables the gateway, and with it every session with MCP connections and every cron that uses one. It also needs the database and core (`BLERG_CORE_URL` plus `BLERG_RUNNER_CORE_INTERNAL_KEY`). Never route it through a public ingress; see [`docs/mcp-connections.md`](../docs/mcp-connections.md) |
-| `BLERG_RUNNER_MCP_GW_URL` | no | — | the address **sessions dial** to reach the gateway: an in-cluster Service URL for pods, the runner's address on the sandbox network for desktop sandbox containers. Sent to a session in its config; not derived from the daemon's WebSocket address. A launch with MCP connections is refused with a specific message while it is unset |
+| `BLERG_RUNNER_MCP_GW_ADDR` | no | — (gateway off) | listen address of the **MCP gateway**, a second listener and `http.Server` separate from the main port (for example `:8090`). Unset disables the gateway, and with it every session with MCP connections and every cron that uses one. It also needs the database and core (`BLERG_CORE_URL` plus `BLERG_RUNNER_CORE_INTERNAL_KEY`). Never route this listener through a public ingress. Sessions on workstation daemons instead reach the gateway on the main port under `/mcp-gw/` (see `BLERG_RUNNER_MCP_GW_PUBLIC`); see [`docs/mcp-connections.md`](../docs/mcp-connections.md) |
+| `BLERG_RUNNER_TRUSTED_PROXIES` | no | — (trust none) | comma-separated CIDRs or addresses of the proxies (an ingress controller) whose `X-Forwarded-For` and `X-Real-IP` the gateway's public route believes when it limits failed attempts per client: from a listed peer it takes the right-most `X-Forwarded-For` hop that is not itself listed. Unset, the client is the TCP peer, so behind a proxy every client shares one allowance. Any peer inside a listed range can claim another client's address: that evades the failure limit, never grants access. The Kubernetes install sets it from `TRUSTED_PROXIES` in `install/k8s/.env` (default: the RFC 1918 ranges and `fc00::/7`) |
+| `BLERG_RUNNER_MCP_GW_PUBLIC` | no | on | the gateway's **public route**: `/mcp-gw/` on the main port, for sessions on workstation daemons that cannot reach the gateway's own listener (desktop daemons connected to a cluster install need it). It serves only grants issued for it to a session on a daemon, within seven days of their last use or their daemon reconnecting; it answers every other token with the same JSON-RPC 401 (the same 429 once the client's address is over its allowance), limits failed attempts per client address (see `BLERG_RUNNER_TRUSTED_PROXIES`; a well-formed token from an address over its allowance is still looked up, within a global budget of 100 lookups a second, so a valid token is served unless a sustained flood exhausts it), and answers a timeout in JSON-RPC. `0`, `false`, `off` or `no` switch it off: the prefix answers 404 and grants are sent with `BLERG_RUNNER_MCP_GW_URL` as before |
+| `BLERG_RUNNER_MCP_GW_URL` | no | — | the address **sessions dial** to reach the gateway: an in-cluster Service URL for pods, the runner's address on the sandbox network for desktop sandbox containers. Sent to a session in its config. A daemon that reports `mcp_gateway_via_server` is told to dial the gateway through its own server address instead (`BLERG_RUNNER_SERVER_HTTP`, else derived from its WebSocket URL), where the runner serves it on the web port under `/mcp-gw/` for grants issued to daemon sessions for that route only (`BLERG_RUNNER_MCP_GW_PUBLIC`). A launch with MCP connections is refused with a specific message while it is unset |
 | `BLERG_RUNNER_BOARD_URL` | no | — | the board's base address **as the runner reaches it** (absolute `http(s)`, no credentials, query or fragment; for example `http://blerg-board:8080`). A cron's failure card is posted to the board's API there, and the built-in `board` connection's MCP endpoint defaults to `<this>/mcp`. Unset or invalid: crons get no board connection and no failure card. See [`docs/crons.md`](../docs/crons.md) |
+| `BLERG_RUNNER_GRANT_HOURLY_CAP` | no | `20` | how many proposals one session permission may approve on its own in an hour; past it, proposals wait for the person and say why. See [`docs/proposals.md`](../docs/proposals.md#session-permissions) |
 | `BLERG_RUNNER_BOARD_MCP_URL` | no | `<BLERG_RUNNER_BOARD_URL>/mcp` | overrides the built-in `board` connection's MCP endpoint alone (same validation as above). Usually a private address: it is fetched by the runner's gateway, never by a session |
 | `BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS` | no | empty | comma-separated hostnames for which an MCP connection URL may use plain `http://` (otherwise `https` only). Applies to the gateway and to the launch sheet's tool listing. Core has its own list, `BLERG_CORE_MCP_ALLOW_HTTP_HOSTS` |
 | `BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS` | no | empty | comma-separated hostnames an MCP connection may reach although they resolve to a loopback, link-local, private, carrier-grade NAT or metadata address. Every other host is checked on the address actually dialled. Core has its own list, `BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS` |
@@ -1533,6 +1653,7 @@ DAEMON.md's "Cluster pod auth" for how each engine's credentials reach a pod.
 | `BLERG_RUNNER_AGENT_GIT_BASE` | `https://github.com/<BLERG_RUNNER_GITHUB_ORG>`, or `https://github.com` when no org is set | git clone URL base for GitHub pods — a bare repo name is appended as `<base>/<repo>.git`; so is an `org/name` when this is set explicitly, while with only the org default an `org/name` clones from `https://github.com/org/name.git`. With neither this nor an org set, a cluster spawn must name its repo as `org/name` (a bare name is refused with 422). Repositories on another git provider (a launch with `"provider":"gitlab"`) always clone from that provider's own host, never from this base |
 | `BLERG_RUNNER_AGENT_SECRET` | `blerg-runner-agent` | k8s Secret holding `ANTHROPIC_API_KEY`/`BLERG_RUNNER_DAEMON_TOKEN`/`BLERG_RUNNER_GIT_TOKEN` |
 | `BLERG_RUNNER_OAUTH_SECRET_NAME` | same as `BLERG_RUNNER_AGENT_SECRET` | separate Secret for operator-synced creds (`CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_AUTH_JSON`, `HERMES_ENV_CONTENTS`, `BLERG_RUNNER_GIT_TOKEN`) when rotation flows from elsewhere (e.g. Infisical) |
+| `BLERG_RUNNER_HERMES_PROVIDERS` | unset | the cluster's shared Hermes provider fragment (a Hermes `config.yaml` document; install/k8s sets it from Secret `blerg-hermes-providers`). Merged into every Hermes session pod's `~/.hermes/config.yaml`, lists the providers' models in the cluster catalog, and makes Hermes available on the cluster without a `.env`. See [Shared Hermes providers](../install/k8s/CLUSTER-RUNTIME.md#shared-hermes-providers) |
 | `BLERG_RUNNER_MAX_SESSIONS` | `4` | concurrent cluster session cap. An administrator can change it (1 to 64) on the runner's Cluster page (`PUT /api/cluster/settings` with `max_sessions`, `0` or `null` returns to this value; needs the `account.manage` capability); a saved value beats the environment and applies to the next session start, no restart. `GET /api/cluster/status` reports the effective `max_sessions` and this value as `max_sessions_default` |
 | `BLERG_RUNNER_POD_TTL_SECONDS` | `604800` (7d) | `activeDeadlineSeconds` — the hard cap on a pod's lifetime, busy or idle |
 | `BLERG_RUNNER_POD_IDLE_TIMEOUT_SECONDS` | `86400` (24h) | the pod ends itself after this long with no message sent and no turn finished (`0` = never). The session keeps its history and can be resumed. An administrator can change this and the lifetime cap on the runner's Cluster page (`PUT /api/cluster/settings`, needs the `account.manage` capability); a saved value beats the environment and applies to pods started afterwards |
@@ -1617,3 +1738,15 @@ the parent's session credential may discard only its own children; a signed-in p
 both parent and child. Success stops the child and records `archived_at`; a failed stop leaves it
 visible for retry. Archived workers leave live/nested lists, but remain readable by URL and
 included in History and Insights. Discard is idempotent. Stop alone keeps a worker listed.
+
+
+A parent session's **Discard** action is separate from Stop. The signed-in human owner can
+confirm `POST /api/sessions/{id}/discard` to stop the session and **all** its children, including
+mid-turn workers marked Keep running. Agent, session and daemon credentials cannot invoke it.
+The operation durably refuses further input, child launches and recovery before stopping workers.
+Every reachable worker is stopped even if another worker is unavailable; only successfully stopped
+workers are archived, and the parent is archived last. A `503` leaves discard pending and visible
+for retry, with its admission fence retained across server restarts. Repeat the same request after
+the worker reconnects. Success is idempotent and returns `status`, `session_id` and `archived_at`.
+Discard keeps conversations, artifacts, direct links, History and Insights. It does not change
+standing desktop rules, and ordinary Stop/`DELETE /api/sessions/{id}` still respects Keep running.

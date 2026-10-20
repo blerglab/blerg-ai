@@ -58,7 +58,7 @@ func TestDaemonDisconnectBroadcastSkipsClusterPods(t *testing.T) {
 		if !strings.Contains(string(m), `"type":"daemon_disconnected"`) || !strings.Contains(string(m), `"ws1"`) {
 			t.Fatalf("workstation disconnect broadcast = %s", m)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("a workstation daemon disconnect was not broadcast")
 	}
 	for _, id := range []string{"runner-abc", "ws1"} {

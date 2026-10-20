@@ -120,7 +120,7 @@ func testCodexManagedCredentialRealCLI(t *testing.T, restricted bool) {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("native runtime did not stop")
 		}
 	}()

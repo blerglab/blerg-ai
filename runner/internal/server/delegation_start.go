@@ -34,6 +34,7 @@ import (
 const (
 	delegationTitleDefaultRunes = 60
 	childRuntimeMessage         = `runtime must be "docker" or "daemon"`
+	msgDesktopChildCluster      = `a desktop session's children run on its desktop (runtime "docker" or "daemon"); cluster children need a parent running on the cluster`
 	childPromptRequired         = "prompt is required"
 	childPromptTooLarge         = "prompt is too large"
 	childPluginsSkipped         = "skipped"
@@ -87,7 +88,7 @@ type delegationRequestPayload struct {
 	Repo            string        `json:"repo,omitempty"`
 	NoRepo          bool          `json:"no_repo,omitempty"`
 	Runtime         string        `json:"runtime"`
-	DaemonName      string        `json:"daemon_name"` // the card's "Always allow … on this desktop" names it
+	DaemonName      string        `json:"daemon_name"` // the card's "Always allow …" target: the daemon's name, or "the cluster"
 	Title           string        `json:"title"`
 	Prompt          string        `json:"prompt"` // first delegationPromptExcerpt runes
 	PromptTruncated bool          `json:"prompt_truncated,omitempty"`
@@ -96,9 +97,11 @@ type delegationRequestPayload struct {
 	ExpiresAt       time.Time     `json:"expires_at"`
 }
 
-// parseChildStart decodes and checks the allowlisted body against the parent's daemon dc. Any key
-// outside delegationAllowedFields is refused before anything else is read.
-func parseChildStart(raw []byte, dc *DaemonConn) (childStart, *APIError) {
+// parseChildStart decodes and checks the allowlisted body against where the parent's children run
+// (host: its daemon, or the cluster). Any key outside delegationAllowedFields is refused before
+// anything else is read.
+func parseChildStart(raw []byte, host childHost) (childStart, *APIError) {
+	dc := host.dc
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		return childStart{}, apiErrorf(http.StatusBadRequest, "the body must be a JSON object")
@@ -143,15 +146,32 @@ func parseChildStart(raw []byte, dc *DaemonConn) (childStart, *APIError) {
 				"repo must be a folder name or org/name (one slash at most, no '..', no leading dot)")
 		}
 		// The pinned daemon skips DaemonForRepo's folder check; a start for a repo it lacks
-		// would answer "started" and fail later.
-		if !containsString(dc.CheckedOutRepos(), cs.Repo) {
+		// would answer "started" and fail later. A cluster child clones its repo, as a cluster
+		// launch does.
+		if !host.cluster && !containsString(dc.CheckedOutRepos(), cs.Repo) {
 			return childStart{}, apiErrorf(http.StatusUnprocessableEntity, "the parent's daemon has no repo %s", cs.Repo)
 		}
+	}
+	if host.cluster {
+		// A cluster parent's children run on the cluster; its own runtime is the default.
+		switch cs.Runtime {
+		case "", runnerRuntimeCluster:
+			cs.Runtime = runnerRuntimeCluster
+		default:
+			return childStart{}, apiErrorf(http.StatusUnprocessableEntity, "%s", msgClusterChildRuntime)
+		}
+		cs.Engine = models.NormalizeEngine(cs.Engine)
+		if d, ok := engines.Lookup(cs.Engine); !ok || !d.SupportsRuntime(runnerRuntimeCluster) {
+			return childStart{}, apiErrorf(http.StatusUnprocessableEntity, "the cluster cannot run %s", engineLabel(cs.Engine))
+		}
+		return cs, nil
 	}
 	switch cs.Runtime {
 	case "":
 		cs.Runtime = resolveDaemonRuntime("", dc.SandboxAvailable())
 	case runnerRuntimeDocker, runnerRuntimeDaemon:
+	case runnerRuntimeCluster:
+		return childStart{}, apiErrorf(http.StatusUnprocessableEntity, "%s", msgDesktopChildCluster)
 	default:
 		return childStart{}, apiErrorf(http.StatusUnprocessableEntity, "%s", childRuntimeMessage)
 	}
@@ -163,8 +183,19 @@ func parseChildStart(raw []byte, dc *DaemonConn) (childStart, *APIError) {
 	return cs, nil
 }
 
-// validateChildStart checks the model and effort against the engine and this daemon's own list.
-func (a *API) validateChildStart(ctx context.Context, cs childStart, dc *DaemonConn) *APIError {
+// validateChildStart checks the model and effort against the engine and this daemon's own list; for
+// a cluster child, against the cluster's catalog and its readiness for the engine (as delegate p).
+func (a *API) validateChildStart(ctx context.Context, cs childStart, host childHost, p runnerPrincipal) *APIError {
+	if host.cluster {
+		if msg := a.modelEffortProblem(ctx, cs.Engine, cs.Model, cs.Effort, ""); msg != "" {
+			return apiErrorf(http.StatusUnprocessableEntity, "%s", msg)
+		}
+		if msg := a.clusterEngineProblem(ctx, cs.Engine, p); msg != "" {
+			return apiErrorf(http.StatusUnprocessableEntity, "%s", msg)
+		}
+		return nil
+	}
+	dc := host.dc
 	if !dc.RecoveryReadyCapable {
 		return apiErrorf(http.StatusConflict, "update the daemon before starting child sessions")
 	}
@@ -210,10 +241,10 @@ func engineLabel(engine string) string {
 	return engine
 }
 
-// trustDirect: the parent is a direct session (spec §0): the person launched it themselves. Every
-// other parent is untrusted-input, and rules and grants never apply to it.
+// trustDirect: the person launched this parent directly. Restricted-tool parents and every
+// other parent are untrusted-input, and rules and grants never apply to them.
 func trustDirect(parent *db.SessionRow) bool {
-	if parent == nil || isChildSession(parent) {
+	if parent == nil || isChildSession(parent) || parent.RestrictTools {
 		return false
 	}
 	if parent.StartedByKind != "" && parent.StartedByKind != "human" {
@@ -223,13 +254,16 @@ func trustDirect(parent *db.SessionRow) bool {
 }
 
 // confinementOK: a rule or grant may start this runtime for this parent without a card. A docker
-// child always; a host child only for a parent that itself runs on the host (R2).
+// child always; a host child only for a parent that itself runs on the host (R2); a cluster child
+// (a pod as confined as its parent) for a cluster parent.
 func confinementOK(parent *db.SessionRow, runtime string) bool {
 	switch runtime {
 	case runnerRuntimeDocker:
 		return true
 	case runnerRuntimeDaemon:
 		return derefOrEmpty(parent.Runtime) == runnerRuntimeDaemon
+	case runnerRuntimeCluster:
+		return onClusterParent(parent)
 	}
 	return false
 }
@@ -244,22 +278,27 @@ func offeredChoices(parent *db.SessionRow, cs childStart) []string {
 }
 
 // matchDelegation: a standing rule first, then a session grant; "" when neither (or when the parent
-// may not use either). Returns "rule:<id>" or "grant:<id>".
-func (a *API) matchDelegation(ctx context.Context, parent *db.SessionRow, dc *DaemonConn, cs childStart) (string, error) {
+// may not use either). Returns "rule:<id>" or "grant:<id>". A cluster child whose owner credentials
+// nothing live authorizes (host.ownerLive false: no proof, or core refuses it) is never started by a
+// rule or grant: the person is asked, and their decision carries a fresh proof.
+func (a *API) matchDelegation(ctx context.Context, parent *db.SessionRow, host childHost, cs childStart) (string, error) {
 	if !trustDirect(parent) || !confinementOK(parent, cs.Runtime) {
 		return "", nil
 	}
-	rules, err := db.CandidateDelegationRules(ctx, a.dbPool, derefOrEmpty(parent.SpawningAccountID), cs.Engine, cs.Runtime, parent.DaemonID)
+	if host.cluster && !host.ownerLive {
+		return "", nil
+	}
+	rules, err := db.CandidateDelegationRules(ctx, a.dbPool, derefOrEmpty(parent.SpawningAccountID), cs.Engine, cs.Runtime, delegationDaemonID(parent))
 	if err != nil {
 		return "", err
 	}
 	for _, r := range rules {
-		if r.LocalOnly && !dc.LocalEngine(cs.Engine) {
+		if r.LocalOnly && !host.localEngine(cs.Engine) {
 			continue
 		}
 		return "rule:" + r.ID, nil
 	}
-	g, err := db.FindDelegationGrant(ctx, a.dbPool, parent.ID, cs.Engine, cs.Runtime, parent.DaemonID)
+	g, err := db.FindDelegationGrant(ctx, a.dbPool, parent.ID, cs.Engine, cs.Runtime, delegationDaemonID(parent))
 	if err != nil {
 		return "", err
 	}
@@ -433,7 +472,7 @@ func childRunnerRequest(parent *db.SessionRow, cs childStart, via string) runner
 		Repo: cs.Repo, NoRepo: cs.NoRepo, Runtime: cs.Runtime,
 		Title: cs.Title, Prompt: cs.Prompt,
 		Interaction:     protocol.InteractionUnattended,
-		DaemonID:        parent.DaemonID,
+		DaemonID:        delegationDaemonID(parent),
 		ParentSessionID: parent.ID,
 		ParentEpoch:     parent.DelegationEndedAt,
 		DelegationVia:   via,
@@ -524,17 +563,29 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	cs, apiErr := parseChildStart(raw, dc)
+	host := hostOf(parent, dc)
+	delegate := a.delegatePrincipalFor(ctx, parent, "")
+	cs, apiErr := parseChildStart(raw, host)
 	if apiErr == nil {
-		apiErr = a.validateChildStart(ctx, cs, dc)
+		// The name an agent typed becomes the catalog's routing id before anything is checked,
+		// hashed or stored.
+		cs.Model, apiErr = a.resolveChildModel(ctx, cs.Engine, cs.Model, host, delegate)
+	}
+	if apiErr == nil {
+		apiErr = a.validateChildStart(ctx, cs, host, delegate)
 	}
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
 	}
+	if host.cluster {
+		// Checked with core before the account lock: it is a network call.
+		host.ownerLive = a.clusterOwnerLive(ctx, delegate)
+		host.local = a.clusterLocalEngines(ctx, parent, delegate)
+	}
 	hash := childRequestHash(cs)
 	now := time.Now()
-	budget := budgetEngineFor(dc, cs.Engine, now)
+	budget := a.budgetEngineForHost(ctx, parent, host, delegate, cs.Engine, now)
 	account := derefOrEmpty(parent.SpawningAccountID)
 
 	conflict := childOutcome{status: http.StatusConflict, body: map[string]string{"error": idempotencyConflictMessage}}
@@ -545,7 +596,7 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if cur == nil || terminalSessionStatus(cur.Status) {
+		if cur == nil || cur.DiscardRequestedAt != nil || terminalSessionStatus(cur.Status) {
 			out = outcomeError(apiErrorf(http.StatusConflict, "%s", msgDelegateEnded))
 			return nil
 		}
@@ -602,7 +653,7 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 			out = outcomeError(apiErr)
 			return nil
 		}
-		via, err := a.matchDelegation(ctx, parent, dc, cs)
+		via, err := a.matchDelegation(ctx, parent, host, cs)
 		if err != nil {
 			return err
 		}
@@ -621,7 +672,7 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		req, isNew, err := db.InsertDelegationRequest(ctx, a.dbPool, db.DelegationRequest{
-			ParentSessionID: parent.ID, AccountID: account, DaemonID: parent.DaemonID,
+			ParentSessionID: parent.ID, AccountID: account, DaemonID: delegationDaemonID(parent),
 			IdempotencyKey: key, RequestHash: hash, Request: request,
 			Offered: offeredChoices(parent, cs), ExpiresAt: now.Add(delegationRequestTTL),
 		})
@@ -646,7 +697,7 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if out.created != nil {
-		if err := a.announceDelegationRequest(context.WithoutCancel(ctx), *parent, dc, cs, *out.created, budget); err != nil {
+		if err := a.announceDelegationRequest(context.WithoutCancel(ctx), *parent, host, cs, *out.created, budget); err != nil {
 			// No card means nobody can decide it: withdraw the request rather than leave it pending.
 			log.Printf("delegation: request %s not shown: %v", out.created.ID, err)
 			if _, xerr := db.ExpireDelegationRequest(context.WithoutCancel(ctx), a.dbPool, out.created.ID, parent.ID); xerr != nil {
@@ -660,13 +711,10 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 
 // announceDelegationRequest writes the delegation_request event in the parent's transcript and
 // pushes it (not for private or headless parents).
-func (a *API) announceDelegationRequest(ctx context.Context, parent db.SessionRow, dc *DaemonConn, cs childStart,
+func (a *API) announceDelegationRequest(ctx context.Context, parent db.SessionRow, host childHost, cs childStart,
 	req db.DelegationRequest, budget *budgetEngine) error {
 	excerpt := cutRunes(cs.Prompt, delegationPromptExcerpt)
-	daemonName := ""
-	if dc != nil {
-		daemonName = dc.Name
-	}
+	daemonName := host.name()
 	payload := delegationRequestPayload{
 		RequestID: req.ID, Engine: cs.Engine, Model: cs.Model, Effort: cs.Effort, Repo: cs.Repo, NoRepo: cs.NoRepo,
 		Runtime: cs.Runtime, DaemonName: daemonName, Title: cs.Title, Prompt: excerpt,

@@ -40,7 +40,11 @@ type ManagerConfig struct {
 	DaemonName       string
 	DaemonToken      string
 	ServerHTTP       string
-	GithubOrg        string
+	// ServerURL is the WebSocket URL the daemon connects to. A grant dialled
+	// through the server falls back to an address derived from it when
+	// ServerHTTP is unset (gatewayServerBase).
+	ServerURL string
+	GithubOrg string
 	// AllowHostCredentialClone lets a named clone use the launching person's
 	// own git token on the bare host (a This machine session). Off by
 	// default: on the host, any other unsandboxed session on this machine
@@ -485,6 +489,11 @@ func claudeCommand(id, model, effort string, skipPerms, resume, sandboxed bool) 
 func spawnModelProblem(msg protocol.SpawnSession) string {
 	if problem := engineProblem(msg.Engine); problem != "" {
 		return problem
+	}
+	if spec, ok := engineRegistry[msg.Engine]; ok && msg.Kind != "agent" && spec.TerminalModelProblem != nil {
+		if problem := spec.TerminalModelProblem(msg.Model); problem != "" {
+			return problem
+		}
 	}
 	if !models.ValidModelFor(msg.Engine, msg.Model) {
 		return fmt.Sprintf("refusing spawn: invalid model %q", msg.Model)
@@ -1203,6 +1212,16 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 		m.sendError(msg.SessionID, problem)
 		return
 	}
+	// A grant the server asked to be dialled through its own web address gets
+	// the address this daemon reaches the server at (the server's own gateway
+	// address is often an in-cluster one, out of a workstation's reach).
+	gateway, gwErr := viaServerGateway(msg.MCPGateway, gatewayServerBase(m.config.ServerHTTP, m.config.ServerURL))
+	if gwErr != nil {
+		log.Printf("manager: %s: %v", msg.SessionID, gwErr)
+		m.sendError(msg.SessionID, gwErr.Error())
+		return
+	}
+	msg.MCPGateway = gateway
 	projectPath, created, err := m.prepareWorkspaceTracked(msg)
 	// A spawn that fails before its session exists must not leave a folder
 	// it created behind (it would show up, empty, in the repo picker).
@@ -1672,6 +1691,12 @@ func (m *Manager) recoverSession(rec SessionRecord) {
 	var inner []string
 	resume := false
 	if spec, ok := engineRegistry[rec.Engine]; ok {
+		if spec.TerminalModelProblem != nil {
+			if problem := spec.TerminalModelProblem(rec.Model); problem != "" {
+				m.sendError(rec.SessionID, problem)
+				return
+			}
+		}
 		inner = buildTerminalCommand(spec, rec.Model, rec.Effort, rec.DangerouslySkipPermissions, rec.Sandbox)
 		if rec.Engine == "codex" {
 			thread := codexTerminalThread(rec.CodexHome)

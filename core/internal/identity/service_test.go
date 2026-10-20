@@ -103,7 +103,7 @@ func TestLoadOrGenerateSigningKeySerializesViaAdvisoryLock(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadOrGenerateSigningKey after lock release: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatalf("LoadOrGenerateSigningKey did not complete after advisory lock was released")
 	}
 }

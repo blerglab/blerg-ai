@@ -88,7 +88,7 @@ for arg in "$@"; do
 done
 
 # --reset-admin (R8: admin recovery) is handled before anything else — the whole point is to
-# recover access when the operator has lost the bootstrap password, so it doesn't wait on the
+# recover access when the operator has lost the admin password, so it doesn't wait on the
 # rest of this script's docker/daemon/build checks. It does require the stack to already be up
 # (it execs `psql` inside the running postgres container and runs blerg-core's own `users`
 # subcommand against it), so a stack that was never started fails with an actionable message
@@ -96,10 +96,10 @@ done
 if [ "$RESET_ADMIN" -eq 1 ]; then
   # Deterministic pick when more than one admin exists (e.g. an operator ran `users create
   # --role admin` for a second account): the OLDEST local admin account, by created_at — the
-  # bootstrap admin EnsureBootstrapAdmin seeds is always the first row, so this reliably targets
+  # first admin (the one created at /setup) is always the first row, so this reliably targets
   # it rather than a newer, arbitrary admin.
   subject="$(docker compose exec -T postgres psql -U blerg -d blerg_core -tAc "select provider_subject from accounts where provider='local' and role='admin' order by created_at limit 1")"
-  [ -n "$subject" ] || { blerg_fail "No local admin account found (is the stack up? ./blerg-up.sh first)"; exit 1; }
+  [ -n "$subject" ] || { blerg_fail "No local admin account found. Is the stack up (./blerg-up.sh first)? On a fresh install there is no account yet: create yours at http://localhost:$(grep '^BLERG_PORT_CORE=' .env | cut -d= -f2 || echo 8081)/setup"; exit 1; }
   # The image is distroless (no shell) — run the binary's own subcommand.
   line="$(docker compose run --rm --no-deps -T --entrypoint /blerg-core -e "DATABASE_URL=postgres://blerg:blerg@postgres:5432/blerg_core?sslmode=disable" blerg-core users set-password --subject "$subject")"
   blerg_box "admin password reset" <<EOF
@@ -288,6 +288,7 @@ BLERG_RUNNER_KEY=${RUNNER_KEY}
 BLERG_RUNNER_DAEMON_TOKEN=$(gen)
 BLERG_CORE_REGISTER_KEY=$(gen)
 BLERG_CORE_INTERNAL_KEY=$(gen)
+BLERG_CORE_BOARD_MINT_KEY=$(gen)
 BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32)
 BLERG_BOARD_SECRET_KEY=$(openssl rand -base64 32)
 ANTHROPIC_API_KEY=
@@ -328,7 +329,14 @@ if ! grep -q '^BLERG_BOARD_SECRET_KEY=.' .env; then
   echo "BLERG_BOARD_SECRET_KEY=$(openssl rand -base64 32)" >> .env
   blerg_ok "Generated BLERG_BOARD_SECRET_KEY (encrypts board automation tokens at rest — back it up with .env)"
 fi
-for k in BLERG_BOARD_SERVICE_KEY BLERG_RUNNER_KEY BLERG_RUNNER_DAEMON_TOKEN BLERG_CORE_REGISTER_KEY BLERG_CORE_INTERNAL_KEY; do check_secret "$k" || BAD="$BAD $k"; done
+# BLERG_CORE_BOARD_MINT_KEY lets the board mint "Run as me" tokens through core (and nothing else).
+# An .env from before it existed gets one; nothing is stored under it, so adding it loses nothing.
+if ! grep -q '^BLERG_CORE_BOARD_MINT_KEY=.' .env; then
+  env_drop_keys BLERG_CORE_BOARD_MINT_KEY
+  echo "BLERG_CORE_BOARD_MINT_KEY=$(gen)" >> .env
+  blerg_ok "Generated BLERG_CORE_BOARD_MINT_KEY (boards can run their cards as you: Run as me)"
+fi
+for k in BLERG_BOARD_SERVICE_KEY BLERG_RUNNER_KEY BLERG_RUNNER_DAEMON_TOKEN BLERG_CORE_REGISTER_KEY BLERG_CORE_INTERNAL_KEY BLERG_CORE_BOARD_MINT_KEY; do check_secret "$k" || BAD="$BAD $k"; done
 check_b64_key BLERG_CORE_LOCAL_KEY || BAD="$BAD BLERG_CORE_LOCAL_KEY"
 check_b64_key BLERG_BOARD_SECRET_KEY || BAD="$BAD BLERG_BOARD_SECRET_KEY"
 if [ -n "$BAD" ] && [ "$REGEN_SECRETS" -eq 1 ]; then
@@ -385,7 +393,6 @@ BLERG_DOCKER_NO_PROXY="$(docker_client_no_proxy)"
 export BLERG_DOCKER_NO_PROXY
 
 blerg_step "Starting desktop stack (postgres, blerg-core, blerg-board, blerg-runner)..."
-RUN_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 docker compose -f "$COMPOSE_FILE" up -d $BUILD_FLAG
 
 wait_for() {
@@ -462,27 +469,46 @@ open_browser() {
   fi
 }
 
-# The bootstrap password is logged once, by the boot that creates the admin
-# account. Only point at the log when THIS run's containers logged it; on a
-# re-run (or if clocks disagree) point at --reset-admin instead, which always
-# works.
-if docker compose logs --since "$RUN_START" blerg-core 2>/dev/null | grep -q BLERG_BOOTSTRAP_ADMIN_PASSWORD; then
-  ADMIN_HINT="$(cat <<HINT
-   the login every component accepts. The bootstrap admin's username AND
-   one-time password are in core's first-boot log:
+# A fresh stack has no account yet: core is in first-run setup mode and the person creates the
+# admin by choosing a username and password at /setup (no password to dig out of a log). On a
+# stack that is already set up, point at the sign-in page and at --reset-admin.
+# The setup link (when a code is needed) is a credential: mint and show it only on a terminal.
+SETUP_MINT=0
+[ -t 1 ] && SETUP_MINT=1
+SETUP_RC=0
+SETUP_URL="$(first_run_setup_url "$PORT_CORE" "$SETUP_MINT")" || SETUP_RC=$?
+if [ -n "$SETUP_URL" ]; then
+  case "$SETUP_URL" in
+    *'#code='*) SETUP_NOTE="
+   The link is a password until it is used: it works once, for 24 hours.
+   Don't share it; run ./blerg-up.sh again for a fresh one." ;;
+    *) SETUP_NOTE="
+   Until you do, any user, process or container on this machine can claim
+   the admin account: finish setup now." ;;
+  esac
+  ADMIN_STEP="$(cat <<HINT
+Create your account: open
 
-     docker compose logs blerg-core | grep BLERG_BOOTSTRAP_ADMIN_PASSWORD
+     $SETUP_URL
 
-   (the username is in that line too, and you choose your own when you first
-   change the password; it is printed once, on the boot that created the
-   account - if it's gone, run: $0 --reset-admin)
+   and choose your username and password. It is the administrator, and
+   every component accepts its login.$SETUP_NOTE
+HINT
+)"
+elif [ "$SETUP_RC" -eq 2 ]; then
+  ADMIN_STEP="$(cat <<HINT
+Create your account. Get the one-time setup link (a credential, so it is
+   not printed here) by running this in your own terminal, in $PWD:
+
+     docker compose exec blerg-core /blerg-core setup-link
+
+   then open it and choose your username and password.
 HINT
 )"
 else
-  ADMIN_HINT="$(cat <<HINT
-   the login every component accepts. Your admin account already exists (its
-   one-time password was printed on the first run only). Forgot it, or never
-   saw it? Mint a new one-time password:
+  ADMIN_STEP="$(cat <<HINT
+Sign in at http://localhost:$PORT_CORE with your account; every component
+   accepts it. Forgot the password? Mint a one-time one:
 
      $0 --reset-admin
 HINT
@@ -492,12 +518,9 @@ fi
 echo
 if [ "$DAEMON_UP" -eq 1 ]; then
   blerg_box "blerg is up" <<EOF
-1. Sign in at http://localhost:$PORT_CORE (click "Sign in"). blerg-core issues
-$ADMIN_HINT
+1. $ADMIN_STEP
 
-2. You'll be sent to /change-password - pick a real one, then sign in again.
-
-3. The runner daemon is installed and running as a background service
+2. The runner daemon is installed and running as a background service
    (check: ./daemon/install.sh status; DAEMON.md for logs/other platforms).
    Runner -> + New -> pick a repo -> Launch; that sheet defaults to the local
    sandbox. Board session / Run board also run in the local sandbox by
@@ -546,17 +569,14 @@ STEP
   blerg_box "do this next" <<EOF
 $DAEMON_STEP
 
-2. Sign in at http://localhost:$PORT_CORE (click "Sign in"). blerg-core issues
-$ADMIN_HINT
-
-3. You'll be sent to /change-password - pick a real one, then sign in again.
+2. $ADMIN_STEP
 
 $DAEMON_FOOTER
 EOF
 fi
 
 if [ "$OPEN_BROWSER" -eq 1 ] && [ "$STATUS" -eq 0 ]; then
-  open_browser "http://localhost:$PORT_CORE" || true
+  open_browser "${SETUP_URL:-http://localhost:$PORT_CORE}" || true
 fi
 
 if [ "$STATUS" -ne 0 ]; then

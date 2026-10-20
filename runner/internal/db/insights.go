@@ -236,12 +236,18 @@ type SessionTokenRow struct {
 // ListSessionTokenUsage sums a session's usage by source (main agent or subagents) and model, under the
 // same rules as ListTokenUsage.
 func ListSessionTokenUsage(ctx context.Context, pool *pgxpool.Pool, sessionID string) ([]SessionTokenRow, error) {
+	return ListSessionTokenUsageThrough(ctx, pool, sessionID, 1<<63-1)
+}
+
+// ListSessionTokenUsageThrough uses the same immutable event boundary as live
+// snapshots, so a concurrent completion cannot be combined with its own progress.
+func ListSessionTokenUsageThrough(ctx context.Context, pool *pgxpool.Pool, sessionID string, through int64) ([]SessionTokenRow, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT e.kind = 'subagent_done', u.model,
 		       count(*) FILTER (WHERE e.kind = 'turn_done' AND u.turn_marker), `+usageSums+`
 		  FROM agent_events e `+usageRows+`
-		 WHERE e.session_id = $1 AND `+usageEvents+`
-		 GROUP BY 1, 2`, sessionID)
+		 WHERE e.session_id = $1 AND e.seq <= $2 AND `+usageEvents+`
+		 GROUP BY 1, 2`, sessionID, through)
 	if err != nil {
 		return nil, fmt.Errorf("list session token usage: %w", err)
 	}
@@ -273,15 +279,17 @@ type SessionActivity struct {
 
 // GetSessionActivity counts a session's tool_call events by tool and by whether a subagent made them,
 // and its user_message events that a person sent: every source but "system" (text the engine or the
-// runner put in the user's place, such as a subagent's completion notice) and "runner" (a message sent
-// through the runner contract or MCP send_message, which may come from another agent).
+// runner put in the user's place, such as a subagent's completion notice), "runner" (a message sent
+// through the runner contract or MCP send_message, which may come from another agent), what a board,
+// a parent session or a cron wrote ("blerg-board", "session", "cron") and the decisions Blerg relays
+// ("review", "proposal").
 func GetSessionActivity(ctx context.Context, pool *pgxpool.Pool, sessionID string) (SessionActivity, error) {
 	var out SessionActivity
 	rows, err := pool.Query(ctx, `
 		SELECT e.kind, COALESCE(e.payload->>'tool', ''), COALESCE(e.payload->>'parent_call_id', '') <> '', count(*)
 		  FROM agent_events e
 		 WHERE e.session_id = $1
-		   AND (e.kind = 'tool_call' OR (e.kind = 'user_message' AND COALESCE(e.payload->>'source', '') NOT IN ('system', 'runner')))
+		   AND (e.kind = 'tool_call' OR (e.kind = 'user_message' AND COALESCE(e.payload->>'source', '') NOT IN ('system', 'runner', 'blerg-board', 'session', 'cron', 'review', 'proposal')))
 		 GROUP BY 1, 2, 3`, sessionID)
 	if err != nil {
 		return out, fmt.Errorf("session activity: %w", err)

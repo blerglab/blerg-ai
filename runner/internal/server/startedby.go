@@ -34,6 +34,32 @@ func startedByOf(row *db.SessionRow) *protocol.StartedBy {
 	return nil
 }
 
+// Who wrote a session's first prompt, as the source its user_message is recorded with (spawn
+// frame initial_prompt_source; BLERG_RUNNER_INITIAL_PROMPT_SOURCE in a cluster pod). The person's
+// own start keeps "" — the daemon's "chat", as before, and what a daemon that predates the field
+// records anyway. Every other origin is named so the chat never draws its prompt as the person's.
+const (
+	promptSourceBoard   = "blerg-board" // a board's automation: a card run, a board session, a reviewer
+	promptSourceSession = "session"     // a parent session (delegation): the source its later messages carry too
+	promptSourceCron    = "cron"        // a cron run
+)
+
+// initialPromptSource is the source of a v1-contract start's prompt. It is derived only from what
+// the caller cannot choose freely (the verified principal, the in-process cron id) or from what
+// can only make the prompt less the person's (a board's env), never from a source in the body: no
+// start can claim to be the person when its credential is not.
+func initialPromptSource(principal runnerPrincipal, req runnerStartRequest) string {
+	switch {
+	case req.CronID != "":
+		return promptSourceCron
+	case principal.Kind == sessionDelegateKind || req.ParentSessionID != "":
+		return promptSourceSession
+	case req.Env["BLERG_BOARD_BOARD"] != "":
+		return promptSourceBoard
+	}
+	return ""
+}
+
 // recordStartedBy writes the start's attribution for a session the v1 contract created.
 func (a *API) recordStartedBy(ctx context.Context, sessionID string, principal runnerPrincipal, cronID string) {
 	if a.dbPool == nil {

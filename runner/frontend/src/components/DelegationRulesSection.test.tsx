@@ -18,6 +18,12 @@ describe('session-starting rules', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/delegation-rules/rule', { method: 'DELETE' }))
   })
+  it('names a cluster rule by the cluster, not as an unsandboxed desktop', async () => {
+    apiFetch.mockImplementation((path: string) => path === '/api/daemons' ? json([]) : json({ rules: [{ ...rule, runtime: 'cluster', daemon_id: 'cluster', daemon_name: 'cluster' }], limits }))
+    render(<DelegationRulesSection />)
+    const item = await screen.findByText(/Codex · on the cluster/)
+    expect(item.textContent).not.toMatch(/unsandboxed|desktop/)
+  })
   it('discovers available engines and defaults local-only on for Hermes', async () => {
     render(<DelegationRulesSection />)
     await screen.findByRole('button', { name: 'Add rule' })

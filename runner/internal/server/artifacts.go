@@ -185,10 +185,13 @@ func (h *artifactsHandler) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.recordArtifactEvent(r.Context(), sid, info.artifactInfo)
+	superseded := a.supersedeReviews(context.WithoutCancel(r.Context()), sid, info.artifactInfo)
 	writeJSON(w, http.StatusCreated, struct {
 		storedArtifact
 		URL string `json:"url"`
-	}{*info, "/sessions/" + sid + "?artifact=" + info.ID})
+		// SupersededReviews: pending review requests of older versions this one superseded.
+		SupersededReviews []reviewRequestView `json:"superseded_reviews,omitempty"`
+	}{*info, "/sessions/" + sid + "?artifact=" + info.ID, superseded})
 }
 
 // storedArtifact is what store() returns: the new file, the version it follows (null for the
@@ -517,6 +520,7 @@ func (h *artifactsHandler) removeSession(w http.ResponseWriter, r *http.Request,
 		writeDatabaseFailure(w, "delete the file", "artifacts delete", err)
 		return
 	}
+	h.api.withdrawDeletedReviews(context.WithoutCancel(r.Context()), sid, row.ID)
 	if err := os.RemoveAll(artifactDir(sid, row.ID)); err != nil {
 		log.Printf("artifacts delete files %s/%s: %v", sid, row.ID, err)
 	}

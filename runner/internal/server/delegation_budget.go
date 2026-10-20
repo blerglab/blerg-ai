@@ -117,6 +117,13 @@ func (a *API) HandleGetSessionBudget(w http.ResponseWriter, r *http.Request) {
 		notFound()
 		return
 	}
+	if onClusterParent(row) && a.hub.JobManager() != nil {
+		delegate := a.delegatePrincipalFor(r.Context(), row, "")
+		available, known := a.clusterAvailableEngines(r.Context(), delegate)
+		local := a.clusterLocalEngines(r.Context(), row, delegate)
+		writeJSON(w, http.StatusOK, budgetForCluster(a.hub.FindDaemonForSession(row.ID), available, known, local, time.Now()))
+		return
+	}
 	var dc *DaemonConn
 	if onDesktopDaemon(row) {
 		dc = a.hub.GetHostDaemon(row.DaemonID)

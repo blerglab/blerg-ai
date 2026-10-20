@@ -427,6 +427,11 @@ type mcpStartConfig struct {
 	GatewayURL string              // the address sessions dial (BLERG_RUNNER_MCP_GW_URL)
 	Core       MCPConnectionLister // nil: core is not configured
 	Board      boardAccess         // nil: the built-in board connection is not available (cronboard.go)
+	// gateway is the running gateway (nil when it is off), kept so RegisterMCPGatewayRoutes can
+	// mount it on the web port too. ServedOnWeb is true once it has: a daemon that can is then
+	// told to dial the gateway at the server address it already uses (MCPGatewayConfig.ViaServer).
+	gateway     *mcpgw.Gateway
+	ServedOnWeb bool
 }
 
 // mcpStartHolder is the Hub's (concurrency-safe) reference to the start configuration, so the
@@ -460,7 +465,9 @@ func (a *API) SetMCPGateway(handle *MCPGatewayHandle, gatewayURL, coreURL, coreI
 	cfg := &mcpStartConfig{GatewayURL: strings.TrimRight(strings.TrimSpace(gatewayURL), "/")}
 	if handle != nil && handle.Gateway != nil {
 		cfg.Hasher = handle.Gateway
+		cfg.gateway = handle.Gateway
 		handle.Gateway.SetRefresher(a.hub)
+		a.installSessionGrantSink(handle.Gateway) // session permissions approve covered proposals (session_permissions.go)
 		if handle.Gateway.BoardConfigured() {
 			cfg.Board = handle.Gateway
 		}
@@ -477,6 +484,100 @@ func (a *API) SetMCPGateway(handle *MCPGatewayHandle, gatewayURL, coreURL, coreI
 		}
 	}
 	a.hub.mcpStart.set(cfg)
+}
+
+// RegisterMCPGatewayRoutes mounts the gateway on the runner's web port as well (under
+// mcpgw.PathPrefix), for sessions on workstation daemons: a daemon reaches the server at its
+// public address, and the gateway's own listener (BLERG_RUNNER_MCP_GW_URL, an in-cluster Service
+// on a cluster install) is out of its reach. public is the operator's switch
+// (BLERG_RUNNER_MCP_GW_PUBLIC): off, or with the gateway off, the prefix answers 404.
+//
+// The mount (mcpgw.PublicHandler) serves only grants issued for it (forDaemon marks them) of
+// sessions on a daemon, within publicGrantIdle of their last use or their daemon's reconnect;
+// every other token, valid or not, gets the same JSON-RPC 401. Call it after SetMCPGateway.
+func (a *API) RegisterMCPGatewayRoutes(mux *http.ServeMux, public bool) {
+	cfg := a.hub.mcpStart.get()
+	if cfg == nil || cfg.gateway == nil || !public {
+		// Never the web app's fallback page.
+		mux.Handle(mcpgw.PathPrefix, http.NotFoundHandler())
+		return
+	}
+	// The web port's server has no write deadline (it streams WebSockets): bound each exchange as
+	// the gateway's own listener does, answering a timeout in JSON-RPC.
+	h := http.TimeoutHandler(cfg.gateway.PublicHandler(a.publicGrantUsable), cfg.gateway.CallTimeout()+60*time.Second, publicGatewayTimeoutBody)
+	mux.Handle(mcpgw.PathPrefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// http.TimeoutHandler writes its timeout body with no Content-Type; a reply the handler
+		// gives sets its own.
+		w.Header().Set("Content-Type", "application/json")
+		h.ServeHTTP(w, r)
+	}))
+	next := *cfg
+	next.ServedOnWeb = true
+	a.hub.mcpStart.set(&next)
+}
+
+// publicGatewayTimeoutBody is the JSON-RPC error the public route answers when an exchange runs
+// past its deadline.
+const publicGatewayTimeoutBody = `{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"MCP gateway timeout"}}`
+
+// publicGrantIdle is how long a grant issued for the public route stays usable there without being
+// used, or renewed by its daemon reconnecting with the session running. Past it the token is
+// refused there for good; the session keeps running, without those tools.
+const publicGrantIdle = 7 * 24 * time.Hour
+
+// envMCPGatewayPublic names the operator's switch for the public route.
+const envMCPGatewayPublic = "BLERG_RUNNER_MCP_GW_PUBLIC"
+
+// MCPGatewayPublicFromEnv reads BLERG_RUNNER_MCP_GW_PUBLIC: on unless it is "0", "false" or "off"
+// (any case). Desktop daemons connected to a cluster install need it on.
+func MCPGatewayPublicFromEnv() bool { return mcpGatewayPublic(os.Getenv(envMCPGatewayPublic)) }
+
+func mcpGatewayPublic(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
+}
+
+// publicGrantUsable is the public route's accept: the grant was issued for it, its session runs on
+// a daemon, and it is within its idle limit (which this use renews).
+func (a *API) publicGrantUsable(ctx context.Context, gr *db.MCPGrant) bool {
+	if a.dbPool == nil || gr == nil {
+		return false
+	}
+	row, err := db.GetSession(ctx, a.dbPool, gr.SessionID)
+	if err != nil || row == nil || row.DaemonID == clusterDaemonID || derefOrEmpty(row.Runtime) == runnerRuntimeCluster {
+		return false
+	}
+	ok, err := db.UsePublicMCPGrant(ctx, a.dbPool, gr.TokenHash, publicGrantIdle)
+	if err != nil {
+		log.Printf("mcp gateway public route: %v", err)
+	}
+	return ok
+}
+
+// gatewayViaServer reports whether a grant delivered to dc should be dialled through the server's
+// web address (MCPGatewayConfig.ViaServer): the gateway is mounted there and the daemon can.
+func (a *API) gatewayViaServer(dc *DaemonConn) bool {
+	cfg := a.hub.mcpStart.get()
+	return dc != nil && cfg != nil && cfg.ServedOnWeb && dc.CanMCPGatewayViaServer()
+}
+
+// forDaemon issues a session's grant, about to be sent to dc, for the public route when the daemon
+// can dial it there (gatewayViaServer): its rows are marked (db.MarkMCPGrantsPublic) and the
+// config says ViaServer. If the rows cannot be marked the grant is sent as before (BaseURL). nil
+// stays nil.
+func (a *API) forDaemon(ctx context.Context, sessionID string, gateway *protocol.MCPGatewayConfig, dc *DaemonConn) *protocol.MCPGatewayConfig {
+	if gateway == nil || !a.gatewayViaServer(dc) || a.dbPool == nil {
+		return gateway
+	}
+	if err := db.MarkMCPGrantsPublic(ctx, a.dbPool, sessionID); err != nil {
+		log.Printf("mcp start %s: %v", sessionID, err)
+		return gateway
+	}
+	gateway.ViaServer = true
+	return gateway
 }
 
 // envMCPGatewayURL names the variable holding the address sessions dial to reach the gateway.
@@ -516,6 +617,23 @@ func (dc *DaemonConn) SetSessionTokenFile(v bool) {
 func (dc *DaemonConn) SetMCPGateway(v bool) {
 	dc.liveMu.Lock()
 	dc.mcpGateway = v
+	dc.liveMu.Unlock()
+}
+
+// CanMCPGatewayViaServer reports whether the daemon said, in its hello, that it honours
+// MCPGatewayConfig.ViaServer: it dials the gateway at the server address it already uses, and
+// accepts a board-only grant for an interactive session on its host. An older daemon dials
+// BaseURL, which from a workstation is often an address only cluster pods can reach.
+func (dc *DaemonConn) CanMCPGatewayViaServer() bool {
+	dc.liveMu.RLock()
+	defer dc.liveMu.RUnlock()
+	return dc.mcpGatewayViaServer
+}
+
+// SetMCPGatewayViaServer records the hello's mcp_gateway_via_server capability.
+func (dc *DaemonConn) SetMCPGatewayViaServer(v bool) {
+	dc.liveMu.Lock()
+	dc.mcpGatewayViaServer = v
 	dc.liveMu.Unlock()
 }
 
@@ -945,6 +1063,10 @@ func revokeSessionGrants(ctx context.Context, pool *pgxpool.Pool, sessionID, why
 	}
 	// Then the board tokens the gateway exchanged for it (none unless it had a board grant).
 	revokeBoardTokens(ctx, sessionID)
+	// Proposal permissions end with the session too (session_permissions.go).
+	if _, err := db.RevokeSessionProposalGrants(ctx, pool, sessionID, "session_ended", false); err != nil {
+		log.Printf("revoke proposal grants %s (%s): %v", sessionID, why, err)
+	}
 }
 
 // grantResumeProblem is why a resume of a session with MCP grants must be refused, or nil.

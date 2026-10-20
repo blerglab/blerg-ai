@@ -27,7 +27,7 @@ const REQUEST: DelegationRequestPayload = {
   expires_at: '2099-01-01T00:00:00Z',
 }
 
-function mount(opts: { decides?: boolean } = { decides: true }, props: { onOpenSession?: (id: string) => void } = {}) {
+function mount(opts: { decides?: boolean } = { decides: true }, props: { onOpenSession?: (id: string) => void; onManageChildApproval?: () => void } = {}) {
   const t = createFakeTransport({ decidesDelegations: opts.decides !== false })
   render(<ChatView session={SESSION} transport={t.transport} meta={running} {...props} />)
   return t
@@ -53,6 +53,15 @@ describe('the delegation card', () => {
     expect(card.textContent).toContain('Read the diff and list the risks.')
     expect(card.textContent).toContain('5h 62% used')
     expect(card.textContent).toContain('7d 31%')
+  })
+
+  it('opens editable session permissions after an allowed-once decision', () => {
+    seedRequest()
+    const manage = vi.fn()
+    mount({}, {onManageChildApproval: manage})
+    act(() => seed(ev(3, 'delegation_decided', {request_id:'r1', status:'allowed',choice:'once'})))
+    fireEvent.click(screen.getByRole('button', {name:'Change child approvals'}))
+    expect(manage).toHaveBeenCalledOnce()
   })
 
   it('does not warn about the sandbox, and says no repository', () => {
@@ -82,6 +91,16 @@ describe('the delegation card', () => {
     seedRequest({ runtime: 'docker' })
     mount()
     expect(screen.getByRole('button', { name: 'Always allow Codex in the desktop sandbox' })).toBeInTheDocument()
+  })
+
+  it('names the cluster on a cluster request, without the unsandboxed warning', () => {
+    seedRequest({ runtime: 'cluster', daemon_name: 'the cluster' })
+    mount()
+    const card = screen.getByTestId('delegation-card')
+    expect(within(card).getByText('on the cluster').className).not.toContain('delegation-warn')
+    const always = screen.getByRole('button', { name: 'Always allow Codex on the cluster' })
+    expect(always.getAttribute('title')).toBe('Applies to Codex on the cluster')
+    expect(always.className).not.toContain('warn')
   })
 
   it('decides through the transport and shows "Allowed once · <time>" with an Open link', async () => {

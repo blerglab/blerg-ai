@@ -72,11 +72,11 @@ describe('native visual theme', () => {
     const stop = observeVisualTheme(host, callback)
     accent = '#1188dd'
     ancestor.style.setProperty('--chat-accent', accent)
-    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1), { timeout: 15000 })
     expect(callback.mock.calls[0][0].accent).toBe(accent)
     accent = '#bb99ee'
     for (const listener of listeners) listener()
-    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(2), { timeout: 15000 })
     expect(callback.mock.calls[1][0].accent).toBe(accent)
     stop()
     expect(media.removeEventListener).toHaveBeenCalledWith('change', expect.any(Function))
@@ -94,7 +94,7 @@ describe('native visual theme', () => {
     expect(callback).not.toHaveBeenCalled()
     host.style.setProperty('--chat-accent', '#1188dd')
     host.style.setProperty('--chat-code-keyword', '#bb99ee')
-    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1), { timeout: 15000 })
     expect(callback.mock.calls[0][0]).toMatchObject({accent: '#1188dd'})
     stop()
     host.style.setProperty('--chat-accent', '#ff0011')

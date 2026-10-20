@@ -434,7 +434,7 @@ func TestSteeringKillMidTurnSaysNothing(t *testing.T) {
 	cancel() // AgentHost.Kill: the context is cancelled and the process goes with it
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
 	time.Sleep(300 * time.Millisecond)

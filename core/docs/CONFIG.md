@@ -19,6 +19,7 @@ board or runner at all — see [Human login](#human-login) below.
 | `BLERG_VERSION` | `dev` | Build version shown on the landing page. |
 | `BLERG_UPDATE_CHECK` / `BLERG_UPDATE_REPO` | on / `blerglab/blerg-ai` | Core looks up the latest public release shortly after startup (30 s) and every 6 hours (`GET https://api.github.com/repos/<repo>/releases/latest`, unauthenticated) and, when it is newer than the running release, adds `latest_version` and `latest_url` to `GET /api/site`; the core footer, the board top bar and the runner sidebar then show a "vX.Y.Z available" link to its GitHub release page (board and runner read it from core through `BLERG_CORE_URL`). Privacy: this check contacts `api.github.com`, which sees the server's IP address; nothing else is sent. `BLERG_UPDATE_REPO` must be `owner/name`; anything else disables the check (logged once). Set `BLERG_UPDATE_CHECK=0` to turn it off (no request is made). |
 | `BLERG_CORE_REGISTER_KEY` | unset | Shared bootstrap key components (board, runner) present to `POST /components` to register themselves. Unset disables component self-registration. |
+| `BLERG_CORE_BOARD_MINT_KEY` | unset | Shared secret the board presents for "Run as me": `POST /internal/tokens/board-automation` mints a `run-sessions` agent token for the person signed in to the board, proved by their own live board access token (kind human, a live browser session of that account), and `.../revoke` revokes only a token minted for that board. Opens nothing else; core refuses to boot when it equals `BLERG_CORE_INTERNAL_KEY` or `BLERG_CORE_REGISTER_KEY`. At most 10 attempts per account an hour. Unset disables both routes (503) and boards take a pasted token. Board reads the same value under the same name. |
 | `BLERG_CORE_INTERNAL_KEY` | unset | Shared secret guarding `POST /internal/credentials/fetch`, the endpoint runner calls to fetch a spawning account's personal engine credential. Deliberately a DIFFERENT secret from `BLERG_CORE_REGISTER_KEY`: registration is a low-trust bootstrap, credential fetch hands back plaintext. Unset disables the endpoint entirely (runner then always falls back to the shared operator Secret). Runner reads the same value as `BLERG_RUNNER_CORE_INTERNAL_KEY`. |
 | `BLERG_CORE_PLUGIN_MARKETPLACES` | `anthropics/claude-plugins-official` | Comma-separated GitHub `owner/repo` marketplaces an account may register **always-on plugins** from; `*` allows any *valid* `owner/repo` (never a URL or path). Enforced when a list is saved (`422 marketplace not allowed by this install`); the runner re-checks it at install time with its own `BLERG_RUNNER_PLUGIN_MARKETPLACES` — set both to the same value. Malformed entries are logged and dropped, never widened. |
 | `BLERG_CORE_MCP_ALLOW_HTTP_HOSTS` | unset | Comma-separated hostnames for which an MCP connection's URL may use plain `http://` (otherwise `https` only). Core fetches a connection's URL itself, so this is an operator decision: list only hosts you run and trust. Empty by default. See [`docs/mcp-connections.md`](../../docs/mcp-connections.md). |
@@ -499,33 +500,72 @@ needs no external service.
 
 ### `local`
 
-Username + password against core's own `accounts` table. No configuration.
+Username + password against core's own `accounts` table. No external service.
 
-On the very first boot against an empty `accounts` table, core seeds exactly
-one admin account with a random password and logs it once, with a greppable
-prefix:
+#### First-run setup
 
-```
-BLERG_BOOTSTRAP_ADMIN_PASSWORD=<password> (username: <username>; ...)
-```
+While the `accounts` table is empty, core is in **setup mode** and creates no
+account by itself. The first person creates the admin on `/setup` ("Create your
+account") by choosing a username and a password; that account is an `admin`,
+has no forced password change, and is signed in straight away. Setup closes for
+good once any account exists: `GET /setup` then redirects to `/login` and
+`POST /auth/setup` answers `409`.
 
-The username is random. On the forced password change at first login the
-person can choose their own (`POST /auth/password` takes an optional
-`provider_subject`), and change it later in Settings → Account
-(`POST /auth/username`, behind the current password). A username is 3–64
-lowercase letters, digits, `.`, `_` and `-`, starting with a letter or digit;
-a taken one is a 409. Only `local` accounts have one to change.
+`/setup` needs a single-use **setup code**, carried in the setup link:
 
-It is logged, never written to disk — the container filesystem is ephemeral, so
-capture it from the logs on first boot (`docker compose logs blerg-core | grep
-BLERG_BOOTSTRAP_ADMIN_PASSWORD`, or `kubectl logs`). Seeding is idempotent: a
-non-empty `accounts` table is a no-op, and it only runs under the `local`
-provider — so a restart, rebuild, or redeploy never prints the line again and
-never changes the password. If the log that had it is gone, mint a new
+- Only `blerg-core setup-link` mints a code (32 random bytes; only its SHA-256
+  is stored, in `setup_code`, with a 24-hour expiry). A new code replaces the
+  previous one, so the previous link stops working. It prints the link alone on
+  stdout: `<BLERG_CORE_PUBLIC_URL>/setup#code=…` (the path alone when
+  `BLERG_CORE_PUBLIC_URL` is unset). The code is in the URL fragment, which
+  browsers never send to a server, so it stays out of proxy and ingress access
+  logs; the page clears it from the address bar. Once an account exists the
+  command says setup is complete on stderr and exits `1`.
+  `blerg-core setup-link --check` mints nothing: exit `0` while setup is open,
+  `1` once it is complete.
+- Core never mints, logs or prints a code by itself. At boot in setup mode it
+  logs one line saying setup is pending and how to finish it (open `/setup` on
+  this machine on the desktop; `blerg-core setup-link` elsewhere).
+- Creating the account consumes the code. A wrong, expired, superseded or used
+  code gets one generic `403`. Every refused `POST /auth/setup` (wrong code,
+  invalid input, or setup already complete) counts against
+  `BLERG_CORE_LOGIN_RATE_LIMIT` per client IP, for the life of the install.
+
+**The setup link is a credential** until it is used: whoever opens it first
+creates the admin. Anyone with `exec` access to core can mint one while setup
+is open.
+
+On a set-up install `POST /auth/setup` answers `409` from one cheap read
+(remembered for the life of the process): no bcrypt, no lock. While setup is
+open the first account is created in one transaction that takes a `SHARE ROW
+EXCLUSIVE` lock on `accounts` and checks the table is still empty, so two
+concurrent submits produce exactly one account; the transaction gives up after
+a 5-second lock timeout rather than queueing behind a long writer. `/setup` and
+its responses send `X-Frame-Options: DENY` and
+`Content-Security-Policy: frame-ancestors 'none'`.
+
+| Var | Default | Notes |
+|---|---|---|
+| `BLERG_SETUP_ALLOW_LOCAL` | unset | `true` lets `/setup` work **without a code** for a direct connection from this machine: the browser addresses core by a loopback name (`localhost`, `127.0.0.1`, `::1`), the request carries no `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host` or `X-Real-IP` header, and the TCP peer is loopback or, with `BLERG_SETUP_TRUST_DOCKER_GATEWAY=1`, the default gateway of core's container network (where the host's own loopback arrives through a published port). Set only by `install/desktop/docker-compose.yml` (default `true`; `BLERG_SETUP_ALLOW_LOCAL=false` in the desktop `.env` turns it off), which publishes core on `127.0.0.1`. Ignored (with a log line) unless `BLERG_SETUP_PUBLISHED_ADDR` is a loopback address. Anything else needs the setup link. This trusts anything that reaches core's port through this host: every user, process and container on it, and any relay that forwards to it without adding forwarding headers (nginx's default `proxy_pass`, ssh or socat tunnels). |
+| `BLERG_SETUP_TRUST_DOCKER_GATEWAY` | unset | `1` (set only by the desktop compose file) says core runs in a container with a published port, so the container's default gateway is trusted as a local peer for code-less setup. Unset: loopback peers only (outside a container the default gateway is the LAN router). |
+| `BLERG_SETUP_PUBLISHED_ADDR` | unset | The host address core's port is published on (the desktop compose file passes `BLERG_BIND_ADDR`, default `127.0.0.1`). With `0.0.0.0` other machines could reach `/setup`, so the code is required. |
+
+`GET /auth/provider` adds `"setup": "open"` (this request may set up without a
+code) or `"setup": "code"` while setup is open. `GET /login` redirects to
+`/setup` in the first case; in the second the login page says the install isn't
+set up yet and to open the setup link from the installer output.
+
+A username is 3–64 lowercase letters, digits, `.`, `_` and `-`, starting with
+a letter or digit. A person can change theirs in Settings → Account
+(`POST /auth/username`, behind the current password); a taken one is a 409.
+On a forced password change (`users create`, `users set-password`) the person can choose a new username too
+(`POST /auth/password` takes an optional `provider_subject`). Only `local`
+accounts have one to change. If the admin password is lost, mint a new
 one-time password with `blerg-core users set-password --subject <username>`
 (see "Operator CLI" below).
 
-The bootstrap account is also seeded with `must_change_password = true`, and this
+Accounts given a one-time password (`users create`, `users set-password`, and
+an admin generated at first boot by an older release) have `must_change_password = true`, and this
 is enforced server-side, not just suggested in the UI (R7/I-7): every access token
 `MintHumanAccessToken` mints for such an account carries **only** the
 `password.change` capability — this replaces the account's normal role caps
@@ -549,8 +589,6 @@ defend against — stops verifying immediately, not just on its next refresh
 (mirroring `POST /auth/logout-all`'s `RevokeAccountEverywhere`). The caller's own
 refresh cookie is cleared too, and a subsequent successful login clears the `sub`
 revocation the same way it always does — this is not a permanent lockout.
-Anyone with `kubectl logs`/`docker compose logs` access on core sees the initial
-printed password, so rotate it immediately after first boot.
 
 ### `github`
 
@@ -706,6 +744,7 @@ register/internal key doesn't block admin recovery.
 | `blerg-core mint --aud <audience> [--sub ...] [--project ...] [--caps ...] [--on-behalf-of ...] [--lineage ...]` | Mints a core-signed agent token for testing, printed to stdout. |
 | `blerg-core users create --subject S --role member\|admin` | Creates a new `local`-provider account with username `S`, a fresh one-time password and `must_change_password=true`. `S` follows the same rules as a username a person picks: 3–64 characters of lowercase letters, digits, `.`, `_` and `-`, starting with a letter or digit. Fails with `ErrSubjectExists` (exit 1) if the username is already taken, or exit 2 for an invalid `--role` or `S`. |
 | `blerg-core users set-password --subject S` | Resets an existing `local` account's password to a fresh one-time value, sets `must_change_password=true`, and invalidates every existing session/token for that account (`identity.Service.RevokeAccountEverywhere`). Exit 1 if `S` has no local account. |
+| `blerg-core setup-link [--check]` | While no account exists, mints a fresh first-run setup code (the previous link stops working) and prints the setup link (`…/setup#code=…`) alone on stdout. `--check` mints nothing and only reports: exit 0 while setup is open. Exit 1, with "setup is complete" on stderr, once an account exists (or under a non-`local` provider); 2 for a usage error. Needs `DATABASE_URL`, and `BLERG_CORE_PUBLIC_URL` for a full link. |
 
 Both `users` subcommands print **exactly one line** to stdout on success:
 
@@ -728,7 +767,7 @@ docker compose run --rm --no-deps -T --entrypoint /blerg-core \
 ```
 
 `install/desktop/blerg-up.sh --reset-admin` wraps `users set-password` for
-the common "I lost the bootstrap admin password" case: it looks up the
+the common "I lost the admin password" case: it looks up the
 **oldest** local admin account (by `created_at` — deterministic even if a
 second admin was created later) and resets its password.
 
@@ -740,6 +779,7 @@ Not read by `blerg-core` itself, but they must agree with the values above.
 |---|---|---|
 | `BLERG_CORE_URL` | board, runner | Base URL of core. Enables core as the identity/discovery authority for bearer tokens. Unset leaves that path inert. |
 | `BLERG_CORE_REGISTER_KEY` | board, runner | Must equal core's own value. |
+| `BLERG_CORE_BOARD_MINT_KEY` | board | Must equal core's own value: enables the board's **Run as me**. |
 | `BLERG_RUNNER_CORE_INTERNAL_KEY` | runner | Must equal core's `BLERG_CORE_INTERNAL_KEY`. Together with `BLERG_CORE_URL`, enables the personal-credential-first session spawn path; either unset means runner always uses the shared operator Secret. |
 | `BLERG_RUNNER_ALLOWED_ORIGINS` | runner | Comma-separated `scheme://host` origins allowed to open the `/ws/browser` WebSocket cross-origin. Same-origin requests and requests with no `Origin` header are always allowed, so this is only needed when the frontend is served from a different origin than runner's API. |
 | `BLERG_BIND_ADDR` | `install/desktop/docker-compose.yml` | Not read by any Go process — it's a `docker compose` interpolation variable that prefixes all three published ports (core/board/runner): `${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_CORE:-8081}:8080`, etc. (R2/C1: without a host address, Docker publishes on `0.0.0.0` and bypasses `ufw`/`firewalld` — every LAN/VPN peer can reach core, board and runner). Defaults to `127.0.0.1` (loopback only). Set to `0.0.0.0` only if other machines must reach the stack — and then also point `BLERG_CORE_ALLOWED_RETURN_ORIGINS`/`BLERG_CORE_ORIGIN_AUDIENCES`/`BLERG_CORE_PUBLIC_URL` at that host, or login will still only work from `localhost`. |

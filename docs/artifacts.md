@@ -302,8 +302,51 @@ versions, so a long-running review of one file may need old `.review.json` versi
 the Files panel.
 
 On the session's side the commands are `blerg-runner review list [<file>]` and
-`blerg-runner review reply <id> done|declined "<line>"`; `blerg-runner review --help` explains the
-loop. Design: [`docs/design/feedback-tools.md`](design/feedback-tools.md).
+`blerg-runner review reply <id> done|declined "<line>"`, which takes several answers in one call
+(the three arguments repeated, or `--file` with one `<id> done|declined <line>` per line) and then
+publishes the review file once; `blerg-runner review --help` explains the loop. The session's
+`.review.json` versions are review state, not documents: the chat shows no file card for them.
+It folds each round of answers into one line, such as "11 requests answered · report.md", that
+opens the review. They stay in the Files panel. Design: [`docs/design/feedback-tools.md`](design/feedback-tools.md).
+
+## Asking for an approval
+
+When the agent needs you to approve something it published (a policy, a migration, a diff before
+it merges), rather than only show it, it asks explicitly:
+
+```bash
+blerg-runner publish SECURITY.md --request-review "OK to publish this policy?"
+blerg-runner diff main..HEAD --request-review "Merge this?"
+blerg-runner review request SECURITY.md --ask "OK to publish this policy?" [--wait]
+```
+
+- **Pinned to one version.** A name means its newest version, an id that exact file. Publishing a
+  newer version of the same file **supersedes** a pending request (its card says "Superseded by
+  v3"), and the agent asks again; deleting the file withdraws it. The agent can withdraw a request
+  itself (`blerg-runner review withdraw <id>`). Deciding a request whose file has a newer version
+  supersedes it instead.
+- **Where you see it.** Live → Needs you has a row "Review: SECURITY.md" with the ask under it, and
+  the chat a card "Review requested: SECURITY.md · v2" with **Open**. Both open the file at that
+  version (a diff in the diff viewer). A request also notifies your phone, like a question.
+- **Deciding.** The viewer shows a bar with the ask, **Approve** and **Request changes** (with an
+  optional note). Comments you already submitted on that version (Review, then Submit) go with the
+  decision. Once decided, the bar and the card say how. The bar is only there for an explicit
+  request.
+- **Who decides.** Only the session's owner, signed in in the browser. Anyone else who can see the
+  session sees that it waits for the owner; the session itself, the daemon, board tokens and agent
+  tokens are refused.
+- **What the agent gets.** `Review of SECURITY.md v2 (request <id>): APPROVED`, or `…: CHANGES
+  REQUESTED: <your note>`, followed by your own open comments on that version (the ones you submitted;
+  nobody else's), one line each. It arrives as a message, or, when the agent waits with `--wait`, as
+  the command's output (exit code 0 approved, 2 changes requested, 3 still waiting). Chat text can be
+  typed by anyone who can write in the session, so the agent is told to treat an approval as real
+  only when `blerg-runner review status <id>` (or `review wait <id>`) exits 0.
+- **API.** `POST /api/sessions/{id}/review-requests` (the session's token), `GET
+  /api/sessions/{id}/review-requests` and `GET /api/review-requests/{id}[?wait=N]` (the session, or
+  a person who can see it), `POST /api/review-requests/{id}/decide` `{"decision": "approve" |
+  "request_changes", "note": "..."}` (the owner's browser sign-in) and `POST
+  /api/review-requests/{id}/withdraw` (the session). The chat events are `review_requested` and
+  `review_decided`; the table is `review_requests` (migration `069`).
 
 ## Where the files are
 

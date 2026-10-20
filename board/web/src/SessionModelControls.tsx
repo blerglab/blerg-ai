@@ -1,3 +1,4 @@
+import { modelDisplayNames } from "@blerglab/chat";
 import { useState } from "react";
 import { api } from "./api";
 import { useMe } from "./me";
@@ -22,6 +23,7 @@ export function SessionModelControls({ session }: { session: RunnerSession }) {
   if (!enabled) return null;
   const engine = catalog.engines.find(e => e.id === session.engine);
   const models = engine?.models.models ?? [];
+  const modelNames = modelDisplayNames(draft.model && !models.some(m => m.id === draft.model) ? [...models, { id: draft.model }] : models);
   const selected = models.find(m => m.id === draft.model);
   const efforts = selected?.efforts ?? [];
   const apply = async () => {
@@ -38,8 +40,8 @@ export function SessionModelControls({ session }: { session: RunnerSession }) {
     {catalog.state === "known" && models.length === 0 && <span>No models are available for this session's engine.</span>}
     {models.length > 0 && <>
       <label>Model <select aria-label="Session model" value={draft.model} disabled={busy} onChange={e => { setDraft({ model: e.target.value, effort: "" }); setNotice(""); }}>
-        {!selected && <option value={draft.model}>{draft.model ? `${draft.model} (current)` : "Choose model"}</option>}
-        {models.map(model => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}
+        {!selected && <option value={draft.model} title={draft.model}>{draft.model ? `${modelNames.get(draft.model)} (current)` : "Choose model"}</option>}
+        {models.map(model => <option key={model.id} value={model.id} title={model.id}>{modelNames.get(model.id)}</option>)}
       </select></label>
       {efforts.length > 0 && <label>Effort <select aria-label="Session effort" value={draft.effort} disabled={busy} onChange={e => { setDraft({ ...draft, effort: e.target.value }); setNotice(""); }}>
         <option value="">{draft.model === session.model ? "Keep current effort" : "Engine chooses effort"}</option>

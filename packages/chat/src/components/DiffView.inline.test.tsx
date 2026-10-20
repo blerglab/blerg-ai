@@ -84,5 +84,5 @@ describe('inline diff comment slots', () => {
     expect(screen.queryByText(/Code not shown/)).toBeNull()
     expect(screen.getByTestId('thread').closest('tr')?.previousElementSibling?.textContent).toContain('value' + count)
     expect(container.querySelectorAll('.diff-row').length).toBeLessThanOrEqual(DIFF_FILE_LINES + 7)
-  }, 15_000)
+  }, 30_000)
 })

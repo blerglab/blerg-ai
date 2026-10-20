@@ -46,6 +46,7 @@ type TokenSummary = {
   expires_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
+  source?: string;
 };
 
 const SITE = {
@@ -326,6 +327,20 @@ describe("Settings — agent tokens", () => {
     expect(rowOf("expired one")).toHaveTextContent("Expired");
     // Never-used tokens say so rather than rendering an empty cell.
     expect(rowOf("revoked one")).toHaveTextContent("Never");
+  });
+
+  it("says which board minted a Run as me token", async () => {
+    store.tokens = [
+      tokenFixture({ id: "a", name: "Board Work automation", source: "board b1" }),
+      tokenFixture({ id: "b", name: "laptop cli", source: "" }),
+    ];
+    render(<Settings />);
+    await screen.findByText("Board Work automation");
+    const rowOf = (name: string) => screen.getByText(name).closest("tr")!;
+    expect(rowOf("Board Work automation")).toHaveTextContent("Minted by board b1 (Run as me)");
+    expect(rowOf("laptop cli")).not.toHaveTextContent("Minted by");
+    // Revocable here like any other token.
+    expect(within(rowOf("Board Work automation")).getByRole("button", { name: "Revoke" })).toBeInTheDocument();
   });
 
   it("shows an empty state when there are no tokens", async () => {

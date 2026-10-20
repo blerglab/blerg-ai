@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -250,13 +252,76 @@ func (a *API) HandleFileTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 413, "The complete filing draft exceeds 64 KiB.")
 		return
 	}
+	// The same draft again from this session, soon after, is the same filing: an agent that
+	// retries (an older CLI that did not understand "done", a lost reply) gets the earlier proposal
+	// and its state, never a second card.
+	if twin := a.recentFilingTwin(r.Context(), p.AccountID, sid, board.ID, draft); twin != nil {
+		log.Printf("proposals: repeated filing session=%s returns proposal=%s state=%s", sid, twin.ID, twin.State)
+		writeFilingOutcome(w, twin, true, "")
+		return
+	}
 	proposal, err := db.InsertProposalLimited(r.Context(), a.dbPool, db.Proposal{AccountID: p.AccountID, SessionID: sid, ConnectionID: db.BoardFilingConnectionID, ConnectionName: "board-file", Tool: "file_ticket", ToolHash: "board-file-v1", URLSnapshot: up.SnapshotURL(), Arguments: raw, AgentSummary: "File a ticket after the person's approval."}, db.ProposalLimits{Account: 50, Session: 50, Cron: 50})
 	if err != nil {
 		writeError(w, 409, "The filing draft could not be queued; check pending proposal limits and retry.")
 		return
 	}
-	// No reproduction text enters events or shared session fanout. Frozen arguments are owner-only.
-	writeJSON(w, 202, map[string]any{"proposal_id": proposal.ID, "url": boardBaseURL(os.Getenv("BLERG_RUNNER_SELF_URL")) + "/proposals?id=" + proposal.ID, "state": "pending"})
+	// No reproduction text enters events or shared session fanout: the chat's card names the
+	// proposal only, and reads the frozen arguments through the owner-only API. A session
+	// permission for this board approves it now, through the person's approval path.
+	if now, note := a.settleNewProposal(r.Context(), proposal); now != nil && now.ApprovedByGrant != "" {
+		writeFilingOutcome(w, now, false, "")
+	} else {
+		writeFilingOutcome(w, proposal, false, note)
+	}
+}
+
+// filingTwinWindow is how long an identical filing from the same session returns the earlier one.
+const filingTwinWindow = 15 * time.Minute
+
+// recentFilingTwin is the session's recent filing of exactly this draft on this board (the
+// origin's commit may differ), still pending, executing, done or unknown; nil when there is none.
+func (a *API) recentFilingTwin(ctx context.Context, account, sid, boardID string, draft boardfiling.Draft) *db.Proposal {
+	rows, err := db.RecentBoardFilings(ctx, a.dbPool, account, sid, time.Now().Add(-filingTwinWindow))
+	if err != nil {
+		log.Printf("proposals: recent filings of %s: %v", sid, err)
+		return nil
+	}
+	for i := range rows {
+		var prev filingArguments
+		if json.Unmarshal(rows[i].Arguments, &prev) != nil {
+			continue
+		}
+		if prev.BoardID == boardID && prev.Title == draft.Title && prev.Body == draft.Body && prev.Type == draft.Type &&
+			prev.Sensitive == draft.Sensitive && slices.Equal(prev.Repos, draft.Repos) {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+// writeFilingOutcome answers a filing with where its proposal stands: done (200, with the card),
+// or pending, executing or unknown (202). repeated marks an earlier identical filing; note says why
+// a session permission did not approve it.
+func writeFilingOutcome(w http.ResponseWriter, p *db.Proposal, repeated bool, note string) {
+	out := map[string]any{"proposal_id": p.ID, "url": boardBaseURL(os.Getenv("BLERG_RUNNER_SELF_URL")) + "/proposals?id=" + p.ID, "state": p.State}
+	if p.ApprovedByGrant != "" {
+		out["auto_approved"] = true
+	}
+	if repeated {
+		out["repeated"] = true
+	}
+	if note != "" {
+		out["message"] = note
+	}
+	if p.State == db.ProposalDone {
+		var card filedCard
+		if json.Unmarshal(p.Result, &card) == nil && card.ID != "" {
+			out["card"] = card
+		}
+		writeJSON(w, 200, out)
+		return
+	}
+	writeJSON(w, 202, out)
 }
 
 func (h *proposalsHandler) editBoardDraft(w http.ResponseWriter, r *http.Request) {
@@ -335,12 +400,12 @@ func (h *proposalsHandler) editBoardDraft(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, 200, viewOfProposal(updated))
 }
-func (h *proposalsHandler) approveBoardDraft(w http.ResponseWriter, r *http.Request, who grantRequester, p *db.Proposal) {
-	var req struct {
-		Expected string `json:"expected_arguments_raw"`
-	}
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2*db.MaxProposalArgumentsBytes))
-	if err != nil || filingDecode(raw, &req) != nil || req.Expected == "" || req.Expected != string(p.Arguments) {
+
+// approveBoardDraft runs an approved filing: expected is the exact stored draft that was reviewed
+// (a person) or proposed (a session permission, grantID). Access to the board is the approver's,
+// checked again here, and only that exact draft is written.
+func (h *proposalsHandler) approveBoardDraft(ctx context.Context, w http.ResponseWriter, who grantRequester, p *db.Proposal, expected, grantID string) {
+	if expected == "" || expected != string(p.Arguments) {
 		writeError(w, 409, "The draft changed; reload it and review it before approving.")
 		return
 	}
@@ -350,12 +415,13 @@ func (h *proposalsHandler) approveBoardDraft(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	proof := mcpgw.Proof{AccountID: who.Account, SessionID: who.Sid}
-	boards, listErr := h.api.filingBoards(r.Context(), proof, who.Project)
+	boards, listErr := h.api.filingBoards(ctx, proof, who.Project)
 	if listErr != nil {
 		writeFilingError(w, listErr)
 		return
 	}
-	if _, err = selectFilingBoard(boards, args.BoardID); err != nil {
+	board, err := selectFilingBoard(boards, args.BoardID)
+	if err != nil {
 		writeFilingError(w, err)
 		return
 	}
@@ -368,16 +434,17 @@ func (h *proposalsHandler) approveBoardDraft(w http.ResponseWriter, r *http.Requ
 		writeError(w, 409, "The Board destination changed; propose again.")
 		return
 	}
-	casCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), proposalWriteBudget)
+	casCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proposalWriteBudget)
 	defer cancel()
-	if _, err = db.BeginBoardFilingExecution(casCtx, h.api.dbPool, who.Account, p.ID, who.Account, req.Expected); err != nil {
+	if _, err = db.BeginBoardFilingExecutionByGrant(casCtx, h.api.dbPool, who.Account, p.ID, who.Account, expected, grantID); err != nil {
 		transitionError(w, err, "The draft changed or was already decided.")
 		return
 	}
-	ctx, stop := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+	log.Printf("proposals: approved board filing id=%s account=%s board=%s grant=%s", p.ID, p.AccountID, args.BoardID, grantLabel(grantID))
+	runCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer stop()
-	result, err := up.Create(ctx, proof, p.ID, args.BoardID, args.Draft)
-	recCtx, stopRec := context.WithTimeout(context.WithoutCancel(r.Context()), proposalWriteBudget)
+	result, err := up.Create(runCtx, proof, p.ID, args.BoardID, args.Draft)
+	recCtx, stopRec := context.WithTimeout(context.WithoutCancel(ctx), proposalWriteBudget)
 	defer stopRec()
 	state := db.ProposalDone
 	if err != nil {
@@ -394,11 +461,14 @@ func (h *proposalsHandler) approveBoardDraft(w http.ResponseWriter, r *http.Requ
 			}
 		}
 		result = json.RawMessage(`{"error":"The filing could not be confirmed; check the target before resolving this proposal."}`)
+	} else {
+		result = h.api.filedCardResult(recCtx, up, proof, board, args, result)
 	}
 	done, err := db.FinishProposal(recCtx, h.api.dbPool, p.ID, state, result)
 	if err != nil {
 		writeError(w, 500, "The filing outcome could not be recorded; check the target before resolving this proposal.")
 		return
 	}
+	log.Printf("proposals: finished board filing id=%s account=%s state=%s grant=%s", p.ID, p.AccountID, state, grantLabel(grantID))
 	writeJSON(w, 200, viewOfProposal(done))
 }

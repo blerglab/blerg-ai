@@ -2,12 +2,14 @@
 // compact view. Pure functions: nothing here touches React.
 import type { AgentEvent, SubagentPayload, ToolCallPayload, ToolResultPayload } from '../types'
 import { isShownUserMessage } from './userMessages'
+import { reviewRounds } from './reviewRounds'
 
 // Event kinds hidden from the timeline (raw context plumbing).
 // start_stage renders as the start panel, capabilities as the Skills &
 // plugins panel — not as timeline cards.
 // subagent_update only feeds its subagent's card, background_task_* only the background strip.
 export const HIDDEN_KINDS = new Set([
+  'usage_updated',
   'provider_blocks', 'status_changed', 'start_stage', 'capabilities', 'subagent_update',
   'background_task_started', 'background_task_done', 'mcp_status',
 ])
@@ -17,7 +19,7 @@ export const HIDDEN_KINDS = new Set([
 const CARD_KINDS = new Set([
   'user_message', 'assistant_text', 'assistant_thinking', 'check_in', 'ask', 'update', 'note',
   'model_changed', 'subagent_started', 'subagent_done', 'turn_done', 'error', 'compaction', 'artifact',
-  'topic', 'checklist', 'ticket', 'delegation_request', 'session_upload',
+  'topic', 'checklist', 'ticket', 'delegation_request', 'proposal_request', 'review_requested', 'session_upload',
 ])
 
 // Tools whose result is a link or image worth seeing at once: they stay full
@@ -30,6 +32,13 @@ export interface ToolEntry {
   ev: AgentEvent
   call: ToolCallPayload
   result?: ToolResultPayload
+  /** Position of the result in the recorded transcript, independent of call start order. */
+  resultOrder?: number
+}
+
+interface ToolCompletion {
+  result: ToolResultPayload
+  order: number
 }
 
 /** A subagent and everything it did: drawn as one card with its own rows inside. */
@@ -114,7 +123,7 @@ export function isVisibleEvent(ev: AgentEvent): boolean {
 function sameEntries(a: ToolEntry[], b: ToolEntry[]): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) {
-    if (a[i].ev !== b[i].ev || a[i].result !== b[i].result) return false
+    if (a[i].ev !== b[i].ev || a[i].result !== b[i].result || a[i].resultOrder !== b[i].resultOrder) return false
   }
   return true
 }
@@ -189,10 +198,11 @@ const NO_CHILDREN: ReadonlyMap<string, string> = new Map()
 
 function fold(
   events: AgentEvent[],
-  results: Map<string, ToolResultPayload>,
+  results: Map<string, ToolCompletion>,
   prev: readonly TimelineItem[] | undefined,
   groupTools: boolean,
   nest: boolean,
+  hidden: ReadonlySet<string>,
 ): TimelineItem[] {
   const before = new Map<string, ToolEntry[]>()
   const subsBefore = new Map<string, SubagentEntry>()
@@ -228,6 +238,9 @@ function fold(
     return card
   }
   for (const ev of events) {
+    // A review-state publish folded into its round's line (model/reviewRounds.ts) draws nothing, and
+    // so splits no run of tool calls.
+    if (hidden.has(ev.client_event_id)) continue
     const owner = childOf.get(ev.client_event_id)
     if (owner !== undefined) {
       const card = place(owner, ev)
@@ -247,7 +260,8 @@ function fold(
     }
     if (ev.kind === 'tool_call') {
       const call = toCall(ev)
-      const entry: ToolEntry = { ev, call, result: results.get(call.call_id) }
+      const completion = results.get(call.call_id)
+      const entry: ToolEntry = { ev, call, result: completion?.result, resultOrder: completion?.order }
       if (keys.has(call.call_id)) {
         const card = place(call.call_id, ev)
         if (!card.call) card.call = entry
@@ -300,22 +314,23 @@ function fold(
   }
   flush()
   return items.map(item => (item.type === 'slot'
-    ? { type: 'subagent', key: item.key, sub: subagentEntry(pending.get(item.key)!, results, subsBefore.get(item.key), groupTools) }
+    ? { type: 'subagent', key: item.key, sub: subagentEntry(pending.get(item.key)!, results, subsBefore.get(item.key), groupTools, hidden) }
     : item))
 }
 
 // subagentEntry: a placed card's entry, or the previous one when it draws the same thing.
 function subagentEntry(
   card: Pending,
-  results: Map<string, ToolResultPayload>,
+  results: Map<string, ToolCompletion>,
   old: SubagentEntry | undefined,
   groupTools: boolean,
+  hidden: ReadonlySet<string>,
 ): SubagentEntry {
   const ids = [card.anchor.client_event_id]
   for (const ev of [card.started, card.call?.ev, card.update, card.done, ...card.events]) {
     if (ev && ev !== card.anchor) ids.push(ev.client_event_id)
   }
-  const built = fold(card.events, results, old?.children, groupTools, false)
+  const built = fold(card.events, results, old?.children, groupTools, false, hidden)
   const children = old && sameItems(old.children, built) ? old.children : built
   let latest: AgentEvent | undefined
   for (let i = card.events.length - 1; i >= 0 && !latest; i--) {
@@ -357,14 +372,14 @@ function subagentEntry(
 // keeps its previous entries array, so the memoised row drawing it is skipped
 // (and a subagent that did not change keeps its entry).
 export function buildTimeline(events: AgentEvent[], prev?: readonly TimelineItem[], opts: TimelineOptions = {}): TimelineItem[] {
-  const results = new Map<string, ToolResultPayload>()
-  for (const ev of events) {
+  const results = new Map<string, ToolCompletion>()
+  for (const [order, ev] of events.entries()) {
     if (ev.kind === 'tool_result' && isRecord(ev.payload)) {
       const p = ev.payload as unknown as ToolResultPayload
-      results.set(p.call_id, p)
+      results.set(p.call_id, {result: p, order})
     }
   }
-  return fold(events, results, prev, opts.groupTools ?? true, true)
+  return fold(events, results, prev, opts.groupTools ?? true, true, reviewRounds(events).hidden)
 }
 
 // The last timeline built for each session (and grouping), with the events it was built from: the
@@ -479,6 +494,15 @@ export function groupStats(entries: ToolEntry[]): GroupStats {
   // Most-used first; ties keep the order the tools first appeared in.
   const byTool = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])
   return { total: entries.length, failed, pending, durationMs, hasDuration, byTool }
+}
+
+/** Counts describe recorded tool attempts, never resolution of the person's task.
+ *  A later successful/failed command does not resolve another attempt's failure. */
+export function groupOutcome(entries: readonly ToolEntry[]): 'pending' | 'mixed' | 'succeeded' | 'failed' {
+  if (!entries.length || entries.some(entry => !entry.result)) return 'pending'
+  const failures = entries.filter(entry => entry.result?.is_error).length
+  if (!failures) return 'succeeded'
+  return failures === entries.length ? 'failed' : 'mixed'
 }
 
 const MAX_TOOL_NAMES = 4

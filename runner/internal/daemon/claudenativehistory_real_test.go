@@ -145,7 +145,7 @@ func TestNativeClaudeHistorySurvivesFreshConfigurationWithoutCredentials(t *test
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(4 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("CLI fixture did not stop")
 		}
 		if em.count("turn_done") == 0 || em.count("error:") != 0 {

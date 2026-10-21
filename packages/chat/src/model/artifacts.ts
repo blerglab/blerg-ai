@@ -77,6 +77,24 @@ export function findLatest(items: ArtifactInfo[], a: Pick<ArtifactInfo, 'name' |
   return groupArtifacts(items).find(g => g.name === a.name && g.origin === origin)?.latest
 }
 
+/** The file a message sent before attachment IDs (a name-only note) meant: the newest upload of
+ *  that name the person made at or before the message's time `at`. An upload made after the message
+ *  never counts, so a later same-name file cannot change an earlier message's picture. undefined
+ *  without a usable message time, or when no upload of that name is old enough. */
+export function attachmentAt(items: ArtifactInfo[], name: string, at: string | undefined): ArtifactInfo | undefined {
+  const limit = at ? Date.parse(at) : NaN
+  if (!Number.isFinite(limit)) return undefined
+  let best: ArtifactInfo | undefined
+  let bestAt = -Infinity
+  for (const a of items) {
+    if (a.origin !== 'user' || a.name !== name || !a.created_at) continue
+    const t = Date.parse(a.created_at)
+    if (!Number.isFinite(t) || t > limit) continue
+    if (t > bestAt || (t === bestAt && (a.version ?? 0) > (best?.version ?? 0))) { best = a; bestAt = t }
+  }
+  return best
+}
+
 // ─── CSV (RFC 4180) ───────────────────────────────────────────────────────────
 
 export interface CsvResult {

@@ -243,6 +243,9 @@ spec:
             - name: BLERG_RUNNER_MAX_SESSIONS
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_SESSIONS, optional: true }
+            - name: BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN, optional: true }
             - name: BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE, optional: true }

@@ -67,3 +67,14 @@ it('directs a child-discard conflict back to the pending parent operation', asyn
   expect(await screen.findByRole('alert')).toHaveTextContent('Retry discarding its parent to finish')
   expect(screen.getByRole('dialog',{name:'Discard child session?'})).toBeInTheDocument()
 })
+
+it('says a session is running before it is discarded, from the sidebar menu and the panel row', () => {
+  const { unmount } = render(<ChildDiscardAction parentId="parent" childId="child" title="Busy worker" running />)
+  fireEvent.click(screen.getByRole('button', {name:'Discard Busy worker'}))
+  expect(screen.getByTestId('discard-running')).toHaveTextContent('It is running now. Discarding stops the work it is doing.')
+  unmount()
+  render(<ChildDiscardAction parentId="parent" childId="idle" title="Idle worker" />)
+  fireEvent.click(screen.getByRole('button', {name:'Discard Idle worker'}))
+  expect(screen.queryByTestId('discard-running')).toBeNull()
+  expect(apiFetch).not.toHaveBeenCalled()
+})

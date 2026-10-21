@@ -122,6 +122,9 @@ func sandboxHost(t *testing.T, engineBinDir string, cfg AgentHostConfig) (host *
 	t.Helper()
 	dockerDir, logPath := fakeDocker(t)
 	useScratchTurnPIDFile(t)
+	// The stop-time step runs in a container; the fake docker would run it on the host. A test
+	// that cares stubs its own answer.
+	stubCloneProbe(t, false, false)
 	t.Setenv("PATH", dockerDir+":"+engineBinDir+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_DOCKER_LOG", logPath)
 	home = t.TempDir()
@@ -610,7 +613,7 @@ func TestStartSandboxContainerClearsAStaleContainerFirst(t *testing.T) {
 	}
 	t.Cleanup(func() { dockerRun = orig; unregisterSandbox("s-stale") })
 
-	if _, err := startSandboxContainer("s-stale", t.TempDir(), nil, sandboxCredential{}, SandboxOptions{}); err != nil {
+	if _, err := startSandboxContainer("s-stale", sandboxTestClone(t, "s-stale"), nil, sandboxCredential{}, SandboxOptions{}); err != nil {
 		t.Fatalf("startSandboxContainer: %v", err)
 	}
 	if len(calls) < 2 {
@@ -633,15 +636,16 @@ func TestListSandboxedTmuxSessionsSkipsAgentContainers(t *testing.T) {
 	dockerOutput = func(args ...string) ([]byte, error) {
 		return []byte(sandboxContainerPrefix + "term-1\n" + sandboxContainerPrefix + "agent-1\n"), nil
 	}
-	dockerRun = func(args ...string) error {
+	origProbe := dockerProbe
+	dockerProbe = func(_ time.Duration, args ...string) (bool, error) {
 		// `docker exec <container> tmux ls` fails for the agent container.
 		if len(args) > 1 && args[1] == sandboxContainerPrefix+"agent-1" {
-			return errNotInImage
+			return false, errNotInImage
 		}
-		return nil
+		return false, nil
 	}
 	t.Cleanup(func() {
-		dockerOutput, dockerRun = origOut, origRun
+		dockerOutput, dockerRun, dockerProbe = origOut, origRun, origProbe
 		unregisterSandbox("term-1")
 		unregisterSandbox("agent-1")
 	})
@@ -701,7 +705,8 @@ func TestPreflightSandboxedAgentChecksTheImageNotTheHostPath(t *testing.T) {
 var errNotInImage = os.ErrNotExist
 
 // TestEngineInSandboxImageRunsTheCheckInTheImage pins the real check's shape:
-// a throwaway `docker run --rm <image> which <bin>`, never a host lookup.
+// a throwaway `docker run --rm --pull=never <image> which <bin>`, never a host lookup and never a
+// pull under the bounded run.
 func TestEngineInSandboxImageRunsTheCheckInTheImage(t *testing.T) {
 	var got []string
 	orig := dockerRun
@@ -711,7 +716,7 @@ func TestEngineInSandboxImageRunsTheCheckInTheImage(t *testing.T) {
 	if err := engineInSandboxImage("codex"); err != nil {
 		t.Fatalf("engineInSandboxImage: %v", err)
 	}
-	if want := "run --rm " + sandboxImage() + " which codex"; strings.Join(got, " ") != want {
+	if want := "run --rm --pull=never " + sandboxImage() + " which codex"; strings.Join(got, " ") != want {
 		t.Fatalf("docker args = %v, want %q", got, want)
 	}
 }
@@ -762,7 +767,7 @@ func TestStartSandboxContainerClaimsTheNameBeforeRunning(t *testing.T) {
 	}
 	t.Cleanup(func() { dockerRun = origRun; unregisterSandbox("s-race") })
 
-	if _, err := startSandboxContainer("s-race", t.TempDir(), nil, sandboxCredential{}, SandboxOptions{}); err != nil {
+	if _, err := startSandboxContainer("s-race", sandboxTestClone(t, "s-race"), nil, sandboxCredential{}, SandboxOptions{}); err != nil {
 		t.Fatalf("startSandboxContainer: %v", err)
 	}
 	// The pre-run `rm -f` of a stale name is expected; a second one would be
@@ -807,17 +812,18 @@ func TestSweepOrphanSandboxContainers(t *testing.T) {
 		}
 		return []byte(out), nil
 	}
+	origProbe := dockerProbe
+	dockerProbe = func(_ time.Duration, args ...string) (bool, error) {
+		// Only the terminal sandbox has a tmux server inside it.
+		if args[1] == sandboxContainerPrefix+term {
+			return false, nil
+		}
+		return false, errNotInImage
+	}
+	t.Cleanup(func() { dockerProbe = origProbe })
 	dockerRun = func(args ...string) error {
-		switch {
-		case len(args) > 2 && args[0] == "exec" && args[2] == "tmux":
-			// Only the terminal sandbox has a tmux server inside it.
-			if args[1] == sandboxContainerPrefix+term {
-				return nil
-			}
-			return errNotInImage
-		case len(args) == 3 && args[0] == "rm":
+		if len(args) == 3 && args[0] == "rm" {
 			removed = append(removed, args[2])
-			return nil
 		}
 		return nil
 	}

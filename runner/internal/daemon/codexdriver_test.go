@@ -187,6 +187,16 @@ for line in sys.stdin:
   continue
  if method=="turn/start" and (os.environ.get("FAKE_CODEX_HOLD_FIRST") or (os.environ.get("FAKE_CODEX_STEER_RACE") and turn_starts==1)): continue
  if method in ("turn/start", "turn/steer"):
+  if os.environ.get("FAKE_CODEX_REASONING_PROGRESS"):
+   # The real order: a request's reasoning item closes, then its usage arrives once the response
+   # completes. A usage update that lands while the next request's reasoning item is open still
+   # carries the previous request's counts.
+   send({"method":"item/started","params":{"threadId":"cx-thread-1","item":{"id":"reasoning-fixture","type":"reasoning"}}})
+   send({"method":"item/completed","params":{"threadId":"cx-thread-1","item":{"id":"reasoning-fixture","type":"reasoning","summary":[]}}})
+   send({"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","tokenUsage":{"last":{"inputTokens":100,"outputTokens":20,"reasoningOutputTokens":13}}}})
+   send({"method":"item/started","params":{"threadId":"cx-thread-1","item":{"id":"reasoning-fixture-2","type":"reasoning"}}})
+   send({"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","tokenUsage":{"last":{"inputTokens":100,"outputTokens":20,"reasoningOutputTokens":13}}}})
+   send({"method":"item/completed","params":{"threadId":"cx-thread-1","item":{"id":"reasoning-fixture-2","type":"reasoning","summary":[]}}})
   for name,item in [("item/completed",{"id":"i0","type":"agentMessage","text":"Reading the card."}), ("item/started",{"id":"i1","type":"commandExecution","command":"ls","status":"inProgress"}), ("item/completed",{"id":"i1","type":"commandExecution","command":"ls","status":"completed","aggregatedOutput":"README.md\n","exitCode":127 if os.environ.get("FAKE_CODEX_COMMAND_FAIL") else 0}), ("item/completed",{"id":"i2","type":"agentMessage","text":"Done."})]: send({"method":name,"params":{"threadId":"cx-thread-1","item":item}})
   send({"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","tokenUsage":{"last":{"inputTokens":100,"cachedInputTokens":10,"outputTokens":20}}}})
   send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-"+str(turn_starts) if os.environ.get("FAKE_CODEX_STEER_RACE") else "turn-1","status":"completed"}}})

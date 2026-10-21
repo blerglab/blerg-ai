@@ -130,7 +130,8 @@ func TestAskAnswerIsRecordedAsTheAnswer(t *testing.T) {
 	for _, c := range []struct {
 		source     string
 		wantClosed bool
-	}{{"chat", true}, {"ask_answer", false}} {
+		answeredBy string
+	}{{"chat", true, ""}, {"ask_answer", false, ""}, {"session", true, "session"}} {
 		rec := &recorder{}
 		fm := &fakeMessenger{}
 		fp := &fakeProvider{scripts: [][]StreamEvent{
@@ -156,7 +157,8 @@ func TestAskAnswerIsRecordedAsTheAnswer(t *testing.T) {
 				answers = append(answers, p)
 			}
 		}
-		want := UserMessagePayload{Text: "blue", Source: "ask_answer", ClientID: "cl-9", MessageID: "msg-1"}
+		// A parent's answer (source "session") is recorded as the parent's.
+		want := UserMessagePayload{Text: "blue", Source: "ask_answer", ClientID: "cl-9", MessageID: "msg-1", AnsweredBy: c.answeredBy}
 		if len(answers) != 1 || answers[0] != want {
 			t.Fatalf("%s: answer events = %+v, want exactly %+v", c.source, answers, want)
 		}

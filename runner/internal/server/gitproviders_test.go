@@ -28,6 +28,7 @@ const (
 
 func TestSetRepoOriginsSanitizesAcrossProviders(t *testing.T) {
 	dc := &DaemonConn{}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetRepoOrigins(map[string]protocol.RepoOrigin{
 		"gh":         {Provider: "github", FullName: "example-org/example-repo"},
 		"gl":         {Provider: "gitlab", FullName: "example-group/example-project"},
@@ -68,6 +69,7 @@ func TestSetRepoOriginsSanitizesAcrossProviders(t *testing.T) {
 func TestHandleGetReposCarriesProvider(t *testing.T) {
 	hub := NewHub()
 	d := &DaemonConn{ID: "d1", Name: "desk"}
+	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"lab-proj", "hub-proj"})
 	d.SetRepoOrigins(map[string]protocol.RepoOrigin{
 		"lab-proj": {Provider: "gitlab", FullName: "example-group/lab-proj"},
@@ -287,6 +289,7 @@ func TestHandleGetReposMergesUserListsByProvider(t *testing.T) {
 
 	hub := NewHub()
 	d := &DaemonConn{ID: "d1", Name: "desk"}
+	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"tool"})
 	d.SetRepoOrigins(map[string]protocol.RepoOrigin{"tool": {Provider: "gitlab", FullName: "example-org/tool"}}, nil)
 	hub.Register(d)
@@ -505,6 +508,7 @@ func TestPostSessionsClusterProvider(t *testing.T) {
 	jm.GitURLBase = "https://github.com"
 	hub.SetJobManager(jm)
 	d := &DaemonConn{ID: "d1", Name: "desk", send: make(chan []byte, 8)}
+	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"lab-folder"})
 	d.SetRepoOrigins(map[string]protocol.RepoOrigin{"lab-folder": {Provider: "gitlab", FullName: "example-group/lab-proj"}}, nil)
 	hub.Register(d)

@@ -2,6 +2,7 @@
 import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { playwright } from "@vitest/browser-playwright";
 
 // The chat comes from the workspace package @blerglab/chat, built from its source here (dev,
 // tests and the production bundle alike), as the runner's web app does.
@@ -22,11 +23,51 @@ export default defineConfig({
       "/ws": { target: "ws://localhost:8080", ws: true },
     },
   },
+  // Pre-bundle the browser tests' dependencies so a cold Vite cache never re-optimizes (and
+  // reloads the page) partway through the run.
+  optimizeDeps: {
+    include: [
+      "react",
+      "react-dom",
+      "react-dom/client",
+      "react/jsx-dev-runtime",
+      "react/jsx-runtime",
+      "@testing-library/react",
+      "react-markdown",
+      "remark-gfm",
+      "zustand",
+    ],
+  },
   test: {
-    environment: "jsdom",
-    testTimeout: 30000,
-    hookTimeout: 30000,
-    setupFiles: ["./src/test/setup.ts"],
-    exclude: ["node_modules/**"],
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          environment: "jsdom",
+          testTimeout: 30000,
+          hookTimeout: 30000,
+          setupFiles: ["./src/test/setup.ts"],
+          exclude: ["node_modules/**", "src/**/*.browser.test.{ts,tsx}"],
+        },
+      },
+      {
+        // Real Chromium (Playwright) for layout: the phone and large-screen passes (#50). The Board
+        // has its own project, apart from the runner's, so neither's optimizer reloads the other.
+        extends: true,
+        test: {
+          name: "browser",
+          include: ["src/**/*.browser.test.{ts,tsx}"],
+          testTimeout: 30000,
+          hookTimeout: 30000,
+          browser: {
+            enabled: true,
+            provider: playwright(),
+            headless: true,
+            instances: [{ browser: "chromium" }],
+          },
+        },
+      },
+    ],
   },
 });

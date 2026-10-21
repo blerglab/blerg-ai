@@ -1,3 +1,4 @@
+import type { Reasoning } from '../model/reasoning'
 // The timeline: start progress, the ready card, every event (folded into tool groups or as full
 // cards), the streaming reply, sent-but-unrecorded messages, the working and waiting lines. It
 // draws the newest WINDOW rows and reveals more as the reader scrolls up, follows new output until
@@ -77,15 +78,16 @@ function viewTop(root: Element, el: Element): number {
 
 // The working line with its clock. It ticks on its own, so the second-by-second clock re-renders
 // this line and not the timeline. since: server time the turn began (null: unknown, shows 0 s).
-function TurnClock({ since, clockOffset, waitingOn, background, activity }: {
+function TurnClock({ since, clockOffset, waitingOn, background, activity, reasoning }: {
   since: number | null
   clockOffset: number
   waitingOn: WaitingOn | null
   background?: BackgroundLine | null
+  reasoning?: Reasoning | null
   activity?: string | null
 }) {
   const now = useTicker(true) - clockOffset
-  return <WorkingIndicator since={since ?? now} now={now} waitingOn={waitingOn} background={background} activity={activity} />
+  return <WorkingIndicator since={since ?? now} now={now} waitingOn={waitingOn} background={background} activity={activity} reasoning={reasoning} />
 }
 
 /** The background tasks running, for the working line: how many, the description of the only one,
@@ -212,6 +214,7 @@ export interface TranscriptProps {
   since: number | null
   waitingOn: WaitingOn | null
   /** What the agent is on, when known ("Thinking…", a model retry): the working line's words. */
+  reasoning?: Reasoning | null
   activity?: string | null
   /** Background tasks running (null: none). While the turn has nothing else in flight, or the
    *  session is idle, the working line names them. */
@@ -754,7 +757,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
           </div>
         ))}
         {p.working && !streaming && (
-          <TurnClock since={p.since} clockOffset={p.clockOffset} waitingOn={p.waitingOn} background={p.background} activity={p.activity} />
+          <TurnClock since={p.since} clockOffset={p.clockOffset} waitingOn={p.waitingOn} background={p.background} activity={p.activity} reasoning={p.reasoning} />
         )}
         {!p.working && !p.waiting && p.background && (
           <TurnClock since={p.background.since} clockOffset={p.clockOffset} waitingOn={null} background={p.background} />

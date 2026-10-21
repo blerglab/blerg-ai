@@ -12,6 +12,7 @@ import (
 func TestPlanUpdatedTransientCannotBypassValidation(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "fixture", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	sub := make(chan []byte, 8)
 	h.Subscribe("fixture-session", "fixture-browser", sub)
@@ -31,6 +32,7 @@ func TestPlanUpdatedMalformedAndChildSnapshotsAreAcknowledgedAndDropped(t *testi
 	for _, raw := range []string{`{}`, `{"items":null}`, `{"items":[{"text":"wrong","status":"surprise"}]}`, `{"items":[],"parent_call_id":"child"}`, `{"items":[],"child_id":"child"}`} {
 		h := NewHub()
 		dc := &DaemonConn{ID: "fixture", send: make(chan []byte, 2)}
+		dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 		h.Register(dc)
 		sub := make(chan []byte, 2)
 		h.Subscribe("fixture-session", "fixture-browser", sub)
@@ -43,6 +45,7 @@ func TestPlanUpdatedMalformedAndChildSnapshotsAreAcknowledgedAndDropped(t *testi
 func TestLiveCodexPlanReplaysAndClearsAndRemainsPrivate(t *testing.T) {
 	fx := newLiveFx(t)
 	dc := &DaemonConn{ID: "fixture", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	appendPlan := func(payload string) {
 		t.Helper()

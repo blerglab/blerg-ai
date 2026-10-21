@@ -68,6 +68,7 @@ export function useSessionLive(sessionId: string, enabled: boolean, refresh: unk
         mcp: view.mcp,
         mcpHold: view.mcpHold,
         canReleasePrompt: view.canReleasePrompt,
+        reasoningTokens: view.reasoningTokens,
       }
     : null), [view, report.answer, report.openFiles, report.filesKey, report.files, clockOffset, generatedAt])
   if (fromServer && view) return { live: fromServer, tasks: view.tasks, toolChanges: view.toolChanges, children: view.children, delegationRequests: view.delegationRequests, delegationGrants: view.delegationGrants, reviewRequests: view.reviewRequests, source: 'server' }

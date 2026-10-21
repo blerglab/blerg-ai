@@ -35,7 +35,7 @@ grep -qF -- 'key: BLERG_RUNNER_TRUSTED_PROXIES, optional: true' "$tmp/runner-dep
 # file limits from the ConfigMap.
 grep -qF 'nginx.ingress.kubernetes.io/proxy-body-size: "128m"' "$tmp/ingress.yaml" \
   || { echo "FAIL: ingress proxy-body-size is not 128m (a 100 MiB file must fit)"; fail=1; }
-for want in BLERG_RUNNER_MAX_FILE_MB BLERG_RUNNER_MAX_SESSION_UPLOADS_MB BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB; do
+for want in BLERG_RUNNER_MAX_FILE_MB BLERG_RUNNER_MAX_SESSION_UPLOADS_MB BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN; do
   grep -qF -- "key: $want, optional: true" "$tmp/runner-deployment.yaml" \
     || { echo "FAIL: $want not passed to the runner"; fail=1; }
 done
@@ -46,7 +46,8 @@ grep -q 'BLERG_RUNNER_AGENT_IMAGE: "reg.example/blerg-runner-agent:t1"' "$tmp/co
   || { echo "FAIL: AGENT_IMAGE not rendered into BLERG_RUNNER_AGENT_IMAGE"; fail=1; }
 for want in 'BLERG_RUNNER_AGENT_NAMESPACE: "blerg-runner-sessions"' \
             'BLERG_RUNNER_INTERNAL_URL: "http://blerg-runner.blerg.svc.cluster.local:8080"' \
-            'BLERG_RUNNER_MAX_SESSIONS:'; do
+            'BLERG_RUNNER_MAX_SESSIONS:' \
+            'BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN: "once"'; do
   grep -qF -- "$want" "$tmp/configmap.yaml" || { echo "FAIL: $want not wired"; fail=1; }
 done
 # BLERG_RUNNER_AGENT_GIT_BASE must stay UNSET: the runner already defaults to

@@ -20,7 +20,7 @@ type ChildLiveRow struct {
 func ListVisibleChildLiveRows(ctx context.Context, pool *pgxpool.Pool, parent, account string) ([]ChildLiveRow, error) {
 	rows, err := pool.Query(ctx, `SELECT s.id::text,COALESCE(s.title,''),COALESCE(s.engine,''),COALESCE(s.model,''),
 		COALESCE(s.effort,''),COALESCE(s.runtime,''),s.status,COALESCE(s.delegation_via,''),s.started_at,s.ended_at,s.keep_running,
-		(SELECT count(*) FROM messages m WHERE m.session_id=s.id AND m.kind='ask' AND m.status='open'),
+		(SELECT count(*) FROM messages m WHERE m.session_id=s.id AND m.kind='ask' AND m.status='open' AND NOT m.no_wait),
 		COALESCE(s.spawning_account_id,''),COALESCE((SELECT max(e.seq) FROM agent_events e WHERE e.session_id=s.id),0), s.archived_at
 		FROM sessions s WHERE s.parent_session_id=$1 AND (NOT s.private OR s.spawning_account_id=$2)
 		ORDER BY s.started_at,s.id`, parent, account)

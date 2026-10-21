@@ -732,3 +732,34 @@ func TestHostDaemonName(t *testing.T) {
 		t.Fatalf("missing: %v %v", ok, err)
 	}
 }
+
+// A question the agent does not wait on (ask --no-wait) leaves its session at work: it is not an
+// open ask for a restart's recovery, and a child that posted one is not "asking" its parent.
+func TestNoWaitQuestionIsNotAnOpenAsk(t *testing.T) {
+	pool := connect(t)
+	ctx := context.Background()
+	daemon := mustDaemon(t, pool)
+	parent := mustSession(t, pool, daemon, "owner-1")
+	child := mustSessionAs(t, pool, daemon, db.SessionOrigin{SpawningAccount: "owner-1", ParentSessionID: parent, DelegationVia: "rule:r1"})
+	if _, err := db.CreateQuestion(ctx, pool, child, "ship blue?"); err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := db.SessionsWithOpenAsks(ctx, pool, []string{child}); err != nil || len(ids) != 0 {
+		t.Fatalf("open asks = %v %v, want none for a no-wait question", ids, err)
+	}
+	list, err := db.ListChildSessions(ctx, pool, parent)
+	if err != nil || len(list) != 1 || list[0].OpenAsks != 0 {
+		t.Fatalf("children = %+v %v, want the child not asking", list, err)
+	}
+	live, err := db.ListVisibleChildLiveRows(ctx, pool, parent, "owner-1")
+	if err != nil || len(live) != 1 || live[0].OpenAsks != 0 {
+		t.Fatalf("live children = %+v %v", live, err)
+	}
+	// A blocking ask still is.
+	if _, err := db.CreateMessage(ctx, pool, child, "ask", "may I?"); err != nil {
+		t.Fatal(err)
+	}
+	if ids, _ := db.SessionsWithOpenAsks(ctx, pool, []string{child}); len(ids) != 1 {
+		t.Fatalf("a blocking ask is not open: %v", ids)
+	}
+}

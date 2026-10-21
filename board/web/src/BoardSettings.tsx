@@ -1,3 +1,4 @@
+import BoardRunTarget from "./BoardRunTarget";
 import { modelDisplayName } from "@blerglab/chat";
 import { FormEvent, Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, ApiError, Board } from "./api";
@@ -111,6 +112,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
           )}
           {expiry && <span className={`inherit${expiry === "expired" ? " warn" : ""}`}> ({expiry})</span>}
         </dd>
+        <BoardRunTarget board={board} editable={canEdit && mine && board.automation_token_set} onChanged={() => { discovery.retry(); onChanged?.(); }} />
         <dt title="the engine every session this board starts runs">engine</dt>
         <dd><span className="mono">{label(board.automation_engine || "claude")}</span></dd>
       </dl>

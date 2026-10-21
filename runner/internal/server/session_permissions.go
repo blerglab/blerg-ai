@@ -21,6 +21,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,8 +122,10 @@ func (a *API) ownedSession(ctx context.Context, w http.ResponseWriter, account, 
 // proposalGrantView is one permission as the owner's browser sees it. The login session it acts
 // with is deliberately absent.
 type proposalGrantView struct {
-	ID                  string `json:"id"`
-	Kind                string `json:"kind"`
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	// Level is a board permission's level (propose, read, file, full); "" for an MCP tool.
+	Level               string `json:"level,omitempty"`
 	BoardID             string `json:"board_id,omitempty"`
 	BoardName           string `json:"board_name,omitempty"`
 	ConnectionID        string `json:"connection_id,omitempty"`
@@ -138,7 +141,11 @@ type proposalGrantView struct {
 }
 
 func viewOfProposalGrant(g *db.ProposalGrant) proposalGrantView {
-	return proposalGrantView{ID: g.ID, Kind: g.Kind, BoardID: g.BoardID, BoardName: g.BoardName, ConnectionID: g.ConnectionID,
+	level := ""
+	if g.Kind == db.ProposalGrantBoard {
+		level = g.Level
+	}
+	return proposalGrantView{ID: g.ID, Kind: g.Kind, Level: level, BoardID: g.BoardID, BoardName: g.BoardName, ConnectionID: g.ConnectionID,
 		ConnectionName: g.ConnectionName, Tool: g.Tool, CreatedVia: g.CreatedVia, CreatedFromProposal: g.CreatedFromProposal,
 		CreatedAt: g.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"), Active: true}
 }
@@ -158,16 +165,20 @@ func (a *API) pinnedToolHashes(ctx context.Context, sessionID string) (map[strin
 // signInAlive reports whether a grant's sign-in can still act: core answers a refused proof for a
 // login session that ended. Unknown (core unreachable or not configured) counts as alive: the
 // approval itself still checks it. seen caches answers for one request.
-func (a *API) signInAlive(ctx context.Context, seen map[string]bool, account, sid string) bool {
+func (a *API) signInAlive(ctx context.Context, seen map[string]bool, account, sid, cacheScope string) bool {
 	if v, ok := seen[sid]; ok {
 		return v
 	}
-	alive := true
-	if cfg := a.hub.mcpStart.get(); cfg != nil && cfg.Core != nil {
-		if _, err := cfg.Core.ListConnections(ctx, mcpgw.Proof{AccountID: account, SessionID: sid}); errors.Is(err, ErrMCPProofInvalid) {
-			alive = false
+	alive := a.permissionSignIns.load(ctx, cacheScope+"\x00"+account+"\x00"+sid, func(ctx context.Context) (bool, bool) {
+		if cfg := a.hub.mcpStart.get(); cfg != nil && cfg.Core != nil {
+			_, err := cfg.Core.ListConnections(ctx, mcpgw.Proof{AccountID: account, SessionID: sid})
+			if errors.Is(err, ErrMCPProofInvalid) {
+				return false, true
+			}
+			return true, err == nil
 		}
-	}
+		return true, false
+	})
 	seen[sid] = alive
 	return alive
 }
@@ -228,6 +239,10 @@ func (a *API) HandleGetSessionPermissions(w http.ResponseWriter, r *http.Request
 		writeDatabaseFailure(w, "read the session permissions", "list propose tools", err)
 		return
 	}
+	// The database snapshot is part of the cache key: changes invalidate across
+	// replicas without sharing a process-local invalidation signal.
+	rawGrants, _ := json.Marshal(grants)
+	cacheScope := row.ID + fmt.Sprintf("%x", sha256.Sum256(rawGrants))
 	views := make([]proposalGrantView, 0, len(grants))
 	pinned, _ := a.pinnedToolHashes(r.Context(), row.ID)
 	alive := map[string]bool{who.Sid: true}
@@ -236,14 +251,58 @@ func (a *API) HandleGetSessionPermissions(w http.ResponseWriter, r *http.Request
 		switch {
 		case grants[i].Kind == db.ProposalGrantMCP && pinned[grants[i].ConnectionID+"\x00"+grants[i].Tool] != grants[i].ToolHash:
 			v.Active, v.Inactive = false, "tool_changed"
-		case !a.signInAlive(r.Context(), alive, who.Account, grants[i].ProofSessionID):
+		case !a.signInAlive(r.Context(), alive, who.Account, grants[i].ProofSessionID, cacheScope):
 			v.Active, v.Inactive = false, "signed_out"
 		}
 		views = append(views, v)
 	}
+	boards, err := a.boardLevelsFor(r.Context(), row)
+	if err != nil {
+		writeDatabaseFailure(w, "read the session permissions", "board levels", err)
+		return
+	}
+	for i := range boards {
+		if boards[i].child {
+			// A started session's board acts with its parent's sign-in for it: that is the one
+			// that has to be alive (the child's own row has none of its own).
+			if p := boards[i].capProof; boards[i].Level != db.BoardLevelPropose && p.SessionID != "" && !a.signInAlive(r.Context(), alive, p.AccountID, p.SessionID, cacheScope) {
+				boards[i].Active, boards[i].Inactive = false, "signed_out"
+			}
+			continue
+		}
+		// An untouched launch board acts with the launch's own sign-in.
+		if p := boards[i].launchProof; boards[i].GrantID == "" && p.SessionID != "" && !a.signInAlive(r.Context(), alive, p.AccountID, p.SessionID, cacheScope) {
+			boards[i].Active, boards[i].Inactive = false, "signed_out"
+		}
+		for _, v := range views {
+			if v.ID == boards[i].GrantID && v.Kind == db.ProposalGrantBoard && !v.Active {
+				boards[i].Active, boards[i].Inactive = false, v.Inactive
+			}
+		}
+	}
 	reason := proposalGrantProblem(row)
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"can_grant": reason == "", "reason": reason, "grants": views, "mcp_tools": tools})
+	// boards: every board above propose (the Boards section and its chips), the launch board
+	// included; grants: every live permission row (board rows carry their level). For a session
+	// started by another one, started_by names that session: its levels cap this one's (each board
+	// has own_level and parent_level, and level is the lower), and parent_boards are its levels now,
+	// the most this session can be given.
+	out := map[string]any{"can_grant": reason == "", "reason": reason, "grants": views, "mcp_tools": tools, "boards": boards}
+	if isChildSession(row) {
+		started := map[string]any{"id": derefOrEmpty(row.ParentSessionID), "title": ""}
+		parentBoards := []map[string]string{}
+		if parent, err := a.childBoardParent(r.Context(), row); err == nil && parent != nil {
+			started["title"] = sessionLabel(derefOrEmpty(parent.Title), parent.Repo, parent.ID)
+			if levels, err := a.sessionBoardLevels(r.Context(), parent.ID); err == nil {
+				for _, b := range levels {
+					parentBoards = append(parentBoards, map[string]string{"board_id": b.BoardID, "board_name": b.BoardName, "level": b.Level})
+				}
+			}
+		}
+		started["boards"] = parentBoards
+		out["started_by"] = started
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // proposalGrantRequest is the body of POST /api/sessions/{id}/proposal-grants: exactly one scope.
@@ -290,13 +349,32 @@ func (a *API) HandleRevokeProposalGrant(w http.ResponseWriter, r *http.Request) 
 		writeDatabaseFailure(w, "revoke the permission", "get proposal grant", err)
 		return
 	}
-	if g == nil {
+	if g == nil || (g.Kind == db.ProposalGrantBoard && who.Project != "" && g.BoardID != who.Project) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if _, err := db.RevokeProposalGrant(r.Context(), a.dbPool, g.ID, who.Account, "revoked"); err != nil {
+	changed, err := db.RevokeProposalGrant(r.Context(), a.dbPool, g.ID, who.Account, "revoked")
+	if err != nil {
 		writeDatabaseFailure(w, "revoke the permission", "revoke proposal grant", err)
 		return
+	}
+	if changed && g.Kind == db.ProposalGrantBoard && g.Level != db.BoardLevelPropose {
+		if row, err := db.GetSession(r.Context(), a.dbPool, g.SessionID); err == nil && row != nil {
+			name := boardDisplayName(g.BoardName, g.BoardID)
+			from := g.Level
+			if isChildSession(row) {
+				// What the child had: its own level under its parent's cap.
+				if parent, err := a.childBoardParent(r.Context(), row); err == nil {
+					if lv, err := a.applyParentCap(r.Context(), boardLevelOf{Level: g.Level}, parent, g.BoardID); err == nil {
+						from = lv.Level
+					}
+				}
+			}
+			if from != db.BoardLevelPropose {
+				a.relayBoardAccess(r.Context(), who.Account, row, g.ID+"-revoked", name, from, db.BoardLevelPropose)
+			}
+			a.relayChildrenBoardAccess(r.Context(), who.Account, row, "board-access-"+g.ID+"-revoked", g.BoardID, name, g.Level, db.BoardLevelPropose)
+		}
 	}
 	log.Printf("session permissions: revoked grant=%s session=%s account=%s kind=%s", g.ID, g.SessionID, g.AccountID, g.Kind)
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "id": g.ID})
@@ -322,24 +400,15 @@ func (a *API) createProposalGrant(ctx context.Context, who grantRequester, row *
 		if req.BoardID == "" || req.ConnectionID != "" || req.Tool != "" || !filingText(req.BoardID, 200, false) {
 			return nil, apiErrorf(http.StatusBadRequest, "a board permission names one board_id and nothing else")
 		}
-		boards, err := a.filingBoards(ctx, mcpgw.Proof{AccountID: who.Account, SessionID: who.Sid}, who.Project)
-		if err != nil {
-			var apiErr *APIError
-			if errors.As(err, &apiErr) {
-				return nil, apiErr
-			}
-			return nil, apiErrorf(http.StatusServiceUnavailable, "could not check your boards; retry")
+		// Filing without asking is board level file (0.4.4): it raises the board to file and never
+		// lowers a board that is already full.
+		level := db.BoardLevelFile
+		if now, err := a.effectiveBoardLevel(ctx, row, req.BoardID); err != nil {
+			return nil, apiErrorf(http.StatusServiceUnavailable, "could not read the session's board access; retry")
+		} else if db.BoardLevelRank(now.Own) > db.BoardLevelRank(level) {
+			level = now.Own
 		}
-		var board *SessionBoard
-		for i := range boards {
-			if boards[i].ID == req.BoardID {
-				board = &boards[i]
-			}
-		}
-		if board == nil {
-			return nil, apiErrorf(http.StatusNotFound, "That board is not available to this account.")
-		}
-		g.BoardID, g.BoardName = board.ID, board.Name
+		return a.setBoardLevel(ctx, who, row, req.BoardID, level, via, fromProposal)
 	case db.ProposalGrantMCP:
 		if req.ConnectionID == "" || req.Tool == "" || req.BoardID != "" || !utf8.ValidString(req.Tool) || len(req.Tool) > 256 {
 			return nil, apiErrorf(http.StatusBadRequest, "an MCP permission names one connection_id and one tool and nothing else")
@@ -448,6 +517,9 @@ func (a *API) grantFor(ctx context.Context, p *db.Proposal) *db.ProposalGrant {
 		log.Printf("session permissions: find grant for proposal %s: %v", p.ID, err)
 		return nil
 	}
+	if g != nil && kind == db.ProposalGrantBoard {
+		return a.childFilingGrant(ctx, g)
+	}
 	return g
 }
 
@@ -478,6 +550,9 @@ func (a *API) settleNewProposal(ctx context.Context, p *db.Proposal) (*db.Propos
 	}
 	who := grantRequester{Kind: string(identity.Human), Account: g.AccountID, Sid: g.ProofSessionID, Project: g.ProjectScope}
 	capture := &filingToolCapture{header: make(http.Header)}
+	if a.beforeGrantApproval != nil {
+		a.beforeGrantApproval()
+	}
 	(&proposalsHandler{api: a}).execute(ctx, capture, who, p, string(p.Arguments), g.ID)
 	now, err := db.GetOwnedProposal(context.WithoutCancel(ctx), a.dbPool, p.AccountID, p.ID)
 	if err != nil {
@@ -488,9 +563,16 @@ func (a *API) settleNewProposal(ctx context.Context, p *db.Proposal) (*db.Propos
 		log.Printf("session permissions: auto-approved proposal=%s grant=%s session=%s state=%s", p.ID, g.ID, p.SessionID, now.State)
 	} else if capture.status >= 400 {
 		log.Printf("session permissions: grant=%s did not approve proposal=%s (status %d); it waits for the person", g.ID, p.ID, capture.status)
+		// A burst can pass the count above and meet the grant's atomic count instead: say so.
+		if now.State == db.ProposalPending {
+			limit := a.grantHourlyCap()
+			if n, err := db.CountGrantApprovalsSince(context.WithoutCancel(ctx), a.dbPool, g.ID, time.Now().Add(-time.Hour)); err == nil && n >= limit {
+				note = fmt.Sprintf("The session permission already approved %d in the last hour (its limit), so this one waits for you.", n)
+			}
+		}
 	}
 	a.announceProposalDecision(context.WithoutCancel(ctx), p.AccountID, p.ID)
-	return now, ""
+	return now, note
 }
 
 // ---- session events ------------------------------------------------------------------------

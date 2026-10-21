@@ -1,3 +1,4 @@
+import { composeMessage } from '../model/attachments'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ChatView from './ChatView'
@@ -348,10 +349,10 @@ describe('inline previews', () => {
     expect(files.rawCalls).toHaveLength(0)
   })
 
-  it('shows an attached image inline under the message, matched by name to the Files list', async () => {
+  it('shows an attached image inline under the message, matched by ID to the Files list', async () => {
     seed({
       type: 'agent_event', session_id: SESSION, client_event_id: 'e1', seq: 1, ts: '2026-07-26T00:00:00Z',
-      kind: 'user_message', payload: { text: 'look\n\nAttached files (fetch them with: blerg-runner fetch --all): shot.png (12.0 KB)', source: 'human' },
+      kind: 'user_message', payload: { text: composeMessage('look', [{ id: 'u1', name: 'shot.png', size: 12288 }]), source: 'human' },
     })
     const { files } = mount({ listed: [{ ...shot, id: 'u1', origin: 'user' }] })
     const previews = await screen.findByTestId('message-attachment-previews')
@@ -360,10 +361,24 @@ describe('inline previews', () => {
     expect(screen.getByTestId('message-attachments')).toHaveTextContent('shot.png')
   })
 
+  it('shows an older message (a name-only note) with the same-name upload it was sent with, not a later one', async () => {
+    seed({
+      type: 'agent_event', session_id: SESSION, client_event_id: 'e1', seq: 1, ts: '2026-07-26T00:05:00Z',
+      kind: 'user_message', payload: { text: 'look\n\nAttached files (fetch them with: blerg-runner fetch --all): shot.png (12.0 KB)', source: 'human' },
+    })
+    const { files } = mount({ listed: [
+      { ...shot, id: 'later', origin: 'user', version: 2, latest_version: 2, created_at: '2026-07-26T00:09:00Z' },
+      { ...shot, id: 'sent-with', origin: 'user', version: 1, latest_version: 2, created_at: '2026-07-26T00:04:59Z' },
+    ] })
+    const previews = await screen.findByTestId('message-attachment-previews')
+    expect(await within(previews).findByRole('img', { name: 'shot.png' })).toHaveAttribute('src', 'blob:x')
+    expect(files.rawCalls).toEqual(['sent-with'])
+  })
+
   it('shows the chips but no preview when the transport has no file operations', async () => {
     seed({
       type: 'agent_event', session_id: SESSION, client_event_id: 'e1', seq: 1, ts: '2026-07-26T00:00:00Z',
-      kind: 'user_message', payload: { text: 'look\n\nAttached files (fetch them with: blerg-runner fetch --all): shot.png (12.0 KB)', source: 'human' },
+      kind: 'user_message', payload: { text: composeMessage('look', [{ id: 'u1', name: 'shot.png', size: 12288 }]), source: 'human' },
     })
     mount({ files: false })
     expect(await screen.findByTestId('message-attachments')).toHaveTextContent('shot.png')
@@ -463,7 +478,7 @@ describe('inline previews of text-like files', () => {
   it('an attachment of the person gets the same preview', async () => {
     seed({
       type: 'agent_event', session_id: SESSION, client_event_id: 'e1', seq: 1, ts: '2026-07-26T00:00:00Z',
-      kind: 'user_message', payload: { text: 'see\n\nAttached files (fetch them with: blerg-runner fetch --all): notes.md (2.0 KB)', source: 'human' },
+      kind: 'user_message', payload: { text: composeMessage('see', [{ id: 'u9', name: 'notes.md', size: 2048 }]), source: 'human' },
     })
     mount({ listed: [{ ...report, id: 'u9', name: 'notes.md', origin: 'user' }] })
     const previews = await screen.findByTestId('message-attachment-previews')

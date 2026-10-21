@@ -18,6 +18,7 @@ import (
 func TestWorkspaceBrokerBindsConnectionSessionAndConsumesOnce(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -30,6 +31,7 @@ func TestWorkspaceBrokerBindsConnectionSessionAndConsumesOnce(t *testing.T) {
 	}
 	reply := protocol.WorkspaceFileResult{Type: "workspace_file_result", RequestID: req.RequestID, SessionID: "session", OK: true, Path: "README.md", Size: 2, ContentB64: base64.StdEncoding.EncodeToString([]byte("hi")), View: "text", ContentType: "text/plain", Mtime: time.Now().UTC().Format(time.RFC3339Nano)}
 	other := &DaemonConn{ID: "other"}
+	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.deliverWorkspaceFileResult(other, reply)
 	wrong := reply
 	wrong.SessionID = "foreign"
@@ -55,6 +57,7 @@ func TestWorkspaceFileOwnerOnlyAndOldDaemonTimeout(t *testing.T) {
 	fx := newTopicFx(t)
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	get := func(sid, tok string) *httptest.ResponseRecorder {
@@ -91,6 +94,7 @@ func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
 	fx := newTopicFx(t)
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	fx.api.hub.SetSessionOwner(fx.privSess, dc.ID)
@@ -252,6 +256,7 @@ func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
 func TestWorkspaceBrokerLimitsDisconnectAndReplacement(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -292,6 +297,7 @@ func TestWorkspaceBrokerLimitsDisconnectAndReplacement(t *testing.T) {
 		t.Fatal("request did not queue")
 	}
 	replacement := &DaemonConn{ID: dc.ID, send: make(chan []byte, 8)}
+	replacement.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(replacement)
 	reply := protocol.WorkspaceFileResult{RequestID: req.RequestID, SessionID: "session", OK: true}
 	h.deliverWorkspaceFileResult(dc, reply)
@@ -330,6 +336,7 @@ func TestWorkspaceReadLeaseHeldUntilHTTPResponseCompletes(t *testing.T) {
 	fx := newTopicFx(t)
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	gate := make(chan struct{})
@@ -428,6 +435,7 @@ func TestWorkspaceFileTimeoutReturnsJSONOverRealHTTP(t *testing.T) {
 	fx := newTopicFx(t)
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

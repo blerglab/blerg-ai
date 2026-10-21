@@ -300,6 +300,9 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		if end.Reason != "" {
 			hub.SessionTerminallyEnded(msg.SessionID)
 		}
+		if msg.Status == "error" && current.Status != "error" {
+			hub.ChildTurnEnded(msg.SessionID, childTurnFailed, "") // child_turn_notes.go
+		}
 		hub.ChildActivity(msg.SessionID)
 
 		// Persist why a spawn/run failed so the row isn't left with a bare
@@ -457,6 +460,7 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 	}
 
 	failPendingSessionInputs(ctx, hub, pool, msg.SessionID)
+	hub.QuestionSessionEnded(msg.SessionID) // nothing retries its questions' answers now
 	hub.UnsubscribeSession(msg.SessionID)
 	hub.RemoveSessionOwner(msg.SessionID)
 	hub.CancelIdleNotice(msg.SessionID) // it is over: nothing is left to wait for

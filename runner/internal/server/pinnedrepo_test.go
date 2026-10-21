@@ -13,6 +13,7 @@ import (
 func TestPinnedDaemonStartResolvesRepoOnThatDaemon(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "fixture-laptop", Name: "laptop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetAvailableEngines([]string{"claude"})
 	dc.SetCheckedOutRepos([]string{"app-checkout", "tool", "lib"})
 	dc.SetRepoOrigins(map[string]protocol.RepoOrigin{

@@ -42,6 +42,9 @@ type LaunchTarget struct {
 	DaemonID string   `json:"daemon_id,omitempty"`
 	Name     string   `json:"name"`
 	Runtimes []string `json:"runtimes"`
+	// HasRepo (a desktop, when the request names a repo): whether that desktop has a folder for
+	// it, matched the way a start pinned to it finds one (repoFolderOn). Absent otherwise.
+	HasRepo *bool `json:"has_repo,omitempty"`
 }
 
 func (a *API) authorizeLaunchOptions(w http.ResponseWriter, r *http.Request) (runnerPrincipal, bool) {
@@ -85,7 +88,12 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 		if host.SandboxAvailable() {
 			runtimes = append(runtimes, runnerRuntimeDocker)
 		}
-		out.Targets = append(out.Targets, LaunchTarget{DaemonID: host.ID, Name: host.Name, Runtimes: runtimes})
+		target := LaunchTarget{DaemonID: host.ID, Name: host.Name, Runtimes: runtimes}
+		if req.Repo != "" && validateRepoName(req.Repo) == nil {
+			has := slices.Contains(host.CheckedOutRepos(), repoFolderOn(host, req.Repo, ""))
+			target.HasRepo = &has
+		}
+		out.Targets = append(out.Targets, target)
 	}
 	if req.Runtime != "" && req.Runtime != runnerRuntimeCluster && req.Runtime != runnerRuntimeDocker && req.Runtime != runnerRuntimeDaemon {
 		return out, apiErrorf(http.StatusUnprocessableEntity, "%s", runnerRuntimeMessage)

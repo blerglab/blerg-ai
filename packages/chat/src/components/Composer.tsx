@@ -44,6 +44,17 @@ function insertText(box: HTMLTextAreaElement, text: string) {
   box.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
+let pastedImageSequence = 0
+// The names a clipboard gives an image with no file behind it (a screenshot, a copied picture):
+// "image.png" for every one of them, so two would collide. A copied file keeps its own name.
+const GENERIC_PASTE_NAME = /^(?:image(?:\.[a-z0-9]{1,10})?|)$/i
+function namePastedImage(file: File): File {
+  if (!file.type.startsWith('image/') || !GENERIC_PASTE_NAME.test(file.name.trim())) return file
+  const ext = file.name.match(/\.([a-z0-9]{1,10})$/i)?.[1]?.toLowerCase() || (file.type === 'image/jpeg' ? 'jpg' : 'png')
+  const name = `screenshot-${Date.now()}-${++pastedImageSequence}.${ext}`
+  return new File([file], name, { type: file.type, lastModified: file.lastModified })
+}
+
 export default function Composer({ draft, onDraft, placeholder, locked, busy, onSubmit, onInterrupt, attachments, onAttach, actions, autoFocus = true }: ComposerProps) {
   const canSend = (draft.trim() !== '' || attachments.done.length > 0) && !attachments.uploading && !locked
   const box = useRef<HTMLTextAreaElement>(null)
@@ -74,7 +85,7 @@ export default function Composer({ draft, onDraft, placeholder, locked, busy, on
             if (files.length > 0) {
               // A copied file brings no text; a page with an image brings both, and keeps its text.
               if (!e.clipboardData.getData('text/plain')) e.preventDefault()
-              attachments.addFiles(files)
+              attachments.addFiles(files.map(namePastedImage))
             }
             if (plainOnly || e.defaultPrevented) return
             const html = e.clipboardData?.getData('text/html')

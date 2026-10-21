@@ -28,6 +28,8 @@ export interface TicketSummaryLive {
   title: string
   status: string
   url: string
+  /** A Blerg Board card's board (its key is "#<number>"). */
+  boardId?: string
   /** The event that pinned or refreshed it last. */
   eventId: string
   updatedAt: number | null
@@ -240,7 +242,7 @@ export function readTicket(v: unknown): Ticket | null {
     }
   }
   const out: Ticket = { source: str(t.source), key: str(t.key), title: str(t.title) }
-  const opt = ['url', 'status', 'type', 'priority', 'assignee', 'reporter', 'description'] as const
+  const opt = ['url', 'board_id', 'status', 'type', 'priority', 'assignee', 'reporter', 'description'] as const
   for (const k of opt) if (str(t[k])) out[k] = str(t[k])
   const labels = strs(t.labels)
   const acceptance = strs(t.acceptance)
@@ -299,7 +301,10 @@ export function foldTicketEvent(state: PinnedLive, ev: AgentEvent): PinnedLive {
   if (ev.kind !== 'ticket') return state
   const p = readTicketEvent(ev.payload)
   if (!p) return state
-  const same = (s: { source: string; key: string }) => s.source === p.ticket.source && s.key === p.ticket.key
+  // A pin is (source, key) and, for a Blerg Board card, its board: #42 on two boards is two pins.
+  const board = p.ticket.board_id ?? ''
+  const same = (s: { source: string; key: string; boardId?: string; board_id?: string }) =>
+    s.source === p.ticket.source && s.key === p.ticket.key && (s.boardId ?? s.board_id ?? '') === board
   const rest = state.tickets.filter(s => !same(s))
   if (p.action === 'unpin') {
     if (rest.length === state.tickets.length) return state
@@ -312,12 +317,13 @@ export function foldTicketEvent(state: PinnedLive, ev: AgentEvent): PinnedLive {
   const t = p.ticket
   const summary: TicketSummaryLive = {
     source: t.source, key: t.key, title: t.title, status: t.status ?? '', url: t.url ?? '', eventId: ev.client_event_id, updatedAt,
+    ...(t.board_id ? { boardId: t.board_id } : {}),
   }
   return { tickets: [summary, ...rest], ticket: { ...t, eventId: ev.client_event_id, updatedAt } }
 }
 
 function summaryTicket(s: TicketSummaryLive): TicketLive {
-  return { source: s.source, key: s.key, title: s.title, ...(s.status ? { status: s.status } : {}), ...(s.url ? { url: s.url } : {}), eventId: s.eventId, updatedAt: s.updatedAt }
+  return { source: s.source, key: s.key, title: s.title, ...(s.status ? { status: s.status } : {}), ...(s.url ? { url: s.url } : {}), ...(s.boardId ? { board_id: s.boardId } : {}), eventId: s.eventId, updatedAt: s.updatedAt }
 }
 
 /** pinnedFromEvents: what is pinned by the events held (the chat's own reading, on a server without

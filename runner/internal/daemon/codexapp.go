@@ -367,6 +367,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	} else {
 		instructions += "\n\n" + codexQuestionHandoffInstructions
 	}
+	instructions += "\n\n" + agent.MarkerInstructions(d.markerNonce)
 	params["developerInstructions"] = instructions
 	if model != "" {
 		params["model"] = model
@@ -569,7 +570,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 					continue
 				}
 			}
-			inputs := a.skillInput(msg.Text)
+			inputs := a.skillInput(msg.ModelText(d.markerNonce))
 			d.mu.Lock()
 			note := d.adoptionNote
 			d.mu.Unlock()

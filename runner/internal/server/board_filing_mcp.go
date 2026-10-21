@@ -81,13 +81,13 @@ func (a *API) HandleFilingTools(w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		respond(map[string]any{}, nil)
 	case "tools/list":
-		respond(map[string]any{"tools": []any{filingToolDefinition(), pluginRequestToolDefinition()}}, nil)
+		respond(map[string]any{"tools": []any{filingToolDefinition(), pluginRequestToolDefinition(), boardSessionToolDefinition()}}, nil)
 	case "tools/call":
 		var params struct {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
 		}
-		if json.Unmarshal(req.Params, &params) != nil || (params.Name != "blerg_ticket_file" && params.Name != "blerg_request_plugin") {
+		if json.Unmarshal(req.Params, &params) != nil || (params.Name != "blerg_ticket_file" && params.Name != "blerg_request_plugin" && params.Name != "blerg_board") {
 			respond(nil, map[string]any{"code": -32602, "message": "Unknown session tool."})
 			return
 		}
@@ -98,6 +98,10 @@ func (a *API) HandleFilingTools(w http.ResponseWriter, r *http.Request) {
 			capture := &filingToolCapture{header: make(http.Header)}
 			a.HandleSessionPluginRequest(capture, inner)
 			respond(map[string]any{"isError": capture.status >= 400, "content": []any{map[string]any{"type": "text", "text": capture.body.String()}}}, nil)
+			return
+		}
+		if params.Name == "blerg_board" {
+			respond(a.boardToolResult(r, params.Arguments), nil)
 			return
 		}
 		var args struct {
@@ -142,4 +146,49 @@ func (a *API) HandleFilingTools(w http.ResponseWriter, r *http.Request) {
 	default:
 		respond(nil, map[string]any{"code": -32601, "message": "Method not found."})
 	}
+}
+
+// boardToolResult runs the blerg_board session tool through the same authenticated handlers as the
+// CLI (board-access and board-tools) and answers an MCP tool result: the board's own result, or the
+// refusal as an error result.
+func (a *API) boardToolResult(r *http.Request, arguments json.RawMessage) any {
+	text := func(isError bool, body string) any {
+		return map[string]any{"isError": isError, "content": []any{map[string]any{"type": "text", "text": body}}}
+	}
+	var args struct {
+		Tool      string          `json:"tool"`
+		Board     string          `json:"board"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if filingDecode(arguments, &args) != nil || args.Tool == "" {
+		return text(true, `Invalid blerg_board arguments: {"tool": …, "board": …, "arguments": {…}}.`)
+	}
+	inner := r.Clone(r.Context())
+	copyURL := *r.URL
+	inner.URL = &copyURL
+	capture := &filingToolCapture{header: make(http.Header)}
+	if args.Tool == "access" {
+		inner.Method = http.MethodGet
+		inner.Body = http.NoBody
+		a.HandleSessionBoardAccess(capture, inner)
+		return text(capture.status >= 400, capture.body.String())
+	}
+	data, _ := json.Marshal(boardToolRequest{Board: args.Board, Tool: args.Tool, Arguments: args.Arguments})
+	inner.Method = http.MethodPost
+	inner.Body = io.NopCloser(bytes.NewReader(data))
+	a.HandleSessionBoardTool(capture, inner)
+	if capture.status == 0 || capture.status == http.StatusOK {
+		var result map[string]any
+		if json.Unmarshal(capture.body.Bytes(), &result) == nil && result["content"] != nil {
+			return result
+		}
+		return text(true, "The board returned an unreadable result.")
+	}
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(capture.body.Bytes(), &refusal) == nil && refusal.Error != "" {
+		return text(true, refusal.Error)
+	}
+	return text(true, capture.body.String())
 }

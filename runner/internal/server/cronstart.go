@@ -107,7 +107,7 @@ func credentialErrorf(format string, args ...any) error {
 // startFailureCause names the typed causes CreateSessionJob's failures carry, for APIError.Cause.
 func startFailureCause(err error) error {
 	switch {
-	case errors.Is(err, ErrNoPersonalCredential):
+	case errors.Is(err, ErrNoPersonalCredential), errors.Is(err, errRepositoryUnreadable), errors.Is(err, errRepositoryAddress):
 		return ErrNoPersonalCredential
 	case errors.Is(err, errClusterCap):
 		return errClusterCap

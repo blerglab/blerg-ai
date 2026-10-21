@@ -17,7 +17,12 @@ board workflow the agent typically puts that link in a card so you can find it.
 
 ## What you approve
 
-The page shows the **frozen arguments**: that is what will run, not the agent's description of it.
+Needs you, the notification bell, and the Proposals page show a readable preview of the stored
+request. Its first line is what approving runs: the tool and its connection, as the runner recorded
+them. A title the agent wrote into the request is shown below it, labeled as the agent's, so it
+cannot pose as a description of the action. A Board filing shows its title, type, repositories, and
+complete rendered body.
+**Show exact request** opens the full **frozen arguments**: that is what will run, not the agent's description of it.
 The agent's own summary is shown beside it, labeled as the agent's words. Read the arguments. If
 they do not match the summary, reject.
 
@@ -89,7 +94,16 @@ Unattended sessions wait for the person's decision in the same way.
 
 ## Expiry and limits
 
-- A pending proposal **expires after 7 days**. Decided proposals are removed after 30 days.
+- A pending proposal **expires after 7 days**. During its last 24 hours, Needs you and the
+  notification bell warn that it expires soon. **Extend 7 days** adds seven days to the reviewed
+  deadline without changing the request or its creation time; the extension records who made it, and
+the Proposals page lists it. An extended proposal can be approved, and a Board filing edited, until
+its new deadline. A proposal stays open **at most 30 days** from when the agent proposed it: the
+last extension stops there, after which **Extend** is unavailable ("Proposals can stay open up to 30
+days") and the proposal expires at its deadline. The warning is in the app only (Needs you and the
+bell), never a push notification: sessions are short-lived, and a proposal open that long means
+something is wrong.
+  A decided or expired proposal cannot be extended. Decided proposals are removed after 30 days.
 - The frozen arguments may be at most 64 KiB; a larger call is refused and the agent is told why.
 - At most 50 proposals may be pending per account at once; further calls are refused until you
   decide some. Queued calls also count against the session's tool call budget, so a looping agent
@@ -140,7 +154,10 @@ session panel (**Live → Permissions → Manage**) or before the session starts
 **Permissions…**). It is narrow and short-lived on purpose:
 
 - One scope: one board, or one connection's one tool, in one session. It is never broader than the
-  proposal or toggle that created it.
+  proposal or toggle that created it. A board's permission is its access level (0.4.4): filing
+  without asking is level **File without asking**, and **Full** includes it; **Allow for this
+  session** on a filing raises the board to that level and never lowers a Full board. See
+  [Board access](talking-to-an-agent.md#board-access-from-the-permissions-dialog).
 - Only you, signed in, can create or revoke it; the agent cannot, and neither can a token.
 - It ends with the session, and discarding a parent session ends its children's permissions too.
   **Revoke** (the × on its chip under Live → Permissions, or Revoke in the Permissions dialog) stops it at once, also for a proposal already queued.
@@ -172,7 +189,7 @@ filed instead of "Ticket proposed", and an MCP call returns the tool's result.
 
 When a proposal from a session is decided (by you, by a session permission, or when an approval ends
 failed or not known), the session's agent gets a message that starts "Proposal <id>": approved, with
-the card it created ("Launch Night #6 'Live check' created"); rejected, with your note when you gave
+the card it created (`board "Launch Night" #6 "Live check" created`); rejected, with your note when you gave
 one; failed; or could not be confirmed (do not file it again). The agent can check at any time with
 `blerg-runner ticket status <id>` (exit 0 done, 3 still waiting, 4 not done, 5 not known yet), which
 reads only its own session's proposals. An MCP tool's result is not put in the message; the status
@@ -180,10 +197,17 @@ shows it.
 
 ## Where to manage them
 
-The runner UI has a **Proposals** page, with a count badge in the sidebar that counts proposals
-and tool changes waiting for you. It lists pending
-proposals first; open one to see its arguments and approve or reject it. A link an agent leaves in a
-card opens that proposal directly.
+Every pending proposal has its own card in the originating session's **Needs you** and in the
+notification bell, including requests from earlier turns. The list refreshes every 30 seconds,
+when you return to the tab, and after a decision or extension. These notifications are in the app;
+they do not depend on enabling operating-system notifications. A deadline warning also appears
+as an in-app notification while Runner is open.
+
+The **Proposals** page opens on decision history and audit: the stored request, outcome, who
+decided it ("you": a proposal is only ever its owner's), the exact session permission used for an
+automatic approval (its board or tool, when and where you gave it, and a later revocation), and
+every extension of its deadline. Its Pending tab remains available, and a proposal link opens that request directly.
+Only the owning account can read or decide a proposal.
 
 See also [`crons.md`](crons.md) for using propose mode in unattended runs and
 [`SECURITY.md`](../SECURITY.md) for what a hostile message can still do.

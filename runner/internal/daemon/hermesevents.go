@@ -49,6 +49,8 @@ type hermesRun struct {
 	total, baseline                      hermesUsage
 	thought                              strings.Builder
 	thinking                             bool
+	reasoning                            hermesReasoning
+	childReasoningState                  map[string]*hermesReasoning
 	tools                                map[string]bool
 	children                             map[string]agent.SubagentPayload
 	questionsMu                          sync.Mutex
@@ -72,7 +74,7 @@ func (r *hermesRun) begin() {
 	r.usageSeen = false
 	r.carried = agent.Usage{}
 	r.thought.Reset()
-	r.thinking = false
+	r.endThinking()
 }
 func (r *hermesRun) info(raw json.RawMessage) {
 	var p struct {
@@ -284,8 +286,8 @@ func (r *hermesRun) finish(stop, text string) {
 	}
 	if r.thinking {
 		r.d.emit(agent.KindThinkingDone, agent.ThinkingPayload{})
-		r.thinking = false
 	}
+	r.endThinking()
 	if text != "" {
 		r.d.emit("assistant_text", agent.AssistantTextPayload{Text: text, Done: true})
 	}
@@ -357,6 +359,7 @@ func (r *hermesRun) handle(f hermesFrame) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(event.Payload, &p) == nil && r.active {
+			r.endThinking()
 			r.d.emit("assistant_text", agent.AssistantTextPayload{Text: p.Text})
 		}
 	case "message.interim":
@@ -368,19 +371,15 @@ func (r *hermesRun) handle(f hermesFrame) {
 			r.d.emit("assistant_text", agent.AssistantTextPayload{Text: p.Text, Done: true})
 		}
 	case "thinking.delta", "tool.generating":
-		if r.active && !r.thinking {
-			r.thinking = true
-			r.d.emit(agent.KindThinkingStarted, agent.ThinkingPayload{})
+		if r.active {
+			r.startThinking()
 		}
 	case "reasoning.delta", "reasoning.available":
 		var p struct {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(event.Payload, &p) == nil && r.active {
-			if !r.thinking {
-				r.thinking = true
-				r.d.emit(agent.KindThinkingStarted, agent.ThinkingPayload{})
-			}
+			r.startThinking()
 			if event.Type == "reasoning.available" && strings.Contains(r.thought.String(), p.Text) {
 				break
 			}
@@ -436,6 +435,9 @@ func (r *hermesRun) handle(f hermesFrame) {
 		if !json.Valid(p.Args) {
 			p.Args = json.RawMessage(`{}`)
 		}
+		// A tool call ends the thinking phase (the browser and the server close it on tool_call);
+		// reasoning after it is a new phase with its own count.
+		r.endThinking()
 		r.d.emit("tool_call", agent.ToolCallPayload{Tool: p.Name, CallID: p.ID, Input: p.Args})
 	case "tool.complete":
 		var p struct {
@@ -465,6 +467,7 @@ func (r *hermesRun) handle(f hermesFrame) {
 		r.plan(event.Payload)
 	case "subagent.spawn_requested", "subagent.start", "subagent.progress", "subagent.thinking", "subagent.tool", "subagent.complete":
 		r.child(event.Type, event.Payload)
+		r.childReasoning(event.Type, event.Payload)
 	case "sudo.request", "secret.request", "vault.unlock.request", "vault.save_login.request", "vault.code.request":
 		r.refuseLegacyRequest(event.Type, event.Payload)
 	case "approval.request":
@@ -662,6 +665,7 @@ func hermesReportedUsage(raw json.RawMessage) (hermesUsage, bool) {
 }
 
 func (r *hermesRun) reportUsage(raw json.RawMessage) {
+	r.reasoningProgress(raw)
 	u, valid := hermesReportedUsage(raw)
 	if !valid {
 		return

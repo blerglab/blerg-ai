@@ -50,3 +50,10 @@ export function loadCompact(storage: ChatStorage): boolean {
 export function saveCompact(storage: ChatStorage, on: boolean): void {
   storage.set(COMPACT_KEY, on ? '1' : '0')
 }
+
+/** The artifact viewer's layouts, each with its own remembered maximize; 'ticket' is the pinned
+ *  ticket's dialog (TicketModal). */
+export type ViewerLayoutKind = 'file' | 'review' | 'markup' | 'diff' | 'ticket'
+
+/** Where the viewer keeps a layout's maximize choice ("1" maximized, absent not). */
+export const MAXIMIZED_KEY = (kind: ViewerLayoutKind) => `blerg.chat.viewer.maximized.${kind}`

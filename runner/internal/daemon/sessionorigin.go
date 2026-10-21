@@ -11,12 +11,16 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 var sessionOriginReads = make(chan struct{}, 2)
+
+// sessionOriginBusy holds the sessions with an origin read in flight.
+var sessionOriginBusy sync.Map
 var errOriginOutput = errors.New("git output exceeds origin limit")
 
 type originOutput struct{ data []byte }
@@ -98,18 +102,47 @@ func readWorkspaceOrigin(parent context.Context, binding workspaceFileBinding, a
 	}
 	return commit, true
 }
+
+// readSandboxOrigin is readWorkspaceOrigin for a sandboxed session's clone: its HEAD is read as
+// plain files (readCloneHead), never by host Git, whose configuration in the clone the session
+// controls.
+func readSandboxOrigin(binding workspaceFileBinding) (string, bool) {
+	if binding.live == nil || binding.info == nil || !binding.live() {
+		return "", false
+	}
+	if info, err := os.Stat(binding.root); err != nil || !os.SameFile(binding.info, info) {
+		return "", false
+	}
+	commit, ok := readCloneHead(binding.root)
+	if !ok || !binding.live() || (commit != "" && !protocol.ValidSessionOriginCommit(commit)) {
+		return "", false
+	}
+	return commit, true
+}
+
 func queueSessionOrigin(ctx context.Context, sender Sender, req protocol.ReadSessionOrigin, binding workspaceFileBinding) {
 	if !validSessionOriginID(req.RequestID) || !validSessionOriginID(req.SessionID) {
+		return
+	}
+	// One read at a time per session, so no session can take the daemon's shared slots.
+	if _, busy := sessionOriginBusy.LoadOrStore(req.SessionID, struct{}{}); busy {
 		return
 	}
 	select {
 	case sessionOriginReads <- struct{}{}:
 	default:
+		sessionOriginBusy.Delete(req.SessionID)
 		return
 	}
 	go func() {
-		defer func() { <-sessionOriginReads }()
-		commit, ok := readWorkspaceOrigin(ctx, binding, nil)
+		defer func() { <-sessionOriginReads; sessionOriginBusy.Delete(req.SessionID) }()
+		var commit string
+		var ok bool
+		if isSandboxClone(binding.root, req.SessionID) {
+			commit, ok = readSandboxOrigin(binding)
+		} else {
+			commit, ok = readWorkspaceOrigin(ctx, binding, nil)
+		}
 		result := protocol.SessionOriginResult{Type: "session_origin_result", RequestID: req.RequestID, SessionID: req.SessionID, OK: ok, Commit: commit}
 		if bounded, ok := sender.(interface {
 			SendSessionOriginResult(protocol.SessionOriginResult) error

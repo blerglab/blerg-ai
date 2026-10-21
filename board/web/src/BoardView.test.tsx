@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { BoardView } from "./BoardView";
 import { MeProvider } from "./me";
@@ -114,4 +114,70 @@ describe("BoardView live refresh", () => {
     expect(screen.queryByText("made by a script")).not.toBeNull();
     vi.mocked(api).mockImplementation(base);
   });
+  it("retries the newest failed reload rather than remaining stale", async () => {
+    const { api, boardSocket } = await import("./api");
+    let ping = () => {};
+    vi.mocked(boardSocket).mockImplementation((_id, onPing) => { ping = onPing; return () => {}; });
+    const base = vi.mocked(api).getMockImplementation()!;
+    renderBoard();
+    await screen.findByText("Board One");
+    vi.useFakeTimers();
+    let older!: (v: unknown) => void;
+    let failLatest!: (e: Error) => void;
+    let calls = 0;
+    vi.mocked(api).mockImplementation(((path: string) => {
+      if (path === "/api/boards/b1") {
+        calls++;
+        if (calls === 1) return new Promise(resolve => { older = resolve as (v: unknown) => void; });
+        if (calls === 2) return new Promise((_resolve, reject) => { failLatest = reject; });
+      }
+      return base(path);
+    }) as typeof api);
+    try {
+      act(() => { ping(); ping(); });
+      responses["/api/boards/b1"] = { id: "b1", name: "Recovered board", repos: ["app"] };
+      await act(async () => { failLatest(new Error("temporary failure")); older({ id: "b1", name: "Old board", repos: ["app"] }); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(screen.queryByText("Recovered board")).not.toBeNull();
+      expect(screen.queryByText("Old board")).toBeNull();
+    } finally { vi.useRealTimers(); vi.mocked(api).mockImplementation(base); }
+  });
+
+  it("backs off between failed reloads and stops on a refusal that will not change", async () => {
+    const { api, boardSocket } = await import("./api");
+    let ping = () => {};
+    vi.mocked(boardSocket).mockImplementation((_id, onPing) => { ping = onPing; return () => {}; });
+    const base = vi.mocked(api).getMockImplementation()!;
+    renderBoard();
+    await screen.findByText("Board One");
+    vi.useFakeTimers();
+    let boardCalls = 0;
+    const count = (status: number) => vi.mocked(api).mockImplementation(((path: string) => {
+      if (path === "/api/boards/b1") {
+        boardCalls++;
+        return Promise.reject(new ApiError(status, { error: "x" }));
+      }
+      return base(path);
+    }) as typeof api);
+    try {
+      // A server error: retried after 3 s, then 6 s (not 3 s again).
+      count(503);
+      await act(async () => { ping(); });
+      expect(boardCalls).toBe(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(boardCalls).toBe(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(boardCalls).toBe(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(boardCalls).toBe(3);
+      // The board is gone: no retry at all.
+      count(404);
+      boardCalls = 0;
+      await act(async () => { ping(); });
+      expect(boardCalls).toBe(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(120000); });
+      expect(boardCalls).toBe(1);
+    } finally { vi.useRealTimers(); vi.mocked(api).mockImplementation(base); }
+  });
+
 });

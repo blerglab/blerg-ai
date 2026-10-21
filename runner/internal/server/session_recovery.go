@@ -25,7 +25,9 @@ func sessionResumeEligibility(ctx context.Context, pool *pgxpool.Pool, jobs *Job
 		return false, "", "Cluster recovery is unavailable"
 	}
 	owner := derefOrEmpty(row.SpawningAccountID)
-	if owner != "" && (account != owner || !proof.valid()) {
+	// A live proof is needed only where the pod fetches the owner's personal credentials with it;
+	// an install without them wired needs none (CreateSessionJob agrees).
+	if owner != "" && (account != owner || (jobs.personalCredentialsWired() && !proof.valid())) {
 		return false, "", "Recovery requires the owner's live launch authority"
 	}
 	grants, err := db.ListMCPGrantsForSession(ctx, pool, row.ID)

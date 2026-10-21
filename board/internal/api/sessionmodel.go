@@ -120,7 +120,7 @@ func (a *API) SetSessionModel(ctx context.Context, p auth.Principal, sessionID, 
 	}
 
 	if c, ok := a.runner.Driver.(runner.IdentityController); ok {
-		token, _, err := a.startIdentity(ctx, boardID)
+		token, err := a.startIdentity(ctx, boardID)
 		if err != nil {
 			return out, err
 		}

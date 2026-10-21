@@ -123,6 +123,9 @@ func (t askTool) Execute(ctx context.Context, in json.RawMessage) (string, error
 		// The answer is recorded when it is taken, as the person's answer to this ask: it never
 		// starts a turn of its own, so nothing else would record it.
 		p := ans.Payload()
+		if ans.Source == "session" {
+			p.AnsweredBy = "session" // the parent answered its child, not the person
+		}
 		p.Source, p.MessageID = "ask_answer", id
 		l.emit("user_message", p)
 		if ans.Source != "ask_answer" {
@@ -131,7 +134,7 @@ func (t askTool) Execute(ctx context.Context, in json.RawMessage) (string, error
 				c.CloseAsk(id, ans.Text)
 			}
 		}
-		return ans.Text, nil
+		return ans.ModelText(l.cfg.MarkerNonce), nil
 	case <-ctx.Done():
 		l.clearAsk()
 		return "", errors.New("ask interrupted")

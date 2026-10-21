@@ -22,10 +22,12 @@ func backgroundSupersededSocketStaysStale(t *testing.T, lifetime string) {
 	t.Helper()
 	fx := newLiveFx(t)
 	old := &DaemonConn{ID: topicDaemonID, BackgroundTaskLifetime: lifetime, send: make(chan []byte, 8)}
+	old.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(old)
 	HandleAgentEvent(t.Context(), fx.api.hub, fx.pool, old, protocol.AgentEvent{SessionID: fx.sess, ClientEventID: newUUID(), Kind: backgroundStartedKind, Payload: json.RawMessage(`{"task_id":"alive","call_id":"original"}`)})
 	<-old.send
 	replacement := &DaemonConn{ID: topicDaemonID, BackgroundTaskLifetime: "00000000-0000-4000-8000-00000000da02", send: make(chan []byte, 8)}
+	replacement.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(replacement)
 	if !fx.api.hub.UnregisterIfCurrent(replacement) {
 		t.Fatal("replacement did not disconnect")
@@ -80,6 +82,7 @@ func TestBackgroundReconcilePodInventoryCannotCloseSiblingSession(t *testing.T) 
 	}
 	lifetime := "00000000-0000-4000-8000-00000000da03"
 	dc := &DaemonConn{ID: topicDaemonID, BoundSessionID: fx.sess, BackgroundTaskLifetime: lifetime, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	reconcileBackgroundTaskInventory(t.Context(), fx.api.hub, fx.pool, dc, &protocol.BackgroundTaskInventory{Lifetime: lifetime, Sessions: map[string][]string{fx.privSess: {}}})
 	for sid, want := range map[string]int{fx.sess: 0, fx.privSess: 1} {
@@ -97,6 +100,7 @@ func TestBackgroundReconcileMalformedOrChangedLifetimeIsUnknown(t *testing.T) {
 	}
 	lifetime := "00000000-0000-4000-8000-00000000da04"
 	dc := &DaemonConn{ID: topicDaemonID, BackgroundTaskLifetime: lifetime, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	for _, inventory := range []*protocol.BackgroundTaskInventory{
 		nil,
@@ -125,6 +129,7 @@ func TestBackgroundDaemonCannotCompleteForeignDaemonTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	dc := &DaemonConn{ID: topicDaemonID, BackgroundTaskLifetime: "00000000-0000-4000-8000-00000000da06", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	HandleAgentEvent(t.Context(), fx.api.hub, fx.pool, dc, protocol.AgentEvent{SessionID: foreignSession, ClientEventID: newUUID(), Kind: backgroundDoneKind, Payload: json.RawMessage(`{"task_id":"alive"}`)})
 	row, err := db.GetSession(t.Context(), fx.pool, foreignSession)
@@ -143,10 +148,12 @@ func TestBackgroundStaleHeartbeatCannotStopReplacementSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := &DaemonConn{ID: topicDaemonID, BackgroundTaskLifetime: "00000000-0000-4000-8000-00000000da07", send: make(chan []byte, 8)}
+	old.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(old)
 	HandleAgentEvent(t.Context(), fx.api.hub, fx.pool, old, protocol.AgentEvent{SessionID: fx.sess, ClientEventID: newUUID(), Kind: backgroundStartedKind, Payload: json.RawMessage(`{"task_id":"alive"}`)})
 	<-old.send
 	replacement := &DaemonConn{ID: topicDaemonID, BackgroundTaskLifetime: "00000000-0000-4000-8000-00000000da08", send: make(chan []byte, 8)}
+	replacement.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(replacement)
 	raw := []byte(`{"type":"daemon_heartbeat","active_sessions":[],"background_task_inventory":{"lifetime":"00000000-0000-4000-8000-00000000da07","sessions":{}}}`)
 	handleDaemonFrame(t.Context(), fx.api.hub, old, fx.pool, raw, envelope{Type: "daemon_heartbeat"})

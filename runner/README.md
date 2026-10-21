@@ -48,8 +48,10 @@ recorded on the session row and returned, with `kind`, by `GET /api/sessions` �
 | Acknowledgement | none | none | required |
 
 A sandboxed **agent-kind** session gets exactly the same container the terminal sandbox gets —
-`--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 512`, `--memory 4g`, the repo
-at `/workspace`, the credential mounts above, and a `BLERG_RUNNER_*`-only environment — and the
+`--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 512`, `--memory 4g`, a clone
+of its own of the repo at `/workspace` (never the checkout or its `.git`; its commits come back on
+`wip/<session_id>`, see [`docs/sandbox-image.md`](../docs/sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land)),
+the credential mounts above, and a `BLERG_RUNNER_*`-only environment — and the
 engine process runs inside it rather than on the host. The daemon master token never enters it.
 Preflight for such a spawn checks the image and looks for the engine binary *inside the image*,
 never on the host PATH. The engine versions in the image are pinned (`sandbox/engines/package.json`,
@@ -142,7 +144,7 @@ Paths are relative to the runner's `base_url`.
 | `GET` | `/api/models/{engine}` | the models (and each one's effort levels) a session on that engine can use | see [Model lists](#model-lists); also readable with a browser session |
 | `POST` | `/api/runner/start` | start a session | `202 {session_id}`; honors `Idempotency-Key` |
 | `GET` | `/api/runner/sessions/{id}` | status | `{lifecycle, runtime, resumable, auto_stop, interaction, error_reason, end_reason, ended_by, limits}`; `limits` is `{max_file_bytes, max_session_upload_bytes, max_session_artifact_bytes}`, what the session's files may weigh (absent before 0.2.1) |
-| `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?, client_id?}` → `202`; resumes a disconnected cluster session |
+| `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?, client_id?}` → `202`; resumes a disconnected cluster session. The sources Blerg writes itself (`proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`) are refused with `422`, and so is `session`, which the runner sets itself for a parent session's messages to its child |
 | `POST` | `/api/runner/sessions/{id}/model` | select next-turn model/effort | `{model?, effort?}` → `202`; existing session engine remains authoritative |
 | `POST` | `/api/runner/sessions/{id}/interrupt` | cancel the in-flight turn | `202`; `409` when there is no live runtime |
 | `POST` | `/api/runner/sessions/{id}/stop` | end the session | `200 {"status":"stopped"}`; idempotent. Finished work **must** call this or cluster session slots leak |
@@ -593,11 +595,12 @@ id on the item (`diff`). See [Diffs](../docs/artifacts.md#diffs).
 session's whole event log: `{session_id, through_seq, generated_at, tokens_hidden, asks:[{event_id,
 message_id, question, asked_at, seq}], subagents:[{key, title, type, model, tokens, doing, started_at,
 active_at, background, seq}], tasks:[{task_id, call_id, kind, description, started_at, seq}],
-tool_changes, counts:{needs_you, running}}`. An ask is open until it is answered, its message is
+tool_changes, proposals, counts:{needs_you, running}}`. An ask is open until it is answered, its message is
 closed or the session ends (one the native loop asked also closes with its turn); a subagent runs
 until its final `subagent_done` (a foreground one only while its turn runs and no message but the system's has come since it started, as in the chat); a task until its
 `background_task_done`; anything with no sign of life for 12 hours is left out. Tokens follow the
-Insights rule, and `tool_changes` is the caller's own pending tool changes on the session. The page
+Insights rule, `tool_changes` is the caller's own pending tool changes on the session, and
+`proposals` the caller's own pending proposals from it (both count in `needs_you`). The page
 folds the events after `through_seq` into the reply until its next read. Migration 042 adds the
 partial index the read uses (`agent_events_live_idx`). The reply also carries `checklist` (the newest
 list, `{items, event_id, updated_at}`, `null` when there is none or it was cleared), `plan` (the
@@ -744,7 +747,11 @@ return the same object, with every field always present:
 }
 ```
 
-`branch` is the convention the session runtime names its work after, derived from the session id.
+`branch` is the convention the session runtime names its work after, derived from the session id: a
+cluster session pushes `wip/<session_id>`, and every sandboxed session in a repository (a child or
+not) commits on `wip/<session_id>` in its own clone, which the daemon fetches into that repository on
+its desktop. It is empty for a host session and a session with no repository, neither of which
+makes one.
 `last_assistant_message` is the main agent's last text in the session's **last turn** only
 (streaming deltas are not persisted, and a subagent's text is not the session's), found within the
 last 400 events; while a turn runs, that is the turn in progress. A turn that ended in failure
@@ -778,26 +785,28 @@ fields as a list entry minus `latest_version` and `created_at`.
 
 These private routes accept the parent's own session token (or its bound runtime token), not an
 agent token or a daemon master token. They are separate from the public agent contract and MCP
-operations. The parent must have a human owner and run on its desktop daemon; child sessions cannot
-delegate again. For child operations, another parent's child, the parent itself, and unrelated
+operations. The parent must have a human owner and run on its desktop daemon or in a cluster pod;
+child sessions cannot delegate again. A desktop parent's children run on its desktop, or as cluster
+pods when it asks for `runtime: "cluster"` on an install with a cluster runtime (refused with `422`
+"this install has no cluster" otherwise); a cluster parent's always run as cluster pods. For child operations, another parent's child, the parent itself, and unrelated
 sessions all return the same `404`.
 
 | Route | Body and response |
 |---|---|
-| `GET /api/sessions/{id}/budget` | Provider capacity from the parent's desktop; unknown data remains unknown. |
-| `POST /api/sessions/{id}/children` | `Idempotency-Key` required. Allowlisted body: `engine`, `model`, `effort`, `repo` or `no_repo`, `runtime` (`docker` or `daemon`), `title`, `prompt`, `keep_running`. Returns `201` with a child, or `202` with an approval request. Unknown fields return `422`; limit failures return `429` and `Retry-After`. |
+| `GET /api/sessions/{id}/budget` | Provider capacity where the parent's children run (its desktop, or the cluster); `?runtime=cluster` asks for a desktop parent's cluster children. Unknown data remains unknown. |
+| `POST /api/sessions/{id}/children` | `Idempotency-Key` required. Allowlisted body: `engine`, `model`, `effort`, `repo` or `no_repo`, `runtime` (`docker` or `daemon`; `cluster` for a cluster parent, or a desktop parent on an install with a cluster), `title`, `prompt`, `keep_running`, `boards` (`[{"board": "<name or id>", "level": "read"|"file"|"full"}]`, at most 8, each one of the parent's boards at no more than the parent's level; the child is capped by the parent's level on every call). Returns `201` with a child, or `202` with an approval request. Unknown fields return `422`; limit failures return `429` and `Retry-After`. |
 | `GET /api/delegation-requests/{id}` | Request status; optional `wait` up to 25 seconds. Only its parent's token or its human owner can read it. |
 | `POST /api/delegation-requests/{id}/expire` | Parent cancels its pending request; an already allowed request returns its outcome. |
 | `POST /api/delegation-requests/{id}/decide` | Human with a live browser session only: deny, allow once, allow for the session, or create a standing rule, from the stored request. |
 | `GET /api/delegation-rules` | Human owner's standing rules. |
-| `POST /api/delegation-rules` | Human owner creates a rule for an engine, desktop and runtime across repositories, optionally restricted to a local endpoint. |
+| `POST /api/delegation-rules` | Human owner creates a rule for an engine, desktop and runtime across repositories, optionally restricted to a local endpoint; `runtime: "cluster"` (no `daemon_id`) creates a cluster rule where the install has a cluster. |
 | `DELETE /api/delegation-rules/{id}` | Owner removes a rule; existing children continue. |
 | `GET /api/sessions/{id}/child-approval` | Human owner with a live browser login only. Current-parent session permissions, eligible engines per runtime, standing desktop rules, effective authority and an opaque revision. |
-| `PUT /api/sessions/{id}/child-approval` | Same owner login only: `{runtime:"docker"|"daemon",enabled:boolean,revision}` atomically sets or revokes exact current-daemon session grants. A stale revision returns `409`; reload before explicitly trying again. |
+| `PUT /api/sessions/{id}/child-approval` | Same owner login only: `{runtime:"docker"|"daemon"|"cluster",enabled:boolean,revision}` atomically sets or revokes exact session grants of that runtime (the current desktop's, or the cluster's). A stale revision returns `409`; reload before explicitly trying again. |
 | `POST /api/delegation-grants/{id}/revoke` | Owner revokes a session grant; existing children continue. |
 | `GET /api/sessions/{id}/children` | `{children:[...]}` with status, lifecycle, model, effort, runtime, asking, delegation and keep-running fields. |
 | `GET /api/sessions/{id}/children/{child}` | Session status plus authoritative `open_asks:[{message_id,body}]`. |
-| `POST /api/sessions/{id}/children/{child}/message` | `{text,client_id?}`; `202`, including `answered_ask` when it answers an open question. |
+| `POST /api/sessions/{id}/children/{child}/message` | `{text,client_id?}`; `202`, including `answered_ask` when it answers an open question. An idle cluster child is resumed with the sign-in it was started with (a desktop parent's) or the parent's newest (a cluster parent's); with none live, `409` says to ask the person to send it from their browser. |
 | `POST /api/sessions/{id}/children/{child}/model` | `{model?,effort?}`; `202`. |
 | `POST /api/sessions/{id}/children/{child}/interrupt` | Interrupts the current turn; `202`. |
 | `POST /api/sessions/{id}/children/{child}/stop` | Stops the child; `200 {status:"stopped"}`. |
@@ -841,7 +850,7 @@ by an upgrade or by reading this endpoint.
 | `blerg-runner session discard <child>` | Stop and archive a worker; retain its history, Insights totals and direct URL. |
 | `blerg-runner session send <child> <text>` | Send a message; agents must leave destructive approval questions to the person. |
 | `blerg-runner session upload <child> <file>` / `files <child>` / `download <child> <artifact>` | Exchange files through the artifact service. |
-| `blerg-runner session model <child> ...` / `interrupt <child>` / `stop <child>` / `result <child>` | Change settings, interrupt, stop or read results. |
+| `blerg-runner session model <child> ...` / `interrupt <child>` / `stop <child>` / `result <child>` | Change settings, interrupt, stop or read results. Model changes confirm the model and any supplied effort. |
 
 Waiting commands default to 100 seconds and exit with code 3 when still waiting, printing a command
 to continue. The request remains pending until answered, canceled, or its ten-minute server expiry.
@@ -918,7 +927,7 @@ REST decodes a request body and MCP decodes a tool-call argument object, so the 
 |---|---|
 | `start_session` | start a session on a repo and return its `session_id` (`repo`, `prompt`, `title`, `model`, `effort`, `engine`, `runtime`, `idempotency_key`, `callback_url`, `callback_secret`, `git_url`, `env`) |
 | `get_session` | where a session is: lifecycle, runtime, resumable, error reason, why it ended |
-| `send_message` | send a conversational turn (`session_id`, `text`, `source`); resumes a disconnected cluster session |
+| `send_message` | send a conversational turn (`session_id`, `text`, `source`); resumes a disconnected cluster session; the sources Blerg writes itself are refused, as on the REST route |
 | `interrupt_session` | cancel the turn in flight, leaving the session alive |
 | `stop_session` | end a session for good and free its slot |
 | `get_events` | a window of the transcript (`after_seq`, `limit`) |
@@ -1222,7 +1231,8 @@ credential; lookup failures and revoked authority refuse startup. On a
 **daemon** the session runs on that workstation with the developer's own logins, attributed to the
 launcher — in the **Local sandbox** (the default for the launch sheet and for board-started
 sessions alike when there is no cluster and the daemon has the image) the engine runs inside a
-container that can see `/workspace` and the mounted login directories and nothing else of the
+container that can see `/workspace` (a clone of its own of the repository, whose commits the daemon
+brings back to `wip/<session_id>`) and the mounted login directories and nothing else of the
 machine, with no git credentials (it can commit but not push) and, of the stack's services, a route to the
 board and runner only (via `blerg-sandbox`); on **This machine** it runs on the host with full filesystem
 access, which the launch sheet asks the launcher to acknowledge and a v1 start gets with
@@ -1319,8 +1329,10 @@ before you launch. What happens depends on where the session runs:
   session's `repo` is `""`. A resume is another empty workspace. Only the transcript carries
   over.
 - **This machine / Local sandbox:** the session still runs in a real folder on that machine's
-  disk. The Local sandbox bind-mounts the same host folder at `/workspace`. So the session gets
-  a new, empty folder directly under the daemon's repos root, named `.scratch-<suffix>`. The
+  disk. The session gets a new, empty folder directly under the daemon's repos root, named
+  `.scratch-<suffix>`. The Local sandbox makes that folder an empty Git repository and works in a
+  clone of it, like every sandbox: what it commits (and what it left uncommitted at the stop) lands
+  on `wip/<session_id>` in the scratch folder's repository, not in its working tree. The
   sheet generates a name such as `.scratch-granite-3f9a`, shows it with the repos folder, and
   offers a Rename. The daemon creates it on the new-folder path and never clones into it.
   Because the name starts with a dot, the folder never appears in the repos list (the daemon
@@ -1374,6 +1386,27 @@ selected. What happens:
 Behavior change: the cluster branch used to ignore `new_repo` (a caller sending it with an
 existing repository got a clone); it now answers 409. The v1 start contract
 (`POST /api/runner/start`) does not take `new_repo`.
+
+### Cluster repository checks
+
+A bare folder name (no `owner/`) on a cluster start resolves in this order. A configured default
+organization or git base is the install's answer and always wins. Without one, only the desktop
+the start names may answer with its reported remote: the launch sheet's chosen machine, or a
+desktop parent's own machine for its cluster child. Desktops have no owner in the runner, so a
+start that names no desktop (a board card, a cron) never takes another machine's folder of the same
+name; such a start is refused before a pod, and names its repo as `owner/name`. The remote's
+provider and owner/name are retained.
+
+Before creating a cluster Job, Runner checks repository read access over Git's HTTP transport
+with the same personal or operator git credential selected for that pod. Public repositories may
+be checked anonymously. A missing repository or insufficient access is a clear 422 with guidance
+to check the name and connect a read credential in Settings. A network failure, throttling, or
+unavailable git service produces a temporary failure. Upstream response bodies and credentials
+are never included in these errors. Same-origin repository redirects are allowed; credentials
+are never forwarded to another origin, and are sent only over https (a plain-http base is checked
+anonymously, as the pod clones it). HTTP(S) clone URLs are required for this check, with
+internal or plain-HTTP servers allowed only through the install's explicit git base. No-repository
+sessions and the existing create-new-repository flow do not require an existing readable repo.
 
 ### Launching on a repository by name
 
@@ -1544,6 +1577,7 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_MCP_GW_PUBLIC` | no | on | the gateway's **public route**: `/mcp-gw/` on the main port, for sessions on workstation daemons that cannot reach the gateway's own listener (desktop daemons connected to a cluster install need it). It serves only grants issued for it to a session on a daemon, within seven days of their last use or their daemon reconnecting; it answers every other token with the same JSON-RPC 401 (the same 429 once the client's address is over its allowance), limits failed attempts per client address (see `BLERG_RUNNER_TRUSTED_PROXIES`; a well-formed token from an address over its allowance is still looked up, within a global budget of 100 lookups a second, so a valid token is served unless a sustained flood exhausts it), and answers a timeout in JSON-RPC. `0`, `false`, `off` or `no` switch it off: the prefix answers 404 and grants are sent with `BLERG_RUNNER_MCP_GW_URL` as before |
 | `BLERG_RUNNER_MCP_GW_URL` | no | — | the address **sessions dial** to reach the gateway: an in-cluster Service URL for pods, the runner's address on the sandbox network for desktop sandbox containers. Sent to a session in its config. A daemon that reports `mcp_gateway_via_server` is told to dial the gateway through its own server address instead (`BLERG_RUNNER_SERVER_HTTP`, else derived from its WebSocket URL), where the runner serves it on the web port under `/mcp-gw/` for grants issued to daemon sessions for that route only (`BLERG_RUNNER_MCP_GW_PUBLIC`). A launch with MCP connections is refused with a specific message while it is unset |
 | `BLERG_RUNNER_BOARD_URL` | no | — | the board's base address **as the runner reaches it** (absolute `http(s)`, no credentials, query or fragment; for example `http://blerg-board:8080`). A cron's failure card is posted to the board's API there, and the built-in `board` connection's MCP endpoint defaults to `<this>/mcp`. Unset or invalid: crons get no board connection and no failure card. See [`docs/crons.md`](../docs/crons.md) |
+| `BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN` | no | `once` | whether a **sandboxed** desktop session's cluster children may start without a card: `once` (a card per child, the default; any other value means the same) or `any` (session permissions and standing cluster rules apply, as for an unsandboxed desktop session). Only matters with a cluster runtime. See [`install/k8s/CLUSTER-RUNTIME.md`](../install/k8s/CLUSTER-RUNTIME.md#desktop-sessions-cluster-children) |
 | `BLERG_RUNNER_GRANT_HOURLY_CAP` | no | `20` | how many proposals one session permission may approve on its own in an hour; past it, proposals wait for the person and say why. See [`docs/proposals.md`](../docs/proposals.md#session-permissions) |
 | `BLERG_RUNNER_BOARD_MCP_URL` | no | `<BLERG_RUNNER_BOARD_URL>/mcp` | overrides the built-in `board` connection's MCP endpoint alone (same validation as above). Usually a private address: it is fetched by the runner's gateway, never by a session |
 | `BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS` | no | empty | comma-separated hostnames for which an MCP connection URL may use plain `http://` (otherwise `https` only). Applies to the gateway and to the launch sheet's tool listing. Core has its own list, `BLERG_CORE_MCP_ALLOW_HTTP_HOSTS` |
@@ -1650,7 +1684,7 @@ DAEMON.md's "Cluster pod auth" for how each engine's credentials reach a pod.
 | `BLERG_RUNNER_AGENT_IMAGE` | — | pod image (required to enable this runtime at all) |
 | `BLERG_RUNNER_AGENT_NAMESPACE` | `blerg-runner-sessions` | k8s namespace for session Jobs |
 | `BLERG_RUNNER_INTERNAL_URL` | `http://blerg-runner-server.default.svc.cluster.local:8080` | in-cluster URL pods dial back to |
-| `BLERG_RUNNER_AGENT_GIT_BASE` | `https://github.com/<BLERG_RUNNER_GITHUB_ORG>`, or `https://github.com` when no org is set | git clone URL base for GitHub pods — a bare repo name is appended as `<base>/<repo>.git`; so is an `org/name` when this is set explicitly, while with only the org default an `org/name` clones from `https://github.com/org/name.git`. With neither this nor an org set, a cluster spawn must name its repo as `org/name` (a bare name is refused with 422). Repositories on another git provider (a launch with `"provider":"gitlab"`) always clone from that provider's own host, never from this base |
+| `BLERG_RUNNER_AGENT_GIT_BASE` | `https://github.com/<BLERG_RUNNER_GITHUB_ORG>`, or `https://github.com` when no org is set | git clone URL base for GitHub pods — a bare repo name is appended as `<base>/<repo>.git`; so is an `org/name` when this is set explicitly, while with only the org default an `org/name` clones from `https://github.com/org/name.git`. This base or an org decides a bare folder name; without either, only the remote reported by the desktop the start names resolves it; otherwise name the repo as `org/name` (422). Repositories on another git provider (a launch with `"provider":"gitlab"`) always clone from that provider's own host, never from this base |
 | `BLERG_RUNNER_AGENT_SECRET` | `blerg-runner-agent` | k8s Secret holding `ANTHROPIC_API_KEY`/`BLERG_RUNNER_DAEMON_TOKEN`/`BLERG_RUNNER_GIT_TOKEN` |
 | `BLERG_RUNNER_OAUTH_SECRET_NAME` | same as `BLERG_RUNNER_AGENT_SECRET` | separate Secret for operator-synced creds (`CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_AUTH_JSON`, `HERMES_ENV_CONTENTS`, `BLERG_RUNNER_GIT_TOKEN`) when rotation flows from elsewhere (e.g. Infisical) |
 | `BLERG_RUNNER_HERMES_PROVIDERS` | unset | the cluster's shared Hermes provider fragment (a Hermes `config.yaml` document; install/k8s sets it from Secret `blerg-hermes-providers`). Merged into every Hermes session pod's `~/.hermes/config.yaml`, lists the providers' models in the cluster catalog, and makes Hermes available on the cluster without a `.env`. See [Shared Hermes providers](../install/k8s/CLUSTER-RUNTIME.md#shared-hermes-providers) |

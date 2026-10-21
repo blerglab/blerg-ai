@@ -239,9 +239,7 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 		if rows, err := db.ListMessagesFor(ctx, dbPool, defaultMessageLimit, bc.AccountID); err != nil {
 			log.Printf("browser initial_state ListMessages: %v", err)
 		} else {
-			for _, r := range rows {
-				messageInfos = append(messageInfos, messageRowToInfo(r))
-			}
+			messageInfos = messageInfosFor(ctx, dbPool, rows, bc.AccountID)
 		}
 	}
 
@@ -780,7 +778,14 @@ func handleUnsubscribeSession(h *Hub, bc *BrowserConn, sessionID string) {
 // session's daemon is connected: with it away (a restart) the `ask` is dead, so the message is
 // held for the daemon, which hands it to the session hosted again — where it replaces recovery's
 // continue. A message accepted for the session (forwarded or held) ends its pause by a restart.
+//
+// A browser writes as the person and nothing else: the frame's source is ignored and set to
+// "chat" before the outbox, the hold or a cluster resume sees it, so a socket cannot claim a
+// source Blerg writes itself (reservedMessageSource: a relayed review or proposal decision, a
+// system note). An answer to an ask goes by answer_message_id and the server records it as
+// ask_answer itself (messageevents.go).
 func handleBrowserAgentMessage(ctx context.Context, h *Hub, bc *BrowserConn, dbPool *pgxpool.Pool, msg protocol.AgentUserMessage) {
+	msg.Source = "chat"
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	if err := withCancelledPendingLimitResumeConn(ctx, dbPool, msg.SessionID, func(conn *pgxpool.Conn) error {
@@ -811,7 +816,10 @@ func handleBrowserAgentMessageUnlocked(ctx context.Context, h *Hub, bc *BrowserC
 		return
 	}
 	daemonHere := h.FindDaemonForSession(msg.SessionID) != nil
-	if daemonHere && (msg.Source == "" || msg.Source == "chat" || msg.AnswerMessageID != "") &&
+	// An answer to a question the agent did not wait on needs no daemon: it is recorded now and sent
+	// on in Blerg's voice through the durable outbox, tied to its question, whenever the host is back.
+	answersNoWait := msg.AnswerMessageID != "" && noWaitQuestion(ctx, dbPool, msg.SessionID, msg.AnswerMessageID)
+	if (daemonHere || answersNoWait) && (msg.Source == "" || msg.Source == "chat" || msg.AnswerMessageID != "") &&
 		answerAskFromChatAs(ctx, h, dbPool, msg.SessionID, msg.Text, msg.ClientID, msg.AnswerMessageID, bc.AccountID) {
 		return
 	}

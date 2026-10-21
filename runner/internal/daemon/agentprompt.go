@@ -45,8 +45,10 @@ inside the turn.
   headless chromium). Use them whenever showing beats describing. The user
   can review a published markdown or PDF file, or mark up an image, from the
   chat: the review arrives as a message listing requests with ids. Make the
-  changes, publish the file again, and answer each request with
-  blerg-runner review reply <id> done|declined "<one line>".`
+  changes, publish the file again, and answer the whole round in one call with
+  blerg-runner review reply <id> done|declined "<one line>". Repeat the three
+  arguments per request, or use --file <path> with one <id> done|declined <line>
+  per line; each reviewed file publishes once.`
 
 // BuildSystemPrompt assembles the full system prompt for an agent session:
 // harness instructions → the interaction mode's paragraph → user CLAUDE.md →

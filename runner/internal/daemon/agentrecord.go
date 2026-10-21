@@ -211,11 +211,15 @@ func destructiveCutOff(rec AgentRecord) bool {
 // asksPerson reports whether the call is a question for the person: `blerg-runner ask` (it blocks
 // until they answer) or Claude Code's own AskUserQuestion.
 func (c OpenCall) asksPerson() bool {
-	return c.Tool == "AskUserQuestion" || strings.EqualFold(c.Tool, "Bash") && ccAskCommand.MatchString(c.Detail)
+	return c.Tool == "AskUserQuestion" || strings.EqualFold(c.Tool, "Bash") && ccAskCommand.MatchString(c.Detail) && !ccAskNoWait.MatchString(c.Detail)
 }
 
-// ccAskCommand finds `blerg-runner ask` in a command.
-var ccAskCommand = regexp.MustCompile(`(^|[^\w-])blerg-runner\s+ask\b`)
+// ccAskCommand finds `blerg-runner ask` in a command; ccAskNoWait the forms that return at once
+// (`ask --no-wait`, `ask --resolve`), which never wait on the person.
+var (
+	ccAskCommand = regexp.MustCompile(`(^|[^\w-])blerg-runner\s+ask\b`)
+	ccAskNoWait  = regexp.MustCompile(`(^|[^\w-])blerg-runner\s+ask\b[^;&|\n]*\s--(no-wait|resolve)\b`)
+)
 
 // waitsOnPerson reports whether a record says its session was waiting for the person: its status
 // was "waiting" (a permission prompt, a native question), or one of its open calls is a question.

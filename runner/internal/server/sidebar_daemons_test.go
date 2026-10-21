@@ -16,7 +16,9 @@ func sidebarHubFixture(t *testing.T) (*Hub, *DaemonConn, *DaemonConn, *BrowserCo
 	t.Helper()
 	hub := NewHub()
 	ws := &DaemonConn{ID: "ws1", Name: "desk", Mode: "local", ReposRoot: "/r", send: make(chan []byte, 4)}
+	ws.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	pod := &DaemonConn{ID: "runner-abc", Name: "runner-abc", Mode: "runner", send: make(chan []byte, 4)}
+	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(ws)
 	hub.Register(pod)
 	ctx, cancel := context.WithCancel(context.Background())

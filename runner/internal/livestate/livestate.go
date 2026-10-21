@@ -60,6 +60,8 @@ type Ask struct {
 	Question  string    `json:"question"`
 	AskedAt   time.Time `json:"asked_at"`
 	Seq       int64     `json:"seq"`
+	// NoWait: the agent did not wait for the answer (`blerg-runner ask --no-wait`).
+	NoWait bool `json:"no_wait,omitempty"`
 }
 
 // Subagent is a top-level subagent still at work. Key is its child_id (the Agent call's id, or for a
@@ -67,19 +69,20 @@ type Ask struct {
 // StaleRunning after that). Resumed: a finished subagent the main agent resumed, running until its
 // own end whatever the turn does; Background then says how its original ran.
 type Subagent struct {
-	Progress   *Progress `json:"progress,omitempty"`
-	Effort     string    `json:"effort"`
-	Key        string    `json:"key"`
-	Title      string    `json:"title"`
-	Type       string    `json:"type"`
-	Model      string    `json:"model"`
-	Tokens     *int64    `json:"tokens"`
-	Doing      string    `json:"doing"`
-	StartedAt  time.Time `json:"started_at"`
-	ActiveAt   time.Time `json:"active_at"`
-	Background bool      `json:"background"`
-	Resumed    bool      `json:"resumed,omitempty"`
-	Seq        int64     `json:"seq"`
+	Reasoning  *Reasoning `json:"reasoning,omitempty"`
+	Progress   *Progress  `json:"progress,omitempty"`
+	Effort     string     `json:"effort"`
+	Key        string     `json:"key"`
+	Title      string     `json:"title"`
+	Type       string     `json:"type"`
+	Model      string     `json:"model"`
+	Tokens     *int64     `json:"tokens"`
+	Doing      string     `json:"doing"`
+	StartedAt  time.Time  `json:"started_at"`
+	ActiveAt   time.Time  `json:"active_at"`
+	Background bool       `json:"background"`
+	Resumed    bool       `json:"resumed,omitempty"`
+	Seq        int64      `json:"seq"`
 }
 
 // Task is a background task still running (a background subagent's own task left out).
@@ -389,6 +392,7 @@ type askAcc struct {
 	native bool   // closes with its turn (not one the server holds open)
 	open   bool
 	q      string
+	noWait bool
 }
 
 // openAsks is the chat's askStates read without the tool calls: an ask the server recorded for
@@ -398,7 +402,7 @@ type askAcc struct {
 // child.
 func answersLegacyAsk(source string) bool {
 	switch source {
-	case "system", "review", "proposal", "blerg-board", "cron":
+	case "system", "review", "proposal", "child_turn", "blerg-board", "cron", "question_answer":
 		return false
 	}
 	return true
@@ -428,7 +432,7 @@ func openAsks(events []Event, opt Options) []Ask {
 				continue
 			}
 			server := p.MessageID != "" && opt.ServerAsk != nil && opt.ServerAsk(ev.ID, p.MessageID)
-			all = append(all, &askAcc{ev: ev, id: p.MessageID, native: !server, open: true, q: p.Body})
+			all = append(all, &askAcc{ev: ev, id: p.MessageID, native: !server, open: true, q: p.Body, noWait: p.NoWait})
 		case "user_message":
 			var p agent.UserMessagePayload
 			if json.Unmarshal(ev.Payload, &p) != nil {
@@ -467,7 +471,7 @@ func openAsks(events []Event, opt Options) []Ask {
 		if !a.open || (a.id != "" && opt.Closed[a.id]) {
 			continue
 		}
-		out = append(out, Ask{EventID: a.ev.ID, MessageID: a.id, Question: a.q, AskedAt: a.ev.Ts, Seq: a.ev.Seq})
+		out = append(out, Ask{EventID: a.ev.ID, MessageID: a.id, Question: a.q, AskedAt: a.ev.Ts, Seq: a.ev.Seq, NoWait: a.noWait})
 	}
 	return out
 }

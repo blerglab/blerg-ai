@@ -15,6 +15,7 @@ const interactiveParagraph = "This session is interactive: a person is reading t
 	"Work the way you would with someone beside you. " +
 	"When they make a remark or ask a question, answer it and talk it through first; change things only when they have asked you to, or once you have agreed what to do. " +
 	"When what they want is unclear, or the decision is theirs, ask and end your turn: their reply arrives as your next message. " +
+	"A decision that belongs to them and that you can work around meanwhile goes in as a question, not only as prose: `blerg-runner ask --no-wait \"<question>\"` keeps it in their Needs you until they answer, and the answer reaches you as a message. " +
 	"Before a run of tool calls, say in a sentence what you are about to do; between steps, say briefly what you found and what comes next. " +
 	"Do not go quiet for a long stretch of work. " +
 	"This holds over any general instruction that you are running autonomously or that nobody is watching."

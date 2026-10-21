@@ -285,8 +285,14 @@ hidden `.blerg-clone-*` folder that clone left behind at its next start.
 
 **Both** session kinds — Terminal ("classic tmux") **and** Agent (the headless
 kind the Board and the API start) — default to the **Local sandbox** runtime
-on a daemon: each session runs in a throwaway Docker container with the repo
-mounted at `/workspace`. Your `~/.claude` and `~/.codex` are mounted read-write
+on a daemon: each session runs in a throwaway Docker container with **a clone
+of its own** of the repo mounted at `/workspace`, never your checkout and
+never your `.git`. Its commits land on the branch `wip/<session-id>` in your
+repository at the end of each turn and when it stops (work it left
+uncommitted is committed for it at the stop); nothing is merged or pushed.
+What the sandbox can and cannot touch, and how the commits come back:
+[`docs/sandbox-image.md`](../../docs/sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land).
+Your `~/.claude` and `~/.codex` are mounted read-write
 so the engine can use your login — the sandbox does NOT protect those
 credentials or your host Claude settings. Network is open. "This machine,
 unsandboxed" (bare host, full filesystem access) is one click away in the
@@ -345,8 +351,9 @@ pick it up.
 
 **No git credentials in the sandbox.** `~/.ssh` and `~/.gitconfig` are not
 mounted, so an agent in the sandbox can commit into `/workspace` but cannot
-push. Push from the host yourself (the commits are in your repo), or choose
-**This machine** for a session that must push on its own.
+push. Its commits reach your repo on `wip/<session-id>`; review and push them
+from the host yourself, or choose **This machine** for a session that must
+push on its own.
 
 **Upgrading an older stack.** A stack brought up from a compose file that
 predates the network has no `blerg-sandbox`. Re-run `./blerg-up.sh`: it
@@ -494,8 +501,9 @@ silently replace the image's own install with whatever's on the host.
 Practically, this means a sandboxed session has the same visibility into your
 engine account state (chat history across all your other projects, settings)
 that the bare-host daemon already has — the isolation this runtime buys you
-is your **filesystem** (nothing outside `/workspace` and the mounted account
-dirs is reachable) and **process boundary**, not your account data.
+is your **filesystem** (nothing outside `/workspace`, which is the session's
+own clone, and the mounted account dirs is reachable; your checkout and its
+`.git` are not) and **process boundary**, not your account data.
 
 **Network**: full outbound access (v1) — nothing is blocked. This means
 package installs, anonymous git fetches, and the engine's own API calls all

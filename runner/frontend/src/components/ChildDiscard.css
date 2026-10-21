@@ -19,3 +19,4 @@
 .rail-child-item.has-discard { position: relative; padding-right: 42px; }
 .rail-child-item > .child-discard-trigger { position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; }
 .child-discard-trigger:disabled { opacity: .5; cursor: default; }
+.child-discard-running { color: var(--amber); }

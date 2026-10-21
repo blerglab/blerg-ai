@@ -363,3 +363,57 @@ func TestBoardAutomationRevoke(t *testing.T) {
 		t.Errorf("the Settings token was touched: revoked_at=%v err=%v", revokedAt, err)
 	}
 }
+
+func TestBoardMintConcurrentAttemptsRespectLimit(t *testing.T) {
+	e := newBoardMintEnv(t, 3)
+	// Hold the limiter mutex long enough for contending requests to queue. Its
+	// starvation handoff exposes a separate check/charge gap deterministically.
+	now := time.Now()
+	e.deps.BoardMintLimiter.SetClock(func() time.Time { time.Sleep(2 * time.Millisecond); return now })
+	start := make(chan struct{})
+	results := make(chan int, 128)
+	for range 128 {
+		go func() {
+			<-start
+			code, _, _ := e.internal(t, boardMintPath, testBoardMintKey, e.mintBody(e.acctA, "invalid-proof"))
+			results <- code
+		}()
+	}
+	close(start)
+	allowed := 0
+	for range 128 {
+		code := <-results
+		if code == http.StatusNotFound {
+			allowed++
+		} else if code != http.StatusTooManyRequests {
+			t.Errorf("attempt=%d", code)
+		}
+	}
+	if allowed != 3 {
+		t.Fatalf("allowed %d attempts, limit 3", allowed)
+	}
+}
+
+func TestBoardMintOffSwitchPreservesRevoke(t *testing.T) {
+	e := newBoardMintEnv(t, 10)
+	code, out, _ := e.internal(t, boardMintPath, testBoardMintKey, e.mintBody(e.acctA, e.boardHuman(t, e.acctA, e.sidA)))
+	if code != 200 {
+		t.Fatalf("mint=%d", code)
+	}
+	var minted boardMintResp
+	if err := json.Unmarshal([]byte(out), &minted); err != nil {
+		t.Fatal(err)
+	}
+	deps := e.deps
+	deps.BoardMintDisabled = true
+	disabled := httptest.NewServer(api.NewRouter(deps))
+	defer disabled.Close()
+	e.srv = disabled
+	// The board tells the switch apart from a missing key by this header (review M4).
+	if code, _, hdr := e.internal(t, boardMintPath, testBoardMintKey, e.mintBody(e.acctA, e.boardHuman(t, e.acctA, e.sidA))); code != http.StatusServiceUnavailable || hdr.Get("Blerg-Mint-Disabled") == "" {
+		t.Fatalf("disabled mint=%d Blerg-Mint-Disabled=%q", code, hdr.Get("Blerg-Mint-Disabled"))
+	}
+	if code, _, _ := e.internal(t, boardMintPath+"/revoke", testBoardMintKey, map[string]any{"account_id": e.acctA, "token_id": minted.ID, "board_id": "b1"}); code != http.StatusOK {
+		t.Fatalf("disabled revoke=%d", code)
+	}
+}

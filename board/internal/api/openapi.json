@@ -15,6 +15,13 @@
     { "name": "reviews", "description": "Admission-gate verdicts." }
   ],
   "paths": {
+    "/api/boards/{id}/run-targets": {
+      "get": {
+        "summary": "Discover the board's execution target choices and unavailable selected targets",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "default_runtime, default_daemon_id, can_choose, and targets (runtime, daemon_id, label, desktop_name, optional unavailable reason). A card's menu offers a desktop's host only when the board's own target is that acknowledged host." } }
+      }
+    },
     "/agents": {
       "get": {
         "operationId": "agents",
@@ -685,6 +692,9 @@
           "field_schema": { "type": "array", "items": { "$ref": "#/components/schemas/FieldDef" } },
           "concurrency": { "type": "integer", "description": "How many cards a board run works at once." },
           "deploy_url": { "type": ["string", "null"] },
+          "run_runtime": { "type": "string", "enum": ["", "cluster", "docker", "daemon"], "description": "Default execution target for all board starts." },
+          "run_daemon_id": { "type": "string", "description": "Desktop target id; empty for automatic or cluster." },
+          "run_host_acknowledged_at": { "type": "string", "format": "date-time", "description": "When the automation owner acknowledged a host (daemon) target: it runs unattended and unsandboxed as the person who runs that desktop. Present only for a host target." },
           "automation_engine": { "type": "string", "description": "Implemented engine for future sessions. Discover current availability first. Changing it clears board and card model/effort overrides; existing sessions keep their engine." },
           "automation_token_set": { "type": "boolean", "description": "Whether an automation token is configured. The token itself is write-only and never returned." },
           "automation_token_expires_at": { "type": ["string", "null"], "format": "date-time", "description": "When the configured automation token expires." },
@@ -711,6 +721,9 @@
           "require_repo": { "type": "boolean" },
           "concurrency": { "type": "integer" },
           "deploy_url": { "type": "string" },
+          "run_runtime": { "type": "string", "enum": ["", "cluster", "docker", "daemon"], "description": "PATCH only, saved with run_daemon_id by the automation owner." },
+          "run_daemon_id": { "type": "string", "description": "PATCH only; saved together with run_runtime." },
+          "run_host_acknowledged": { "type": "boolean", "description": "PATCH only: must be true to save run_runtime \"daemon\" (This machine). The board records who acknowledged it and when." },
           "automation_engine": { "type": "string" },
           "automation_token": { "type": "string", "writeOnly": true, "description": "PATCH only, and only by a signed-in person: a blerg-core agent token (preset run-sessions) they minted for themselves. Every session the board starts runs as that person, on their own engine credential. Empty string clears it. Never returned." }
         }

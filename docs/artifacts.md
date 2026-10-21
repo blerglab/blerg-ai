@@ -133,10 +133,10 @@ The first publish of a name prints no version note.
   **View latest** button. A `?artifact=<id>` link opens any version.
 - **Downloads.** The latest version is saved under the plain name, an older one as `report-v2.md`
   (a name without an extension just gets `-v2`).
-- **For the agent.** `blerg-runner fetch --all` fetches the **latest** version of each attached
-  name; `fetch --all-versions` fetches every version, saved as `name-v1.ext`, `name-v2.ext`;
-  `fetch --list` shows the versions. `publish --help` and the instructions every Claude Code
-  session reads carry the "publish again under the same name" rule.
+- **For the agent.** `blerg-runner fetch --all` fetches every attachment ID, including older
+  files with the same name; `fetch --all-versions` fetches every version, saved as `name-v1.ext`,
+  `name-v2.ext`; `fetch --list` shows their IDs and versions. Already fetched, unchanged files are
+  skipped. `publish --help` and the instructions every Claude Code session reads carry the "publish again under the same name" rule.
 - **API.** An artifact (list entry, upload reply, the `artifact` event) has `version`; the list also
   has `latest_version`, and the upload reply has `latest_version` (the version just made) and `previous` (the version it follows, or `null`).
 - **In the History tab.** The session panel's History tab lists each file under the topic that
@@ -240,15 +240,27 @@ from the chat box, and the session's agent fetches them into its working folder.
   and why (for example that its disk is full, or that it may not write to its data folder) and what
   to do, followed by a short error id. Whoever runs Blerg finds the same id in the runner's log. Name handling and the content type
   work exactly as for an agent's files (the server decides the type; folders in names are dropped).
-- **What the agent sees:** your text, then a blank line and one line naming the files, for example
-  `Attached files (fetch them with: blerg-runner fetch --all): a.pdf (1.2 MB), b.pdf (800 KB)`. If
+- **What the agent sees:** your text, then a blank line and an attachment note containing each
+  file's ID, name and size. The chat uses the IDs for previews, so a later upload with the same
+  name cannot replace an earlier message's picture. A review or an image mark-up names its files
+  the same way. An older message with a name-only note (sent before 0.4.4) shows the newest
+  upload of that name made at or before the message, never a later one. A pasted screenshot (a
+  clipboard image called `image.png`, or with no name) gets a unique `screenshot-…` name; a copied
+  file keeps its own name. If
   you attach files without typing anything, the message starts with "Please take a look at the
   attached files." The chat shows the files as chips on your message. It works while the session is
   running too: the message is queued like any other.
 - **How the agent gets them:** `blerg-runner fetch --all` downloads every attachment into
-  `./attachments/` (or `--out DIR`), never overwriting an existing file; `fetch --list` only lists
-  them. It uses the session's own token, which only works for that session, and it only serves
-  files you uploaded, never the agent's published ones.
+  `./attachments/` (or `--out DIR`), never overwriting an existing file. Same-name files are named
+  by upload time: the oldest keeps `name.ext`, later ones are `name-1.ext`, then `name-2.ext`,
+  whichever order they are fetched in. Each `Saved` line names the attachment ID next to the local
+  file, and a skipped file reads `Already have <id> at <path>`. `fetch --list` lists IDs and where
+  each was saved; pass an ID to fetch one attachment (a name is refused, with the matching IDs as
+  a hint). Repeating `fetch --all` skips unchanged downloads using the hidden `.blerg-fetch/`
+  ID and hash index. Keep that folder with the files. Edited files are preserved and a new copy
+  is saved. Downloads from before this tracking was added are preserved and fetched once more.
+  It uses the session's own token, which only works for that session, and it only serves files
+  you uploaded, never the agent's published ones.
 - **Privacy:** an upload belongs to its session. Anyone who can see the session can see the uploaded
   files in the Files panel (under "Uploaded by you" / their own), and a private session's files
   are visible to its owner alone. Uploads are stored on the same volume as published files
@@ -264,7 +276,10 @@ token, `GET /api/sessions/{id}/attachments` and `GET /api/sessions/{id}/attachme
 
 ## Review and mark-up
 
-A published file can be answered precisely, without quoting by hand. Open it in the viewer:
+A published file can be answered precisely, without quoting by hand. Open it in the viewer. A
+review or a diff fills most of the window; the **⤢** button in the viewer's header (or
+**Ctrl+Alt+F**, Command+Option+F on a Mac) takes it edge to edge, and the choice is remembered
+separately for files, reviews, diffs and image mark-up.
 
 - **Review** (markdown and PDF). The document is shown as it reads: rendered markdown, or the
   PDF's real pages. Select a passage and press **Ctrl+Alt+M** (or **Add comment**) to ask for a change
@@ -340,7 +355,12 @@ blerg-runner review request SECURITY.md --ask "OK to publish this policy?" [--wa
   nobody else's), one line each. It arrives as a message, or, when the agent waits with `--wait`, as
   the command's output (exit code 0 approved, 2 changes requested, 3 still waiting). Chat text can be
   typed by anyone who can write in the session, so the agent is told to treat an approval as real
-  only when `blerg-runner review status <id>` (or `review wait <id>`) exits 0.
+  only when `blerg-runner review status <id>` (or `review wait <id>`) exits 0. Claude, Codex and
+  native sessions also see a relayed decision marked with the session's private code (Hermes and
+  OpenClaw do not). The marker guards against accidents and against text retyped from a
+  transcript; it is not a security boundary against someone who tells the agent to transform and
+  print a transcript or the daemon's `marker.key`. The review request's state on the server stays
+  the authority.
 - **API.** `POST /api/sessions/{id}/review-requests` (the session's token), `GET
   /api/sessions/{id}/review-requests` and `GET /api/review-requests/{id}[?wait=N]` (the session, or
   a person who can see it), `POST /api/review-requests/{id}/decide` `{"decision": "approve" |

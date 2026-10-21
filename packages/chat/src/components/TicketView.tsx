@@ -7,11 +7,12 @@
 // Tracker data is untrusted, and any session token can claim any source: every field is text; the
 // description and the comments go through Markdown WITHOUT the app's cards (a ```card fence stays
 // a code block) and, as everywhere, without raw HTML or images.
-import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { parseTs } from '../model/timeLabel'
+import { MAXIMIZED_KEY, localStorageChatStorage } from '../model/storage'
 import { priorityGlyph, sourceLabel, statusTone, ticketHref, ticketMeta } from '../model/worklist'
 import type { Ticket, TicketComment } from '../types'
 import Markdown from './Markdown'
@@ -142,31 +143,35 @@ function Section({ title, testId, className, children }: { title: string; testId
   )
 }
 
-/** TicketDetails: the issue view's body: the Details list (first in the page; on a wide screen it
- *  sits beside the rest), then Description, Acceptance criteria and Comments. */
+/** TicketDetailChips: the ticket's details as one wrapping row of chips, each named ("Type bug",
+ *  "Priority ↑ high", a label as itself, an extra field "Sprint 12"), never a box of its own. */
+export function TicketDetailChips({ ticket }: { ticket: Ticket }) {
+  const chips: [string, ReactNode][] = []
+  if (ticket.type) chips.push(['Type', ticket.type])
+  if (ticket.priority) chips.push(['Priority', <Priority key="p" value={ticket.priority} />])
+  if (ticket.assignee) chips.push(['Assignee', ticket.assignee])
+  if (ticket.reporter) chips.push(['Reporter', ticket.reporter])
+  for (const f of ticket.fields ?? []) chips.push([f.name, f.value])
+  const labels = ticket.labels ?? []
+  if (chips.length === 0 && labels.length === 0) return null
+  return (
+    <ul className="ticket-detail-chips" data-testid="ticket-modal-details" aria-label="Details">
+      {chips.map(([name, value], i) => (
+        <li key={i} className="ticket-detail-chip"><span className="ticket-detail-name">{name}</span> <span className="ticket-detail-value">{value}</span></li>
+      ))}
+      {labels.map((l, i) => <li key={`l${i}`} className="ticket-detail-chip ticket-label" title="Label">{l}</li>)}
+    </ul>
+  )
+}
+
+/** TicketDetails: the issue view's body, one column: the details as chips, then Description,
+ *  Acceptance criteria and Comments. */
 export function TicketDetails({ ticket, children }: { ticket: Ticket; children?: ReactNode }) {
-  const rows: [string, ReactNode][] = []
-  if (ticket.type) rows.push(['Type', ticket.type])
-  if (ticket.priority) rows.push(['Priority', <Priority key="p" value={ticket.priority} />])
-  if (ticket.assignee) rows.push(['Assignee', ticket.assignee])
-  if (ticket.reporter) rows.push(['Reporter', ticket.reporter])
-  if (ticket.labels?.length) {
-    rows.push(['Labels', <span key="l" className="ticket-labels">{ticket.labels.map((l, i) => <span key={i} className="ticket-label">{l}</span>)}</span>])
-  }
-  for (const f of ticket.fields ?? []) rows.push([f.name, f.value])
   const comments = ticket.comments ?? []
   return (
     <div className="ticket-modal-grid">
-      {rows.length > 0 && (
-        <aside className="ticket-side">
-          <Section title="Details">
-            <dl className="ticket-fields" data-testid="ticket-modal-details">
-              {rows.map(([name, value], i) => <div key={i}><dt>{name}</dt><dd>{value}</dd></div>)}
-            </dl>
-          </Section>
-        </aside>
-      )}
       <div className="ticket-main">
+        <TicketDetailChips ticket={ticket} />
         {ticket.description
           ? (
               <Section title="Description" testId="ticket-modal-description">
@@ -198,16 +203,27 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input, select, textarea, sum
 
 /** TicketModal: a ticket over the page, as an issue view. Esc, the backdrop and × close it; Tab
  *  stays inside it; the focus goes back where it was. */
-export function TicketModal({ ticket, onClose, onShow }: {
+export function TicketModal({ ticket, onClose, onShow, body, actions }: {
   ticket: Ticket
   onClose: () => void
   /** "Show in conversation", when the host can find its card. */
   onShow?: () => void
+  /** The host's own view of the ticket in place of the pinned copy's (a live card it read). */
+  body?: ReactNode
+  /** More of the host's actions in the header, before the tracker link. */
+  actions?: ReactNode
 }) {
   const titleId = useId()
   const ref = useRef<HTMLDivElement | null>(null)
   useSelectAllIn(ref)
   const backdrop = useBackdropClose(onClose)
+  // Maximize: edge to edge, remembered like the file viewer's (its own 'ticket' kind).
+  const [maximized, setMaximized] = useState(() => localStorageChatStorage.get(MAXIMIZED_KEY('ticket')) === '1')
+  const toggleMaximized = () => {
+    const next = !maximized
+    setMaximized(next)
+    localStorageChatStorage.set(MAXIMIZED_KEY('ticket'), next ? '1' : null)
+  }
   useEffect(() => {
     const before = document.activeElement as HTMLElement | null
     ref.current?.focus()
@@ -216,6 +232,11 @@ export function TicketModal({ ticket, onClose, onShow }: {
   const href = ticketHref(ticket.url)
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Escape') { e.stopPropagation(); onClose(); return }
+    if (e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && (e.code === 'KeyF' || e.key.toLowerCase() === 'f')) {
+      e.preventDefault()
+      toggleMaximized()
+      return
+    }
     if (e.key !== 'Tab' || !ref.current) return
     const all = [...ref.current.querySelectorAll<HTMLElement>(FOCUSABLE)]
     if (all.length === 0) return
@@ -225,10 +246,10 @@ export function TicketModal({ ticket, onClose, onShow }: {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
   }
   return createPortal(
-    <div className="artifact-overlay" data-testid="ticket-modal-overlay" {...backdrop}>
+    <div className={`artifact-overlay${maximized ? ' is-maximized' : ''}`} data-testid="ticket-modal-overlay" {...backdrop}>
       <div
         ref={ref}
-        className="artifact-dialog ticket-modal"
+        className={`artifact-dialog ticket-modal${maximized ? ' is-maximized' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -246,20 +267,33 @@ export function TicketModal({ ticket, onClose, onShow }: {
             <h2 className={titleClass(ticket, 'ticket-modal-title')} id={titleId}>{ticket.title}</h2>
           </div>
           <div className="ticket-modal-actions">
+            {actions}
             {href && (
               <a className="ticket-open-link" href={href} target="_blank" rel="noopener noreferrer">
                 Open in {sourceLabel(ticket.source) || 'tracker'} <span aria-hidden="true">↗</span>
               </a>
             )}
+            <button
+              type="button"
+              className="artifact-close artifact-maximize"
+              aria-label={maximized ? 'Restore size' : 'Maximize'}
+              aria-pressed={maximized}
+              title={`${maximized ? 'Restore size' : 'Maximize'} (Ctrl+Alt+F)`}
+              onClick={toggleMaximized}
+            >
+              <span aria-hidden="true">{maximized ? '⤡' : '⤢'}</span>
+            </button>
             <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
           </div>
         </header>
         <div className="artifact-body ticket-modal-body">
-          <TicketDetails ticket={ticket}>
-            {onShow && (
-              <button type="button" className="ticket-more" onClick={onShow}>Show in conversation</button>
-            )}
-          </TicketDetails>
+          {body ?? (
+            <TicketDetails ticket={ticket}>
+              {onShow && (
+                <button type="button" className="ticket-more" onClick={onShow}>Show in conversation</button>
+              )}
+            </TicketDetails>
+          )}
         </div>
       </div>
     </div>,

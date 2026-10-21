@@ -18,6 +18,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/scratch"
 )
 
 // assistantTextKind is the agent-loop event kind carrying assistant prose
@@ -120,6 +121,18 @@ func (a *API) runnerRuntimeAxis(sessionID, storedRuntime string) string {
 	}
 }
 
+// sessionWorkBranch is the branch a session's commits land on, when its runtime makes one. It is
+// a convention, not a column, so it is derived the same way here. Two runtimes make one: a cluster
+// pod (pushed as wip/<id>) and any sandboxed session (its own clone on wip/<id>, fetched into the
+// repository on the daemon's machine). A host session works in its checkout, on whatever branch is
+// there; a session with no repository has no branch. Those report "".
+func sessionWorkBranch(row *db.SessionRow) string {
+	if scratch.IsNoRepo(row.Repo) || derefOrEmpty(row.Runtime) == runnerRuntimeDaemon {
+		return ""
+	}
+	return "wip/" + row.ID
+}
+
 // buildSessionResult assembles the result body for one session. It returns an
 // error when the session does not exist (the handler turns that into a 404) or
 // when the lookup fails — never a zero-valued result, which a caller could
@@ -135,16 +148,13 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string) (session
 	runtime := a.runnerRuntimeAxis(sessionID, derefOrEmpty(row.Runtime)) //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
 	lifecycle := runnerLifecycle(row.Status, runtime == "job_finished")
 	res := sessionResult{
-		SessionID: row.ID,
-		Lifecycle: lifecycle,
-		Terminal:  runnerLifecycleTerminal(lifecycle),
-		Runtime:   runtime,
-		Repo:      row.Repo,
-		GitURL:    derefOrEmpty(row.GitURL),
-		// The branch a session's work lands on is named from its id by the
-		// session runtime; it is a convention, not a column, so it is derived
-		// the same way here.
-		Branch:      "wip/" + row.ID,
+		SessionID:   row.ID,
+		Lifecycle:   lifecycle,
+		Terminal:    runnerLifecycleTerminal(lifecycle),
+		Runtime:     runtime,
+		Repo:        row.Repo,
+		GitURL:      derefOrEmpty(row.GitURL),
+		Branch:      sessionWorkBranch(row),
 		ErrorReason: derefOrEmpty(row.ErrorReason),
 		AutoStop:    row.AutoStop,
 		StartedAt:   row.StartedAt.UTC().Format(time.RFC3339),
@@ -198,7 +208,7 @@ scan:
 				Message string `json:"message"`
 				Code    string `json:"code"`
 			}
-			if json.Unmarshal([]byte(ev.Payload), &p) == nil && lastErr == "" && p.Message != "" && p.Code != "api_retry" {
+			if json.Unmarshal([]byte(ev.Payload), &p) == nil && lastErr == "" && p.Message != "" && p.Code != "api_retry" && p.Code != childSyncErrorCode {
 				lastErr = p.Message
 			}
 		case assistantTextKind:

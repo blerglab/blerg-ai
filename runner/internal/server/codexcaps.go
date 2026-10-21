@@ -16,6 +16,20 @@ func (dc *DaemonConn) SetCodexRestricted(v bool) {
 	dc.liveMu.Unlock()
 }
 
+// CanSandboxClones reports whether the daemon runs every sandboxed session in a clone of its own
+// (DaemonHello.SandboxClones). An older daemon would mount the person's checkout, .git included.
+func (dc *DaemonConn) CanSandboxClones() bool {
+	dc.liveMu.RLock()
+	defer dc.liveMu.RUnlock()
+	return dc.sandboxClones
+}
+
+func (dc *DaemonConn) SetSandboxClones(v bool) {
+	dc.liveMu.Lock()
+	dc.sandboxClones = v
+	dc.liveMu.Unlock()
+}
+
 func (dc *DaemonConn) SetPluginEngines(engines []string) {
 	dc.liveMu.Lock()
 	dc.pluginEngines = append([]string(nil), engines...)

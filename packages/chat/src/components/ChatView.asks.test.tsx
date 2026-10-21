@@ -45,6 +45,69 @@ describe('the agent asks a question', () => {
     expect(within(screen.getByTestId('ask-card')).queryByLabelText('Your answer')).toBeNull()
   })
 
+  it('marks owner-only approvals and hides answers from other viewers', () => {
+    resetChatState()
+    seed(ev(1, 'user_message', { text: 'go', source: 'chat' }), ev(2, 'ask', { ...ASK, owner_only: true }))
+    mount()
+    const card = screen.getByTestId('ask-card')
+    expect(card.textContent).toContain('owner-only approval')
+    expect(card.textContent).toContain('Only the session owner can answer')
+    expect(within(card).queryByLabelText('Your answer')).toBeNull()
+    expect(screen.queryByTestId('ask-composer-hint')).toBeNull()
+  })
+
+  it('says who can answer an owner-only approval only once the host knows', () => {
+    resetChatState()
+    seed(ev(1, 'user_message', { text: 'go', source: 'chat' }), ev(2, 'ask', { ...ASK, owner_only: true }))
+    const t = createFakeTransport({ answersAsks: true })
+    const { rerender } = render(<ChatView session={SESSION} transport={t.transport} meta={running} canAnswerApprovals={null} />)
+    // Still loading: the owner must not be told they cannot answer.
+    expect(screen.queryByTestId('ask-owner-only')).toBeNull()
+    expect(screen.queryByLabelText('Your answer')).toBeNull()
+    rerender(<ChatView session={SESSION} transport={t.transport} meta={running} canAnswerApprovals={false} />)
+    expect(screen.getByTestId('ask-owner-only').textContent).toBe('Only the session owner can answer this approval.')
+    rerender(<ChatView session={SESSION} transport={t.transport} meta={running} canAnswerApprovals />)
+    expect(screen.queryByTestId('ask-owner-only')).toBeNull()
+    expect(screen.getByLabelText('Your answer')).toBeInTheDocument()
+  })
+
+  it('a question the agent did not wait on is answered on its card, never from the composer', async () => {
+    resetChatState()
+    seed(ev(1, 'user_message', { text: 'go', source: 'chat' }), ev(2, 'ask', { body: 'Ship the blue one?', message_id: 'q1', owner_only: true, no_wait: true }))
+    const t = createFakeTransport({ answersAsks: true })
+    render(<ChatView session={SESSION} transport={t.transport} meta={running} canAnswerApprovals />)
+    const card = screen.getByTestId('ask-card')
+    expect(card.textContent).toContain('question')
+    expect(card.textContent).not.toContain('owner-only approval')
+    expect(card.textContent).toContain('the agent keeps working')
+    // The composer stays the composer: its message goes to the agent as itself.
+    expect(screen.queryByPlaceholderText('Answer the agent’s question…')).toBeNull()
+    fireEvent.change(within(card).getByLabelText('Your answer'), { target: { value: 'yes' } })
+    await act(async () => { fireEvent.click(within(card).getByRole('button', { name: 'Answer' })) })
+    expect(t.sentWith[0].opts?.answerTo).toBe('q1')
+    // The answer Blerg sends on to the agent is not drawn again.
+    act(() => t.emit(ev(3, 'user_message', { text: 'yes', source: 'ask_answer', message_id: 'q1' })))
+    act(() => t.emit(ev(4, 'user_message', { text: 'Answer to your question q1 ("Ship the blue one?"): yes', source: 'question_answer' })))
+    expect(screen.queryByText(/Answer to your question q1/)).toBeNull()
+    expect(screen.getByTestId('ask-closed').textContent).toBe('answered')
+  })
+
+  it('points a host that never answers approvals to Runner', () => {
+    resetChatState()
+    seed(ev(1, 'user_message', { text: 'go', source: 'chat' }), ev(2, 'ask', { ...ASK, owner_only: true }))
+    mount()
+    expect(screen.getByTestId('ask-owner-only').textContent).toContain('from the session in Runner')
+  })
+
+  it('lets the signed-in owner answer an owner-only approval', () => {
+    resetChatState()
+    seed(ev(1, 'user_message', { text: 'go', source: 'chat' }), ev(2, 'ask', { ...ASK, owner_only: true }))
+    const t = createFakeTransport({ answersAsks: true })
+    render(<ChatView session={SESSION} transport={t.transport} meta={running} canAnswerApprovals />)
+    expect(screen.getByLabelText('Your answer')).toBeInTheDocument()
+    expect(screen.getByTestId('ask-card').textContent).toContain('owner-only approval')
+  })
+
   it('Enter in the reply box answers too', async () => {
     const t = mount()
     const box = screen.getByLabelText('Your answer')

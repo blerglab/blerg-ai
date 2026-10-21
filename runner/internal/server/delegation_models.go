@@ -173,10 +173,18 @@ func (a *API) HandleGetChildModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	host := hostOf(parent, dc)
-	delegate := a.delegatePrincipalFor(ctx, parent, "")
+	host := a.parentHost(parent, dc)
 	want := models.NormalizeEngine(r.URL.Query().Get("engine"))
 	runtime := r.URL.Query().Get("runtime")
+	if runtime == runnerRuntimeCluster && !host.cluster {
+		// A desktop parent's cluster children, when the install has a cluster.
+		if !host.clusterOn {
+			writeError(w, http.StatusUnprocessableEntity, msgNoClusterRuntime)
+			return
+		}
+		host = host.forRuntime(runtime)
+	}
+	delegate := a.delegateFor(ctx, parent, runtime, "")
 	if runtime == "" {
 		runtime = runnerRuntimeDocker
 		if host.cluster {

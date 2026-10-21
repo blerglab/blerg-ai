@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
@@ -437,6 +439,26 @@ func TestSessionPermissionHourlyCapFallsBackToAsking(t *testing.T) {
 	}
 }
 
+// A burst can pass the soft count and then meet the atomic cap; the proposal stays pending and the
+// agent is told why (review M5).
+func TestSessionPermissionAtomicCapSaysWhy(t *testing.T) {
+	fx, up := newPermFx(t)
+	fx.api.grantCapOverride = 2
+	grantBoardA(t, fx)
+	if code, out := fileOn(t, fx, "A", "One"); code != 200 || out["state"] != "done" {
+		t.Fatalf("first: %d %v", code, out)
+	}
+	// A concurrent approval lands between the soft count and the approval itself.
+	fx.api.beforeGrantApproval = func() { fx.api.grantCapOverride = 1 }
+	code, out := fileOn(t, fx, "A", "Two")
+	if code != 202 || out["state"] != "pending" || up.creates != 1 {
+		t.Fatalf("over the atomic cap: %d %v creates=%d", code, out, up.creates)
+	}
+	if !strings.Contains(fmt.Sprint(out["message"]), "limit") {
+		t.Fatalf("the agent is not told why it waits: %v", out)
+	}
+}
+
 // m2: the approval's compare-and-set requires the grant's own scope, not just a live grant of the
 // session.
 func TestGrantOfAnotherBoardCannotWinTheCompareAndSet(t *testing.T) {
@@ -511,5 +533,63 @@ func TestAllowForSessionRefusedApprovalSaysThePermissionStands(t *testing.T) {
 	}
 	if live, _ := db.ListLiveProposalGrants(t.Context(), fx.pool, fx.sess); len(live) != 1 || live[0].ID != out.GrantID {
 		t.Fatalf("grant = %+v", live)
+	}
+}
+
+type countingPermissionCore struct {
+	deadLoginCore
+	calls atomic.Int32
+}
+
+func (c *countingPermissionCore) ListConnections(ctx context.Context, p mcpgw.Proof) ([]MCPConnection, error) {
+	c.calls.Add(1)
+	return c.deadLoginCore.ListConnections(ctx, p)
+}
+
+func TestPermissionPanelCachesSignInAndInvalidatesOnLevelChange(t *testing.T) {
+	fx, _ := newPermFx(t)
+	core := &countingPermissionCore{}
+	fx.api.hub.mcpStart.set(&mcpStartConfig{Core: core})
+	// Another browser session made this grant, so the viewer's bearer cannot
+	// supply its liveness result directly.
+	_, err := db.InsertProposalGrant(t.Context(), fx.pool, db.ProposalGrant{SessionID: fx.sess, AccountID: topicOwner, Kind: db.ProposalGrantBoard, BoardID: "board-a", ProofSessionID: "other-login", CreatedVia: "panel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InsertProposalGrant(t.Context(), fx.pool, db.ProposalGrant{SessionID: fx.sess, AccountID: topicOwner, Kind: db.ProposalGrantBoard, BoardID: "board-b", ProofSessionID: "other-login", CreatedVia: "panel"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	fx.api.permissionSignIns.now = func() time.Time { return now }
+	get := func() {
+		rec := filingRequest(fx, "GET", "/api/sessions/"+fx.sess+"/permissions", fx.token(topicOwner, "human"), nil)
+		if rec.Code != 200 {
+			t.Fatalf("panel=%d", rec.Code)
+		}
+	}
+	get()
+	get()
+	if got := core.calls.Load(); got != 1 {
+		t.Fatalf("panel made %d core calls, want 1", got)
+	}
+	g, err := db.InsertProposalGrant(t.Context(), fx.pool, db.ProposalGrant{SessionID: fx.sess, AccountID: topicOwner, Kind: db.ProposalGrantBoard, BoardID: "board-a", Level: db.BoardLevelRead, ProofSessionID: "other-login", CreatedVia: "panel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get()
+	if got := core.calls.Load(); got != 2 {
+		t.Fatalf("level change did not invalidate: calls=%d", got)
+	}
+	if _, err := db.RevokeProposalGrant(t.Context(), fx.pool, g.ID, topicOwner, "revoked"); err != nil {
+		t.Fatal(err)
+	}
+	get()
+	if got := core.calls.Load(); got != 3 {
+		t.Fatalf("revoke did not invalidate: calls=%d", got)
+	}
+	now = now.Add(permissionSignInTTL)
+	get()
+	if got := core.calls.Load(); got != 4 {
+		t.Fatalf("expired cache did not refresh: calls=%d", got)
 	}
 }

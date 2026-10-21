@@ -55,6 +55,18 @@ describe('the delegation card', () => {
     expect(card.textContent).toContain('7d 31%')
   })
 
+  it('shows the board access the new session gets, and nothing when there is none', () => {
+    seedRequest({ boards: [{ board: 'b-1', name: 'Blerg', level: 'full' }, { board: 'b-2', name: 'Ops', level: 'read' }] })
+    mount()
+    expect(screen.getByTestId('delegation-boards').textContent).toBe('with Blerg · Full, Ops · Read')
+  })
+
+  it('has no board line without boards', () => {
+    seedRequest()
+    mount()
+    expect(screen.queryByTestId('delegation-boards')).toBeNull()
+  })
+
   it('opens editable session permissions after an allowed-once decision', () => {
     seedRequest()
     const manage = vi.fn()

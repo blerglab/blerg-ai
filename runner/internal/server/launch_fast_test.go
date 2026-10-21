@@ -241,6 +241,7 @@ func TestUserRepoListerKindsSingleFlight(t *testing.T) {
 func TestHandleGetReposETag(t *testing.T) {
 	hub := NewHub()
 	d := &DaemonConn{ID: "d1", Name: "desk"}
+	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"tool"})
 	hub.Register(d)
 	api := NewAPI(hub, nil, "", nil, "")
@@ -287,7 +288,7 @@ func TestHandleGetReposETag(t *testing.T) {
 }
 
 // GET /api/me/credentials reads the repository lister's per-account kinds
-// cache: the sheet's two requests ask core once a minute between them.
+// cache: the sheet's two requests ask core once, and a reopened sheet asks again.
 func TestMyCredentialsSharesTheListersKindsCache(t *testing.T) {
 	var coreCalls atomic.Int32
 	api, token, coreSrv := newCredentialsAPI(t, func(w http.ResponseWriter, r *http.Request) {
@@ -310,10 +311,16 @@ func TestMyCredentialsSharesTheListersKindsCache(t *testing.T) {
 	if c := coreCalls.Load(); c != 1 {
 		t.Errorf("core asked %d times within the kinds TTL, want 1", c)
 	}
-	now = now.Add(2 * time.Minute)
+	// A credential saved in core shows the next time the sheet opens, not a minute later.
+	now = now.Add(10 * time.Second)
 	callMyCredentials(t, api, token)
 	if c := coreCalls.Load(); c != 2 {
-		t.Errorf("core asked %d times after the kinds TTL, want 2", c)
+		t.Errorf("core asked %d times 10 s later, want 2", c)
+	}
+	now = now.Add(2 * time.Minute)
+	callMyCredentials(t, api, token)
+	if c := coreCalls.Load(); c != 3 {
+		t.Errorf("core asked %d times after the kinds TTL, want 3", c)
 	}
 }
 

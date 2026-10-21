@@ -1154,6 +1154,9 @@ type MessageRow struct {
 	// OwnerOnly asks (an engine's command approval) accept an answer only from
 	// the session's signed-in owner.
 	OwnerOnly bool
+	// NoWait asks (`blerg-runner ask --no-wait`) are questions the agent does not wait on: their
+	// answer is sent to the session as a message, and only an answer addressed to them closes them.
+	NoWait bool
 }
 
 // MessageBoardID returns the board the message's session is bound to, or ""
@@ -1203,13 +1206,25 @@ func CreateAsk(ctx context.Context, conn *pgxpool.Pool, sessionID, body string, 
 	return id, err
 }
 
+// CreateQuestion inserts an open ask the agent does not wait on (`blerg-runner ask --no-wait`). It
+// is owner-only: the person who started the session answers it.
+func CreateQuestion(ctx context.Context, conn *pgxpool.Pool, sessionID, body string) (string, error) {
+	var id string
+	err := conn.QueryRow(ctx, `
+		INSERT INTO messages (session_id, kind, body, status, owner_only, no_wait)
+		VALUES ($1, 'ask', $2, 'open', true, true)
+		RETURNING id
+	`, sessionID, body).Scan(&id)
+	return id, err
+}
+
 func scanMessageRows(rows pgx.Rows) ([]MessageRow, error) {
 	defer rows.Close()
 	var out []MessageRow
 	for rows.Next() {
 		var m MessageRow
 		if err := rows.Scan(&m.ID, &m.SessionID, &m.Kind, &m.Body, &m.Status,
-			&m.Answer, &m.CreatedAt, &m.AnsweredAt, &m.OwnerOnly); err != nil {
+			&m.Answer, &m.CreatedAt, &m.AnsweredAt, &m.OwnerOnly, &m.NoWait); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -1217,7 +1232,7 @@ func scanMessageRows(rows pgx.Rows) ([]MessageRow, error) {
 	return out, rows.Err()
 }
 
-const messageCols = `id, session_id, kind, body, status, answer, created_at, answered_at, owner_only`
+const messageCols = `id, session_id, kind, body, status, answer, created_at, answered_at, owner_only, no_wait`
 
 // GetMessage returns one message, or (nil, nil) if not found.
 func GetMessage(ctx context.Context, conn *pgxpool.Pool, id string) (*MessageRow, error) {
@@ -1297,14 +1312,15 @@ func ListOpenAsks(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]
 	return scanMessageRows(rows)
 }
 
-// SessionsWithOpenAsks returns which of ids have an open ask.
+// SessionsWithOpenAsks returns which of ids have an open ask the agent waits on. A question it did
+// not wait on (no_wait) is not one: the session is at work, not waiting on the person.
 func SessionsWithOpenAsks(ctx context.Context, conn *pgxpool.Pool, ids []string) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	rows, err := conn.Query(ctx, `
 		SELECT DISTINCT session_id FROM messages
-		 WHERE session_id = ANY($1) AND kind = 'ask' AND status = 'open'
+		 WHERE session_id = ANY($1) AND kind = 'ask' AND status = 'open' AND NOT no_wait
 		 ORDER BY session_id
 	`, ids)
 	if err != nil {
@@ -1356,11 +1372,12 @@ func CloseOpenMessagesForSession(ctx context.Context, conn *pgxpool.Pool, sessio
 // 'answered' with an empty answer, which is how a closed ask is stored (migration 007; the
 // expiry and the session's end close them the same way, and the chat shows them closed). Used
 // when the process that waited for their answers is gone (a daemon restart), so an answer typed
-// later goes to the session as a message instead of to an ask nobody reads.
+// later goes to the session as a message instead of to an ask nobody reads. A question the agent
+// does not wait on (no_wait) is no process's: it stays open.
 func CloseOpenAsksForSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]MessageRow, error) {
 	rows, err := conn.Query(ctx, `
 		UPDATE messages SET answer = '', status = 'answered', answered_at = now()
-		 WHERE session_id = $1 AND kind = 'ask' AND status = 'open'
+		 WHERE session_id = $1 AND kind = 'ask' AND status = 'open' AND NOT no_wait
 		 RETURNING `+messageCols+`
 	`, sessionID)
 	if err != nil {
@@ -1981,6 +1998,14 @@ func PruneIdempotency(ctx context.Context, conn *pgxpool.Pool, ttl time.Duration
 
 // ListAgentEventsTailKinds returns a session's newest events of the given kinds, newest-first,
 // capped at limit (at most 1000).
+// LatestUserMessageSeq is the seq of the session's newest user_message (0 with none): the input
+// its current turn answers.
+func LatestUserMessageSeq(ctx context.Context, conn *pgxpool.Pool, sessionID string) (int64, error) {
+	var seq int64
+	err := conn.QueryRow(ctx, `SELECT COALESCE(max(seq), 0) FROM agent_events WHERE session_id = $1 AND kind = 'user_message'`, sessionID).Scan(&seq)
+	return seq, err
+}
+
 func ListAgentEventsTailKinds(ctx context.Context, conn *pgxpool.Pool, sessionID string, kinds []string, limit int) ([]AgentEventRow, error) {
 	if conn == nil {
 		return nil, nil
@@ -2041,4 +2066,22 @@ func ListAgentEventsTail(ctx context.Context, conn *pgxpool.Pool, sessionID, kin
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// UndeliveredQuestionAnswers are a session's questions the agent did not wait on (no_wait) that
+// the person answered within the last day but whose answer never reached the session's input
+// outbox (no session_inputs row 'question-<id>'): the server stopped between the answer and its
+// delivery. They are delivered again (questions.go).
+func UndeliveredQuestionAnswers(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]MessageRow, error) {
+	rows, err := conn.Query(ctx, `
+		SELECT `+messageCols+` FROM messages m
+		 WHERE m.session_id = $1 AND m.kind = 'ask' AND m.no_wait AND m.status = 'answered'
+		   AND COALESCE(m.answer, '') <> '' AND m.answered_at > now() - interval '1 day'
+		   AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id AND s.kind = 'agent')
+		   AND NOT EXISTS (SELECT 1 FROM session_inputs i WHERE i.session_id = m.session_id AND i.client_id = 'question-' || m.id::text)
+		 ORDER BY m.answered_at`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return scanMessageRows(rows)
 }

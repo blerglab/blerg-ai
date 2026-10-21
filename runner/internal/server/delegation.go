@@ -1,8 +1,9 @@
 package server
 
 // Sessions start sessions (0.4.0). A running session (the parent) starts, drives and stops other
-// sessions (its children) with its owner's approval: on its own desktop daemon, or (0.4.3), for a
-// parent running in a cluster pod, as cluster pods (delegation_cluster.go).
+// sessions (its children) with its owner's approval: on its own desktop daemon, or as cluster pods
+// (delegation_cluster.go): always for a parent running in a cluster pod (0.4.3), and on request
+// (runtime "cluster") for a desktop parent on an install that has a cluster runtime (0.4.4).
 //
 // The credential is the parent's own session token and nothing else (delegateParent). It is turned
 // into an in-process principal of kind sessionDelegateKind (delegatePrincipal) whose visibility is
@@ -44,7 +45,7 @@ var _ = childrenChangedThrottle
 
 var delegationAllowedFields = map[string]bool{
 	"engine": true, "model": true, "effort": true, "repo": true, "no_repo": true,
-	"runtime": true, "title": true, "prompt": true, "keep_running": true,
+	"runtime": true, "title": true, "prompt": true, "keep_running": true, "boards": true,
 }
 
 // The refusals delegateParent and the start path answer with. The CLI shows them as they are.
@@ -222,8 +223,19 @@ func delegationDaemonID(row *db.SessionRow) string {
 	return row.DaemonID
 }
 
+// childDaemonID is the daemon the delegation rows (rules, grants, requests) of a parent's child on
+// runtime are keyed on: the stable clusterDaemonID for a child on the cluster (a cluster parent's,
+// or a desktop parent's cluster child), else the parent's own (delegationDaemonID). A desktop
+// parent's rows are thus in two sets: its desktop's (docker, daemon) and the cluster's.
+func childDaemonID(parent *db.SessionRow, runtime string) string {
+	if runtime == runnerRuntimeCluster {
+		return clusterDaemonID
+	}
+	return delegationDaemonID(parent)
+}
+
 // delegatePrincipal is the in-process principal a parent acts as. Never built from a request body.
-// It carries no liveness proof; delegatePrincipalFor adds a cluster parent's.
+// It carries no liveness proof; delegatePrincipalFor and delegateFor add the owner's.
 func delegatePrincipal(parent *db.SessionRow) runnerPrincipal {
 	return runnerPrincipal{Kind: sessionDelegateKind, Sub: parent.ID,
 		OnBehalfOf: derefOrEmpty(parent.SpawningAccountID), Aud: coreAuthAudience, Caps: []string{coreAuthRunnerCap}}
@@ -235,8 +247,17 @@ func delegatePrincipal(parent *db.SessionRow) runnerPrincipal {
 // when given, else the parent's recorded launch proof (clusterOwnerProof). A desktop parent's
 // delegate carries none: its children run on the owner's own workstation.
 func (a *API) delegatePrincipalFor(ctx context.Context, parent *db.SessionRow, decidedSid string) runnerPrincipal {
+	return a.delegateFor(ctx, parent, "", decidedSid)
+}
+
+// delegateFor is the delegate for a child on runtime: delegatePrincipalFor, plus, for a desktop
+// parent's child on the cluster, the same owner proof a cluster parent's delegate carries (the
+// decider's sid, else the parent's recorded launch proof). The proof stays in this process: it is
+// sent only to core, never to the desktop daemon or the parent agent; a desktop child's delegate
+// (docker, daemon) still carries none.
+func (a *API) delegateFor(ctx context.Context, parent *db.SessionRow, runtime, decidedSid string) runnerPrincipal {
 	p := delegatePrincipal(parent)
-	if onClusterParent(parent) {
+	if onClusterParent(parent) || runtime == runnerRuntimeCluster && onDesktopDaemon(parent) {
 		p.delegateProof = a.clusterOwnerProof(ctx, parent.ID, decidedSid)
 	}
 	return p
@@ -244,6 +265,8 @@ func (a *API) delegatePrincipalFor(ctx context.Context, parent *db.SessionRow, d
 
 // childStart is the allowlisted start (Task 4 parses it from the body; Task 5 from the stored row).
 type childStart struct {
+	// Set only by origin resolution; the child request allowlist rejects caller-supplied provider.
+	Provider    string `json:"provider,omitempty"`
 	Engine      string `json:"engine"`
 	Model       string `json:"model,omitempty"`
 	Effort      string `json:"effort,omitempty"`
@@ -253,12 +276,14 @@ type childStart struct {
 	Title       string `json:"title"`
 	Prompt      string `json:"prompt"`
 	KeepRunning bool   `json:"keep_running,omitempty"`
+	// Boards are the board levels passed down (child_board_access.go), resolved by the server.
+	Boards []childBoard `json:"boards,omitempty"`
 }
 
 // startChild starts a child of parent from cs, as the delegate principal, on the parent's own daemon
-// (or, for a cluster parent, on the cluster). via is "rule:<id>" | "grant:<id>" | "request:<id>".
+// or, for a cluster parent or a desktop parent's runtime "cluster" child, on the cluster. via is "rule:<id>" | "grant:<id>" | "request:<id>".
 // idemKey is passed to StartSession (scope session_delegate:<parent>). It never sets Env,
-// CallbackURL, CallbackSecret, GitURL, Provider, AutoStop or Grant.
+// CallbackURL, CallbackSecret, GitURL, AutoStop or Grant. Provider may only come from the server's origin resolver.
 func (a *API) startChild(ctx context.Context, parent *db.SessionRow, cs childStart, via, idemKey string) (StartResponse, *APIError) {
 	return a.startChildScoped(ctx, parent, cs, via, idemKey, "", "")
 }
@@ -277,15 +302,24 @@ func (a *API) startChildScoped(ctx context.Context, parent *db.SessionRow, cs ch
 	if !onDesktopDaemon(parent) && !onClusterParent(parent) {
 		return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", msgChildrenOnDaemon)
 	}
+	// Board levels passed down are checked again against the parent's levels now: a start can run
+	// later than it was asked (a decided card), and the parent may have been lowered since.
+	if apiErr := a.childBoardsProblem(ctx, parent, cs.Boards); apiErr != nil {
+		return StartResponse{}, apiErr
+	}
 	req := childRunnerRequest(parent, cs, via)
 	req.IdemScope = scope
-	return a.StartSession(ctx, a.delegatePrincipalFor(ctx, parent, decidedSid), req, idemKey)
+	resp, apiErr := a.StartSession(ctx, a.delegateFor(ctx, parent, cs.Runtime, decidedSid), req, idemKey)
+	if apiErr == nil && len(cs.Boards) > 0 {
+		a.seedChildBoards(context.WithoutCancel(ctx), parent, resp.SessionID, cs.Boards)
+	}
+	return resp, apiErr
 }
 
 // delegateStartProblem is the start path's own check of a delegate's request (defense in depth:
 // startChild builds only allowlisted requests). A delegate starts only on its parent's pinned
 // desktop daemon, explicitly docker or the host, or on the cluster pinned to the cluster's daemon
-// (startClusterChild then checks the parent is a cluster parent), for its own parent, with no
+// (startClusterChild then checks the parent is a cluster or desktop parent), for its own parent, with no
 // control channel. Its idempotency scope is its own, or the server's scope for a decided request of
 // this parent.
 func delegateStartProblem(req runnerStartRequest, p runnerPrincipal) *APIError {
@@ -295,7 +329,7 @@ func delegateStartProblem(req runnerStartRequest, p runnerPrincipal) *APIError {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgChildrenOnDaemon)
 	}
 	if req.ParentSessionID == "" || req.ParentSessionID != p.Sub || len(req.Env) > 0 || req.CallbackURL != "" ||
-		req.CallbackSecret != "" || req.GitURL != "" || req.Provider != "" || req.AutoStop || req.Grant != nil ||
+		req.CallbackSecret != "" || req.GitURL != "" || (req.Provider != "" && (!onCluster || !req.resolvedRepoProvider)) || req.AutoStop || req.Grant != nil ||
 		req.CronID != "" || req.TargetDaemonID != "" || req.NoOperatorFallback ||
 		(req.IdemScope != "" && req.IdemScope != delegateDecideScope(p.Sub)) {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgDelegateFields)

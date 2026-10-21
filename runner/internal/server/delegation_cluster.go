@@ -1,20 +1,28 @@
 package server
 
-// Child sessions on the cluster (0.4.3). A parent running in a cluster pod starts children that run
-// as cluster pods: the same allowlisted start, rules, grants, cards, limits, child routes and
-// cascades as a desktop parent's children (delegation*.go), with these differences:
+// Child sessions on the cluster (0.4.3, 0.4.4). A parent running in a cluster pod starts children
+// that run as cluster pods; so does a desktop parent that asks for runtime "cluster" on an install
+// with a cluster runtime. The same allowlisted start, rules, grants, cards, limits, child routes and
+// cascades as a desktop parent's desktop children (delegation*.go), with these differences:
 //
-//   - the child's runtime is "cluster", the default for a cluster parent; a cluster parent cannot
-//     start a desktop child, nor a desktop parent a cluster child;
+//   - a cluster parent's children run on the cluster (runtime "cluster", its default); a desktop
+//     parent's run on its desktop unless it asks for "cluster" (never its default); a cluster parent
+//     cannot start a desktop child;
 //   - its repo resolves the way a cluster launch's does (cloned into the pod), not from a daemon's
-//     checked-out folders;
+//     checked-out folders; for a desktop parent a one-segment folder name is refused unless the
+//     cluster resolves bare names (an org or an explicit git base), as a launch refuses it;
 //   - engines are the cluster's (descriptor runtimes and the cluster readiness snapshot);
 //   - rules and grants name runtime "cluster" on the cluster's synthetic daemon, so a desktop rule
-//     never starts a cluster child, nor the reverse;
+//     never starts a cluster child, nor the reverse; a desktop parent has both sets;
 //   - the child pod gets the owner's credentials like any cluster session of the owner, against a
 //     liveness proof: the browser session of the person who just allowed the start, else the
-//     parent's recorded launch proof (clusterOwnerProof). With no proof at all, a rule or grant does
-//     not start the child: the person is asked, and their decision carries one.
+//     parent's recorded launch proof (clusterOwnerProof). With no live proof, a rule or grant does
+//     not start the child: the person is asked, and their decision carries one. The proof a child
+//     was started with is recorded on the child (launch_auth_session_id, or token_id for an agent
+//     token) and a desktop parent resumes its idle cluster child with it (delegateChild).
+//
+// No proof, token or credential ever goes to a desktop daemon or to the parent agent: the proof is
+// a server-side value core checks, and the credentials go only into the child pod's Secret.
 
 import (
 	"context"
@@ -36,11 +44,30 @@ const clusterDaemonLabel = "the cluster"
 // msgClusterChildNoProof: the owner's credentials cannot be released to the child pod.
 const msgClusterChildNoProof = "the owner's sign-in cannot authorize a child on the cluster; ask the person to allow it from the card"
 
-// childHost is where a parent's children run: its desktop daemon (dc, nil while disconnected) or,
-// for a cluster parent, the cluster.
+// msgNoClusterRuntime: a desktop parent asked for a cluster child on an install with no cluster.
+const msgNoClusterRuntime = `this install has no cluster: a desktop session's children run on its desktop (runtime "docker" or "daemon")`
+
+// msgClusterChildBareRepo: a desktop folder name the cluster cannot clone (no org or git base).
+const msgClusterChildBareRepo = "the cluster could not resolve this desktop folder; use owner/name or make its git remote available on the parent desktop"
+
+// msgClusterChildResumeNoProof: an idle cluster child's resume has no live owner sign-in.
+const msgClusterChildResumeNoProof = "the sign-in this child was started with is no longer live, so it cannot resume on the cluster; ask the person to open the child and send the message from their browser"
+
+// childHost is where a parent's child runs: its desktop daemon (dc, nil while disconnected) or the
+// cluster (a cluster parent's children, and a desktop parent's runtime "cluster" child).
 type childHost struct {
-	dc      *DaemonConn
-	cluster bool
+	repoSource *DaemonConn
+	dc         *DaemonConn
+	cluster    bool
+	// clusterOn (a desktop parent's host only): the install has a cluster runtime, so a child may
+	// ask for runtime "cluster" (forRuntime).
+	clusterOn bool
+	// fromDesktop (a cluster host only): the child of a desktop parent.
+	fromDesktop bool
+	// bareRepo (a cluster host only): a one-segment repo name resolves on the cluster. Always for a
+	// cluster parent (as before 0.4.4); for a desktop parent, the fallback for an unknown origin
+	// needs an org or an explicit git base, as a cluster launch requires.
+	bareRepo bool
 	// ownerLive (a cluster host only): core accepts the delegate's proof for the owner's
 	// credentials right now (clusterOwnerLive). A rule or grant starts a cluster child only then.
 	ownerLive bool
@@ -49,8 +76,26 @@ type childHost struct {
 	local []string
 }
 
-func hostOf(parent *db.SessionRow, dc *DaemonConn) childHost {
-	return childHost{dc: dc, cluster: onClusterParent(parent)}
+// parentHost is where parent's children run by default: the cluster for a cluster parent, else its
+// desktop daemon (dc), noting whether the install also has a cluster for a runtime "cluster" child.
+func (a *API) parentHost(parent *db.SessionRow, dc *DaemonConn) childHost {
+	h := childHost{dc: dc, cluster: onClusterParent(parent), bareRepo: true}
+	if !h.cluster && onDesktopDaemon(parent) {
+		if jm := a.hub.JobManager(); jm != nil {
+			h.clusterOn = true
+			h.bareRepo = jm.GitHubOrg != "" || jm.ExplicitGitURLBase != ""
+		}
+	}
+	return h
+}
+
+// forRuntime is the host of a child on runtime: the cluster for a desktop parent's runtime
+// "cluster" child when the install has one, else h itself.
+func (h childHost) forRuntime(runtime string) childHost {
+	if !h.cluster && h.clusterOn && runtime == runnerRuntimeCluster {
+		return childHost{cluster: true, fromDesktop: true, bareRepo: h.bareRepo, repoSource: h.dc}
+	}
+	return h
 }
 
 // name is what the card and the budget call the host.
@@ -74,10 +119,10 @@ func (h childHost) localEngine(engine string) bool {
 	return h.dc.LocalEngine(engine)
 }
 
-// recordLaunchAuthSession records the owner's browser session behind a cluster launch or resume
-// (best effort, logged; "" records nothing). Its only callers are cluster paths (HandlePostSessions'
-// cluster branch, startClusterNoRepo, startRunnerSession's cluster half, the cluster resume), so a
-// desktop session's column stays NULL, as migration 066 says.
+// recordLaunchAuthSession records the owner's browser session behind a launch or resume (best
+// effort, logged; "" records nothing): a cluster launch or resume, a desktop launch from the browser
+// or by a person's token (0.4.4: its cluster children are authorized with it), a decision on a
+// child's card (the parent's newest proof), and the proof a cluster child was started with.
 func recordLaunchAuthSession(ctx context.Context, pool *pgxpool.Pool, sessionID, sid string) {
 	if pool == nil || sid == "" {
 		return
@@ -87,19 +132,26 @@ func recordLaunchAuthSession(ctx context.Context, pool *pgxpool.Pool, sessionID,
 	}
 }
 
-// clusterOwnerProof is the proof a cluster parent's child is started (or resumed) with: decidedSid
-// when the person just allowed it, else the parent's recorded browser session, else the agent token
-// it was launched with. The zero proof when there is none (or no database).
+// clusterOwnerProof is the proof a cluster child is started (or a cluster parent's child resumed)
+// with: decidedSid when the person just allowed it, else the parent's recorded browser session, else
+// the agent token it was launched with. The zero proof when there is none (or no database).
 func (a *API) clusterOwnerProof(ctx context.Context, parentID, decidedSid string) coreProof {
 	if decidedSid != "" {
 		return coreProof{SessionID: decidedSid}
 	}
+	return a.sessionLaunchProof(ctx, parentID)
+}
+
+// sessionLaunchProof is the proof recorded on a session: its browser session, else its agent token;
+// the zero proof when there is none (or no database). For a cluster child it is the proof the child
+// was started with (startClusterChild), which a desktop parent resumes the child with.
+func (a *API) sessionLaunchProof(ctx context.Context, sessionID string) coreProof {
 	if a.dbPool == nil {
 		return coreProof{}
 	}
-	tokenID, sid, err := db.GetSessionLaunchProof(ctx, a.dbPool, parentID)
+	tokenID, sid, err := db.GetSessionLaunchProof(ctx, a.dbPool, sessionID)
 	if err != nil {
-		log.Printf("delegation: launch proof of %s: %v", parentID, err)
+		log.Printf("delegation: launch proof of %s: %v", sessionID, err)
 		return coreProof{}
 	}
 	if sid != "" {
@@ -117,17 +169,29 @@ func (a *API) clusterOwnerProof(ctx context.Context, parentID, decidedSid string
 // core that cannot answer, is not live: a rule or grant then asks the person instead of starting a
 // child that would fail at its credential fetch.
 func (a *API) clusterOwnerLive(ctx context.Context, p runnerPrincipal) bool {
+	live, _ := a.clusterOwnerState(ctx, p)
+	return live
+}
+
+// clusterOwnerState is clusterOwnerLive, also telling whether the answer is known: known false when
+// core could not be asked or answered with an error (a retry may succeed), true when it accepted or
+// refused the proof, or none is needed.
+func (a *API) clusterOwnerState(ctx context.Context, p runnerPrincipal) (live, known bool) {
 	jm := a.hub.JobManager()
 	if jm == nil {
-		return false
+		return false, true
 	}
 	if !jm.personalCredentialsWired() {
-		return true
+		return true, true
 	}
 	if !p.proof().valid() {
-		return false
+		return false, true
 	}
-	return verifyCorePrincipal(ctx, jm.CredentialClient, jm.CoreURL, jm.CoreInternalKey, p.spawningAccountID(), p.proof()) == nil
+	err := verifyCorePrincipal(ctx, jm.CredentialClient, jm.CoreURL, jm.CoreInternalKey, p.spawningAccountID(), p.proof())
+	if err == nil {
+		return true, true
+	}
+	return false, errors.Is(err, errCorePrincipalRefused)
 }
 
 // clusterEngineProblem checks an engine against the cluster as a launch does: the engine runs in a
@@ -201,13 +265,22 @@ func (a *API) budgetEngineForHost(ctx context.Context, parent *db.SessionRow, ho
 		return budgetEngineFor(host.dc, engine, now)
 	}
 	available, known := a.clusterAvailableEngines(ctx, p)
-	reply := budgetForCluster(a.hub.FindDaemonForSession(parent.ID), available, known, host.local, now)
+	reply := budgetForCluster(clusterParentPod(a.hub, parent), available, known, host.local, now)
 	for i := range reply.Engines {
 		if reply.Engines[i].Engine == engine {
 			return &reply.Engines[i]
 		}
 	}
 	return nil
+}
+
+// clusterParentPod is a cluster parent's own pod connection (nil while it is away, and for a desktop
+// parent: a desktop's usage windows and local engines say nothing about the cluster).
+func clusterParentPod(h *Hub, parent *db.SessionRow) *DaemonConn {
+	if !onClusterParent(parent) {
+		return nil
+	}
+	return h.FindDaemonForSession(parent.ID)
 }
 
 // startClusterChild is the cluster driver of a delegate's start (startRunnerSession): the child
@@ -230,7 +303,7 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	if parent == nil {
 		return apiErrorf(http.StatusNotFound, "session not found")
 	}
-	if !onClusterParent(parent) {
+	if !onClusterParent(parent) && !onDesktopDaemon(parent) {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgChildrenOnDaemon)
 	}
 	account := principal.spawningAccountID()
@@ -243,7 +316,7 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	}
 	gitURL, workdir := "", clusterNoRepoWorkdir
 	if !req.NoRepo {
-		gitURL = jm.CloneURLFor("", req.Repo)
+		gitURL = jm.CloneURLFor(req.Provider, req.Repo)
 		workdir = "/workspace/" + req.Repo
 	}
 	if err := db.UpsertDaemon(ctx, a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
@@ -285,6 +358,14 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		log.Printf("cluster child %s: SetSessionKind: %v", sessionID, err)
 	}
 	recordLaunchEffort(ctx, a.dbPool, sessionID, req.Effort)
+	// The proof the child starts with is its own from now on: a desktop parent resumes the idle
+	// child with it (delegateChild), whatever the parent's own newest proof becomes.
+	recordLaunchAuthSession(ctx, a.dbPool, sessionID, proof.SessionID)
+	if proof.TokenID != "" {
+		if err := db.SetSessionTokenID(ctx, a.dbPool, sessionID, proof.TokenID); err != nil {
+			log.Printf("cluster child %s: SetSessionTokenID: %v", sessionID, err)
+		}
+	}
 	if err := db.SetSessionEngine(ctx, a.dbPool, sessionID, req.Engine); err != nil {
 		log.Printf("cluster child %s: SetSessionEngine: %v", sessionID, err)
 	}
@@ -327,7 +408,7 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		if rerr := db.RevokeBoardTokensForSession(ctx, a.dbPool, sessionID); rerr != nil {
 			log.Printf("cluster child %s: revoke token after a failed start: %v", sessionID, rerr)
 		}
-		return apiErrorCause(http.StatusServiceUnavailable, startFailureCause(err), "%s", err.Error())
+		return apiErrorCause(clusterStartFailureStatus(err), startFailureCause(err), "%s", err.Error())
 	}
 	clusterJobCreated(ctx, a.hub, a.dbPool, sessionID, a.startWatchEvery())
 	return nil

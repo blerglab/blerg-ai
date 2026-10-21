@@ -9,10 +9,12 @@ Run with:
 
 import http.server
 import json
+import shlex
 import os
 import subprocess
 import sys
 import threading
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -1069,3 +1071,186 @@ def test_selected_board_gateway_never_forwards_token_on_redirect(gateway, code):
         receiver.shutdown()
         receiver.server_close()
         thread.join()
+
+
+# ── Board access from the session's Permissions (0.4.4) ─────────────────────────
+# No launch-time board credential: the board commands go to the runner with the session's own
+# token, name their board on every call, and the runner checks the level.
+
+SESSION_ID = "5e5e5e5e-0000-4000-8000-5e5e5e5e5e5e"
+SESSION_TOKEN = "session-tok-test"
+
+
+class SessionBoardHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *_):
+        pass
+
+    def _reply(self, status, body):
+        raw = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        self.server.calls.append(('GET', self.path, self.headers.get('Authorization'), None))
+        if self.path == f'/api/sessions/{SESSION_ID}/board-access':
+            self._reply(200, {'configured': True, 'boards': self.server.boards})
+        elif self.path.startswith(f'/api/sessions/{SESSION_ID}/board-card-url?'):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            self._reply(200, {'url': f"https://board.example.test/boards/{q['board'][0]}/cards/{q['number'][0]}"})
+        else:
+            self._reply(404, {'error': 'not found'})
+
+    def do_POST(self):
+        request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        self.server.calls.append(('POST', self.path, self.headers.get('Authorization'), request))
+        if self.path == f'/api/sessions/{SESSION_ID}/filing-tools':
+            self._reply(200, {'jsonrpc': '2.0', 'id': request['id'], 'result': {'content': [{'type': 'text', 'text': 'via ' + request['params']['name']}]}})
+            return
+        if self.path != f'/api/sessions/{SESSION_ID}/board-tools':
+            self._reply(404, {'error': 'not found'})
+            return
+        tool = request['tool']
+        level = {b['id']: b['level'] for b in self.server.boards}.get(request['board'], 'propose')
+        reads = ('blerg_board_get', 'blerg_column_list', 'blerg_card_search', 'blerg_card_get')
+        if level == 'propose' or (tool not in reads and level != 'full'):
+            need = 'read' if tool in reads else 'full'
+            self._reply(403, {'error': f"this session has {level} access to board {request['board']}; {tool} needs {need} access. "
+                                        "Ask the person to raise it in the session's Permissions (Boards)"})
+            return
+        responses = {
+            'blerg_board_get': {k: v for k, v in CLEAR_BOARD.items() if k not in ('columns', 'tickets')},
+            'blerg_column_list': CLEAR_BOARD['columns'],
+            'blerg_card_search': CLEAR_BOARD['tickets'],
+            'blerg_card_get': {**CLEAR_BOARD['tickets'][0], **({'number': self.server.card_number} if self.server.card_number else {})},
+            'blerg_card_create': {'card': {'id': TICKET_UUID, 'title': request['arguments'].get('title')}, 'refreshed': False},
+        }
+        result = responses.get(tool, {'id': TICKET_UUID, 'title': 'Fix the bug'})
+        self._reply(200, {'content': [{'type': 'text', 'text': json.dumps(result)}]})
+
+
+@pytest.fixture
+def session_board():
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), SessionBoardHandler)
+    server.calls = []
+    server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'read'}]
+    server.card_number = None
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    env = {'BLERG_RUNNER_SERVER_HTTP': f'http://127.0.0.1:{server.server_port}', 'BLERG_RUNNER_SESSION_ID': SESSION_ID,
+           'BLERG_RUNNER_SESSION_TOKEN': SESSION_TOKEN, 'BLERG_RUNNER_DAEMON_STATE_DIR': '/nonexistent-state-dir'}
+    try:
+        yield server, env
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_session_board_commands_work_without_board_env(session_board):
+    server, env = session_board
+    result = run_cli(['board', 'show'], env)
+    assert result.returncode == 0, result.stderr
+    assert 'Test Board' in result.stdout and 'Fix the bug' in result.stdout
+    assert server.calls[0][:2] == ('GET', f'/api/sessions/{SESSION_ID}/board-access')
+    tools = [c[3] for c in server.calls if c[0] == 'POST']
+    assert [t['tool'] for t in tools] == ['blerg_board_get', 'blerg_column_list', 'blerg_card_search']
+    assert all(t['board'] == TEST_BOARD_ID for t in tools)
+    # Only the session's own token, to the session's own routes.
+    assert all(c[2] == 'Bearer ' + SESSION_TOKEN and c[1].startswith(f'/api/sessions/{SESSION_ID}/') for c in server.calls)
+    result = run_cli(['ticket', 'get', TICKET_UUID], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][3] == {'board': TEST_BOARD_ID, 'tool': 'blerg_card_get', 'arguments': {'card_id': TICKET_UUID}}
+
+
+def test_ticket_get_prints_the_card_address_to_pin(session_board):
+    server, env = session_board
+    server.card_number = 7
+    result = run_cli(['ticket', 'get', TICKET_UUID], env)
+    assert result.returncode == 0, result.stderr
+    assert f'Card: https://board.example.test/boards/{TEST_BOARD_ID}/cards/7' in result.stdout
+    pin_line = [line for line in result.stdout.splitlines() if line.startswith('Pin it: ')][0]
+    pin = json.loads(shlex.split(pin_line[len('Pin it: echo '):].split(' | ')[0])[0])
+    assert pin == {'source': 'blerg-board', 'board_id': TEST_BOARD_ID, 'key': '#7', 'title': 'Fix the bug'}
+    assert ('GET', f'/api/sessions/{SESSION_ID}/board-card-url?board={TEST_BOARD_ID}&number=7', 'Bearer ' + SESSION_TOKEN, None) in server.calls
+
+
+def test_session_board_level_refusal_is_reported(session_board):
+    server, env = session_board
+    result = run_cli(['ticket', 'create', '--title', 'New work'], env)
+    assert result.returncode != 0
+    assert 'needs full access' in result.stderr and 'Permissions' in result.stderr
+    assert SESSION_TOKEN not in result.stderr
+    # Raised to full: the next command works, with nothing restarted.
+    server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'full'}]
+    result = run_cli(['ticket', 'create', '--title', 'New work'], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][3] == {'board': TEST_BOARD_ID, 'tool': 'blerg_card_create', 'arguments': {'board_id': TEST_BOARD_ID, 'title': 'New work'}}
+
+
+def test_session_board_without_access_says_how_to_get_it(session_board):
+    server, env = session_board
+    server.boards = []
+    result = run_cli(['ticket', 'list'], env)
+    assert result.returncode != 0
+    assert 'no board access' in result.stderr and 'Permissions' in result.stderr and 'ticket file' in result.stderr
+    assert not [c for c in server.calls if c[0] == 'POST']
+
+
+def test_session_board_several_boards_need_a_name(session_board):
+    server, env = session_board
+    server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'read'}, {'id': OTHER_UUID, 'name': 'Other', 'level': 'full'}]
+    result = run_cli(['ticket', 'list'], env)
+    assert result.returncode != 0 and 'several boards' in result.stderr
+    result = run_cli(['ticket', 'list', 'Other'], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][3]['board'] == OTHER_UUID
+    result = run_cli(['board', 'access'], env)
+    assert result.returncode == 0, result.stderr
+    assert f'Other  ({OTHER_UUID})  full' in result.stdout and f'Test Board  ({TEST_BOARD_ID})  read' in result.stdout
+
+
+def test_session_board_never_uses_board_columns_or_archive(session_board):
+    server, env = session_board
+    server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'full'}]
+    for args in (['column', 'add', '--name', 'Oops'], ['ticket', 'archive', TICKET_UUID]):
+        result = run_cli(args, env)
+        assert result.returncode != 0, args
+    assert not [c for c in server.calls if c[0] == 'POST']
+
+
+def test_session_mcp_passes_board_tool_through(session_board):
+    server, env = session_board
+    request = {'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call', 'params': {'name': 'blerg_board', 'arguments': {'tool': 'access'}}}
+    full_env = {'HOME': os.environ.get('HOME', '/tmp'), 'PATH': os.environ.get('PATH', '/usr/bin:/bin'), **env}
+    result = subprocess.run([sys.executable, SCRIPT, '_session_mcp'], input=json.dumps(request) + '\n', capture_output=True, text=True, timeout=10, env=full_env)
+    assert result.returncode == 0, result.stderr
+    reply = json.loads(result.stdout.strip().splitlines()[-1])
+    assert reply['id'] == 7 and reply['result']['content'][0]['text'] == 'via blerg_board', reply
+    assert server.calls[-1][1] == f'/api/sessions/{SESSION_ID}/filing-tools'
+
+
+def test_session_with_launch_board_reaches_a_permission_board_by_name(session_board):
+    # A launch board's env is set, and the person gave another board in Permissions: naming that
+    # board goes through the runner with the session token, never the launch board's gateway.
+    server, env = session_board
+    server.boards = [{'id': TEST_BOARD_ID, 'name': 'Launch', 'level': 'full'}, {'id': OTHER_UUID, 'name': 'Other', 'level': 'read'}]
+    launch_env = {**env, 'BLERG_RUNNER_BOARD_GATEWAY_URL': 'http://127.0.0.1:9/mcp-gw/board',
+                  'BLERG_RUNNER_BOARD_ID': TEST_BOARD_ID, 'BLERG_RUNNER_BOARD_TOKEN': TEST_BOARD_TOKEN}
+    result = run_cli(['ticket', 'list', 'Other'], launch_env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][3]['board'] == OTHER_UUID
+    assert all(c[2] == 'Bearer ' + SESSION_TOKEN for c in server.calls)
+
+
+def test_session_board_access_shows_a_started_sessions_cap(session_board):
+    server, env = session_board
+    server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'read', 'parent_level': 'read'}]
+    result = run_cli(['board', 'access'], env)
+    assert result.returncode == 0, result.stderr
+    assert f'Test Board  ({TEST_BOARD_ID})  read  (capped by the session that started you, which has read)' in result.stdout
+    server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'full'}]
+    result = run_cli(['board', 'access'], env)
+    assert 'capped' not in result.stdout

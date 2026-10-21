@@ -1,6 +1,9 @@
 /* ── the diff viewer (view "diff") and the diff card ─────────────────────── */
-.artifact-viewer.is-diff {
-  width: min(1320px, 100%);
+@media (min-width: 900px) {
+  .artifact-dialog.artifact-viewer.is-diff {
+    width: 96vw;
+    height: 92vh;
+  }
 }
 .diff-view {
   display: flex;

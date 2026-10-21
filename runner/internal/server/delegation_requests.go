@@ -398,6 +398,13 @@ func (a *API) decideTx(ctx context.Context, cur db.DelegationRequest, cs childSt
 		log.Printf("delegation decide %s: %s: %v", cur.ID, what, err)
 		return db.DelegationRequest{}, apiErrorf(http.StatusInternalServerError, "could not record the decision")
 	}
+	if choice == "always" && cur.DaemonID == clusterDaemonID {
+		// A rule names its daemon row: the cluster's may not exist yet on an install where no cluster
+		// session has run (a desktop parent's first cluster child).
+		if err := db.UpsertDaemon(ctx, a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+			return fail("cluster daemon", err)
+		}
+	}
 	tx, err := a.dbPool.Begin(ctx)
 	if err != nil {
 		return fail("begin", err)
@@ -478,10 +485,16 @@ func decidedParentProblem(parent *db.SessionRow, r db.DelegationRequest) string 
 		return msgDelegateNoOwner
 	case isChildSession(parent):
 		return msgDelegateDepth
-	case !onDesktopDaemon(parent) && !onClusterParent(parent) || delegationDaemonID(parent) != r.DaemonID:
+	case !onDesktopDaemon(parent) && !onClusterParent(parent) || !requestDaemonOK(parent, r.DaemonID):
 		return msgChildrenOnDaemon
 	}
 	return ""
+}
+
+// requestDaemonOK: a request of this parent may be keyed on daemonID: the parent's own
+// (delegationDaemonID), or for a desktop parent also the cluster's (its runtime "cluster" children).
+func requestDaemonOK(parent *db.SessionRow, daemonID string) bool {
+	return daemonID == delegationDaemonID(parent) || onDesktopDaemon(parent) && daemonID == clusterDaemonID
 }
 
 // startDecidedChild starts the child of an allowed request from its stored start cs, under the
@@ -533,15 +546,20 @@ func (a *API) startDecidedChild(ctx context.Context, r db.DelegationRequest, cs 
 			startError = msg
 			return nil
 		}
-		var host childHost
-		if onClusterParent(parent) {
+		// The stored start's runtime must be the one its request is keyed on (the server wrote
+		// both; checked again so a row can never move a child between the two sets).
+		if (cs.Runtime == runnerRuntimeCluster) != (r.DaemonID == clusterDaemonID) {
+			startError = msgChildrenOnDaemon
+			return nil
+		}
+		host := a.parentHost(parent, nil)
+		if onClusterParent(parent) || cs.Runtime == runnerRuntimeCluster {
 			if a.hub.JobManager() == nil {
 				startError = msgClusterNotConfigured
 				return nil
 			}
-			host = childHost{cluster: true}
 			// The decider is the owner, signed in now: their session is the newest proof a later
-			// rule or grant start of this parent's children is authorized with.
+			// rule or grant start of this parent's cluster children is authorized with.
 			recordLaunchAuthSession(ctx, a.dbPool, parent.ID, r.DecidedSid)
 		} else if host.dc = a.hub.GetHostDaemon(parent.DaemonID); host.dc == nil {
 			startError = msgDelegateDisconnected
@@ -575,14 +593,20 @@ func (a *API) startDecidedChild(ctx context.Context, r db.DelegationRequest, cs 
 // storedStartProblem re-validates the stored start against the parent's daemon (or the cluster) as
 // it is now, and re-checks the limits without counting this request twice: "" when it may start.
 func (a *API) storedStartProblem(ctx context.Context, parent *db.SessionRow, host childHost, r db.DelegationRequest, cs childStart) string {
-	raw, err := json.Marshal(cs)
+	// The stored start carries the provider the server resolved a bare folder name to; it is not a
+	// caller field, so the allowlist re-check reads the start without it (the repo is already
+	// owner/name, and validateChildStart below checks the start with its provider).
+	recheck := cs
+	recheck.Provider = ""
+	raw, err := json.Marshal(recheck)
 	if err != nil {
 		return msgStartFailed
 	}
-	if _, apiErr := parseChildStart(raw, host); apiErr != nil {
+	_, host, apiErr := parseChildStart(raw, host)
+	if apiErr != nil {
 		return apiErr.Message
 	}
-	if apiErr := a.validateChildStart(ctx, cs, host, a.delegatePrincipalFor(ctx, parent, r.DecidedSid)); apiErr != nil {
+	if apiErr := a.validateChildStart(ctx, cs, host, a.delegateFor(ctx, parent, cs.Runtime, r.DecidedSid)); apiErr != nil {
 		return apiErr.Message
 	}
 	if apiErr := a.checkDelegationLimits(ctx, parent, &r); apiErr != nil {
@@ -592,7 +616,8 @@ func (a *API) storedStartProblem(ctx context.Context, parent *db.SessionRow, hos
 }
 
 // startStoredChild starts the child in the server's own idempotency scope, key "dr:"+id. A cluster
-// child's credentials are released against the decider's browser session.
+// child's credentials are released against the decider's browser session (for a cluster or a
+// desktop parent alike).
 func (a *API) startStoredChild(ctx context.Context, parent *db.SessionRow, r db.DelegationRequest, cs childStart) (child, startError string) {
 	resp, apiErr := a.startChildScoped(ctx, parent, cs, "request:"+r.ID, "dr:"+r.ID, delegateDecideScope(parent.ID), r.DecidedSid)
 	if apiErr != nil {

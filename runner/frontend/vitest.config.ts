@@ -11,32 +11,32 @@ import { chatAliases } from './vite.config'
 //               implement. Scroll/touch/device-switch regressions kept slipping
 //               through precisely because they were never under a real browser.
 // Browser tests are named *.browser.test.tsx and excluded from the unit project.
+const prebundled = [
+  'react',
+  'react-dom',
+  'react-dom/client',
+  'react/jsx-dev-runtime',
+  'react/jsx-runtime',
+  '@testing-library/react',
+  '@xterm/xterm',
+  '@testing-library/user-event',
+  'react-router-dom',
+  'zustand',
+  'react-markdown',
+  'remark-gfm',
+  'pdfjs-dist',
+  'mermaid',
+  'vega',
+  'vega-lite',
+  'vega-interpreter',
+]
+
 export default defineConfig({
   resolve: { alias: chatAliases },
   // Pre-bundle these so the browser project doesn't trigger a mid-run Vite
   // re-optimize (which aborts the first test with "Failed to fetch dynamically
   // imported module").
-  optimizeDeps: {
-    include: [
-      'react',
-      'react-dom',
-      'react-dom/client',
-      'react/jsx-dev-runtime',
-      'react/jsx-runtime',
-      '@testing-library/react',
-      '@xterm/xterm',
-      '@testing-library/user-event',
-      'react-router-dom',
-      'zustand',
-      'react-markdown',
-      'remark-gfm',
-      'pdfjs-dist',
-      'mermaid',
-      'vega',
-      'vega-lite',
-      'vega-interpreter',
-    ],
-  },
+  optimizeDeps: { include: prebundled },
   test: {
     projects: [
       {
@@ -58,8 +58,13 @@ export default defineConfig({
       {
         plugins: [react()],
         resolve: { alias: chatAliases },
+        // An inline project does not inherit the root's optimizeDeps: without its own list, a cold
+        // cache found react-dom/client partway through the run and reloaded the page.
+        optimizeDeps: { include: prebundled },
         test: {
           name: 'browser',
+          // Only this app's files: the Board's browser tests have their own project in board/web,
+          // because files outside this root are not pre-scanned and a cold cache reloaded mid-run.
           include: ['src/**/*.browser.test.{ts,tsx}'],
           // cleanup() after each test so mounted terminals don't accumulate across
           // tests (they share one browser page and would otherwise leak).

@@ -64,9 +64,12 @@ type fakeK8s struct {
 	// the plugin list; a missing account answers 404. pluginStatus, when set,
 	// answers every plugin request with that status instead. pluginRequests
 	// records each request body received.
-	pluginLists    map[string][]pluginspec.Entry
-	pluginStatus   int
-	pluginRequests []internalPluginsRequest
+	pluginLists  map[string][]pluginspec.Entry
+	pluginStatus int
+	// credentialListStatus, when set, answers every credential list (the liveness check) with
+	// that status: a core outage (5xx) or a refusal.
+	credentialListStatus int
+	pluginRequests       []internalPluginsRequest
 	// conflictJob, when set, makes the next Job-create POST return 409 as if
 	// a live Job with the same name already existed (the "double spawn"
 	// branch of CreateSessionJob's 409 handling — jobFinished's GET for that
@@ -292,8 +295,12 @@ func (f *fakeK8s) credentialHandler() http.HandlerFunc {
 				return
 			}
 			f.mu.Lock()
-			dead := f.deadSessionIDs[proof.SessionID]
+			dead, forced := f.deadSessionIDs[proof.SessionID], f.credentialListStatus
 			f.mu.Unlock()
+			if forced != 0 {
+				w.WriteHeader(forced)
+				return
+			}
 			if dead {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -355,7 +362,9 @@ func newTestJobManager(t *testing.T, f *fakeK8s) *JobManager {
 	life := newClusterWatchLifetime(t.Context())
 	t.Cleanup(life.close) // cancel and join before either fake receiver closes
 	return &JobManager{
-		startWatches: life,
+		repositoryRead: func(context.Context, string, string) error { return nil }, // unrelated Job fixtures never contact real repositories
+		GitHubOrg:      "org",
+		startWatches:   life,
 		mintRuntimeLaunch: func(_ context.Context, _ string, message string) (string, string, error) {
 			if message == "" {
 				message = "test-message-capability"

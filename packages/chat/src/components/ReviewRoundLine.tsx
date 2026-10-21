@@ -1,7 +1,6 @@
 // The one line a round of review answers draws in the transcript (model/reviewRounds.ts):
-// "✓ 11 requests answered · report.md", which opens the review. Until the round's review file is
-// read, the count is the round's publishes (one per `review reply` call); then it is the requests
-// the round settled, against the review before it.
+// "✓ 11 requests answered · report.md", which opens the review. Counts appear only after
+// reading this version and its baseline; a publish can settle several requests at once.
 import { createContext, useContext, useEffect, useState } from 'react'
 import { useChat } from './context'
 import { parseReviewFile, type ReviewFile } from '../model/review'
@@ -26,33 +25,33 @@ export function ReviewRoundLine({ ev }: { ev: AgentEvent }) {
   const sessionId = chat?.sessionId ?? ''
   const latestId = round.latest.id
   const baselineId = round.baseline?.id
-  const [read, setRead] = useState<{ count: number; review: ReviewFile } | null>(null)
+  const [read, setRead] = useState<{ latestId: string; baselineId: string | undefined; count: number; review: ReviewFile } | null>(null)
 
   useEffect(() => {
-    // Without the review before the round (a page not loaded) the publishes are the best count.
+    // Without the baseline, the number of requests answered is unknown.
     if (!files || (!baselineId && !round.first)) return
     let live = true
     const load = async (id: string) => parseReviewFile(await (await files.raw(sessionId, id)).text())
     void (async () => {
       try {
         const [latest, baseline] = await Promise.all([load(latestId), baselineId ? load(baselineId) : Promise.resolve(null)])
-        if (live && latest) setRead({ count: answeredInRound(latest, baseline), review: latest })
+        if (live && latest) setRead({ latestId, baselineId, count: answeredInRound(latest, baseline), review: latest })
       } catch {
-        // The publishes stay the count.
+        // Leave the count unknown if the review could not be read.
       }
     })()
     return () => { live = false }
   }, [files, sessionId, latestId, baselineId, round.first])
 
-  const count = read?.count ?? round.publishes
+  const current = read?.latestId === latestId && read.baselineId === baselineId ? read : null
   const open = chat?.openReview
-  const text = <>✓ {plural(count)} · {round.file}</>
+  const text = <>{current ? `✓ ${plural(current.count)}` : 'Review responses'} · {round.file}</>
   return (
     <div className="agent-card marker review-round" data-testid="review-round" data-event-id={key}>
       {open
         ? (
             <button type="button" className="review-round-open" title={`Open the review of ${round.file}`}
-              onClick={() => open(round.file, read?.review.file.artifactId)}>
+              onClick={() => open(round.file, current?.review.file.artifactId)}>
               {text}
             </button>
           )

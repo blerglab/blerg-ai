@@ -18,8 +18,8 @@ export function SessionPage() {
 
   if (!boardId || !number) return null;
   return (
-    <main style={{ maxWidth: 720 }}>
-      <div className="row" style={{ marginBottom: 10 }}>
+    <main className="board-session-page">
+      <div className="row board-session-heading">
         <Link className="btn ghost small" to={`/boards/${boardId}/cards/${number}`}>
           ← card #{number}
         </Link>

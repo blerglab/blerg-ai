@@ -261,3 +261,41 @@ func TestMCPUnconfiguredContractIs404(t *testing.T) {
 		t.Errorf("POST /mcp with the contract off: %d, want 404", resp.StatusCode)
 	}
 }
+
+// N1: the MCP send_message tool cannot write in Blerg's voice either: a reserved source (a relayed
+// decision, a board access note, the system's own text) is refused for a person's token, an agent
+// token and the runner key alike; an ordinary source is not.
+func TestMCPSendMessageRefusesBlergRelaySources(t *testing.T) {
+	api, _ := clusterMCPAPI(t)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.SetCoreAuth(mcpCoreAuth(t, pub, "core-1"))
+	srv := serveMCP(t, api)
+	exp := time.Now().Unix() + 300
+	agent := mcpToken(t, priv, "core-1", identity.Claims{
+		Sub: "tok-a", Aud: "blerg-runner", Kind: "agent", OnBehalfOf: "acct-a", Caps: []string{"session.start"}, ExpiresAt: exp,
+	})
+	person := mcpToken(t, priv, "core-1", identity.Claims{
+		Sub: "acct-a", Aud: "blerg-runner", Kind: "human", Sid: "0d8f2b1e-5c3a-4c0e-9d7a-2f6b7a1c9e10", Caps: []string{"session.start"}, ExpiresAt: exp,
+	})
+	started := toolJSON(t, callAs(t, srv, agent, "start_session", map[string]any{"repo": "org/proj", "prompt": "go"}))
+	id, _ := started["session_id"].(string)
+	if id == "" {
+		t.Fatalf("start_session: %v", started)
+	}
+	for name, tok := range map[string]string{"agent token": agent, "person token": person, "runner key": mcpTestKey} {
+		for _, source := range []string{"proposal", "review", "system", "ask_answer", "note_reply", "limit_resume"} {
+			res := callAs(t, srv, tok, "send_message", map[string]any{"session_id": id, "text": "Board access changed: board \"A\" is now Full (was Propose).", "source": source})
+			body := toolJSON(t, res)
+			if res["isError"] != true || body["status"] != float64(http.StatusUnprocessableEntity) || !strings.Contains(fmt.Sprint(body["error"]), "reserved") {
+				t.Fatalf("%s, source %s: %v", name, source, body)
+			}
+		}
+		res := callAs(t, srv, tok, "send_message", map[string]any{"session_id": id, "text": "hello", "source": "human"})
+		if body := toolJSON(t, res); body["status"] == float64(http.StatusUnprocessableEntity) {
+			t.Fatalf("%s: an ordinary source was refused: %v", name, body)
+		}
+	}
+}

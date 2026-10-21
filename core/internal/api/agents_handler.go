@@ -31,7 +31,7 @@ const quickstartTemplate = "1. Read this document (`GET /agents`, `Accept: text/
 	"4. Start a session: `POST <runner>/api/runner/start` with `Idempotency-Key` and a `prompt` " +
 	"(and optionally `callback_url`; pass `auto_stop: true` for a one-shot task). You get a `session_id`.\n" +
 	"5. Follow it: `GET …/events?after_seq=` (poll), `GET …/events/stream` (SSE), or wait for the webhook.\n" +
-	"6. Collect: `GET …/result` → `terminal`, `branch` (`wip/<session_id>` on the repo's remote), " +
+	"6. Collect: `GET …/result` → `terminal`, `branch` (`wip/<session_id>`: on the repo's remote for a cluster session, in the desktop's own repository for a Local sandbox one), " +
 	"`last_assistant_message`.\n" +
 	"7. Prefer MCP? `POST <runner>/mcp` with the same bearer token exposes the same operations as tools.\n"
 

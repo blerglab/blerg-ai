@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 	"github.com/blerglab/blerg-ai/runner/internal/gitremote"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
@@ -75,6 +76,7 @@ type DaemonConn struct {
 	tokenHealSkipLogged  atomic.Bool // the "too old for a token heal" line was logged for this connection
 	restrictTools        bool        // honours SpawnSession.RestrictTools (hello restrict_tools)
 	codexRestricted      bool        // isolated Codex file/MCP runtime (hello codex_restricted)
+	sandboxClones        bool        // every sandboxed session in its own clone (hello sandbox_clones)
 	plugins              bool        // honours SpawnSession.Plugins (hello plugins)
 	sessionPluginEngines []string
 	pluginEngines        []string
@@ -375,6 +377,7 @@ func (dc *DaemonConn) AvailableEngines() []string {
 // Hub holds maps of connected daemons and browsers and serialises access to
 // those maps.
 type Hub struct {
+	reasoning reasoningCache
 	// daemonWorkFences is guarded by mu. Never wait for a fence while holding mu.
 	// Entries include waiters and are removed when their final holder releases.
 	daemonWorkFences     map[string]*daemonWorkFence
@@ -397,6 +400,7 @@ type Hub struct {
 	// why every call goes through NotifyCompletion rather than the field.
 	completionNotifier func(sessionID string)
 	childActivity      func(string)
+	childTurn          func(sessionID, kind, detail string) // child_turn_notes.go
 	delegationTerminal func(sessionID string)
 	delegationPaused   func(sessionID string)
 	delegationHello    func(context.Context, string) error
@@ -428,6 +432,11 @@ type Hub struct {
 	gaps agentGaps
 	// askSignal wakes an `ask` answer poll (messageevents.go). Registered by NewAPI; guarded by mu.
 	askSignal func(messageID string)
+	// questionAnswered delivers the answer to a question the agent did not wait on (questions.go).
+	// Registered by NewAPI; guarded by mu.
+	questionAnswered func(row db.MessageRow, answer, answerer string)
+	// questionSessionEnded drops a session's question delivery state when it ends (questions.go).
+	questionSessionEnded func(sessionID string)
 	// idleNotices are the sessions whose idle notice waits for their running work (notices.go).
 	idleNotices idleNoticeSet
 	// tokenHeals are the re-issued session tokens awaiting their daemon's answer (sessiontokenheal.go).
@@ -709,6 +718,16 @@ func (h *Hub) Register(d *DaemonConn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.daemons[d.ID] = d
+	// A (re)connecting daemon has no thinking in flight from before: a restart ended it, and a
+	// resumed turn opens a new scope. Without this a scope opened before the restart keeps its clock
+	// ticking from the old start until the next text or tool call.
+	var owned []string
+	for sid, owner := range h.sessionOwners {
+		if owner == d.ID {
+			owned = append(owned, sid)
+		}
+	}
+	h.reasoning.forget(owned)
 }
 
 // UnregisterIfCurrent removes a daemon from the hub only if dc is still the
@@ -943,6 +962,7 @@ func (h *Hub) Unsubscribe(sessionID, browserID string) {
 // Callers must call Unsubscribe or UnsubscribeSession before closing
 // a BrowserConn's send channel to avoid a send-on-closed-channel panic.
 func (h *Hub) FanOutSessionOutput(sessionID string, data []byte) {
+	h.observeReasoning(sessionID, data)
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, ch := range h.subscriptions[sessionID] {

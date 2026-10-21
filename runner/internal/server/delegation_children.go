@@ -32,6 +32,10 @@ func (a *API) registerDelegationChildRoutes(mux *http.ServeMux) {
 
 // Child access precedes parsing or handling a body: unknown and foreign child
 // ids have the same response even when the supplied body is invalid.
+//
+// The delegate carries the owner proof the child would resume with: a cluster parent's (its newest,
+// delegatePrincipalFor), or for a desktop parent's cluster child the proof that child was started
+// with (recorded on the child), never the desktop's (a desktop child needs none).
 func (a *API) delegateChild(w http.ResponseWriter, r *http.Request) (*db.SessionRow, runnerPrincipal, string, bool) {
 	parent, _, ok := a.delegateParent(w, r, delegateOpts{AllowDisconnected: true})
 	if !ok {
@@ -43,11 +47,44 @@ func (a *API) delegateChild(w http.ResponseWriter, r *http.Request) (*db.Session
 		writeError(w, http.StatusNotFound, "session not found")
 		return nil, runnerPrincipal{}, "", false
 	}
-	if _, problem := a.requireSessionAccess(r.Context(), p, child); problem != nil {
+	row, problem := a.requireSessionAccess(r.Context(), p, child)
+	if problem != nil {
 		writeAPIError(w, problem)
 		return nil, runnerPrincipal{}, "", false
 	}
+	if !onClusterParent(parent) && onClusterParent(row) {
+		p.delegateProof = a.sessionLaunchProof(r.Context(), child)
+	}
 	return parent, p, child, true
+}
+
+// clusterResumeProblem: a message to an idle cluster child resumes it with the owner's credentials,
+// against p's proof. With no live proof the resume would start a pod that cannot fetch them: refuse
+// first, with what to do. nil when the message needs no resume (a pod is connected, or the child is
+// not an idle cluster child) or the proof is live.
+func (a *API) clusterResumeProblem(ctx context.Context, p runnerPrincipal, child string) *APIError {
+	row, err := db.GetSession(ctx, a.dbPool, child)
+	if err != nil {
+		return apiErrorf(http.StatusServiceUnavailable, "session lookup failed")
+	}
+	if row == nil || !onClusterParent(row) || row.Status != "disconnected" || a.hub.FindDaemonForSession(child) != nil {
+		return nil
+	}
+	if a.hub.JobManager() == nil {
+		return nil
+	}
+	// clusterOwnerState needs no proof where none is needed (no personal credentials wired), and
+	// tells a refused sign-in apart from a core it could not ask.
+	live, known := a.clusterOwnerState(ctx, p)
+	switch {
+	case live:
+		return nil
+	case !known:
+		e := apiErrorf(http.StatusServiceUnavailable, "the owner's sign-in could not be checked; retry shortly")
+		e.RetryAfter = 5
+		return e
+	}
+	return apiErrorf(http.StatusConflict, "%s", msgClusterChildResumeNoProof)
 }
 
 type childOperationSummary struct {
@@ -139,6 +176,10 @@ func (a *API) handleChildMessage(w http.ResponseWriter, r *http.Request) {
 		ClientID string `json:"client_id,omitempty"`
 	}
 	if !decodeChildBody(w, r, &request) {
+		return
+	}
+	if problem := a.clusterResumeProblem(r.Context(), p, child); problem != nil {
+		writeAPIError(w, problem)
 		return
 	}
 	body, problem := a.SendMessage(r.Context(), p, child, request.Text, "session", request.ClientID)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { budgetLine, decidedLine, delegationStates, engineLabel, runtimeWords } from './delegations'
+import { boardsLine, budgetLine, decidedLine, delegationStates, engineLabel, runtimeWords } from './delegations'
 import type { AgentEvent } from '../types'
 
 function ev(kind: string, ts: string, payload: unknown): AgentEvent {
@@ -58,5 +58,16 @@ describe('delegation states', () => {
     expect(runtimeWords('docker')).toBe('in the desktop sandbox')
     expect(runtimeWords('daemon')).toBe('on your desktop, unsandboxed')
     expect(runtimeWords('cluster')).toBe('on the cluster')
+  })
+})
+
+describe('boardsLine', () => {
+  it('names each board passed down with its level', () => {
+    expect(boardsLine([{ board: 'b-1', name: 'Blerg', level: 'full' }, { board: 'b-2', level: 'read' }, { board: 'b-3', name: 'Ops', level: 'file' }]))
+      .toBe('with Blerg · Full, b-2 · Read, Ops · File without asking')
+  })
+  it('is empty without boards', () => {
+    expect(boardsLine(undefined)).toBe('')
+    expect(boardsLine([])).toBe('')
   })
 })

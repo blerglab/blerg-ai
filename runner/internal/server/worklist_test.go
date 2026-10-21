@@ -346,3 +346,29 @@ func TestChecklistRemoveKeepsTheOthersAndRecordsTheChange(t *testing.T) {
 		t.Fatalf("remove 7 = %d %v", code, body)
 	}
 }
+
+// A pinned Blerg Board card (source blerg-board with its board_id) gets the runner's address for it
+// (the Board app's page, inside Blerg) in place of any the agent sent, and /live names its board.
+func TestPinnedBoardCardIsAddressedByTheRunner(t *testing.T) {
+	fx := newWorkFx(t)
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"board_url": "https://board.example.test"})
+	}))
+	defer core.Close()
+	fx.api.coreURL = core.URL
+	code, body := fx.postWork("tickets", fx.sess, fx.sessTok, map[string]any{"action": "pin", "ticket": map[string]any{
+		"source": "blerg-board", "board_id": "board-a", "key": "#12", "title": "Fix the flaky test", "status": "In progress",
+		"url": "https://elsewhere.example/card"}})
+	tk, _ := body["ticket"].(map[string]any)
+	if code != http.StatusCreated || tk["url"] != "https://board.example.test/boards/board-a/cards/12" || tk["board_id"] != "board-a" || tk["key"] != "#12" {
+		t.Fatalf("pin = %d %v", code, body)
+	}
+	r := fx.getLive(fx.sess, fx.token(topicOwner, "human"), "")
+	var live struct {
+		Tickets []map[string]any `json:"tickets"`
+	}
+	_ = json.Unmarshal(r.Body.Bytes(), &live)
+	if len(live.Tickets) != 1 || live.Tickets[0]["board_id"] != "board-a" || live.Tickets[0]["url"] != "https://board.example.test/boards/board-a/cards/12" {
+		t.Fatalf("live tickets = %s", r.Body.String())
+	}
+}

@@ -19,6 +19,11 @@ function reviewOf(body: unknown, sessionId: string, requestId: string): Review {
   }
   for (const key of ['model', 'effort', 'repo'] as const) if (typeof request[key] === 'string') payload[key] = request[key]
   if (typeof request.no_repo === 'boolean') payload.no_repo = request.no_repo
+  // The board access the child gets: shown on the card, so the person decides knowing it.
+  if (Array.isArray(request.boards)) {
+    if (!request.boards.every(b => record(b) && typeof b.board === 'string' && typeof b.level === 'string' && (b.name === undefined || typeof b.name === 'string'))) throw new Error('Request unavailable.')
+    payload.boards = (request.boards as { board: string; name?: string; level: string }[]).map(b => ({ board: b.board, name: b.name, level: b.level }))
+  }
   const budget = request.budget
   if (record(budget) && typeof budget.engine === 'string' && typeof budget.available === 'boolean' && Array.isArray(budget.windows) && budget.windows.every(window => record(window) && typeof window.id === 'string' && typeof window.used_percent === 'number' && Number.isFinite(window.used_percent) && (window.resets_at == null || typeof window.resets_at === 'string'))) {
     payload.budget = { engine: budget.engine, available: budget.available, windows: budget.windows as NonNullable<DelegationRequestPayload['budget']>['windows'] }

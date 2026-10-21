@@ -396,6 +396,50 @@ class TestNote(unittest.TestCase):
         server.server_close()
 
 
+class TestAskNoWait(unittest.TestCase):
+    """ask --no-wait posts a question and returns at once; ask --resolve closes one."""
+
+    def _run(self, args, requests):
+        server = make_stub_server(message_id="q-123")
+        port = server.server_address[1]
+        t = threading.Thread(target=lambda: [server.handle_request() for _ in range(requests)])
+        t.start()
+        env = {
+            "BLERG_RUNNER_SERVER_HTTP": f"http://127.0.0.1:{port}",
+            "BLERG_RUNNER_SESSION_ID": "sess-q",
+            "BLERG_RUNNER_DAEMON_TOKEN": "tok-q",
+        }
+        result = run_blerg_runner(args, env_override=env)
+        t.join(timeout=5)
+        server.server_close()
+        return result, server.recorded
+
+    def test_no_wait_posts_and_returns_the_id_without_polling(self):
+        result, recorded = self._run(["ask", "--no-wait", "Ship the blue one?"], 1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(recorded), 1, recorded)
+        self.assertEqual(recorded[0]["path"], "/api/messages")
+        self.assertEqual(recorded[0]["body"], {"session_id": "sess-q", "kind": "ask",
+                                               "body": "Ship the blue one?", "no_wait": True})
+        self.assertIn("q-123", result.stdout)
+        self.assertIn("ask --resolve q-123", result.stdout)
+
+    def test_resolve_closes_the_question(self):
+        result, recorded = self._run(["ask", "--resolve", "q-123"], 1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([(r["method"], r["path"]) for r in recorded], [("POST", "/api/messages/q-123/expire")])
+
+    def test_resolve_refuses_a_question_text(self):
+        result, recorded = self._run(["ask", "--resolve", "q-123", "extra"], 0)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_help_says_decisions_go_in_as_questions(self):
+        result = run_blerg_runner(["ask", "--help"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("belongs to the person", result.stdout)
+        self.assertIn("--no-wait", result.stdout)
+
+
 class TestAskTimeoutExpiry(unittest.TestCase):
     """ask --timeout should POST to /expire and exit non-zero when time runs out."""
 
@@ -1157,11 +1201,16 @@ class AttachmentStubHandler(http.server.BaseHTTPRequestHandler):
         base = "/api/sessions/sess-fetch/attachments"
         if self.path == base:
             items = []
-            for i, (n, b) in self.server.files.items():
-                it = {"id": i, "name": n, "size": self.server.listed_size.get(i, len(b)), "content_type": "application/pdf"}
+            # server.files is in upload order. The real server lists oldest first with each upload's
+            # time; server.newest_first flips the listing so the CLI cannot lean on the order.
+            for n_up, (i, (n, b)) in enumerate(self.server.files.items()):
+                it = {"id": i, "name": n, "size": self.server.listed_size.get(i, len(b)), "content_type": "application/pdf",
+                      "created_at": getattr(self.server, "created", {}).get(i, f"2026-10-20T10:{n_up // 60:02d}:{n_up % 60:02d}.5Z")}
                 if i in self.server.versions:
                     it["version"], it["latest_version"] = self.server.versions[i]
                 items.append(it)
+            if getattr(self.server, "newest_first", False):
+                items.reverse()
             return self._reply(200, json.dumps({"attachments": items}).encode())
         if self.path.startswith(base + "/") and self.path.endswith("/file"):
             aid = self.path[len(base) + 1:-len("/file")]
@@ -1228,6 +1277,9 @@ class TestFetch(unittest.TestCase):
         return subprocess.run([sys.executable, SCRIPT, "fetch"] + args, capture_output=True, text=True,
                               timeout=15, env=env, cwd=self.tmp.name)
 
+    def _downloaded_names(self):
+        return sorted(n for n in os.listdir(os.path.join(self.tmp.name, "attachments")) if n != ".blerg-fetch")
+
     def _read(self, *parts):
         with open(os.path.join(self.tmp.name, *parts), "rb") as f:
             return f.read()
@@ -1244,8 +1296,8 @@ class TestFetch(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self._read("attachments", "one.pdf"), b"%PDF one")
         self.assertEqual(self._read("attachments", "two.pdf"), b"%PDF two two")
-        self.assertIn("Saved attachments/one.pdf (8 B)", result.stdout)
-        self.assertIn("Saved attachments/two.pdf (12 B)", result.stdout)
+        self.assertIn(f"Saved attachments/one.pdf (id {'a' * 32}, 8 B)", result.stdout)
+        self.assertIn(f"Saved attachments/two.pdf (id {'b' * 32}, 12 B)", result.stdout)
         self.assertIn("Fetched 2 files", result.stdout)
         self.assertTrue(all(r["auth"] == "Bearer sess-tok" for r in self.server.recorded))
         self.assertEqual(os.stat(os.path.join(self.tmp.name, "attachments")).st_mode & 0o777, 0o755)
@@ -1257,26 +1309,56 @@ class TestFetch(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "work", "in", "one.pdf")))
         self.assertIn("Saved work/in/two.pdf", result.stdout)
 
-    def test_select_by_name(self):
-        result = self._run(["one.pdf"])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self._read("attachments", "one.pdf"), b"%PDF one")
-
     def test_never_overwrites(self):
-        self.assertEqual(self._run(["--all"]).returncode, 0)
-        self.assertEqual(self._run(["--all"]).returncode, 0)
+        folder = os.path.join(self.tmp.name, "attachments")
+        os.mkdir(folder)
+        with open(os.path.join(folder, "one.pdf"), "wb") as f:
+            f.write(b"local work")
+        first = self._run(["--all"])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self._run(["--all"])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self._read("attachments", "one.pdf"), b"local work")
+        self.assertEqual(self._read("attachments", "one-1.pdf"), b"%PDF one")
+        self.assertNotIn("Saved ", second.stdout)
+        self.assertFalse(os.path.exists(os.path.join(folder, "one-2.pdf")))
+
+    def test_changed_local_copy_is_preserved_and_replaced_once(self):
+        self.assertEqual(self._run(["a" * 32]).returncode, 0)
+        with open(os.path.join(self.tmp.name, "attachments", "one.pdf"), "wb") as f:
+            f.write(b"modified")  # Same byte length: a size-only cache would miss this edit.
         result = self._run(["--all"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self._read("attachments", "one.pdf"), b"%PDF one")
+        self.assertEqual(self._read("attachments", "one.pdf"), b"modified")
         self.assertEqual(self._read("attachments", "one-1.pdf"), b"%PDF one")
-        self.assertEqual(self._read("attachments", "one-2.pdf"), b"%PDF one")
-        self.assertIn("Saved attachments/one-2.pdf", result.stdout)
+        self.assertEqual(self._run(["--all"]).returncode, 0)
+        self.assertEqual(self._downloaded_names(), ["one-1.pdf", "one.pdf", "two.pdf"])
+
+    def test_simultaneous_fetches_download_each_id_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: self._run(["--all"]), range(2)))
+        for result in results:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._downloaded_names(), ["one.pdf", "two.pdf"])
+        self.assertEqual(len([r for r in self.server.recorded if r["path"].endswith("/file")]), 2)
+
+    def test_cached_symlink_is_not_followed(self):
+        self.assertEqual(self._run(["a" * 32]).returncode, 0)
+        folder = os.path.join(self.tmp.name, "attachments")
+        os.rename(os.path.join(folder, "one.pdf"), os.path.join(self.tmp.name, "outside.pdf"))
+        os.symlink("../outside.pdf", os.path.join(folder, "one.pdf"))
+        result = self._run(["--all"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.path.islink(os.path.join(folder, "one.pdf")))
+        self.assertEqual(self._read("attachments", "one-1.pdf"), b"%PDF one")
+        self.assertEqual(self._read("outside.pdf"), b"%PDF one")
 
     def test_server_name_is_sanitised(self):
         self.server.files = {"c" * 32: ("../../evil\\x.txt", b"x"), "d" * 32: ("..", b"y")}
         result = self._run(["--all"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        names = sorted(os.listdir(os.path.join(self.tmp.name, "attachments")))
+        names = self._downloaded_names()
         self.assertEqual(len(names), 2, names)
         for n in names:
             self.assertNotIn("/", n)
@@ -1305,7 +1387,7 @@ class TestFetch(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("blerg-runner fetch:", result.stderr)
         self.assertIn("size", result.stderr)
-        self.assertEqual(os.listdir(os.path.join(self.tmp.name, "attachments")), [])
+        self.assertEqual(self._downloaded_names(), [])
 
     def test_unknown_id_fails_but_others_are_still_fetched(self):
         result = self._run(["nosuchid", "a" * 32])
@@ -1344,35 +1426,123 @@ class TestFetch(unittest.TestCase):
         }
         self.server.versions = {"a" * 32: (1, 2), "c" * 32: (2, 2), "b" * 32: (1, 1)}
 
-    def test_all_fetches_only_the_latest_version_of_each_name(self):
+    def test_same_name_ids_both_fetch_and_second_all_is_a_noop(self):
+        self._versioned()
+        first = self._run(["--all"])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(self._read("attachments", "one.pdf"), b"%PDF one v1")
+        self.assertEqual(self._read("attachments", "one-1.pdf"), b"%PDF one v2 newer")
+        before = {name: os.stat(os.path.join(self.tmp.name, "attachments", name)).st_mtime_ns
+                  for name in ("one.pdf", "one-1.pdf", "two.pdf")}
+        gets = len([r for r in self.server.recorded if r["path"].endswith("/file")])
+        second = self._run(["--all"])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertNotIn("Saved ", second.stdout)
+        self.assertEqual(gets, len([r for r in self.server.recorded if r["path"].endswith("/file")]))
+        self.assertEqual(before, {name: os.stat(os.path.join(self.tmp.name, "attachments", name)).st_mtime_ns for name in before})
+
+    def test_fetch_requires_an_id_instead_of_guessing_from_a_name(self):
+        result = self._run(["one.pdf"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("attachment ID", result.stderr)
+        self.assertIn(f"did you mean {'a' * 32}", result.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "attachments", "one.pdf")))
+
+    def test_a_name_with_several_uploads_hints_every_id(self):
+        self._versioned()
+        result = self._run(["one.pdf"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"did you mean {'a' * 32} or {'c' * 32}", result.stderr)
+
+    def test_same_name_local_names_follow_upload_time_whatever_the_listing_order(self):
+        for newest_first in (False, True):
+            with self.subTest(newest_first=newest_first):
+                self._versioned()
+                self.server.newest_first = newest_first
+                out = os.path.join(self.tmp.name, f"order-{newest_first}")
+                result = self._run(["--all", "--out", out])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                with open(os.path.join(out, "one.pdf"), "rb") as f:
+                    self.assertEqual(f.read(), b"%PDF one v1")  # the oldest keeps the plain name
+                with open(os.path.join(out, "one-1.pdf"), "rb") as f:
+                    self.assertEqual(f.read(), b"%PDF one v2 newer")
+                self.assertIn(f"one.pdf (id {'a' * 32}, ", result.stdout)
+                self.assertIn(f"one-1.pdf (id {'c' * 32}, ", result.stdout)
+
+    def test_upload_times_compare_as_instants_not_strings(self):
+        # "10:00:00Z" sorts after "10:00:00.5Z" as text; as times it is earlier. The listing order
+        # (here the opposite of upload order) and the version are deliberately no help.
+        self.server.files = {"c" * 32: ("one.pdf", b"later"), "a" * 32: ("one.pdf", b"earlier")}
+        self.server.created = {"a" * 32: "2026-10-20T10:00:00Z", "c" * 32: "2026-10-20T12:00:00.5+02:00"}
+        result = self._run(["--all"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._read("attachments", "one.pdf"), b"earlier")
+        self.assertEqual(self._read("attachments", "one-1.pdf"), b"later")
+
+    def test_fetch_before_and_after_a_second_same_name_upload(self):
+        # The person attaches image.png, the agent fetches; then a second image.png, and it fetches again.
+        self.server.newest_first = True
+        self.server.files = {"a" * 32: ("image.png", b"first picture")}
+        self.server.versions = {"a" * 32: (1, 1)}
+        first = self._run(["--all"])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn(f"Saved attachments/image.png (id {'a' * 32}, ", first.stdout)
+        self.server.files["c" * 32] = ("image.png", b"second picture")
+        self.server.versions = {"a" * 32: (1, 2), "c" * 32: (2, 2)}
+        second = self._run(["--all"])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self._read("attachments", "image.png"), b"first picture")
+        self.assertEqual(self._read("attachments", "image-1.png"), b"second picture")
+        self.assertIn(f"Saved attachments/image-1.png (id {'c' * 32}, ", second.stdout)
+        self.assertIn(f"Already have {'a' * 32} at attachments/image.png", second.stdout)
+        # A fetch of the same two into a fresh folder in one go maps them the same way.
+        fresh = self._run(["--all", "--out", "fresh"])
+        self.assertEqual(fresh.returncode, 0, fresh.stderr)
+        self.assertEqual(self._read("fresh", "image.png"), b"first picture")
+        self.assertEqual(self._read("fresh", "image-1.png"), b"second picture")
+        # The same ID asked for again says where it already is.
+        again = self._run(["c" * 32])
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn(f"Already have {'c' * 32} at attachments/image-1.png", again.stdout)
+        listed = self._run(["--list"])
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        lines = {l.split()[0]: l for l in listed.stdout.strip().splitlines()}
+        self.assertIn("attachments/image.png", lines["a" * 32])
+        self.assertIn("attachments/image-1.png", lines["c" * 32])
+
+    def test_repeated_all_with_unchanged_files_never_writes_another_copy(self):
+        self.assertEqual(self._run(["--all"]).returncode, 0)
+        result = self._run(["--all"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Saved ", result.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "attachments", "one-1.pdf")))
+
+    def test_all_fetches_every_id_including_older_same_name_files(self):
         self._versioned()
         result = self._run(["--all"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(sorted(os.listdir(os.path.join(self.tmp.name, "attachments"))), ["one.pdf", "two.pdf"])
-        self.assertEqual(self._read("attachments", "one.pdf"), b"%PDF one v2 newer")
-        self.assertIn("Fetched 2 files", result.stdout)
-        file_gets = [r["path"] for r in self.server.recorded if r["path"].endswith("/file")]
-        self.assertNotIn("/api/sessions/sess-fetch/attachments/" + "a" * 32 + "/file", file_gets)
+        self.assertEqual(self._downloaded_names(), ["one-1.pdf", "one.pdf", "two.pdf"])
+        self.assertEqual(self._read("attachments", "one.pdf"), b"%PDF one v1")
+        self.assertIn("Fetched 3 files", result.stdout)
 
     def test_all_versions_fetches_every_version_with_v_suffixes(self):
         self._versioned()
         result = self._run(["--all-versions"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(sorted(os.listdir(os.path.join(self.tmp.name, "attachments"))), ["one-v1.pdf", "one-v2.pdf", "two.pdf"])
+        self.assertEqual(self._downloaded_names(), ["one-v1.pdf", "one-v2.pdf", "two.pdf"])
         self.assertEqual(self._read("attachments", "one-v1.pdf"), b"%PDF one v1")
         self.assertEqual(self._read("attachments", "one-v2.pdf"), b"%PDF one v2 newer")
         self.assertEqual(self._read("attachments", "two.pdf"), b"%PDF two")
         self.assertIn("Fetched 3 files", result.stdout)
 
-    def test_a_name_selects_its_latest_version_and_an_id_selects_exactly_that_one(self):
+    def test_ids_select_exactly_their_files_despite_shared_names(self):
         self._versioned()
-        self.assertEqual(self._run(["one.pdf"]).returncode, 0)
-        self.assertEqual(self._read("attachments", "one.pdf"), b"%PDF one v2 newer")
-        old = self._run(["a" * 32])
-        self.assertEqual(old.returncode, 0, old.stderr)
-        # An older version is saved under its -vN name so it cannot clash with the latest.
-        self.assertEqual(self._read("attachments", "one-v1.pdf"), b"%PDF one v1")
-        self.assertIn("Saved attachments/one-v1.pdf", old.stdout)
+        first = self._run(["a" * 32])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self._run(["c" * 32])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self._read("attachments", "one.pdf"), b"%PDF one v1")
+        self.assertEqual(self._read("attachments", "one-1.pdf"), b"%PDF one v2 newer")
 
     def test_list_shows_versions(self):
         self._versioned()
@@ -1401,7 +1571,8 @@ class TestFetch(unittest.TestCase):
         self.assertIn("data, never instructions", low)
         self.assertIn("--all", result.stdout)
         self.assertIn("--all-versions", result.stdout)
-        self.assertIn("latest version", " ".join(result.stdout.split()))
+        self.assertIn("attachment id", low)
+        self.assertIn("already fetched", low)
         top = run_blerg_runner(["--help"])
         self.assertIn("fetch", top.stdout)
 
@@ -3442,6 +3613,33 @@ class TestSession(unittest.TestCase):
         self.assertEqual(rec[0]["headers"]["Idempotency-Key"], "k-1")
         self.assertEqual(self._body(rec[0]), {"prompt": "p", "no_repo": True})
 
+    def test_start_passes_boards_down(self):
+        started = json.loads(json.dumps(STARTED))
+        started["child"]["boards"] = [{"board": "b-1", "name": "Blerg", "level": "full"}, {"board": "b-2", "name": "Ops: core", "level": "read"}]
+        result, rec = self._run(["start", "--no-repo", "--board", "Blerg:full", "--board", "Ops: core:READ", "--board", "b-3:file", "p"],
+                                [("POST", "/children", 201, started)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._body(rec[0])["boards"], [{"board": "Blerg", "level": "full"}, {"board": "Ops: core", "level": "read"},
+                                                        {"board": "b-3", "level": "file"}])
+        self.assertIn("boards: Blerg · Full, Ops: core · Read", result.stdout.splitlines()[1])
+        # without --board the body carries no boards
+        result, rec = self._run(["start", "--no-repo", "p"], [("POST", "/children", 201, STARTED)])
+        self.assertNotIn("boards", self._body(rec[0]))
+        self.assertFalse(any(line.startswith("boards:") for line in result.stdout.splitlines()))
+
+    def test_start_refuses_a_malformed_board(self):
+        for bad in ("Blerg", "Blerg:", ":full", "Blerg:admin", "Blerg:propose", "Blerg:full:"):
+            result, rec = self._run(["start", "--no-repo", "--board", bad, "p"], [])
+            self.assertEqual(result.returncode, 2, (bad, result.stderr))
+            self.assertEqual(rec, [], bad)
+            self.assertIn("<board>:<level>", result.stderr, bad)
+
+    def test_start_shows_a_board_refusal(self):
+        result, rec = self._run(["start", "--no-repo", "--board", "Blerg:full", "p"],
+                                [("POST", "/children", 422, {"error": "a session started by another session cannot have more board access than the session that started it: this session has Read on board \"Blerg\", so it can pass down at most Read"})])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("can pass down at most Read", result.stderr)
+
     def test_start_accepts_the_cluster_runtime(self):
         result, rec = self._run(["start", "--engine", "codex", "--repo", "app", "--runtime", "cluster", "p"],
                                 [("POST", "/children", 201, STARTED)])
@@ -3652,6 +3850,15 @@ class TestSession(unittest.TestCase):
         self.assertEqual(out[4][0].strip(), "stopped")
         self.assertEqual(json.loads(out[5][0]), {"lifecycle": "running", "text": "hi"})
 
+    def test_model_confirms_the_model_and_effort(self):
+        for reply, resolved in [({}, "gpt-6"), ({"model": "gpt-6.1"}, "gpt-6.1")]:
+            with self.subTest(reply=reply):
+                res, rec = self._run(["model", CHILD, "gpt-6", "--effort", "high"],
+                                     [("POST", "/model", 202, reply)])
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(res.stdout.strip(), f"model set: {resolved} (effort high)")
+                self.assertEqual(self._body(rec[0]), {"model": "gpt-6", "effort": "high"})
+
     def test_send_reports_an_answered_question(self):
         res, _ = self._run(["send", CHILD, "yes"], [("POST", "/children/", 202, {"answered_ask": True})])
         self.assertEqual(res.stdout.strip(), "answered its question")
@@ -3778,6 +3985,21 @@ class TestSession(unittest.TestCase):
         self.assertEqual(res.stdout.strip(), "claude  5h 100% used · capped until 4:10 PM")
         res, _ = self._run(["budget"], [("GET", "/budget", 200, {"engines": [], "note": "no desktop daemon"})], cmd=())
         self.assertEqual(res.stdout.strip(), "no desktop daemon")
+
+    def test_budget_for_a_desktop_sessions_cluster_children(self):
+        body = {"daemon": "the cluster", "engines": [{"engine": "codex", "available": True, "windows": [], "note": "usage unknown (remote provider)"}]}
+        res, rec = self._run(["budget", "--runtime", "cluster"], [("GET", "/api/sessions/sess-par/budget", 200, body)], cmd=())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(rec[0]["path"].endswith("/budget?runtime=cluster"), rec[0]["path"])
+        self.assertEqual(res.stdout.strip(), "codex  usage unknown (remote provider)")
+        res, rec = self._run(["budget"], [("GET", "/api/sessions/sess-par/budget", 200, body)], cmd=())
+        self.assertNotIn("runtime", rec[0]["path"])
+
+    def test_help_says_a_desktop_session_can_start_a_cluster_child(self):
+        res = run_blerg_runner(["session", "--help"])
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("a desktop session can start a child on the cluster", " ".join(res.stdout.split()))
+        self.assertNotIn("A desktop session cannot start a cluster child", " ".join(res.stdout.split()))
 
     def test_not_under_blerg_is_a_quiet_noop(self):
         res = run_blerg_runner(["session", "list"])

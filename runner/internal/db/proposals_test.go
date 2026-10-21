@@ -303,3 +303,35 @@ func TestProposalFailPendingForConnections(t *testing.T) {
 		t.Errorf("another account must stay pending: %+v", p)
 	}
 }
+
+// The account-wide pending count (the navigation badge's pending_count) leaves out a pending row past
+// its deadline that the sweeper has not yet moved to expired: the list shows it as expired, so it
+// no longer needs the person, as CountPendingProposalsForSession already does.
+func TestCountPendingProposalsLeavesOutRowsPastTheirDeadline(t *testing.T) {
+	pool := proposalTestPool(t)
+	ctx := context.Background()
+	fresh, err := db.InsertProposal(ctx, pool, newProposal("acct-a", propConn1), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overdue, err := db.InsertProposal(ctx, pool, newProposal("acct-a", propConn1), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended, err := db.InsertProposal(ctx, pool, newProposal("acct-a", propConn1), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE mcp_proposals SET created_at = now() - interval '8 days' WHERE id = ANY($1::uuid[])`,
+		[]string{overdue.ID, extended.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// An extension moves the deadline: that one still counts.
+	if _, err := pool.Exec(ctx, `UPDATE mcp_proposals SET expires_at_override = now() + interval '1 day' WHERE id = $1::uuid`, extended.ID); err != nil {
+		t.Fatal(err)
+	}
+	n, err := db.CountPendingProposals(ctx, pool, "acct-a")
+	if err != nil || n != 2 {
+		t.Fatalf("CountPendingProposals = %d, %v; want 2 (%s fresh, %s extended; not %s, past its deadline)", n, err, fresh.ID, extended.ID, overdue.ID)
+	}
+}

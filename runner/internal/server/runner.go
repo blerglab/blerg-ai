@@ -219,8 +219,9 @@ func (a *API) authRunner(w http.ResponseWriter, r *http.Request) (runnerPrincipa
 }
 
 type runnerStartRequest struct {
-	Repo   string `json:"repo"`
-	GitURL string `json:"git_url"` // optional override for cross-org repos
+	resolvedRepoProvider bool
+	Repo                 string `json:"repo"`
+	GitURL               string `json:"git_url"` // optional override for cross-org repos
 	// Provider is the git provider Repo lives on (a gitprovider ID). Optional:
 	// absent means GitHub, as it always did for this contract (see
 	// repo_provider.go). omitempty keeps an older request's idempotency hash.
@@ -292,6 +293,9 @@ type runnerStartRequest struct {
 	DelegationVia   string     `json:"-"`
 	KeepRunning     bool       `json:"-"`
 	ParentEpoch     *time.Time `json:"-"`
+	// ChildBoards are the board levels a parent passes down (child_board_access.go): part of the
+	// child's idempotency hash, so a key reused with other boards is a different request.
+	ChildBoards []childBoard `json:"-"`
 }
 
 // Runtime values POST /api/runner/start accepts. "" means "whatever this
@@ -411,8 +415,18 @@ func (p runnerPrincipal) seesAllSessions() bool {
 // session ids exist. A session with no spawning account (one the static runner
 // key started) belongs to nobody, so a scoped principal cannot see it either.
 func (a *API) requireSessionAccess(ctx context.Context, p runnerPrincipal, sessionID string) (*db.SessionRow, *APIError) {
+	if !db.ValidUUID(sessionID) {
+		return nil, apiErrorf(http.StatusNotFound, "session not found")
+	}
 	row, err := db.GetSession(ctx, a.dbPool, sessionID)
-	if err != nil || row == nil {
+	if err != nil {
+		// Not "not found": a caller that counts refusals (a question's answer, questions.go) must
+		// not read a database it could not ask as a session that is gone.
+		e := apiErrorf(http.StatusServiceUnavailable, "session state unavailable; retry shortly")
+		e.RetryAfter = 5
+		return nil, e
+	}
+	if row == nil {
 		return nil, apiErrorf(http.StatusNotFound, "session not found")
 	}
 	if !canSee(p, row) { // privacy.go: also the private-session rule, which no principal bypasses
@@ -637,6 +651,13 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	// The session id is minted here, before anything is started, because the
 	// idempotency record has to name it: a retry that arrives while the first
 	// start is still in flight must be answered with the SAME id.
+	if !req.NoRepo && req.GitURL == "" && principal.Kind != sessionDelegateKind && a.hub.JobManager() != nil && (req.Runtime == "" || req.Runtime == runnerRuntimeCluster) {
+		repo, provider, problem := a.resolveClusterRepo(req.Repo, req.Provider, req.DaemonID)
+		if problem != "" {
+			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", problem)
+		}
+		req.Repo, req.Provider = repo, provider
+	}
 	sessionID := newUUID()
 	scope := principal.startScope()
 	if req.IdemScope != "" {
@@ -697,7 +718,9 @@ func startRequestHash(req runnerStartRequest) (string, error) {
 			ParentSessionID string             `json:"parent_session_id"`
 			DelegationVia   string             `json:"delegation_via"`
 			KeepRunning     bool               `json:"keep_running"`
-		}{req, req.ParentSessionID, req.DelegationVia, req.KeepRunning}
+			// Absent without boards: the hash of a start that passes none is what it was before.
+			Boards []childBoard `json:"boards,omitempty"`
+		}{req, req.ParentSessionID, req.DelegationVia, req.KeepRunning, childBoardsHashKey(req.ChildBoards)}
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -864,7 +887,7 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 		}
 		// The typed causes let the cron start path tell a credential failure and a cap reached
 		// in a race from an ordinary one; the body the caller sees is unchanged.
-		return apiErrorCause(http.StatusServiceUnavailable, startFailureCause(err), "%s", err.Error())
+		return apiErrorCause(clusterStartFailureStatus(err), startFailureCause(err), "%s", err.Error())
 	}
 	clusterJobCreated(ctx, a.hub, a.dbPool, sessionID, a.startWatchEvery())
 	return nil
@@ -968,6 +991,12 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	if principal.Kind == sessionDelegateKind && !dc.RecoveryReadyCapable {
 		return apiErrorf(http.StatusConflict, "update the daemon before starting child sessions")
 	}
+	// A sandboxed session (a board's card run, a cron, a child, an API start) works in a clone of
+	// its own, never in the person's checkout; a daemon that cannot make one would mount that
+	// checkout, .git included.
+	if runtime == runnerRuntimeDocker && !dc.CanSandboxClones() {
+		return apiErrorf(http.StatusConflict, "%s", msgSandboxCloneDaemon)
+	}
 	// A grant is attached or the start is refused, before anything is recorded: never on the
 	// bare host, and only on a daemon that reports mcp_gateway (mcpstart.go).
 	if req.Grant != nil {
@@ -1017,6 +1046,11 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 			if err := db.SetSessionTokenID(ctx, a.dbPool, sessionID, tokenID); err != nil {
 				log.Printf("runner start: SetSessionTokenID %s: %v", sessionID, err)
 			}
+		}
+		if principal.Kind != sessionDelegateKind {
+			// A person's start records their sign-in, as a browser launch does (a desktop
+			// child records none: its delegate carries no proof).
+			recordLaunchAuthSession(ctx, a.dbPool, sessionID, principal.proof().SessionID)
 		}
 		if principal.Kind != sessionDelegateKind {
 			// Every start records who made it, as the cluster path does: a service or runner-key
@@ -1277,9 +1311,34 @@ func (a *API) HandleRunnerMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, body)
 }
 
+// reservedMessageSource reports a message source only Blerg itself writes: decisions it relays to an
+// agent ("review", "proposal": the chat draws them as a Blerg note, and they never answer an ask), the
+// engine's and the daemon's own text ("system"), and what the server writes for an ask's answer, a
+// note's reply or a limit resume. SendMessage, the entry point of every external caller (the runner
+// API, the MCP send_message tool, a parent's message to its child), refuses them; the server's own
+// relays go through sendRelay.
+func reservedMessageSource(source string) bool {
+	switch source {
+	case "review", "proposal", "system", "ask_answer", "note_reply", "limit_resume", childTurnSource, questionAnswerSource:
+		return true
+	}
+	return false
+}
+
+// sendRelay is SendMessage for a note Blerg relays in its own voice (source "review", "proposal",
+// childTurnSource or questionAnswerSource): the server's own paths only, never a caller's.
+func (a *API) sendRelay(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) *APIError {
+	if source != "review" && source != "proposal" && source != childTurnSource && source != questionAnswerSource {
+		return apiErrorf(http.StatusInternalServerError, "not a relay source")
+	}
+	_, apiErr := a.deliverMessage(ctx, principal, sessionID, text, source, clientIDs...)
+	return apiErr
+}
+
 // SendMessage delivers one conversational turn to a session, resuming a
 // disconnected cluster session if that is what it takes. Shared with the MCP
-// send_message tool. source "" defaults to "runner".
+// send_message tool. source "" defaults to "runner". A reserved source (reservedMessageSource)
+// is refused: no caller, an agent included, can write in Blerg's voice.
 //
 // A message from a person or an API caller (source human, runner or chat) sent while a
 // `blerg-runner ask` of the session is open answers that ask, as a message typed in the runner's
@@ -1287,6 +1346,22 @@ func (a *API) HandleRunnerMessage(w http.ResponseWriter, r *http.Request) {
 // timed out. The reply then carries "answered_ask": true. A board's automation (blerg-board) never
 // answers an ask.
 func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) (map[string]any, *APIError) {
+	if reservedMessageSource(source) {
+		return nil, apiErrorf(http.StatusUnprocessableEntity, "source %s is reserved for text Blerg writes itself", source)
+	}
+	// "session" (a parent's message to its child, drawn as the parent's) is the server's to set,
+	// from the parent's own session token: no other caller can claim it, and a parent's message
+	// always carries it, whatever a body says.
+	switch {
+	case principal.Kind == sessionDelegateKind:
+		source = promptSourceSession
+	case source == promptSourceSession:
+		return nil, apiErrorf(http.StatusUnprocessableEntity, "source session is set by the runner for a parent session's messages")
+	}
+	return a.deliverMessage(ctx, principal, sessionID, text, source, clientIDs...)
+}
+
+func (a *API) deliverMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) (map[string]any, *APIError) {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	if text == "" {
@@ -1425,7 +1500,7 @@ func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	if principal.Kind == "human" && principal.OnBehalfOf == "" {
 		answerer = principal.Sub
 	}
-	if dc != nil && answersAsk(source) && answerAskFromChatAs(ctx, a.hub, a.dbPool, sessionID, text, clientID, "", answerer) {
+	if dc != nil && answersAsk(source) && answerAskFrom(ctx, a.hub, a.dbPool, sessionID, text, clientID, "", answerer, source) {
 		return map[string]any{"ok": true, "answered_ask": true, "client_id": clientID}, nil
 	}
 	if dc != nil {

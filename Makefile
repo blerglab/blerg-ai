@@ -39,7 +39,7 @@ test:
 	cd board && export GOWORK=off && go vet ./... && go test -timeout 30m ./...
 
 # The frontend steps CI runs after lint: type-check, tests, production build. The
-# runner frontend's browser tests need Chromium: npx playwright install chromium.
+# runner frontend's and the board's browser tests need Chromium: npx playwright install chromium.
 test-web:
 	@for d in $(FRONTENDS); do echo "== $$d"; (cd $$d && npx tsc --noEmit && npm test && npm run build) || exit 1; done
 

@@ -104,6 +104,21 @@ describe('tickets', () => {
     expect(after.ticket?.key).toBe('B')
   })
 
+  it('keeps a Blerg Board card\'s board, so the host can show the live card', () => {
+    const pins = pinnedFromEvents([ev('ticket', { action: 'pin', ticket: { source: 'blerg-board', key: '#12', board_id: 'board-a', title: 'Card' } })])
+    expect(pins.tickets[0].boardId).toBe('board-a')
+    expect(pins.ticket?.board_id).toBe('board-a')
+    expect(readTicket({ source: 'jira', key: 'A-1', title: 'x' })?.board_id).toBeUndefined()
+  })
+
+  it('keeps #42 on two boards as two pins', () => {
+    const pins = pinnedFromEvents([
+      ev('ticket', { action: 'pin', ticket: { source: 'blerg-board', key: '#42', board_id: 'board-a', title: 'A' } }),
+      ev('ticket', { action: 'pin', ticket: { source: 'blerg-board', key: '#42', board_id: 'board-b', title: 'B' } }),
+    ])
+    expect(pins.tickets.map(t => t.boardId)).toEqual(['board-b', 'board-a'])
+  })
+
   it('names the tracker', () => {
     expect(sourceLabel('jira')).toBe('JIRA')
     expect(sourceLabel('redmine')).toBe('redmine')

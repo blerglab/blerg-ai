@@ -1,8 +1,13 @@
 /* The review mode of the artifact viewer: source | page | requests on a desktop, one pane at a
    time (Source / Page toggle) on a narrow screen. Tokens only (theme/tokens.test.ts). */
 
-.artifact-viewer.is-review {
-  width: min(1280px, 100%);
+/* About the whole viewport, no pixel cap: a 4K display gets a 4K review. A phone keeps the full-screen
+   sheet (chat.css). */
+@media (min-width: 900px) {
+  .artifact-dialog.artifact-viewer.is-review {
+    width: 96vw;
+    height: 92vh;
+  }
 }
 
 .review-mode {
@@ -387,17 +392,36 @@
   text-overflow: ellipsis;
 }
 
-/* Document and margin share one scroll coordinate system. */
+/* Document and margin share one scroll coordinate system. The panes split the width: the source
+   and the page evenly, the comments a fixed 300px. */
 .document-review .document-scroll {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
+  grid-template-columns: minmax(0, 1fr) 300px;
   overflow: auto;
   align-items: start;
   position: relative;
 }
-.document-review.document-source-mode .document-scroll { grid-template-columns: minmax(180px, .7fr) minmax(0, 1fr) 280px; }
+.document-review.document-source-mode .document-scroll { grid-template-columns: minmax(180px, 1fr) minmax(0, 1fr) 300px; }
 .document-review .review-page-col { overflow: visible; }
 .document-review .review-source { position: sticky; top: 0; height: 65vh; }
+/* In the viewer, whose height is set, the grid is a size container so the source is exactly as
+   tall as the visible panes at any dialog size. (Elsewhere a size container could collapse.) */
+.artifact-viewer .document-review .document-scroll { container-type: size; }
+.artifact-viewer .document-review .review-source { height: 100cqh; }
+/* Markdown: the page reads at a 75ch measure with its comments right beside it, the two centered as
+   one group. Without the source the group is centered in the panes; with it, the source takes the
+   left (up to half, growing first) and the group is centered in the rest, between two flexible
+   spacer columns. PDF and diff reviews keep the page at full width. */
+.document-review.review-markdown .document-scroll { grid-template-columns: minmax(0, 75ch) 300px; justify-content: center; }
+.document-review.review-markdown.document-source-mode .document-scroll {
+  grid-template-columns: minmax(180px, 50%) minmax(0, 1fr) minmax(0, 75ch) 300px minmax(0, 1fr);
+  justify-content: stretch;
+  column-gap: 0; /* the spacers stay equal; the source and the page carry the gaps */
+}
+.document-review.review-markdown.document-source-mode .review-source { grid-column: 1; margin-right: 12px; }
+.document-review.review-markdown.document-source-mode .review-page-col { grid-column: 3; margin-right: 12px; }
+.document-review.review-markdown.document-source-mode .document-margin { grid-column: 4; }
+.review-markdown .review-page-col > * { box-sizing: border-box; width: 100%; max-width: 75ch; margin-inline: auto; }
 .document-margin { position: relative; min-width: 0; }
 .document-margin-card { position: absolute; left: 0; right: 0; }
 .document-margin-card::before { content: ''; position: absolute; top: 14px; right: 100%; width: 12px; border-top: 1px solid var(--chat-border); }
@@ -418,7 +442,7 @@
   .document-review .document-margin { min-height: 0 !important; }
   .document-review .document-margin-card { position: relative; top: auto !important; margin: 8px 0; }
   .document-review .document-margin-card::before { display: none; }
-  .document-review .review-source { height: 35vh; position: static; width: 100%; flex: none; }
+  .document-review .review-source, .artifact-viewer .document-review .review-source { height: 35vh; position: static; width: 100%; flex: none; }
 }
 ::highlight(chat-document-comments) { background-color: color-mix(in srgb, var(--chat-warning) 22%, transparent); }
 ::highlight(chat-document-active) { background-color: color-mix(in srgb, var(--chat-warning) 50%, transparent); text-decoration: underline; }

@@ -26,7 +26,7 @@ func sandboxGitFixture(t *testing.T) (string, string) {
 		}
 		return strings.TrimSpace(string(out))
 	}
-	git("init", "-q")
+	git("init", "-q", "-b", "main")
 	git("config", "user.name", "Example Developer")
 	git("config", "user.email", "developer@example.com")
 	if err := os.WriteFile(filepath.Join(repo, "initial.txt"), []byte("initial\n"), 0644); err != nil {
@@ -38,22 +38,28 @@ func sandboxGitFixture(t *testing.T) (string, string) {
 	return repo, child
 }
 
-// This uses a disposable fixture and a prebuilt image, never a running daemon,
-// real repository, engine login, host Git home or remote credentials.
-func TestSandboxChildWorktreeCommitAndBuild(t *testing.T) {
+// The 0.4.2 linked-worktree path, now a clone like every sandbox: a session given a linked worktree
+// works in its own clone of it, can commit and build there, and its commit lands on wip/<id> in
+// the repository while neither checkout moves. This uses a disposable fixture and a prebuilt
+// image, never a running daemon, real repository, engine login, host Git home or remote
+// credentials.
+func TestSandboxLinkedWorktreeCommitAndBuild(t *testing.T) {
 	if os.Getenv("BLERG_SANDBOX_CHILD_TEST") != "1" {
 		t.Skip("set BLERG_SANDBOX_CHILD_TEST=1 with a built sandbox image")
 	}
 	repo, child := sandboxGitFixture(t)
-	before, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Exercise the production launch path with an empty fixture home: no
-	// engine login, Git config or credentials from the operator enter it.
 	t.Setenv("HOME", t.TempDir())
-	id := "child-test-" + ccUUID()
-	name, err := startSandboxContainer(id, child, nil, sandboxCredential{}, SandboxOptions{})
+	t.Setenv(DaemonStateDirEnv, t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	before := childRepoGit(t, repo, "rev-parse", "HEAD")
+	id := "worktree-test-" + ccUUID()
+	clone, err := createSandboxClone(child, id, "")
+	if err != nil {
+		t.Fatalf("clone of the linked worktree: %v", err)
+	}
+	t.Cleanup(func() { discardSandboxClone(clone, id) })
+	name, err := startSandboxContainer(id, clone, nil, sandboxCredential{}, SandboxOptions{})
 	if err != nil {
 		t.Fatalf("fixture sandbox failed: %v", err)
 	}
@@ -68,122 +74,80 @@ printf 'package child\nimport "testing"\nfunc TestAnswer(t *testing.T) { if Answ
 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test ./...
 printf 'import test from "node:test"; import assert from "node:assert/strict"; test("child",()=>assert.equal(6*7,42));\n' > child.test.mjs
 node -e 'const [major,minor]=process.versions.node.split(".").map(Number);if(major<22||(major===22&&minor<12))process.exit(1)'
-node --test child.test.mjs
-git status --porcelain`
+node --test child.test.mjs`
 	cmd := exec.Command("docker", "exec", "-e", "HOME=/tmp", "-e", "GOCACHE=/tmp/go-cache", "-e", "GOPATH=/tmp/go", name, "sh", "-c", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("child commit/build failed: %s", out)
+		t.Fatalf("commit/build in the clone failed: %s", out)
 	}
-	after, _ := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
-	if string(after) != string(before) {
-		t.Fatal("child changed parent checkout HEAD")
+	finishSandbox(id)
+	if got := childRepoGit(t, repo, "rev-parse", "HEAD"); got != before {
+		t.Fatal("the session moved the main checkout's HEAD")
 	}
-	if out, err := exec.Command("git", "-C", repo, "log", "-1", "--format=%s", "child").Output(); err != nil || strings.TrimSpace(string(out)) != "child change" {
-		t.Fatal("parent cannot see child commit")
+	if got := childRepoGit(t, child, "rev-parse", "--abbrev-ref", "HEAD"); got != "child" {
+		t.Fatalf("the linked worktree is on %q", got)
+	}
+	// The build files were uncommitted at stop: committed for the session, on wip/<id>.
+	if got := childRepoGit(t, repo, "log", "-2", "--format=%s", "wip/"+id); got != sandboxSnapshotMessage+"\nchild change" {
+		t.Fatalf("wip/%s holds %q", id, got)
+	}
+	if out := childRepoGit(t, child, "status", "--porcelain"); out != "" {
+		t.Fatalf("the linked worktree was written to:\n%s", out)
 	}
 }
 
-func TestSandboxWorktreeGitBoundary(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		mutate func(*testing.T, string, string)
-	}{
-		{"world writable", func(t *testing.T, r, w string) {
-			if err := os.Chmod(filepath.Join(r, ".git"), 0777); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"wrong backlink", func(t *testing.T, r, w string) {
-			if err := os.WriteFile(filepath.Join(r, ".git", "worktrees", "child", "gitdir"), []byte(filepath.Join(r, ".git")), 0644); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"arbitrary directory", func(t *testing.T, r, w string) {
-			if err := os.WriteFile(filepath.Join(w, ".git"), []byte("gitdir: "+t.TempDir()), 0644); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"symlinked objects", func(t *testing.T, r, w string) {
-			p := filepath.Join(r, ".git", "objects")
-			if err := os.Rename(p, p+"-old"); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(t.TempDir(), p); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"external alternates", func(t *testing.T, r, w string) {
-			if err := os.WriteFile(filepath.Join(r, ".git", "objects", "info", "alternates"), []byte(t.TempDir()), 0644); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"foreign owner", func(t *testing.T, r, w string) {
-			old := ownedByDaemon
-			ownedByDaemon = func(os.FileInfo) bool { return false }
-			t.Cleanup(func() { ownedByDaemon = old })
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r, w := sandboxGitFixture(t)
-			tc.mutate(t, r, w)
-			if _, err := sandboxWorktreeGit(w); err == nil {
-				t.Fatal("unsafe metadata was accepted")
-			}
-		})
-	}
-}
-func TestSandboxWorktreeGitMountScope(t *testing.T) {
-	repo, child := sandboxGitFixture(t)
-	m, err := sandboxWorktreeGit(child)
-	if err != nil {
+// The last check before Docker: only the session's own recorded clone is ever mounted. A checkout,
+// a linked worktree, a folder inside a checkout, a plain folder, a folder with a repository below
+// it, a bare repository, another session's clone and a clone whose record is gone are all refused.
+func TestSandboxMountRefusesACheckout(t *testing.T) {
+	t.Setenv(DaemonStateDirEnv, t.TempDir())
+	repo, worktree := sandboxGitFixture(t)
+	sub := filepath.Join(repo, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if m.source != filepath.Join(repo, ".git") || m.target != m.source {
-		t.Fatal("metadata must be mounted at the pointer's absolute path")
+	nested := t.TempDir()
+	initChildRepo(t, filepath.Join(nested, "inner"))
+	bare := filepath.Join(t.TempDir(), "bare.git")
+	childRepoGit(t, filepath.Dir(bare), "init", "-q", "--bare", bare)
+	refused := map[string]string{
+		"checkout": repo, "linked worktree": worktree, "folder inside a checkout": sub,
+		"plain folder": t.TempDir(), "folder with a repository below it": nested, "bare repository": bare,
 	}
-	args := sandboxRunArgs("fixture", child, "", []string{"GITHUB_TOKEN=secret-sentinel", "SSH_AUTH_SOCK=/socket", "GIT_ASKPASS=/secret"}, sandboxRunExtras{gitMetadata: m})
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "src="+m.source+",dst="+m.target) || strings.Contains(joined, "readonly") {
-		t.Fatal("shared Git metadata must be writable")
-	}
-	for _, bad := range []string{"secret-sentinel", "SSH_AUTH_SOCK", "GIT_ASKPASS", ".git-credentials", ".ssh"} {
-		if strings.Contains(joined, bad) {
-			t.Fatalf("sandbox exposed push authority: %s", bad)
+	for name, path := range refused {
+		if err := sandboxMountRefusal(path, "s-mount"); err == nil {
+			t.Fatalf("%s was accepted for the sandbox mount", name)
+		}
+		if _, err := startSandboxContainer("s-mount", path, nil, sandboxCredential{}, SandboxOptions{}); err == nil {
+			removeSandboxContainer("s-mount")
+			t.Fatalf("%s was mounted into a sandbox", name)
 		}
 	}
-	if m, err := sandboxWorktreeGit(repo); err != nil || m != nil {
-		t.Fatal("ordinary checkout needs no extra Git mount")
-	}
-}
-func TestSandboxWorktreeRelativeGitPointer(t *testing.T) {
-	repo, child := sandboxGitFixture(t)
-	rel, _ := filepath.Rel(child, filepath.Join(repo, ".git", "worktrees", "child"))
-	if err := os.WriteFile(filepath.Join(child, ".git"), []byte("gitdir: "+rel+"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	m, err := sandboxWorktreeGit(child)
+	clone, err := createSandboxClone(repo, "s-mount", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.target != "/main/.git" {
-		t.Fatalf("relative pointer mount target %q", m.target)
+	// Again now that the session has a valid clone record: the path half of the check alone must
+	// refuse every folder that is not that clone.
+	for name, path := range refused {
+		if err := sandboxMountRefusal(path, "s-mount"); err == nil {
+			t.Fatalf("with a clone record, %s was accepted for the sandbox mount", name)
+		}
+		if _, err := startSandboxContainer("s-mount", path, nil, sandboxCredential{}, SandboxOptions{}); err == nil {
+			removeSandboxContainer("s-mount")
+			t.Fatalf("with a clone record, %s was mounted into a sandbox", name)
+		}
 	}
-}
-
-func TestSandboxWorktreeRejectsMetadataReplacement(t *testing.T) {
-	repo, child := sandboxGitFixture(t)
-	m, err := sandboxWorktreeGit(child)
-	if err != nil {
+	if err := sandboxMountRefusal(clone, "s-mount"); err != nil {
+		t.Fatalf("the session's own clone was refused: %v", err)
+	}
+	if err := sandboxMountRefusal(clone, "another-session"); err == nil {
+		t.Fatal("another session's clone was accepted")
+	}
+	_, record, _ := sandboxClonePaths("s-mount")
+	if err := os.Remove(record); err != nil {
 		t.Fatal(err)
 	}
-	common := filepath.Join(repo, ".git")
-	if err := os.Rename(common, common+"-original"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(t.TempDir(), common); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.validate(); err == nil {
-		t.Fatal("metadata replacement before Docker bind was accepted")
+	if err := sandboxMountRefusal(clone, "s-mount"); err == nil {
+		t.Fatal("a clone with no record was accepted")
 	}
 }

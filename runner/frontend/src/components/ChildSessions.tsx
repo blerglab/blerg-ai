@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { modelDisplayName, tokenLabel } from '@blerglab/chat'
 import { OpenSessionContext } from '../lib/openSession'
 import { ENGINE_LABELS, ENGINE_SHORT } from '../lib/runtimes'
-import { childIsRunning, type LiveChildSession } from '../lib/liveState'
+import { childIsRunning, childIsWorking, type LiveChildSession } from '../lib/liveState'
 import { formatDuration, formatUSD } from '../lib/insights'
 
 export function EngineBadge({ engine }: { engine: string }) {
@@ -39,16 +39,23 @@ export function ChildSessionRow({ child, now, compact = false, parentId, assignm
       </span>}
     </button>
     {assignment}
-    {parentId && <ChildDiscardAction parentId={parentId} childId={child.id} title={child.title || 'Untitled session'}/>}
+    {parentId && <ChildDiscardAction parentId={parentId} childId={child.id} title={child.title || 'Untitled session'} running={childIsWorking(child)}/>}
   </li>
 }
 
-export function StartedSessions({ sessionId, children, now, assignmentFor, readOnly = false }: { sessionId: string; children: LiveChildSession[]; now: number; readOnly?: boolean; assignmentFor?: (id: string) => ReactNode }) {
+/** The session's started sessions. One that is at work is drawn once, in Running now (onShowRunning
+ *  brings it into view): here it is a single "N running ↑" line. One that stopped (idle, done,
+ *  failed) is listed here, to open, reuse or discard. Without onShowRunning (an archived session,
+ *  which has no Running now) every child is listed. */
+export function StartedSessions({ sessionId, children, now, assignmentFor, readOnly = false, onShowRunning }: { sessionId: string; children: LiveChildSession[]; now: number; readOnly?: boolean; assignmentFor?: (id: string) => ReactNode; onShowRunning?: () => void }) {
   const visible = children.filter(child => !child.archived_at).sort((a,b) => a.started_at.localeCompare(b.started_at) || a.id.localeCompare(b.id))
+  const working = onShowRunning ? visible.filter(childIsWorking).length : 0
+  const listed = onShowRunning ? visible.filter(child => !childIsWorking(child)) : visible
   return <>
     {visible.length > 0 && <section className="rail-section" data-testid="rail-started" aria-label="Started sessions">
       <h3 className="rail-section-head">Started sessions <span className="rail-count">{visible.length}</span></h3>
-      <ul className="rail-list">{visible.map(child => <ChildSessionRow key={child.id} child={child} now={now} parentId={readOnly ? undefined : sessionId} assignment={assignmentFor?.(child.id)}/>)}</ul>
+      {working > 0 && <button type="button" className="rail-link rail-started-running" data-testid="rail-started-running" onClick={onShowRunning} title="It is in Running now">{working} running ↑</button>}
+      {listed.length > 0 && <ul className="rail-list">{listed.map(child => <ChildSessionRow key={child.id} child={child} now={now} parentId={readOnly ? undefined : sessionId} assignment={assignmentFor?.(child.id)}/>)}</ul>}
     </section>}
   </>
 }

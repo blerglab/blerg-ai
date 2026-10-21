@@ -11,6 +11,7 @@ import (
 func TestHandleAgentEventAcksAndFansOut(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "d1", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	h.SetSessionOwner("s1", "d1")
 
@@ -50,6 +51,7 @@ func TestHandleAgentEventAcksAndFansOut(t *testing.T) {
 func TestForwardToSessionDaemonRoutes(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "d1", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	h.SetSessionOwner("s1", "d1")
 	bc := &BrowserConn{ID: "b1"}

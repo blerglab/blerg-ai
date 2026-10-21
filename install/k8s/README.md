@@ -106,6 +106,8 @@ multi-tenant install set `BLERG_BOARD_DEFAULT_RUN_AS_CREATOR: "false"` in
 
 Then run the [verification](#verify) checks.
 
+To disable new **Run as me** tokens entirely, set `BLERG_CORE_BOARD_MINT_DISABLED: "true"` in `blerg-config` and restart the core deployment. Existing tokens can still be revoked; this setting does not revoke them.
+
 ## Configuration reference
 
 `deploy.sh` reads `install/k8s/.env` if it exists (otherwise the same names

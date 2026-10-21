@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -91,6 +92,25 @@ func fakeClaudeMain() {
 		}
 	}
 	fakeLog("start " + strings.Join(args, " "))
+	if !streaming && prompt == "" {
+		// `claude -p` with no prompt argument reads the prompt from stdin.
+		if in, err := io.ReadAll(os.Stdin); err == nil {
+			prompt = string(in)
+		}
+	}
+	for _, a := range args {
+		if path, ok := strings.CutPrefix(a, "--append-system-prompt-file="); ok {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				fakeLog("prompt-file unreadable")
+				continue
+			}
+			if st, err := os.Stat(path); err == nil && st.Mode().Perm() != 0o600 {
+				fakeLog("prompt-file not private")
+			}
+			fakeLog("prompt-file " + strings.ReplaceAll(string(body), "\n", " "))
+		}
+	}
 	if streaming && os.Getenv("FAKE_MODE") == "unknown" {
 		fmt.Fprintln(os.Stderr, "error: unknown option '--input-format'")
 		os.Exit(1)

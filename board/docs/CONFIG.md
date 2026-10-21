@@ -179,7 +179,7 @@ blerg-board purely as a board.
 |---|---|---|
 | `BLERG_RUNNER_URL` | unset | Runner service base URL. Required to enable the runner. |
 | `BLERG_RUNNER_KEY` | unset | Runner service bearer key. Required to enable the runner. Used to follow, message and stop sessions — never to start one (see *Board automation identity*). |
-| `BLERG_BOARD_RUNNER_RUNTIME` | unset | Runtime the board asks for on every session start, sent as `runtime` on `POST /api/runner/start`: `daemon` (the connected daemon's bare host), `docker` (that daemon's local sandbox) or `cluster`. Unset sends no `runtime`, so the runner decides: cluster where one is configured, else the sandbox when the daemon has its image, else the host. Set `daemon` to pin board sessions to the host — e.g. for agents that must `git push`, since the sandbox has no git credentials. Any other value refuses to boot. It is the default of a card's **Run this card**: the owner of the board's automation token can pick another target for a run (the cluster, or a connected daemon's sandbox; never its bare host, since a card's run is unattended); the session still runs as them, and a respawn of that card's worker keeps the choice. |
+| `BLERG_BOARD_RUNNER_RUNTIME` | unset | Install-wide default runtime: `daemon` (desktop host), `docker` (desktop sandbox), or `cluster`. A board’s **Automation → Where it runs** setting overrides it, and a single card run can override the board setting. On an install with only one desktop and no cluster runtime, an unset board target automatically selects that desktop: sandbox when available, otherwise host; an explicit desktop runtime default is retained. A disconnected selected target refuses the start and never falls back to the cluster. Only the automation token’s owner can save a board target or choose a run override. |
 | `RUNNER_GIT_BASE` | unset | Git host base (e.g. `https://github.com/your-org`) sessions clone `<repo>.git` from. |
 | `BLERG_BOARD_PUBLIC_URL` | `https://blerg-board.example.com` | Human-facing base URL used in card links. Always set it. |
 | `BLERG_BOARD_AGENT_URL` | `http://blerg-board.blerg-board.svc` | blerg-board's own URL as reachable *from spawned sessions* (in-cluster address). **In-cluster default — override it — the installers set it to the public URL.** |
@@ -218,6 +218,11 @@ service account's token or on an install without the mint key:
 Replacing a token Blerg minted (another Run as me, or a pasted token),
 removing it, or deleting its board revokes it in core. A pasted token is
 yours and is never revoked by the board.
+
+An operator can switch new Run as me tokens off on core
+(`BLERG_CORE_BOARD_MINT_DISABLED=true`, see core's CONFIG.md). The button
+stays, and pressing it says Run as me is turned off and offers pasting a token
+instead; tokens already minted keep working and are still revoked as above.
 
 | Var | Default | Notes |
 |---|---|---|

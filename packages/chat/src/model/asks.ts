@@ -23,8 +23,11 @@ export interface AskState {
 export interface Asks {
   /** By the ask event's client_event_id. */
   byEvent: Map<string, AskState>
-  /** The newest ask still open, or null. */
+  /** The newest ask still open that the composer's next message answers, or null. A question the
+   *  agent does not wait on (no_wait) is never it: only an answer addressed to it answers it. */
   open: AgentEvent | null
+  /** Whether any ask is open, a no_wait question included. */
+  anyOpen: boolean
 }
 
 /** A board's or a cron's message is not the person answering (the server never takes one as an
@@ -33,7 +36,7 @@ function closesNoAsk(source: unknown): boolean {
   return source !== 'session' && automationAuthor(source) !== undefined
 }
 
-export const NO_ASKS: Asks = { byEvent: new Map(), open: null }
+export const NO_ASKS: Asks = { byEvent: new Map(), open: null, anyOpen: false }
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : ''
@@ -62,7 +65,7 @@ export function askStates(events: AgentEvent[], closed: ReadonlyMap<string, stri
 
 function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, ended: boolean): Asks {
   if (!events.some(ev => ev.kind === 'ask')) return NO_ASKS
-  const asks: Array<{ ev: AgentEvent; id: string; call: string; native: boolean; state: AskState }> = []
+  const asks: Array<{ ev: AgentEvent; id: string; call: string; native: boolean; noWait: boolean; state: AskState }> = []
   // The main agent's calls that ask the person and have not returned yet, oldest first, and
   // which of them are the native loop's ask tool.
   const asking: string[] = []
@@ -72,18 +75,22 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
   const close = (a: { state: AskState }, answer: string) => {
     a.state = { open: false, answer }
   }
-  const newestOpen = (pred: (a: { id: string }) => boolean) => {
+  const newestOpen = (pred: (a: { id: string; noWait: boolean }) => boolean) => {
     for (let i = asks.length - 1; i >= 0; i--) if (asks[i].state.open && pred(asks[i])) return asks[i]
     return null
   }
   for (const ev of events) {
     if (ev.kind === 'ask') {
       const call = asking[asking.length - 1] ?? ''
+      const p = (ev.payload ?? {}) as Partial<MessagingPayload>
+      const id = str(p.message_id)
       asks.push({
         ev,
-        id: str((ev.payload as Partial<MessagingPayload> | null)?.message_id),
+        id,
         call,
         native: call !== '' && nativeCalls.has(call),
+        // Only a question the server holds can be one the agent does not wait on.
+        noWait: p.no_wait === true && id !== '',
         state: { open: true, answer: '' },
       })
     } else if (ev.kind === 'tool_call') {
@@ -103,9 +110,9 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
       const p = (ev.payload ?? {}) as Partial<UserMessagePayload>
       if (p.source === 'ask_answer') {
         const id = str(p.message_id)
-        const a = id ? asks.find(x => x.id === id) : newestOpen(() => true)
+        const a = id ? asks.find(x => x.id === id) : newestOpen(x => !x.noWait)
         if (a) close(a, str(p.text))
-      } else if (p.source !== 'system' && !isBlergRelaySource(p.source) && !closesNoAsk(p.source)) {
+      } else if (p.source !== 'system' && p.source !== 'question_answer' && !isBlergRelaySource(p.source) && !closesNoAsk(p.source)) {
         const a = newestOpen(x => x.id === '')
         if (a) close(a, str(p.text))
       }
@@ -115,10 +122,14 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
   }
   const byEvent = new Map<string, AskState>()
   let open: AgentEvent | null = null
+  let anyOpen = false
   for (const a of asks) {
     if (a.state.open && (ended || (a.id && closed.has(a.id)))) close(a, a.id ? closed.get(a.id) ?? '' : '')
     byEvent.set(a.ev.client_event_id, a.state)
-    if (a.state.open) open = a.ev
+    if (a.state.open) {
+      anyOpen = true
+      if (!a.noWait) open = a.ev
+    }
   }
-  return { byEvent, open }
+  return { byEvent, open, anyOpen }
 }

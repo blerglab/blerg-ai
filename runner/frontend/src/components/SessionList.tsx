@@ -15,7 +15,8 @@ import { prefetchLaunchData } from '../lib/launchCache'
 import { formatBuild } from '../lib/buildInfo'
 import { setSettingsOpen } from '../lib/settingsDialog'
 import UsageMeters from './UsageMeters'
-import { displayState, waitingBannerText } from '../lib/displayState'
+import { displayState, pausedByRestart, waitingBannerText } from '../lib/displayState'
+import { repoLabel } from '../lib/noRepo'
 
 interface Props {
   onNewSession?: () => void
@@ -23,6 +24,12 @@ interface Props {
 }
 
 const Nesting = createContext<{ tree: SessionTree; activeId?: string; daemons: DaemonInfo[]; query: string } | null>(null)
+
+/** A parent's started sessions, under its card. A small round chevron button in the card's second line,
+ *  right over the indent line (never opening the card), shows or hides them; the top line has the plain "↳ N" chip;
+ *  the choice is kept per parent (sidebarPrefs). Hidden, the parent card says what is behind it (a
+ *  glyph, its words in the tooltip), and a child that runs or needs the person is never hidden: it
+ *  stays as a one-line row. */
 function SessionBranch(props: SessionCardProps) {
   const context = useContext(Nesting)
   const [expanded, setExpanded] = useState(() => childrenExpanded(props.session.id))
@@ -30,10 +37,61 @@ function SessionBranch(props: SessionCardProps) {
   const [searchChoice, setSearchChoice] = useState<{ query: string; open: boolean } | null>(null)
   const shown = context?.query ? searchChoice?.query === context.query ? searchChoice.open : true : expanded
   const toggle = () => { const next = !shown; setExpanded(next); if (context?.query) setSearchChoice({ query: context.query, open: next }); setChildrenExpanded(props.session.id, next) }
+  // Collapsed: what runs or needs the person anywhere below (a grandchild too) stays, and is counted.
+  const below = shown ? [] : descendants(context?.tree, props.session.id)
+  const kept = below.filter(childStaysVisible)
+  const hidden = shown ? null : { ...childrenSummary(below), total: children.length }
   return <div data-session-branch={props.session.id}>
-    <SessionCard {...props} childrenCount={children.length} childrenExpanded={!!shown} onToggleChildren={toggle} />
-    {shown && children.length > 0 && <div data-testid="nested-sessions" style={{ marginLeft: 12, paddingLeft: 8, borderLeft: '1px solid var(--stone)' }}>{children.map(child => <SessionBranch key={child.id} session={child} daemon={context?.daemons.find(d => d.id === child.daemon_id)} active={context?.activeId === child.id} nested />)}</div>}
+    <SessionCard {...props} hiddenChildren={hidden} childrenControl={children.length > 0 ? { total: children.length, shown: !!shown, toggle } : null} />
+    {shown && children.length > 0 && <div data-testid="nested-sessions" style={{ marginLeft: 21, paddingLeft: 8, borderLeft: '1px solid var(--stone)' }}>{children.map(child => <SessionBranch key={child.id} session={child} daemon={context?.daemons.find(d => d.id === child.daemon_id)} active={context?.activeId === child.id} nested />)}</div>}
+    {kept.length > 0 && <ul className="session-children-kept" data-testid="kept-children" aria-label="Started sessions that run or need you">
+      {kept.map(child => <KeptChild key={child.id} session={child} active={context?.activeId === child.id} />)}
+    </ul>}
   </div>
+}
+
+/** Every session started under id, at any depth, in tree order. */
+function descendants(tree: SessionTree | undefined, id: string): SessionInfo[] {
+  const out: SessionInfo[] = []
+  const walk = (parent: string) => {
+    for (const c of tree?.childrenOf.get(parent) ?? []) {
+      out.push(c)
+      walk(c.id)
+    }
+  }
+  walk(id)
+  return out
+}
+
+/** A child that runs or needs the person: never hidden with its siblings. */
+function childStaysVisible(s: SessionInfo): boolean {
+  return s.status === 'starting' || s.status === 'running' || s.status === 'waiting' || pausedByRestart(s)
+}
+
+/** What a collapsed parent's card says of its hidden children: how many, how many run, how many
+ *  need the person. */
+function childrenSummary(children: SessionInfo[]): { total: number; running: number; waiting: number } {
+  let running = 0, waiting = 0
+  for (const c of children) {
+    if (c.status === 'waiting' || pausedByRestart(c)) waiting++
+    else if (c.status === 'starting' || c.status === 'running') running++
+  }
+  return { total: children.length, running, waiting }
+}
+
+/** A child kept visible under a collapsed parent: one line, its state as one glyph, opening it. */
+function KeptChild({ session, active }: { session: SessionInfo; active: boolean }) {
+  const openSession = useContext(OpenSessionContext)
+  const navigate = useNavigate()
+  const waiting = session.status === 'waiting' || pausedByRestart(session)
+  const words = waiting ? 'needs you' : session.status === 'starting' ? 'starting' : 'running'
+  return <li>
+    <button type="button" className={`session-kept-child${active ? ' active' : ''}`} data-testid="kept-child" data-state={waiting ? 'waiting' : 'running'}
+      title={`${session.title || repoLabel(session.repo)} · ${words}`} onClick={() => openSession ? openSession(session.id) : navigate(`/sessions/${session.id}`)}>
+      <span className={`session-kept-glyph${waiting ? ' waiting' : ''}`} aria-label={words} role="img">{waiting ? '?' : <span className="session-kept-spin" aria-hidden="true" />}</span>
+      <span className="session-kept-title">{session.title || repoLabel(session.repo)}</span>
+    </button>
+  </li>
 }
 
 const ACTIVE_STATUSES = new Set<SessionStatus>(['starting', 'running', 'idle', 'waiting'])

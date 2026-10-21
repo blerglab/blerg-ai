@@ -33,6 +33,7 @@ import {
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { composeMarkupMessage } from '../model/feedback'
+import { MAXIMIZED_KEY, localStorageChatStorage, type ViewerLayoutKind as LayoutKind } from '../model/storage'
 import { FILE_GONE_MESSAGE, FileRequestError, fileErrorText, isArtifactGone } from '../transport/files'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { useChat } from './context'
@@ -56,6 +57,11 @@ type Loaded =
 
 /** What the dialog's body shows: the file, its review (markdown, pdf) or a draw-over (image). */
 type Mode = 'view' | 'review' | 'markup'
+
+/** Ctrl+Alt+F, or Cmd+Alt+F on a Mac: by the physical key, since Option changes the character. */
+function isMaximizeShortcut(e: React.KeyboardEvent) {
+  return e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && (e.code === 'KeyF' || e.key.toLowerCase() === 'f')
+}
 
 interface Props {
   sessionId: string
@@ -142,25 +148,39 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
     }
   }
 
-  function onKeyDown(e: React.KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.stopPropagation()
-      onClose()
-    }
-  }
-
   // Which feedback mode this file takes, once its bytes are here.
   const gone = artifact.missing === true || loaded?.kind === 'gone'
   const ready = loaded !== null && loaded.kind !== 'error' && !gone
   const inlineReview = view === 'diff' && !!chat && ready
+
+  // Maximize: edge to edge, remembered per kind of layout (a review, a diff, a draw-over, a file).
+  const layoutKind: LayoutKind = view === 'diff' ? 'diff' : mode === 'review' ? 'review' : mode === 'markup' ? 'markup' : 'file'
+  const [maximizedByKind, setMaximizedByKind] = useState<Partial<Record<LayoutKind, boolean>>>({})
+  const maximized = maximizedByKind[layoutKind] ?? localStorageChatStorage.get(MAXIMIZED_KEY(layoutKind)) === '1'
+  function toggleMaximized() {
+    const next = !maximized
+    setMaximizedByKind(m => ({ ...m, [layoutKind]: next }))
+    localStorageChatStorage.set(MAXIMIZED_KEY(layoutKind), next ? '1' : null)
+  }
+
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      onClose()
+    } else if (isMaximizeShortcut(e)) {
+      e.preventDefault()
+      e.stopPropagation()
+      toggleMaximized()
+    }
+  }
   const feedback: Exclude<Mode, 'view'> | null =
     !chat || !ready ? null : view === 'markdown' || view === 'pdf' || view === 'diff' ? 'review' : view === 'image' ? 'markup' : null
 
   return createPortal(
-    <div className="artifact-overlay artifact-overlay-viewer" data-testid="artifact-viewer-overlay" {...backdrop}>
+    <div className={`artifact-overlay artifact-overlay-viewer${maximized ? ' is-maximized' : ''}`} data-testid="artifact-viewer-overlay" {...backdrop}>
       <div
         ref={dialogRef}
-        className={`artifact-dialog artifact-viewer${mode !== 'view' || inlineReview ? ' is-review' : ''}${view === 'diff' ? ' is-diff' : ''}`}
+        className={`artifact-dialog artifact-viewer${mode !== 'view' || inlineReview ? ' is-review' : ''}${view === 'diff' ? ' is-diff' : ''}${maximized ? ' is-maximized' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -180,6 +200,16 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
             <button type="button" className="artifact-btn" onClick={() => setMode('markup')}>Mark up</button>
           ) : null}
           {!gone && <button type="button" className="artifact-btn" onClick={() => void download()}>Download</button>}
+          <button
+            type="button"
+            className="artifact-close artifact-maximize"
+            aria-label={maximized ? 'Restore size' : 'Maximize'}
+            aria-pressed={maximized}
+            title={`${maximized ? 'Restore size' : 'Maximize'} (Ctrl+Alt+F)`}
+            onClick={toggleMaximized}
+          >
+            <span aria-hidden="true">{maximized ? '⤡' : '⤢'}</span>
+          </button>
           <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
         </header>
         {isOlder && (

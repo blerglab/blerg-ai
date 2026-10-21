@@ -110,3 +110,31 @@ func AppendCommentTx(ctx context.Context, tx pgx.Tx, cardID, text string, ev Eve
 	return appendEvent(ctx, tx, cardID, "comment", ev, nil, nil,
 		map[string]any{"text": text})
 }
+
+// ListRecentCardEvents returns a card's latest limit trail events, oldest first.
+func ListRecentCardEvents(ctx context.Context, pool *pgxpool.Pool, cardID string, limit int) ([]CardEvent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT id, card_id, type, actor, actor_token_id, review_id,
+			from_column_id, to_column_id, data,
+			to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		FROM (SELECT * FROM card_events WHERE card_id = $1 ORDER BY id DESC LIMIT $2) recent
+		ORDER BY id`,
+		cardID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CardEvent
+	for rows.Next() {
+		var e CardEvent
+		if err := rows.Scan(&e.ID, &e.CardID, &e.Type, &e.Actor, &e.ActorTokenID,
+			&e.ReviewID, &e.FromColumnID, &e.ToColumnID, &e.Data, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

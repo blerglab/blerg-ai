@@ -28,7 +28,7 @@ export const RUNTIME_CARDS: { id: RunRuntime; title: string; body: string }[] = 
   {
     id: 'docker',
     title: 'Local sandbox',
-    body: 'A container on the connected daemon. Your ~/.claude and ~/.codex are mounted so the engine can use them; the rest of the machine is not.',
+    body: 'A container on the connected daemon, working in a clone of your repo: never your checkout or its .git. Its commits land on the branch wip/<session-id> in your repo (uncommitted work is committed for it when it stops); nothing is merged or pushed. Your ~/.claude and ~/.codex are mounted so the engine can use them; the rest of the machine is not.',
   },
   {
     id: 'daemon',

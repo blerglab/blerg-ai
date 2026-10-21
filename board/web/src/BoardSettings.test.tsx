@@ -6,6 +6,7 @@ import { api, Board } from "./api";
 
 let catalog: unknown = { state: "known", engines: [] };
 let me: unknown = { kind: "service", is_admin: true, is_human: true };
+let targets: unknown = {};
 let runAsMeRefusal: string | null = null;
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
@@ -15,7 +16,7 @@ vi.mock("./api", async (importOriginal) => {
       if (path.endsWith("/automation/run-as-me") && runAsMeRefusal) {
         return Promise.reject(new actual.ApiError(403, { error: runAsMeRefusal }));
       }
-      return Promise.resolve(path === "/api/me" ? me : path.includes("/launch-options") ? catalog : {});
+      return Promise.resolve(path === "/api/me" ? me : path.includes("/launch-options") ? catalog : path.endsWith("/run-targets") ? targets : {});
     }),
   };
 });
@@ -44,6 +45,27 @@ describe("BoardSettings automation", () => {
     vi.mocked(api).mockClear();
     catalog = { state: "known", engines: ["claude", "codex", "hermes"].map(id => ({ id, name: id === "claude" ? "Claude" : id, models: { models: [] } })) };
     me = { kind: "service", is_admin: true, is_human: true };
+  });
+
+  it("saves the board runtime and explains an unavailable desktop", async () => {
+    me = { is_admin: true, is_human: true, account_id: "owner-fixture" };
+    targets = { can_choose: true, default_runtime: "docker", targets: [
+      { runtime: "cluster", label: "Cluster" },
+      { runtime: "docker", daemon_id: "desktop-a", label: "Desktop · Local sandbox" },
+      { runtime: "daemon", daemon_id: "desktop-a", desktop_name: "Workstation", label: "Workstation · This machine" },
+      { runtime: "docker", daemon_id: "desktop-offline", label: "Offline desktop", unavailable: "Desktop is disconnected." },
+    ] };
+    open(board({ automation_token_set: true, automation_account_id: "owner-fixture" }));
+    const where = await screen.findByRole("combobox", { name: "Where this board runs" });
+    expect(screen.getByRole("option", { name: /Offline desktop.*disconnected/ })).toBeDisabled();
+    fireEvent.change(where, { target: { value: "daemon|desktop-a" } });
+    // The host needs an explicit acknowledgement that names the machine and who it runs as.
+    const ack = screen.getByRole("checkbox", { name: /run on Workstation as the person who runs that desktop.*unattended, without a sandbox/i });
+    const saveButton = screen.getByRole("button", { name: "Save where it runs" });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(ack);
+    fireEvent.click(saveButton);
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/boards/b1", { method: "PATCH", json: { run_runtime: "daemon", run_daemon_id: "desktop-a", run_host_acknowledged: true } }));
   });
 
   it("automatically selects a sole discovered engine and hides the engine dropdown", async () => {

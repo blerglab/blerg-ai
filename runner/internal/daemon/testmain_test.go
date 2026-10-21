@@ -19,5 +19,7 @@ func TestMain(m *testing.M) {
 	ccHelpText = func(context.Context, sandboxExec, string, []string) ([]byte, error) {
 		return nil, errors.New("no --help probe in tests")
 	}
+	// The marker key stays in memory: no test writes the daemon's real state directory.
+	markerKeyDir = func() string { return "" }
 	os.Exit(testsupport.Run(m))
 }

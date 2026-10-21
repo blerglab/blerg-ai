@@ -1,3 +1,4 @@
+import { splitAttachmentNote } from '../model/attachments'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ChatView from './ChatView'
@@ -172,7 +173,8 @@ describe('composer attachments', () => {
     fireEvent.change(box(), { target: { value: 'compare these' } })
     await waitFor(() => expect(sendBtn()).not.toBeDisabled())
     await send()
-    expect(t.sent).toEqual([`compare these\n\n${NOTE}a.pdf (1.2 MB), b.pdf (800 KB)`])
+    expect(t.sent).toHaveLength(1)
+    expect(splitAttachmentNote(t.sent[0])).toEqual({ body: 'compare these', files: [{ id: '1'.padStart(32, 'a'), name: 'a.pdf', size: '1.2 MB' }, { id: '2'.padStart(32, 'a'), name: 'b.pdf', size: '800 KB' }] })
     expect(chips()).toHaveLength(0)
     fireEvent.change(box(), { target: { value: 'and then?' } })
     await send()
@@ -185,7 +187,8 @@ describe('composer attachments', () => {
     attach(file('a.pdf'))
     await waitFor(() => expect(sendBtn()).not.toBeDisabled())
     await send()
-    expect(t.sent).toEqual([`Please take a look at the attached files.\n\n${NOTE}a.pdf (10 B)`])
+    expect(t.sent).toHaveLength(1)
+    expect(splitAttachmentNote(t.sent[0])).toEqual({ body: 'Please take a look at the attached files.', files: [{ id: '1'.padStart(32, 'a'), name: 'a.pdf', size: '10 B' }] })
   })
 
   it('keeps the chips when the message could not be sent', async () => {

@@ -75,6 +75,18 @@ describe('SessionDetail', () => {
     expect(screen.queryByText('running')).not.toBeInTheDocument()
   })
 
+  it('a child\'s header says who started it and from where, never "started by from …"', () => {
+    const child = makeSession({ id: 'sess-a', status: 'idle', parent_session_id: 'parent-1', started_by: { kind: 'session', name: 'Parent work' } })
+    useSessionStore.setState({
+      daemons: [makeDaemon()],
+      sessions: [makeSession({ id: 'parent-1', title: 'Parent work', engine: 'codex' }), child],
+      statusChangedAt: {},
+      serverVersion: 'test',
+    })
+    renderDetail()
+    expect(screen.getByTestId('detail-started-by')).toHaveTextContent('started by Codex agent from Parent work ·')
+  })
+
   it('says Skills & plugins are not available for a terminal session', () => {
     seedSession({ status: 'running' })
     renderDetail()
@@ -139,6 +151,27 @@ describe('SessionDetail', () => {
     expect(screen.getByTestId('rail-task')).toHaveTextContent('Wait for the deploy')
   })
 
+  it('counts a pending proposal in Needs you only until its deadline: past it, it is listed as expired, not counted', async () => {
+    seedSession({ kind: 'agent', title: 'Ship it', status: 'idle' })
+    useTranscriptStore.setState({ sessions: {} })
+    const proposal = (id: string, expiresAt: number) => ({ id, state: 'pending', kind: 'board_file', connection_id: '', connection_name: 'Board', tool: 'file_ticket',
+      arguments: { title: `Card ${id}`, type: 'bug', body: 'Body' }, arguments_raw: '{}', agent_summary: '', session_id: 'sess-a', cron_id: null,
+      created_at: new Date().toISOString(), expires_at: new Date(expiresAt).toISOString(), decided_at: null, decided_by: null, result: null })
+    const proposals = [proposal('waiting', Date.now() + 86400_000), proposal('overdue', Date.now() - 60_000)]
+    vi.stubGlobal('fetch', vi.fn((url: string) => String(url).startsWith('/api/proposals?')
+      ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ proposals }) })
+      : Promise.resolve({ ok: true, json: () => Promise.resolve({}) })))
+    renderDetail()
+    await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('1'))
+    expect(screen.getByTestId('rail-toggle')).toHaveAccessibleName(expect.stringContaining('1 needs you'))
+    // The panel counts the same way (its Needs you section and its Live tab), and still lists the
+    // overdue one, as expired.
+    await waitFor(() => expect(screen.getByTestId('rail-needs-count')).toHaveTextContent('1'))
+    expect(screen.getByTestId('rail-tab-count')).toHaveTextContent('1')
+    expect(screen.getByTestId('proposal-action-waiting')).toBeInTheDocument()
+    expect(screen.getByTestId('proposal-action-overdue')).toBeInTheDocument()
+  })
+
   it('on a phone the side panel toggle is an icon with a name and its count', async () => {
     const desktop = window.matchMedia
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({
@@ -194,7 +227,7 @@ describe('SessionDetail', () => {
 
     fireEvent.click(screen.getByText('✕ Kill'))
     expect(screen.getByText('✕ Confirm kill?')).toBeInTheDocument()
-    expect(fetch).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalledWith('/api/sessions/sess-a', expect.objectContaining({ method: 'DELETE' }))
 
     fireEvent.click(screen.getByText('✕ Confirm kill?'))
     // apiFetch (Task 18) adds an Authorization header on top of the call site's own init —
@@ -349,9 +382,7 @@ describe('SessionDetail', () => {
     fireEvent.click(screen.getByText('⏸ Pause'))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
-    expect(url).toContain('/api/sessions/sess-a/pause')
-    expect(init.method).toBe('POST')
+    expect(fetchMock).toHaveBeenCalledWith('/api/sessions/sess-a/pause', expect.objectContaining({ method: 'POST' }))
     // it stays on the session: pausing is not leaving
     expect(screen.queryByText('HOME')).not.toBeInTheDocument()
     expect(useToastStore.getState().toasts).toHaveLength(0)

@@ -129,6 +129,9 @@ func scanCronRun(row pgx.Row) (*CronRun, error) {
 
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
+// ValidUUID reports whether s is a UUID in its text form, the only form a uuid column takes.
+func ValidUUID(s string) bool { return uuidRe.MatchString(s) }
+
 // InsertCron creates a cron, refusing (ErrCronLimit) when the owner already has
 // maxPerAccount. The check and the insert share a per-account advisory lock, so
 // concurrent creates cannot overshoot the limit. The caller supplies NextRunAt

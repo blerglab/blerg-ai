@@ -218,7 +218,7 @@ func (d Deps) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.LoginLimiter.Reset(ip, setupLimiterKey(ip))
-	if d.startHumanSession(w, r, acc.ID) {
+	if d.startHumanSession(w, r, acc.ID, nil) {
 		w.WriteHeader(http.StatusOK)
 	}
 }

@@ -72,6 +72,7 @@ func (fx *artFx) agentDaemon() *DaemonConn {
 		fx.t.Fatal(err)
 	}
 	dc := &DaemonConn{ID: "0d0d0d0d-0d0d-4d0d-8d0d-0d0d0d0d0d0d", Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 16)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetInputReceipts(true)
 	fx.hub.Register(dc)
 	fx.hub.SetSessionOwner(fx.sess, dc.ID)
@@ -336,6 +337,9 @@ func TestReviewRequestWaitGetsTheDecisionInsteadOfAMessage(t *testing.T) {
 	decodeReview(t, fx.send("POST", "/api/review-requests/"+req.RequestID+"/decide", fx.human(artUser), `{"decision":"approve","note":"ship it"}`), http.StatusOK)
 	select {
 	case got := <-done:
+		if strings.Contains(got.Message, "Confirm it before you act") {
+			t.Errorf("verified status repeats the instruction to verify itself: %s", got.Message)
+		}
 		if got.State != db.ReviewApproved || !strings.Contains(got.Message, "(request "+req.RequestID+"): APPROVED") || !strings.Contains(got.Message, "ship it") {
 			t.Fatalf("waiter got %+v", got)
 		}

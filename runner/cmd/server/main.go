@@ -273,6 +273,7 @@ func main() {
 	mux.HandleFunc("GET /api/daemons", api.HandleGetDaemons)
 	mux.HandleFunc("PUT /api/daemons/{id}/repos-root", api.HandlePutDaemonReposRoot)
 	mux.HandleFunc("GET /api/cluster/status", api.HandleGetClusterStatus)
+	mux.HandleFunc("GET /api/site-board", api.HandleGetSiteBoard)
 	mux.HandleFunc("PUT /api/cluster/settings", api.HandlePutClusterSettings)
 	mux.HandleFunc("GET /api/insights", api.HandleGetInsights)
 	mux.HandleFunc("GET /api/insights/prices", api.HandleGetInsightPrices)

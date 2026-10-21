@@ -94,6 +94,13 @@ interface RunStatus {
   runner_full?: boolean;
 }
 
+// retryableLoadError says whether a failed board reload may succeed if tried again: anything but
+// a client error, except a timeout (408) or a rate limit (429).
+function retryableLoadError(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return true;
+  return e.status >= 500 || e.status === 408 || e.status === 429 || e.status < 400;
+}
+
 export function BoardView({ boardId }: { boardId: string }) {
   const [board, setBoard] = useState<Board | null>(null);
   const [deploys, setDeploys] = useState<Deployment[]>([]);
@@ -209,20 +216,45 @@ export function BoardView({ boardId }: { boardId: string }) {
   // starts a reload. Only the newest reload may land: an older one that answers late would put back
   // the board as it was before the change, and a card a script created would vanish again.
   const [loadTicket] = useState(latestOnly);
+  // A failed reload is retried after 3 s, then 6, 12, ... up to a minute between tries, while it
+  // can still succeed: a network error, a timeout or a server error. A refusal that will not
+  // change stops retrying: 401 (signed out: api() and the sign-in banner handle that, and its
+  // recovery remounts the board), 403 (access lost), 404 (the board is gone).
+  const [reloadRetry] = useState(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = 3000;
+    return {
+      clear: () => clearTimeout(timer),
+      reset: () => { delay = 3000; },
+      schedule: (callback: () => void) => {
+        timer = setTimeout(callback, delay);
+        delay = Math.min(delay * 2, 60000);
+      },
+    };
+  });
   const load = useCallback(async () => {
+    reloadRetry.clear();
+    reloadRetry.reset();
     const isLatest = loadTicket();
-    const [b, cols, cs, act, deps] = await Promise.all([
-      api<Board>(`/api/boards/${boardId}`),
-      api<Column[]>(`/api/boards/${boardId}/columns`),
-      api<Card[]>(`/api/boards/${boardId}/cards`),
-      api<Record<string, ActiveInfo>>(`/api/boards/${boardId}/active-sessions`).catch(() => ({})),
-      api<Deployment[]>(`/api/boards/${boardId}/deployments`).catch(() => []),
-    ]);
-    if (!isLatest()) return;
-    setBoard(b); setColumns(cols ?? []);
-    setCards((cs ?? []).slice().sort(byRank));
-    setActive(act ?? {}); setDeploys(deps ?? []);
-  }, [boardId, loadTicket]);
+    const attempt = async () => {
+      try {
+        const [b, cols, cs, act, deps] = await Promise.all([
+          api<Board>(`/api/boards/${boardId}`),
+          api<Column[]>(`/api/boards/${boardId}/columns`),
+          api<Card[]>(`/api/boards/${boardId}/cards`),
+          api<Record<string, ActiveInfo>>(`/api/boards/${boardId}/active-sessions`).catch(() => ({})),
+          api<Deployment[]>(`/api/boards/${boardId}/deployments`).catch(() => []),
+        ]);
+        if (!isLatest()) return;
+        setBoard(b); setColumns(cols ?? []);
+        setCards((cs ?? []).slice().sort(byRank));
+        setActive(act ?? {}); setDeploys(deps ?? []);
+      } catch (e) {
+        if (isLatest() && retryableLoadError(e)) reloadRetry.schedule(() => { void attempt(); });
+      }
+    };
+    await attempt();
+  }, [boardId, loadTicket, reloadRetry]);
 
   // A board_changed ping refreshes the run status too, not just the cards:
   // concurrency is a board setting the chip renders, so without this a PATCH
@@ -230,8 +262,13 @@ export function BoardView({ boardId }: { boardId: string }) {
   // 10s poll catches up.
   useEffect(() => {
     load().catch(() => {});
-    return boardSocket(boardId, () => { load().catch(() => {}); loadRun(); });
-  }, [boardId, load, loadRun]);
+    const disconnect = boardSocket(boardId, () => { load().catch(() => {}); loadRun(); });
+    return () => {
+      disconnect();
+      loadTicket(); // Retire pending replies and retries for the previous board.
+      reloadRetry.clear();
+    };
+  }, [boardId, load, loadRun, loadTicket, reloadRetry]);
 
   // Deep link: /boards/:id/cards/:number opens that card's sheet.
   // (state adjusted during render, not in an effect: the sheet follows the URL)
@@ -281,7 +318,7 @@ export function BoardView({ boardId }: { boardId: string }) {
 
   return (
     <>
-      <div className="row" style={{ padding: "12px 16px 0" }}>
+      <div className="row board-toolbar" style={{ padding: "12px 16px 0" }}>
         <h1 className="page" style={{ margin: 0 }}>{board.name}</h1>
         {board.gate_enabled && (
           <span

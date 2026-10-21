@@ -104,8 +104,8 @@ export { holdClock, mcpFromEvents, mcpSummary, readMcp, readMcpHold } from './mo
 export type { McpHold, McpLive, McpReleased, McpServer, McpServerStatus, McpSummary } from './model/mcp'
 export { CommitChips, type CommitRef } from './components/CommitChips'
 export { ChecklistItems, ChecklistRow, TicketCard } from './components/cards/WorkCards'
-export { SourceBadge, StatusChip, TicketChips, TicketDetails, TicketHead, TicketKey, TicketModal, TicketSummary } from './components/TicketView'
-export { automationAuthor, firstPersonMessage, isShownUserMessage, userMessageShape } from './model/userMessages'
+export { SourceBadge, StatusChip, TicketChips, TicketDetailChips, TicketDetails, TicketHead, TicketKey, TicketModal, TicketSummary } from './components/TicketView'
+export { automationAuthor, firstPersonMessage, isFromParentSession, isShownUserMessage, userMessageShape } from './model/userMessages'
 export type { UserMessageShape } from './model/userMessages'
 export { droppedMessageId, isRetryNotice, isTurnError } from './model/notices'
 export { askStates } from './model/asks'
@@ -122,6 +122,7 @@ export {
   downloadFileName,
   fileCount,
   filenameFromDisposition,
+  attachmentAt,
   findLatest,
   formatSize,
   groupArtifacts,
@@ -241,3 +242,6 @@ export { outcomeLine, proposalStates, readCard, readProposalView } from './model
 export { readReviewRequest, reviewForArtifact, reviewOutcomeLine, reviewRequestStates } from './model/reviewRequests'
 
 export { modelDisplayName, modelDisplayNames } from "./model/modelDisplay"
+
+export { reasoningLabel, readReasoning } from './model/reasoning'
+export type { Reasoning } from './model/reasoning'

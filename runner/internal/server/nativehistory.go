@@ -297,6 +297,10 @@ func nativeHistoryPod(spec SessionJobSpec, pod map[string]any) error {
 		return nil
 	}
 	layout, _ := nativehistory.ForEngine(spec.Engine)
+	return nativeHistoryPodLayout(spec, pod, layout)
+}
+
+func nativeHistoryPodLayout(spec SessionJobSpec, pod map[string]any, layout nativehistory.Layout) error {
 	mounts := []map[string]any{{"name": "native-history", "mountPath": nativehistory.IdentityPath, "subPath": "identity"}}
 	subdirs := []string{"identity"}
 	// The engine's home (~/.codex, ~/.claude) would otherwise be created as
@@ -307,7 +311,7 @@ func nativeHistoryPod(spec SessionJobSpec, pod map[string]any) error {
 	var homeDir string
 	if layout.Home != "" {
 		homeDir = strings.TrimPrefix(path.Base(layout.Home), ".")
-		if path.Dir(layout.Home) != sessionHomeDir || homeDir == "" {
+		if path.Dir(layout.Home) != sessionHomeDir || homeDir == "" || layout.Home != path.Clean(layout.Home) {
 			return errNativeHistory
 		}
 		mounts = append(mounts, map[string]any{"name": engineHomeVolume, "mountPath": layout.Home, "subPath": homeDir})

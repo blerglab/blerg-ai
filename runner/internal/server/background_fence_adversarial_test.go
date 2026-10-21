@@ -11,8 +11,10 @@ func TestBackgroundStaleHeartbeatCannotRewriteReposRoot(t *testing.T) {
 	fx := newLiveFx(t)
 	h := fx.api.hub
 	old := &DaemonConn{ID: topicDaemonID, Name: "fixture", Mode: "local", ReposRoot: "/old-fixture", send: make(chan []byte, 8)}
+	old.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(old)
 	current := &DaemonConn{ID: topicDaemonID, Name: "fixture", Mode: "local", ReposRoot: "/current-fixture", send: make(chan []byte, 8)}
+	current.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(current)
 	if _, err := fx.pool.Exec(t.Context(), `UPDATE daemons SET repos_root=$2 WHERE id=$1`, topicDaemonID, current.ReposRoot); err != nil {
 		t.Fatal(err)
@@ -44,6 +46,7 @@ func TestBackgroundUnlockedFollowupsDoNotSendToSupersededSocket(t *testing.T) {
 		t.Fatalf("accept input: fresh=%v err=%v", fresh, err)
 	}
 	replacement := &DaemonConn{ID: f.dc.ID, inputReceipts: true, sessionTokenFile: true, send: make(chan []byte, 8)}
+	replacement.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	f.hub.Register(replacement)
 	healSessionTokens(f.ctx, f.hub, f.pool, f.dc, []string{f.sessionID})
 	replayPendingSessionInputs(f.ctx, f.hub, f.pool, f.dc, []string{f.sessionID})

@@ -14,8 +14,8 @@ vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...ar
 vi.mock('../ws', () => ({ send: vi.fn(), onMessage: vi.fn() }))
 vi.mock('@blerglab/chat', async () => ({
   ...await vi.importActual<typeof import('@blerglab/chat')>('@blerglab/chat'),
-  ChatView: ({ slots, maxFileBytes, canOpenWorkspaceFiles, describeUserMessage, readOnly }: { slots: { header: ReactNode }; readOnly?: boolean; maxFileBytes?: number; canOpenWorkspaceFiles?: boolean; describeUserMessage?: DescribeUserMessage }) => (
-    <div data-testid="chat" data-read-only={String(!!readOnly)} data-session-author={describeUserMessage?.({} as never, { source: 'session', text: 'fixture' }, { first: false })?.author} data-max-file-bytes={maxFileBytes ?? 'none'} data-workspace-files={String(canOpenWorkspaceFiles)}>{slots.header}</div>
+  ChatView: ({ slots, maxFileBytes, canOpenWorkspaceFiles, canAnswerApprovals, describeUserMessage, readOnly }: { slots: { header: ReactNode }; readOnly?: boolean; maxFileBytes?: number; canOpenWorkspaceFiles?: boolean; canAnswerApprovals?: boolean | null; describeUserMessage?: DescribeUserMessage }) => (
+    <div data-testid="chat" data-read-only={String(!!readOnly)} data-answer-approvals={String(canAnswerApprovals)} data-session-author={describeUserMessage?.({} as never, { source: 'session', text: 'fixture' }, { first: false })?.author} data-session-href={describeUserMessage?.({} as never, { source: 'session', text: 'fixture' }, { first: false })?.authorHref} data-answer-author={describeUserMessage?.({} as never, { source: 'ask_answer', answered_by: 'session', text: 'fixture' }, { first: false })?.author} data-person-answer-author={String(describeUserMessage?.({} as never, { source: 'ask_answer', text: 'fixture' }, { first: false })?.author)} data-max-file-bytes={maxFileBytes ?? 'none'} data-workspace-files={String(canOpenWorkspaceFiles)}>{slots.header}</div>
   ),
   ReadyCard: () => null,
   createBlergTransport: () => ({}),
@@ -55,6 +55,18 @@ describe('AgentChatView workspace files', () => {
     expect(screen.getByTestId('chat')).toHaveAttribute('data-workspace-files', 'false')
     view.rerender(<AgentChatView session={session} thinking={false} compact={false} />)
     expect(screen.getByTestId('chat')).toHaveAttribute('data-workspace-files', 'false')
+  })
+})
+
+describe('AgentChatView owner-only approvals', () => {
+  it('passes "not known yet" through while the live state loads', () => {
+    const session = makeSession({ kind: 'agent' })
+    const view = render(<AgentChatView session={session} thinking={false} compact={false} canAnswerApprovals={null} />)
+    expect(screen.getByTestId('chat')).toHaveAttribute('data-answer-approvals', 'null')
+    view.rerender(<AgentChatView session={session} thinking={false} compact={false} canReleasePrompt canAnswerApprovals />)
+    expect(screen.getByTestId('chat')).toHaveAttribute('data-answer-approvals', 'true')
+    view.rerender(<AgentChatView session={session} thinking={false} compact={false} canReleasePrompt />)
+    expect(screen.getByTestId('chat')).toHaveAttribute('data-answer-approvals', 'true')
   })
 })
 
@@ -118,7 +130,12 @@ describe('AgentChatView model controls', () => {
 it('labels session-sourced messages with the listed parent title', () => {
   useSessionStore.setState({ sessions: [makeSession({ id: 'parent', title: 'Parent task' })] })
   render(<AgentChatView session={makeSession({ parent_session_id: 'parent', started_by: { kind: 'session', name: 'Old name' } })} thinking={false} compact={false} />)
-  expect(screen.getByTestId('chat')).toHaveAttribute('data-session-author', 'from Parent task')
+  const chat = screen.getByTestId('chat')
+  expect(chat).toHaveAttribute('data-session-author', '↑ Parent · Parent task')
+  expect(chat).toHaveAttribute('data-session-href', '/sessions/parent')
+  // The parent's answer to the child's question is the parent's; the person's own stays "You".
+  expect(chat).toHaveAttribute('data-answer-author', '↑ Parent · Parent task')
+  expect(chat).toHaveAttribute('data-person-answer-author', 'undefined')
 })
 
 

@@ -32,6 +32,7 @@ func desktopRunnerAPI(t *testing.T) (*API, *Hub) {
 func registerDaemon(t *testing.T, api *API, hub *Hub, id, name string, repos ...string) *DaemonConn {
 	t.Helper()
 	dc := &DaemonConn{ID: id, Name: name, ReposRoot: "/repos", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetCheckedOutRepos(repos)
 	hub.Register(dc)
 	if err := db.UpsertDaemon(context.Background(), api.dbPool, id, name, "local", "/repos"); err != nil {

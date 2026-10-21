@@ -102,6 +102,9 @@ type grantState struct {
 	account   string
 	tokenHash []byte
 	closed    bool
+	// ephemeral marks a state CallBoard made for one call: it uses the credential it was given and
+	// never exchanges another (boardCredential), so a read can never fall back to a write credential.
+	ephemeral bool
 }
 
 func (st *grantState) touch() { st.lastUsed.Store(st.g.now().UnixNano()) }

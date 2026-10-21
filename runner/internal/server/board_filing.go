@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -252,17 +251,13 @@ func (a *API) HandleFileTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 413, "The complete filing draft exceeds 64 KiB.")
 		return
 	}
-	// The same draft again from this session, soon after, is the same filing: an agent that
-	// retries (an older CLI that did not understand "done", a lost reply) gets the earlier proposal
-	// and its state, never a second card.
-	if twin := a.recentFilingTwin(r.Context(), p.AccountID, sid, board.ID, draft); twin != nil {
-		log.Printf("proposals: repeated filing session=%s returns proposal=%s state=%s", sid, twin.ID, twin.State)
-		writeFilingOutcome(w, twin, true, "")
-		return
-	}
 	proposal, err := db.InsertProposalLimited(r.Context(), a.dbPool, db.Proposal{AccountID: p.AccountID, SessionID: sid, ConnectionID: db.BoardFilingConnectionID, ConnectionName: "board-file", Tool: "file_ticket", ToolHash: "board-file-v1", URLSnapshot: up.SnapshotURL(), Arguments: raw, AgentSummary: "File a ticket after the person's approval."}, db.ProposalLimits{Account: 50, Session: 50, Cron: 50})
 	if err != nil {
 		writeError(w, 409, "The filing draft could not be queued; check pending proposal limits and retry.")
+		return
+	}
+	if proposal.Repeated {
+		writeFilingOutcome(w, proposal, true, "")
 		return
 	}
 	// No reproduction text enters events or shared session fanout: the chat's card names the
@@ -273,30 +268,6 @@ func (a *API) HandleFileTicket(w http.ResponseWriter, r *http.Request) {
 	} else {
 		writeFilingOutcome(w, proposal, false, note)
 	}
-}
-
-// filingTwinWindow is how long an identical filing from the same session returns the earlier one.
-const filingTwinWindow = 15 * time.Minute
-
-// recentFilingTwin is the session's recent filing of exactly this draft on this board (the
-// origin's commit may differ), still pending, executing, done or unknown; nil when there is none.
-func (a *API) recentFilingTwin(ctx context.Context, account, sid, boardID string, draft boardfiling.Draft) *db.Proposal {
-	rows, err := db.RecentBoardFilings(ctx, a.dbPool, account, sid, time.Now().Add(-filingTwinWindow))
-	if err != nil {
-		log.Printf("proposals: recent filings of %s: %v", sid, err)
-		return nil
-	}
-	for i := range rows {
-		var prev filingArguments
-		if json.Unmarshal(rows[i].Arguments, &prev) != nil {
-			continue
-		}
-		if prev.BoardID == boardID && prev.Title == draft.Title && prev.Body == draft.Body && prev.Type == draft.Type &&
-			prev.Sensitive == draft.Sensitive && slices.Equal(prev.Repos, draft.Repos) {
-			return &rows[i]
-		}
-	}
-	return nil
 }
 
 // writeFilingOutcome answers a filing with where its proposal stands: done (200, with the card),
@@ -434,9 +405,15 @@ func (h *proposalsHandler) approveBoardDraft(ctx context.Context, w http.Respons
 		writeError(w, 409, "The Board destination changed; propose again.")
 		return
 	}
+	// A started session's permission is capped by its parent's level, which the execution guard
+	// below does not see: check it again now, after the network round trips above.
+	if grantID != "" && !h.api.childFilingStillCovered(ctx, p.SessionID, args.BoardID, who.Sid) {
+		writeError(w, 409, "The session permission no longer covers this filing (the session that started it was lowered); it waits for you.")
+		return
+	}
 	casCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proposalWriteBudget)
 	defer cancel()
-	if _, err = db.BeginBoardFilingExecutionByGrant(casCtx, h.api.dbPool, who.Account, p.ID, who.Account, expected, grantID); err != nil {
+	if _, err = db.BeginBoardFilingExecutionByGrant(casCtx, h.api.dbPool, who.Account, p.ID, who.Account, expected, grantID, h.api.grantHourlyCap()); err != nil {
 		transitionError(w, err, "The draft changed or was already decided.")
 		return
 	}

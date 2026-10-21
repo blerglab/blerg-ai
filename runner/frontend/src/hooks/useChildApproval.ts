@@ -1,7 +1,7 @@
 // useChildApproval: a parent session's child approvals (GET/PUT /api/sessions/{id}/child-approval),
 // read and written as authoritative server snapshots, never optimistic or inferred from an engine
 // name. A stalled read or write is bounded, a late answer is ignored, and a 409 re-reads the current
-// scope without retrying. The panel's child control and the permissions modal both draw from it.
+// scope without retrying. The session permissions modal draws from it.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../apiFetch'
 

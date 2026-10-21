@@ -1,6 +1,9 @@
 package server
 
 import (
+	"errors"
+	"fmt"
+	"github.com/blerglab/blerg-ai/runner/internal/nativehistory"
 	"path"
 	"slices"
 	"strings"
@@ -9,9 +12,6 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/engines"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
-
-// sessionHome is the agent's HOME in the session image (agent-owned there).
-const sessionHome = "/workspace"
 
 // engineCredentialFiles are the files each engine's credentials are written
 // to inside a session pod (runner.go writes Codex's auth.json and Hermes's
@@ -83,10 +83,10 @@ func TestNativeHistoryPodGivesEachEngineAWritableHome(t *testing.T) {
 					continue
 				}
 				mp := m["mountPath"].(string)
-				if !underDir(mp, sessionHome) {
+				if !underDir(mp, sessionHomeDir) {
 					continue
 				}
-				for dir := path.Dir(mp); dir != sessionHome && underDir(dir, sessionHome); dir = path.Dir(dir) {
+				for dir := path.Dir(mp); dir != sessionHomeDir && underDir(dir, sessionHomeDir); dir = path.Dir(dir) {
 					parent := coveringMount(mounts, dir)
 					if parent == nil || parent["mountPath"] != dir || !prepared(parent) {
 						t.Fatalf("%s is created by the container runtime as root above the native-history mount %s; the engine cannot write its home", dir, mp)
@@ -97,6 +97,30 @@ func TestNativeHistoryPodGivesEachEngineAWritableHome(t *testing.T) {
 				if m := coveringMount(mounts, cred); m != nil && m["name"] == "native-history" {
 					t.Fatalf("credential file %s would land on the durable native-history volume", cred)
 				}
+			}
+		})
+	}
+}
+
+// A future engine layout must not place retained data directly under HOME or outside its
+// ephemeral engine directory. Refusal leaves the pod untouched.
+func TestNativeHistoryRefusesUnsafeEngineHome(t *testing.T) {
+	for _, layout := range []nativehistory.Layout{
+		{Home: "/tmp/.engine"},
+		{Home: sessionHomeDir + "/.."},
+		{Home: sessionHomeDir + "/../workspace/.engine"},
+		{Home: sessionHomeDir + "/."},
+		{Home: sessionHomeDir + "/.engine/nested"},
+		{Mounts: []nativehistory.Mount{{SubPath: "history", Path: sessionHomeDir + "/history"}}},
+		{Home: sessionHomeDir + "/.engine", Mounts: []nativehistory.Mount{{SubPath: "history", Path: sessionHomeDir + "/.other/history"}}},
+	} {
+		t.Run(layout.Home+fmt.Sprint(layout.Mounts), func(t *testing.T) {
+			pod := map[string]any{"containers": []map[string]any{{"image": "fixture-image"}}}
+			if err := nativeHistoryPodLayout(SessionJobSpec{nativeHistory: &db.SessionNativeHistory{ClaimName: "fixture-claim"}}, pod, layout); !errors.Is(err, errNativeHistory) {
+				t.Fatalf("unsafe layout accepted: %v", err)
+			}
+			if len(pod) != 1 || len(pod["containers"].([]map[string]any)[0]) != 1 {
+				t.Fatal("refused layout changed the pod")
 			}
 		})
 	}

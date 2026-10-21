@@ -35,6 +35,7 @@ func newReposRootFixture(t *testing.T) *reposRootFixture {
 
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "workstation", Mode: "local", ReposRoot: "/home/dev/repos", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetCheckedOutRepos([]string{"old-repo"})
 	dc.SetRepoRemotes(map[string]string{"old-repo": "example-org/old-repo"})
 	hub.Register(dc)
@@ -204,6 +205,7 @@ func TestPutReposRootServerSideRefusals(t *testing.T) {
 func TestPutReposRootRefusesRunnerPods(t *testing.T) {
 	f := newReposRootFixture(t)
 	pod := &DaemonConn{ID: "pod1", Name: "runner-x", Mode: "runner", send: make(chan []byte, 1)}
+	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	f.hub.Register(pod)
 	if rec := f.put(t, "pod1", `{"repos_root":"/srv/repos"}`, true); rec.Code != http.StatusNotFound {
 		t.Errorf("status %d, want 404", rec.Code)
@@ -237,6 +239,7 @@ func TestPutReposRootIgnoresAnswerFromAnotherDaemon(t *testing.T) {
 	t.Cleanup(func() { reposRootTimeout = prev })
 
 	other := &DaemonConn{ID: "d2", Name: "other", Mode: "local", ReposRoot: "/other", send: make(chan []byte, 1)}
+	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	f.hub.Register(other)
 	go func() {
 		raw := <-f.dc.send
@@ -274,6 +277,7 @@ func TestPutReposRootDaemonDisconnectsMidRequest(t *testing.T) {
 func TestPutReposRootSendBufferFull(t *testing.T) {
 	f := newReposRootFixture(t)
 	full := &DaemonConn{ID: "d3", Name: "busy", Mode: "local", ReposRoot: "/r", send: make(chan []byte)} // unbuffered, nobody reading
+	full.SetSandboxClones(true)
 	f.hub.Register(full)
 	if rec := f.put(t, "d3", `{"repos_root":"/srv/repos"}`, true); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status %d, want 503", rec.Code)
@@ -285,6 +289,7 @@ func TestPutReposRootSendBufferFull(t *testing.T) {
 // implausible one is ignored.
 func TestApplyReposRootFromDaemonReport(t *testing.T) {
 	dc := &DaemonConn{ID: "d1", ReposRoot: "/a"}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	applyReposRoot(context.Background(), nil, dc, "/b")
 	if dc.CurrentReposRoot() != "/b" {
 		t.Errorf("root %q, want /b", dc.CurrentReposRoot())

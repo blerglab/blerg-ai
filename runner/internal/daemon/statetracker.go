@@ -24,6 +24,16 @@ type StateTracker struct {
 	mu         sync.Mutex
 	state      string // "", "running", "idle", or "waiting"
 	idleStreak int    // consecutive idle observations not yet committed (hysteresis)
+	// onTurnEnd, when set, runs (in its own goroutine) each time a running session goes idle:
+	// the end of a terminal session's turn, as near as the screen tells.
+	onTurnEnd func()
+}
+
+// SetOnTurnEnd sets the hook run when the session goes from running to idle.
+func (t *StateTracker) SetOnTurnEnd(f func()) {
+	t.mu.Lock()
+	t.onTurnEnd = f
+	t.mu.Unlock()
 }
 
 // idleConfirmThreshold is how many consecutive idle observations must be seen
@@ -71,6 +81,9 @@ func (t *StateTracker) Update(state string) {
 
 	if state == t.state {
 		return
+	}
+	if state == "idle" && t.state == "running" && t.onTurnEnd != nil {
+		go t.onTurnEnd()
 	}
 	t.state = state
 	t.sendState(state)

@@ -4,7 +4,7 @@
 // its own shape can use it alone.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { create } from 'zustand'
-import { composeMessage } from '../model/attachments'
+import { composeMessage, type MessageAttachment } from '../model/attachments'
 import type { SessionMeta, Transport } from '../transport/types'
 import type { AgentEvent, SessionStatus, UserMessagePayload } from '../types'
 import { useArtifacts, type Artifacts } from './useArtifacts'
@@ -71,7 +71,7 @@ export interface SessionHandle {
   lastSeq: number
   /** Sends the text (with the note naming the files, when any). queued=false: not connected,
    *  nothing was sent. opts.answerTo: the message answers that ask (see Transport.answersAsks). */
-  send: (text: string, files?: Array<{ name: string; size: number }>, opts?: { answerTo?: string }) => Promise<{ queued: boolean }>
+  send: (text: string, files?: MessageAttachment[], opts?: { answerTo?: string }) => Promise<{ queued: boolean }>
   /** Asks the server reported answered or closed (message_answered), by message id, with the
    *  answer ('' when none). */
   closedAsks: ReadonlyMap<string, string>
@@ -321,7 +321,7 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
   const clockOffset = transcript?.clockOffset ?? 0
   const noTurn = opts.noTurnCommands ?? DEFAULT_NO_TURN
 
-  const send = useCallback(async (typed: string, files: Array<{ name: string; size: number }> = [], opts: { answerTo?: string } = {}) => {
+  const send = useCallback(async (typed: string, files: MessageAttachment[] = [], opts: { answerTo?: string } = {}) => {
     const text = composeMessage(typed, files)
     const id = newClientId()
     const r = await transport.send(sessionId, text, { clientId: id, ...(opts.answerTo ? { answerTo: opts.answerTo } : {}) })

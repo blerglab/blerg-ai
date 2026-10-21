@@ -159,6 +159,7 @@ func (d *claudeCodeDriver) signal() {
 
 // Run dispatches to the steering engine, or to the per-turn one when steering is off or gave way.
 func (d *claudeCodeDriver) Run(ctx context.Context) {
+	defer d.promptFile.Remove()
 	if d.steering() {
 		d.runSteering(ctx)
 	}
@@ -335,7 +336,7 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 	// carry the "conversation could not be restored" note instead.
 	line, err := json.Marshal(map[string]any{
 		"type": "user", "uuid": uuid,
-		"message": map[string]any{"role": "user", "content": d.engineText(m.Text, m.adopt)},
+		"message": map[string]any{"role": "user", "content": d.engineText(m.ModelText(d.markerNonce), m.adopt)},
 	})
 	if err != nil {
 		d.steer.sq = d.steer.sq[1:]
@@ -404,6 +405,7 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 	} else {
 		opts = append(opts, withSessionGuide(), withInteraction(d.interaction))
 	}
+	opts = append(opts, withMarkerNonce(d.markerNonce), withPromptFile(d.promptFile))
 	if d.mcpFile != nil {
 		path, err := d.mcpFile.Ensure()
 		if err != nil {
@@ -668,18 +670,23 @@ func (d *claudeCodeDriver) onUser(ev *ccLine) {
 		}
 		return
 	}
+	relayBody, relaySource, isRelay := agent.UnwrapRelay(echo, d.markerNonce)
 	switch {
 	case matched:
 		d.emitTurnMessage(m.Payload())
 	case lateSettled || !isString || strings.HasPrefix(strings.TrimSpace(echo), "<local-command"):
 		// already shown, or the CLI's own rendering of a command (its caveat)
+	case isRelay:
+		// A decision Blerg relayed whose echo matched no message here: shown as that relay, by
+		// its body, never as the marked block the engine read (the block carries the code).
+		d.emit("user_message", agent.UserMessagePayload{Text: relayBody, Source: relaySource})
 	case harnessInjected(echo):
 		// The CLI's own user-role messages (a subagent's completion, a system reminder): kept
 		// in the transcript as source "system", which the chat does not show as the person.
-		d.emit("user_message", agent.UserMessagePayload{Text: echo, Source: "system"})
+		d.emit("user_message", agent.UserMessagePayload{Text: agent.ScrubCode(echo, d.markerNonce), Source: "system"})
 	default:
 		// A message nobody here wrote (a hook, a resumed history): show it as the user's.
-		d.emitTurnMessage(agent.UserMessagePayload{Text: echo, Source: "chat", TurnID: ev.UUID})
+		d.emitTurnMessage(agent.UserMessagePayload{Text: agent.ScrubCode(echo, d.markerNonce), Source: "chat", TurnID: ev.UUID})
 	}
 }
 

@@ -42,8 +42,14 @@ type childApprovalWrite struct {
 
 // childApprovalSnapshot runs under the account lock and parent row fence. Grants and rules are
 // exact scopes; discovery never expands an existing grant to a newly installed engine.
-// local is clusterLocalEngines for a cluster parent, computed by the caller before it takes the
-// account and parent-row locks (it may ask core); ignored for a desktop parent.
+// local is clusterLocalEngines for a parent with a cluster row (a cluster parent, or a desktop
+// parent on an install with a cluster), computed by the caller before it takes the account and
+// parent-row locks (it may ask core).
+//
+// A cluster parent has one row (cluster). A desktop parent has its desktop's two (docker, daemon)
+// and, when the install has a cluster runtime, a third (cluster), keyed on the cluster's daemon:
+// each row has its own engines and its own reason, so a sleeping desktop does not hide the cluster
+// row, nor a cluster still being checked the desktop rows.
 func (a *API) childApprovalSnapshot(ctx context.Context, tx pgx.Tx, parent *db.SessionRow, local []string) (childApprovalView, []db.DelegationGrant, error) {
 	view := childApprovalView{DaemonID: delegationDaemonID(parent), AllowedEngines: []string{}, Runtimes: []childApprovalRuntime{}}
 	grants, err := db.ListLiveDelegationGrants(ctx, tx, parent.ID)
@@ -52,15 +58,17 @@ func (a *API) childApprovalSnapshot(ctx context.Context, tx pgx.Tx, parent *db.S
 	}
 	restricted := parent.RestrictTools
 	cluster := onClusterParent(parent)
+	jm := a.hub.JobManager()
+	clusterRow := cluster || onDesktopDaemon(parent) && jm != nil
 	var dc *DaemonConn
 	if !cluster {
 		dc = a.hub.GetHostDaemon(parent.DaemonID)
 	}
-	// A cluster parent's children run on the cluster: its engines are the readiness snapshot's.
+	// Cluster children's engines are the readiness snapshot's.
 	var clusterEngines []string
 	clusterKnown := false
-	if cluster && a.hub.JobManager() != nil {
-		clusterEngines, clusterKnown = a.clusterAvailableEngines(ctx, a.delegatePrincipalFor(ctx, parent, ""))
+	if clusterRow && jm != nil {
+		clusterEngines, clusterKnown = a.clusterAvailableEngines(ctx, a.delegateFor(ctx, parent, runnerRuntimeCluster, ""))
 	}
 	reason := ""
 	switch {
@@ -68,36 +76,51 @@ func (a *API) childApprovalSnapshot(ctx context.Context, tx pgx.Tx, parent *db.S
 		reason = "This parent session is not active."
 	case !trustDirect(parent) || restricted:
 		reason = "Only a direct, unrestricted personal session can have session approval."
-	case cluster && a.hub.JobManager() == nil:
-		reason = "The cluster runtime is not configured."
-	case cluster && !clusterKnown:
-		reason = "The cluster's engine credentials are still being checked. Reload in a moment."
-	case cluster:
+	}
+	clusterReason := ""
+	switch {
+	case jm == nil:
+		clusterReason = "The cluster runtime is not configured."
+	case !clusterKnown:
+		clusterReason = "The cluster's engine credentials are still being checked. Reload in a moment."
+	}
+	desktopReason := ""
+	switch {
 	case !onDesktopDaemon(parent):
-		reason = "Child sessions require the parent's desktop daemon."
+		desktopReason = "Child sessions require the parent's desktop daemon."
 	case dc == nil:
-		reason = "The parent's desktop daemon is disconnected."
+		desktopReason = "The parent's desktop daemon is disconnected."
 	case !dc.RecoveryReadyCapable:
-		reason = "Update the daemon before enabling session approval."
+		desktopReason = "Update the daemon before enabling session approval."
 	case dc.AvailableEngines() == nil:
-		reason = "The daemon has not reported its available engines."
+		desktopReason = "The daemon has not reported its available engines."
 	}
-	runtimes := []string{runnerRuntimeDocker, runnerRuntimeDaemon}
-	if cluster {
-		runtimes = []string{runnerRuntimeCluster}
+	runtimes := []string{}
+	if !cluster {
+		runtimes = append(runtimes, runnerRuntimeDocker, runnerRuntimeDaemon)
 	}
-	host := childHost{dc: dc, cluster: cluster}
-	if cluster {
-		host.local = local
+	if clusterRow {
+		runtimes = append(runtimes, runnerRuntimeCluster)
 	}
+	host := childHost{dc: dc}
+	clusterHost := childHost{cluster: true, local: local}
 	allRuleIDs := []string{}
 	for _, runtime := range runtimes {
+		onCluster := runtime == runnerRuntimeCluster
+		daemonID := childDaemonID(parent, runtime)
+		rowHost, rowReason := host, desktopReason
+		if onCluster {
+			rowHost, rowReason = clusterHost, clusterReason
+		}
 		state := childApprovalRuntime{Runtime: runtime, AllowedEngines: []string{}, GrantedEngines: []string{}, StandingRuleEngines: []string{}, EffectiveAllowedEngines: []string{}, Reason: reason}
+		if state.Reason == "" {
+			state.Reason = rowReason
+		}
 		if state.Reason == "" && !confinementOK(parent, runtime) {
-			state.Reason = "A sandboxed parent cannot preapprove unsandboxed children."
+			state.Reason = confinementReason(runtime)
 		}
 		for _, descriptor := range engines.All() {
-			if cluster {
+			if onCluster {
 				if !slices.Contains(clusterEngines, descriptor.ID) {
 					continue
 				}
@@ -108,20 +131,23 @@ func (a *API) childApprovalSnapshot(ctx context.Context, tx pgx.Tx, parent *db.S
 			if !slices.Contains(view.AllowedEngines, descriptor.ID) {
 				view.AllowedEngines = append(view.AllowedEngines, descriptor.ID)
 			}
-			rules, err := db.CandidateDelegationRules(ctx, tx, derefOrEmpty(parent.SpawningAccountID), descriptor.ID, runtime, delegationDaemonID(parent))
-			if err != nil {
-				return view, nil, err
+			var rules []db.DelegationRule
+			if standingRulesApply(parent, runtime) {
+				rules, err = db.CandidateDelegationRules(ctx, tx, derefOrEmpty(parent.SpawningAccountID), descriptor.ID, runtime, daemonID)
+				if err != nil {
+					return view, nil, err
+				}
 			}
 			for _, rule := range rules {
 				allRuleIDs = append(allRuleIDs, rule.ID)
-				if trustDirect(parent) && !restricted && confinementOK(parent, runtime) && (!rule.LocalOnly || host.localEngine(descriptor.ID)) {
+				if trustDirect(parent) && !restricted && confinementOK(parent, runtime) && (!rule.LocalOnly || rowHost.localEngine(descriptor.ID)) {
 					state.StandingRuleEngines = append(state.StandingRuleEngines, descriptor.ID)
 					break
 				}
 			}
 		}
 		for _, grant := range grants {
-			if grant.DaemonID == delegationDaemonID(parent) && grant.Runtime == runtime {
+			if grant.DaemonID == daemonID && grant.Runtime == runtime {
 				state.GrantedEngines = append(state.GrantedEngines, grant.Engine)
 			}
 		}
@@ -206,7 +232,7 @@ func (a *API) HandleChildApproval(w http.ResponseWriter, r *http.Request) {
 }
 
 // msgChildRuntimeUnavailable answers a change for a runtime this parent's children never run on
-// (sandboxed children under a cluster parent, say).
+// (sandboxed children under a cluster parent, or cluster children on an install with no cluster).
 const msgChildRuntimeUnavailable = "This session cannot start children on that runtime."
 
 // applyChildApproval reads (write false) or changes a parent's child approval under the account's
@@ -218,8 +244,8 @@ func (a *API) applyChildApproval(ctx context.Context, account, sid string, write
 	// The cluster local-hardware answer may ask core: before the locks, from an unlocked read
 	// (the locked snapshot below re-checks everything else).
 	var clusterLocal []string
-	if pre, err := db.GetSession(ctx, a.dbPool, sid); err == nil && pre != nil && ownsSession(account, pre) && onClusterParent(pre) && a.hub.JobManager() != nil {
-		clusterLocal = a.clusterLocalEngines(ctx, pre, a.delegatePrincipalFor(ctx, pre, ""))
+	if pre, err := db.GetSession(ctx, a.dbPool, sid); err == nil && pre != nil && ownsSession(account, pre) && (onClusterParent(pre) || onDesktopDaemon(pre)) && a.hub.JobManager() != nil {
+		clusterLocal = a.clusterLocalEngines(ctx, pre, a.delegateFor(ctx, pre, runnerRuntimeCluster, ""))
 	}
 	var view childApprovalView
 	var problem *APIError
@@ -268,11 +294,12 @@ func (a *API) applyChildApproval(ctx context.Context, account, sid string, write
 			return nil
 		}
 		changed := []string{}
+		daemonID := childDaemonID(parent, body.Runtime)
 		if *body.Enabled {
 			for _, engine := range selected.AllowedEngines {
 				found := false
 				for _, g := range grants {
-					if g.Engine == engine && g.Runtime == body.Runtime && g.DaemonID == delegationDaemonID(parent) {
+					if g.Engine == engine && g.Runtime == body.Runtime && g.DaemonID == daemonID {
 						found = true
 						break
 					}
@@ -280,14 +307,14 @@ func (a *API) applyChildApproval(ctx context.Context, account, sid string, write
 				if found {
 					continue
 				}
-				grant, err := db.InsertDelegationGrantTx(ctx, tx, db.DelegationGrant{ParentSessionID: sid, AccountID: account, Engine: engine, Runtime: body.Runtime, DaemonID: delegationDaemonID(parent)})
+				grant, err := db.InsertDelegationGrantTx(ctx, tx, db.DelegationGrant{ParentSessionID: sid, AccountID: account, Engine: engine, Runtime: body.Runtime, DaemonID: daemonID})
 				if err != nil {
 					return err
 				}
 				changed = append(changed, grant.ID)
 			}
 		} else {
-			changed, err = db.RevokeChildApprovalTx(ctx, tx, sid, account, delegationDaemonID(parent), body.Runtime)
+			changed, err = db.RevokeChildApprovalTx(ctx, tx, sid, account, daemonID, body.Runtime)
 			if err != nil {
 				return err
 			}
@@ -296,7 +323,7 @@ func (a *API) applyChildApproval(ctx context.Context, account, sid string, write
 			slices.Sort(changed)
 			eventID = newUUID()
 			eventAt = time.Now()
-			eventPayload, _ = json.Marshal(map[string]any{"runtime": body.Runtime, "enabled": *body.Enabled, "daemon_id": delegationDaemonID(parent), "grant_ids": changed, "source": source})
+			eventPayload, _ = json.Marshal(map[string]any{"runtime": body.Runtime, "enabled": *body.Enabled, "daemon_id": daemonID, "grant_ids": changed, "source": source})
 			eventSeq, _, err = db.AppendAgentEventTx(ctx, tx, sid, eventID, "delegation_permissions_changed", string(eventPayload), eventAt)
 			if err != nil {
 				return err

@@ -75,6 +75,7 @@ services:
       BLERG_CORE_LOCAL_KEY: ${BLERG_CORE_LOCAL_KEY:-}
       # The key the board presents to mint "Run as me" automation tokens (opens nothing else).
       BLERG_CORE_BOARD_MINT_KEY: ${BLERG_CORE_BOARD_MINT_KEY:-}
+      BLERG_CORE_BOARD_MINT_DISABLED: ${BLERG_CORE_BOARD_MINT_DISABLED:-false}
       # The public URL humans and browsers use to reach core (host-side, not
       # the in-cluster name — matters for links/redirects core emits).
       BLERG_CORE_PUBLIC_URL: http://localhost:${BLERG_PORT_CORE:-8081}

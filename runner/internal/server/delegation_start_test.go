@@ -215,7 +215,7 @@ func TestChildrenBodyValidation(t *testing.T) {
 		"no repo at all":      {map[string]any{"prompt": "x"}, "k", 422, "repo is required"},
 		"bad repo name":       {map[string]any{"repo": "../etc", "prompt": "x"}, "k", 422, "repo must be a folder name"},
 		"repo not on daemon":  {map[string]any{"repo": "other", "prompt": "x"}, "k", 422, "the parent's daemon has no repo other"},
-		"runtime cluster":     {map[string]any{"repo": "app", "prompt": "x", "runtime": "cluster"}, "k", 422, msgDesktopChildCluster},
+		"runtime cluster":     {map[string]any{"repo": "app", "prompt": "x", "runtime": "cluster"}, "k", 422, msgNoClusterRuntime},
 		"title too long":      {map[string]any{"repo": "app", "prompt": "x", "title": long}, "k", 422, "title is longer"},
 		"engine cannot run":   {map[string]any{"repo": "app", "prompt": "x", "engine": "openclaw", "runtime": "docker"}, "k", 422, "the parent's daemon cannot run OpenClaw in docker"},
 		"unknown engine":      {map[string]any{"repo": "app", "prompt": "x", "engine": "nope"}, "k", 422, "cannot run"},

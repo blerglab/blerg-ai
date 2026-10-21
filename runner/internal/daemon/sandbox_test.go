@@ -262,7 +262,7 @@ func TestStartSandboxContainerFailsWhenTheNetworkCannotBeChecked(t *testing.T) {
 	sandboxNetworkWarned.Store(false)
 	t.Cleanup(func() { unregisterSandbox("s-dockerdown") })
 
-	_, err := startSandboxContainer("s-dockerdown", t.TempDir(), hostSessionEnv(), sandboxCredential{},
+	_, err := startSandboxContainer("s-dockerdown", sandboxTestClone(t, "s-dockerdown"), hostSessionEnv(), sandboxCredential{},
 		SandboxOptions{Network: "blerg-sandbox"})
 	if err == nil || !strings.Contains(err.Error(), "could not check the sandbox network: ") ||
 		!strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
@@ -285,7 +285,7 @@ func TestStartSandboxContainerFailsWhenTheNetworkCannotBeChecked(t *testing.T) {
 func TestCreateDockerSandboxFailsWhenTheNetworkCannotBeChecked(t *testing.T) {
 	recordDockerCalls(t, errors.New("permission denied"))
 	t.Cleanup(func() { unregisterSandbox("s-term-down") })
-	err := createDockerSandbox("s-term-down", t.TempDir(), []string{"claude"}, nil,
+	err := createDockerSandbox("s-term-down", sandboxTestClone(t, "s-term-down"), []string{"claude"}, nil,
 		SandboxOptions{Network: "blerg-sandbox"})
 	if err == nil || !strings.Contains(err.Error(), "could not check the sandbox network: docker network inspect failed: permission denied") {
 		t.Fatalf("err = %v, want the network check failure", err)
@@ -446,7 +446,7 @@ func TestStartSandboxContainerRemoteServerOnTheNetwork(t *testing.T) {
 	calls := recordDockerRun(t, true)
 	t.Cleanup(func() { unregisterSandbox("s-remote-net") })
 
-	if _, err := startSandboxContainer("s-remote-net", t.TempDir(), []string{
+	if _, err := startSandboxContainer("s-remote-net", sandboxTestClone(t, "s-remote-net"), []string{
 		"BLERG_RUNNER_SESSION_ID=s1",
 		"BLERG_RUNNER_SERVER_URL=wss://runner.example.com/ws/daemon",
 		"BLERG_RUNNER_DAEMON_TOKEN=master-token-must-not-leak",
@@ -474,7 +474,7 @@ func TestStartSandboxContainerJoinsTheSandboxNetwork(t *testing.T) {
 	calls := recordDockerRun(t, true)
 	t.Cleanup(func() { unregisterSandbox("s-net") })
 
-	if _, err := startSandboxContainer("s-net", t.TempDir(), hostSessionEnv(), sandboxCredential{},
+	if _, err := startSandboxContainer("s-net", sandboxTestClone(t, "s-net"), hostSessionEnv(), sandboxCredential{},
 		SandboxOptions{Network: "blerg-sandbox"}); err != nil {
 		t.Fatalf("startSandboxContainer: %v", err)
 	}
@@ -515,12 +515,12 @@ func TestStartSandboxContainerWithoutTheNetworkStaysOnTheBridge(t *testing.T) {
 	sandboxNetworkWarned.Store(false)
 	t.Cleanup(func() { unregisterSandbox("s-nonet"); unregisterSandbox("s-nonet-2") })
 
-	if _, err := startSandboxContainer("s-nonet", t.TempDir(), hostSessionEnv(), sandboxCredential{},
+	if _, err := startSandboxContainer("s-nonet", sandboxTestClone(t, "s-nonet"), hostSessionEnv(), sandboxCredential{},
 		SandboxOptions{Network: "blerg-sandbox"}); err != nil {
 		t.Fatalf("startSandboxContainer: %v", err)
 	}
 	// A second spawn does not repeat the warning: once per daemon process.
-	if _, err := startSandboxContainer("s-nonet-2", t.TempDir(), hostSessionEnv(), sandboxCredential{},
+	if _, err := startSandboxContainer("s-nonet-2", sandboxTestClone(t, "s-nonet-2"), hostSessionEnv(), sandboxCredential{},
 		SandboxOptions{Network: "blerg-sandbox"}); err != nil {
 		t.Fatalf("second startSandboxContainer: %v", err)
 	}
@@ -556,7 +556,7 @@ func TestStartSandboxContainerUsesACustomNetworkName(t *testing.T) {
 	calls := recordDockerRun(t, true)
 	t.Cleanup(func() { unregisterSandbox("s-custom") })
 
-	if _, err := startSandboxContainer("s-custom", t.TempDir(), hostSessionEnv(), sandboxCredential{},
+	if _, err := startSandboxContainer("s-custom", sandboxTestClone(t, "s-custom"), hostSessionEnv(), sandboxCredential{},
 		SandboxOptions{Network: "my-agents"}); err != nil {
 		t.Fatalf("startSandboxContainer: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestStartSandboxContainerWithTheNetworkDisabledSkipsTheCheck(t *testing.T) 
 	calls := recordDockerRun(t, true)
 	t.Cleanup(func() { unregisterSandbox("s-off") })
 
-	if _, err := startSandboxContainer("s-off", t.TempDir(), hostSessionEnv(), sandboxCredential{},
+	if _, err := startSandboxContainer("s-off", sandboxTestClone(t, "s-off"), hostSessionEnv(), sandboxCredential{},
 		SandboxOptions{}); err != nil {
 		t.Fatalf("startSandboxContainer: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestStartSandboxContainerMountsTheMessagingCLI(t *testing.T) {
 	repoRoot := t.TempDir()
 	cli := writeMessagingCLI(t, repoRoot)
 
-	if _, err := startSandboxContainer("s-cli", t.TempDir(), nil, sandboxCredential{},
+	if _, err := startSandboxContainer("s-cli", sandboxTestClone(t, "s-cli"), nil, sandboxCredential{},
 		SandboxOptions{RepoRoot: repoRoot}); err != nil {
 		t.Fatalf("startSandboxContainer: %v", err)
 	}
@@ -644,11 +644,11 @@ func TestCLIMountArgSurvivesAwkwardPaths(t *testing.T) {
 func TestStartSandboxContainerSkipsAMissingMessagingCLI(t *testing.T) {
 	for name, repoRoot := range map[string]string{"no script": t.TempDir(), "no repo root": ""} {
 		calls := recordDockerRun(t, true)
-		if _, err := startSandboxContainer("s-nocli", t.TempDir(), nil, sandboxCredential{},
+		if _, err := startSandboxContainer("s-nocli-"+strings.ReplaceAll(name, " ", "-"), sandboxTestClone(t, "s-nocli-"+strings.ReplaceAll(name, " ", "-")), nil, sandboxCredential{},
 			SandboxOptions{RepoRoot: repoRoot}); err != nil {
 			t.Fatalf("%s: startSandboxContainer: %v", name, err)
 		}
-		unregisterSandbox("s-nocli")
+		unregisterSandbox("s-nocli-" + strings.ReplaceAll(name, " ", "-"))
 		if joined, _ := runCall(t, *calls); strings.Contains(joined, ".local/bin/blerg-runner") {
 			t.Errorf("%s: mounted a CLI that does not exist: %s", name, joined)
 		}
@@ -670,7 +670,7 @@ func TestCreateDockerSandboxGetsTheNetworkAndCLI(t *testing.T) {
 	repoRoot := t.TempDir()
 	cli := writeMessagingCLI(t, repoRoot)
 
-	if err := createDockerSandbox("s-term", t.TempDir(), []string{"claude"}, hostSessionEnv(),
+	if err := createDockerSandbox("s-term", sandboxTestClone(t, "s-term"), []string{"claude"}, hostSessionEnv(),
 		SandboxOptions{Network: "blerg-sandbox", RepoRoot: repoRoot}); err != nil {
 		t.Fatalf("createDockerSandbox: %v", err)
 	}

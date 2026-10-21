@@ -21,3 +21,17 @@ export function tokenExpired(token: string): boolean {
     return true
   }
 }
+
+// tokenSubject is the token's `sub` (the account), unverified, for keying what this tab holds per
+// person (a silent renewal can change the account without a reload); "" when it cannot be read.
+export function tokenSubject(token: string | null): string {
+  if (!token) return ''
+  try {
+    const parts = token.split('.')
+    if (parts.length < 2) return ''
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'))) as { sub?: unknown }
+    return typeof payload.sub === 'string' ? payload.sub : ''
+  } catch {
+    return ''
+  }
+}

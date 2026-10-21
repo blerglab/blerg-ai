@@ -281,3 +281,34 @@ func testSessionBuiltinOwnedChild(t *testing.T, builtin string) {
 		})
 	}
 }
+
+// The board tool (0.4.4) rides the same session transport: the session's own token to its own
+// filing-tools endpoint, the call named blerg_board, nothing else.
+func TestSessionBoardToolUsesTheSessionTransport(t *testing.T) {
+	var got struct {
+		Params struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		} `json:"params"`
+	}
+	var auth, path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth, path = r.Header.Get("Authorization"), r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"id\":\"c1\"}"}]}}`))
+	}))
+	defer server.Close()
+	tool := &sessionFilingTool{server: server.URL, session: "own-session", initialToken: "fixture-token", stateDir: t.TempDir()}
+	text, err := tool.CallNamed(t.Context(), sessionBoardToolName, json.RawMessage(`{"tool":"blerg_card_get","board":"A","arguments":{"card_id":"c1"}}`))
+	if err != nil || text != `{"id":"c1"}` {
+		t.Fatalf("call: %q %v", text, err)
+	}
+	if got.Params.Name != "blerg_board" || got.Params.Arguments["tool"] != "blerg_card_get" || auth != "Bearer fixture-token" || path != "/api/sessions/own-session/filing-tools" {
+		t.Fatalf("transport: name=%q args=%v auth=%q path=%q", got.Params.Name, got.Params.Arguments, auth, path)
+	}
+	spec := sessionBoardSpec()
+	if spec["name"] != "blerg_board" {
+		t.Fatalf("spec %v", spec)
+	}
+}

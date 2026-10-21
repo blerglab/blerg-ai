@@ -18,6 +18,7 @@ func controlFixture(t *testing.T) (*API, *DaemonConn, string) {
 	pool := runnerContractPool(t)
 	h := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-00000000bc01", Name: "controls", send: make(chan []byte, 8), inputReceipts: true}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	if err := db.UpsertDaemon(t.Context(), pool, dc.ID, "controls", "daemon", ""); err != nil {
 		t.Fatal(err)

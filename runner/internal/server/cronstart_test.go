@@ -501,6 +501,7 @@ func TestCronStartPinnedDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	dc2 := &DaemonConn{ID: other, Name: "desk", ReposRoot: "/repos", send: make(chan []byte, 8)}
+	dc2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc2.SetMCPGateway(true)
 	dc2.SetRestrictTools(true)
 	dc2.SetSandboxAvailable(true)

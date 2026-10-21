@@ -42,6 +42,7 @@ func newIngestFixture(t *testing.T) *ingestFixture {
 	sub := make(chan []byte, 64)
 	hub.Subscribe(sessionID, "b1", sub)
 	dc := &DaemonConn{ID: daemonID, inputReceipts: true, send: make(chan []byte, 64)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	return &ingestFixture{ctx: ctx, hub: hub, pool: pool, sessionID: sessionID, dc: dc, sub: sub}
 }

@@ -543,6 +543,7 @@ func TestErrorReasonIsPersistedAndOrphanDeletable(t *testing.T) {
 	}
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, Name: "err-daemon", send: make(chan []byte, 4)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	hub.SetSessionOwner(sessionID, daemonID)
 
@@ -597,6 +598,7 @@ func TestErrorReasonClearedOnRevival(t *testing.T) {
 	}
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, Name: "revive-daemon", send: make(chan []byte, 4)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	hub.SetSessionOwner(sessionID, daemonID)
 
@@ -639,6 +641,7 @@ func TestDeleteSessionWithConnectedDaemonForwardsKill(t *testing.T) {
 	daemonID := "00000000-0000-4000-8000-00000000d007"
 	sessionID := "00000000-0000-4000-8000-00000000e007"
 	dc := &DaemonConn{ID: daemonID, Name: "live-daemon", send: make(chan []byte, 4)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	hub.SetSessionOwner(sessionID, daemonID)
 

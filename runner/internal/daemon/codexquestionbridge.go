@@ -46,9 +46,12 @@ func codexQuestionHandler(base, token, sessionID string, emitter agent.Emitter, 
 		}}
 		id, err := messenger.SendAsk(body) //nolint:contextcheck // httpMessenger carries ctx on the instance for posting and polling.
 		if err != nil {
+			if ownerOnly {
+				emitter.Emit(agent.Event{Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: ownerOnlyAskFailure(err)}})
+			}
 			return "", errors.New("the question could not be delivered")
 		}
-		emitter.Emit(agent.Event{ClientEventID: protocol.SessionMessageEventID(id, "ask"), Ts: time.Now(), Kind: "ask", Payload: agent.MessagingPayload{Body: body, MessageID: id, TurnID: turnID}})
+		emitter.Emit(agent.Event{ClientEventID: protocol.SessionMessageEventID(id, "ask"), Ts: time.Now(), Kind: "ask", Payload: agent.MessagingPayload{Body: body, MessageID: id, TurnID: turnID, OwnerOnly: ownerOnly}})
 		select {
 		case reply := <-answers:
 			if reply.failed {
@@ -66,6 +69,30 @@ func codexQuestionHandler(base, token, sessionID string, emitter agent.Emitter, 
 			return "", errors.New("question interrupted")
 		}
 	}
+}
+
+// questionAsker is the AskUser of a Codex or Hermes session: native questions and approvals go to
+// the session's chat with the marker code taken out (scrubQuestions). currentTurn may be nil.
+func (h *AgentHost) questionAsker(sessionID string, emitter agent.Emitter, nonce string, currentTurn func() string) func(context.Context, string) (string, error) {
+	return scrubQuestions(codexQuestionHandler(h.cfg.ServerHTTP, h.cfg.DaemonToken, sessionID, emitter, currentTurn), nonce)
+}
+
+// scrubQuestions takes the session's marker code out of a question before it is posted.
+func scrubQuestions(ask func(context.Context, string) (string, error), nonce string) func(context.Context, string) (string, error) {
+	return func(ctx context.Context, body string) (string, error) {
+		return ask(ctx, agent.ScrubCode(body, nonce))
+	}
+}
+
+// ownerOnlyAskFailure says why an owner-only approval was denied without being asked: the
+// server's 409 means the session has no signed-in owner (a runner-key session); anything else
+// (a network error, a timeout, a server error, an ended session) is a delivery failure.
+func ownerOnlyAskFailure(err error) string {
+	var apiErr *messagesAPIError
+	if errors.As(err, &apiErr) && apiErr.status == http.StatusConflict {
+		return "Approval denied: runner-key sessions cannot answer owner-only approvals; start the session while signed in to answer approvals."
+	}
+	return "Approval denied: it could not be delivered to the chat (the server could not be reached or refused it)."
 }
 
 // ownerOnlyAsk marks a question's context: the server then accepts its answer

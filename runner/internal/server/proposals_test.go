@@ -605,3 +605,20 @@ func TestSweeperFailsPendingProposalsOfADeletedConnection(t *testing.T) {
 		t.Errorf("a proposal on a connection core never reported gone changed to %s", state(otherConn))
 	}
 }
+
+// The list carries the server's clock, so a client decides which pending proposal is past its
+// deadline as the server's counts do, whatever its own clock says (followups review M5).
+func TestProposalListCarriesServerTime(t *testing.T) {
+	fx := newPropFx(t, 0)
+	fx.insert("send", `{}`)
+	rec := fx.req("GET", "/api/proposals?scope=open", fx.human(), "")
+	var body struct {
+		ServerTime time.Time `json:"server_time"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || rec.Code != 200 {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	if d := time.Since(body.ServerTime); body.ServerTime.IsZero() || d < 0 || d > time.Minute {
+		t.Fatalf("server_time = %v, want about now", body.ServerTime)
+	}
+}

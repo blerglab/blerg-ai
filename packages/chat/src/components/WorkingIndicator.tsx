@@ -1,5 +1,6 @@
 // WorkingIndicator: "the agent is on it" — bouncing dots plus the time the
 // current turn has been running. Static dots under prefers-reduced-motion.
+import type { Reasoning } from '../model/reasoning'
 import { useState } from 'react'
 import { usePrefersReducedMotion } from '../hooks/useTicker'
 import { formatElapsed } from '../model/timeLabel'
@@ -7,6 +8,7 @@ import { WAITING_ON_INITIAL, nextWaitingOn, runningLabel, type WaitingOn } from 
 import { backgroundLabel, backgroundSummary } from '../model/backgroundTasks'
 
 interface Props {
+  reasoning?: Reasoning | null
   since: number
   now: number
   /** compact: one line for the toolbar while text is streaming. */
@@ -23,9 +25,9 @@ interface Props {
   background?: { count: number; description: string; command?: string } | null
 }
 
-export default function WorkingIndicator({ since, now, compact, waitingOn, background, activity }: Props) {
+export default function WorkingIndicator({ since, now, compact, waitingOn, background, activity, reasoning }: Props) {
   const reduced = usePrefersReducedMotion()
-  const elapsed = formatElapsed(now - since)
+  const elapsed = formatElapsed(Math.max(0, now - (reasoning?.since ?? since)))
   // The suffix as shown: held steady, so a run of short calls does not make it flash in and out.
   const [held, setHeld] = useState(WAITING_ON_INITIAL)
   const next = nextWaitingOn(held, waitingOn ?? null, now)
@@ -49,7 +51,7 @@ export default function WorkingIndicator({ since, now, compact, waitingOn, backg
             {activity || (background && !shownOn ? backgroundLabel(background.count, background.description) : 'Working…')}
           </span>{' '}
           {/* The clock is visible but not re-announced every second. */}
-          <span className="agent-working-time" aria-hidden="true">{elapsed}</span>
+          <span className="agent-working-time" aria-hidden="true">{reasoning?.tokens != null ? `${reasoning.tokens.toLocaleString('en-US')} tokens` : elapsed}</span>
           {shownOn && (
             <span
               key={`${shownOn.tool}@${shownOn.startedAt}`}

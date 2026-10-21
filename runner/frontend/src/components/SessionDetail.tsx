@@ -1,3 +1,6 @@
+import { useProposalInbox } from '../hooks/useProposalInbox'
+import { useProposalsWaiting } from '../hooks/useProposalsWaiting'
+import { ProposalBell } from './ProposalNotifications'
 import { modelDisplayName } from '@blerglab/chat'
 import type { ChecklistItem } from '@blerglab/chat'
 import { useParams, useNavigate } from 'react-router-dom'
@@ -23,7 +26,7 @@ import CapabilitiesPanel from './CapabilitiesPanel'
 import SessionInsights from './SessionInsights'
 import StatusPill from './StatusPill'
 import { backgroundCount, displayState } from '../lib/displayState'
-import { childIsRunning } from '../lib/liveState'
+import { childIsWorking } from '../lib/liveState'
 import SessionRail, { PanelIcon } from './SessionRail'
 import { readRailPref, useCompact, useThinking, writeRailPref } from '../lib/sessionRail'
 import { isNoRepo, repoLabel } from '../lib/noRepo'
@@ -47,6 +50,8 @@ export default function SessionDetail() {
 
   const session = useSessionStore(s => s.sessions.find(sess => sess.id === sessionId))
   const daemon = useSessionStore(s => s.daemons.find(d => d.id === session?.daemon_id))
+  // A child's header names its parent's agent: "started by Codex agent from <parent>".
+  const parentSession = useSessionStore(s => (session?.parent_session_id ? s.sessions.find(p => p.id === session.parent_session_id) : undefined))
   const pendingSessionIds = useSessionStore(s => s.pendingSessionIds)
   const failedSessions = useSessionStore(s => s.failedSessions)
   const clearFailedSession = useSessionStore(s => s.clearFailedSession)
@@ -164,6 +169,10 @@ export default function SessionDetail() {
   // The session's asks the message store holds as closed: one closed elsewhere is read again.
   const closedAsks = useMemo(() => sessionMessages.filter(m => m.kind === 'ask' && m.status !== 'open').map(m => m.id).join(','), [sessionMessages])
   const sessionLive = useSessionLive(sessionId ?? '', agentSession, `${session?.status ?? ''}|${toolsNonce}|${closedAsks}`)
+  const proposalInbox = useProposalInbox()
+  const sessionProposals = useMemo(() => proposalInbox.pending.filter(p => p.session_id === sessionId), [proposalInbox.pending, sessionId])
+  // The list shows a proposal past its deadline as expired; Needs you does not count it.
+  const sessionProposalsWaiting = useProposalsWaiting(sessionProposals, proposalInbox.clockOffset ?? 0)
   const liveState = sessionLive.live
   // The tool changes come with the live state; an older server's page reads them itself.
   const toolChangesOwn = usePendingToolChanges(sessionId ?? '', agentSession && sessionLive.source === 'client', toolsNonce)
@@ -185,8 +194,8 @@ export default function SessionDetail() {
   const liveShown = useCallback(() => setLiveAsk(null), [])
   if (liveAsk !== null && liveAsk !== sessionId) setLiveAsk(null)
   // A background subagent is listed (and counted) once, as a subagent.
-  const needsYou = liveState.openAsks.length + toolChanges + (sessionLive.delegationRequests?.length ?? 0) + (sessionLive.reviewRequests?.length ?? 0)
-  const runningNow = liveState.subagents.length + liveState.backgroundRunning + (sessionLive.children ?? []).filter(childIsRunning).length
+  const needsYou = liveState.openAsks.length + toolChanges + sessionProposalsWaiting.length + (sessionLive.delegationRequests?.length ?? 0) + (sessionLive.reviewRequests?.length ?? 0)
+  const runningNow = liveState.subagents.length + liveState.backgroundRunning + (sessionLive.children ?? []).filter(childIsWorking).length
   if (agentSession && sessionId) {
     if (railPref === null && needsYou + runningNow > 0 && autoOpenFor !== sessionId) {
       setAutoOpenFor(sessionId)
@@ -410,7 +419,7 @@ export default function SessionDetail() {
             {/* The header shows no status (the chat or terminal does), except this one, which nothing
                 else on the page says: its turn is over, its background work is not. */}
             {shownState === 'background' && <><StatusPill state={shownState} tasks={shownTasks} testId="detail-status" />{' '}</>}
-            {isAutomated(session) && <span data-testid="detail-started-by">started by {startedByLabel(session)} · </span>}
+            {isAutomated(session) && <span data-testid="detail-started-by">started by {startedByLabel(session, parentSession)} · </span>}
             {/* Fixed at start; an interactive session is the ordinary case and goes unmarked. */}
             {session.interaction === 'unattended' && (
               <span data-testid="detail-unattended" title="Started unattended: the agent does not wait for you in the chat">Unattended · </span>
@@ -583,6 +592,7 @@ export default function SessionDetail() {
         {!session.archived_at && (session.parent_session_id
           ? <ChildDiscardAction key={session.id} parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'}/>
           : <ParentDiscardAction key={session.id} sessionId={session.id} title={session.title || 'Untitled session'} onDiscarded={() => navigate('/sessions')}/>)}
+        <ProposalBell inbox={proposalInbox} />
         {/* The side panel: what needs you, what runs, this session. The badge counts the first two. */}
         {isAgent && (
           <button
@@ -692,7 +702,7 @@ export default function SessionDetail() {
         {isAgent
           // Keyed by id: draft, pending turn and notices belong to one
           // session and must not carry over when the route switches sessions.
-          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} onOpenChecklistItem={openChecklistItem} onManageChildApproval={openChildApproval} checklistItems={sessionLive.source === 'server' ? (liveState.checklist?.items ?? EMPTY_CHECKLIST_ITEMS) : undefined} mcpHold={liveState.mcpHold ?? null} canReleasePrompt={liveState.canReleasePrompt === true} />
+          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} onOpenChecklistItem={openChecklistItem} onManageChildApproval={openChildApproval} checklistItems={sessionLive.source === 'server' ? (liveState.checklist?.items ?? EMPTY_CHECKLIST_ITEMS) : undefined} mcpHold={liveState.mcpHold ?? null} canReleasePrompt={liveState.canReleasePrompt === true} canAnswerApprovals={sessionLive.source === 'loading' ? null : liveState.canReleasePrompt === true} reasoningTokens={liveState.reasoningTokens === true} />
           : <TerminalDOMView sessionId={sessionId ?? ''} ref={termRef} readOnly={!!session.archived_at}/>}
       </div>
 
@@ -778,6 +788,10 @@ export default function SessionDetail() {
           delegationGrants={sessionLive.delegationGrants}
           liveRunning={liveRunning}
           toolChanges={toolChanges}
+          proposals={sessionProposals}
+          waitingProposals={sessionProposalsWaiting}
+          proposalsError={proposalInbox.error}
+          onProposalsChanged={() => void proposalInbox.refresh()}
           mode={narrow ? 'drawer' : 'panel'}
           open={railOpen}
           onClose={closeRail}

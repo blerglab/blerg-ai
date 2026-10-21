@@ -189,3 +189,11 @@ func TestManagedBlockDefersToTheInteractionMode(t *testing.T) {
 		}
 	}
 }
+
+// An interactive session is told to put a decision that belongs to the person in as a question
+// that stays in their Needs you, not only as prose.
+func TestInteractiveSessionPutsDecisionsInAsQuestions(t *testing.T) {
+	if !strings.Contains(interactionParagraph(protocol.InteractionInteractive), "blerg-runner ask --no-wait") {
+		t.Fatal("the interactive paragraph does not mention blerg-runner ask --no-wait")
+	}
+}

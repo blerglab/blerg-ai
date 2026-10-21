@@ -17,6 +17,7 @@ func TestBackgroundBlockedDaemonDoesNotStallOtherDaemonEvents(t *testing.T) {
 	fx := newLiveFx(t)
 	h := fx.api.hub
 	blocked := &DaemonConn{ID: topicDaemonID, BackgroundTaskLifetime: newUUID(), send: make(chan []byte, 8)}
+	blocked.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(blocked)
 	if _, _, _, err := db.AppendBackgroundTaskEventAt(t.Context(), fx.pool, fx.sess, newUUID(), backgroundStartedKind, `{"task_id":"orphan","daemon_lifetime":"old-process"}`, time.Time{}); err != nil {
 		t.Fatal(err)
@@ -62,6 +63,7 @@ func TestBackgroundBlockedDaemonDoesNotStallOtherDaemonEvents(t *testing.T) {
 		}
 	}
 	other := &DaemonConn{ID: otherID, BackgroundTaskLifetime: newUUID(), send: make(chan []byte, 8)}
+	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	flowing := make(chan struct{})
 	go func() {
 		defer close(flowing)

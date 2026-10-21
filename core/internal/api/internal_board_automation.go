@@ -99,6 +99,12 @@ func (d Deps) boardMintGate(w http.ResponseWriter, r *http.Request, body any) (*
 
 // handleBoardAutomationMint is POST /internal/tokens/board-automation.
 func (d Deps) handleBoardAutomationMint(w http.ResponseWriter, r *http.Request) {
+	if d.BoardMintDisabled {
+		// The header tells the board this is the operator's switch, not a missing mint key.
+		w.Header().Set("Blerg-Mint-Disabled", "1")
+		http.Error(w, "board automation minting disabled", http.StatusServiceUnavailable)
+		return
+	}
 	var body boardAutomationMintRequest
 	svc, ok := d.boardMintGate(w, r, &body)
 	if !ok {
@@ -121,12 +127,11 @@ func (d Deps) handleBoardAutomationMint(w http.ResponseWriter, r *http.Request) 
 
 	// Every attempt counts, refused or not: the route must not be a free oracle for tokens.
 	if d.BoardMintLimiter != nil {
-		if allowed, retryAfter := d.BoardMintLimiter.Allow(body.AccountID, body.AccountID); !allowed {
+		if allowed, retryAfter := d.BoardMintLimiter.Take(body.AccountID, body.AccountID); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 			http.Error(w, "too many attempts — try again later", http.StatusTooManyRequests)
 			return
 		}
-		d.BoardMintLimiter.Fail(body.AccountID, body.AccountID)
 	}
 
 	deny := func(why string) {

@@ -392,9 +392,10 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 
 	case "blerg_card_get":
 		var a struct {
-			CardID  string `json:"card_id"`
-			BoardID string `json:"board_id"`
-			Number  int    `json:"number"`
+			CardID    string `json:"card_id"`
+			BoardID   string `json:"board_id"`
+			Number    int    `json:"number"`
+			WithTrail bool   `json:"with_trail"`
 		}
 		_ = json.Unmarshal(args, &a)
 		card, err := s.resolveCard(ctx, a.CardID, a.BoardID, a.Number)
@@ -407,6 +408,9 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		card, err = s.api.CardForPrincipal(ctx, p, card)
 		if err != nil {
 			return nil, err
+		}
+		if a.WithTrail {
+			return s.cardWithTrail(ctx, card)
 		}
 		return toolText(card), nil
 
@@ -615,3 +619,66 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 }
 
 var _ = strconv.Itoa
+
+// cardTrailLimit is how many of a card's latest trail events blerg_card_get with_trail returns.
+const cardTrailLimit = 30
+
+// trailEvent is one trail event as blerg_card_get with_trail returns it: a move names its column,
+// a comment carries its text.
+type trailEvent struct {
+	Type      string `json:"type"`
+	Actor     string `json:"actor"`
+	ToColumn  string `json:"to_column,omitempty"`
+	Text      string `json:"text,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+// cardWithTrail is the card with what a live view of it needs in the same call (another app shows
+// it, e.g. the runner's pinned card): its column's name, the board's columns (to move it) and its
+// latest trail events, oldest first. Read at card.read, like the card and the board's own trail.
+func (s *Server) cardWithTrail(ctx context.Context, card db.Card) (map[string]any, error) {
+	cols, err := db.ListColumns(ctx, s.api.Pool, card.BoardID)
+	if err != nil {
+		return nil, err
+	}
+	events, err := db.ListRecentCardEvents(ctx, s.api.Pool, card.ID, cardTrailLimit)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]string, len(cols))
+	columns := make([]map[string]any, 0, len(cols))
+	for _, c := range cols {
+		names[c.ID] = c.Name
+		columns = append(columns, map[string]any{"id": c.ID, "name": c.Name, "is_terminal": c.Terminal()})
+	}
+	trail := make([]trailEvent, 0, len(events))
+	for _, e := range events {
+		t := trailEvent{Type: e.Type, Actor: e.Actor, CreatedAt: e.CreatedAt}
+		if e.ToColumnID != nil {
+			t.ToColumn = names[*e.ToColumnID]
+		}
+		if e.Type == "comment" {
+			var d struct {
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(e.Data, &d)
+			t.Text = d.Text
+		}
+		trail = append(trail, t)
+	}
+	raw, err := json.Marshal(card)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	out["column_name"] = ""
+	if card.ColumnID != nil {
+		out["column_name"] = names[*card.ColumnID]
+	}
+	out["columns"] = columns
+	out["trail"] = trail
+	return toolText(out), nil
+}

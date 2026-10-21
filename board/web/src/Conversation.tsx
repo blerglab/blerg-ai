@@ -124,7 +124,7 @@ export function useCardSessions(cardId: string) {
 
 // Where a person's Run of a card may go (GET /api/cards/{id}/run-targets): the board's default,
 // or, for the owner of the board's automation token, the cluster or a connected desktop.
-interface RunTargetOption { runtime: string; daemon_id?: string; label: string }
+interface RunTargetOption { runtime: string; daemon_id?: string; label: string; unavailable?: string }
 interface RunTargets {
   default_runtime: string; can_choose: boolean; targets: RunTargetOption[]; reason?: string;
   // Why the board cannot start sessions at all (no token, or a dead one), and whether this
@@ -196,7 +196,7 @@ function RunWhere({ targets, value, onChange }: { targets: RunTargets | null; va
       <option value="">Board default ({runtimeName(targets.default_runtime)})</option>
       {targets.targets.map((t) => {
         const key = `${t.runtime}|${t.daemon_id ?? ""}`;
-        return <option key={key} value={key}>{t.label}</option>;
+        return <option key={key} value={key} disabled={!!t.unavailable}>{t.label}{t.unavailable ? ` — unavailable: ${t.unavailable}` : ""}</option>;
       })}
     </select>
   );

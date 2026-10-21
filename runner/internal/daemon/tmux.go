@@ -264,7 +264,8 @@ func modeSyncSequences(sessionID string) string {
 // otherwise a killed session would leak a stopped container per launch.
 func killTmuxSession(sessionID string) {
 	_ = runTmuxFor(sessionID, "kill-session", "-t", tmuxSessionName(sessionID)).Run()
-	removeSandboxContainer(sessionID)
+	// A sandbox's leftover work is committed and brought back before the container goes.
+	finishSandbox(sessionID)
 }
 
 // refreshTmuxClient forces a full repaint of every tmux client attached to

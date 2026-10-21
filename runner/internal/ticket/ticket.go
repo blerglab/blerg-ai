@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -59,8 +61,11 @@ type Comment struct {
 
 // Ticket is the pinned ticket. Description and comment bodies are markdown, drawn as text.
 type Ticket struct {
-	Source      string    `json:"source"`
-	Key         string    `json:"key"`
+	Source string `json:"source"`
+	Key    string `json:"key"`
+	// BoardID names the board of a Blerg Board card (source "blerg-board", key "#<number>"): the
+	// panel then shows the live card, and the runner sets URL itself (BoardCard).
+	BoardID     string    `json:"board_id,omitempty"`
 	URL         string    `json:"url,omitempty"`
 	Title       string    `json:"title"`
 	Status      string    `json:"status,omitempty"`
@@ -191,6 +196,7 @@ func Clean(raw json.RawMessage) (Ticket, error) {
 		Description: block(r.str("description"), MaxDescription),
 	}
 	rawURL := r.str("url")
+	boardID := strings.TrimSpace(r.str("board_id"))
 	labels := r.strs("labels")
 	acceptance := r.strs("acceptance")
 	fields := r.objs("fields", "name, value")
@@ -247,7 +253,38 @@ func Clean(raw json.RawMessage) (Ticket, error) {
 		}
 		t.URL = u
 	}
+	if boardID != "" && t.Source == SourceBoard {
+		n, ok := cardNumber(t.Key)
+		switch {
+		case !boardIDPattern.MatchString(boardID):
+			return Ticket{}, refuse("board_id must be the board's id (letters, digits, - and _), as blerg-runner ticket get prints it")
+		case !ok:
+			return Ticket{}, refuse(`a Blerg Board card's key is its number, e.g. "#42"`)
+		}
+		t.BoardID, t.Key = boardID, "#"+strconv.Itoa(n)
+	}
 	return t, nil
+}
+
+// SourceBoard is the source of a Blerg Board card.
+const SourceBoard = "blerg-board"
+
+var boardIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// cardNumber reads a card number written "#42" or "42".
+func cardNumber(key string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(key), "#"))
+	return n, err == nil && n > 0
+}
+
+// BoardCard is the board and number of a Blerg Board card pinned with its board_id; ok is false for
+// any other ticket.
+func BoardCard(t Ticket) (boardID string, number int, ok bool) {
+	if t.Source != SourceBoard || t.BoardID == "" {
+		return "", 0, false
+	}
+	number, ok = cardNumber(t.Key)
+	return t.BoardID, number, ok
 }
 
 // CleanURL accepts an absolute http or https address with a host, and nothing else.
@@ -276,6 +313,7 @@ func CleanURL(s string) (string, error) {
 type Summary struct {
 	Source    string    `json:"source"`
 	Key       string    `json:"key"`
+	BoardID   string    `json:"board_id,omitempty"`
 	Title     string    `json:"title"`
 	Status    string    `json:"status"`
 	URL       string    `json:"url"`
@@ -286,7 +324,7 @@ type Summary struct {
 
 // SummaryOf is the unpin event's ticket: the summary fields only.
 func SummaryOf(t Ticket) Ticket {
-	return Ticket{Source: t.Source, Key: t.Key, Title: t.Title, Status: t.Status, URL: t.URL}
+	return Ticket{Source: t.Source, Key: t.Key, BoardID: t.BoardID, Title: t.Title, Status: t.Status, URL: t.URL}
 }
 
 // Row is what the fold reads of one ticket event.
@@ -297,24 +335,27 @@ type Row struct {
 	Action  string
 	Source  string
 	Key     string
+	BoardID string
 	Title   string
 	Status  string
 	URL     string
 }
 
-type id struct{ source, key string }
+// id is a pin's identity: its tracker and key, and for a Blerg Board card its board too (#42 on
+// one board is not #42 on another).
+type id struct{ source, key, board string }
 
 // Pinned folds a session's ticket events (any order) into the tickets pinned now, newest pin or
-// refresh first: the first is the current one. A pin is identified by (source, key).
+// refresh first: the first is the current one. A pin is identified by (source, key, board id).
 func Pinned(rows []Row) []Summary {
 	rows = append([]Row(nil), rows...)
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Seq < rows[j].Seq })
 	byID := map[id]Summary{}
 	for _, r := range rows {
-		k := id{r.Source, r.Key}
+		k := id{r.Source, r.Key, r.BoardID}
 		switch r.Action {
 		case "pin", "update":
-			byID[k] = Summary{Source: r.Source, Key: r.Key, Title: r.Title, Status: r.Status, URL: r.URL, EventID: r.EventID, Seq: r.Seq, UpdatedAt: r.Ts}
+			byID[k] = Summary{Source: r.Source, Key: r.Key, BoardID: r.BoardID, Title: r.Title, Status: r.Status, URL: r.URL, EventID: r.EventID, Seq: r.Seq, UpdatedAt: r.Ts}
 		case "unpin":
 			delete(byID, k)
 		}

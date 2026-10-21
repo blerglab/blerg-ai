@@ -464,6 +464,7 @@ func TestHub_InvalidToken(t *testing.T) {
 // daemon_hello (initial) and daemon_heartbeat (refreshed live).
 func TestDaemonConnSandboxAvailable(t *testing.T) {
 	dc := &DaemonConn{ID: "d1"}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	if dc.SandboxAvailable() {
 		t.Fatal("zero-value DaemonConn should report sandbox unavailable")
 	}
@@ -482,6 +483,7 @@ func TestDaemonConnSandboxAvailable(t *testing.T) {
 // daemon_hello (initial) and daemon_heartbeat (refreshed live).
 func TestDaemonConnAvailableEngines(t *testing.T) {
 	dc := &DaemonConn{ID: "d1"}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	if got := dc.AvailableEngines(); len(got) != 0 {
 		t.Fatalf("zero-value DaemonConn should report no available engines, got %v", got)
 	}
@@ -503,6 +505,7 @@ func TestDaemonConnAvailableEngines(t *testing.T) {
 // reconnect, since the field was only ever set once at hello time.
 func TestDaemonConnCheckedOutRepos(t *testing.T) {
 	dc := &DaemonConn{ID: "d1"}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	if got := dc.CheckedOutRepos(); len(got) != 0 {
 		t.Fatalf("zero-value DaemonConn.CheckedOutRepos() = %v, want empty", got)
 	}

@@ -15,6 +15,13 @@ import (
 )
 
 type Board struct {
+	RunRuntime       string `json:"run_runtime"`
+	RunDaemonID      string `json:"run_daemon_id"`
+	RunTargetAccount string `json:"-"`
+	// RunHostAckAt is when the automation owner acknowledged a host ("This machine") target:
+	// it runs unattended and unsandboxed as that desktop's person. Set only for a host target.
+	RunHostAckBy            string          `json:"-"`
+	RunHostAckAt            *string         `json:"run_host_acknowledged_at,omitempty"`
 	IncludeComponentVersion bool            `json:"include_component_version"`
 	ChatEffort              string          `json:"chat_effort"`
 	DiscussEffort           string          `json:"discuss_effort"`
@@ -105,7 +112,8 @@ const boardCols = `effort, reviewer_effort, discuss_effort, chat_effort, id, nam
 	gate_enabled, gate_on_unavailable, gate_on_dispute, driven_by, concurrency, ci_policy,
 	automation_engine, automation_token <> '', automation_token_expires_at, automation_account_id,
 	automation_token_minted_id IS NOT NULL,
-	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), include_component_version`
+	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), include_component_version, run_runtime, run_daemon_id, run_target_account,
+	run_host_ack_by, to_char(run_host_ack_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
 
 func scanBoard(row pgx.Row) (Board, error) {
 	var b Board
@@ -113,7 +121,8 @@ func scanBoard(row pgx.Row) (Board, error) {
 		&b.DiscussModel, &b.ChatModel, &b.FieldSchema,
 		&b.RequireRepo, &b.GateEnabled, &b.GateOnUnavailable, &b.GateOnDispute, &b.DrivenBy, &b.Concurrency,
 		&b.CIPolicy, &b.AutomationEngine, &b.AutomationTokenSet, &b.AutomationTokenExpiresAt, &b.AutomationAccountID,
-		&b.AutomationTokenMinted, &b.CreatedAt, &b.UpdatedAt, &b.IncludeComponentVersion)
+		&b.AutomationTokenMinted, &b.CreatedAt, &b.UpdatedAt, &b.IncludeComponentVersion, &b.RunRuntime, &b.RunDaemonID, &b.RunTargetAccount,
+		&b.RunHostAckBy, &b.RunHostAckAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, ErrNotFound
 	}
@@ -121,6 +130,12 @@ func scanBoard(row pgx.Row) (Board, error) {
 }
 
 type BoardParams struct {
+	// Execution placement is accepted only through the owner-checked HTTP setting.
+	RunRuntime       *string `json:"-"`
+	RunDaemonID      *string `json:"-"`
+	RunTargetAccount *string `json:"-"`
+	// RunHostAckBy records who acknowledged a host target ("" clears it); the time is set with it.
+	RunHostAckBy            *string         `json:"-"`
 	IncludeComponentVersion *bool           `json:"include_component_version"`
 	ChatEffort              *string         `json:"chat_effort"`
 	DiscussEffort           *string         `json:"discuss_effort"`
@@ -223,8 +238,12 @@ func checkAutomationEngine(p *string) error {
 // raw automation token (a bearer credential — never log it, never put it in a
 // response) and the engine. Token is "" when none is configured.
 type BoardAutomation struct {
-	Token  string
-	Engine string
+	AccountID        string
+	RunRuntime       string
+	RunDaemonID      string
+	RunTargetAccount string
+	Token            string
+	Engine           string
 }
 
 // GetBoardAutomation reads a board's automation token and engine. It is the
@@ -233,8 +252,8 @@ func GetBoardAutomation(ctx context.Context, pool *pgxpool.Pool, boardID string)
 	var a BoardAutomation
 	var stored string
 	err := pool.QueryRow(ctx,
-		`SELECT automation_token, automation_engine FROM boards WHERE id = $1`, boardID).
-		Scan(&stored, &a.Engine)
+		`SELECT automation_token, automation_engine, COALESCE(automation_account_id,''), run_runtime, run_daemon_id, run_target_account FROM boards WHERE id = $1`, boardID).
+		Scan(&stored, &a.Engine, &a.AccountID, &a.RunRuntime, &a.RunDaemonID, &a.RunTargetAccount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return a, ErrNotFound
 	}
@@ -676,6 +695,23 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 	if p.AutomationEngine != nil {
 		add("automation_engine", *p.AutomationEngine)
 	}
+	if p.RunRuntime != nil {
+		add("run_runtime", *p.RunRuntime)
+	}
+	if p.RunDaemonID != nil {
+		add("run_daemon_id", *p.RunDaemonID)
+	}
+	if p.RunTargetAccount != nil {
+		add("run_target_account", *p.RunTargetAccount)
+	}
+	if p.RunHostAckBy != nil {
+		add("run_host_ack_by", *p.RunHostAckBy)
+		if *p.RunHostAckBy == "" {
+			set = append(set, "run_host_ack_at = NULL")
+		} else {
+			set = append(set, "run_host_ack_at = now()")
+		}
+	}
 	if auto != nil {
 		add("automation_token", tokenCol)
 		add("automation_token_expires_at", expCol)
@@ -720,25 +756,40 @@ func joinSet(parts []string) string {
 }
 
 func DeleteBoard(ctx context.Context, pool *pgxpool.Pool, id string) error {
+	_, err := DeleteBoardWithAutomation(ctx, pool, id)
+	return err
+}
+
+// DeleteBoardWithAutomation captures the token to revoke under the same board row
+// lock as token replacement. Either deletion observes the replacement, or the
+// replacement fails after deletion and its caller revokes the unused minted token.
+func DeleteBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id string) (*MintedAutomation, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
+	if err := lockBoard(ctx, tx, id); err != nil {
+		return nil, err
+	}
+	minted, err := lockedMintedAutomation(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
 	// Cards first: the boards→board_columns cascade would otherwise trip
 	// cards.column_id ON DELETE RESTRICT while live cards still reference
 	// the columns being cascaded away.
 	if _, err := tx.Exec(ctx, `DELETE FROM cards WHERE board_id = $1`, id); err != nil {
-		return err
+		return nil, err
 	}
 	tag, err := tx.Exec(ctx, `DELETE FROM boards WHERE id = $1`, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
-	return tx.Commit(ctx)
+	return minted, tx.Commit(ctx)
 }
 
 // ── Columns ──────────────────────────────────────────────────────────────────

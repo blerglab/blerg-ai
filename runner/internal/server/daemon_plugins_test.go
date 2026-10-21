@@ -145,6 +145,7 @@ func TestPostSessionsDaemonPluginsHonourTheAllowList(t *testing.T) {
 
 func TestDaemonConnRecordsThePluginsCapability(t *testing.T) {
 	dc := &DaemonConn{ID: "d"}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	if dc.CanPlugins() {
 		t.Error("a daemon that has not said so must not be assumed to load plugins")
 	}

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ArtifactViewer from './ArtifactViewer'
+import { MAXIMIZED_KEY, localStorageChatStorage } from '../model/storage'
 import { ChatContext, type ChatContextValue } from './context'
 import { HTML_ARTIFACT_CSP } from '../model/artifacts'
 import { testing as hl } from '../model/highlight'
@@ -532,5 +533,75 @@ describe('ArtifactViewer: diff review entry', () => {
     expect(screen.queryByRole('button', { name: 'Review' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Select new line 1 in file.go' })).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: 'Source' })).toBeNull()
+  })
+})
+
+describe('ArtifactViewer: maximize', () => {
+  // The storage helper keeps a memory copy beside localStorage; clear both.
+  const reset = () => { for (const kind of ['file', 'review', 'markup', 'diff'] as const) localStorageChatStorage.set(MAXIMIZED_KEY(kind), null) }
+  beforeEach(reset)
+  afterEach(reset)
+
+  it('goes edge to edge and back from the header button, and says which it does', async () => {
+    serve('x')
+    show(art({}))
+    await screen.findByTestId('artifact-text')
+    const dialog = screen.getByRole('dialog')
+    const button = screen.getByRole('button', { name: 'Maximize' })
+    expect(button).toHaveAttribute('aria-pressed', 'false')
+    expect(button).toHaveTextContent('⤢')
+    expect(dialog).not.toHaveClass('is-maximized')
+    fireEvent.click(button)
+    expect(dialog).toHaveClass('is-maximized')
+    expect(screen.getByTestId('artifact-viewer-overlay')).toHaveClass('is-maximized')
+    const restore = screen.getByRole('button', { name: 'Restore size' })
+    expect(restore).toHaveAttribute('aria-pressed', 'true')
+    expect(restore).toHaveTextContent('⤡')
+    fireEvent.click(restore)
+    expect(dialog).not.toHaveClass('is-maximized')
+  })
+
+  it('toggles with Ctrl+Alt+F (Cmd+Alt+F on a Mac)', async () => {
+    serve('x')
+    show(art({}))
+    await screen.findByTestId('artifact-text')
+    const dialog = screen.getByRole('dialog')
+    fireEvent.keyDown(dialog, { key: 'f', code: 'KeyF', ctrlKey: true, altKey: true })
+    expect(dialog).toHaveClass('is-maximized')
+    // Option changes the character on a Mac; the physical key still counts.
+    fireEvent.keyDown(dialog, { key: 'ƒ', code: 'KeyF', metaKey: true, altKey: true })
+    expect(dialog).not.toHaveClass('is-maximized')
+    fireEvent.keyDown(dialog, { key: 'f', code: 'KeyF' })
+    expect(dialog).not.toHaveClass('is-maximized')
+  })
+
+  it('remembers the choice per kind: a maximized review does not maximize a plain file', async () => {
+    serve('# Title\n\nsome text')
+    const md = art({ name: 'r.md', view: 'markdown', content_type: 'text/markdown' })
+    const first = showInChat(md)
+    await screen.findByRole('heading', { name: 'Title' })
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize' }))
+    expect(screen.getByRole('dialog')).toHaveClass('is-maximized')
+    // Back to the file: the plain viewer has its own setting.
+    fireEvent.keyDown(screen.getByTestId('review-mode'), { key: 'Escape' })
+    expect(screen.getByRole('dialog')).not.toHaveClass('is-maximized')
+    first.unmount()
+
+    // Opened again, the review comes up maximized and the file does not.
+    serve('# Title\n\nsome text')
+    showInChat(md)
+    await screen.findByRole('heading', { name: 'Title' })
+    expect(screen.getByRole('dialog')).not.toHaveClass('is-maximized')
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }))
+    expect(screen.getByRole('dialog')).toHaveClass('is-maximized')
+  })
+
+  it('remembers a maximized diff on its own', async () => {
+    localStorage.setItem('blerg.chat.viewer.maximized.diff', '1')
+    serve('diff --git a/file.go b/file.go\n--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new\n')
+    showInChat(art({ name: 'change.diff', view: 'diff', content_type: 'text/x-diff' }))
+    await screen.findByTestId('review-mode')
+    expect(screen.getByRole('dialog')).toHaveClass('is-maximized')
   })
 })

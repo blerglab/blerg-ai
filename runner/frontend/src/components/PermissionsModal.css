@@ -12,8 +12,10 @@
 }
 .pm-dialog {
   box-sizing: border-box;
-  width: min(720px, 100%);
-  height: min(86vh, 860px);
+  /* Dense: it grows with a large screen (a 4K display gets a wide dialog, not a 720 px strip), and
+     Maximize takes the whole window. */
+  width: min(clamp(720px, 50vw, 1280px), 100%);
+  height: min(86vh, max(860px, 70vh));
   display: flex;
   flex-direction: column;
   background: var(--basalt);
@@ -24,8 +26,10 @@
   overflow: hidden;
   outline: none;
 }
+.pm-dialog.pm-maximized { width: 100%; height: 100%; }
 @media (max-width: 599px) {
   .pm-overlay { padding: 0; align-items: stretch; }
+  .pm-maximize { display: none; }
   .pm-dialog { width: 100%; height: 100%; max-height: none; border-radius: 0; border: none; }
 }
 
@@ -135,3 +139,20 @@
 .pm-row-notes { padding-left: 26px; }
 .pm-row-notes:empty { display: none; }
 .pm-failed-note { color: var(--danger); font-weight: 600; }
+
+/* Boards: one row per board, its name and a level select; on a phone the select wraps under it. */
+.pm-board-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.pm-board-name { flex: 1 1 12em; min-width: 0; overflow-wrap: anywhere; font-size: var(--text-sm); }
+.pm-level {
+  flex: none; max-width: 100%; padding: 4px 8px; border: 1px solid var(--stone); border-radius: 6px;
+  background: var(--scree); color: var(--chalk); font: inherit; font-size: var(--text-xs); cursor: pointer;
+}
+.pm-level:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pm-level:disabled { opacity: 0.5; cursor: default; }
+.pm-levels-note { margin: 0 0 8px; }
+.pm-dialog.pm-maximized .pm-scroll { max-height: min(60vh, 1200px); }
+@media (min-width: 1600px) { .pm-scroll { max-height: 40vh; } }
+
+.pm-board-pages { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--text-xs); margin-top: 8px; }
+.pm-board-pages button { min-height: 44px; }
+.pm-save-results { padding: 8px 16px; font-size: var(--text-sm); border-top: 1px solid var(--stone); max-height: 160px; overflow-y: auto; }

@@ -226,7 +226,7 @@ describe('ticket modal', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
-  it('has its header, then Details, Description, Acceptance criteria and Comments, in that order', () => {
+  it('has its header, then the details as chips, Description, Acceptance criteria and Comments, in one column', () => {
     render(<TicketModal ticket={full} onClose={() => {}} />)
     const dialog = screen.getByRole('dialog')
     const header = dialog.querySelector('header')!
@@ -234,17 +234,45 @@ describe('ticket modal', () => {
     expect(within(header).getByTestId('ticket-status')).toHaveAttribute('data-tone', 'active')
     expect(within(header).getByRole('link', { name: /Open in JIRA/ })).toHaveAttribute('href', 'https://tracker.example.test/ABC-1')
     const heads = [...dialog.querySelectorAll('.ticket-section-title')].map(h => h.textContent)
-    expect(heads).toEqual(['Details', 'Description', 'Acceptance criteria', 'Comments'])
-    // Details come first in the page: on a narrow screen they are on top; a wide one puts them on the side.
-    expect(dialog.querySelector('.ticket-modal-grid > :first-child')).toHaveClass('ticket-side')
+    expect(heads).toEqual(['Description', 'Acceptance criteria', 'Comments'])
+    // One column, the details first: no side panel and no Details box.
+    expect(dialog.querySelector('.ticket-side')).toBeNull()
+    expect(dialog.querySelector('.ticket-main > :first-child')).toHaveAttribute('data-testid', 'ticket-modal-details')
   })
 
-  it('lists the details with their names, labels as chips, then the extra fields', () => {
+  it('lists the details as named chips, the extra fields after them, then the labels', () => {
     render(<TicketModal ticket={full} onClose={() => {}} />)
     const details = screen.getByTestId('ticket-modal-details')
-    const names = [...details.querySelectorAll('dt')].map(d => d.textContent)
-    expect(names).toEqual(['Type', 'Priority', 'Assignee', 'Reporter', 'Labels', 'Sprint'])
+    const names = [...details.querySelectorAll('.ticket-detail-name')].map(d => d.textContent)
+    expect(names).toEqual(['Type', 'Priority', 'Assignee', 'Reporter', 'Sprint'])
     expect(details.querySelectorAll('.ticket-label')).toHaveLength(2)
+  })
+
+  it('shows no details row for a ticket with none', () => {
+    render(<TicketModal ticket={{ source: 'github', key: '9', title: 'Bare' }} onClose={() => {}} />)
+    expect(screen.queryByTestId('ticket-modal-details')).toBeNull()
+  })
+
+  it('remembers Maximize for the next ticket opened', () => {
+    localStorage.removeItem('blerg.chat.viewer.maximized.ticket')
+    const first = render(<TicketModal ticket={full} onClose={() => {}} />)
+    expect(screen.getByTestId('ticket-modal')).not.toHaveClass('is-maximized')
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize' }))
+    expect(screen.getByTestId('ticket-modal')).toHaveClass('is-maximized')
+    first.unmount()
+    render(<TicketModal ticket={full} onClose={() => {}} />)
+    expect(screen.getByTestId('ticket-modal')).toHaveClass('is-maximized')
+    expect(screen.getByRole('button', { name: 'Restore size' })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: 'Restore size' }))
+    expect(localStorage.getItem('blerg.chat.viewer.maximized.ticket')).toBeNull()
+  })
+
+  it('takes a host body and header actions in place of the pinned copy', () => {
+    render(<TicketModal ticket={full} onClose={() => {}} body={<p>live card</p>} actions={<button type="button">Move</button>} />)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('live card')
+    expect(dialog.querySelector('.ticket-section-title')).toBeNull()
+    expect(within(dialog.querySelector('header')!).getByRole('button', { name: 'Move' })).toBeInTheDocument()
   })
 
   it('draws acceptance criteria as an unticked list and comments with an avatar, a name and a time', () => {

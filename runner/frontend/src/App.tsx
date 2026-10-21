@@ -1,3 +1,4 @@
+import ProposalNotifications from './components/ProposalNotifications'
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import SessionList from './components/SessionList'
@@ -94,6 +95,7 @@ export function BrandHeader() {
         Runner
       </span>
     </a>
+      <ProposalNotifications />
       <ThemeToggle />
     </div>
   )

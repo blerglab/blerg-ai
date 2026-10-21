@@ -101,6 +101,11 @@ func NewUserRepoLister(registry *gitprovider.Registry,
 // One ask per account at a time: a caller arriving while core is being asked
 // waits for that answer instead of asking again.
 func (l *UserRepoLister) account(ctx context.Context, accountID string, now time.Time) (acct *userRepoAccount, known bool) {
+	return l.accountWithin(ctx, accountID, now, l.kindsTTL)
+}
+
+// accountWithin is account with the kinds check due once the last one is older than maxAge.
+func (l *UserRepoLister) accountWithin(ctx context.Context, accountID string, now time.Time, maxAge time.Duration) (acct *userRepoAccount, known bool) {
 	l.mu.Lock()
 	l.evictIdleLocked(now)
 	acct = l.cache[accountID]
@@ -109,7 +114,7 @@ func (l *UserRepoLister) account(ctx context.Context, accountID string, now time
 		l.cache[accountID] = acct
 	}
 	acct.lastUsed = now
-	fresh := func() bool { return acct.kindsKnown && now.Sub(acct.kindsCheckedAt) < l.kindsTTL }
+	fresh := func() bool { return acct.kindsKnown && now.Sub(acct.kindsCheckedAt) < maxAge }
 	if fresh() {
 		l.mu.Unlock()
 		return acct, true
@@ -162,10 +167,16 @@ func (l *UserRepoLister) account(ctx context.Context, accountID string, now time
 // asked together when the launch sheet opens, ask core once between them.
 // ok=false means "couldn't tell", exactly as listKinds.
 func (l *UserRepoLister) Kinds(ctx context.Context, accountID string) ([]string, bool) {
+	return l.KindsWithin(ctx, accountID, l.kindsTTL)
+}
+
+// KindsWithin is Kinds with core asked again once the last answer is older than maxAge (the
+// lister's own kindsTTL still applies to List).
+func (l *UserRepoLister) KindsWithin(ctx context.Context, accountID string, maxAge time.Duration) ([]string, bool) {
 	if l == nil || accountID == "" {
 		return nil, false
 	}
-	acct, known := l.account(ctx, accountID, l.now())
+	acct, known := l.accountWithin(ctx, accountID, l.now(), maxAge)
 	if !known {
 		return nil, false
 	}

@@ -107,12 +107,16 @@ func (h *artifactsHandler) attachments(w http.ResponseWriter, r *http.Request) {
 		ContentType string `json:"content_type"`
 		Version     int    `json:"version"`
 		Latest      int    `json:"latest_version"`
+		// When the person attached it: the CLI names same-name files by upload time, whatever
+		// the list order.
+		CreatedAt string `json:"created_at"`
 	}
 	latest := latestVersions(rows)
 	out := []entry{}
 	for i := len(rows) - 1; i >= 0; i-- { // oldest first: the order the person attached them
 		if rows[i].Origin == db.OriginUser {
-			out = append(out, entry{rows[i].ID, rows[i].Name, rows[i].Size, rows[i].ContentType, rows[i].Version, latest[latestKey(rows[i])]})
+			out = append(out, entry{rows[i].ID, rows[i].Name, rows[i].Size, rows[i].ContentType, rows[i].Version,
+				latest[latestKey(rows[i])], rows[i].CreatedAt.UTC().Format(time.RFC3339Nano)})
 		}
 	}
 	w.Header().Set("Cache-Control", "private, no-store")

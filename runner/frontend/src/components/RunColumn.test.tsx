@@ -125,6 +125,14 @@ describe('RunColumn', () => {
     }
   })
 
+  // The sandbox card says what the sandbox can touch and where its commits land.
+  it('says the Local sandbox works in a clone and where its commits land', () => {
+    renderColumn({ clusterConfigured: true })
+    const card = screen.getByTestId('runtime-docker')
+    expect(card).toHaveTextContent('working in a clone of your repo: never your checkout or its .git')
+    expect(card).toHaveTextContent('Its commits land on the branch wip/<session-id> in your repo')
+  })
+
   it('marks the chosen runtime and reports picks', () => {
     const props = renderColumn({ runtime: 'docker', clusterConfigured: true })
     expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'true')

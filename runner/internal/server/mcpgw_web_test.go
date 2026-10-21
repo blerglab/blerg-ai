@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -126,6 +127,12 @@ func TestGatewayOnWebPortIdleLimitAndRenewal(t *testing.T) {
 	if got := pingGateway(mux, mcpConn, token); got != http.StatusUnauthorized {
 		t.Fatalf("idle grant: %d, want 401", got)
 	}
+	// Repeating an expired bearer cannot renew an abandoned grant by itself.
+	for range 3 {
+		if got := pingGateway(mux, mcpConn, token); got != http.StatusUnauthorized {
+			t.Fatalf("idle bearer renewed itself: %d", got)
+		}
+	}
 	if err := db.RenewPublicMCPGrants(t.Context(), fx.pool, "another-daemon", []string{sid}); err != nil {
 		t.Fatal(err)
 	}
@@ -151,14 +158,28 @@ func TestGatewayOnWebPortValidTokenNeverThrottled(t *testing.T) {
 	})
 	fx.sessionID(rec)
 	token := spawnOf(t, fx.dc).MCPGateway.Servers[0].Token
+	// Establish a recent successful grant before exhausting the shared lookup allowance.
+	if got := pingGateway(mux, mcpConn, token); got != http.StatusOK {
+		t.Fatalf("initial valid token: %d", got)
+	}
 	for i := 0; i < 400; i++ {
 		pingGateway(mux, mcpConn, "junk")
+	}
+	for i := 0; i < 1000; i++ {
+		pingGateway(mux, mcpConn, "gw_"+strings.Repeat("0", 64))
 	}
 	if got := pingGateway(mux, mcpConn, "junk"); got != http.StatusTooManyRequests {
 		t.Fatalf("junk from a throttled address: %d, want 429", got)
 	}
 	if got := pingGateway(mux, mcpConn, token); got != http.StatusOK {
 		t.Fatalf("valid token from a throttled address: %d, want 200", got)
+	}
+	// A budget bypass never caches authorization: deletion is effective immediately.
+	if _, err := fx.pool.Exec(t.Context(), `DELETE FROM session_mcp_grants WHERE public_route`); err != nil {
+		t.Fatal(err)
+	}
+	if got := pingGateway(mux, mcpConn, token); got == http.StatusOK {
+		t.Fatal("deleted recent grant was accepted")
 	}
 }
 
@@ -174,6 +195,9 @@ func TestGatewayOnWebPortThrottledRefusalsAreUniform(t *testing.T) {
 	cluster := fx.secretConfig(fx.sessionID(rec)).Servers[0].Token
 	for i := 0; i < 400; i++ {
 		pingGateway(mux, mcpConn, "junk")
+	}
+	for i := 0; i < 1000; i++ {
+		pingGateway(mux, mcpConn, "gw_"+strings.Repeat("0", 64))
 	}
 	junkCode, junkBody := pingGatewayBody(mux, mcpConn, "junk")
 	unknownCode, unknownBody := pingGatewayBody(mux, mcpConn, "gw_"+strings.Repeat("1", 64))
@@ -312,5 +336,36 @@ func TestLaunchBoardOnHostNeedsWebGateway(t *testing.T) {
 	}
 	if fx.count("sessions") != 0 || len(fx.dc.send) != 0 {
 		t.Fatal("refusal created a session or sent a spawn")
+	}
+}
+
+// The public route's accept tells a database error apart from a refusal (security N2): an error
+// is returned, so the gateway answers 503 instead of dropping the token and counting a failure.
+func TestPublicGrantUsableReportsDatabaseErrors(t *testing.T) {
+	fx := newMCPFx(t)
+	fx.dc.SetMCPGatewayViaServer(true)
+	serveGatewayOnWeb(fx)
+	rec := fx.do(fx.api.HandlePostSessions, fx.human(), map[string]any{
+		"daemon_id": fx.dc.ID, "repo": "app", "kind": "agent", "runtime": "docker", "mcp": fx.selection(),
+	})
+	sid := fx.sessionID(rec)
+	spawnOf(t, fx.dc)
+	grants, err := db.ListMCPGrantsForSession(t.Context(), fx.pool, sid)
+	if err != nil || len(grants) == 0 {
+		t.Fatalf("grants: %v %d", err, len(grants))
+	}
+	gr := grants[0]
+	if ok, err := fx.api.publicGrantUsable(t.Context(), &gr); !ok || err != nil {
+		t.Fatalf("live grant: %v %v, want accepted", ok, err)
+	}
+	gone := gr
+	gone.SessionID = "00000000-0000-0000-0000-000000000000"
+	if ok, err := fx.api.publicGrantUsable(t.Context(), &gone); ok || err != nil {
+		t.Fatalf("grant of no session: %v %v, want a plain refusal", ok, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if ok, err := fx.api.publicGrantUsable(ctx, &gr); ok || err == nil {
+		t.Fatalf("database error: %v %v, want an error, not a refusal", ok, err)
 	}
 }

@@ -74,6 +74,7 @@ func newPrivFixture(t *testing.T) *privFixture {
 	}
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	api := NewAPI(hub, pool, spawnTokenDaemonTok, nil, "")
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)

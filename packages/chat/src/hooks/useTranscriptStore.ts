@@ -4,6 +4,7 @@
 import { create } from 'zustand'
 import type { OlderPage, ReplayDone } from '../transport/types'
 import { isTurnError } from '../model/notices'
+import { NO_REASONING, nextReasoning, type ReasoningScopes } from '../model/reasoning'
 import { nextAnswering, nextThinking } from '../model/workingActivity'
 import type { AgentEvent, AssistantTextPayload } from '../types'
 
@@ -13,6 +14,7 @@ export interface SessionTranscript {
   // The main agent has a thinking block open (transient thinking_started / _done; see
   // model/workingActivity nextThinking). Live only: a transcript loaded later never sets it.
   // Optional so a host's own transcript fixture need not name it (absent: false).
+  reasoning?: ReasoningScopes
   thinking?: boolean
   // The model has said something live since the newest retry notice (nextAnswering): the retry got
   // through, and the working line no longer says it is retrying. Optional like thinking.
@@ -113,15 +115,16 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
       // Transient streaming deltas accumulate separately and never persist; another transient event
       // (a thinking block's start or end) is never held either: it only moves the thinking flag.
       if (ev.transient) {
+        const reasoning = nextReasoning(cur.reasoning ?? NO_REASONING, ev)
         const thinking = nextThinking(cur.thinking ?? false, ev)
         const answering = nextAnswering(cur.answering ?? false, ev)
         if (ev.kind === 'assistant_text' && isMainEvent(ev)) {
           const p = ev.payload as AssistantTextPayload
-          return { sessions: { ...state.sessions, [ev.session_id]: { ...cur, thinking, answering, streaming: cur.streaming + p.text } } }
+          return { sessions: { ...state.sessions, [ev.session_id]: { ...cur, reasoning, thinking, answering, streaming: cur.streaming + p.text } } }
         }
-        return thinking === (cur.thinking ?? false) && answering === (cur.answering ?? false)
+        return reasoning === (cur.reasoning ?? NO_REASONING) && thinking === (cur.thinking ?? false) && answering === (cur.answering ?? false)
           ? state
-          : { sessions: { ...state.sessions, [ev.session_id]: { ...cur, thinking, answering } } }
+          : { sessions: { ...state.sessions, [ev.session_id]: { ...cur, reasoning, thinking, answering } } }
       }
 
       // Dedup: resends and replay overlaps share client_event_id.
@@ -144,6 +147,7 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
             ...cur,
             events,
             streaming: closesStream(ev) ? '' : cur.streaming,
+            reasoning: nextReasoning(cur.reasoning ?? NO_REASONING, ev),
             thinking: nextThinking(cur.thinking ?? false, ev),
             answering: nextAnswering(cur.answering ?? false, ev),
             lastSeq: Math.max(cur.lastSeq, ev.seq ?? 0),
@@ -158,12 +162,14 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
       const ids = idsOf(cur.events)
       const fresh: AgentEvent[] = []
       let streaming = cur.streaming
+      let reasoning = cur.reasoning ?? NO_REASONING
       let thinking = cur.thinking ?? false
       let answering = cur.answering ?? false
       let lastSeq = cur.lastSeq
       for (const ev of batch) {
         if (ev.session_id !== sessionId) continue
         if (ev.transient) {
+          reasoning = nextReasoning(reasoning, ev)
           thinking = nextThinking(thinking, ev)
           answering = nextAnswering(answering, ev)
           if (ev.kind === 'assistant_text' && isMainEvent(ev)) streaming += (ev.payload as AssistantTextPayload).text
@@ -173,18 +179,19 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
         ids.add(ev.client_event_id)
         fresh.push(ev)
         if (closesStream(ev)) streaming = ''
+        reasoning = nextReasoning(reasoning, ev)
         thinking = nextThinking(thinking, ev)
         answering = nextAnswering(answering, ev)
         lastSeq = Math.max(lastSeq, ev.seq ?? 0)
       }
-      if (fresh.length === 0 && streaming === cur.streaming && thinking === (cur.thinking ?? false) &&
+      if (fresh.length === 0 && reasoning === (cur.reasoning ?? NO_REASONING) && streaming === cur.streaming && thinking === (cur.thinking ?? false) &&
         answering === (cur.answering ?? false)) return state
       let events = cur.events
       if (fresh.length > 0) {
         events = [...cur.events, ...fresh].sort(bySeq)
         handOn(cur.events, events, ids)
       }
-      return { sessions: { ...state.sessions, [sessionId]: { ...cur, events, streaming, thinking, answering, lastSeq } } }
+      return { sessions: { ...state.sessions, [sessionId]: { ...cur, events, streaming, reasoning, thinking, answering, lastSeq } } }
     }),
 
   appendStreaming: (sessionId, delta) =>

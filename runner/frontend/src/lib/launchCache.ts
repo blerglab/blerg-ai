@@ -73,6 +73,9 @@ export interface DaemonApiInfo {
 
 export interface ClusterStatusApi {
   configured: boolean
+  /** BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN: "once" (a sandboxed desktop session asks for each
+   *  cluster child) or "any" (it may have them preapproved). Absent means "once". */
+  sandbox_cluster_children?: 'once' | 'any'
   available_engines?: string[]
   // Whether the operator's Secret carries a shared git token. A user with
   // their own GitHub credential doesn't need it; a user without one can only

@@ -379,13 +379,21 @@ func TestAttachmentsPodRoutesExposeVersions(t *testing.T) {
 			Name          string `json:"name"`
 			Version       int    `json:"version"`
 			LatestVersion int    `json:"latest_version"`
+			CreatedAt     string `json:"created_at"`
 		} `json:"attachments"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
 	var got []string
+	var prev time.Time
 	for _, a := range out.Attachments {
+		// Each carries its upload time (the CLI orders same-name files by it), oldest first.
+		at, err := time.Parse(time.RFC3339Nano, a.CreatedAt)
+		if err != nil || at.Before(prev) {
+			t.Errorf("%s v%d created_at = %q (previous %v), want an RFC 3339 time, not before the previous", a.Name, a.Version, a.CreatedAt, prev)
+		}
+		prev = at
 		got = append(got, fmt.Sprintf("%s v%d/%d", a.Name, a.Version, a.LatestVersion))
 		if a.Name == "brief.pdf" && a.Version == 2 && a.ID != b2.ID {
 			t.Errorf("v2 is %s, want %s", a.ID, b2.ID)

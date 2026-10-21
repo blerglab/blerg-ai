@@ -33,6 +33,9 @@ type UserMessagePayload struct {
 	Source    string `json:"source"`
 	ClientID  string `json:"client_id,omitempty"`
 	MessageID string `json:"message_id,omitempty"`
+	// AnsweredBy, on an ask_answer, is "session" when the parent session answered (its message
+	// came with source "session", which only the runner sets); absent for the person's answer.
+	AnsweredBy string `json:"answered_by,omitempty"`
 }
 
 // Input is one message for a session's engine. Text is what the engine is given; Shown, when set,
@@ -91,13 +94,15 @@ type AssistantThinkingPayload struct {
 // reader say "Thinking…" while a long think runs; one that missed the done reads the
 // assistant_thinking, the next tool call or the turn's end instead.
 type ThinkingPayload struct {
+	Tokens       *int   `json:"tokens,omitempty"`
 	ParentCallID string `json:"parent_call_id,omitempty"`
 }
 
 // The ThinkingPayload kinds.
 const (
-	KindThinkingStarted = "thinking_started"
-	KindThinkingDone    = "thinking_done"
+	KindThinkingProgress = "thinking_progress"
+	KindThinkingStarted  = "thinking_started"
+	KindThinkingDone     = "thinking_done"
 )
 
 // IsTransient reports whether an event is sent live only, never persisted: a typing delta
@@ -107,7 +112,7 @@ func IsTransient(ev Event) bool {
 	case "assistant_text":
 		p, ok := ev.Payload.(AssistantTextPayload)
 		return ok && !p.Done
-	case KindThinkingStarted, KindThinkingDone:
+	case KindThinkingStarted, KindThinkingDone, KindThinkingProgress:
 		return true
 	}
 	return false
@@ -154,6 +159,10 @@ type CheckInPayload struct {
 // the message's id in the messages API, when known: an ask is answered (and a note replied to) with
 // POST /api/messages/{id}/reply.
 type MessagingPayload struct {
+	OwnerOnly bool `json:"owner_only,omitempty"`
+	// NoWait: an ask the agent does not wait on (`blerg-runner ask --no-wait`); its answer reaches
+	// the agent as a message, and the person's chat messages do not answer it.
+	NoWait    bool   `json:"no_wait,omitempty"`
 	Body      string `json:"body"`
 	MessageID string `json:"message_id,omitempty"`
 	TurnID    string `json:"turn_id,omitempty"`
@@ -298,6 +307,10 @@ const (
 	// ErrorCodeAPIRetry: the engine is retrying a failed API call. A notice, not an outcome: the
 	// turn goes on.
 	ErrorCodeAPIRetry = "api_retry"
+	// ErrorCodeChildSync: the daemon could not bring a sandboxed child's commits back to its
+	// wip/<id> branch at the end of a turn. A notice, not the turn's outcome; the parent's
+	// turn-end note says so.
+	ErrorCodeChildSync = "child_sync"
 )
 
 // CompactionPayload — kind "compaction". Summary is the full replacement

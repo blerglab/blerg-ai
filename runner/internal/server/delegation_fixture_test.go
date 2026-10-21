@@ -67,6 +67,7 @@ func newDelegFx(t *testing.T) *delegFx {
 	dc := registerDaemon(t, api, hub, "00000000-0000-4000-8000-0000000000d1", "laptop", "app")
 	dc.SetSandboxAvailable(true)
 	dc.RecoveryReadyCapable = true
+	dc.SetSandboxClones(true)
 	dc.SetAvailableEngines([]string{"claude", "codex", "hermes"})
 	mux := http.NewServeMux()
 	api.RegisterDelegationRoutes(mux)

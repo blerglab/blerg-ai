@@ -139,6 +139,80 @@ describe('session side panel', () => {
     document.body.style.overflow = ''
   })
 
+  it('keeps successive pending proposals even with no proposal events in the loaded transcript', async () => {
+    seedSession({ status: 'idle' })
+    seedEvents()
+    const previous = fetchMock.getMockImplementation() as (url: string) => Promise<unknown>
+    let titles = ['First draft']
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).startsWith('/api/proposals?')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ proposals: titles.map((title, n) => ({ id: `p${n}`, state: 'pending', kind: 'board_file', tool: 'file_ticket', connection_name: 'Board', session_id: 'sess-a', arguments: { title, type: 'bug', body: 'Full draft body' }, arguments_raw: '{}', expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(), created_at: new Date().toISOString() })) }) })
+      return previous(url)
+    })
+    await renderPage()
+    const needs = await screen.findByTestId('rail-needs')
+    expect(await within(needs).findByText('First draft')).toBeTruthy()
+    titles = ['First draft', 'Second draft']
+    fireEvent(window, new Event('focus'))
+    expect(await within(needs).findByText('Second draft')).toBeTruthy()
+    expect(within(needs).getByText('First draft')).toBeTruthy()
+    expect(screen.getByTestId('rail-toggle').getAttribute('aria-label')).toContain('2 need you')
+  })
+
+  it('names the tool and connection a proposal runs before the title the agent wrote', async () => {
+    seedSession({ status: 'idle' })
+    seedEvents()
+    const previous = fetchMock.getMockImplementation() as (url: string) => Promise<unknown>
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).startsWith('/api/proposals?')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ proposals: [{ id: 'p-mismatch', state: 'pending', kind: 'mcp', tool: 'delete_branch', connection_name: 'Source host', session_id: 'sess-a', arguments: { title: 'Fix a typo', branch: 'main' }, arguments_raw: '{"title":"Fix a typo","branch":"main"}', expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(), created_at: new Date().toISOString() }] }) })
+      return previous(url)
+    })
+    await renderPage()
+    const needs = await screen.findByTestId('rail-needs')
+    const action = await within(needs).findByTestId('proposal-action-p-mismatch')
+    expect(action.textContent).toBe('Runs delete_branch on Source host')
+    const title = within(needs).getByTestId('proposal-agent-title-p-mismatch')
+    expect(title.textContent).toBe('Title in the agent’s request: Fix a typo')
+    expect(within(needs).queryByRole('heading', { name: 'Fix a typo' })).toBeNull()
+    expect(action.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('uses an elapsed reasoning clock on the Running now session card', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-01T00:00:00Z'))
+    seedSession(); seedEvents(user())
+    stubFetch(0, liveReply({ children: [{ id: 'thinking-session', title: 'Reasoning fixture', engine: 'hermes', model: 'fixture', status: 'running', started_at: iso(-3 * MIN), ended_at: null, asking: false, tokens: null, activity: 'Thinking…', activity_since: iso(-83_000) }] }))
+    await renderPage()
+    expect(screen.getByTestId('rail-running')).toHaveTextContent('Thinking… 1:23')
+  })
+
+  it('shows live reasoning counts and elapsed fallback on the native child working line', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-01T00:00:00Z'))
+    seedSession()
+    seedEvents(user())
+    stubFetch(0, liveReply({ subagents: [{ key: 'child', title: 'Reasoning fixture', type: '', model: '', tokens: null, doing: '', started_at: iso(-MIN), active_at: iso(0), background: false, seq: 1, reasoning: { since: Date.now() - 83_000, tokens: null } }] }))
+    await renderPage()
+    const row = within(screen.getByTestId('rail-running')).getByTestId('rail-subagent')
+    expect(row).toHaveTextContent('Thinking… 1:23')
+    act(() => useTranscriptStore.getState().ingest({ type: 'agent_event', session_id: 'sess-a', client_event_id: 'thinking-count', ts: iso(0), kind: 'thinking_progress', payload: { parent_call_id: 'child', tokens: 1234 }, transient: true }))
+    expect(row).toHaveTextContent('Thinking… 1,234 tokens')
+    act(() => useTranscriptStore.getState().ingest({ type: 'agent_event', session_id: 'sess-a', client_event_id: 'thinking-end', ts: iso(0), kind: 'thinking_done', payload: { parent_call_id: 'child' }, transient: true }))
+    expect(row).not.toHaveTextContent('Thinking…')
+  })
+
+  it('keeps a subagent reasoning count to the owner rule: the clock for a viewer who may not see tokens', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-01T00:00:00Z'))
+    seedSession()
+    seedEvents(user())
+    stubFetch(0, liveReply({ tokens_hidden: true, subagents: [{ key: 'child', title: 'Reasoning fixture', type: '', model: '', tokens: null, doing: '', started_at: iso(-MIN), active_at: iso(0), background: false, seq: 1, reasoning: { since: Date.now() - 83_000, tokens: null } }] }))
+    await renderPage()
+    const row = within(screen.getByTestId('rail-running')).getByTestId('rail-subagent')
+    act(() => useTranscriptStore.getState().ingest({ type: 'agent_event', session_id: 'sess-a', client_event_id: 'thinking-count', ts: iso(-83_000), kind: 'thinking_progress', payload: { parent_call_id: 'child', tokens: 1234 }, transient: true }))
+    expect(row).toHaveTextContent('Thinking… 1:23')
+    expect(row).not.toHaveTextContent('1,234')
+  })
+
   describe('progress bars', () => {
     const progress = { completed: 2, total: 5, label: 'Run tests', updated_at: iso(0) }
     it('shows separate session and child progress, with accessible bounds', async () => {
@@ -456,7 +530,8 @@ describe('session side panel', () => {
       // The subagent keeps its own look: the agent glyph, model, effort.
       const sub = within(rail()!).getByTestId('rail-subagent')
       expect(within(sub).getByRole('img', { name: 'Subagent' })).toHaveTextContent('🤖')
-      expect(within(sub).getByTestId('rail-sub-effort')).toBeInTheDocument()
+      // It reports no effort of its own: it runs at the session's, which is said, never "unknown".
+      expect(within(sub).getByTestId('rail-sub-effort')).toHaveTextContent("effort: high (session's)")
     })
 
     it('an older start with only a description shows that as the command line', async () => {
@@ -545,6 +620,16 @@ describe('session side panel', () => {
       await renderPage()
       fireEvent.click(within(rail()!).getByTestId('rail-show'))
       expect(within(rail()!).getByRole('status')).toHaveTextContent('Not in the part of the conversation the chat has drawn. Scroll up in the chat to reach it.')
+    })
+
+    it('does not tell the owner they cannot answer a question while ownership is unknown', async () => {
+      seedSession({ status: 'running' })
+      seedEvents(user(), ev('ask', { body: 'Ship blue?', message_id: 'q1', owner_only: true, no_wait: true }, 2 * MIN))
+      await renderPage()
+      const row = within(rail()!).getByTestId('rail-ask')
+      expect(row).toHaveTextContent('not blocking')
+      expect(row).not.toHaveTextContent('Only the session owner')
+      expect(within(row).getByLabelText('Your answer')).toBeInTheDocument()
     })
 
     it('answers an ask from the panel, as the ask card would', async () => {
@@ -654,6 +739,37 @@ describe('session side panel', () => {
         act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'yes, staging', source: 'ask_answer', message_id: 'm1', client_id: sent!.client_id }, 0)) })
         expect(within(rail()!).queryByTestId('rail-ask')).toBeNull()
         expect(screen.queryByTestId('rail-badge')).toBeNull()
+      })
+
+      it('lists a question the agent did not wait on until the answer naming it; only the owner answers it', async () => {
+        seedSession({ status: 'running' })
+        seedEvents(user())
+        const q = { ...replyAsk(-3 * MIN), no_wait: true }
+        stubFetch(0, liveReply({ through_seq: seq, asks: [q], can_release_prompt: true }))
+        await renderPage()
+        const row = await within(rail()!).findByTestId('rail-ask')
+        expect(row).toHaveTextContent('not blocking')
+        // The person's chat message goes to the agent: it does not take the question off.
+        act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'also fix the footer', source: 'chat' }, 0)) })
+        act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'Answer to your question', source: 'question_answer' }, 0)) })
+        expect(within(rail()!).getByTestId('rail-ask')).toBeInTheDocument()
+        fireEvent.change(within(row).getByLabelText('Your answer'), { target: { value: 'blue' } })
+        wsMock.send.mockClear()
+        await act(async () => { fireEvent.click(within(row).getByRole('button', { name: 'Answer' })) })
+        const sent = wsMock.send.mock.calls.map(c => c[0]).find(m => m.type === 'agent_user_message') as { answer_message_id?: string; client_id: string } | undefined
+        expect(sent?.answer_message_id).toBe('m1')
+        act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'blue', source: 'ask_answer', message_id: 'm1', client_id: sent!.client_id }, 0)) })
+        expect(within(rail()!).queryByTestId('rail-ask')).toBeNull()
+      })
+
+      it('gives no answer box for a question the agent did not wait on to someone other than its owner', async () => {
+        seedSession({ status: 'running' })
+        seedEvents(user())
+        stubFetch(0, liveReply({ through_seq: seq, asks: [{ ...replyAsk(-3 * MIN), no_wait: true }], can_release_prompt: false }))
+        await renderPage()
+        const row = await within(rail()!).findByTestId('rail-ask')
+        expect(within(row).queryByLabelText('Your answer')).toBeNull()
+        expect(row).toHaveTextContent('Only the session owner can answer this question.')
       })
 
       it('drops a question the server closed with no transcript event (it expired) at once', async () => {
@@ -794,20 +910,37 @@ describe('session side panel', () => {
     expect((await screen.findAllByTestId('rail-child'))[0]).toHaveTextContent('Codex review')
     expect(screen.getByTestId('rail-session-progress')).toHaveTextContent('Verify integration')
     expect(within(screen.getByTestId('rail-session-progress')).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '2')
-    // A running child counts toward Running now and has its compact row there, as in Started sessions.
+    // A running child counts toward Running now and has its one card there, with everything (model,
+    // effort, discard); Started sessions has a single line that jumps to it.
     expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent('1')
-    expect(within(screen.getByTestId('rail-running')).getByTestId('rail-child')).toHaveTextContent('Codex review')
+    const card = within(screen.getByTestId('rail-running')).getByTestId('rail-child')
+    expect(card).toHaveTextContent('Codex review')
+    expect(card).toHaveTextContent('high')
+    expect(within(card).getByRole('button', { name: /Discard/ })).toBeInTheDocument()
+    expect(screen.getAllByTestId('rail-child')).toHaveLength(1)
     expect(screen.getByTestId('rail-running')).not.toHaveTextContent('Nothing is running.')
-    expect(within(screen.getByTestId('rail-started')).getByTestId('rail-child')).toHaveTextContent('Codex review')
+    expect(within(screen.getByTestId('rail-started')).queryByTestId('rail-child')).toBeNull()
+    expect(within(screen.getByTestId('rail-started')).getByTestId('rail-started-running')).toHaveTextContent('1 running ↑')
     expect(screen.getByTestId('rail-needs-count')).toHaveTextContent('1')
     expect(screen.getByTestId('rail-needs')).toHaveTextContent('Another review')
   })
 
-  it('Running now lists running children only, and a row opens the child', async () => {
+  it('an idle child does not badge or announce the panel toggle as running', async () => {
+    seedSession({ status: 'idle' })
+    seedEvents(user())
+    stubFetch(0, liveReply({ children: [{ id: 'c-idle', title: 'Idle child', engine: 'codex', model: 'fixture', status: 'idle', started_at: iso(-MIN), ended_at: null, asking: false, tokens: null }] }))
+    await renderPage()
+    await waitFor(() => expect(screen.getByTestId('rail-started')).toHaveTextContent('Idle child'))
+    expect(screen.queryByTestId('rail-badge')).toBeNull()
+    expect(screen.getByTestId('rail-toggle').getAttribute('aria-label')).not.toMatch(/running/)
+    expect(screen.getByTestId('rail-announce')).not.toHaveTextContent(/running/)
+  })
+
+  it('Running now lists working children only, and a row opens the child', async () => {
     seedSession({ status: 'idle' })
     seedEvents(user())
     const child = (id: string, title: string, status: string, ended: string | null) => ({ id, title, engine: 'codex', model: 'fixture', status, started_at: iso(-MIN), ended_at: ended, asking: false, tokens: null })
-    stubFetch(0, liveReply({ children: [child('c-run', 'Running child', 'running', null), child('c-done', 'Finished child', 'ended', iso(-1000))] }))
+    stubFetch(0, liveReply({ children: [child('c-run', 'Running child', 'running', null), child('c-done', 'Finished child', 'ended', iso(-1000)), child('c-idle', 'Idle child', 'idle', null)] }))
     const opened = vi.fn()
     render(
       <OpenSessionContext.Provider value={opened}>
@@ -822,8 +955,15 @@ describe('session side panel', () => {
     const rows = within(running).getAllByTestId('rail-child')
     expect(rows).toHaveLength(1)
     expect(rows[0]).toHaveTextContent('Running child')
-    expect(within(screen.getByTestId('rail-started')).getAllByTestId('rail-child')).toHaveLength(2)
-    fireEvent.click(within(rows[0]).getByRole('button', { name: /Running child/ }))
+    // Stopped ones (done, or idle with its turn over) are in Started sessions, once each, to reuse or
+    // discard; the running one is a line there that brings Running now into view.
+    const started = screen.getByTestId('rail-started')
+    expect(within(started).getAllByTestId('rail-child').map(r => r.textContent)).toEqual([expect.stringContaining('Finished child'), expect.stringContaining('Idle child')])
+    running.scrollIntoView = vi.fn()
+    fireEvent.click(within(started).getByTestId('rail-started-running'))
+    expect(running.scrollIntoView).toHaveBeenCalled()
+    expect(document.activeElement).toBe(running)
+    fireEvent.click(rows[0].querySelector('.rail-child-button')!)
     expect(opened).toHaveBeenCalledWith('c-run')
   })
 

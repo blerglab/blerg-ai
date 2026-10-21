@@ -381,6 +381,7 @@ func TestCompletionHooksFireOnEndNotOnDisconnect(t *testing.T) {
 	ctx := context.Background()
 
 	dc := &DaemonConn{ID: newUUID(), Name: "desktop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	if err := db.UpsertDaemon(ctx, pool, dc.ID, dc.Name, "desktop", "/repos"); err != nil {
 		t.Fatal(err)
 	}

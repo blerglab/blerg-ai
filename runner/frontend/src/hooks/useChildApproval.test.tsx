@@ -1,0 +1,92 @@
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useChildApproval, type ChildRuntime } from './useChildApproval'
+
+const request = vi.fn()
+vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => request(...args) }))
+const runtime = (runtime: ChildRuntime = 'docker') => ({ runtime, enabled: false, partial: false, can_enable: true, reason: '', allowed_engines: ['claude', 'codex'], granted_engines: [], standing_rule_engines: [], effective_allowed_engines: [] })
+const view = () => ({ revision: 'rev-a', daemon_id: 'desktop-a', allowed_engines: ['claude', 'codex'], runtimes: [runtime(), runtime('daemon')] })
+const ok = (body: unknown) => ({ ok: true, json: async () => body })
+const mount = () => renderHook(() => useChildApproval('parent-a', true, ''))
+beforeEach(() => request.mockReset())
+afterEach(() => vi.useRealTimers())
+
+describe('child approval hook', () => {
+  it('reads authority without preapproving and writes only the selected runtime and revision', async () => {
+    request.mockResolvedValueOnce(ok(view())).mockResolvedValueOnce(ok({ ...view(), revision: 'rev-b', runtimes: [{ ...runtime(), enabled: true }, runtime('daemon')] }))
+    const { result } = mount()
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.value?.runtimes.every(r => !r.enabled)).toBe(true)
+    await act(async () => { await result.current.save('docker', true) })
+    expect(request.mock.calls[1][0]).toBe('/api/sessions/parent-a/child-approval')
+    expect(JSON.parse(request.mock.calls[1][1].body)).toEqual({ runtime: 'docker', enabled: true, revision: 'rev-a' })
+    expect(result.current.value?.runtimes[0].enabled).toBe(true)
+    expect(result.current.value?.runtimes[1].enabled).toBe(false)
+  })
+  it('uses the cluster snapshot without desktop assumptions', async () => {
+    request.mockResolvedValue(ok({ ...view(), daemon_id: 'cluster', runtimes: [runtime('cluster')] }))
+    const { result } = mount()
+    await waitFor(() => expect(result.current.value).not.toBeNull())
+    await act(async () => { await result.current.save('cluster', true) })
+    expect(JSON.parse(request.mock.calls[1][1].body).runtime).toBe('cluster')
+  })
+  it('refreshes a conflict without retrying a grant', async () => {
+    request.mockResolvedValueOnce(ok(view())).mockResolvedValueOnce({ ok: false, status: 409 }).mockResolvedValueOnce(ok({ ...view(), revision: 'rev-new' }))
+    const { result } = mount()
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    await act(async () => { await result.current.save('docker', true) })
+    expect(request).toHaveBeenCalledTimes(3)
+    expect(result.current.error).toMatch(/changed.*review/i)
+    expect(result.current.value?.revision).toBe('rev-new')
+    expect(result.current.saving).toBe(false)
+  })
+  it.each([null, { ...view(), revision: [] }, { ...view(), runtimes: [{ ...runtime(), enabled: 'true' }] }, { ...view(), runtimes: [{ ...runtime(), runtime: ['docker'] }] }])('fails closed on malformed authority', async body => {
+    request.mockResolvedValue(ok(body))
+    const { result } = mount()
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.value).toBeNull()
+    expect(result.current.error).toMatch(/Could not load/)
+  })
+  it('bounds a stalled read and ignores its late authority', async () => {
+    vi.useFakeTimers()
+    let done!: (body: unknown) => void
+    request.mockReturnValueOnce(new Promise(resolve => { done = resolve }))
+    const { result } = mount()
+    await act(async () => { await Promise.resolve(); await vi.advanceTimersByTimeAsync(10_001) })
+    expect(result.current.error).toMatch(/Could not load/)
+    await act(async () => { done(ok(view())) })
+    expect(result.current.value).toBeNull()
+  })
+  it('does not treat an unconfirmed write as granted or let an old write clear a later write', async () => {
+    request.mockResolvedValueOnce(ok(view()))
+    const { result } = mount()
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    vi.useFakeTimers()
+    let oldDone!: (body: unknown) => void
+    request.mockReturnValueOnce(new Promise(resolve => { oldDone = resolve }))
+    act(() => { void result.current.save('docker', true) })
+    expect(result.current.saving).toBe(true)
+    expect(result.current.value?.runtimes[0].enabled).toBe(false)
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_001) })
+    expect(result.current.error).toMatch(/Could not confirm/)
+    request.mockResolvedValueOnce(ok({ ...view(), revision: 'fresh' }))
+    await act(async () => { result.current.refresh(); await Promise.resolve() })
+    let newDone!: (body: unknown) => void
+    request.mockReturnValueOnce(new Promise(resolve => { newDone = resolve }))
+    act(() => { void result.current.save('docker', true) })
+    await act(async () => { oldDone(ok(view())) })
+    expect(result.current.saving).toBe(true)
+    await act(async () => { newDone(ok(view())) })
+    expect(result.current.saving).toBe(false)
+  })
+  it('ignores stale authority after switching parents', async () => {
+    let done!: (body: unknown) => void
+    request.mockReturnValueOnce(new Promise(resolve => { done = resolve })).mockResolvedValueOnce({ ok: false, status: 404 })
+    const { result, rerender } = renderHook(({ id }) => useChildApproval(id, true, ''), { initialProps: { id: 'parent-a' } })
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1))
+    rerender({ id: 'parent-b' })
+    await act(async () => { done(ok(view())) })
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.value).toBeNull()
+  })
+})

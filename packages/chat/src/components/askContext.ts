@@ -3,7 +3,13 @@
 import { createContext, useContext } from 'react'
 import type { AskState } from '../model/asks'
 
+/** Whether this viewer answers an owner-only approval (ChatViewProps.canAnswerApprovals): 'yes',
+ *  'no', 'unknown' (still loading) or 'elsewhere' (not from this host). */
+export type OwnerOnlyAnswer = 'yes' | 'no' | 'unknown' | 'elsewhere'
+
 export interface AskContextValue {
+  /** Whether this viewer answers an owner-only approval; absent: 'elsewhere'. */
+  ownerOnly?: OwnerOnlyAnswer
   /** By the ask event's client_event_id. */
   states: ReadonlyMap<string, AskState>
   /** Sends the answer to the ask (messageId: its messages API id, when it has one); false when

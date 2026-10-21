@@ -47,6 +47,7 @@ func backgroundHelloBarrier(t *testing.T, fx *topicFx, srvURL string, inventory 
 func TestBackgroundReconcileHelloClosesOrphanAcrossTwoRestarts(t *testing.T) {
 	fx := newLiveFx(t)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 16)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	HandleAgentEvent(t.Context(), fx.api.hub, fx.pool, dc, protocol.AgentEvent{Type: "agent_event", SessionID: fx.sess, ClientEventID: newUUID(), Kind: "background_task_started", Payload: json.RawMessage(`{"task_id":"orphan","call_id":"call","kind":"bash"}`)})
 	srv := httptest.NewServer(fx.api.hub.ServeDaemon(topicDaemonToken, fx.pool))
 	defer srv.Close()
@@ -81,6 +82,7 @@ func TestBackgroundReconcileHelloPreservesUnknownAndContinuingTasks(t *testing.T
 				inv["sessions"] = map[string][]string{fx.sess: {"alive"}}
 			}
 			dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
+			dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 			HandleAgentEvent(t.Context(), fx.api.hub, fx.pool, dc, protocol.AgentEvent{Type: "agent_event", SessionID: fx.sess, ClientEventID: newUUID(), Kind: "background_task_started", Payload: json.RawMessage(`{"task_id":"alive","call_id":"call","kind":"monitor"}`)})
 			srv := httptest.NewServer(fx.api.hub.ServeDaemon(topicDaemonToken, fx.pool))
 			defer srv.Close()

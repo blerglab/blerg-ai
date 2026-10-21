@@ -34,7 +34,7 @@ func ListSessionPluginProposals(ctx context.Context, pool *pgxpool.Pool, account
 
 // The exact reviewed bytes are fenced in the same transition as ordinary approvals.
 func BeginSessionPluginExecution(ctx context.Context, pool *pgxpool.Pool, account, id, expected string) (*Proposal, error) {
-	return transitionOwnedWhere(ctx, pool, account, id, ProposalPending, ProposalExecuting, `,decided_by=$5,decided_at=now()`, ` AND arguments::text=$6 AND connection_id=$7::uuid AND connection_name='session-plugin' AND tool='request_plugin' AND tool_hash='session-plugin-v1' AND created_at>now()-interval '7 days'`, account, expected, SessionPluginConnectionID)
+	return transitionOwnedWhere(ctx, pool, account, id, ProposalPending, ProposalExecuting, `,decided_by=$5,decided_at=now()`, ` AND arguments::text=$6 AND connection_id=$7::uuid AND connection_name='session-plugin' AND tool='request_plugin' AND tool_hash='session-plugin-v1' AND `+proposalDeadline+`>now()`, account, expected, SessionPluginConnectionID)
 }
 
 // A queued approval is durable before dispatch. Replies only advance queued -> terminal;

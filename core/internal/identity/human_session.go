@@ -40,10 +40,10 @@ const SessionRevocationMargin = time.Hour
 // sign-out.
 var ErrSessionBusy = errors.New("identity: session busy; try again")
 
-// sessionBusy maps a Postgres lock timeout to ErrSessionBusy and leaves any other error as is.
+// sessionBusy maps retryable transaction aborts and lock timeouts to a temporary failure.
 func sessionBusy(err error) error {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "55P03" { // lock_not_available
+	if errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01" || pgErr.Code == "40001") { // lock_not_available
 		return fmt.Errorf("%w: %s", ErrSessionBusy, pgErr.Message)
 	}
 	return err
@@ -215,24 +215,132 @@ func (s *Service) sessionTTL() time.Duration {
 	return s.sessionTTLValue
 }
 
+// ErrLoginSuperseded is returned when the account was signed out everywhere (log out
+// everywhere, a password change, a disable) after a sign-in began checking its credential: that
+// check may have used what the revocation replaced, so the sign-in must start over.
+var ErrLoginSuperseded = errors.New("identity: signed out everywhere during sign-in; sign in again")
+
+// LoginMark is what a sign-in saw before it checked the credential (BeginLogin). Under the
+// account fence, IssueRefreshTokenSince refuses the sign-in when an account-wide revocation
+// committed after the mark.
+type LoginMark struct {
+	start     time.Time  // database clock when the sign-in began
+	accountID string     // the account the subject named at the start; "" when none did
+	lineage   *time.Time // that account's "lineage" revocation then; nil when it had none
+}
+
+// BeginLogin marks the start of a sign-in, before its credential is checked. provider and
+// subject name the account when the caller knows them up front (the password form); pass ""
+// for both when the account is only known after the check (an identity provider's callback).
+//
+// The account's "lineage" revocation is the version that is compared: every revocation
+// everywhere rewrites its revoked_at and nothing ever deletes it, so a sign-in that sees a
+// different value under the fence knows a revocation committed in between, however its
+// timestamps fall. Without an account, the mark's start time is compared instead.
+func (s *Service) BeginLogin(ctx context.Context, provider, subject string) (LoginMark, error) {
+	var m LoginMark
+	var accountID *string
+	err := s.st.Pool().QueryRow(ctx, `
+  SELECT now(), a.id::text, r.revoked_at
+    FROM (SELECT 1) one
+    LEFT JOIN accounts a ON a.provider = $1 AND a.provider_subject = $2 AND $1 <> ''
+    LEFT JOIN revocations r ON r.kind = 'lineage' AND r.value = a.id::text`, provider, subject).
+		Scan(&m.start, &accountID, &m.lineage)
+	if err != nil {
+		return LoginMark{}, sessionBusy(err)
+	}
+	if accountID != nil {
+		m.accountID = *accountID
+	}
+	return m, nil
+}
+
+// supersededBy reports whether lineage (the account's "lineage" revocation, read under the
+// fence) shows a revocation that committed after the mark.
+func (m *LoginMark) supersededBy(accountID string, lineage *time.Time) bool {
+	if lineage != nil && !lineage.Before(m.start) {
+		return true
+	}
+	if m.accountID == "" {
+		return false
+	}
+	if m.accountID != accountID {
+		return true
+	}
+	if (lineage == nil) != (m.lineage == nil) {
+		return true
+	}
+	return lineage != nil && !lineage.Equal(*m.lineage)
+}
+
 // IssueRefreshToken creates a new human_sessions row (starting a fresh rotation chain) and
 // returns the raw opaque token — the caller sets this as a cookie value; only its SHA-256 hash
 // is ever persisted. The row's chain_id starts as its own id, and expires_at is set from the
 // configured session TTL (sessionTTL()).
+//
+// It is for a session that follows no credential check (first-run setup). A sign-in uses
+// IssueRefreshTokenSince with the mark it took before checking the credential.
 func (s *Service) IssueRefreshToken(ctx context.Context, accountID, userAgent, ip string) (string, error) {
+	return s.issueRefreshToken(ctx, nil, accountID, userAgent, ip)
+}
+
+// IssueRefreshTokenSince is IssueRefreshToken for a sign-in that began at mark (BeginLogin). It
+// returns ErrLoginSuperseded, and changes nothing, when the account was revoked everywhere after
+// the mark: a login whose password check ran before a password change must not survive it, nor
+// clear the revocation the change wrote.
+func (s *Service) IssueRefreshTokenSince(ctx context.Context, mark LoginMark, accountID, userAgent, ip string) (string, error) {
+	return s.issueRefreshToken(ctx, &mark, accountID, userAgent, ip)
+}
+
+func (s *Service) issueRefreshToken(ctx context.Context, mark *LoginMark, accountID, userAgent, ip string) (string, error) {
 	raw, hash, err := newRefreshToken()
 	if err != nil {
 		return "", err
 	}
-	ttl := s.sessionTTL()
-	_, err = s.st.Pool().Exec(ctx, `
-		WITH ins AS (
-		  INSERT INTO human_sessions (account_id, token_hash, user_agent, ip, expires_at, chain_id)
-		  VALUES ($1, $2, $3, $4, now() + $5::interval, gen_random_uuid()) RETURNING id)
-		UPDATE human_sessions SET chain_id = ins.id FROM ins WHERE human_sessions.id = ins.id`,
-		accountID, hash, userAgent, ip, ttl.String())
+	// Login and sign-out are ordered by the account fence, not HTTP arrival time.
+	// A login that obtains it first commits before sign-out and is revoked by it.
+	// One that obtains it after sign-out is refused when it began before the sign-out (mark),
+	// and is a fresh login otherwise. Clearing the sub revocation and inserting the session
+	// must commit together under that same fence.
+	tx, err := s.st.Pool().Begin(ctx)
+	if err != nil {
+		return "", sessionBusy(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	if err := s.lockAccountSessions(ctx, tx, accountID); err != nil {
+		return "", sessionBusy(err)
+	}
+	state, err := accountState(ctx, tx, accountID)
 	if err != nil {
 		return "", err
+	}
+	if state.Disabled {
+		return "", ErrAccountDisabled
+	}
+	if mark != nil {
+		var lineage *time.Time
+		err := tx.QueryRow(ctx, `SELECT revoked_at FROM revocations WHERE kind = 'lineage' AND value = $1`, accountID).Scan(&lineage)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", sessionBusy(err)
+		}
+		if mark.supersededBy(accountID, lineage) {
+			return "", ErrLoginSuperseded
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM revocations WHERE kind = 'sub' AND value = $1`, accountID); err != nil {
+		return "", sessionBusy(err)
+	}
+	ttl := s.sessionTTL()
+	_, err = tx.Exec(ctx, `
+  INSERT INTO human_sessions (id, account_id, token_hash, user_agent, ip, expires_at, chain_id)
+  SELECT id, $1, $2, $3, $4, now() + $5::interval, id FROM (SELECT gen_random_uuid() AS id) seed`,
+		accountID, hash, userAgent, ip, ttl.String())
+	if err != nil {
+		return "", sessionBusy(err)
+	}
+	s.sessionHook("issue")
+	if err := tx.Commit(ctx); err != nil {
+		return "", sessionBusy(err)
 	}
 	return raw, nil
 }
@@ -340,6 +448,7 @@ func (s *Service) RefreshAccessToken(ctx context.Context, rawRefreshToken, audie
 			if err != nil {
 				return "", "", err
 			}
+			s.sessionHook("redo")
 			// The presented token was used, whatever its state.
 			if _, err := tx.Exec(ctx, `UPDATE human_sessions SET last_used_at = now() WHERE id = $1`, id); err != nil {
 				return "", "", err
@@ -639,8 +748,9 @@ func (s *Service) revokeAllSessionsOnce(ctx context.Context, accountID string) e
 // tokens issued at or before revoked_at), so a re-login and any token minted after it verify
 // normally while everything issued before stays dead.
 //
-// Deliberately, only the "sub" entry is ever cleared again (Unrevoke, in startHumanSession and
-// reconcile's re-enable branch); the "lineage" entry is left in place for good. Removing it
+// Deliberately, only the "sub" entry is ever cleared again (by a sign-in, in
+// issueRefreshToken, and by Unrevoke in reconcile's re-enable branch); the "lineage" entry is
+// left in place for good (sign-in also reads it as the account's revocation version). Removing it
 // would RESURRECT every agent token the revocation killed — a human access token lives ten
 // minutes, so clearing its entry is harmless, but a user-minted agent token lives up to a
 // year, and "I revoked everything, then signed back in, and the leaked token started working
@@ -683,6 +793,7 @@ func (s *Service) RevokeAccountEverywhereTx(ctx context.Context, tx pgx.Tx, acco
 		 ON CONFLICT (kind, value) DO UPDATE SET revoked_at = now()`, accountID); err != nil {
 		return sessionBusy(err)
 	}
+	s.sessionHook("logout_all")
 	// The lineage entry is what actually stops those tokens verifying; this marks the ROWS
 	// revoked too, so the owner's token list says what is true instead of showing a page of
 	// "Active" credentials that no component will accept.

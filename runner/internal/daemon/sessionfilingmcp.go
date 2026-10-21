@@ -17,6 +17,7 @@ import (
 const sessionFilingMCPName = "_blerg_session"
 const sessionFilingToolName = "blerg_ticket_file"
 const sessionPluginRequestToolName = "blerg_request_plugin"
+const sessionBoardToolName = "blerg_board"
 
 // These are fixed own-session proposal/read tools, never arbitrary MCP grant
 // names or destinations. Adding one does not enable shell or ambient servers.
@@ -26,6 +27,7 @@ var sessionBuiltinTools = []struct {
 }{
 	{sessionFilingToolName, sessionFilingSpec},
 	{sessionPluginRequestToolName, sessionPluginRequestSpec},
+	{sessionBoardToolName, sessionBoardSpec},
 }
 
 func sessionBuiltinAllowed(name string) bool {
@@ -45,6 +47,22 @@ func sessionBuiltinSpecs() []map[string]any {
 }
 func sessionPluginRequestSpec() map[string]any {
 	return map[string]any{"type": "function", "name": sessionPluginRequestToolName, "description": "Request an allowed plugin or its skills. This only queues human approval; it never installs code or changes settings. Restricted sessions keep their restrictions.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"name", "reason"}, "properties": map[string]any{"name": map[string]any{"type": "string", "minLength": 1, "maxLength": 205}, "reason": map[string]any{"type": "string", "minLength": 1, "maxLength": 2000}}}}
+}
+
+// sessionBoardSpec is the session's board tool (0.4.4): the server checks the board's level in the
+// session's Permissions on every call and makes the call itself; the session holds no board
+// credential. It is always offered, so a level the person gives while the engine runs works at once.
+func sessionBoardSpec() map[string]any {
+	str := map[string]any{"type": "string"}
+	return map[string]any{"type": "function", "name": sessionBoardToolName, "description": "Read or change cards on a board your person gave this session access to in its Permissions. " +
+		"Call {\"tool\":\"access\"} first to list the boards and their level. Level read: blerg_board_get, blerg_board_list, blerg_board_schema, blerg_column_list, " +
+		"blerg_card_search, blerg_card_get. Level full adds blerg_card_create, blerg_card_update, blerg_card_move, blerg_card_comment, blerg_card_link. " +
+		"The person can change levels while you work: if a board tool you need is not listed or a call is refused, call this tool with {\"tool\":\"access\"} " +
+		"before telling the person you lack permission, and use it for anything the level allows. Without access, use blerg_ticket_file to propose a card; it asks the person.",
+		"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tool"}, "properties": map[string]any{
+			"tool": map[string]any{"type": "string", "enum": []string{"access", "blerg_board_get", "blerg_board_list", "blerg_board_schema", "blerg_column_list",
+				"blerg_card_search", "blerg_card_get", "blerg_card_create", "blerg_card_update", "blerg_card_move", "blerg_card_comment", "blerg_card_link"}},
+			"board": str, "arguments": map[string]any{"type": "object"}}}}
 }
 
 func sessionFilingStdio() map[string]any {

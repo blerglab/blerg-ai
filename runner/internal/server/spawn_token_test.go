@@ -36,6 +36,7 @@ func spawnTokenFixture(t *testing.T) (*API, *Hub, *DaemonConn, *pgxpool.Pool) {
 	}
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true)
 	dc.SetSessionTokenFile(true) // a current daemon: it can take a re-issued token
 	hub.Register(dc)
 	api := NewAPI(hub, pool, spawnTokenDaemonTok, nil, "")
@@ -153,6 +154,7 @@ func TestForwardBrowserSpawnMintsSessionToken(t *testing.T) {
 func TestForwardBrowserSpawnWithoutDBSendsNoToken(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{Type: "spawn_session", DaemonID: "d1", Repo: "app"}, nil); err != nil {
 		t.Fatal(err)
@@ -239,6 +241,7 @@ func TestSessionTokenSurvivesDaemonReconnect(t *testing.T) {
 
 	// Daemon comes back, re-registers, and reports the session alive.
 	dc2 := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte, 8)}
+	dc2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc2)
 	reconcileSessions(ctx, hub, pool, dc.ID, []string{sessionID}, map[string]string{sessionID: "running"})
 	if row, _ := db.GetSession(ctx, pool, sessionID); row == nil || row.Status != "running" {
@@ -264,6 +267,7 @@ func TestPostSessionsAbortsTokenWhenDaemonBufferFull(t *testing.T) {
 	api, hub, dc, pool := spawnTokenFixture(t)
 	ctx := context.Background()
 	full := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte)} // unbuffered, nobody reading
+	full.SetSandboxClones(true)
 	hub.Register(full)
 
 	tok := enableBrowserAuth(t, api)("session.start")

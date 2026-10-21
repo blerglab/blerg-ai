@@ -308,8 +308,32 @@ a.ticket-key:focus-visible {
 /* Drawn after Blerg Board's card sheet: a header block (badge, key, status; a large title), then
    sections under small uppercase display-face headings split by hairlines; the fields as a
    label/value grid on a panel of their own; comments as boxed entries on a trail. */
+/* Wider on a wide screen, in moderation: the description keeps a reading width beside the details. */
 .artifact-dialog.ticket-modal {
-  width: min(980px, 100%);
+  box-sizing: border-box;
+  width: 100%;
+}
+/* Beside the file viewer it opens from, the same size: most of the screen, any size of screen. */
+@media (min-width: 900px) {
+  .artifact-dialog.ticket-modal {
+    width: min(1400px, 94vw);
+    max-height: 90vh;
+  }
+}
+/* Maximize (⤢ / Ctrl+Alt+F): edge to edge, remembered (MAXIMIZED_KEY('ticket')). */
+.artifact-dialog.ticket-modal.is-maximized {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border: none;
+  border-radius: 0;
+}
+/* The issue's text keeps a reading width, centered, however wide the dialog. */
+.ticket-modal .ticket-main {
+  width: 100%;
+  max-width: 1100px;
+  margin-inline: auto;
 }
 
 /* A grid: the badges and the actions share the first row, the title takes the whole second, so a
@@ -426,35 +450,44 @@ a.ticket-key:focus-visible {
   color: var(--chat-muted-2);
 }
 
-/* Details: a panel of its own: on top on a narrow screen, beside the rest on a wide one. */
-.ticket-side {
-  min-width: 0;
-  margin-top: 20px;
-  padding: 14px 16px 16px;
-  background: var(--chat-surface);
-  border: 1px solid var(--chat-border);
-  border-radius: 8px;
+/* Details: one wrapping row of named chips at the top of the one column, never a box of its own. */
+.ticket-detail-chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 16px 0 0;
+  padding: 0;
 }
 
-@media (min-width: 900px) {
-  .ticket-modal-grid {
-    grid-template-columns: minmax(0, 1fr) 272px;
-    grid-template-areas: 'main side';
-    gap: 32px;
-  }
-  .ticket-main { grid-area: main; }
-  .ticket-side {
-    grid-area: side;
-    align-self: start;
-    position: sticky;
-    top: 20px;
-  }
+.ticket-detail-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--chat-border);
+  border-radius: 999px;
+  font-size: var(--chat-text-xs);
+  line-height: 20px;
+  color: var(--chat-fg);
+  overflow-wrap: anywhere;
+}
+
+.ticket-detail-name {
+  color: var(--chat-muted-2);
+}
+
+.ticket-main > .ticket-detail-chips + .ticket-section,
+.ticket-main > .ticket-detail-chips + .ticket-empty {
+  margin-top: 16px;
 }
 
 /* The description reads like a document, but its headings stay under the issue's title. */
 .ticket-description.md.md-doc {
   font-size: 15px;
   line-height: 1.6;
+  max-width: 80ch;
 }
 
 .ticket-description.md.md-doc :is(h1, h2) {

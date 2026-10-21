@@ -380,8 +380,10 @@ func newToolMode(preset string) string {
 func (g *Gateway) reconcileListing(ctx context.Context, gr *db.MCPGrant, st *grantState, tools []upstreamTool, complete bool) (serve []upstreamTool, listed map[string]string) {
 	listed = map[string]string{}
 	if gr.Builtin != "" {
+		// The session's board level (0.4.4), read now: a lowered level lists fewer tools.
+		level := g.boardGrantLevel(ctx, gr)
 		for _, t := range tools {
-			if entry, ok := gr.Tools[t.Name]; ok && g.effectiveMode(entry, true) != "off" && toolPinOK(gr, entry, t.Name, t.Hash) {
+			if entry, ok := gr.Tools[t.Name]; ok && g.effectiveMode(entry, true) != "off" && toolPinOK(gr, entry, t.Name, t.Hash) && BoardLevelAllows(level, t.Name) {
 				serve = append(serve, t)
 			}
 		}

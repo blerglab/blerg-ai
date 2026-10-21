@@ -290,7 +290,7 @@ func TestRecreatedSandboxGetsTheHostTokenFile(t *testing.T) {
 	writeSandboxTokenFile = func(c, sid, tok string) error { got = []string{c, sid, tok}; return nil }
 	t.Cleanup(func() { writeSandboxTokenFile = origWrite })
 
-	container, err := startSandboxContainer(id, t.TempDir(), hostSessionEnv(), sandboxCredential{}, SandboxOptions{})
+	container, err := startSandboxContainer(id, sandboxTestClone(t, id), hostSessionEnv(), sandboxCredential{}, SandboxOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestRecreatedSandboxGetsTheHostTokenFile(t *testing.T) {
 
 	// No re-issued token: nothing to copy.
 	got = nil
-	if _, err := startSandboxContainer("44444444-5555-4666-8777-888888888888", t.TempDir(), hostSessionEnv(), sandboxCredential{}, SandboxOptions{}); err != nil {
+	if _, err := startSandboxContainer("44444444-5555-4666-8777-888888888888", sandboxTestClone(t, "44444444-5555-4666-8777-888888888888"), hostSessionEnv(), sandboxCredential{}, SandboxOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got != nil {

@@ -144,6 +144,23 @@ func TestAnAnsweredAskIsClosed(t *testing.T) {
 	eq(t, "asks after the bare answer", asks(Build(s.events, s.opts("running"))), nil)
 }
 
+// A question the agent did not wait on (`blerg-runner ask --no-wait`) is listed as one, stays open
+// past its turn and through the person's chat messages, and closes with its answer. The message
+// that brings the answer to the agent (question_answer) closes nothing.
+func TestANoWaitQuestionIsListedUntilItsAnswer(t *testing.T) {
+	s := newScript()
+	s.addID("ask", "srv-q1", agent.MessagingPayload{Body: "Ship blue?", MessageID: "q1", NoWait: true})
+	s.turnDone()
+	s.nativeAsk("", "Proceed?")
+	s.msg("question_answer", "Answer to your question q1: yes")
+	got := Build(s.events, s.opts("idle"))
+	if len(got.Asks) != 2 || got.Asks[0].MessageID != "q1" || !got.Asks[0].NoWait || got.Asks[1].NoWait {
+		t.Fatalf("asks = %+v, want the native ask and the no-wait question q1", got.Asks)
+	}
+	s.answer("q1", "yes")
+	eq(t, "asks after the answer", asks(Build(s.events, s.opts("idle"))), []string{":Proceed?"})
+}
+
 func TestAnAskTheServerClosedIsClosed(t *testing.T) {
 	s := newScript()
 	s.serverAsk("m1", "Ship it?")

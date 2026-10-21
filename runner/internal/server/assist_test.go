@@ -386,6 +386,7 @@ func TestAssistSpawn_SendFailureRollsBack(t *testing.T) {
 	hub := NewHub()
 	// Unbuffered send channel with no reader → the non-blocking select hits default.
 	dc := &DaemonConn{ID: daemonID, Name: "assist-daemon-7", send: make(chan []byte)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	api := NewAPI(hub, pool, "tok", nil, "")
 
@@ -481,6 +482,7 @@ func TestAssistSpawnKeepsTicketWithinRequestedBoard(t *testing.T) {
 	}
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	api := NewAPI(hub, pool, "fixture-token", nil, "")
 	body, err := json.Marshal(assistRequest{TicketID: ticket.ID})

@@ -18,13 +18,16 @@ import (
 )
 
 type StartRequest struct {
-	Repo   string
-	Title  string
-	Prompt string
-	Model  string
-	Effort string
-	GitURL string // full clone URL; overrides the driver's default git base
-	Env    map[string]string
+	// TargetAccount binds a per-run override to the automation owner that authorized it.
+	// Internal to Board; never sent on the runner wire.
+	TargetAccount string
+	Repo          string
+	Title         string
+	Prompt        string
+	Model         string
+	Effort        string
+	GitURL        string // full clone URL; overrides the driver's default git base
+	Env           map[string]string
 	// Engine is the coding engine the session runs ("" = the runner's
 	// default, claude).
 	Engine string

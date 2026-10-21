@@ -197,6 +197,42 @@ describe("boardSocket", () => {
     vi.resetModules();
   });
 
+  it("retries a failed silent renewal without needing another board event", async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    let token: string | null = null;
+    const renew = vi.fn().mockResolvedValueOnce(false).mockImplementation(async () => { token = "tok-retried"; return true; });
+    vi.doMock("./authClient", () => ({ getAccessToken: () => token, ensureFreshToken: renew, redirectToRefresh: vi.fn() }));
+    const { boardSocket: socket } = await import("./api");
+    const cleanup = socket("board-1", () => {});
+    try {
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(renew).toHaveBeenCalledTimes(2);
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      expect(lastArgs![1]).toEqual(["bearer", "tok-retried"]);
+      cleanup();
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(renew).toHaveBeenCalledTimes(2);
+    } finally { cleanup(); vi.useRealTimers(); vi.doUnmock("./authClient"); vi.resetModules(); }
+  });
+
+  it("retries a handshake after an unanswered renewal and catches up on reconnect", async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    const renew = vi.fn().mockResolvedValue("no-answer");
+    vi.doMock("./authClient", () => ({ getAccessToken: () => "fixture-token", renewSilently: renew, ensureFreshToken: async () => false, redirectToRefresh: vi.fn() }));
+    const { boardSocket: socket } = await import("./api");
+    const ping = vi.fn();
+    const cleanup = socket("board-1", ping);
+    try {
+      FakeWebSocket.instances[0].onclose?.();
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      FakeWebSocket.instances[1].onopen?.();
+      expect(ping).toHaveBeenCalledTimes(1);
+    } finally { cleanup(); vi.useRealTimers(); vi.doUnmock("./authClient"); vi.resetModules(); }
+  });
+
   it("opens no socket when no token can be had, and none after cleanup", async () => {
     vi.resetModules();
     let renewed!: (ok: boolean) => void;

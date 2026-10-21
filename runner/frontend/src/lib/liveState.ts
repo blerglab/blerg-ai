@@ -1,3 +1,4 @@
+import { readReasoning, type Reasoning } from '@blerglab/chat'
 // The session panel's Live tab, read from the server: the reply of GET /api/sessions/{id}/live
 // (runner/internal/livestate) and the events that came after it, folded in so the panel moves at
 // once between two reads. Only what is trivial to fold is: a subagent's start, update and end (and a
@@ -12,8 +13,13 @@ import {
 
 /** Engine-neutral progress supplied by the server; no command-output inference. */
 export interface LiveProgress { completed: number; total: number; label: string; updated_at?: string }
-export type ProgressSubagent = SubagentLive & { progress?: LiveProgress }
-export type SessionPanelLiveState = Omit<LiveState, 'subagents'> & { subagents: ProgressSubagent[]; progress?: LiveProgress | null }
+export type ProgressSubagent = SubagentLive & { progress?: LiveProgress; reasoning?: Reasoning }
+export type SessionPanelLiveState = Omit<LiveState, 'subagents'> & {
+  subagents: ProgressSubagent[]
+  progress?: LiveProgress | null
+  /** The viewer may see token counts; absent (the chat's own reading): no live reasoning count. */
+  reasoningTokens?: boolean
+}
 
 export function readProgress(value: unknown): LiveProgress | null {
   const p = rec(value)
@@ -24,9 +30,11 @@ export function readProgress(value: unknown): LiveProgress | null {
     ...(typeof p.updated_at === 'string' ? { updated_at: p.updated_at } : {}) }
 }
 
-export interface LiveAskReply { event_id: string; message_id: string; question: string; asked_at: string; seq: number }
+/** no_wait: a question the agent does not wait on (`blerg-runner ask --no-wait`). */
+export interface LiveAskReply { event_id: string; message_id: string; question: string; asked_at: string; seq: number; no_wait?: boolean }
 
 export interface LiveSubagentReply {
+ reasoning?: Reasoning
   key: string
   child_id?: string
   title: string
@@ -49,7 +57,7 @@ export interface LiveTaskReply { task_id: string; call_id: string; kind: string;
 
 export interface LiveChecklistReply { items: ChecklistItem[]; event_id: string; updated_at: string; commit_urls?: Record<string, string> }
 export interface LivePlanReply { items: { text: string; status: PlanStatus; active?: string }[]; updated_at: string }
-export interface LiveTicketSummaryReply { source: string; key: string; title: string; status: string; url: string; event_id: string; seq: number; updated_at: string }
+export interface LiveTicketSummaryReply { source: string; key: string; title: string; status: string; url: string; board_id?: string; event_id: string; seq: number; updated_at: string }
 export type LiveTicketReply = Ticket & { event_id: string; updated_at: string }
 
 export interface LiveChildSession {
@@ -64,6 +72,9 @@ export interface LiveDelegationRequest { request_id: string; engine: string; tit
 export interface LiveReviewRequest { request_id: string; artifact_id: string; artifact_name: string; artifact_version: number; artifact_view: string; ask: string; created_at: string }
 export interface LiveDelegationGrant { id: string; engine: string; runtime: string; daemon_id?: string; daemon_name?: string; repo?: string; no_repo?: boolean }
 export const childIsRunning = (s: LiveChildSession) => !s.ended_at && ['starting', 'running', 'idle', 'waiting'].includes(s.status)
+/** A child at work: starting, running, or waiting on an answer. An idle one (its turn over) is not:
+ *  it waits in Started sessions to be reused or discarded. */
+export const childIsWorking = (s: LiveChildSession) => !s.ended_at && ['starting', 'running', 'waiting'].includes(s.status)
 
 export interface LiveReply {
   children?: LiveChildSession[]
@@ -78,6 +89,8 @@ export interface LiveReply {
   subagents: LiveSubagentReply[]
   tasks: LiveTaskReply[]
   tool_changes: number
+  /** The viewer's pending proposals from this session (absent on an older server). */
+  proposals?: number
   counts: { needs_you: number; running: number }
   /** The checklist, the engine's plan and the pins (a server older than them leaves them out). */
   checklist?: LiveChecklistReply | null
@@ -128,7 +141,7 @@ export interface LiveView {
   /** Background tasks still running (a background subagent's own task left out). */
   tasks: BackgroundTask[]
   toolChanges: number
-  counts: { needsYou: number; running: number }
+  counts: { needsYou: number }
   /** The agent's checklist; null when it has none. */
   checklist: ChecklistLive | null
   /** The engine's plan (only the server reads it); null when there is none. */
@@ -143,6 +156,9 @@ export interface LiveView {
   mcpHold: McpHold | null
   /** The viewer may release the held prompt. */
   canReleasePrompt: boolean
+  /** The viewer may see token counts (the owner or an administrator): a live reasoning count
+   *  shows only then; anyone else sees the reasoning clock. */
+  reasoningTokens: boolean
 }
 
 type Rec = Record<string, unknown>
@@ -195,6 +211,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
       startedAt: parseTs(s.started_at), background: s.background, activeAt: parseTs(s.active_at),
       ...(s.resumed ? { resumed: true } : {}),
       ...(readProgress(s.progress) ? { progress: readProgress(s.progress)! } : {}),
+      ...(readReasoning(s.reasoning) ? { reasoning: readReasoning(s.reasoning)! } : {}),
     })
   }
   const tasks = new Map<string, BackgroundTask>()
@@ -212,10 +229,10 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   let mcpHold: McpHold | null = readMcpHold(reply.mcp_hold)
   const plan: PlanLive | null = reply.plan && reply.plan.items.length ? { items: reply.plan.items, updatedAt: parseTs(reply.plan.updated_at) } : null
   let pinned: PinnedLive = {
-    tickets: (reply.tickets ?? []).map(t => ({ source: t.source, key: t.key, title: t.title, status: t.status, url: t.url, eventId: t.event_id, updatedAt: parseTs(t.updated_at) })),
+    tickets: (reply.tickets ?? []).map(t => ({ source: t.source, key: t.key, title: t.title, status: t.status, url: t.url, ...(t.board_id ? { boardId: t.board_id } : {}), eventId: t.event_id, updatedAt: parseTs(t.updated_at) })),
     ticket: reply.ticket ? (({ event_id, updated_at, ...t }) => ({ ...t, eventId: event_id, updatedAt: parseTs(updated_at) }))(reply.ticket) : null,
   }
-  const asks: AskLive[] = (reply.asks ?? []).map(a => ({ eventId: a.event_id, messageId: a.message_id, question: a.question, askedAt: parseTs(a.asked_at) }))
+  const asks: AskLive[] = (reply.asks ?? []).map(a => ({ eventId: a.event_id, messageId: a.message_id, question: a.question, askedAt: parseTs(a.asked_at), ...(a.no_wait ? { noWait: true } : {}) }))
 
   const promote = (native: string, call: string) => {
     if (!native || !call || native === call || subs.has(native)) return
@@ -313,7 +330,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         break
       case 'ask':
         if (!asks.some(a => a.eventId === ev.client_event_id)) {
-          asks.push({ eventId: ev.client_event_id, messageId: str(p.message_id), question: str(p.body), askedAt: at })
+          asks.push({ eventId: ev.client_event_id, messageId: str(p.message_id), question: str(p.body), askedAt: at, ...(p.no_wait === true && str(p.message_id) ? { noWait: true } : {}) })
         }
         break
       case 'user_message': {
@@ -322,8 +339,9 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         const source = str(p.source)
         const id = str(p.message_id)
         let k = -1
-        if (source === 'ask_answer') k = id ? asks.findIndex(a => a.messageId === id) : asks.length - 1
-        else if (source !== 'system') k = asks.map(a => a.messageId === '').lastIndexOf(true)
+        // A question the agent did not wait on closes only with the answer naming it.
+        if (source === 'ask_answer') k = id ? asks.findIndex(a => a.messageId === id) : asks.map(a => !a.noWait).lastIndexOf(true)
+        else if (source !== 'system' && source !== 'question_answer') k = asks.map(a => a.messageId === '').lastIndexOf(true)
         if (k >= 0) asks.splice(k, 1)
         // The chat's liveCalls (and the server's rule): a message that is not the system's ends the
         // calls in flight, so a foreground subagent stops counting; a background one runs on.
@@ -353,6 +371,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
       key: s.key, ...(s.childId ? {childId:s.childId}:{}), title: s.title, type: s.type, model: s.model, ...(typeof s.effort === 'string' ? { effort: s.effort } : {}), tokens: s.tokens, doing: s.doing, startedAt: s.startedAt, background: s.background,
       ...(s.resumed ? { resumed: true } : {}),
       ...(s.progress ? { progress: s.progress } : {}),
+      ...(s.reasoning ? { reasoning: s.reasoning } : {}),
     })
   }
   const listed = new Set(subagents.map(s => s.key))
@@ -362,10 +381,11 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
     asks, subagents, tasks: running, toolChanges,
     children: reply.children ?? [], delegationRequests: reply.delegation_requests ?? [], delegationGrants: reply.delegation_grants ?? [],
     reviewRequests: reply.review_requests ?? [],
-    counts: { needsYou: asks.length + toolChanges + (reply.delegation_requests?.length ?? 0) + (reply.review_requests?.length ?? 0), running: subagents.length + running.length + (reply.children ?? []).filter(childIsRunning).length },
+    counts: { needsYou: asks.length + toolChanges + (reply.delegation_requests?.length ?? 0) + (reply.review_requests?.length ?? 0) },
     checklist, plan, progress: readProgress(reply.progress), tickets: pinned.tickets, ticket: pinned.ticket,
     mcp: mcp && mcp.servers.length ? mcp : null,
     mcpHold: mcpHold && Number.isFinite(now) && mcpHold.until <= now ? null : mcpHold,
     canReleasePrompt: reply.can_release_prompt === true,
+    reasoningTokens: reply.tokens_hidden === false,
   }
 }

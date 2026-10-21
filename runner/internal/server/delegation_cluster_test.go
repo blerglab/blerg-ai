@@ -67,6 +67,7 @@ func (cx *clusterDelegFx) podTakesOver(session, engine string) *DaemonConn {
 	}
 	podID := newUUID()
 	pod := &DaemonConn{ID: podID, Name: "runner-" + session, Mode: "runner", BoundSessionID: session, RuntimeTokenID: rt.ID, send: make(chan []byte, 64)}
+	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	pod.SetAvailableEngines([]string{engine})
 	cx.hub.Register(pod)
 	if err := db.UpsertDaemon(ctx, cx.pool, podID, pod.Name, "runner", ""); err != nil {
@@ -84,9 +85,13 @@ func (cx *clusterDelegFx) podTakesOver(session, engine string) *DaemonConn {
 	return pod
 }
 
-// clusterRule stores a standing rule of owner-1 for engine on the cluster.
+// clusterRule stores a standing rule of owner-1 for engine on the cluster (making the cluster's
+// daemon row first, as Settings does, for an install where no cluster session has run).
 func (cx *clusterDelegFx) clusterRule(engine string) string {
 	cx.t.Helper()
+	if err := db.UpsertDaemon(context.Background(), cx.pool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+		cx.t.Fatal(err)
+	}
 	r, err := db.InsertDelegationRule(context.Background(), cx.pool, db.DelegationRule{AccountID: "owner-1", Engine: engine,
 		Runtime: runnerRuntimeCluster, DaemonID: clusterDaemonID, CreatedVia: "settings"})
 	if err != nil {
@@ -209,14 +214,19 @@ func TestClusterChildRefusals(t *testing.T) {
 	}
 }
 
-// A desktop parent asking for a cluster child is told why it cannot have one.
+// A desktop parent asking for a cluster child (0.4.4) is asked for on the card when nothing allows
+// it: the request is the cluster's (keyed on its daemon), never a start on the desktop. (Before
+// 0.4.4 this was a refusal; delegation_desktop_cluster_test.go covers the rest.)
 func TestDesktopParentAskingForAClusterChild(t *testing.T) {
 	cx := newClusterDelegFx(t)
-	code, out, _ := cx.postChild(cx.parent, cx.parentTok, map[string]any{"repo": "app", "prompt": "x", "runtime": "cluster"}, newUUID())
-	if code != http.StatusUnprocessableEntity || asString(out["error"]) != msgDesktopChildCluster {
+	code, out, _ := cx.postChild(cx.parent, cx.parentTok, map[string]any{"repo": "org/app", "prompt": "x", "runtime": "cluster"}, newUUID())
+	if code != http.StatusAccepted {
 		t.Fatalf("desktop parent, runtime cluster = %d %v", code, out)
 	}
-	cx.storedNothing(cx.parent)
+	if r := cx.request(asString(out["request_id"])); r.DaemonID != clusterDaemonID {
+		t.Fatalf("request daemon = %s, want the cluster's", r.DaemonID)
+	}
+	cx.noSpawn()
 }
 
 func TestClusterParentWithoutAClusterRuntimeIsRefused(t *testing.T) {

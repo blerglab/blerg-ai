@@ -19,15 +19,12 @@ package daemon
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -288,13 +285,8 @@ func (f *mcpConfigFile) removeLocked() {
 }
 
 func (f *mcpConfigFile) writeOnHost(body []byte) error {
-	dir, err := os.MkdirTemp("", "blerg-mcp-") // 0700, unique, under $TMPDIR — never under a workdir
+	dir, path, err := writePrivateOnHost("blerg-mcp-", "mcp.json", body)
 	if err != nil {
-		return fmt.Errorf("could not create the MCP config directory: %w", err)
-	}
-	path := filepath.Join(dir, "mcp.json")
-	if err := os.WriteFile(path, body, 0o600); err != nil { //nolint:gosec // G703: fixed mcp.json in the fresh, private MkdirTemp directory above.
-		_ = os.RemoveAll(dir)
 		return fmt.Errorf("could not write the MCP config: %w", err)
 	}
 	f.dir, f.path = dir, path
@@ -310,18 +302,10 @@ var dockerRunStdin = func(stdin []byte, args ...string) error {
 }
 
 func (f *mcpConfigFile) writeInContainer(body []byte) error {
-	var rnd [8]byte
-	if _, err := rand.Read(rnd[:]); err != nil {
-		return err
-	}
-	dir := sandboxMCPDirBase + "/blerg-mcp-" + hex.EncodeToString(rnd[:])
-	// mkdir -m 700 (no -p) fails if the name exists, so nobody else's directory
-	// is adopted; the umask makes the file 0600. The directory is an argument
-	// ($1), not interpolated into the script.
-	const script = `umask 077 && mkdir -m 700 "$1" && cat > "$1/mcp.json"`
-	if err := dockerRunStdin(body, "exec", "-i", f.prefix.container(), "sh", "-c", script, "sh", dir); err != nil {
+	dir, path, err := writePrivateInContainer(f.prefix.container(), "blerg-mcp-", "mcp.json", body)
+	if err != nil {
 		return fmt.Errorf("could not write the MCP config inside the sandbox: %w", err)
 	}
-	f.dir, f.path = dir, dir+"/mcp.json"
+	f.dir, f.path = dir, path
 	return nil
 }

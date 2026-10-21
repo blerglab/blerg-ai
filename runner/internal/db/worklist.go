@@ -61,7 +61,8 @@ func LatestChecklist(ctx context.Context, q Querier, sessionID string, through i
 func ListTicketRows(ctx context.Context, q Querier, sessionID string, through int64) ([]ticket.Row, error) {
 	rows, err := q.Query(ctx, `SELECT seq, client_event_id, ts,
 			coalesce(payload->>'action', ''), coalesce(payload->'ticket'->>'source', ''), coalesce(payload->'ticket'->>'key', ''),
-			coalesce(payload->'ticket'->>'title', ''), coalesce(payload->'ticket'->>'status', ''), coalesce(payload->'ticket'->>'url', '')
+			coalesce(payload->'ticket'->>'title', ''), coalesce(payload->'ticket'->>'status', ''), coalesce(payload->'ticket'->>'url', ''),
+			coalesce(payload->'ticket'->>'board_id', '')
 		FROM agent_events WHERE session_id = $1 AND kind = 'ticket' AND seq <= $2 ORDER BY seq`, sessionID, through)
 	if err != nil {
 		return nil, err
@@ -71,7 +72,7 @@ func ListTicketRows(ctx context.Context, q Querier, sessionID string, through in
 	for rows.Next() {
 		var r ticket.Row
 		var ts time.Time
-		if err := rows.Scan(&r.Seq, &r.EventID, &ts, &r.Action, &r.Source, &r.Key, &r.Title, &r.Status, &r.URL); err != nil {
+		if err := rows.Scan(&r.Seq, &r.EventID, &ts, &r.Action, &r.Source, &r.Key, &r.Title, &r.Status, &r.URL, &r.BoardID); err != nil {
 			return nil, err
 		}
 		r.Ts = ts

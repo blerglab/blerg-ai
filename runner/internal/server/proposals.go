@@ -47,6 +47,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
 )
@@ -105,14 +107,60 @@ type proposalView struct {
 	DecidedBy    *string         `json:"decided_by"`
 	Result       json.RawMessage `json:"result"`
 	// ApprovedByGrant is the session permission that approved it without asking, or null.
-	ApprovedByGrant *string `json:"approved_by_grant"`
+	ApprovedByGrant    *string                `json:"approved_by_grant"`
+	ApprovedPermission *db.ProposalApproval   `json:"approved_permission,omitempty"`
+	Extensions         []db.ProposalExtension `json:"extensions,omitempty"`
+	// DecidedByYou says the viewer made the decision (or owns the session permission that did).
+	// The runner knows no account names, and every proposal on these routes is the viewer's own,
+	// so the history reads "you" instead of a raw account id.
+	DecidedByYou bool `json:"decided_by_you"`
+	// Extendable says a pending proposal's deadline can still move; MaxExpiresAt is the furthest it
+	// can go (db.ProposalMaxLifetime after it was proposed).
+	Extendable   bool      `json:"extendable"`
+	MaxExpiresAt time.Time `json:"max_expires_at"`
+}
+
+// auditedProposalViews is the views of the account's rows with their history: the session
+// permission that approved each and every extension, both marked when the viewer made them.
+func auditedProposalViews(ctx context.Context, pool *pgxpool.Pool, account string, rows []db.Proposal) ([]proposalView, error) {
+	all, granted := make([]string, 0, len(rows)), []string{}
+	for i := range rows {
+		all = append(all, rows[i].ID)
+		if rows[i].ApprovedByGrant != "" {
+			granted = append(granted, rows[i].ID)
+		}
+	}
+	audit, err := db.ProposalApprovalAudit(ctx, pool, account, granted)
+	if err != nil {
+		return nil, err
+	}
+	extensions, err := db.ProposalExtensionsFor(ctx, pool, account, all)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]proposalView, 0, len(rows))
+	for i := range rows {
+		view := viewOfProposal(&rows[i])
+		view.DecidedByYou = rows[i].DecidedBy != nil && *rows[i].DecidedBy == account
+		if approval, ok := audit[rows[i].ID]; ok {
+			approval.GrantedByYou = approval.AccountID == account
+			view.ApprovedPermission = &approval
+		}
+		for _, e := range extensions[rows[i].ID] {
+			e.ByYou = e.ExtendedBy == account
+			view.Extensions = append(view.Extensions, e)
+		}
+		out = append(out, view)
+	}
+	return out, nil
 }
 
 func viewOfProposal(p *db.Proposal) proposalView {
 	v := proposalView{
 		ID: p.ID, State: p.State, ConnectionID: p.ConnectionID, ConnectionName: p.ConnectionName, Tool: p.Tool,
-		Arguments: p.Arguments, ArgumentsRaw: string(p.Arguments), AgentSummary: p.AgentSummary, CreatedAt: p.CreatedAt, ExpiresAt: p.CreatedAt.Add(proposalExpiry),
+		Arguments: p.Arguments, ArgumentsRaw: string(p.Arguments), AgentSummary: p.AgentSummary, CreatedAt: p.CreatedAt, ExpiresAt: p.Deadline(),
 		DecidedAt: p.DecidedAt, DecidedBy: p.DecidedBy, Result: p.Result,
+		Extendable: p.State == db.ProposalPending && db.ProposalExtendable(p), MaxExpiresAt: db.ProposalMaxDeadline(p),
 	}
 	if db.IsBoardFilingProposal(p) {
 		v.Kind = "board_file"
@@ -183,6 +231,8 @@ func transitionError(w http.ResponseWriter, err error, what string) {
 	switch {
 	case errors.Is(err, db.ErrProposalNotFound):
 		writeError(w, http.StatusNotFound, msgProposalNotFound)
+	case errors.Is(err, db.ErrProposalGrantCap):
+		writeError(w, http.StatusConflict, "The session permission reached its hourly limit; this proposal waits for you.")
 	case errors.Is(err, db.ErrProposalState):
 		writeError(w, http.StatusConflict, what)
 	default:
@@ -276,11 +326,15 @@ func (h *proposalsHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not list proposals")
 		return
 	}
-	out := make([]proposalView, 0, len(rows))
-	for i := range rows {
-		out = append(out, viewOfProposal(&rows[i]))
+	out, err := auditedProposalViews(r.Context(), h.api.dbPool, who.Account, rows)
+	if err != nil {
+		writeDatabaseFailure(w, "read proposal history", "proposal audit", err)
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"proposals": out, "decided_next": next, "pending_count": pending, "tool_changes_pending": changes})
+	// server_time lets a client decide which pending proposal is past its deadline by this server's
+	// clock, not its own, so its counts agree with pending_count whatever its skew.
+	writeJSON(w, http.StatusOK, map[string]any{"proposals": out, "decided_next": next, "pending_count": pending, "tool_changes_pending": changes,
+		"server_time": time.Now().UTC()})
 }
 
 // count answers GET /api/proposals/count with {"pending_count": n, "tool_changes_pending": m}: two
@@ -314,7 +368,13 @@ func (h *proposalsHandler) get(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, viewOfProposal(p))
+	views, err := auditedProposalViews(r.Context(), h.api.dbPool, who.Account, []db.Proposal{*p})
+	if err != nil {
+		writeDatabaseFailure(w, "read proposal history", "proposal audit", err)
+		return
+	}
+	view := views[0]
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (h *proposalsHandler) reject(w http.ResponseWriter, r *http.Request) {
@@ -400,8 +460,8 @@ func (h *proposalsHandler) approve(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "this proposal is no longer pending ("+p.State+")")
 			return
 		}
-		if time.Since(p.CreatedAt) >= proposalExpiry {
-			writeError(w, http.StatusConflict, "this proposal has expired (it is older than 7 days) and can no longer be approved: let the agent propose again")
+		if !time.Now().Before(p.Deadline()) {
+			writeError(w, http.StatusConflict, "this proposal has expired and can no longer be approved: let the agent propose again")
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(raw))
@@ -476,8 +536,8 @@ func (h *proposalsHandler) execute(ctx context.Context, w http.ResponseWriter, w
 		writeError(w, http.StatusConflict, "this proposal is no longer pending ("+p.State+")")
 		return
 	}
-	if time.Since(p.CreatedAt) >= proposalExpiry {
-		writeError(w, http.StatusConflict, "this proposal has expired (it is older than 7 days) and can no longer be approved: let the agent propose again")
+	if !time.Now().Before(p.Deadline()) {
+		writeError(w, http.StatusConflict, "this proposal has expired and can no longer be approved: let the agent propose again")
 		return
 	}
 	if db.IsBoardFilingProposal(p) {
@@ -510,7 +570,7 @@ func (h *proposalsHandler) execute(ctx context.Context, w http.ResponseWriter, w
 	// sent, or an action half way.
 	casCtx, cancelCAS := context.WithTimeout(context.WithoutCancel(ctx), proposalWriteBudget)
 	defer cancelCAS()
-	if _, err := db.BeginProposalExecutionByGrant(casCtx, h.api.dbPool, who.Account, p.ID, who.Account, grantID); err != nil {
+	if _, err := db.BeginProposalExecutionByGrant(casCtx, h.api.dbPool, who.Account, p.ID, who.Account, grantID, h.api.grantHourlyCap()); err != nil {
 		transitionError(w, err, "this proposal was already decided by another request, or has expired")
 		return
 	}

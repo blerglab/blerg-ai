@@ -110,7 +110,7 @@ func (a *API) chatGate(inner http.Handler, capability string, personOnly bool) f
 				return
 			}
 			if _, ok := a.runner.Driver.(runner.IdentityRawDoer); ok {
-				token, _, err := a.startIdentity(ctx, boardID)
+				token, err := a.startIdentity(ctx, boardID)
 				if err != nil {
 					writeStartError(w, err)
 					return

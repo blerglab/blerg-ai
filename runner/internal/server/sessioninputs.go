@@ -66,6 +66,9 @@ func replayPendingSessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool,
 			}
 			continue
 		}
+		// An answer to a question the agent did not wait on that a server restart cut off between
+		// its record and its delivery is sent now (questions.go); the client id dedupes a race.
+		redeliverQuestionAnswers(ctx, h, pool, id)
 		// Every heartbeat lists every active session: take the lock only when
 		// there is something to replay.
 		if pending, err := db.HasPendingSessionInputs(ctx, pool, id); err != nil || !pending {
@@ -96,7 +99,7 @@ func replayPendingSessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool,
 					if json.Unmarshal([]byte(input.Frame), &msg) != nil {
 						continue
 					}
-					if (msg.Source == "" || answersAsk(msg.Source) || msg.AnswerMessageID != "") && answerAskFromChat(ctx, h, pool, id, msg.Text, msg.ClientID, msg.AnswerMessageID) {
+					if (msg.Source == "" || answersAsk(msg.Source) || msg.AnswerMessageID != "") && answerAskFrom(ctx, h, pool, id, msg.Text, msg.ClientID, msg.AnswerMessageID, "", msg.Source) {
 						continue
 					}
 					if err := ctx.Err(); err != nil {

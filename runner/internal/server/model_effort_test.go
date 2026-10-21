@@ -18,6 +18,7 @@ func postSession(t *testing.T, body map[string]any) (int, *protocol.SpawnSession
 	t.Helper()
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
@@ -146,6 +147,7 @@ func TestPostSessionsChecksEffortAgainstTheModelsOwnLevels(t *testing.T) {
 func TestCodexThroughTheRealRoutes(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetCheckedOutRepos([]string{"app"})
 	hub.Register(dc)
 	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
@@ -218,6 +220,7 @@ func TestRunnerStartValidatesModelAndEffort(t *testing.T) {
 func TestRunnerStartCarriesEffortToDaemon(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetCheckedOutRepos([]string{"app"})
 	hub.Register(dc)
 	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
@@ -267,6 +270,7 @@ func TestResumeAfterBadInChatValueDropsIt(t *testing.T) {
 			payload, _ := json.Marshal(map[string]string{"model": tc.model, "effort": tc.effort, "source": "command"})
 			hub := NewHub()
 			dc := &DaemonConn{ID: daemonID, send: make(chan []byte, 8)}
+			dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 			HandleAgentEvent(ctx, hub, pool, dc, protocol.AgentEvent{
 				Type: "agent_event", SessionID: tc.id, ClientEventID: newUUID(), Kind: "model_changed", Payload: payload,
 			})

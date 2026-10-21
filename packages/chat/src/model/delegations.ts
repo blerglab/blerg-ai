@@ -37,6 +37,17 @@ export function runtimeWords(runtime: string): string {
   return runtime === 'daemon' ? 'on your desktop, unsandboxed' : 'in the desktop sandbox'
 }
 
+const BOARD_LEVELS: Record<string, string> = { read: 'Read', file: 'File without asking', full: 'Full' }
+
+/** The board access a start passes down to the child: "with Blerg · Full, Ops · Read", or "". */
+export function boardsLine(boards: DelegationRequestPayload['boards']): string {
+  if (!Array.isArray(boards)) return ''
+  const parts = boards
+    .filter((b) => b && typeof b.board === 'string' && b.board)
+    .map((b) => `${typeof b.name === 'string' && b.name ? b.name : b.board} · ${BOARD_LEVELS[b.level] ?? b.level}`)
+  return parts.length ? `with ${parts.join(', ')}` : ''
+}
+
 /** The "Always allow …" button's label and title for a request's engine and runtime. */
 export function alwaysAllowWords(engine: string, runtime: string, daemonName: string): { label: string; title: string } {
   if (runtime === 'cluster') return { label: `Always allow ${engine} on the cluster`, title: `Applies to ${engine} on the cluster` }

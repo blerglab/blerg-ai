@@ -10,9 +10,11 @@ import { startedByLabel } from '../lib/startedBy'
 import { BACKGROUND_COLOR, PAUSED_WORDS, displayLabel, displayState, pausedByRestart } from '../lib/displayState'
 
 export interface SessionCardProps {
-  childrenCount?: number
-  childrenExpanded?: boolean
-  onToggleChildren?: () => void
+  /** The parent's started sessions while they are collapsed under it (null or absent: shown, or none). */
+  hiddenChildren?: { total: number; running: number; waiting: number } | null
+  /** The card's started sessions: how many (the plain "↳ N" chip), whether they are shown, and the
+   *  show/hide handler (the round chevron in the card's second line, over the nested indent line). */
+  childrenControl?: { total: number; shown: boolean; toggle: () => void } | null
   session: SessionInfo
   daemon: DaemonInfo | undefined
   active?: boolean
@@ -197,7 +199,17 @@ function backgroundTitle(n: number): string {
   return n === 1 ? '1 background task running' : `${n} background tasks running`
 }
 
-export default function SessionCard({ session, active, childrenCount = 0, childrenExpanded = true, onToggleChildren, nested = false }: SessionCardProps) {
+// A session at work: discarding it stops that work, and its confirmation says so.
+const WORKING = new Set(['starting', 'running', 'waiting'])
+
+/** What a collapsed parent says of its hidden started sessions, in words (the glyph's tooltip). */
+function hiddenChildrenWords(h: { total: number; running: number; waiting: number }): string {
+  const parts = [h.waiting ? `${h.waiting} ${h.waiting === 1 ? 'needs' : 'need'} you` : '', h.running ? `${h.running} running` : ''].filter(Boolean)
+  const all = `${h.total} started ${h.total === 1 ? 'session' : 'sessions'}`
+  return parts.length ? `${parts.join(', ')}, hidden (${all})` : `${all} hidden`
+}
+
+export default function SessionCard({ session, active, hiddenChildren = null, childrenControl = null, nested = false }: SessionCardProps) {
   const navigate = useNavigate()
   const openSession = useContext(OpenSessionContext)
   const status = session.status
@@ -223,7 +235,9 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
   const repoLine = session.title && !isNoRepo(session.repo) ? session.repo : ''
   // A session with background tasks keeps its second line when the count moves into the status slot,
   // so the card does not change height as its turn ends.
-  const hasDetails = !!repoLine || bgTasks > 0 || (status === 'error' && !!session.error_reason)
+  const hasChildren = (childrenControl?.total ?? 0) > 0
+  const leftBorder = active || isWaiting || paused ? 3 : 1
+  const hasDetails = hasChildren || !!repoLine || bgTasks > 0 || (status === 'error' && !!session.error_reason)
     || !!(session.runtime && RUNTIME_CHIP[session.runtime]) || !!kindChipLabel(session.kind) || !!session.model || !!session.cron_id || !!session.started_by
 
   return (
@@ -241,6 +255,7 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
         padding: '6px 10px',
         marginBottom: 6,
         cursor: 'pointer',
+        position: 'relative',
         display: 'flex',
         flexDirection: 'column',
         gap: 3,
@@ -274,7 +289,21 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
         {session.title || repoLabel(session.repo)}
       </span>
 
-      {childrenCount > 0 && <button type="button" aria-label={`${childrenCount} started sessions, ${childrenExpanded ? 'hide' : 'show'}`} title={`${childrenCount} started sessions, ${childrenExpanded ? 'hide' : 'show'}`} aria-expanded={childrenExpanded} onClick={e => { e.stopPropagation(); onToggleChildren?.() }} style={{ ...chipStyle, cursor: 'pointer' }}>↳ {childrenCount}</button>}
+      {/* Its started sessions are collapsed: one glyph says what is behind them (amber "?" when one
+          needs you, a running dot when one runs), the count beside it; the words are the tooltip. */}
+      {/* Its started sessions: "↳ N", plain information. Collapsed, one glyph also says what is behind
+          them (amber "?" when one needs you, a running dot when one runs); the words are the tooltip. */}
+      {(hiddenChildren?.total ?? childrenControl?.total ?? 0) > 0 && (() => {
+        const h = hiddenChildren ?? { total: childrenControl!.total, running: 0, waiting: 0 }
+        const words = hiddenChildren ? hiddenChildrenWords(h) : `${h.total} started ${h.total === 1 ? 'session' : 'sessions'}`
+        return (
+          <span data-testid="hidden-children" role="img" aria-label={words} title={words}
+            data-state={h.waiting ? 'waiting' : h.running ? 'running' : 'idle'}
+            style={{ ...chipStyle, color: h.waiting ? 'var(--amber)' : h.running ? 'var(--lichen)' : 'var(--fog-dim)' }}>
+            ↳{h.waiting ? '?' : h.running ? '●' : ''} {h.total}
+          </span>
+        )
+      })()}
       {/* Unread dot — shown whenever session.unread is true, regardless of status */}
       {unread && (
         <span
@@ -291,7 +320,7 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
         />
       )}
 
-      {!session.archived_at && (session.parent_session_id ? <ChildSessionActions parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'}/> : <ParentSessionActions sessionId={session.id} title={session.title || 'Untitled session'}/>)}
+      {!session.archived_at && (session.parent_session_id ? <ChildSessionActions parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'} running={WORKING.has(status)}/> : <ParentSessionActions sessionId={session.id} title={session.title || 'Untitled session'} running={WORKING.has(status)}/>)}
       {/* Star toggle — always visible, outline when unstarred, filled orange when starred */}
       <button
         data-testid="star-toggle"
@@ -412,6 +441,21 @@ export default function SessionCard({ session, active, childrenCount = 0, childr
       )}
 
       </div>}
+      {hasChildren && (() => {
+        const n = childrenControl!.total
+        const label = `${childrenControl!.shown ? 'Hide' : 'Show'} ${n} started ${n === 1 ? 'session' : 'sessions'}`
+        // Centered on the nested list's indent line (21.5 px in from the branch's left edge), whatever
+        // the card's left border is (SessionList: marginLeft 21 + a 1 px line).
+        return (
+          <button type="button" className="session-children-toggle" data-testid="children-toggle" aria-expanded={childrenControl!.shown}
+            aria-label={label} title={label} style={{ left: 14 - leftBorder }}
+            onClick={e => { e.stopPropagation(); e.preventDefault(); childrenControl!.toggle() }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              {childrenControl!.shown ? <path d="M6 15l6-6 6 6" /> : <path d="M6 9l6 6 6-6" />}
+            </svg>
+          </button>
+        )
+      })()}
     </div>
   )
 }

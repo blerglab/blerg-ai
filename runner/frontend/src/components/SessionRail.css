@@ -188,6 +188,14 @@
   color: var(--amber);
 }
 
+.rail-ask-nowait {
+  margin-right: auto;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--fog);
+}
+
 .rail-wait {
   font-weight: 400;
   letter-spacing: 0;
@@ -1020,4 +1028,11 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   color: var(--fog);
+}
+
+/* Started sessions: a child at work is one line here ("1 running ↑"); its card is in Running now. */
+.rail-started-running {
+  display: inline-block;
+  margin: 0 0 6px;
+  font-size: var(--text-xs);
 }

@@ -33,7 +33,7 @@ describe('foldLive', () => {
     expect(v.asks).toEqual([{ eventId: 'a1', messageId: 'm1', question: 'Ship it?', askedAt: T0 }])
     expect(v.subagents).toEqual([{ key: 'k1', childId: 'k1', title: 'Implement', type: 'general-purpose', model: 'sonnet', tokens: 10, doing: 'running Bash · npm test', startedAt: T0, background: false }])
     expect(v.tasks).toEqual([{ taskId: 't1', callId: 'c1', kind: 'bash', description: 'npm run dev', command: '', startedAt: T0, done: null }])
-    expect(v.counts).toEqual({ needsYou: 3, running: 2 })
+    expect(v.counts).toEqual({ needsYou: 3 })
   })
 
   it('folds a subagent start, its updates, its background launch and its end', () => {
@@ -47,7 +47,7 @@ describe('foldLive', () => {
     expect(v.subagents[0]).toMatchObject({ model: 'claude-haiku', tokens: 12, background: true })
     // Its background task is the same work: counted once, as the subagent.
     expect(v.tasks).toEqual([])
-    expect(v.counts.running).toBe(1)
+    expect(v.subagents).toHaveLength(1)
     v = foldLive(reply(), [start, update, launch, task, ev('subagent_done', { child_id: 'k2', summary: 'ok' }, 15)], T0)
     expect(v.subagents).toEqual([])
   })
@@ -109,8 +109,9 @@ describe('foldLive', () => {
       subagents: [sub('k1', { background: true })],
       tasks: [{ task_id: 't1', call_id: 'c1', kind: 'bash', description: '', started_at: iso(0), seq: 4 }],
     })
-    expect(foldLive(r, [], T0 + 11 * HOUR).counts.running).toBe(2)
-    expect(foldLive(r, [], T0 + 13 * HOUR).counts.running).toBe(0)
+    const live = (v: ReturnType<typeof foldLive>) => v.subagents.length + v.tasks.length
+    expect(live(foldLive(r, [], T0 + 11 * HOUR))).toBe(2)
+    expect(live(foldLive(r, [], T0 + 13 * HOUR))).toBe(0)
     // An update is a sign of life.
     expect(foldLive(r, [ev('subagent_update', { child_id: 'k1' }, 11, 10 * 60)], T0 + 13 * HOUR).subagents).toHaveLength(1)
   })
@@ -240,10 +241,10 @@ describe('live progress', () => {
   })
 })
 
-it('counts pending child requests and active child sessions separately from subagents', () => {
+it('counts pending child requests as needing you and keeps every child session', () => {
   const child = { id: 'child', title: 'Review', engine: 'codex', model: 'fixture', effort: 'high', status: 'running', started_at: iso(0), ended_at: null, asking: true, tokens: 123 }
   const out = foldLive(reply({ children: [child, { ...child, id: 'done', status: 'ended', ended_at: iso(1) }], delegation_requests: [{ request_id: 'request', engine: 'codex', title: 'Other review', expires_at: iso(10) }], delegation_grants: [{ id: 'grant', engine: 'codex', runtime: 'docker' }] }), [], T0)
-  expect(out.counts).toEqual({ needsYou: 1, running: 1 })
+  expect(out.counts).toEqual({ needsYou: 1 })
   expect(out.children).toHaveLength(2)
   expect(out.delegationGrants?.[0].id).toBe('grant')
 })

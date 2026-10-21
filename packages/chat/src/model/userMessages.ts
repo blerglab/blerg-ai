@@ -24,9 +24,10 @@ const RESTART_NOTE = '[system] Session resumed after a restart'
 const ADOPT_PROMPT = 'Continue the task you were working on.'
 const ADOPT_NOTE = 'Session recovered: the agent was asked to continue the task it was working on.'
 
-/** Sources whose messages Blerg wrote on its own behalf (decisions relayed to the agent). */
+/** Sources whose messages Blerg wrote on its own behalf (decisions relayed to the agent, and a
+ *  parent's note that its child's turn ended). */
 export function isBlergRelaySource(source: unknown): boolean {
-  return source === 'review' || source === 'proposal'
+  return source === 'review' || source === 'proposal' || source === 'child_turn'
 }
 
 /** Who wrote a message that some automation, not the person, sent: a board's (a card's task, a
@@ -36,10 +37,19 @@ export function isBlergRelaySource(source: unknown): boolean {
 export function automationAuthor(source: unknown): string | undefined {
   switch (source) {
     case 'blerg-board': return 'Board'
-    case 'session': return 'Parent session'
+    case 'session': return '↑ Parent'
     case 'cron': return 'Cron'
   }
   return undefined
+}
+
+/** Whether a user message is the parent session's: its message to this child (source "session"),
+ *  or its answer to this child's question (an ask_answer the runner marked answered_by "session").
+ *  Both are set by the runner from the parent's own token, never by a client. */
+export function isFromParentSession(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false
+  const p = payload as Partial<UserMessagePayload>
+  return p.source === 'session' || (p.source === 'ask_answer' && p.answered_by === 'session')
 }
 
 export function userMessageShape(payload: unknown): UserMessageShape {
@@ -47,6 +57,9 @@ export function userMessageShape(payload: unknown): UserMessageShape {
   const p = payload as Partial<UserMessagePayload>
   const text = typeof p.text === 'string' ? p.text : ''
   if (isHarnessText(text)) return { as: 'hidden' }
+  // The answer to a question the agent did not wait on, as Blerg sent it on to the agent: the
+  // question's card already shows the person's answer.
+  if (p.source === 'question_answer') return { as: 'hidden' }
   const trimmed = text.trim()
   // Blerg itself telling the agent how something it asked for was decided (a review request, a
   // proposal): never the person's words, so never drawn as theirs.

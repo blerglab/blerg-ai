@@ -854,8 +854,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // POSTs the launch: where the repository comes from (repoFields) plus
   // everything else the sheet chose, the same for every kind of repo choice.
   async function postSession(repoFields: Record<string, unknown>) {
-    const granted = kind === 'agent' ? effectiveLaunchPermissions(permissions, { runtime, boards: boards.state === 'ready' && boards.configured ? boards.boards : [], mcp: mcpAvailable ? mcp : [] }) : NO_LAUNCH_PERMISSIONS
-    const launchPermissions = granted.children.length + granted.boards.length + granted.mcp_tools.length > 0 ? granted : undefined
+    const granted = kind === 'agent' ? effectiveLaunchPermissions(permissions, { runtime, boards: boards.state === 'ready' && boards.configured ? boards.boards : [], mcp: mcpAvailable ? mcp : [], clusterConfigured: !!clusterStatus?.configured, sandboxClusterAny: clusterStatus?.sandbox_cluster_children === 'any' }) : NO_LAUNCH_PERMISSIONS
+    const launchPermissions = granted.children.length + granted.board_levels.length + granted.mcp_tools.length > 0 ? granted : undefined
     setSubmitting(true)
     setError(null)
     try {
@@ -1367,6 +1367,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               boards={boards.state === 'ready' && boards.configured ? boards.boards : []}
               boardsLoading={boards.state === 'loading'}
               engines={onCluster ? [] : selectedDaemon?.available_engines ?? []}
+              cluster={clusterStatus?.configured ? { engines: clusterStatus.available_engines ?? [], sandboxAny: clusterStatus.sandbox_cluster_children === 'any' } : undefined}
               mcp={mcpAvailable ? mcp : []}
               connectionName={id => launchMcpConnections.cached()?.find(c => c.id === id)?.name ?? id.slice(0, 8)}
               value={permissions} onChange={setPermissions} />

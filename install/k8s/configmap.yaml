@@ -75,6 +75,12 @@
 #                                            above the per-file limit, and the
 #                                            runner data volume (RUNNER_DATA_SIZE)
 #                                            large enough for the sessions you keep.
+#   BLERG_CORE_BOARD_MINT_DISABLED         — "true" switches new "Run as me"
+#                                            tokens off (core answers 503 and
+#                                            boards offer pasting a token).
+#                                            Revoking existing tokens keeps
+#                                            working; it does not revoke them.
+#                                            Absent = minting on.
 #
 # The MCP gateway (BLERG_RUNNER_MCP_GW_ADDR / _GW_URL in `data` below) is served
 # on its own port (8090), reachable only through the internal-only
@@ -127,6 +133,10 @@ data:
   # Service DNS name, not the public Ingress host.
   BLERG_RUNNER_INTERNAL_URL: "http://blerg-runner.blerg.svc.cluster.local:8080"
   BLERG_RUNNER_MAX_SESSIONS: "4"
+  # A sandboxed desktop session's cluster children: "once" asks the person for each
+  # one (the pod gets their credentials); "any" lets session permissions and standing
+  # cluster rules start them, as for an unsandboxed desktop session.
+  BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN: "once"
   # Account-owned Claude/Codex conversations survive pod replacement. Only
   # native history is retained; credentials and current grants stay ephemeral.
   # Empty storage class uses the cluster default (microk8s-hostpath on MicroK8s).

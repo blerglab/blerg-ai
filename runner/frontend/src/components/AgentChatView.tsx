@@ -1,4 +1,4 @@
-import { modelDisplayNames, type FiledCard } from '@blerglab/chat'
+import { isFromParentSession, modelDisplayNames, type FiledCard } from '@blerglab/chat'
 // Chat/timeline view for agent-kind sessions: the runner's page over @blerglab/chat's ChatView.
 // The package draws the transcript, composer, files and viewer; this file adds what is the
 // runner's own — the model and effort pickers, the Rules panel, the ready card's repo line — and
@@ -18,7 +18,7 @@ import {
 import '@blerglab/chat/blerg.css'
 import * as ws from '../ws'
 import { blergTransport } from '../lib/chatTransport'
-import { boardCardUrl } from '../lib/boardLink'
+import { boardCardUrl, useBoardOrigin } from '../lib/boardLink'
 import ProposalEditSheet from './ProposalEditSheet'
 import { apiFetch } from '../apiFetch'
 import { effectiveEffort, modelCatalogTarget, useEngineModels } from '../lib/engineModels'
@@ -102,21 +102,36 @@ interface Props {
   openArtifact?: { id: string; n: number; commit?: string } | null
   /** The first message is held while the session's MCP servers connect (from the live state). */
   mcpHold?: McpHold | null
-  /** The viewer owns the session: "Send now" works for them, and they may open the files the agent names. */
   checklistItems?: readonly ChecklistItem[]
   onManageChildApproval?: () => void
   onOpenChecklistItem?: (id: string) => void
+  /** The viewer owns the session: "Send now" works for them, and they may open the files the agent names. */
   canReleasePrompt?: boolean
+  /** The viewer may see token counts (the server's /live rule): a live reasoning count shows only then. */
+  reasoningTokens?: boolean
+  /** Whether the viewer may answer an owner-only approval (the server's live state); null while
+   *  that is not known yet, so the owner is not told they cannot. Absent: canReleasePrompt. */
+  canAnswerApprovals?: boolean | null
 }
 
 // Memoised: the page around it re-renders as the side panel's state moves, the chat need not.
 export default memo(AgentChatView)
 
-function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canReleasePrompt, onOpenChecklistItem, checklistItems, onManageChildApproval }: Props) {
+function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canReleasePrompt, reasoningTokens, canAnswerApprovals, onOpenChecklistItem, checklistItems, onManageChildApproval }: Props) {
+  const boardBase = useBoardOrigin()
   const sessionId = session.id
   const navigate = useNavigate()
   const parentTitle = useSessionStore(s => s.sessions.find(p => p.id === session.parent_session_id)?.title) || session.started_by?.name
-  const describeUserMessage: DescribeUserMessage = (_event, payload) => payload.source === 'session' ? { author: parentTitle ? `from ${parentTitle}` : 'from another session' } : undefined
+  const parentId = session.parent_session_id
+  // The parent session's message or answer (the runner marks both from the parent's own token):
+  // named after the parent, and a link to it inside Blerg.
+  const describeUserMessage: DescribeUserMessage = (_event, payload) => {
+    if (!isFromParentSession(payload)) return undefined
+    const author = `↑ Parent · ${parentTitle || 'another session'}`
+    if (!parentId) return { author }
+    const href = `/sessions/${encodeURIComponent(parentId)}`
+    return { author, authorHref: href, onAuthorOpen: () => navigate(href) }
+  }
   const transport = blergTransport()
   // The board-card draft open in the editor sheet (the chat card's Edit), and a nudge for the
   // cards to read their proposal again after the sheet approved it.
@@ -228,13 +243,15 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
       thinking={thinking ? 'shown' : 'hidden'}
       compact={compact}
       filesButton={false}
+      canAnswerApprovals={canAnswerApprovals === undefined ? canReleasePrompt === true : canAnswerApprovals}
       canOpenWorkspaceFiles={!session.archived_at && canReleasePrompt === true}
+      reasoningTokens={reasoningTokens === true}
       maxFileBytes={maxFileBytes ?? undefined}
       linkedArtifact={linked}
       linkedCommit={linkedCommit}
       onLinkedArtifactConsumed={() => { setLinked(null); setLinkedCommit(null); clearArtifactParam() }}
       onEditProposal={session.archived_at ? undefined : setEditingProposal}
-      onOpenBoardCard={openBoardCard}
+      onOpenBoardCard={card => openBoardCard(card, boardBase)}
       onManagePermissions={session.archived_at ? undefined : onManageChildApproval}
       proposalRevision={proposalRevision}
     />
@@ -244,6 +261,6 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
 }
 
 // A created card opens on its Board page, in Blerg, in a tab of its own.
-function openBoardCard(card: FiledCard) {
-  window.open(boardCardUrl(card.board_id, card.number), '_blank', 'noopener')
+function openBoardCard(card: FiledCard, boardBase: string) {
+  window.open(boardCardUrl(card.board_id, card.number, boardBase), '_blank', 'noopener')
 }

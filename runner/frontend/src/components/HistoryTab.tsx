@@ -23,7 +23,7 @@ import {
   TOPIC_COMMAND, countsLabel, heldFrom, hm, shownVersion, spanLabel, unmarkedLabel, usageTotal,
   type AgentItem, type AgentStatus, type DocItem, type Topic, type TopicCard, type TopicCommit, type TopicItem, type Unmarked,
 } from '../lib/topics'
-import { boardCardUrl } from '../lib/boardLink'
+import { boardCardUrl, useBoardOrigin } from '../lib/boardLink'
 import ShowLink from './RailShowLink'
 
 /** The unmarked line's key in the open set (a topic id is tp_…). */
@@ -231,9 +231,10 @@ function scrollToProposal(id: string): boolean {
 /** A card an approved proposal created: board, #number and title, as one chip that opens the card
  *  on its Board page, in Blerg (never a link out of Blerg). */
 function CardChip({ card }: { card: TopicCard }) {
+  const boardBase = useBoardOrigin()
   const label = `${card.board_name || 'Board'} #${card.number}${card.title ? ` ${card.title}` : ''}`
   return (
-    <a className="reel-chip reel-card-chip" href={boardCardUrl(card.board_id, card.number)} target="_blank" rel="noopener"
+    <a className="reel-chip reel-card-chip" href={boardCardUrl(card.board_id, card.number, boardBase)} target="_blank" rel="noopener"
       title={`${label}${card.column ? ` · ${card.column}` : ''}${card.auto ? ' · approved by a session permission' : ''}`} data-testid="reel-card-chip">
       <span className="reel-card-board">{card.board_name || 'Board'}</span> <span className="reel-card-number">#{card.number}</span>
       {card.title && <> <span className="reel-card-title">{card.title}</span></>}

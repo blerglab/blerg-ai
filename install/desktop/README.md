@@ -109,6 +109,8 @@ on that board can spend your credential and could get an agent to reveal it, so 
 token you're comfortable with every card-writer effectively having. Details:
 [`board/docs/CONFIG.md`](../../board/docs/CONFIG.md#board-automation-identity-who-a-boards-sessions-run-as).
 
+To disable new **Run as me** tokens entirely, set `BLERG_CORE_BOARD_MINT_DISABLED=true` in the desktop `.env` and rerun `./blerg-up.sh`. Existing tokens can still be revoked; this setting does not revoke them.
+
 ## What runs as you
 
 Every session, sandboxed or not, uses the engine login on your machine (`claude`, `codex`) and
@@ -118,7 +120,9 @@ Claude settings. A repo you launch a session in is code the agent will run: don'
 something you wouldn't run yourself.
 
 From the launch sheet both session kinds, Terminal and Agent, default to the sandbox, so the
-agent sees `/workspace` and your mounted logins and nothing else of the machine. **This machine,
+agent sees `/workspace` (a clone of its own of the repo: never your checkout or its `.git`; its
+commits land on `wip/<session-id>` in your repo) and your mounted logins and nothing else of the
+machine. **This machine,
 unsandboxed** is the third card in its Run column: it runs on the host as you with full filesystem
 access (and, for an Agent session, no permission prompts), it is never a default, and Launch stays
 disabled until you tick the acknowledgement.

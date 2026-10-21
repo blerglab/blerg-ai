@@ -20,6 +20,9 @@ type Config struct {
 	Effort      string
 	MaxParallel int       // read-only tool concurrency (default 4)
 	Messenger   Messenger // session→user messaging (update/note/ask)
+	// MarkerNonce is the session's marker code for relayed decisions (inputtext.go); "" draws a
+	// random one. NewLoop announces it at the end of a non-empty System.
+	MarkerNonce string
 
 	RetryBase time.Duration    // provider retry backoff base (default 1s)
 	BudgetUSD float64          // hard per-session cost cap (default 25.0)
@@ -163,6 +166,12 @@ func NewLoop(cfg Config) *Loop {
 	if cfg.MaxParallel <= 0 {
 		cfg.MaxParallel = 4
 	}
+	if cfg.MarkerNonce == "" {
+		cfg.MarkerNonce = NewMarkerNonce()
+	}
+	if cfg.System != "" {
+		cfg.System += "\n\n" + MarkerInstructions(cfg.MarkerNonce)
+	}
 	return &Loop{cfg: cfg, wake: make(chan struct{}, 1)}
 }
 
@@ -257,7 +266,7 @@ const completionReminder = `[system reminder] You made changes this turn but did
 func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
 	l.emit("user_message", msg.Payload())
 	l.emit("status_changed", StatusPayload{Status: "running", Reason: "turn started"})
-	l.messages = append(l.messages, Message{Role: "user", Blocks: []Block{{Type: "text", Text: msg.Text}}})
+	l.messages = append(l.messages, Message{Role: "user", Blocks: []Block{{Type: "text", Text: msg.ModelText(l.cfg.MarkerNonce)}}})
 	l.turnBlocks = nil
 	l.applyPendingModel(true) // turn boundary — always safe
 
@@ -335,7 +344,7 @@ func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
 		// blocks must come first in the user message — API pairing rule).
 		for _, q := range l.drainQueue() {
 			l.emit("user_message", q.Payload())
-			resultBlocks = append(resultBlocks, Block{Type: "text", Text: q.Text})
+			resultBlocks = append(resultBlocks, Block{Type: "text", Text: q.ModelText(l.cfg.MarkerNonce)})
 		}
 		if len(resultBlocks) > 0 {
 			l.messages = append(l.messages, Message{Role: "user", Blocks: resultBlocks})

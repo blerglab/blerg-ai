@@ -1,0 +1,76 @@
+/* A pinned Blerg Board card shown live (BoardCardView.tsx): the chat's ticket dialog, with the
+   board's own sections. */
+.board-live-mark {
+  color: var(--chat-success, #3fb950);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.board-card-note {
+  margin: 8px 0 0;
+  font-size: var(--chat-text-sm, 13px);
+  color: var(--chat-muted, var(--fog));
+}
+
+.board-card-error {
+  margin: 12px 0 0;
+  font-size: var(--chat-text-sm, 13px);
+  color: var(--chat-warning, var(--amber));
+}
+
+.board-card-move {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.board-card-move-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--chat-text-sm, 13px);
+}
+
+.board-card-move select,
+.board-card-move button {
+  min-height: 32px;
+  max-width: 100%;
+}
+
+.board-card-trail {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.board-card-trail li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  font-size: var(--chat-text-sm, 13px);
+  overflow-wrap: anywhere;
+}
+
+.board-card-trail li.comment {
+  flex-direction: column;
+  padding: 8px 10px;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+}
+
+.board-card-who {
+  color: var(--chat-muted-2, var(--fog-dim));
+  font-size: var(--chat-text-xs, 12px);
+}
+
+@media (max-width: 600px) {
+  .board-card-move select,
+  .board-card-move button {
+    min-height: 44px;
+  }
+}

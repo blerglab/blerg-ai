@@ -61,6 +61,7 @@ func (g *agentGaps) take(sessionID, subscriberID string) int64 {
 // session. A subscriber whose buffer is full misses it, and the hub records the gap for its
 // forwarder to report (TakeAgentEventGap). seq 0 (not persisted) is fanned out like any output.
 func (h *Hub) FanOutAgentEvent(sessionID string, seq int64, data []byte) {
+	h.observeReasoning(sessionID, data)
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for id, ch := range h.subscriptions[sessionID] {

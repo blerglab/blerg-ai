@@ -28,15 +28,22 @@ const (
 // launchPermissions is the launch sheet's "permissions" field.
 type launchPermissions struct {
 	Children []string `json:"children,omitempty"` // "docker" (sandboxed), "daemon" (unsandboxed), "cluster"
-	Boards   []string `json:"boards,omitempty"`
-	MCPTools []struct {
+	Boards   []string `json:"boards,omitempty"`   // file without asking (0.4.3); board_levels says more
+	// BoardLevels sets a board's access level (0.4.4): "read", "file" or "full".
+	BoardLevels []launchBoardLevel `json:"board_levels,omitempty"`
+	MCPTools    []struct {
 		ConnectionID string `json:"connection_id"`
 		Tool         string `json:"tool"`
 	} `json:"mcp_tools,omitempty"`
 }
 
+type launchBoardLevel struct {
+	BoardID string `json:"board_id"`
+	Level   string `json:"level"`
+}
+
 func (p *launchPermissions) empty() bool {
-	return p == nil || len(p.Children) == 0 && len(p.Boards) == 0 && len(p.MCPTools) == 0
+	return p == nil || len(p.Children) == 0 && len(p.Boards) == 0 && len(p.BoardLevels) == 0 && len(p.MCPTools) == 0
 }
 
 // launchPermissionsProblem checks the field's shape; the policy is checked when it is applied.
@@ -47,7 +54,7 @@ func launchPermissionsProblem(p *launchPermissions, kind string) string {
 	if kind != "agent" {
 		return "permissions apply only to agent sessions"
 	}
-	if len(p.Boards) > maxLaunchBoards || len(p.MCPTools) > maxLaunchTools || len(p.Children) > 3 {
+	if len(p.Boards) > maxLaunchBoards || len(p.BoardLevels) > maxLaunchBoards || len(p.MCPTools) > maxLaunchTools || len(p.Children) > 3 {
 		return "too many permissions"
 	}
 	for _, c := range p.Children {
@@ -58,6 +65,11 @@ func launchPermissionsProblem(p *launchPermissions, kind string) string {
 	for _, b := range p.Boards {
 		if b == "" || !filingText(b, 200, false) {
 			return "permissions.boards takes board ids"
+		}
+	}
+	for _, b := range p.BoardLevels {
+		if b.BoardID == "" || !filingText(b.BoardID, 200, false) || db.BoardLevelRank(b.Level) < 1 {
+			return `permissions.board_levels takes board_id and a level of "read", "file" or "full"`
 		}
 	}
 	for _, t := range p.MCPTools {
@@ -98,12 +110,17 @@ func (a *API) HandleLaunchSession(w http.ResponseWriter, r *http.Request) {
 	}
 	var head struct {
 		Kind        string             `json:"kind"`
+		BoardID     string             `json:"board_id"`
 		Permissions *launchPermissions `json:"permissions"`
 	}
 	_ = json.Unmarshal(raw, &head) // a malformed body is the start's to refuse
 	r.Body = io.NopCloser(bytes.NewReader(raw))
-	if head.Permissions.empty() {
+	if head.Permissions.empty() && head.BoardID == "" {
 		a.HandlePostSessions(w, r)
+		return
+	}
+	if head.Permissions.empty() {
+		a.launchWithBoard(w, r, head.BoardID)
 		return
 	}
 	if msg := launchPermissionsProblem(head.Permissions, head.Kind); msg != "" {
@@ -128,6 +145,7 @@ func (a *API) HandleLaunchSession(w http.ResponseWriter, r *http.Request) {
 	var out map[string]any
 	if capture.status == http.StatusAccepted && json.Unmarshal(capture.body.Bytes(), &out) == nil {
 		if sid, _ := out["session_id"].(string); sid != "" {
+			a.recordLaunchBoard(context.WithoutCancel(r.Context()), who, sid, head.BoardID)
 			problems := a.applyLaunchPermissions(context.WithoutCancel(r.Context()), who, sid, head.Permissions)
 			if len(problems) > 0 {
 				out["permission_problems"] = problems
@@ -181,6 +199,11 @@ func (a *API) applyLaunchPermissions(ctx context.Context, who grantRequester, si
 		}
 		return problems
 	}
+	for _, b := range p.BoardLevels {
+		if _, apiErr := a.setBoardLevel(ctx, who, row, b.BoardID, b.Level, "launch", ""); apiErr != nil {
+			problems = append(problems, "Board access ("+b.Level+") was not given: "+strings.TrimSuffix(apiErr.Message, "."))
+		}
+	}
 	for _, board := range p.Boards {
 		if _, apiErr := a.createProposalGrant(ctx, who, row, proposalGrantRequest{Kind: "board_file", BoardID: board}, "launch", ""); apiErr != nil {
 			problems = append(problems, "Filing cards without asking was not allowed: "+strings.TrimSuffix(apiErr.Message, "."))
@@ -201,4 +224,48 @@ func (a *API) readOwnedRow(ctx context.Context, account, sid string) (*db.Sessio
 		return nil, err
 	}
 	return row, nil
+}
+
+// launchWithBoard is a start that chose a board and no permissions: the start as it is, then the
+// board's level recorded as full (recordLaunchBoard), when a signed-in person started it.
+func (a *API) launchWithBoard(w http.ResponseWriter, r *http.Request, boardID string) {
+	capture := &launchCapture{header: make(http.Header)}
+	a.HandlePostSessions(capture, r)
+	var out map[string]any
+	if capture.status == http.StatusAccepted && json.Unmarshal(capture.body.Bytes(), &out) == nil {
+		if sid, _ := out["session_id"].(string); sid != "" {
+			// The start authenticated the caller already; this only learns who it was, and writes nothing.
+			if p, ok := a.authBrowser(&launchCapture{header: make(http.Header)}, r); ok && p.OnBehalfOf == "" {
+				a.recordLaunchBoard(context.WithoutCancel(r.Context()), requesterOf(p), sid, boardID)
+			}
+		}
+	}
+	for k, v := range capture.header {
+		w.Header()[k] = v
+	}
+	if capture.status == 0 {
+		capture.status = http.StatusOK
+	}
+	w.WriteHeader(capture.status)
+	_, _ = w.Write(capture.body.Bytes())
+}
+
+// recordLaunchBoard records the board a person chose at launch as level full in the session's
+// Permissions, so it shows there, can be lowered or revoked, and files without asking like any full
+// board. Best effort: without the row the launch board is full anyway (sessionBoardLevel), and a
+// session that cannot hold permissions (restricted, for one) keeps exactly what its launch gave it.
+func (a *API) recordLaunchBoard(ctx context.Context, who grantRequester, sid, boardID string) {
+	if boardID == "" || a.dbPool == nil || checkGrantRequester(who) != nil || who.Sid == "" {
+		return
+	}
+	row, err := a.readOwnedRow(ctx, who.Account, sid)
+	if err != nil || row == nil || proposalGrantProblem(row) != "" {
+		return
+	}
+	if lv, err := a.sessionBoardLevel(ctx, sid, boardID); err != nil || lv.Launch == nil {
+		return // the start did not give it the board connection
+	}
+	if _, apiErr := a.setBoardLevel(ctx, who, row, boardID, db.BoardLevelFull, "launch", ""); apiErr != nil {
+		log.Printf("board access: launch board of %s not recorded: %s", sid, apiErr.Message)
+	}
 }

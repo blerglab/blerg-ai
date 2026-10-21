@@ -977,3 +977,81 @@ func TestRefreshBusySessionIsRetryableNotSignOut(t *testing.T) {
 		t.Fatalf("refresh after the lock freed = %d %q, want a token", resp.StatusCode, resp.Header.Get("Location"))
 	}
 }
+
+func TestRefreshDatabaseAbortDoesNotSignOut(t *testing.T) {
+	for _, code := range []string{"40P01", "40001"} {
+		t.Run(code, func(t *testing.T) {
+			deps, pool := newTestDeps(t, []string{"http://board.example.com"}, nil)
+			svc := deps.Identity.(*identity.Service)
+			var acct string
+			if err := pool.QueryRow(t.Context(), `INSERT INTO accounts(provider,provider_subject,role) VALUES('local','temporary-abort','member') RETURNING id::text`).Scan(&acct); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := svc.IssueRefreshToken(t.Context(), acct, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Inject a retryable database abort at the actual rotation write, after authentication.
+			sql := `CREATE FUNCTION abort_rotation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'temporary abort' USING ERRCODE = '` + code + `'; END $$;
+    CREATE TRIGGER abort_rotation BEFORE INSERT ON human_sessions FOR EACH ROW EXECUTE FUNCTION abort_rotation()`
+			if _, err := pool.Exec(t.Context(), sql); err != nil {
+				t.Fatal(err)
+			}
+			router := api.NewRouter(deps)
+			refresh := func() *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodGet, "/auth/refresh?return_to="+url.QueryEscape("http://board.example.com/silent-refresh.html"), nil)
+				req.AddCookie(&http.Cookie{Name: refreshCookieNameForTest, Value: raw})
+				rec := httptest.NewRecorder()
+				router.ServeHTTP(rec, req)
+				return rec
+			}
+			rec := refresh()
+			if rec.Code != http.StatusServiceUnavailable || len(rec.Result().Cookies()) != 0 || rec.Header().Get("Retry-After") == "" {
+				t.Fatalf("temporary abort response=%d cookies=%d", rec.Code, len(rec.Result().Cookies()))
+			}
+			if _, err := pool.Exec(t.Context(), `DROP TRIGGER abort_rotation ON human_sessions`); err != nil {
+				t.Fatal(err)
+			}
+			if rec := refresh(); rec.Code != http.StatusFound {
+				t.Fatalf("retry=%d", rec.Code)
+			}
+		})
+	}
+}
+
+// Only a retryable database abort is a temporary failure; any other refresh error signs the
+// browser out as before, so a persistent failure shows the sign-in page instead of looping on
+// "session busy" (review M1).
+func TestRefreshOtherDatabaseErrorSignsOut(t *testing.T) {
+	deps, pool := newTestDeps(t, []string{"http://board.example.com"}, nil)
+	svc := deps.Identity.(*identity.Service)
+	var acct string
+	if err := pool.QueryRow(t.Context(), `INSERT INTO accounts(provider,provider_subject,role) VALUES('local','persistent-error','member') RETURNING id::text`).Scan(&acct); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := svc.IssueRefreshToken(t.Context(), acct, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := `CREATE FUNCTION fail_rotation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'persistent failure'; END $$;
+    CREATE TRIGGER fail_rotation BEFORE INSERT ON human_sessions FOR EACH ROW EXECUTE FUNCTION fail_rotation()`
+	if _, err := pool.Exec(t.Context(), sql); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/auth/refresh?return_to="+url.QueryEscape("http://board.example.com/silent-refresh.html"), nil)
+	req.AddCookie(&http.Cookie{Name: refreshCookieNameForTest, Value: raw})
+	rec := httptest.NewRecorder()
+	api.NewRouter(deps).ServeHTTP(rec, req)
+	if rec.Code == http.StatusServiceUnavailable {
+		t.Fatal("a non-retryable refresh error answered 503 session busy")
+	}
+	cleared := false
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == refreshCookieNameForTest && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatalf("a non-retryable refresh error kept the cookie: status=%d", rec.Code)
+	}
+}

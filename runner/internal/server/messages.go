@@ -78,6 +78,9 @@ type postMessageRequest struct {
 	// OwnerOnly (asks only): the answer is accepted only from the session's
 	// signed-in owner. The daemon sets it on an engine's command approval.
 	OwnerOnly bool `json:"owner_only,omitempty"`
+	// NoWait (asks only): a question the agent does not wait on (`blerg-runner ask --no-wait`,
+	// questions.go). It is owner-only, and its answer is sent to the session as a message.
+	NoWait bool `json:"no_wait,omitempty"`
 }
 
 // HandlePostMessages creates a session→user message (bearer-authed, since the CLI
@@ -119,8 +122,23 @@ func (a *API) HandlePostMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.NoWait && req.Kind != "ask" {
+		writeError(w, http.StatusBadRequest, "no_wait is for an ask only")
+		return
+	}
+	if req.NoWait && (sess.SpawningAccountID == nil || *sess.SpawningAccountID == "") {
+		writeError(w, http.StatusConflict, "a question that does not wait needs a session started by a signed-in person, who answers it; ask and wait instead (blerg-runner ask without --no-wait)")
+		return
+	}
+	if req.OwnerOnly && req.Kind == "ask" && (sess.SpawningAccountID == nil || *sess.SpawningAccountID == "") {
+		writeError(w, http.StatusConflict, "owner-only approvals are unavailable for runner-key sessions; start the session while signed in to answer approvals")
+		return
+	}
+
 	var id string
 	switch {
+	case req.NoWait:
+		id, err = db.CreateQuestion(ctx, a.dbPool, req.SessionID, req.Body)
 	case req.OwnerOnly && req.Kind == "ask":
 		id, err = db.CreateAsk(ctx, a.dbPool, req.SessionID, req.Body, true)
 	case boardSessionID == "" && req.Kind == "ask" && sess.Kind == "agent" && sess.Engine != nil && *sess.Engine == "codex":
@@ -142,10 +160,32 @@ func (a *API) HandlePostMessages(w http.ResponseWriter, r *http.Request) {
 	info := messageRowToInfo(*row)
 	// An ask from a session nobody attends is listed, not toasted (notices.go).
 	quiet := row.Kind == "ask" && headlessSession(sess)
-	a.hub.BroadcastJSON(protocol.MessageCreated{Type: "message_created", Message: info, Quiet: quiet})
+	if row.NoWait {
+		// A question the owner alone answers notifies the owner alone: every other viewer gets it
+		// quiet and not answerable (they see it read-only in the session).
+		owner := derefOrEmpty(sess.SpawningAccountID)
+		a.hub.BroadcastJSONPerAccount(func(account string) any {
+			mine := owner != "" && account == owner
+			view := info
+			view.Answerable = mine
+			return protocol.MessageCreated{Type: "message_created", Message: view, Quiet: quiet || !mine}
+		})
+	} else {
+		a.hub.BroadcastJSON(protocol.MessageCreated{Type: "message_created", Message: info, Quiet: quiet})
+	}
 	if row.Kind == "ask" {
 		// A question is its own notice: a deferred idle notice would only repeat it.
 		a.hub.CancelIdleNotice(sess.ID)
+		// A child's parent is told it is waiting (child_turn_notes.go): on an answer it can give,
+		// or on an approval only the person can. A question the child does not wait on is not
+		// a wait: the child goes on working.
+		switch {
+		case row.NoWait:
+		case row.OwnerOnly:
+			a.hub.ChildTurnEnded(sess.ID, childTurnApproval, row.Body)
+		default:
+			a.hub.ChildTurnEnded(sess.ID, childTurnAsked, row.Body)
+		}
 	}
 	if boardSessionID != "" {
 		// `blerg-runner` (the session's own token): shown in an agent session's chat
@@ -169,6 +209,11 @@ func (a *API) pushForMessage(sess db.SessionRow, msg db.MessageRow) {
 	}
 	// Nobody attends a headless session: its question calls no one (notices.go).
 	if msg.Kind == "ask" && headlessSession(&sess) {
+		return
+	}
+	// A question only the owner answers: a push cannot be aimed at the owner alone (the
+	// subscriptions belong to no account), so none is sent; the owner's bell and toast carry it.
+	if msg.NoWait {
 		return
 	}
 	if msg.Kind == "update" && a.hub.ActiveWithin(activityTTL) {
@@ -364,7 +409,7 @@ func (a *API) HandlePostMessageReply(w http.ResponseWriter, r *http.Request) {
 	}
 	err = withCancelledLimitResume(ctx, a.dbPool, row.SessionID, func() error {
 		return withParentInputGuard(ctx, a.dbPool, row.SessionID, func() error {
-			a.replyMessageUnlocked(w, r, id, req)
+			a.replyMessageUnlocked(w, r, id, req, coreAnswerer(actor))
 			return nil
 		})
 	})
@@ -375,7 +420,15 @@ func (a *API) HandlePostMessageReply(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *API) replyMessageUnlocked(w http.ResponseWriter, r *http.Request, id string, req postMessageReplyRequest) {
+// coreAnswerer is the account of a person signed in as themselves, "" for any other credential.
+func coreAnswerer(actor boardActor) string {
+	if actor.Core == nil || actor.Core.Kind != "human" || actor.Core.OnBehalfOf != "" {
+		return ""
+	}
+	return actor.Core.Sub
+}
+
+func (a *API) replyMessageUnlocked(w http.ResponseWriter, r *http.Request, id string, req postMessageReplyRequest, answerer string) {
 	ctx := r.Context()
 	changed, err := db.AnswerMessage(ctx, a.dbPool, id, req.Answer)
 	if err != nil {
@@ -406,6 +459,8 @@ func (a *API) replyMessageUnlocked(w http.ResponseWriter, r *http.Request, id st
 	}
 	// An ask in an agent session's transcript: its answer is recorded there too (messageevents.go).
 	recordAskAnswer(ctx, a.hub, a.dbPool, *row, req.Answer, "")
+	// A question the agent did not wait on: the answer goes to it as a message (questions.go).
+	a.hub.QuestionAnswered(*row, req.Answer, answerer)
 
 	a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)})
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
@@ -547,11 +602,11 @@ func (a *API) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	out := make([]protocol.MessageInfo, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, messageRowToInfo(row))
+	viewer := "" // only a person signed in as themselves answers a question
+	if principal.Kind == "human" && principal.OnBehalfOf == "" {
+		viewer = principal.Sub
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, messageInfosFor(r.Context(), a.dbPool, rows, viewer))
 }
 
 // actorOwnsMessageSession reports whether the actor is the session's owner,

@@ -142,6 +142,9 @@ func (st *grantState) boardCredential(ctx context.Context, gr *db.MCPGrant) (Cre
 		return *st.cred, nil
 	}
 	st.cred = nil
+	if st.ephemeral {
+		return Credential{}, errBoardAccess
+	}
 	if !g.BoardConfigured() {
 		return Credential{}, errBoardNotConfigured
 	}

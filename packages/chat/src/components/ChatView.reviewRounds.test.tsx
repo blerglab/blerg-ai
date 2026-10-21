@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ChatView from './ChatView'
 import { createFakeTransport } from '../test/fakeTransport'
 import { COMPACT, SESSION, meta, resetChatState, seed } from '../test/chat'
@@ -73,6 +73,23 @@ describe('review answers in the chat', () => {
       localStorage.removeItem(COMPACT)
     })
   }
+
+  it('shows no guessed or stale count while a review version loads', async () => {
+    seed(event('artifact', plan), event('artifact', reviewVersion(1)))
+    const t = createFakeTransport({ files: { items: [plan, reviewVersion(1), reviewVersion(2)] } })
+    const pending = new Map<string, (b: Blob) => void>()
+    t.files!.raw = (_sid, id) => new Promise(resolve => { pending.set(id, resolve) })
+    render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'idle' })} />)
+    const line = screen.getByTestId('review-round')
+    expect(line).not.toHaveTextContent(/requests? answered/)
+    await act(async () => { pending.get('rv1')!(new Blob([reviewBody(['done', 'done', 'done'])])) })
+    expect(line).toHaveTextContent('3 requests answered')
+    act(() => t.emit(event('artifact', reviewVersion(2))))
+    const nextLine = screen.getByTestId('review-round')
+    expect(nextLine).not.toHaveTextContent(/requests? answered/)
+    await act(async () => { pending.get('rv2')!(new Blob([reviewBody(['done', 'done'])])) })
+    expect(nextLine).toHaveTextContent('2 requests answered')
+  })
 
   it('counts what the round answered, against the review before it', async () => {
     seed(

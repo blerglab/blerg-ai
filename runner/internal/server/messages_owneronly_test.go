@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,5 +151,20 @@ func TestOwnerOnlyAskIsClosedByTheDaemonAndFreesTheChat(t *testing.T) {
 		if rec := privDo(f.api.HandlePostMessageReply, "POST", "/x", other, spawnTokenDaemonTok, `{"answer":`+answer+`}`); rec.Code != http.StatusForbidden {
 			t.Fatalf("daemon answered an owner-only approval with %s: %d", answer, rec.Code)
 		}
+	}
+}
+
+func TestOwnerOnlyAskWithoutSignedInOwnerIsRefused(t *testing.T) {
+	f := newPrivFixture(t)
+	if _, err := f.pool.Exec(t.Context(), `UPDATE sessions SET spawning_account_id=NULL,started_by_kind='runner_key' WHERE id=$1`, f.pubSession); err != nil {
+		t.Fatal(err)
+	}
+	rec := privDo(f.api.HandlePostMessages, "POST", "/api/messages", "", spawnTokenDaemonTok, `{"session_id":"`+f.pubSession+`","kind":"ask","body":"approve?","owner_only":true}`)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "start the session while signed in") {
+		t.Fatalf("approval without owner = %d %s", rec.Code, rec.Body.String())
+	}
+	var count int
+	if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM messages WHERE session_id=$1 AND owner_only`, f.pubSession).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("unanswerable approvals stored = %d, %v", count, err)
 	}
 }

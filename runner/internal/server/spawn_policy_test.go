@@ -17,6 +17,7 @@ func spawnPolicyAPI(t *testing.T) (*API, *DaemonConn, func(...string) string) {
 	pool := connectSrvTestDB(t)
 	hub := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-00000000d001", Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	if err := db.UpsertDaemon(context.Background(), pool, dc.ID, dc.Name, "local", dc.ReposRoot); err != nil {
 		t.Fatal(err)

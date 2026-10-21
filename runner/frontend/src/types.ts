@@ -53,6 +53,12 @@ export interface MessageInfo {
   answer?: string | null;
   created_at: string;
   answered_at?: string | null;
+  // A question the agent does not wait on (`blerg-runner ask --no-wait`): listed in the bell
+  // and the session's Needs you until answered there or closed by the agent.
+  no_wait?: boolean;
+  // Set by the server per viewer on a no_wait question: true for the session's owner, who alone
+  // answers it and is notified of it.
+  answerable?: boolean;
 }
 
 export interface DaemonInfo {
@@ -175,6 +181,7 @@ export type AgentEventKind =
   | 'assistant_text'
   | 'assistant_thinking'
   | 'thinking_started'
+  | 'thinking_progress'
   | 'thinking_done'
   | 'tool_call'
   | 'tool_result'
@@ -812,6 +819,8 @@ export interface CronInfo {
 // `agent_summary` is a convenience line built by the gateway. `result` is untrusted upstream output.
 export type ProposalState = 'pending' | 'executing' | 'done' | 'rejected' | 'expired' | 'failed' | 'unknown'
 export type ProposalResult = { state: string; message?: string } | null | { content?: { type: string; text?: string }[]; isError?: boolean } | { error: string }
+export interface ProposalExtensionInfo { extended_at: string; previous_expires_at: string; expires_at: string; by_you?: boolean }
+
 export interface ProposalInfo {
   kind?: 'board_file' | 'mcp' | 'plugin_request'
   plugin_session_apply?: boolean
@@ -834,6 +843,15 @@ export interface ProposalInfo {
   result: ProposalResult
   /** The session permission that approved it without asking (absent on an older server). */
   approved_by_grant?: string | null
+  approved_permission?: { id: string; kind: string; account_id: string; board_id?: string; board_name?: string; connection_name?: string; tool?: string; level: string; created_via: string; created_at: string; revoked_at?: string; granted_by_you?: boolean }
+  /** The viewer made the decision (absent on an older server). The runner knows no account names. */
+  decided_by_you?: boolean
+  /** A pending proposal's deadline can still move (absent on an older server: assume it can). */
+  extendable?: boolean
+  /** The furthest the deadline can go: 30 days after it was proposed. */
+  max_expires_at?: string
+  /** Every extension of the deadline, oldest first (absent on an older server). */
+  extensions?: ProposalExtensionInfo[]
 }
 
 export type ToolChangeKind = 'changed' | 'new' | 'removed'

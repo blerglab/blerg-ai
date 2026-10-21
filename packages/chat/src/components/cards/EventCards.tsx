@@ -6,7 +6,7 @@ import type { CardRegistry } from '../../cards/registry'
 import { isRetryNotice } from '../../model/notices'
 import { topicDividerText } from '../../model/topicMarker'
 import { isReviewStateEvent } from '../../model/reviewRounds'
-import { automationAuthor, userMessageShape } from '../../model/userMessages'
+import { automationAuthor, isFromParentSession, userMessageShape } from '../../model/userMessages'
 import { parseTs, turnDuration } from '../../model/timeLabel'
 import type {
   AgentEvent,
@@ -47,6 +47,10 @@ export type MessageFooter = (ev: AgentEvent) => ReactNode
 export interface UserMessageLook {
   /** Who it is from, in place of "You": a host whose automation also messages the session says so. */
   author?: string
+  /** Where the author lives in the host (the parent session's page): the author becomes a link
+   *  there. With onAuthorOpen the host opens it itself (inside the app, no page load). */
+  authorHref?: string
+  onAuthorOpen?: () => void
   /** Draw it as one collapsed line that expands (the long prompt a session was started with). The
    *  string is the line's label; `true` uses "session brief". */
   brief?: boolean | string
@@ -99,14 +103,23 @@ function AskCard({ ev, cards }: { ev: AgentEvent; cards?: CardRegistry }) {
   const body = typeof p.body === 'string' ? p.body : ''
   const state = asks?.states.get(ev.client_event_id)
   const open = asks ? state?.open === true : true
-  const answer = asks?.answer
+  const ownerOnly = p.owner_only === true ? asks?.ownerOnly ?? 'elsewhere' : 'yes'
+  const blocked = ownerOnly !== 'yes'
+  const answer = blocked ? undefined : asks?.answer
+  const what = p.no_wait ? 'question' : 'approval'
+  const blockedHint = ownerOnly === 'no' ? `Only the session owner can answer this ${what}.`
+    : ownerOnly === 'elsewhere' ? `Only the session owner can answer this ${what}, from the session in Runner.`
+    : null
+  // A question the agent did not wait on is answered here (or in the host's Needs you): the
+  // composer's messages go to the agent as themselves.
+  const hint = p.no_wait ? 'the agent keeps working; your answer is sent to it' : 'answer in the composer'
   return (
     <div className={`agent-card message kind-ask${open ? ' open' : ' closed'}`} data-testid="ask-card" data-event-id={ev.client_event_id}>
       <div className="ask-head">
-        <span className="message-kind">question</span>
+        <span className="message-kind">{p.owner_only && !p.no_wait ? 'owner-only approval' : 'question'}</span>
         <Markdown text={body} className="message-body" cards={cards} />
         {open
-          ? !answer && <span className="ask-hint">answer in the composer</span>
+          ? blocked ? blockedHint && <span className="ask-hint" data-testid="ask-owner-only">{blockedHint}</span> : (!answer || p.no_wait) && <span className="ask-hint">{hint}</span>
           : <span className="ask-hint" data-testid="ask-closed">{state?.answer ? 'answered' : 'closed'}</span>}
         <TimeLabel ts={ev.ts} className="card-time-end" />
       </div>
@@ -259,12 +272,21 @@ export function renderEvent(
         return <BriefLine key={key} label={typeof look.brief === 'string' ? look.brief : 'session brief'} text={p.text} cards={options.cards} eventId={key} />
       }
       const answer = p.source === 'ask_answer'
-      // A board, a parent session or a cron wrote it: never drawn as "You".
-      const author = look?.author ?? automationAuthor(p.source)
+      // A board, a parent session or a cron wrote it, or the parent answered its child's question:
+      // never drawn as "You".
+      const parent = isFromParentSession(p)
+      const author = look?.author ?? automationAuthor(parent ? 'session' : p.source)
+      const label = author ?? 'You'
+      const open = look?.onAuthorOpen
       return (
-        <div key={key} className={`agent-card user source-${p.source}${author ? ' other-author' : ''}`} data-event-id={key}>
-          <span className="card-author">{author ?? 'You'}{answer && <span className="card-author-note"> · answer</span>}</span>
-          <MessageText text={p.text} cards={options.cards} />
+        <div key={key} className={`agent-card user source-${p.source}${author ? ' other-author' : ''}${parent ? ' from-parent' : ''}`} data-event-id={key}>
+          <span className="card-author" data-testid="message-author">
+            {look?.authorHref
+              ? <a className="card-author-link" href={look.authorHref} onClick={open ? (e) => { e.preventDefault(); open() } : undefined}>{label}</a>
+              : label}
+            {answer && <span className="card-author-note"> · Answer</span>}
+          </span>
+          <MessageText text={p.text} cards={options.cards} at={ev.ts} />
           <CopyMessage text={p.text} />
           <div className="card-foot"><TimeLabel ts={ev.ts} /></div>
           {options.messageFooter?.(ev)}

@@ -41,6 +41,8 @@ func messageEventID(messageID, role string) string {
 
 // messagingPayload is the payload of an ask/update/note event (agent.MessagingPayload).
 type messagingPayload struct {
+	OwnerOnly bool   `json:"owner_only,omitempty"`
+	NoWait    bool   `json:"no_wait,omitempty"`
 	Body      string `json:"body"`
 	MessageID string `json:"message_id"`
 	TurnID    string `json:"turn_id,omitempty"`
@@ -48,11 +50,15 @@ type messagingPayload struct {
 
 // askAnswerPayload is the user_message an ask's answer is recorded as (agent.UserMessagePayload).
 type askAnswerPayload struct {
-	Text      string `json:"text"`
-	Source    string `json:"source"`
-	MessageID string `json:"message_id"`
-	ClientID  string `json:"client_id,omitempty"`
-	TurnID    string `json:"turn_id,omitempty"`
+	Text   string `json:"text"`
+	Source string `json:"source"`
+	// AnsweredBy is "session" when the parent session answered its child's ask (the runner sets
+	// it from the parent's own session token, never from a request body), so the chat labels it
+	// as the parent's and not the person's. Absent for the person's answer.
+	AnsweredBy string `json:"answered_by,omitempty"`
+	MessageID  string `json:"message_id"`
+	ClientID   string `json:"client_id,omitempty"`
+	TurnID     string `json:"turn_id,omitempty"`
 }
 
 // recordServerAgentEvent appends an event the server itself writes into a session's transcript and
@@ -113,7 +119,7 @@ func (a *API) recordMessageEvent(ctx context.Context, sess db.SessionRow, row db
 		return
 	}
 	recordServerAgentEvent(ctx, a.hub, a.dbPool, row.SessionID, messageEventID(row.ID, row.Kind), row.Kind,
-		messagingPayload{Body: row.Body, MessageID: row.ID})
+		messagingPayload{Body: row.Body, MessageID: row.ID, OwnerOnly: row.OwnerOnly, NoWait: row.NoWait})
 }
 
 // createCodexQuestion commits the visible message and routing marker together,
@@ -191,6 +197,21 @@ func answerAskFromChat(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionI
 // the session's owner answers an owner-only ask (an engine's command approval);
 // anyone else's text is left to reach the session as an ordinary message.
 func answerAskFromChatAs(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, clientID, messageID, answerer string) bool {
+	return answerAskFrom(ctx, h, pool, sessionID, text, clientID, messageID, answerer, "")
+}
+
+// answeredBy is who an answer sent with source is from, for the chat: the parent session
+// ("session", a source only a parent's own token can send: SendMessage), or "" for the person.
+func answeredBy(source string) string {
+	if source == promptSourceSession {
+		return promptSourceSession
+	}
+	return ""
+}
+
+// answerAskFrom is answerAskFromChatAs for a message sent with source: the parent's answer to its
+// child's ask is recorded as the parent's (askAnswerPayload.AnsweredBy).
+func answerAskFrom(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, clientID, messageID, answerer, source string) bool {
 	if pool == nil {
 		return false
 	}
@@ -226,7 +247,9 @@ func answerAskFromChatAs(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessio
 		}
 		for i := range rows { // newest first
 			r := rows[i]
-			if r.OwnerOnly && !owner() {
+			// A question the agent did not wait on is answered only by name (its card, its Needs
+			// you entry): the agent reads a chat message itself (questions.go).
+			if r.NoWait || r.OwnerOnly && !owner() {
 				continue
 			}
 			if ok, err := db.HasAgentEvent(ctx, pool, sessionID, messageEventID(r.ID, "ask")); err == nil && ok {
@@ -256,7 +279,7 @@ func answerAskFromChatAs(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessio
 	if tag.RowsAffected() == 0 {
 		return false
 	}
-	payload, err := json.Marshal(askAnswerPayload{Text: text, Source: "ask_answer", MessageID: target.ID, ClientID: clientID, TurnID: askTurnID(ctx, tx, sessionID, target.ID)})
+	payload, err := json.Marshal(askAnswerPayload{Text: text, Source: "ask_answer", AnsweredBy: answeredBy(source), MessageID: target.ID, ClientID: clientID, TurnID: askTurnID(ctx, tx, sessionID, target.ID)})
 	if err != nil {
 		return true
 	}
@@ -286,6 +309,7 @@ func answerAskFromChatAs(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessio
 	if err != nil || row == nil {
 		return true
 	}
+	h.QuestionAnswered(*row, text, answerer)
 
 	h.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)})
 	return true

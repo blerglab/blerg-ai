@@ -16,6 +16,7 @@ func TestCodexGrantTargetsRequireExplicitDaemonSupport(t *testing.T) {
 	a := &API{hub: NewHub(), dbPool: &pgxpool.Pool{}}
 	for _, modern := range []bool{false, true} {
 		dc := &DaemonConn{}
+		dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 		dc.SetMCPGateway(true)
 		dc.SetRestrictTools(true)
 		dc.SetCodexRestricted(modern)
@@ -53,6 +54,7 @@ func TestCodexPluginsRequireNativeCapability(t *testing.T) {
 		t.Fatal("restricted Codex session admitted plugins")
 	}
 	dc := &DaemonConn{}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetPlugins(true)
 	if dc.CanPluginsFor("codex") || !dc.CanPluginsFor("claude") {
 		t.Fatal("legacy plugin capability was widened beyond Claude")
@@ -105,7 +107,9 @@ func TestCodexCronEnginePersistsAcrossCreateAndPatch(t *testing.T) {
 func TestCodexCronSelectsOnlyCapableDaemons(t *testing.T) {
 	h := NewHub()
 	old := &DaemonConn{ID: "a", Name: "legacy"}
+	old.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	modern := &DaemonConn{ID: "b", Name: "modern"}
+	modern.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	for _, dc := range []*DaemonConn{old, modern} {
 		dc.SetSandboxAvailable(true)
 		dc.SetRestrictTools(true)

@@ -242,6 +242,7 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			dc.SetInputReceipts(hello.InputReceipts)
 			dc.SetRestrictTools(hello.RestrictTools)
 			dc.SetCodexRestricted(hello.CodexRestricted)
+			dc.SetSandboxClones(hello.SandboxClones)
 			dc.SetPlugins(hello.Plugins)
 			dc.SetPluginEngines(hello.PluginEngines)
 			dc.SetSessionPluginEngines(hello.SessionPluginEngines)

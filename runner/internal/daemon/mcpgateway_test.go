@@ -460,7 +460,7 @@ func TestMCPConfigFileSandboxDelivery(t *testing.T) {
 	if first[0] != "exec" || !slices.Contains(first, "-i") || !slices.Contains(first, "blerg-sandbox-s1") {
 		t.Errorf("not a docker exec into the session container: %v", first)
 	}
-	script := first[len(first)-3] // sh -c <script> sh <dir>
+	script := first[len(first)-4] // sh -c <script> sh <dir> <name>
 	if !strings.Contains(script, "umask 077") || !strings.Contains(script, "mkdir -m 700") {
 		t.Errorf("script does not make a private dir: %q", script)
 	}

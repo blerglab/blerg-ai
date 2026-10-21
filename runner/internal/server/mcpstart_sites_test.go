@@ -761,6 +761,7 @@ func TestResumeWithoutGrantsIsUnchanged(t *testing.T) {
 
 func TestDaemonConnRecordsTheMCPGatewayCapability(t *testing.T) {
 	dc := &DaemonConn{ID: "d"}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	if dc.CanMCPGateway() {
 		t.Error("a daemon that has not said so must not be assumed to deliver grants")
 	}

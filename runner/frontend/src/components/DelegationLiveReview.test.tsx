@@ -29,6 +29,11 @@ describe('live delegation approval independent of conversation history', () => {
   expect(await screen.findByText('on the cluster')).toBeInTheDocument()
   expect(screen.getByRole('button',{name:'Always allow Codex on the cluster'})).toBeInTheDocument()
  })
+ it('shows the board access the child would get',async()=>{
+  fetchMock.mockResolvedValue({ok:true,json:async()=>({...request,request:{...request.request,boards:[{board:'b-1',name:'Blerg',level:'full'}]}})})
+  mount();fireEvent.click(screen.getByRole('button',{name:'Review request'}))
+  expect(await screen.findByText('with Blerg · Full')).toBeInTheDocument()
+ })
  it('makes the full canonical long prompt reviewable before deciding',async()=>{
   fetchMock.mockResolvedValue({ok:true,json:async()=>({...request,request:{...request.request,prompt:'Public instructions '.repeat(50)+'TAIL_FIXTURE'}})})
   mount();fireEvent.click(screen.getByRole('button',{name:'Review request'}))

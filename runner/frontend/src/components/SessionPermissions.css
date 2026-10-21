@@ -53,3 +53,5 @@
 .perm-dormant-list { margin-top: 8px; }
 .perm-dormant-head { margin: 0 0 4px; font-size: var(--text-xs); color: var(--fog-dim); }
 .perm-saved { color: var(--lichen); }
+
+.child-approval-note { margin: 4px 0; font-size: 12px; line-height: 1.4; color: var(--fog-dim); }

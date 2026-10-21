@@ -570,6 +570,7 @@ func TestGetTopicsCommitLinks(t *testing.T) {
 	tag := first.Header().Get("ETag")
 
 	dc := &DaemonConn{ID: topicDaemonID}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetRepoOrigins(map[string]protocol.RepoOrigin{"app": {Provider: "gitlab", FullName: "example-group/app"}}, nil)
 	fx.api.hub.Register(dc)
 	rec := fx.get(fx.sess, owner, tag)

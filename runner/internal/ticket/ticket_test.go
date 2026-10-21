@@ -173,3 +173,15 @@ func TestPinnedFold(t *testing.T) {
 		t.Fatal("nil list")
 	}
 }
+
+// Card #42 on one board and #42 on another are two pins, not one replacing the other.
+func TestPinnedBoardCardsOnTwoBoardsAreTwoPins(t *testing.T) {
+	at := time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)
+	got := Pinned([]Row{
+		{Seq: 1, EventID: "e1", Ts: at, Action: "pin", Source: SourceBoard, Key: "#42", BoardID: "board-a", Title: "A"},
+		{Seq: 2, EventID: "e2", Ts: at, Action: "pin", Source: SourceBoard, Key: "#42", BoardID: "board-b", Title: "B"},
+	})
+	if len(got) != 2 || got[0].BoardID != "board-b" || got[1].BoardID != "board-a" {
+		t.Fatalf("pinned = %+v, want both cards", got)
+	}
+}

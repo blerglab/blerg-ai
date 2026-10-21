@@ -109,8 +109,8 @@ var toolDefs = []map[string]any{
 	},
 	{
 		"name":        "blerg_card_get",
-		"description": "Get one card with repos, tags, links, dependencies, and version. Address by card_id, or by board_id + number (#42).",
-		"inputSchema": cardRef(nil, nil),
+		"description": "Get one card with repos, tags, links, dependencies, and version. Address by card_id, or by board_id + number (#42). with_trail also returns column_name, the board's columns and the card's latest trail events (moves, comments, runs), newest last.",
+		"inputSchema": cardRef(props{"with_trail": boolean("also return column_name, columns and the latest trail events")}, nil),
 	},
 	{
 		"name":        "blerg_card_create",

@@ -21,6 +21,30 @@ const (
 	ProposalGrantMCP   = "mcp_tool"
 )
 
+// Board access levels (migration 070), lowest first. Each includes the ones below it. A board with
+// no row is at BoardLevelPropose, except a board chosen at launch (see LatestBoardGrant).
+const (
+	BoardLevelPropose = "propose" // search, and filings that ask the person
+	BoardLevelRead    = "read"    // also list, get and search every card
+	BoardLevelFile    = "file"    // also file cards without asking
+	BoardLevelFull    = "full"    // also create, update, move, link and comment
+)
+
+// BoardLevelRank orders the levels (propose 0 … full 3); -1 for anything else.
+func BoardLevelRank(level string) int {
+	switch level {
+	case BoardLevelPropose:
+		return 0
+	case BoardLevelRead:
+		return 1
+	case BoardLevelFile:
+		return 2
+	case BoardLevelFull:
+		return 3
+	}
+	return -1
+}
+
 // ErrProposalGrantSession is returned when the session is not the account's or can no longer
 // hold a grant (ended, discarded or archived).
 var ErrProposalGrantSession = errors.New("the session cannot hold this permission")
@@ -28,16 +52,18 @@ var ErrProposalGrantSession = errors.New("the session cannot hold this permissio
 // ProposalGrant is a row of session_proposal_grants. ProofSessionID is the creator's login session
 // and never leaves the server.
 type ProposalGrant struct {
-	ID                  string
-	SessionID           string
-	AccountID           string
-	Kind                string
-	BoardID             string
-	BoardName           string
-	ConnectionID        string
-	ConnectionName      string
-	Tool                string
-	ToolHash            string // an MCP grant's pinned tool definition; "" for a board grant
+	ID             string
+	SessionID      string
+	AccountID      string
+	Kind           string
+	BoardID        string
+	BoardName      string
+	ConnectionID   string
+	ConnectionName string
+	Tool           string
+	ToolHash       string // an MCP grant's pinned tool definition; "" for a board grant
+	// Level is a board grant's access level (BoardLevel*); an MCP grant's is always BoardLevelFile.
+	Level               string
 	ProofSessionID      string
 	ProjectScope        string
 	CreatedVia          string
@@ -48,13 +74,13 @@ type ProposalGrant struct {
 
 const proposalGrantColumns = `g.id::text, g.session_id::text, g.account_id, g.kind, g.board_id, g.board_name,
 	COALESCE(g.connection_id::text, ''), g.connection_name, g.tool, g.tool_hash, g.proof_session_id, g.project_scope,
-	g.created_via, COALESCE(g.created_from_proposal::text, ''), g.created_at, g.revoked_at`
+	g.created_via, COALESCE(g.created_from_proposal::text, ''), g.created_at, g.revoked_at, g.level`
 
 func scanProposalGrant(row pgx.Row) (*ProposalGrant, error) {
 	var g ProposalGrant
 	if err := row.Scan(&g.ID, &g.SessionID, &g.AccountID, &g.Kind, &g.BoardID, &g.BoardName, &g.ConnectionID,
 		&g.ConnectionName, &g.Tool, &g.ToolHash, &g.ProofSessionID, &g.ProjectScope, &g.CreatedVia, &g.CreatedFromProposal,
-		&g.CreatedAt, &g.RevokedAt); err != nil {
+		&g.CreatedAt, &g.RevokedAt, &g.Level); err != nil {
 		return nil, err
 	}
 	return &g, nil
@@ -81,8 +107,11 @@ func InsertProposalGrant(ctx context.Context, pool *pgxpool.Pool, g ProposalGran
 	if !proposalUUID.MatchString(g.SessionID) {
 		return nil, ErrProposalGrantSession
 	}
+	if g.Level == "" || g.Kind == ProposalGrantMCP {
+		g.Level = BoardLevelFile
+	}
 	switch {
-	case g.Kind == ProposalGrantBoard && g.BoardID != "" && g.ConnectionID == "" && g.Tool == "" && g.ToolHash == "":
+	case g.Kind == ProposalGrantBoard && g.BoardID != "" && g.ConnectionID == "" && g.Tool == "" && g.ToolHash == "" && BoardLevelRank(g.Level) >= 0:
 	case g.Kind == ProposalGrantMCP && g.BoardID == "" && proposalUUID.MatchString(g.ConnectionID) && g.Tool != "" && g.ToolHash != "":
 	default:
 		return nil, fmt.Errorf("invalid proposal grant scope")
@@ -115,15 +144,21 @@ func InsertProposalGrant(ctx context.Context, pool *pgxpool.Pool, g ProposalGran
 		WHERE g.session_id = $1::uuid AND g.kind = $2 AND g.board_id = $3 AND COALESCE(g.connection_id::text, '') = $4
 		  AND g.tool = $5 AND g.revoked_at IS NULL`, g.SessionID, g.Kind, g.BoardID, g.ConnectionID, g.Tool))
 	switch {
-	case err == nil && existing.ProofSessionID == g.ProofSessionID && existing.ToolHash == g.ToolHash:
+	case err == nil && existing.ProofSessionID == g.ProofSessionID && existing.ToolHash == g.ToolHash && existing.Level == g.Level:
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
 		}
 		return existing, nil
 	case err == nil:
-		// The same scope given again from another sign-in, or on a changed tool definition: the new
-		// one replaces it (the old one may be dormant: its sign-in ended, or its definition changed).
-		if _, err := tx.Exec(ctx, `UPDATE session_proposal_grants SET revoked_at = now(), revoked_reason = 'renewed' WHERE id = $1::uuid`, existing.ID); err != nil {
+		// The same scope given again from another sign-in, on a changed tool definition, or at
+		// another board level: the new one replaces it (the old one may be dormant: its sign-in
+		// ended, or its definition changed). A level is never edited in place, so the rows are the
+		// history of who set which level when.
+		reason := "renewed"
+		if existing.Level != g.Level {
+			reason = "level_changed"
+		}
+		if _, err := tx.Exec(ctx, `UPDATE session_proposal_grants SET revoked_at = now(), revoked_reason = $2 WHERE id = $1::uuid`, existing.ID, reason); err != nil {
 			return nil, err
 		}
 	case !errors.Is(err, pgx.ErrNoRows):
@@ -139,10 +174,10 @@ func InsertProposalGrant(ctx context.Context, pool *pgxpool.Pool, g ProposalGran
 	}
 	out, err := scanProposalGrant(tx.QueryRow(ctx, `WITH g AS (
 		INSERT INTO session_proposal_grants (session_id, account_id, kind, board_id, board_name, connection_id,
-		  connection_name, tool, tool_hash, proof_session_id, project_scope, created_via, created_from_proposal)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7, $8, $9, $10, $11, $12, $13::uuid) RETURNING *)
+		  connection_name, tool, tool_hash, proof_session_id, project_scope, created_via, created_from_proposal, level)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7, $8, $9, $10, $11, $12, $13::uuid, $14) RETURNING *)
 		SELECT `+proposalGrantColumns+` FROM g`, g.SessionID, g.AccountID, g.Kind, g.BoardID, g.BoardName, conn,
-		g.ConnectionName, g.Tool, g.ToolHash, g.ProofSessionID, g.ProjectScope, g.CreatedVia, from))
+		g.ConnectionName, g.Tool, g.ToolHash, g.ProofSessionID, g.ProjectScope, g.CreatedVia, from, g.Level))
 	if err != nil {
 		return nil, fmt.Errorf("insert proposal grant: %w", err)
 	}
@@ -175,8 +210,9 @@ func ListLiveProposalGrants(ctx context.Context, pool *pgxpool.Pool, sessionID s
 }
 
 // LiveProposalGrantFor finds the live grant that covers exactly this scope for the session and
-// account, or nil. A board grant matches its board only; an MCP grant its connection and tool, at
-// the pinned definition (toolHash) it was given on.
+// account, or nil. A board grant matches its board only, and only at level file or full (a read or
+// propose level never approves a filing); an MCP grant its connection and tool, at the pinned
+// definition (toolHash) it was given on.
 func LiveProposalGrantFor(ctx context.Context, pool *pgxpool.Pool, sessionID, accountID, kind, boardID, connectionID, tool, toolHash string) (*ProposalGrant, error) {
 	if !proposalUUID.MatchString(sessionID) || accountID == "" {
 		return nil, nil
@@ -184,6 +220,7 @@ func LiveProposalGrantFor(ctx context.Context, pool *pgxpool.Pool, sessionID, ac
 	g, err := scanProposalGrant(pool.QueryRow(ctx, `SELECT `+proposalGrantColumns+proposalGrantFrom+`
 		WHERE g.session_id = $1::uuid AND g.account_id = $2 AND g.kind = $3 AND g.board_id = $4
 		  AND COALESCE(g.connection_id::text, '') = $5 AND g.tool = $6 AND g.tool_hash = $7 AND `+proposalGrantLiveSQL+`
+		  AND (g.kind <> 'board_file' OR g.level IN ('file','full'))
 		ORDER BY g.created_at LIMIT 1`, sessionID, accountID, kind, boardID, connectionID, tool, toolHash))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -242,16 +279,80 @@ func CountGrantApprovalsSince(ctx context.Context, pool *pgxpool.Pool, grantID s
 	return n, err
 }
 
-// RecentBoardFilings lists the session's board filings since then that are not closed for good
-// (pending, executing, done or unknown), newest first: the candidates a repeated filing returns
-// instead of filing again.
-func RecentBoardFilings(ctx context.Context, pool *pgxpool.Pool, accountID, sessionID string, since time.Time) ([]Proposal, error) {
-	if !proposalUUID.MatchString(sessionID) {
+// BoardGrantState is the latest board permission row of one (session, board), and whether it still
+// holds (proposalGrantLiveSQL: not revoked, the session its owner's, not discarded or ended for good,
+// given in the session's current lifetime).
+type BoardGrantState struct {
+	Grant ProposalGrant
+	Live  bool
+}
+
+// Level is the board's level by this row: its own while it holds, otherwise propose.
+func (b *BoardGrantState) Level() string {
+	if b == nil || !b.Live {
+		return BoardLevelPropose
+	}
+	return b.Grant.Level
+}
+
+// boardGrantLifetimeSQL keeps the rows of the session's current lifetime: a session stopped for good
+// and resumed starts again from what its launch gave it, like every other session permission.
+const boardGrantLifetimeSQL = `(s.delegation_ended_at IS NULL OR g.created_at > s.delegation_ended_at)`
+
+const boardGrantStateSQL = `SELECT ` + proposalGrantColumns + `, COALESCE((` + proposalGrantLiveSQL + `), false)` + proposalGrantFrom
+
+func scanBoardGrantState(row pgx.Row) (*BoardGrantState, error) {
+	var b BoardGrantState
+	g := &b.Grant
+	if err := row.Scan(&g.ID, &g.SessionID, &g.AccountID, &g.Kind, &g.BoardID, &g.BoardName, &g.ConnectionID,
+		&g.ConnectionName, &g.Tool, &g.ToolHash, &g.ProofSessionID, &g.ProjectScope, &g.CreatedVia, &g.CreatedFromProposal,
+		&g.CreatedAt, &g.RevokedAt, &g.Level, &b.Live); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// LatestBoardGrant is the latest board permission row of the session's current lifetime for the
+// board: its live row when it has one (the unique live-scope index allows at most one, and a row's
+// created_at is its transaction's start, so two racing changes can leave the live row older than a
+// revoked one), else the newest revoked row, or nil when there is none (its level is then propose, or full for the board the session's
+// launch gave it a connection to: the caller decides). Read on every board call, so a change of
+// level holds at the next call.
+func LatestBoardGrant(ctx context.Context, pool *pgxpool.Pool, sessionID, boardID string) (*BoardGrantState, error) {
+	if !proposalUUID.MatchString(sessionID) || boardID == "" {
 		return nil, nil
 	}
-	return queryProposals(ctx, pool, `SELECT `+proposalColumns+` FROM mcp_proposals
-		WHERE account_id = $1 AND session_id = $2::uuid AND created_at >= $3 AND connection_id = $4::uuid
-		  AND connection_name = 'board-file' AND tool = 'file_ticket' AND tool_hash = 'board-file-v1'
-		  AND state IN ('pending','executing','done','unknown')
-		ORDER BY created_at DESC, id DESC LIMIT 50`, accountID, sessionID, since, BoardFilingConnectionID)
+	b, err := scanBoardGrantState(pool.QueryRow(ctx, boardGrantStateSQL+`
+		WHERE g.session_id = $1::uuid AND g.kind = 'board_file' AND g.board_id = $2 AND `+boardGrantLifetimeSQL+`
+		ORDER BY (g.revoked_at IS NULL) DESC, g.created_at DESC, g.id DESC LIMIT 1`, sessionID, boardID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("latest board grant: %w", err)
+	}
+	return b, nil
+}
+
+// ListLatestBoardGrants is LatestBoardGrant for every board the session has a row for, by board id.
+func ListLatestBoardGrants(ctx context.Context, pool *pgxpool.Pool, sessionID string) ([]BoardGrantState, error) {
+	if !proposalUUID.MatchString(sessionID) {
+		return []BoardGrantState{}, nil
+	}
+	rows, err := pool.Query(ctx, `SELECT DISTINCT ON (g.board_id) `+proposalGrantColumns+`, COALESCE((`+proposalGrantLiveSQL+`), false)`+proposalGrantFrom+`
+		WHERE g.session_id = $1::uuid AND g.kind = 'board_file' AND `+boardGrantLifetimeSQL+`
+		ORDER BY g.board_id, (g.revoked_at IS NULL) DESC, g.created_at DESC, g.id DESC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list board grants: %w", err)
+	}
+	defer rows.Close()
+	out := []BoardGrantState{}
+	for rows.Next() {
+		b, err := scanBoardGrantState(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *b)
+	}
+	return out, rows.Err()
 }

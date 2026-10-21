@@ -9,10 +9,17 @@ export function isAutomated(s: Pick<SessionInfo, 'started_by' | 'cron_id' | 'par
   return !!s.started_by || !!s.cron_id
 }
 
-/** The source to group and label by: the token's name, else what kind of thing started it. */
-export function startedByLabel(s: Pick<SessionInfo, 'started_by' | 'cron_id'>): string {
+const ENGINE_NAMES: Record<string, string> = { '': 'Claude', claude: 'Claude', codex: 'Codex', hermes: 'Hermes', openclaw: 'OpenClaw' }
+
+/** The source to group and label by: the token's name, else what kind of thing started it. A
+ *  child reads "<who> from <where>": the parent's agent (its engine, when the parent is known)
+ *  from the parent session. */
+export function startedByLabel(s: Pick<SessionInfo, 'started_by' | 'cron_id'>, parent?: Pick<SessionInfo, 'engine'> | null): string {
   const by = s.started_by
-  if (by?.kind === 'session') return by.name ? `from ${by.name}` : 'another session'
+  if (by?.kind === 'session') {
+    const who = parent ? `${ENGINE_NAMES[parent.engine ?? ''] ?? parent.engine} agent` : 'an agent'
+    return `${who} from ${by.name || 'another session'}`
+  }
   if (by?.name) return by.name
   const kind = by?.kind ?? (s.cron_id ? 'cron' : '')
   switch (kind) {

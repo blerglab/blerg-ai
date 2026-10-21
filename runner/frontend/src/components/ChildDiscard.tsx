@@ -11,6 +11,8 @@ interface Props {
   menu?: boolean
   focusTarget?: RefObject<HTMLButtonElement | null>
   onOpen?(): void
+  /** The session is at work now: the confirmation says discarding stops it. */
+  running?: boolean
 }
 interface SessionProps extends Omit<Props, 'parentId' | 'childId'> {
   sessionId: string
@@ -26,7 +28,7 @@ export function ParentDiscardAction(props: SessionProps) {
 }
 
 /** A human-only action: never changes local session records ahead of the server's update. */
-function DiscardAction({parentId, sessionId, title, menu = false, focusTarget, onOpen, onDiscarded}: SessionProps & {parentId?: string}) {
+function DiscardAction({parentId, sessionId, title, menu = false, focusTarget, onOpen, onDiscarded, running = false}: SessionProps & {parentId?: string}) {
   const child = !!parentId
   const actionName = child ? 'Discard child session' : 'Discard session and children'
   const [open, setOpen] = useState(false)
@@ -86,6 +88,7 @@ function DiscardAction({parentId, sessionId, title, menu = false, focusTarget, o
       }}>
         <h3 id={heading}>{child ? 'Discard child session?' : 'Discard session and all children?'}</h3>
         <p className="child-discard-title">{title}</p>
+        {running && <p className="child-discard-running" data-testid="discard-running"><strong>It is running now.</strong> Discarding stops the work it is doing.</p>}
         <p id={description}>{child ? 'This stops any running work and removes this child from the active session lists. Its conversation, history and insights remain available.' : 'This stops and archives this session and every child, including children marked Keep running and work in progress. Their conversations, files, history and insights remain available. This cannot be resumed.'}</p>
         {error && <p role="alert">{error}</p>}
         <div className="child-discard-buttons">
@@ -102,11 +105,11 @@ export function ChildSessionActions({childId, ...props}: Omit<Props, 'menu' | 'f
   return <SessionActions key={childId} {...props} sessionId={childId}/>
 }
 
-export function ParentSessionActions(props: Pick<SessionProps, 'sessionId' | 'title'>) {
+export function ParentSessionActions(props: Pick<SessionProps, 'sessionId' | 'title' | 'running'>) {
   return <SessionActions key={props.sessionId} {...props}/>
 }
 
-function SessionActions({parentId, sessionId, title}: Pick<SessionProps, 'sessionId' | 'title'> & {parentId?: string}) {
+function SessionActions({parentId, sessionId, title, running}: Pick<SessionProps, 'sessionId' | 'title' | 'running'> & {parentId?: string}) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -124,7 +127,7 @@ function SessionActions({parentId, sessionId, title}: Pick<SessionProps, 'sessio
   }}>
     <button ref={trigger} type="button" className="child-card-menu-button" aria-label={`Actions for ${title}`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}>⋯</button>
     <div className="child-card-menu" role="menu" aria-label={`Actions for ${title}`} hidden={!open}>
-      <DiscardAction key={sessionId} parentId={parentId} sessionId={sessionId} title={title} menu focusTarget={trigger} onOpen={() => setOpen(false)}/>
+      <DiscardAction key={sessionId} parentId={parentId} sessionId={sessionId} title={title} running={running} menu focusTarget={trigger} onOpen={() => setOpen(false)}/>
     </div>
   </div>
 }

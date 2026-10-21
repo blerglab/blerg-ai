@@ -52,6 +52,11 @@ type filingBoardList struct{ *fakeMCPList }
 func (*filingBoardList) ListSessionBoards(context.Context, mcpgw.Proof) ([]SessionBoard, error) {
 	return []SessionBoard{{ID: "board-a", Name: "A"}, {ID: "board-b", Name: "B"}}, nil
 }
+
+// ListConnections answers every proof as live (no connections).
+func (*filingBoardList) ListConnections(context.Context, mcpgw.Proof) ([]MCPConnection, error) {
+	return nil, nil
+}
 func newFilingFx(t *testing.T) (*topicFx, *fixtureFiling) {
 	fx := newWorkFx(t)
 	fx.api.RegisterProposalRoutes(fx.mux)

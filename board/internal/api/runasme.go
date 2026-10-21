@@ -38,6 +38,10 @@ type AutomationMinter interface {
 const msgRunAsMeUnavailable = "Run as me is not set up on this install (blerg-board and blerg-core need the same " +
 	"BLERG_CORE_BOARD_MINT_KEY): paste a run-sessions agent token from blerg-core Settings → Agent tokens instead"
 
+// msgRunAsMeSwitchedOff is the answer when an operator switched new mints off on core.
+const msgRunAsMeSwitchedOff = "Run as me is turned off on this install: paste a run-sessions agent token from " +
+	"blerg-core Settings → Agent tokens instead"
+
 // runAsMeAvailable reports whether this board server can mint at all.
 func (a *API) runAsMeAvailable() bool {
 	return a.Minter != nil && db.AutomationKeyConfigured() && a.Auth != nil && a.Auth.Core() != nil
@@ -100,6 +104,9 @@ func (a *API) runAsMe(r *http.Request, p auth.Principal, board db.Board) error {
 		return &runAsMeError{http.StatusTooManyRequests, err.Error()}
 	case errors.Is(err, coremint.ErrTooManyTokens), errors.Is(err, coremint.ErrForbidden):
 		return &runAsMeError{http.StatusUnprocessableEntity, err.Error()}
+	case errors.Is(err, coremint.ErrSwitchedOff):
+		log.Printf("run as me: board %s: %v", board.ID, err)
+		return &runAsMeError{http.StatusServiceUnavailable, msgRunAsMeSwitchedOff}
 	case errors.Is(err, coremint.ErrDisabled), errors.Is(err, coremint.ErrUnauthorized), errors.Is(err, coremint.ErrNotConfigured):
 		log.Printf("run as me: board %s: %v", board.ID, err)
 		return &runAsMeError{http.StatusServiceUnavailable, msgRunAsMeUnavailable}

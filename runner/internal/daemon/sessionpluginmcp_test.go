@@ -49,7 +49,7 @@ func TestSessionPluginRequestDynamicBridgeIsApprovalOnly(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatal("unknown tool reached network")
 	}
-	if len(rt.Specs()) != 2 {
+	if len(rt.Specs()) != len(sessionBuiltinTools) || len(sessionBuiltinTools) != 3 { // filing, plugin request, board (0.4.4)
 		t.Fatal("unexpected built-in tools")
 	}
 }

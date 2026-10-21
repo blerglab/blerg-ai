@@ -455,7 +455,7 @@
                   "text": { "type": "string", "description": "The turn to deliver. Required and non-empty." },
                   "source": {
                     "type": "string",
-                    "description": "Who is speaking, for the transcript. Defaults to `runner`.",
+                    "description": "Who is speaking, for the transcript. Defaults to `runner`. The sources Blerg writes itself (`proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`) are refused with 422, and so is `session`, which the runner sets itself for a parent session's messages to its child.",
                     "default": "runner"
                   },
                   "client_id": {
@@ -1279,7 +1279,7 @@
         "properties": {
           "repo": {
             "type": "string",
-            "description": "A folder name or `org/name` (one slash at most, no `..`, no leading dot). On a daemon runtime it must exist under the daemon's repos root. Required unless `no_repo` is true."
+            "description": "A folder name or `org/name` (one slash at most, no `..`, no leading dot). On a daemon runtime it must exist under the daemon's repos root. Cluster starts resolve bare folder names from unambiguous reported desktop remotes, preserving their provider; otherwise they need a configured organization/base or owner/name. Repository read access is checked before Job creation. Required unless `no_repo` is true."
           },
           "no_repo": {
             "type": "boolean",
@@ -1465,7 +1465,7 @@
           "runtime": { "$ref": "#/components/schemas/Status/properties/runtime" },
           "repo": { "type": "string" },
           "git_url": { "type": "string" },
-          "branch": { "type": "string", "description": "`wip/<session_id>` on the repository's remote." },
+          "branch": { "type": "string", "description": "`wip/<session_id>`: pushed to the repository's remote by a cluster session; for any sandboxed session (a child or not), the branch fetched from its own clone into the repository on its desktop. Empty for a host session or a session with no repository." },
           "last_assistant_message": { "type": "string", "description": "The last text the agent wrote in its last turn (the one in progress, while one is). Empty when that turn wrote none or failed." },
           "error_reason": { "type": "string", "description": "Why the session failed; else, when its last turn failed, why that turn did." },
           "end_reason": { "$ref": "#/components/schemas/EndReason" },
@@ -1575,6 +1575,10 @@
                   "items": {
                     "type": "string"
                   }
+                },
+                "has_repo": {
+                  "type": "boolean",
+                  "description": "A desktop, when the request names a repo: whether it has a folder for that repo."
                 }
               }
             }

@@ -113,6 +113,11 @@ func TestSessionStartHooksRunOnlyForHostNativeSessions(t *testing.T) {
 			}
 			workDir := filepath.Join(h.cfg.ReposRoot, "proj")
 			marker := plantStartupHook(t, h.cfg.HomeDir, workDir)
+			if tc.mode == sandboxed {
+				// A sandbox works in a clone of the repository: the planted hook is committed so
+				// the clone has it too.
+				initChildRepo(t, workDir)
+			}
 
 			msg := protocol.SpawnSession{
 				Type: "spawn_session", SessionID: "s-" + strings.ReplaceAll(tc.name, "/", "-"),

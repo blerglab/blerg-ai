@@ -29,6 +29,10 @@ function parentOf(ev: AgentEvent): string {
 export function nextThinking(open: boolean, ev: AgentEvent): boolean {
   if (parentOf(ev) !== '') return open
   switch (ev.kind) {
+    case 'thinking_progress': {
+      const n = payloadOf(ev).tokens
+      return typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? true : open
+    }
     case 'thinking_started':
       return true
     case 'thinking_done':

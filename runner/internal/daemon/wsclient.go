@@ -431,6 +431,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	}
 	hello.Plugins = pluginsCapability() // SpawnSession.Plugins (pluginworkshop.go)
 	hello.InputReceipts = true
+	hello.SandboxClones = true    // every Sandbox spawn works in its own clone (sandboxclone.go)
 	hello.SessionTokenFile = true // SessionToken → SessionTokenResult (sessiontoken.go)
 	hello.RecoveryReady = true
 	if c.recoveryRequiredSessions != nil {

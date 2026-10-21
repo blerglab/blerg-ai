@@ -3,7 +3,7 @@
 // says so in one line. Typing in the composer never decides: there is no reply box here.
 import { useEffect, useRef, useState } from 'react'
 import type { AgentEvent, DelegationChoice, DelegationDecidedPayload, DelegationRequestPayload } from '../../types'
-import { alwaysAllowWords, budgetLine, decidedLine, engineLabel, runtimeWords, type DelegationState } from '../../model/delegations'
+import { alwaysAllowWords, boardsLine, budgetLine, decidedLine, engineLabel, runtimeWords, type DelegationState } from '../../model/delegations'
 import { parseTs } from '../../model/timeLabel'
 import { useDelegations } from '../delegationContext'
 import { TimeLabel } from '../TimeLabel'
@@ -77,6 +77,7 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
   const excerpt = full === null && prompt.length > EXCERPT ? `${prompt.slice(0, EXCERPT)}…` : prompt
   const canShowAll = full === null && !!ctx?.fullPrompt && (p.prompt_truncated === true || prompt.length > EXCERPT)
   const budget = budgetLine(p.budget, now)
+  const boards = boardsLine(p.boards)
   const line = decidedLine(state, expired)
   const child = state.decided?.child_session_id
   const startError = state.decided?.start_error
@@ -94,6 +95,7 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
           <span>{p.repo ? p.repo : 'no repository'}</span>
           <span className={unsandboxed ? 'delegation-warn' : undefined}>{runtimeWords(p.runtime)}</span>
         </div>
+        {boards && <div className="delegation-boards" data-testid="delegation-boards" title="Board access the new session gets, never above this session's own">{boards}</div>}
         {p.title && <div className="delegation-name">{p.title}</div>}
         {prompt && <div className="delegation-prompt" data-testid="delegation-prompt">{excerpt}</div>}
         {canShowAll && <button type="button" className="delegation-link" onClick={() => void showAll()}>Show all</button>}

@@ -19,7 +19,12 @@ export interface ChatContextValue {
   artifactLink?: (href: string | undefined) => ArtifactLink | null
   /** The newest version number of the file a card's payload is a version of (from the list). */
   latestVersion: (a: ArtifactPayload) => number | undefined
-  /** The newest version of a file the person attached, by name (for inline previews). */
+  /** Resolves an attachment by its stable identity, including earlier same-name uploads. */
+  attachmentById?: (id: string) => ArtifactInfo | undefined
+  /** For a message sent before attachment IDs: the newest upload of that name made at or before
+   *  the message's time `at` (never a later one); undefined without a time. */
+  attachmentAt?: (name: string, at: string | undefined) => ArtifactInfo | undefined
+  /** Legacy name lookup for host cards; never used for a message attachment preview. */
   byName: (name: string) => ArtifactInfo | undefined
   /** Sends a message with files attached the ordinary way (uploads first, then the message with
    *  the attachment note). false when nothing was sent. */
@@ -32,6 +37,8 @@ export interface ChatContextValue {
   openReview?: (name: string, artifactId?: string) => void
   /** The session is over (stopped, ended or failed): a run with no end recorded is not running. */
   sessionOver?: boolean
+  /** The session's configured effort: a subagent that reports none of its own runs at it. */
+  sessionEffort?: string
   /** Opens a file the agent's text names, from the session's folder; absent: such text stays text. */
   openWorkspaceFile?: (path: string, line?: number) => void
   /** Opens the diff a checklist item names (its artifact id), at a commit's section when one is

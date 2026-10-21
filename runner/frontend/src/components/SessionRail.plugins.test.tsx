@@ -33,6 +33,14 @@ function show(owner: boolean) {
   return render(
     <MemoryRouter>
       <SessionRail
+        proposals={owner ? [{
+          id: 'p1', connection_id: '', connection_name: 'Plugins', agent_summary: '',
+          session_id: null, cron_id: null, created_at: '2026-01-01T00:00:00Z',
+          decided_at: null, decided_by: null, result: null,
+          kind: 'plugin_request', state: 'pending', tool: 'request_plugin',
+          arguments: { plugin: 'helper', marketplace: 'example/plugins', reason: 'Need a review skill' },
+          arguments_raw: '{"plugin":"helper"}', expires_at: new Date(Date.now() + 3600_000).toISOString(),
+        }] : []}
         id="rail"
         session={makeSession()}
         live={makeLive({ canReleasePrompt: owner })}
@@ -49,7 +57,7 @@ describe('plugin requests in the session panel', () => {
   it('counts owner requests under Needs you and offers the add form in Capabilities', async () => {
     show(true)
     const needs = screen.getByTestId('rail-needs')
-    expect(await within(needs).findByRole('link', { name: 'Approve or decline helper' })).toHaveAttribute(
+    expect(await within(needs).findByRole('link', { name: 'Review' })).toHaveAttribute(
       'href',
       '/proposals?id=p1',
     )

@@ -153,6 +153,7 @@ func TestSessionPluginsPolicyOwnershipAndUnsupportedSession(t *testing.T) {
 
 func livePluginDaemon(fx *topicFx) *DaemonConn {
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 32)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetSessionPluginEngines([]string{"claude"})
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
@@ -188,6 +189,7 @@ func TestSessionPluginsSessionOnlyDurableReplayAndReplyFences(t *testing.T) {
 	}
 	old := dc
 	dc = &DaemonConn{ID: old.ID, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetSessionPluginEngines([]string{"claude"})
 	fx.api.hub.Register(dc)
 	reply := protocol.SessionPluginsResult{RequestID: p.ID, SessionID: fx.sess, State: "applied", Error: "private provider detail"}

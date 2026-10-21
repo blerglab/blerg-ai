@@ -62,6 +62,7 @@ type fakeExchanger struct {
 	boards    []string
 	refs      []string
 	revoked   []string // "<account>:<sub>"
+	readOnly  []bool   // per exchange: whether it was ExchangeReadOnly
 }
 
 func (f *fakeExchanger) Exchange(_ context.Context, p Proof, boardID, sessionRef string) (BoardToken, error) {
@@ -74,11 +75,22 @@ func (f *fakeExchanger) Exchange(_ context.Context, p Proof, boardID, sessionRef
 	f.proofs = append(f.proofs, p)
 	f.boards = append(f.boards, boardID)
 	f.refs = append(f.refs, sessionRef)
+	f.readOnly = append(f.readOnly, false)
 	ttl := f.ttl
 	if ttl == 0 {
 		ttl = 10 * time.Minute
 	}
 	return BoardToken{Token: fmt.Sprintf("tok-%d", f.n), Sub: fmt.Sprintf("sub-%d", f.n), ExpiresAt: f.clock.Now().Add(ttl)}, nil
+}
+
+func (f *fakeExchanger) ExchangeReadOnly(ctx context.Context, p Proof, boardID, sessionRef string) (BoardToken, error) {
+	tok, err := f.Exchange(ctx, p, boardID, sessionRef)
+	f.mu.Lock()
+	if err == nil {
+		f.readOnly[len(f.readOnly)-1] = true
+	}
+	f.mu.Unlock()
+	return tok, err
 }
 
 func (f *fakeExchanger) Revoke(_ context.Context, accountID, sub string) error {

@@ -4,7 +4,7 @@
 // the session can be silently renewed instead of just bouncing the user.
 // board no longer has its own /login route to fall back to (see Task 6).
 
-import { ensureFreshToken, getAccessToken } from "./authClient";
+import { ensureFreshToken, getAccessToken, renewSilently } from "./authClient";
 import { refreshAlreadyAttempted } from "./refreshGuard";
 import { bounceToRefresh, clearSignInStuck } from "./signIn";
 
@@ -61,6 +61,9 @@ export async function api<T = unknown>(
 // ── shapes ──────────────────────────────────────────────────────────────────
 
 export interface Board {
+  run_runtime?: string;
+  run_daemon_id?: string;
+  run_host_acknowledged_at?: string;
   id: string;
   name: string;
   description: string | null;
@@ -246,13 +249,19 @@ export function boardSocket(boardId: string, onPing: () => void): () => void {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   let ws: WebSocket | null = null;
   let closed = false;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  const reconnect = () => {
+    if (!closed) retry = setTimeout(connect, 3000);
+  };
   const connect = () => {
     if (closed) return;
     // The token in memory may have been renewed since the socket was first opened.
     const token = getAccessToken();
     if (!token) {
       void ensureFreshToken().then((ok) => {
+        if (closed) return;
         if (ok && getAccessToken()) connect();
+        else reconnect();
       });
       return;
     }
@@ -261,35 +270,29 @@ export function boardSocket(boardId: string, onPing: () => void): () => void {
     ws.onopen = () => {
       opened = true;
       clearSignInStuck();
+      onPing(); // Catch up on changes missed while disconnected.
     };
     ws.onmessage = onPing;
     ws.onclose = () => {
       if (closed) return;
-      // A socket that closed without ever opening was almost certainly
-      // refused at the handshake — most likely an expired access token, since
-      // the socket outlives the token it was opened with.
-      // Reconnecting with the same dead token would just loop forever, so go
-      // get a new one instead — but only once per page load (the guard is
-      // shared with api.ts's 401 handling), so an unreachable server can
-      // never turn into a redirect loop.
+      // A refused handshake may mean an expired token. A missing answer from core is
+      // temporary; only a positive signed-out response should navigate away.
       if (!opened && !refreshAlreadyAttempted()) {
-        // Renew quietly first; only when that fails send the page away to do it.
-        void ensureFreshToken().then((ok) => {
+        void renewSilently().then((outcome) => {
           if (closed) return;
-          if (ok) {
-            connect();
-            return;
-          }
-          bounceToRefresh();
+          if (outcome === "token") connect();
+          else if (outcome === "signed-out") bounceToRefresh();
+          else reconnect();
         });
         return;
       }
-      setTimeout(connect, 3000);
+      reconnect();
     };
   };
   connect();
   return () => {
     closed = true;
+    clearTimeout(retry);
     ws?.close();
   };
 }

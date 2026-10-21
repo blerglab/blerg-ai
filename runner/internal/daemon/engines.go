@@ -134,7 +134,10 @@ type AgentDriverOpts struct {
 	Effort string
 	// SessionID is the Blerg session identity, distinct from native conversation IDs.
 	SessionID string
-	Emitter   agent.Emitter
+	// MarkerNonce is the session's marker code for relayed decisions (agent/inputtext.go); a
+	// driver that marks them draws a random one when it is "".
+	MarkerNonce string
+	Emitter     agent.Emitter
 	// Env is the sanitised environment every engine subprocess starts from
 	// (never the daemon master token); nil means sanitizedEnviron().
 	Env []string

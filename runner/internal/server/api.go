@@ -93,7 +93,8 @@ func validateRepoNames(repos []string) error {
 
 // API groups the dependencies shared by all REST handlers.
 type API struct {
-	launchReady launchReadinessCache
+	launchReady       launchReadinessCache
+	permissionSignIns permissionSignInCache
 	// beforeMarkPrivate is a test seam: it runs at the top of MarkPrivate, that is
 	// between a session's insert and its marking (privacy_atomic_test.go).
 	beforeMarkPrivate func(sessionID string)
@@ -116,6 +117,12 @@ type API struct {
 	reviewWaiters  *delegationWaiters
 	delegationLife delegationLifecycle
 	children       childrenNotifier
+	childTurns     childTurnSeen // child-turn notes already relayed (child_turn_notes.go)
+	// questionAttempts counts failed deliveries of each question's answer (questions.go).
+	questionAttempts questionAttempts
+	// questionDeliveryFailed is a test seam: it is told of each failed delivery of a question's
+	// answer, and whether the failure was permanent (questions.go).
+	questionDeliveryFailed func(messageID string, permanent bool)
 	// answerHold overrides the polling cap for deterministic short test timers.
 	// Nonpositive uses maxAnswerHold; configure before serving requests.
 	answerHold time.Duration
@@ -130,8 +137,9 @@ type API struct {
 	// Deliberately the API's own copy rather than the JobManager's: the
 	// JobManager exists only in-cluster with an agent image configured,
 	// while this endpoint must answer on every deployment shape.
-	coreURL         string // BLERG_CORE_URL
-	coreInternalKey string // BLERG_RUNNER_CORE_INTERNAL_KEY
+	coreURL         string         // BLERG_CORE_URL
+	coreInternalKey string         // BLERG_RUNNER_CORE_INTERNAL_KEY
+	siteBoard       siteBoardCache // GET /api/site-board: core's browser-facing Board URL (site_board.go)
 
 	// ssePollInterval/sseKeepaliveInterval pace the agent-contract SSE stream
 	// (events_stream.go). Zero means the production defaults; tests shorten
@@ -181,7 +189,10 @@ type API struct {
 	// grantCapOverride, when positive, is the hourly cap of a session permission's automatic
 	// approvals (a test seam; BLERG_RUNNER_GRANT_HOURLY_CAP otherwise).
 	grantCapOverride int
-	boardFiling      boardFilingUpstream
+	// beforeGrantApproval, when set (tests only), runs after a session permission's soft hourly
+	// count passed and before its approval takes the grant's atomic count.
+	beforeGrantApproval func()
+	boardFiling         boardFilingUpstream
 	// fetchPlugins fetches an account's always-on plugin list for a daemon session. nil = core's
 	// internal endpoint; tests set it.
 	fetchPlugins   func(ctx context.Context, accountID string, proof coreProof) ([]pluginspec.Entry, error)
@@ -300,6 +311,7 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		hub.SetCompletionNotifier(api.notifyCompletion)
 		hub.SetDelegationHooks(api.onParentTerminalEnd, api.onParentPaused)
 		hub.SetChildActivityHook(api.noteChildActivity)
+		hub.SetChildTurnHook(api.onChildTurnEnded)
 		hub.SetDelegationHelloHook(api.onDelegationDaemonHello)
 		hub.SetDelegationInputGuard(func(ctx context.Context, id string, enqueue func() error) error {
 			if dbPool == nil {
@@ -310,6 +322,8 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		hub.SetAutoStopper(api.autoStopOnTurnDone)
 		hub.setModelController(api.SetSessionModel)
 		hub.SetAskSignal(api.waiters.signal)
+		hub.SetQuestionAnswered(api.deliverQuestionAnswer)
+		hub.SetQuestionSessionEnded(api.questionAttempts.forgetSession)
 	}
 	return api
 }
@@ -402,6 +416,7 @@ func messageRowToInfo(row db.MessageRow) protocol.MessageInfo {
 		Status:    row.Status,
 		Answer:    row.Answer,
 		CreatedAt: row.CreatedAt.UTC().Format(time.RFC3339),
+		NoWait:    row.NoWait,
 	}
 	if row.AnsweredAt != nil {
 		s := row.AnsweredAt.UTC().Format(time.RFC3339)
@@ -472,7 +487,9 @@ func (a *API) HandleGetClusterStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, protocol.ClusterStatus{Configured: false})
 		return
 	}
-	writeJSON(w, http.StatusOK, jm.Status()) //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
+	status := jm.Status() //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
+	status.SandboxClusterChildren = sandboxClusterChildren()
+	writeJSON(w, http.StatusOK, status)
 }
 
 // ─── GET /api/me/credentials ──────────────────────────────────────────────────
@@ -507,8 +524,13 @@ type internalCredentialListResponse struct {
 // definite empty answer would tell the user they have none when they may have
 // several.
 //
-// The answer can be up to a minute old: it shares the repository lister's
-// per-account cache of which kinds are held (UserRepoLister.Kinds).
+// It shares the repository lister's per-account cache of which kinds are held, but asks core
+// again once that answer is older than myCredentialsMaxAge, so the launch sheet shows a
+// credential saved in core's Settings the next time it opens, not a minute later. The sheet's
+// /api/repos and this request, which arrive together, still ask core once.
+// myCredentialsMaxAge is how old a cached answer GET /api/me/credentials may give.
+const myCredentialsMaxAge = 5 * time.Second
+
 func (a *API) HandleGetMyCredentials(w http.ResponseWriter, r *http.Request) {
 	principal, ok := a.authBrowser(w, r)
 	if !ok {
@@ -520,9 +542,9 @@ func (a *API) HandleGetMyCredentials(w http.ResponseWriter, r *http.Request) {
 	var kinds []string
 	var found, known bool
 	if a.userRepos != nil {
-		// The repository lister already asks core this, at most once a
-		// minute per account; the launch sheet asks both at once.
-		kinds, known = a.userRepos.Kinds(ctx, account)
+		// The repository lister asks core this once per account at a time; the launch sheet
+		// asks both at once.
+		kinds, known = a.userRepos.KindsWithin(ctx, account, myCredentialsMaxAge)
 		found = known && len(kinds) > 0
 	} else {
 		kinds, found, known = a.listPersonalCredentialKinds(ctx, account)
@@ -844,20 +866,8 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "cluster runtime not configured on this server")
 			return
 		}
-		// A cluster session clones from the configured git base. With neither
-		// an explicit BLERG_RUNNER_AGENT_GIT_BASE nor an org to default to,
-		// that base is bare github.com, so a one-segment repo name has
-		// nothing to resolve against — refuse it up front rather than
-		// spawning a pod that fails its clone. Either piece of config is a
-		// complete answer on its own (an operator-chosen base may well be a
-		// host whose paths are single-segment), and a repo already given as
-		// org/name always resolves regardless.
-		// Backstop for a bare local-folder name: if the caller named the
-		// daemon it picked the folder from and that daemon reported the
-		// folder's GitHub origin, that org/name is the repository — resolve
-		// it here. Only the explicitly requested daemon is consulted (two
-		// machines' same-named folders can be different repos), and only
-		// when nothing else would resolve the bare name.
+		// Resolve local folder aliases from the same origin inventory used by board and child
+		// starts. An explicit desktop limits the lookup; a unique origin needs no hint.
 		if req.Provider != "" {
 			if _, ok := gitprovider.Default.ProviderForCredentialKind(req.Provider); !ok {
 				writeError(w, http.StatusUnprocessableEntity, "unknown git provider")
@@ -878,17 +888,13 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		// The origin a daemon reported carries its provider, so a folder
 		// whose origin is on GitLab resolves to GitLab, never to a same-named
 		// GitHub guess.
-		if !strings.Contains(req.Repo, "/") && jm.GitHubOrg == "" && jm.ExplicitGitURLBase == "" && req.DaemonID != "" {
-			if d := a.hub.GetHostDaemon(req.DaemonID); d != nil {
-				if o, ok := d.RepoOrigin(req.Repo); ok && (req.Provider == "" || req.Provider == o.Provider) {
-					req.Repo, req.Provider = o.FullName, o.Provider
-				}
+		if !req.NewRepo && req.GitURL == "" {
+			repo, provider, problem := a.resolveClusterRepo(req.Repo, req.Provider, req.DaemonID)
+			if problem != "" {
+				writeError(w, 422, problem)
+				return
 			}
-		}
-		if !strings.Contains(req.Repo, "/") && jm.GitHubOrg == "" && jm.ExplicitGitURLBase == "" {
-			writeError(w, http.StatusUnprocessableEntity,
-				"repo must be given as org/name for cluster sessions (or set BLERG_RUNNER_GITHUB_ORG)")
-			return
+			req.Repo, req.Provider = repo, provider
 		}
 		// A non-default provider has no operator base to resolve a bare name
 		// against, and its own naming rules to meet.
@@ -1018,7 +1024,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 			// about to begin — the same text the caller gets in the 503
 			// (CreateSessionJob keeps anything sensitive out of it).
 			a.markClusterStartFailed(ctx, sessionID, err.Error())
-			writeError(w, http.StatusServiceUnavailable, err.Error())
+			writeError(w, clusterStartFailureStatus(err), err.Error())
 			return
 		}
 		clusterJobCreated(ctx, a.hub, a.dbPool, sessionID, a.startWatchEvery())
@@ -1064,6 +1070,12 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	daemon := a.hub.GetHostDaemon(req.DaemonID)
 	if daemon == nil {
 		writeError(w, http.StatusNotFound, "daemon not found or not connected")
+		return
+	}
+	// A Local sandbox works in a clone of its own (sandboxclone.go on the daemon): a daemon that
+	// would mount the checkout, .git included, never gets one.
+	if req.Runtime == "docker" && !daemon.CanSandboxClones() {
+		writeError(w, http.StatusConflict, msgSandboxCloneDaemon)
 		return
 	}
 	if !daemon.CanCloneFrom(req.Provider) {
@@ -1170,6 +1182,10 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		if err := db.SetSessionSpawningAccount(ctx, a.dbPool, sessionID, principal.Sub); err != nil {
 			log.Printf("SetSessionSpawningAccount %s: %v", sessionID, err)
 		}
+		// The browser sign-in behind the launch, as the cluster branch records it: a cluster child
+		// this desktop session starts under a rule or grant is authorized with it (core checks it
+		// is live and the owner's). It stays on the server; the daemon never sees it.
+		recordLaunchAuthSession(ctx, a.dbPool, sessionID, proofFromPrincipal(principal).SessionID)
 	}
 
 	if grant != nil {

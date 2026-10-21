@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
@@ -1332,9 +1333,21 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 		// registry-transparent so it needs no branching here beyond create.
 		var createErr error
 		if msg.Sandbox {
+			// A sandboxed terminal works in a clone of its own, as every sandbox does
+			// (sandboxclone.go): never the person's checkout. No clone, no session.
+			clone, err := createSandboxClone(projectPath, msg.SessionID, m.reposRoot())
+			if err != nil {
+				log.Printf("manager: %s: %v", msg.SessionID, err)
+				m.sendError(msg.SessionID, err.Error())
+				return
+			}
+			projectPath = clone
 			opts := m.config.sandboxOptions()
 			opts.CodexHome, opts.CodexSourceHome = codexHome, codexSource
-			createErr = createDockerSandbox(msg.SessionID, projectPath, inner, env, opts)
+			if createErr = startTerminalSandbox(msg.SessionID, projectPath, inner, env, opts); createErr != nil {
+				removeSandboxContainer(msg.SessionID)
+				discardSandboxClone(clone, msg.SessionID)
+			}
 		} else {
 			createErr = createTmuxSession(msg.SessionID, projectPath, inner, env)
 		}
@@ -1384,6 +1397,7 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 
 	cleanupCreated = false // the session started: its folder is real now
 	tracker := NewStateTracker(msg.SessionID, m.client)
+	m.watchSandboxTurns(msg.SessionID, projectPath, tracker)
 	metaParser := NewMetaParser(msg.SessionID, m.client)
 	m.mu.Lock()
 	m.sessions[msg.SessionID] = sess
@@ -1457,6 +1471,15 @@ func (m *Manager) streamSession(id string, sess *Session) {
 			delete(m.refreshTimers, id)
 		}
 		m.mu.Unlock()
+		// A sandboxed terminal whose tmux is gone has ended for good: its leftover work is
+		// committed in the container, the container removed and the clone's branch brought
+		// back (a kill already did this; it is safe twice). An attach client that merely
+		// dropped, with tmux still running in the container, is left for the reattach pass.
+		if isSandboxClone(sess.workspace, id) {
+			if has, known := tmuxProbe(dockerContainerName(id)); !has && known {
+				finishSandbox(id)
+			}
+		}
 		// Remove the recovery record now that the session has ended naturally.
 		// Best-effort: safe to call when no record exists (e.g. test path).
 		m.deleteRecord(id)
@@ -1581,7 +1604,8 @@ func (m *Manager) ReattachSessions() {
 	m.reattachMu.Lock()
 	defer m.reattachMu.Unlock()
 
-	liveIDs := mergeSessionIDs(listBlergRunnerTmuxSessions(), listSandboxedTmuxSessions())
+	sandboxed := m.stopLegacySandboxes(listSandboxedTmuxSessions())
+	liveIDs := mergeSessionIDs(listBlergRunnerTmuxSessions(), sandboxed)
 	for _, id := range liveIDs {
 		m.mu.Lock()
 		_, exists := m.sessions[id]
@@ -1613,6 +1637,85 @@ func (m *Manager) ReattachSessions() {
 	// alone it keeps its memory ceiling, its mounts and its name forever, so
 	// the next session with that id cannot even start without a collision.
 	sweepOrphanSandboxContainers(m.ownsSession)
+}
+
+// startTerminalSandbox starts a sandboxed terminal's container and tmux (a seam for tests).
+var startTerminalSandbox = createDockerSandbox
+
+// watchSandboxTurns brings a sandboxed terminal's commits back to wip/<id> in the repository each
+// time it goes from running to idle (its turn's end, as near as the screen tells), one sync at a
+// time. Nothing for a session that is not in a sandbox clone.
+func (m *Manager) watchSandboxTurns(id, workspace string, tracker *StateTracker) {
+	if !isSandboxClone(workspace, id) {
+		return
+	}
+	var busy atomic.Bool
+	tracker.SetOnTurnEnd(func() {
+		if !busy.CompareAndSwap(false, true) {
+			return
+		}
+		defer busy.Store(false)
+		if err := syncSandboxAtTurnEnd(workspace, id); err != nil {
+			log.Printf("manager: sandboxed session %s: %v", id, err)
+		}
+	})
+}
+
+// legacySandboxMessage is what a terminal sandbox started by an older daemon is told when this one
+// stops it.
+const legacySandboxMessage = "This sandboxed session was started by an older daemon that mounted your checkout (.git included) into the sandbox. It was stopped for safety; start it again to work in a clone of its own."
+
+// legacySandboxRecordMessage is what a sandboxed terminal whose recovery record names no clone of its
+// own is told when this daemon declines to recover it.
+const legacySandboxRecordMessage = "This sandboxed session was not recovered: its record names a folder of yours, not a clone of its own (an older daemon started it). Start it again to work in a clone of its own."
+
+// sandboxRecordProblem is why a sandboxed terminal's recovery record cannot be used, or "".
+func sandboxRecordProblem(rec SessionRecord) string {
+	if !isSandboxClone(rec.ProjectPath, rec.SessionID) {
+		return legacySandboxRecordMessage
+	}
+	if _, err := loadSandboxClone(rec.SessionID); err != nil {
+		return "This sandboxed session was not recovered: the record of its clone is missing or invalid. Its work may still be on wip/" + rec.SessionID + " in your repository; start a new session to continue."
+	}
+	return ""
+}
+
+// unknownSandboxMessage is what a sandboxed terminal is told when this daemon stops it because it
+// has no record of a clone of its own for it.
+const unknownSandboxMessage = "This sandboxed session was stopped: this daemon has no record of a clone of its own for it, so it cannot tell what its container mounts (an older daemon may have started it). Any work it committed was brought back where possible; start it again to work in a clone of its own."
+
+// stopLegacySandboxes stops every running sandboxed terminal that this daemon cannot show is on a
+// clone of its own, and returns the others. It decides from what the daemon writes reliably: the
+// clone record (written before any container starts, and older daemons never wrote one), not the
+// best-effort recovery record. A session this process already manages is kept. Otherwise a session
+// is kept when its clone record loads and docker inspect, when it answers, names that clone. One
+// whose container mounts anything else, or that has no clone record, is stopped and told which.
+func (m *Manager) stopLegacySandboxes(ids []string) []string {
+	kept := ids[:0:0]
+	for _, id := range ids {
+		m.mu.Lock()
+		_, managed := m.sessions[id]
+		m.mu.Unlock()
+		if managed {
+			kept = append(kept, id)
+			continue
+		}
+		message, reason := "", ""
+		if source, ok := containerWorkspaceSource(dockerContainerName(id)); ok && !isSandboxClone(source, id) {
+			message, reason = legacySandboxMessage, "its container mounts "+source
+		} else if _, err := loadSandboxClone(id); err != nil {
+			message, reason = unknownSandboxMessage, "no record of a clone of its own"
+		}
+		if message == "" {
+			kept = append(kept, id)
+			continue
+		}
+		log.Printf("manager: stopping sandboxed session %s: %s", id, reason)
+		killTmuxSession(id)
+		m.deleteRecord(id)
+		m.sendError(id, message)
+	}
+	return kept
 }
 
 // ownsSession reports whether this daemon is currently managing sessionID, as
@@ -1665,6 +1768,7 @@ func (m *Manager) reattachSession(id string) {
 	})
 
 	tracker := NewStateTracker(id, m.client)
+	m.watchSandboxTurns(id, sess.workspace, tracker)
 	metaParser := NewMetaParser(id, m.client)
 	m.mu.Lock()
 	m.sessions[id] = sess
@@ -1684,6 +1788,17 @@ func (m *Manager) reattachSession(id string) {
 // resume the interactive tmux case — it spawns fresh and injects the stored
 // initial prompt instead.
 func (m *Manager) recoverSession(rec SessionRecord) {
+	// A sandboxed record must name this session's own recorded clone. One an older daemon wrote
+	// names the person's folder: it is never recovered onto, the record goes (so it is not tried
+	// again at every reconnect) and the session says why.
+	if rec.Sandbox {
+		if problem := sandboxRecordProblem(rec); problem != "" {
+			log.Printf("manager: recover %s: not recovered: %s", rec.SessionID, problem)
+			m.deleteRecord(rec.SessionID)
+			m.sendError(rec.SessionID, problem)
+			return
+		}
+	}
 	if problem := engineProblem(rec.Engine); problem != "" {
 		m.sendError(rec.SessionID, problem)
 		return
@@ -1736,7 +1851,8 @@ func (m *Manager) recoverSession(rec SessionRecord) {
 	if rec.Sandbox {
 		opts := m.config.sandboxOptions()
 		opts.CodexHome, opts.CodexSourceHome = rec.CodexHome, rec.CodexSourceHome
-		createErr = createDockerSandbox(rec.SessionID, rec.ProjectPath, inner, env, opts)
+		// The record names the session's clone (checked above, and again by the mount check).
+		createErr = startTerminalSandbox(rec.SessionID, rec.ProjectPath, inner, env, opts)
 	} else {
 		createErr = createTmuxSession(rec.SessionID, rec.ProjectPath, inner, env)
 	}

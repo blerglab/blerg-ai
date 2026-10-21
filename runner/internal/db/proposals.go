@@ -25,8 +25,8 @@ const (
 	ProposalUnknown   = "unknown"
 )
 
-// ProposalExpiry is how long a proposal stays pending: the sweeper expires older ones, and the
-// approval refuses them even before the sweeper runs.
+// ProposalExpiry is the default pending lifetime. Explicit owner extensions move the deadline;
+// the sweeper and approval both enforce that deadline.
 const ProposalExpiry = 7 * 24 * time.Hour
 
 // MaxOpenProposalsListed bounds the unpaged open list (pending, executing, unknown). Pending ones
@@ -78,17 +78,30 @@ type Proposal struct {
 	State          string
 	Result         json.RawMessage
 	CreatedAt      time.Time
+	ExpiresAt      time.Time
 	DecidedAt      *time.Time
 	DecidedBy      *string
 	// ApprovedByGrant is the session permission that approved it on its own ("" for a person's
 	// decision or no decision).
 	ApprovedByGrant string
+	// Repeated marks an insert that returned an existing identical board filing.
+	Repeated bool `json:"-"`
 }
 
 const proposalColumns = `id::text, account_id, COALESCE(session_id::text, ''), COALESCE(cron_id::text, ''),
 	connection_id::text, connection_name, url_snapshot, tool, tool_hash, arguments::text,
 	COALESCE(agent_summary, ''), state, result::text, created_at, decided_at, decided_by,
-	COALESCE(approved_by_grant::text, '')`
+	COALESCE(approved_by_grant::text, ''), ` + proposalDeadline
+
+const proposalDeadline = `COALESCE(expires_at_override, created_at + interval '168 hours')`
+
+// Deadline includes an explicit owner extension; literals from older callers keep the default.
+func (p *Proposal) Deadline() time.Time {
+	if !p.ExpiresAt.IsZero() {
+		return p.ExpiresAt
+	}
+	return p.CreatedAt.Add(ProposalExpiry)
+}
 
 func scanProposal(row pgx.Row) (*Proposal, error) {
 	var p Proposal
@@ -96,7 +109,7 @@ func scanProposal(row pgx.Row) (*Proposal, error) {
 	var result *string
 	if err := row.Scan(&p.ID, &p.AccountID, &p.SessionID, &p.CronID, &p.ConnectionID, &p.ConnectionName,
 		&p.URLSnapshot, &p.Tool, &p.ToolHash, &args, &p.AgentSummary, &p.State, &result,
-		&p.CreatedAt, &p.DecidedAt, &p.DecidedBy, &p.ApprovedByGrant); err != nil {
+		&p.CreatedAt, &p.DecidedAt, &p.DecidedBy, &p.ApprovedByGrant, &p.ExpiresAt); err != nil {
 		return nil, err
 	}
 	p.Arguments = json.RawMessage(args)
@@ -138,6 +151,23 @@ func InsertProposalLimited(ctx context.Context, pool *pgxpool.Pool, p Proposal, 
 		}
 		if account != p.AccountID || status == "ended" || status == "stopped" || status == "error" {
 			return nil, ErrProposalState
+		}
+	}
+	// Compare and insert under the same per-account lock. Origin metadata and a
+	// board rename do not turn a retry into a different draft.
+	if IsBoardFilingProposal(&p) {
+		twin, err := scanProposal(tx.QueryRow(ctx, `SELECT `+proposalColumns+` FROM mcp_proposals
+   WHERE account_id=$1 AND session_id=$2::uuid AND connection_id=$3::uuid
+    AND connection_name='board-file' AND tool='file_ticket' AND tool_hash='board-file-v1'
+    AND state IN ('pending','executing','done','unknown') AND created_at > now()-interval '15 minutes'
+    AND arguments - 'origin' - 'board_name' = $4::jsonb - 'origin' - 'board_name'
+   ORDER BY created_at DESC,id DESC LIMIT 1`, p.AccountID, p.SessionID, BoardFilingConnectionID, string(p.Arguments)))
+		if err == nil {
+			twin.Repeated = true
+			return twin, tx.Commit(ctx)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
 		}
 	}
 	var pending int
@@ -308,13 +338,30 @@ func ListDecidedProposals(ctx context.Context, pool *pgxpool.Pool, accountID, st
 // CountPendingProposals is how many proposals the account has waiting for a decision.
 func CountPendingProposals(ctx context.Context, pool *pgxpool.Pool, accountID string) (int, error) {
 	var n int
-	err := pool.QueryRow(ctx, `SELECT count(*) FROM mcp_proposals WHERE account_id = $1 AND state = 'pending'`, accountID).Scan(&n)
+	// Like CountPendingProposalsForSession, a pending row past its deadline is not counted: the
+	// list shows it as expired until the sweeper moves it there.
+	err := pool.QueryRow(ctx, `SELECT count(*) FROM mcp_proposals WHERE account_id = $1 AND state = 'pending'
+		AND `+proposalDeadline+` > now()`, accountID).Scan(&n)
+	return n, err
+}
+
+// CountPendingProposalsForSession is how many of the account's proposals from one session wait
+// for a decision: the session's Needs you counts them.
+func CountPendingProposalsForSession(ctx context.Context, q Querier, accountID, sessionID string) (int, error) {
+	if !proposalUUID.MatchString(sessionID) {
+		return 0, nil
+	}
+	var n int
+	// A pending row past its deadline is not counted: it can no longer be approved or extended, and
+	// the list shows it as expired until the sweeper moves it there.
+	err := q.QueryRow(ctx, `SELECT count(*) FROM mcp_proposals WHERE account_id = $1 AND session_id = $2::uuid AND state = 'pending'
+		AND `+proposalDeadline+` > now()`, accountID, sessionID).Scan(&n)
 	return n, err
 }
 
 // proposalMiss says why an owner-scoped transition matched no row: the proposal is not the
 // account's (ErrProposalNotFound) or is in another state (ErrProposalState).
-func proposalMiss(ctx context.Context, pool *pgxpool.Pool, accountID, id string) error {
+func proposalMiss(ctx context.Context, pool Querier, accountID, id string) error {
 	var one int
 	err := pool.QueryRow(ctx, `SELECT 1 FROM mcp_proposals WHERE id = $1::uuid AND account_id = $2`, id, accountID).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -333,7 +380,7 @@ func transitionOwned(ctx context.Context, pool *pgxpool.Pool, accountID, id, fro
 }
 
 // transitionOwnedWhere is transitionOwned with an extra condition (written without parameters).
-func transitionOwnedWhere(ctx context.Context, pool *pgxpool.Pool, accountID, id, from, to, set, where string, args ...any) (*Proposal, error) {
+func transitionOwnedWhere(ctx context.Context, pool Querier, accountID, id, from, to, set, where string, args ...any) (*Proposal, error) {
 	if !proposalUUID.MatchString(id) {
 		return nil, ErrProposalNotFound
 	}
@@ -347,7 +394,7 @@ func transitionOwnedWhere(ctx context.Context, pool *pgxpool.Pool, accountID, id
 
 // BeginProposalExecution is the approval's compare-and-set: pending -> executing for the owner,
 // recording who decided and when. Exactly one of any number of concurrent approvals wins; the
-// rest get ErrProposalState. A proposal older than ProposalExpiry is refused even when the
+// rest get ErrProposalState. A proposal past its deadline is refused even when the
 // sweeper has not expired it yet.
 func BeginProposalExecution(ctx context.Context, pool *pgxpool.Pool, accountID, id, decidedBy string) (*Proposal, error) {
 	return BeginProposalExecutionByGrant(ctx, pool, accountID, id, decidedBy, "")
@@ -357,10 +404,12 @@ func BeginProposalExecution(ctx context.Context, pool *pgxpool.Pool, accountID, 
 // made (grantID; "" for a person's). The grant is recorded with the decision, and the
 // compare-and-set wins only while that grant is live for the proposal's session and owner, so a
 // revoke that commits first stops the approval.
-func BeginProposalExecutionByGrant(ctx context.Context, pool *pgxpool.Pool, accountID, id, decidedBy, grantID string) (*Proposal, error) {
-	return transitionOwnedWhere(ctx, pool, accountID, id, ProposalPending, ProposalExecuting,
-		`, decided_by = $5, decided_at = now(), approved_by_grant = NULLIF($6, '')::uuid`,
-		fmt.Sprintf(` AND created_at > now() - make_interval(secs => %d)`, int64(ProposalExpiry.Seconds()))+liveGrantGuard("$6"), decidedBy, grantID)
+func BeginProposalExecutionByGrant(ctx context.Context, pool *pgxpool.Pool, accountID, id, decidedBy, grantID string, hourlyCap ...int) (*Proposal, error) {
+	return beginGrantExecution(ctx, pool, grantID, hourlyCap, func(q Querier) (*Proposal, error) {
+		return transitionOwnedWhere(ctx, q, accountID, id, ProposalPending, ProposalExecuting,
+			`, decided_by = $5, decided_at = now(), approved_by_grant = NULLIF($6, '')::uuid`,
+			` AND `+proposalDeadline+` > now()`+liveGrantGuard("$6"), decidedBy, grantID)
+	})
 }
 
 // liveGrantGuard is the CAS condition that the grant named by param (or none) still covers this
@@ -370,7 +419,7 @@ func BeginProposalExecutionByGrant(ctx context.Context, pool *pgxpool.Pool, acco
 func liveGrantGuard(param string) string {
 	return ` AND (` + param + ` = '' OR EXISTS (SELECT 1` + proposalGrantFrom + `
 		WHERE g.id = NULLIF(` + param + `, '')::uuid AND g.account_id = mcp_proposals.account_id AND g.session_id = mcp_proposals.session_id
-		  AND ((g.kind = 'board_file' AND mcp_proposals.connection_id = '` + BoardFilingConnectionID + `'::uuid AND g.board_id = mcp_proposals.arguments->>'board_id')
+		  AND ((g.kind = 'board_file' AND g.level IN ('file','full') AND mcp_proposals.connection_id = '` + BoardFilingConnectionID + `'::uuid AND g.board_id = mcp_proposals.arguments->>'board_id')
 		    OR (g.kind = 'mcp_tool' AND g.connection_id = mcp_proposals.connection_id AND g.tool = mcp_proposals.tool AND g.tool_hash = mcp_proposals.tool_hash))
 		  AND ` + proposalGrantLiveSQL + `))`
 }
@@ -474,7 +523,7 @@ func FailPendingProposals(ctx context.Context, pool *pgxpool.Pool, accountID str
 // ExpirePendingProposals marks proposals still pending after maxAge expired (spec 9: 7 days).
 func ExpirePendingProposals(ctx context.Context, pool *pgxpool.Pool, maxAge time.Duration) (int64, error) {
 	tag, err := pool.Exec(ctx, `UPDATE mcp_proposals SET state = 'expired', decided_at = now()
-		WHERE state = 'pending' AND created_at < now() - make_interval(secs => $1)`, maxAge.Seconds())
+		WHERE state = 'pending' AND COALESCE(expires_at_override, created_at + make_interval(secs => $1)) <= now()`, maxAge.Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("ExpirePendingProposals: %w", err)
 	}

@@ -295,6 +295,7 @@ func TestHermesLocalOnCluster(t *testing.T) {
 	// the agent's to edit, and a child gets the owner's saved .env, not the
 	// parent's copy.
 	pod := &DaemonConn{ID: "pod", Name: "runner-s", send: make(chan []byte, 1)}
+	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	pod.SetAvailableEngines([]string{"hermes"})
 	if hermesLocalOnCluster(context.Background(), jm, pod, "hermes", noPersonalHermes) {
 		t.Error("pod said not local, rule says local")
@@ -459,14 +460,12 @@ func TestClusterBudgetHermesLocalWithLaunchProof(t *testing.T) {
 	cx.k8s.mu.Lock()
 	cx.k8s.credentialKinds = []string{"claude", "hermes"}
 	cx.k8s.mu.Unlock()
-	jm.expireHermesPersonalCache() // the owner's answer is cached for 30 s
 	if hm := get(cx.cparent, cx.cparentTk); hm["local"] != nil {
 		t.Errorf("personal Hermes credential: hermes = %v, want not local", hm)
 	}
 	cx.k8s.mu.Lock()
 	cx.k8s.credentialKinds = nil
 	cx.k8s.mu.Unlock()
-	jm.expireHermesPersonalCache()
 	// No recorded launch proof: core cannot be asked, so not local.
 	bare, bareTok := cx.session(sessOpts{owner: "owner-1", runtime: runnerRuntimeCluster})
 	if hm := get(bare, bareTok); hm["local"] != nil {
@@ -493,42 +492,9 @@ func TestClusterLocalOnlyHermesRule(t *testing.T) {
 	cx.k8s.mu.Lock()
 	cx.k8s.credentialKinds = []string{"hermes"}
 	cx.k8s.mu.Unlock()
-	cx.hub.JobManager().expireHermesPersonalCache() // the owner's answer is cached for 30 s
 	code, out, _ = cx.postChild(cx.cparent, cx.cparentTk, map[string]any{"repo": "app", "prompt": "y", "engine": "hermes"}, newUUID())
 	if code != http.StatusAccepted {
 		t.Fatalf("personal Hermes credential under a local_only rule = %d %v, want the person asked", code, out)
-	}
-}
-
-// The owner's credential-kind answer is cached briefly: a burst of budget calls and child starts
-// asks core once, and the answer still changes within the cache window's bound.
-func TestClusterLocalEnginesCachesTheCoreAnswer(t *testing.T) {
-	cx := newClusterDelegFx(t)
-	jm := cx.hub.JobManager()
-	jm.Hermes = hermesShared(sharedHermesFragment)
-	row := cx.row(cx.cparent)
-	p := cx.api.delegatePrincipalFor(context.Background(), row, "")
-	calls := func() int {
-		cx.k8s.mu.Lock()
-		defer cx.k8s.mu.Unlock()
-		return cx.k8s.credentialListCalls
-	}
-	before := calls()
-	for range 5 {
-		if got := cx.api.clusterLocalEngines(context.Background(), row, p); !slices.Equal(got, []string{"hermes"}) {
-			t.Fatalf("local = %v", got)
-		}
-	}
-	if n := calls() - before; n != 1 {
-		t.Fatalf("core list calls = %d, want 1 within the cache window", n)
-	}
-	// Past the window the answer is asked again.
-	jm.expireHermesPersonalCache()
-	cx.k8s.mu.Lock()
-	cx.k8s.credentialKinds = []string{"hermes"}
-	cx.k8s.mu.Unlock()
-	if got := cx.api.clusterLocalEngines(context.Background(), row, p); got != nil {
-		t.Fatalf("after expiry with a saved Hermes credential: local = %v", got)
 	}
 }
 

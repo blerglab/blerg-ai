@@ -282,14 +282,14 @@ type SessionActivity struct {
 // runner put in the user's place, such as a subagent's completion notice), "runner" (a message sent
 // through the runner contract or MCP send_message, which may come from another agent), what a board,
 // a parent session or a cron wrote ("blerg-board", "session", "cron") and the decisions Blerg relays
-// ("review", "proposal").
+// ("review", "proposal", "child_turn").
 func GetSessionActivity(ctx context.Context, pool *pgxpool.Pool, sessionID string) (SessionActivity, error) {
 	var out SessionActivity
 	rows, err := pool.Query(ctx, `
 		SELECT e.kind, COALESCE(e.payload->>'tool', ''), COALESCE(e.payload->>'parent_call_id', '') <> '', count(*)
 		  FROM agent_events e
 		 WHERE e.session_id = $1
-		   AND (e.kind = 'tool_call' OR (e.kind = 'user_message' AND COALESCE(e.payload->>'source', '') NOT IN ('system', 'runner', 'blerg-board', 'session', 'cron', 'review', 'proposal')))
+		   AND (e.kind = 'tool_call' OR (e.kind = 'user_message' AND COALESCE(e.payload->>'source', '') NOT IN ('system', 'runner', 'blerg-board', 'session', 'cron', 'review', 'proposal', 'child_turn')))
 		 GROUP BY 1, 2, 3`, sessionID)
 	if err != nil {
 		return out, fmt.Errorf("session activity: %w", err)

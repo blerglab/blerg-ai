@@ -42,6 +42,8 @@ export interface AskLive {
   question: string
   /** Server-time ms it was asked. */
   askedAt: number | null
+  /** A question the agent does not wait on (`blerg-runner ask --no-wait`). */
+  noWait?: boolean
 }
 
 /** What the chat showing the session says about it (see ChatView). */
@@ -111,7 +113,7 @@ export function liveSubagents(
 /** openAsks: the agent's questions still open, oldest first. */
 export function openAsks(events: AgentEvent[], report: Pick<LiveReport, 'ended' | 'closedAsks'>): AskLive[] {
   const asks = askStates(events, report.closedAsks, report.ended)
-  if (asks.open === null) return []
+  if (asks.open === null && !asks.anyOpen) return []
   const out: AskLive[] = []
   for (const ev of events) {
     if (ev.kind !== 'ask' || asks.byEvent.get(ev.client_event_id)?.open !== true) continue
@@ -121,6 +123,7 @@ export function openAsks(events: AgentEvent[], report: Pick<LiveReport, 'ended' 
       messageId: typeof p.message_id === 'string' ? p.message_id : '',
       question: typeof p.body === 'string' ? p.body : '',
       askedAt: parseTs(ev.ts),
+      ...(p.no_wait === true ? { noWait: true } : {}),
     })
   }
   return out

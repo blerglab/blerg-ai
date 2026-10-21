@@ -245,6 +245,14 @@ func TestRunAsMeRefusals(t *testing.T) {
 	}
 	srvAPI.Minter = minter
 
+	// Switched off on core: the person is told so, not that it was never set up.
+	minter.err = coremint.ErrSwitchedOff
+	resp = do("POST", path, human, nil)
+	if body := readAll(t, resp); resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body, "turned off") || strings.Contains(body, "not set up") {
+		t.Errorf("switched off: %d %s", resp.StatusCode, body)
+	}
+	minter.err = nil
+
 	// Without the encryption key nothing is minted at all.
 	_ = db.SetAutomationKey(nil)
 	resp = do("POST", path, human, nil)
@@ -252,8 +260,8 @@ func TestRunAsMeRefusals(t *testing.T) {
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Errorf("no key: %d, want 422", resp.StatusCode)
 	}
-	if len(minter.mints) != 3 {
-		t.Errorf("mints = %d, want 3 (none without the key)", len(minter.mints))
+	if len(minter.mints) != 4 {
+		t.Errorf("mints = %d, want 4 (none without the key)", len(minter.mints))
 	}
 }
 
@@ -346,5 +354,127 @@ func TestCardOffersRunAsMeThenTheChooser(t *testing.T) {
 	}
 	if list, _ := after["targets"].([]any); len(list) == 0 {
 		t.Fatalf("no targets after run as me: %v", after)
+	}
+}
+
+func TestRunAsMeRacingBoardDeletionRevokesMint(t *testing.T) {
+	do, board, human, minter := runAsMeEnv(t)
+	pool := srvAPI.Pool
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	// Pause deletion after the old implementation's token read, but before it deletes
+	// the board. A concurrent mint can then expose whether that read was protected.
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(context.Background()) }()
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(53053)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `CREATE FUNCTION pause_board_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(53053); RETURN NULL; END $$;
+ CREATE TRIGGER pause_board_delete BEFORE DELETE ON cards FOR EACH STATEMENT EXECUTE FUNCTION pause_board_delete()`); err != nil {
+		t.Fatal(err)
+	}
+	deleted := make(chan *http.Response, 1)
+	go func() { deleted <- do("DELETE", "/api/boards/"+board.ID, human, nil) }()
+	waitQuery := func(prefix string) bool {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND starts_with(query,$1)`, prefix).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n > 0
+	}
+	for !waitQuery("DELETE FROM cards") {
+		select {
+		case <-ctx.Done():
+			t.Fatal("deletion never paused")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	minted := make(chan *http.Response, 1)
+	go func() { minted <- do("POST", "/api/boards/"+board.ID+"/automation/run-as-me", human, nil) }()
+	var mintResponse *http.Response
+	// With the fix storage waits on deletion's board lock. Without it, storage finishes.
+	for mintResponse == nil && !waitQuery("SELECT id FROM boards WHERE id = $1 FOR UPDATE") {
+		select {
+		case mintResponse = <-minted:
+		case <-ctx.Done():
+			t.Fatal("mint neither finished nor waited")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	resp := <-deleted
+	_ = readAll(t, resp)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete=%d", resp.StatusCode)
+	}
+	if mintResponse == nil {
+		mintResponse = <-minted
+	}
+	_ = readAll(t, mintResponse)
+	revokes := minter.revoked()
+	if len(revokes) != 1 || revokes[0].tokenID != mintedID(1) {
+		t.Fatalf("mint orphaned by deletion: revokes=%v", revokes)
+	}
+}
+
+// Deletion must read the minted token under the board lock: a replacement that commits while
+// deletion waits for that lock is the token deletion revokes. Reading it first, without the
+// lock, misses the replacement and orphans it. This pins the handler half of the deletion race;
+// TestRunAsMeRacingBoardDeletionRevokesMint pins db.DeleteBoardWithAutomation's lock.
+func TestBoardDeletionRevokesTokenReplacedWhileItWaited(t *testing.T) {
+	do, board, human, minter := runAsMeEnv(t)
+	pool := srvAPI.Pool
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	// A replacement in progress: it holds the board row, as ReplaceBoardAutomationToken does.
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(context.Background()) }()
+	if _, err := holder.Exec(ctx, `SELECT id FROM boards WHERE id = $1 FOR UPDATE`, board.ID); err != nil {
+		t.Fatal(err)
+	}
+	deleted := make(chan *http.Response, 1)
+	go func() { deleted <- do("DELETE", "/api/boards/"+board.ID, human, nil) }()
+	for {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+			AND wait_event_type = 'Lock' AND cardinality(pg_blocking_pids(pid)) > 0`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("deletion never waited on the board lock")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	const account = "00000000-0000-4000-8000-0000000000aa"
+	if _, err := holder.Exec(ctx, `UPDATE boards SET automation_account_id = $2, automation_token_minted_id = $3 WHERE id = $1`,
+		board.ID, account, mintedID(7)); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	resp := <-deleted
+	_ = readAll(t, resp)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete=%d", resp.StatusCode)
+	}
+	revokes := minter.revoked()
+	if len(revokes) != 1 || revokes[0].tokenID != mintedID(7) || revokes[0].account != account {
+		t.Fatalf("the token stored while deletion waited was orphaned: revokes=%v", revokes)
 	}
 }

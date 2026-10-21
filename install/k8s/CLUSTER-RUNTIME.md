@@ -213,6 +213,24 @@ actually live before looking anywhere else:
 kubectl -n blerg exec deploy/blerg-runner -- env | grep BLERG_RUNNER_CORE_INTERNAL_KEY
 ```
 
+## Desktop sessions' cluster children
+
+A session on a desktop can start a child on the cluster (`blerg-runner session start --runtime
+cluster`). The child pod gets the person's engine credentials and git token, which a desktop sandbox
+child never gets, so by default a **sandboxed** desktop session asks the person for each cluster child:
+its card offers only **Allow once** and **Deny**, and neither session permissions nor standing cluster
+rules start one. An **unsandboxed** desktop session, and a cluster session, can have cluster children
+allowed for the session or by a standing rule.
+
+`BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN` (in `blerg-config`) changes this for sandboxed sessions:
+
+- `once` (default; any other value means the same): a card for each cluster child;
+- `any`: session permissions and standing cluster rules apply, as for an unsandboxed session.
+
+Restart the runner after changing it. A standing "Always allow … on the cluster" rule covers the
+cluster children of every direct session of the person that may use it (cluster sessions, unsandboxed
+desktop sessions, and under `any` sandboxed ones too).
+
 ## Shared Hermes providers
 
 Hermes sessions on the cluster can use the operator's own model servers (for

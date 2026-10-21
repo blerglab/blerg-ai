@@ -324,3 +324,42 @@ func TestLaunchReadinessPersonalOnlyExcludesOperatorAndHasSeparateCache(t *testi
 		t.Fatal("account-only result replaced ordinary cache")
 	}
 }
+
+// A desktop target says whether it has the requested repo (by folder or by its reported origin),
+// so the Board can pick the one desktop with a board's repository.
+func TestLaunchOptionsTargetsReportRepoPresence(t *testing.T) {
+	hub := NewHub()
+	a1 := &DaemonConn{ID: "desktop-a", Name: "A", send: make(chan []byte, 8)}
+	a1.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	a1.SetCheckedOutRepos([]string{"app"})
+	a1.SetRepoRemotes(map[string]string{"app": "example-org/app"})
+	hub.Register(a1)
+	b := &DaemonConn{ID: "desktop-b", Name: "B", send: make(chan []byte, 8)}
+	b.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	b.SetCheckedOutRepos([]string{"other"})
+	hub.Register(b)
+	a := NewAPI(hub, nil, "fixture-daemon", nil, "")
+	has := func(repo string) map[string]any {
+		options, err := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Repo: repo, Kind: "agent"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]any{}
+		for _, target := range options.Targets {
+			if target.HasRepo == nil {
+				out[target.DaemonID] = nil
+			} else {
+				out[target.DaemonID] = *target.HasRepo
+			}
+		}
+		return out
+	}
+	for _, repo := range []string{"app", "example-org/app"} {
+		if got := has(repo); got["desktop-a"] != true || got["desktop-b"] != false {
+			t.Fatalf("%s: %v", repo, got)
+		}
+	}
+	if got := has(""); got["desktop-a"] != nil || got["desktop-b"] != nil {
+		t.Fatalf("no repo asked: %v", got)
+	}
+}

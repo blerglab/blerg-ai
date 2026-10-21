@@ -1,9 +1,14 @@
+import ProposalPreview from './ProposalPreview'
+import { ProposalExpiry } from './ProposalAttention'
+import { proposalsChanged } from '../hooks/useProposalInbox'
+import { actorLabel, permissionVia, serverClockOffset } from '../lib/proposalAttention'
+import { useProposalsWaiting } from '../hooks/useProposalsWaiting'
 // Proposals (/proposals): what agents asked to do through a tool in `propose` mode (spec 9). The
 // gateway froze each call; nothing ran. Here the person reads the FROZEN ARGUMENTS (authoritative:
 // approving sends exactly these), then approves or rejects. Built-in board filing drafts can be
 // edited first; their saved arguments require a fresh confirmation. Ordinary MCP calls stay frozen.
 // The summary line is built by the gateway and is only a convenience. Upstream results are untrusted: shown as plain text only.
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
@@ -11,7 +16,7 @@ import ToolChanges from './ToolChanges'
 import BoardFileDraft from './BoardFileDraft'
 import {pluginApplication,pluginState,type PluginScope} from '../lib/sessionPlugins'
 import {
-  PROPOSALS_POLL_MS, applyPendingCount, approveFailureMessage, beginCountRequest, collapsedArguments, formatArguments, isAwaitingYou, resultText,
+  PROPOSALS_POLL_MS, applyPendingCount, applyPendingChanges, approveFailureMessage, beginCountRequest, beginChangesRequest, isAwaitingYou, resultText,
   usePendingProposals,
 } from '../lib/proposals'
 import type { ProposalInfo, ProposalState } from '../types'
@@ -43,25 +48,6 @@ const preStyle: CSSProperties = {
   margin: 0, padding: '8px 10px', background: 'var(--basalt)', border: '1px solid var(--stone)', borderRadius: 6,
   color: 'var(--chalk)', fontFamily: 'var(--mono, monospace)', fontSize: 13, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
   maxHeight: 360, overflowY: 'auto',
-}
-
-// Arguments shows the frozen call. The card may cut very long strings (with "Show all"); the
-// approve step (`complete`) never does: what is approved is what is fully on screen.
-function Arguments({ p, complete }: { p: ProposalInfo; complete: boolean }) {
-  const [full, setFull] = useState(false)
-  const { text, truncated } = collapsedArguments(p)
-  const showFull = complete || full || !truncated
-  return (
-    <div>
-      <div style={{ ...muted, color: 'var(--chalk)', fontWeight: 700, marginBottom: 4 }}>Arguments (exactly what approving sends)</div>
-      <pre data-testid={`proposal-args-${p.id}`} style={preStyle}>{showFull ? formatArguments(p) : text}</pre>
-      {truncated && !complete && (
-        <button type="button" style={{ ...button, marginTop: 4 }} onClick={() => setFull(f => !f)}>
-          {full ? 'Collapse long values' : 'Show all'}
-        </button>
-      )}
-    </div>
-  )
 }
 
 interface CardProps {
@@ -98,7 +84,8 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
         <span data-testid="proposal-state" style={{ marginLeft: 'auto', color: stateColor, border: `1px solid ${stateColor}`, borderRadius: 10, padding: '0 8px', fontSize: 12 }}>{stateLabel === 'new_sessions' ? 'new sessions only' : stateLabel}</span>
       </div>
       {boardFile && <div>File a ticket on {typeof p.arguments.board_name === 'string' ? p.arguments.board_name : String(p.arguments.board_id ?? '')}</div>}
-      <Arguments p={p} complete={confirming} />
+      <ProposalPreview proposal={p} complete={confirming} />
+      <ProposalExpiry proposal={p} />
       {boardFile && p.state === 'pending' && (editing
         ? <BoardFileDraft proposal={p} onSaved={updated => { setEditing(false); onSavedDraft(updated) }} onCancel={() => setEditing(false)} />
         : <button type="button" style={button} disabled={busy || !p.arguments_raw} onClick={() => { onCancel(); setEditing(true) }}>Edit ticket draft</button>)}
@@ -117,8 +104,22 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
         <span>Proposed <TimeLabel ts={p.created_at} /></span>
         {p.state === 'pending' && <span>Expires <TimeLabel ts={p.expires_at} /></span>}
         {p.decided_at && <span>Decided <TimeLabel ts={p.decided_at} /></span>}
-        {p.approved_by_grant && <span data-testid="proposal-by-grant">Approved by a session permission</span>}
+        {p.decided_by && <span>Decided by {actorLabel(p.decided_by_you)}</span>}
+        {p.approved_by_grant && <span data-testid="proposal-by-grant">Approved automatically by a session permission</span>}
       </div>
+
+      {p.approved_permission && <div className="proposal-permission-audit" data-testid={`proposal-permission-${p.id}`}>
+        Permission: {p.approved_permission.board_name || p.approved_permission.board_id || p.approved_permission.connection_name}
+        {' · '}{p.approved_permission.tool || p.approved_permission.level}
+        {' · '}set by {actorLabel(p.approved_permission.granted_by_you)} {permissionVia(p.approved_permission.created_via)} <TimeLabel ts={p.approved_permission.created_at} />
+        {p.approved_permission.revoked_at && <> · since revoked <TimeLabel ts={p.approved_permission.revoked_at} /></>}
+      </div>}
+
+      {(p.extensions?.length ?? 0) > 0 && <ul className="proposal-extension-history" aria-label="Deadline extensions" data-testid={`proposal-extensions-${p.id}`}>
+        {p.extensions!.map(e => <li key={e.extended_at + e.expires_at}>
+          Extended by {actorLabel(e.by_you)} <TimeLabel ts={e.extended_at} />: deadline moved to {new Date(e.expires_at).toLocaleString()}
+        </li>)}
+      </ul>}
 
       {result && (
         <div>
@@ -192,11 +193,13 @@ export default function Proposals() {
   // ?session=<id> (the session panel's link): that session's proposals and tool changes only.
   const sessionFilter = params.get('session')
   const [open, setOpen] = useState<ProposalInfo[] | null>(null)
+  // This client's clock minus the server's, from the open list's server_time.
+  const [openClockOffset, setOpenClockOffset] = useState(0)
   const [decided, setDecided] = useState<ProposalInfo[] | null>(null)
   const [decidedNext, setDecidedNext] = useState<string | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [tab, setTab] = useState<Tab>('pending')
+  const [tab, setTab] = useState<Tab>(() => ['id', 'session', 'change', 'connection'].some(key => params.has(key)) || params.get('view') === 'pending' ? 'pending' : 'decided')
   const [focused, setFocused] = useState<ProposalInfo | null>(null)
   const [focusError, setFocusError] = useState<string | null>(null)
   const [confirmedRaw, setConfirmedRaw] = useState<Record<string, string | undefined>>({})
@@ -216,13 +219,16 @@ export default function Proposals() {
   const loadOpen = useCallback(async () => {
     const seq = ++openSeq.current
     const ticket = beginCountRequest()
+    const changesTicket = beginChangesRequest()
     try {
       const res = await apiFetch('/api/proposals?scope=open')
       if (!res.ok) throw new Error(await errorText(res))
-      const body = await res.json() as { proposals?: ProposalInfo[]; pending_count?: number }
+      const body = await res.json() as { proposals?: ProposalInfo[]; pending_count?: number; tool_changes_pending?: number; server_time?: string }
       if (seq !== openSeq.current) return
       setOpen(body.proposals ?? [])
+      setOpenClockOffset(serverClockOffset(body.server_time))
       if (typeof body.pending_count === 'number') applyPendingCount(ticket, body.pending_count)
+      if (typeof body.tool_changes_pending === 'number') applyPendingChanges(changesTicket, body.tool_changes_pending)
       setError(null)
     } catch (e: unknown) {
       if (seq !== openSeq.current) return
@@ -302,10 +308,12 @@ export default function Proposals() {
     const tick = () => { if (!document.hidden) void load() }
     const timer = setInterval(tick, PROPOSALS_POLL_MS)
     window.addEventListener('focus', tick)
+    window.addEventListener('blerg:proposals-changed', tick)
     document.addEventListener('visibilitychange', tick)
     return () => {
       clearInterval(timer)
       window.removeEventListener('focus', tick)
+      window.removeEventListener('blerg:proposals-changed', tick)
       document.removeEventListener('visibilitychange', tick)
     }
   }, [load])
@@ -345,12 +353,17 @@ export default function Proposals() {
       setDecided(null)
       setDecidedNext(null)
       if (focusId) void loadFocused(focusId, false)
+      proposalsChanged()
       await loadOpen()
     }
   }
 
   const ofSession = (ps: ProposalInfo[]) => (sessionFilter ? ps.filter(p => p.session_id === sessionFilter) : ps)
   const pending = ofSession(open ?? [])
+  // The tab counts what still waits on the person, as the bell and the badges do: a pending proposal
+  // past its deadline (by the server's clock) is listed, as expired, but not counted.
+  const pendingForCount = useMemo(() => (sessionFilter ? (open ?? []).filter(p => p.session_id === sessionFilter) : open ?? []), [open, sessionFilter])
+  const waitingCount = useProposalsWaiting(pendingForCount, openClockOffset).length
   const listed = tab === 'pending' ? pending : ofSession(decided ?? [])
   // The deep-linked proposal shows on the tab it belongs to even when its page is not loaded.
   const focusedBelongs = focused !== null && isAwaitingYou(focused) === (tab === 'pending')
@@ -376,8 +389,9 @@ export default function Proposals() {
   return (
     <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 820 }}>
       <h2 style={{ margin: 0, color: 'var(--chalk)', fontSize: '1.1rem' }}>Proposals</h2>
+      <p style={muted}>Decision history and audit. Pending requests also appear in their session’s Needs you and in the notification bell.</p>
       <div role="tablist" style={{ display: 'flex', gap: 8 }}>
-        {tabButton('pending', open === null ? 'Pending' : `Pending (${pending.length})`)}
+        {tabButton('pending', open === null ? 'Pending' : `Pending (${waitingCount})`)}
         {tabButton('decided', 'Decided')}
       </div>
       {sessionFilter && (

@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import ChatView from './ChatView'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
 import { createFakeTransport } from '../test/fakeTransport'
 import { SESSION, ev as mk, meta, resetChatState, seed } from '../test/chat'
 import { compactionText } from './cards/EventCards'
-import { userMessageShape } from '../model/userMessages'
+import { isFromParentSession, userMessageShape } from '../model/userMessages'
 import type { SessionMeta } from '../transport/types'
 import type { AgentEvent } from '../types'
 
@@ -53,6 +53,19 @@ describe('text nobody typed', () => {
     expect(notes[1].textContent).toContain('APPROVED')
   })
 
+  it("a child's turn note in its parent is a Blerg note, never the person", () => {
+    seed(
+      ev(1, 'user_message', { text: 'start', source: 'chat' }),
+      ev(2, 'user_message', { text: 'Child "Port" finished its turn: "Done.". blerg-runner session result c1', source: 'child_turn' }),
+    )
+    mount()
+    expect(screen.getAllByText('You')).toHaveLength(1)
+    const notes = screen.getAllByTestId('system-note')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].textContent).toContain('Blerg')
+    expect(notes[0].textContent).toContain('finished its turn')
+  })
+
   it('a prompt a board, a parent session or a cron wrote is drawn under that author, never "You"', () => {
     seed(
       ev(1, 'user_message', { text: 'You are working card #43 on the blerg-board board', source: 'blerg-board' }),
@@ -62,7 +75,7 @@ describe('text nobody typed', () => {
     )
     mount()
     expect(screen.getAllByText('You')).toHaveLength(1)
-    for (const [author, text] of [['Board', 'card #43'], ['Parent session', 'Port the tests'], ['Cron', 'Summarize my inbox']]) {
+    for (const [author, text] of [['Board', 'card #43'], ['↑ Parent', 'Port the tests'], ['Cron', 'Summarize my inbox']]) {
       const card = screen.getByText(author).closest('.agent-card')
       expect(card?.className).toContain('other-author')
       expect(card?.textContent).toContain(text)
@@ -75,7 +88,7 @@ describe('text nobody typed', () => {
     render(<ChatView session={SESSION} transport={t.transport} meta={idle}
       describeUserMessage={(_e, p) => (p.source === 'session' ? { author: 'from Release prep' } : null)} />)
     expect(screen.getByText('from Release prep')).toBeTruthy()
-    expect(screen.queryByText('Parent session')).toBeNull()
+    expect(screen.queryByText('↑ Parent')).toBeNull()
     expect(screen.queryByText('You')).toBeNull()
   })
 
@@ -105,7 +118,40 @@ describe('text nobody typed', () => {
   it('an answer to an ask is the person, marked as an answer', () => {
     seed(ev(1, 'user_message', { text: 'yes, ship it', source: 'ask_answer', message_id: 'm1' }))
     mount()
-    expect(screen.getByText('yes, ship it').closest('.agent-card')!.textContent).toMatch(/You · answer/)
+    expect(screen.getByText('yes, ship it').closest('.agent-card')!.textContent).toMatch(/You · Answer/)
+  })
+
+  it("the parent's answer to the child's question is the parent's, never \"You\"", () => {
+    seed(
+      ev(1, 'user_message', { text: 'use main', source: 'ask_answer', message_id: 'm1', answered_by: 'session' }),
+      ev(2, 'user_message', { text: 'my own answer', source: 'ask_answer', message_id: 'm2' }),
+    )
+    mount()
+    const parent = screen.getByText('use main').closest('.agent-card')!
+    expect(parent.className).toContain('other-author')
+    expect(parent.textContent).toMatch(/↑ Parent · Answer/)
+    expect(screen.getByText('my own answer').closest('.agent-card')!.textContent).toMatch(/You · Answer/)
+    expect(screen.getAllByText('You')).toHaveLength(1)
+  })
+
+  it("a host names and links the parent: the author opens the parent session in the app", () => {
+    seed(
+      ev(1, 'user_message', { text: 'Port the tests', source: 'session' }),
+      ev(2, 'user_message', { text: 'use main', source: 'ask_answer', message_id: 'm1', answered_by: 'session' }),
+    )
+    const opened: string[] = []
+    const t = createFakeTransport()
+    render(<ChatView session={SESSION} transport={t.transport} meta={idle}
+      describeUserMessage={(_e, p) => (isFromParentSession(p)
+        ? { author: '↑ Parent · Release prep', authorHref: '/sessions/p1', onAuthorOpen: () => opened.push('p1') }
+        : null)} />)
+    const links = screen.getAllByRole('link', { name: '↑ Parent · Release prep' })
+    expect(links).toHaveLength(2)
+    expect(links[0].getAttribute('href')).toBe('/sessions/p1')
+    fireEvent.click(links[1])
+    expect(opened).toEqual(['p1'])
+    expect(screen.getByText('use main').closest('.agent-card')!.textContent).toMatch(/↑ Parent · Release prep · Answer/)
+    expect(screen.queryByText('You')).toBeNull()
   })
 
   it("the daemon's continue after recovering a session is a system note", () => {

@@ -101,27 +101,34 @@ func tokenProblem(err error) string {
 	}
 }
 
-// startIdentity resolves the token and engine a board's sessions start under,
+// startIdentity resolves the token a board's sessions start under,
 // refusing (automationError) when the board has none or the one it has is
 // dead. For a driver that does not take a per-call identity it returns empty
 // values and no error.
-func (a *API) startIdentity(ctx context.Context, boardID string) (token, engine string, err error) {
+func (a *API) startIdentity(ctx context.Context, boardID string) (token string, err error) {
+	authority, err := a.startAuthority(ctx, boardID)
+	return authority.Token, err
+}
+
+// Read identity and its owner-selected placement together, so a concurrent settings change
+// cannot pair the previous owner's credential with the next owner's desktop.
+func (a *API) startAuthority(ctx context.Context, boardID string) (db.BoardAutomation, error) {
 	if !a.requiresStartIdentity() {
-		return "", "", nil
+		return db.BoardAutomation{}, nil
 	}
 	ba, err := db.GetBoardAutomation(ctx, a.Pool, boardID)
 	switch {
 	case errors.Is(err, db.ErrAutomationUndecryptable):
-		return "", "", &automationError{"this board's " + db.ErrAutomationUndecryptable.Error() +
+		return db.BoardAutomation{}, &automationError{"this board's " + db.ErrAutomationUndecryptable.Error() +
 			" in this board's settings under Automation (the encryption key changed or the stored value is damaged): " + automationHowTo}
 	case errors.Is(err, db.ErrAutomationKeyMissing):
-		return "", "", &automationError{"this board's automation token cannot be used: " + db.SecretKeyEnv +
+		return db.BoardAutomation{}, &automationError{"this board's automation token cannot be used: " + db.SecretKeyEnv +
 			" is not set on blerg-board, so it cannot decrypt it — the administrator must set the key the token was saved under"}
 	case err != nil:
-		return "", "", err
+		return db.BoardAutomation{}, err
 	}
 	if ba.Token == "" {
-		return "", "", &automationError{"this board has no automation token, so it cannot start sessions: " + automationHowTo}
+		return db.BoardAutomation{}, &automationError{"this board has no automation token, so it cannot start sessions: " + automationHowTo}
 	}
 	// Check it locally first when core is wired: expiry and revocation are
 	// known here without a round trip, and "your token expired" is a far
@@ -129,11 +136,11 @@ func (a *API) startIdentity(ctx context.Context, boardID string) (token, engine 
 	// core's problem, not the token's — let the runner decide that one.
 	if a.Auth != nil && a.Auth.Core() != nil {
 		if _, verr := a.Auth.VerifyAgentToken(ba.Token, automationAud); verr != nil && !errors.Is(verr, identity.ErrFailClosed) {
-			return "", "", &automationError{"this board's automation token can no longer start sessions (" +
+			return db.BoardAutomation{}, &automationError{"this board's automation token can no longer start sessions (" +
 				tokenProblem(verr) + "): " + automationHowTo}
 		}
 	}
-	return ba.Token, ba.Engine, nil
+	return ba, nil
 }
 
 // modelForEngine is a compatibility repair for boards saved before engine
@@ -151,10 +158,24 @@ func modelForEngine(engine, model string) string {
 // automation authority and returns the settings actually sent to the runner.
 // Credentials are removed from that metadata before it is returned.
 func (a *API) startOnRunnerConfigured(ctx context.Context, boardID string, req runner.StartRequest) (string, runner.StartRequest, error) {
-	token, engine, err := a.startIdentity(ctx, boardID)
+	authority, err := a.startAuthority(ctx, boardID)
 	if err != nil {
 		return "", runner.StartRequest{}, err
 	}
+	if req.TargetAccount != "" && a.requiresStartIdentity() && req.TargetAccount != authority.AccountID {
+		return "", runner.StartRequest{}, &automationError{"the board's automation owner changed while this run target was being selected; choose where it runs again"}
+	}
+	snapshots := []db.BoardAutomation{}
+	if a.requiresStartIdentity() {
+		snapshots = append(snapshots, authority)
+	}
+	target, err := a.resolveBoardTarget(ctx, boardID, runTarget{Runtime: req.Runtime, DaemonID: req.DaemonID}, snapshots...)
+	if err != nil {
+		return "", runner.StartRequest{}, err
+	}
+	token, engine := authority.Token, authority.Engine
+
+	req.Runtime, req.DaemonID = target.Runtime, target.DaemonID
 	req.Token, req.Engine = token, engine
 	model := modelForEngine(engine, req.Model)
 	if model != req.Model {
@@ -182,7 +203,7 @@ func writeStartError(w http.ResponseWriter, err error) {
 // cannot start sessions must not move a card into the work column for a
 // session that will never exist. Answers the 422 itself; false = refused.
 func (a *API) checkStartIdentity(ctx context.Context, w http.ResponseWriter, boardID string) bool {
-	if _, _, err := a.startIdentity(ctx, boardID); err != nil {
+	if _, err := a.startIdentity(ctx, boardID); err != nil {
 		if isAutomationErr(err) {
 			writeStartError(w, err)
 		} else {

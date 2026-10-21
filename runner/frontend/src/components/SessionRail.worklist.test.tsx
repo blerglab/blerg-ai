@@ -148,9 +148,9 @@ describe('session panel: ticket, checklist and plan', () => {
     seedSession();seedEvents(user());await renderPage()
     const panel=screen.getByTestId('session-rail')
     expect(within(panel).getByTestId('rail-plan-summary-text')).toHaveTextContent('Doing: Build; Review')
-    // The running child is listed under Running now and Started sessions; both rows carry the reference.
-    expect(within(within(panel).getByTestId('rail-running')).getByTestId('rail-checklist-reference')).toBeInTheDocument()
-    fireEvent.click(within(within(panel).getByTestId('rail-started')).getByTestId('rail-checklist-reference'))
+    // The running child has one card, under Running now, and it carries the reference.
+    expect(within(within(panel).getByTestId('rail-started')).queryByTestId('rail-checklist-reference')).toBeNull()
+    fireEvent.click(within(within(panel).getByTestId('rail-running')).getByTestId('rail-checklist-reference'))
     await waitFor(()=>expect(document.activeElement).toHaveAttribute('data-checklist-id','a'))
   })
 

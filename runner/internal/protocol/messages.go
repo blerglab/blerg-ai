@@ -76,9 +76,13 @@ type ClusterStatus struct {
 	// Configured is false when this server has no cluster runtime at all
 	// (not running in k8s, or BLERG_RUNNER_AGENT_IMAGE unset) — every other
 	// field is the zero value in that case.
-	Configured bool   `json:"configured"`
-	Namespace  string `json:"namespace,omitempty"`
-	Image      string `json:"image,omitempty"`
+	Configured bool `json:"configured"`
+	// SandboxClusterChildren is BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN as the runner applies it:
+	// "once" (a sandboxed desktop session asks for each cluster child) or "any" (it may have them
+	// preapproved too). The launch sheet shows its Cluster row by it.
+	SandboxClusterChildren string `json:"sandbox_cluster_children,omitempty"`
+	Namespace              string `json:"namespace,omitempty"`
+	Image                  string `json:"image,omitempty"`
 	// DaemonID is the fixed synthetic daemon_id a cluster session is recorded
 	// under only until its pod actually connects (each session pod then
 	// registers as its own ephemeral per-session daemon, overwriting this).
@@ -286,6 +290,12 @@ type DaemonHello struct {
 	// sends RestrictTools to a daemon that does not say this, and treats such a
 	// daemon as unavailable for a cron.
 	RestrictTools bool `json:"restrict_tools,omitempty"`
+	// SandboxClones: this daemon runs every sandboxed session (Sandbox) in a clone of its own of
+	// the repository (git clone --shared, on the branch wip/<session_id>), never in the person's
+	// checkout and with no write access to its .git; the host fetches wip/<id> back. Absent from
+	// older daemons, which mount the checkout itself, .git included, so the server refuses to
+	// start any sandboxed session on one.
+	SandboxClones bool `json:"sandbox_clones,omitempty"`
 	// CodexRestricted supports the isolated Codex file/MCP runtime. Older daemons
 	// must never receive a Codex grant or an unattended Codex session.
 	CodexRestricted bool `json:"codex_restricted,omitempty"`
@@ -1013,6 +1023,12 @@ type MessageInfo struct {
 	Answer     *string `json:"answer,omitempty"`
 	CreatedAt  string  `json:"created_at"`
 	AnsweredAt *string `json:"answered_at,omitempty"`
+	// NoWait: a question the agent does not wait on (`blerg-runner ask --no-wait`).
+	NoWait bool `json:"no_wait,omitempty"`
+	// Answerable (no_wait questions only): set per viewer, true for the session's owner signed in
+	// as themselves, who alone answers it. Only they are notified (bell, toast); everyone else
+	// who can see the session sees it there, read-only.
+	Answerable bool `json:"answerable,omitempty"`
 }
 
 // ─── Agent sessions ──────────────────────────────────────────────────────────

@@ -18,9 +18,11 @@ func TestHeadlessPlacementUsesRequestedEngine(t *testing.T) {
 		t.Run(map[bool]string{false: "repository", true: "scratch"}[scratch], func(t *testing.T) {
 			hub := NewHub()
 			first := &DaemonConn{ID: "a-host", send: make(chan []byte, 8)}
+			first.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 			first.SetCheckedOutRepos([]string{"project"})
 			first.SetAvailableEngines([]string{"claude"})
 			second := &DaemonConn{ID: "b-host", send: make(chan []byte, 8)}
+			second.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 			second.SetCheckedOutRepos([]string{"project"})
 			second.SetAvailableEngines([]string{"codex"})
 			hub.Register(first)
@@ -73,8 +75,10 @@ func TestRegisteredCapabilitiesDriveCronAndUsage(t *testing.T) {
 func TestHeadlessPinnedTargetNeverFallsBack(t *testing.T) {
 	hub := NewHub()
 	first := &DaemonConn{ID: "fixture-first", send: make(chan []byte, 8)}
+	first.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	first.SetAvailableEngines([]string{"claude"})
 	second := &DaemonConn{ID: "fixture-second", send: make(chan []byte, 8)}
+	second.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	second.SetAvailableEngines([]string{"codex"})
 	hub.Register(first)
 	hub.Register(second)

@@ -50,6 +50,7 @@ type codexDriver struct {
 	lastLimitTurn   string
 	usageTurnID     string
 	threadID        string // Codex's durable thread identity.
+	markerNonce     string // the session's marker code (AgentDriverOpts.MarkerNonce), only ever sent to Codex
 	// RuntimeConfig is passed to Codex thread configuration (never emitted).
 	AskUser               func(context.Context, string) (string, error)
 	RestrictedRuntime     *codexRestrictedRuntime
@@ -75,9 +76,13 @@ func newCodexDriver(o AgentDriverOpts) *codexDriver {
 	if env == nil {
 		env = sanitizedEnviron()
 	}
+	nonce := o.MarkerNonce
+	if nonce == "" {
+		nonce = agent.NewMarkerNonce()
+	}
 	return &codexDriver{
 		CredentialSource: o.CredentialSource, workDir: o.WorkDir, engineModel: newEngineModel(o), emitter: o.Emitter, env: env,
-		queue: make(chan queuedMsg, 64),
+		queue: make(chan queuedMsg, 64), markerNonce: nonce,
 	}
 }
 

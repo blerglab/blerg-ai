@@ -246,3 +246,114 @@ code {
   padding: 4px 8px;
   background: var(--code-bg);
 }
+
+/* A parent's started sessions in the sidebar (SessionList SessionBranch); under a collapsed parent,
+   the children that run or need the person stay as one-line rows. */
+/* On the parent card's second line (positioned against the card, so its hit area is not clipped by the
+   line), in the empty slot under the status glyph; its center is on the
+   nested list's indent line (SessionCard sets `left` from the card's left border). */
+.session-children-toggle {
+  position: absolute;
+  bottom: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 1px solid var(--stone);
+  border-radius: 50%;
+  background: var(--basalt);
+  color: var(--fog-dim);
+  cursor: pointer;
+}
+
+.session-children-toggle:hover,
+.session-children-toggle:focus-visible {
+  color: var(--chalk);
+  border-color: var(--fog-dim);
+}
+
+.session-children-kept {
+  list-style: none;
+  margin: 0 0 6px 12px;
+  padding: 0 0 0 8px;
+  border-left: 1px solid var(--stone);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-kept-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--scree);
+  border-radius: 6px;
+  background: var(--scree);
+  color: var(--chalk);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-kept-child.active {
+  border-color: var(--blaze);
+}
+
+.session-kept-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--lichen);
+  font-weight: 700;
+}
+
+.session-kept-glyph.waiting {
+  color: var(--amber);
+}
+
+.session-kept-spin {
+  width: 9px;
+  height: 9px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: blerg-spin 1s linear infinite;
+}
+
+.session-kept-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (pointer: coarse), (max-width: 600px) {
+  /* The glyph stays small; an invisible 44 px hit area surrounds it. */
+  .session-children-toggle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 28px;
+    transform: translate(-50%, -50%);
+  }
+  .session-kept-child {
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-kept-spin {
+    animation: none;
+  }
+}

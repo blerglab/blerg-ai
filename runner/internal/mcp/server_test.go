@@ -34,6 +34,9 @@ func mcpTestPool(t *testing.T) *pgxpool.Pool {
 func fakeK8sHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/info/refs") && r.URL.Query().Get("service") == "git-upload-pack":
+			w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+			_, _ = w.Write([]byte("001e# service=git-upload-pack\n0000"))
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/secrets/"):
 			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs") && r.URL.RawQuery != "":
@@ -82,7 +85,7 @@ func clusterMCPAPI(t *testing.T) (*server.API, *pgxpool.Pool) {
 		BaseURL: k8s.URL, Token: "tok", Namespace: "blerg-runner-sessions",
 		Image: "blerg-runner-devcontainer:test", Client: k8s.Client(),
 		ServerWSURL: "ws://server/ws/daemon", ServerHTTPURL: "http://server",
-		SecretName: "blerg-runner-agent", GitURLBase: "https://git.example.test/org",
+		SecretName: "blerg-runner-agent", GitURLBase: k8s.URL + "/git", ExplicitGitURLBase: k8s.URL + "/git",
 		MaxSessions: 4, PodTTLSeconds: 3600,
 		CPURequest: "500m", MemRequest: "1Gi", CPULimit: "1", MemLimit: "4Gi",
 		TerminationGraceSeconds: 120, TTLSecondsAfterFinished: 3600,

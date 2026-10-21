@@ -280,6 +280,7 @@ func TestCloneFolderFor(t *testing.T) {
 	}
 	for _, c := range cases {
 		d := &DaemonConn{Name: "desk"}
+		d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 		d.SetCheckedOutRepos(c.folders)
 		d.SetRepoOrigins(c.origins, nil)
 		got, present, problem := cloneFolderFor(d, ref)
@@ -345,6 +346,7 @@ func TestNamedCloneTokenIsNeverLogged(t *testing.T) {
 	_ = recvNamedSpawn(t, dc)
 	// A full send buffer: the spawn fails, and still nothing is logged.
 	full := &DaemonConn{ID: "d2", Name: "full", send: make(chan []byte)}
+	full.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	full.SetCloneFrom(true)
 	api.hub.Register(full)
 	rec := postSpawn(t, api, map[string]any{"daemon_id": "d2", "git_url": "https://github.com/octo/tiny", "kind": "agent", "runtime": "docker"})

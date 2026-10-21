@@ -16,10 +16,12 @@ func TestHostTargetsExcludePodRolesBeforeFallback(t *testing.T) {
 		t.Run(role.name, func(t *testing.T) {
 			h := NewHub()
 			pod := &DaemonConn{ID: "a-pod", Mode: role.mode, BoundSessionID: role.bound, send: make(chan []byte, 8)}
+			pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 			pod.SetCheckedOutRepos([]string{"victim-repository"})
 			pod.SetSandboxAvailable(true)
 			h.Register(pod)
 			host := &DaemonConn{ID: "z-host", Mode: "local", send: make(chan []byte, 8)}
+			host.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 			h.Register(host)
 			for name, got := range map[string]*DaemonConn{"repo": h.DaemonForRepo("victim-repository"), "scratch-host": h.DaemonForScratch("daemon"), "scratch-sandbox": h.DaemonForScratch("docker"), "assist": h.AnyDaemon()} {
 				if got != host {
@@ -50,6 +52,7 @@ func TestHostTargetsExplicitPinsCannotLaunchIntoPods(t *testing.T) {
 				bound = "fixture-owned-session"
 			}
 			pod := &DaemonConn{ID: podID, Name: "fixture-pod", Mode: mode, BoundSessionID: bound, send: make(chan []byte, 8)}
+			pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 			pod.SetCheckedOutRepos([]string{"victim-repository"})
 			pod.SetSandboxAvailable(true)
 			pod.SetRestrictTools(true)
@@ -98,6 +101,7 @@ func TestHostTargetsBoardConfiguredPodPinIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	pod := &DaemonConn{ID: podID, Mode: "local", BoundSessionID: "fixture-owned-session", send: make(chan []byte, 8)}
+	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	pod.SetCheckedOutRepos([]string{"victim-repository"})
 	hub.Register(pod)
 	board, err := db.CreateBoard(context.Background(), pool, "Fixture board", nil, []string{"victim-repository"}, &podID)

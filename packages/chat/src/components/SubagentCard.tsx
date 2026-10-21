@@ -106,6 +106,10 @@ export const SubagentCard = memo(function SubagentCard({ sub, live, options }: {
   const summary = over ? payloadOf(sub.done).summary ?? '' : ''
   const line = stale ? NO_END_RECORDED : over ? endLine(sub, status) : doingLine(sub)
   const resumed = resumedSubagent(sub)
+  // A subagent that reports no effort of its own runs at the session's: say so, never "unknown"
+  // while the session's is known.
+  const ownEffort = subagentEffort(sub)
+  const effort = ownEffort || (chat?.sessionEffort ? `${chat.sessionEffort} (the session's)` : 'unknown')
   // A resumed run's call is the SendMessage: the message it was sent stands for the prompt.
   const prompt = inputField(sub.call?.call.input, resumed ? 'message' : 'prompt')
   // A background subagent's call returned its launch, not its report; a resumed run's call may have
@@ -125,7 +129,7 @@ export const SubagentCard = memo(function SubagentCard({ sub, live, options }: {
     resumed ? 'resumed' : '',
     type,
     model,
-    `configured effort: ${subagentEffort(sub) || 'unknown'}`,
+    `configured effort: ${effort}`,
     tokens !== null && tokens > 0 ? tokenLabel(tokens) : '',
     STATUS_LABEL[status],
     why,
@@ -148,7 +152,7 @@ export const SubagentCard = memo(function SubagentCard({ sub, live, options }: {
         <div className="subagent-body" data-testid="subagent-body">
           {line && <div className={`subagent-line${!over && !stale ? ' doing' : ''}`} data-testid="subagent-line">{line}</div>}
           {gist && <div className="subagent-line subagent-gist" data-testid="subagent-gist">↲ {gist}</div>}
-          <div className="subagent-line" data-testid="subagent-settings">Model: <span title={model}>{model ? modelDisplayName(model) : 'unknown'}</span> <span className="model-effort">Configured effort: {subagentEffort(sub) || 'unknown'}</span></div>
+          <div className="subagent-line" data-testid="subagent-settings">Model: <span title={model}>{model ? modelDisplayName(model) : 'unknown'}</span> <span className="model-effort" data-testid="subagent-effort">Configured effort: {effort}</span></div>
           {prompt && (
             <details className="subagent-detail">
               <summary>{resumed ? 'Message' : 'Prompt'}</summary>

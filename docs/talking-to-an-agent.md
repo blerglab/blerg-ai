@@ -40,6 +40,8 @@ Choose an agent session in a supported local sandbox or cluster runtime. The ses
 coding tools and can read and write that board directly through the built-in `board` connection.
 It appears in the panel's Capabilities tab; the session's supported `blerg-runner board` and
 `ticket` commands use it too. See [board connection details](mcp-connections.md#the-built-in-board-connection).
+The board shows in the session's Permissions as **Full**, where you can lower or revoke it like
+any other ([Board access](#board-access-from-the-permissions-dialog)).
 
 If a remembered board is unavailable, choose another or explicitly clear it before launching.
 Discovery has a timeout and a Retry control; launches without a board do not wait on it.
@@ -92,12 +94,21 @@ run. Once a tool call has run two seconds it adds "· waiting on Bash · Run the
 tool, what the call says it does (a Bash call's description, else the start of its command; an
 Agent's or a Monitor's description; nothing more for other tools) and how long it has run. The
 suffix changes at most every three seconds, so a run of short calls does not make it flicker. With
-no call in flight it says "Thinking…" while the model thinks (Claude Code and the native engine say
-when a thinking block opens and closes; the thinking itself still arrives as one card when it is
-over), and "Retrying the model (attempt 2)…" while the engine retries a failed API call, until the
-model answers; the muted retry line stays in the transcript. Otherwise it says "Working…", or names
-the background tasks running. "Thinking…" is known live only: a page opened mid-think says
-"Working…" until the next step. Both need a daemon from this release (reinstall the desktop daemon)
+no call in flight it says "Thinking…" while the model thinks, with how long this thinking phase
+has run ("Thinking… 1:23"; the clock restarts at each phase, then goes back to the turn's time).
+Hermes shows a live token count for the phase instead ("Thinking… 1,234 tokens"), when it reports
+one: it starts again at each thinking phase, and a child's count is its output since its phase
+began. Claude and Codex always show the clock: neither reports reasoning tokens while the model is
+still thinking (Claude's count comes after the thinking block and covers the whole reply; Codex's
+comes after the request ends), so a count there would be the wrong one. Counts come from the
+engine, never from the length of its text, and like other token numbers only the session's owner
+and an administrator see them; anyone else sees the clock. The Running now card uses the same
+reasoning line for a child; status glyphs stay compact. The thinking itself still arrives as one
+card when it is over. "Retrying the model (attempt 2)…" appears while the engine retries a failed API
+call, until the model answers; the muted retry line stays in the transcript. Otherwise the line
+says "Working…", or names the background tasks running. The main chat's thinking indication is
+known live only: a page opened mid-think says "Working…" until the next live observation.
+These indicators need a daemon from this release (reinstall the desktop daemon)
 and, for Claude Code, a CLI that takes `--include-partial-messages`.
 
 ## Pointing at what you mean
@@ -329,14 +340,19 @@ Terminal sessions have no panel.
   with × to revoke it at once. A permission given from a card in the chat is one more chip. One that
   no longer approves (its sign-in ended, or the tool changed) shows apart with why. **Manage** opens
   the Permissions dialog (a full-screen sheet on a phone), with a search over everything in it:
-  - **Child sessions**: start sandboxed or unsandboxed children (or children on the cluster)
+  - **Child sessions**: start sandboxed or unsandboxed children, or children on the cluster (a
+    desktop session gets all three where the install has a cluster, each saying where it runs),
     without asking, with the engines each covers; a control the session cannot use says why.
-  - **Board filing**: your boards, each checkable, with how many are selected and **Select all
-    shown**, which takes only the boards the search leaves.
+  - **Boards**: your boards, each with an access level and how many have one
+    ([Board access](#board-access-from-the-permissions-dialog)); a chip reads "Product · Full".
   - **MCP write tools**: grouped by connection, each tool you set to approval mode checkable; a tool
     whose definition changed since you allowed it says so.
   - **Active**: everything given now, with how and when (a card in the chat, the panel, launch),
     each with Revoke.
+
+  Large board lists show 25 rows at a time, with Previous, Next, and search. Board links use the
+  board address published by the site, which the runner reads for the app. If a save partially fails, **Save results** names the rows
+  saved and the rows that failed; **Retry failed changes** retries the remaining edits.
 
   Nothing changes until **Save**, which applies it and says what it did ("Grant 2, revoke 1");
   Cancel or Esc throws the changes away. Rows Save would change are marked. The dialog works from the
@@ -345,6 +361,7 @@ Terminal sessions have no panel.
   [Session permissions](proposals.md#session-permissions). The launch sheet's **Permissions…** opens
   the same dialog to choose them before the session starts (the button counts them); they are given
   as it starts, and one that cannot be given is reported after launch and the session asks as usual.
+  The dialog grows with a large screen, and **Maximize** (⤢) gives it the whole window.
 - **Needs you**: the agent's open questions, each with how long it has been waiting and a box that
   answers it (the same answer as the ask card's), and the MCP tool changes waiting on your decision
   for this session, with a link to the Proposals page showing that session's proposals and tool
@@ -527,6 +544,94 @@ session, repository, verified commit when available, and engine. Nothing is writ
 approval, and an ambiguous **unknown** result is never retried automatically. See
 [Board filing proposals](proposals.md#filing-a-board-card-from-a-session).
 
+### Board access from the Permissions dialog
+
+A session without a board can still search your boards and propose cards; each proposal asks you.
+To let it do more, give a board a level under **Live → Permissions → Manage → Boards** (or in the
+launch sheet's **Permissions…**). Each level includes the ones below it:
+
+| Level | The session may |
+|---|---|
+| **Propose** (every board, the default) | search for duplicates and propose a card, which asks you |
+| **Read** | also list, get and search every card |
+| **File without asking** | also file its proposals at once (the 0.4.3 board filing permission) |
+| **Full** | also create, update, move, link and comment: what choosing the board at launch gives |
+
+Session board access allows 240 HTTP requests per rolling minute. A CLI command can make several
+requests: a named card move uses one access lookup and six board-tool calls. Access is checked
+fresh for every command. At most four board-tool calls run at once. A rate refusal includes the
+remaining wait in seconds and a `Retry-After` header. A refused request is not counted (it never
+was), so retrying does not extend the window. Each call's board credential is revoked right after
+it; while revokes fail, an account stops starting board calls once 20 unrevoked credentials are
+still live, and answers 503 until they expire (at most 10 minutes).
+
+Columns, archiving and board settings are never available to an agent at any level. A board you
+chose at launch shows as Full; lower it, or set it to Propose to revoke it, like any other.
+
+The level is checked on every command and call, so a change holds at the agent's next one, with no
+restart; lowering a level applies from the next call, and a call already running finishes. The agent
+is told when you change a level: a short note from Blerg reaches it at its next step ("Board access
+changed: board "Product" is now Full (was Propose)"), and it is asked to check `blerg_board` with
+`{"tool":"access"}` (or `blerg-runner board access`) before telling you it lacks access.
+`blerg-runner board access` lists the boards and levels the session has. The `blerg-runner board`,
+`ticket list|get|create|update|move` and `tag` commands reach a board given here through the runner
+with the session's own token: name it (`blerg-runner ticket list Product`), or, in a session without
+a board chosen at launch, it is their default when it is the only one. With a launch board, a command
+that names no board uses the launch board. Claude and Codex get the same through the `blerg_board`
+tool, which every session has from its start, so a level you give mid-session works at the next call. The agent
+never receives a board credential: the runner exchanges one for each call (read-only for a read)
+and revokes it after. A board chosen at launch also gives the engine the board's own tools, and
+those follow the level too: lowering the board refuses its write tools at the next call, though the
+engine may still list them until it restarts.
+
+Only you, signed in, can set a level; a level acts with the sign-in you set it from, so signing out
+stops it until you renew it (**Renew** on the board's row, or choose another level). A sign-in limited
+to one board changes only that board's level. The engine's own board tools of a launch board act with
+the sign-in you launched with. Restricted, cron and board-started sessions cannot be given board
+access this way; they keep exactly what their launch gave them. Like every session permission, the
+levels end with the session: one stopped for good and resumed starts again from its launch.
+
+### Board access for sessions a session starts
+
+A session a session starts (a child) has no board access of its own. The parent passes its own down
+with the start, one board at a time and never above its own level for that board:
+
+    blerg-runner session start --engine codex --repo myrepo --board Blerg:full --board Ops:read "work cards 12-15"
+
+The approval card shows it ("with Blerg · Full, Ops · Read"); a rule or a grant you gave can start
+such a child without a card, and the start is checked against the parent's levels again when it runs
+(a card decided later, a rule or a grant), so a parent you lowered in between cannot pass down what it
+no longer has. No new credential is minted: the child gets a level of its own, and its board calls go
+through the runner with its own session token like any session's, acting with the parent's sign-in
+for that board. Desktop and cluster children, sandboxed or not, read and change cards the same way.
+
+**A desktop child cannot file proposals yet.** Filing (`blerg-runner ticket file`, `blerg_ticket_file`,
+and so filing without asking at **File without asking**) needs a board sign-in recorded when the
+session starts, and a child started on a desktop has none: its filings are refused with "no retained
+Board discovery proof". Passing **File without asking** to a desktop child therefore gives it only
+**Read**; pass **Full** if it should create cards (`ticket create` goes through its board access), or
+have the parent file. Whether a child may file with its parent's sign-in is an open decision.
+
+**Each child has its own limits.** A child's board calls count against its own limits, not its
+parent's: 4 board calls at once and 240 board requests a minute per session, and at most 20 filings
+an hour approved without asking per permission. A parent runs at most 3 children at once and an
+account at most 6, so with children an account can have up to 24 more board calls in flight, and a
+parent at **File without asking** and its children together up to 80 filings an hour without asking.
+
+Every board call of the child is checked against the lower of its own level and the parent's level
+at that moment. Lowering or revoking the parent's level lowers every child at its next call, and
+raising the parent never lifts a child above its own level. The child's **Permissions** dialog shows
+each board's level with the cap ("Acts at Read: capped by *Parent*, which has Read"); there you can
+lower a single child, or raise it back up to the parent's level, never above it. The child is told
+of each change, the parent's included, by the same "Board access changed" note, and checks
+`blerg_board` with `{"tool":"access"}` (or `blerg-runner board access`, which marks the cap) before
+saying it lacks access.
+
+The access ends with the parent's: when the parent is stopped for good (or discarded), its children
+lose their board access, a child kept running with `--keep-running` included, even if the parent is
+resumed and given access again. A child's own access ends with its own lifetime, like any session
+permission.
+
 ### The first message waits for MCP servers
 
 A new session holds its first message for up to 30 seconds while its MCP servers connect, so the
@@ -640,18 +745,35 @@ need an updated, connected desktop daemon.
 ### Children on the cluster
 
 A session running on the cluster starts its children on the cluster, as cluster pods; that is the
-default there, and `--runtime cluster` asks for it explicitly. The approval card says **on the
-cluster**, and its **Always allow** button creates a standing rule for that engine on the cluster.
-Cluster rules and session permissions are separate from desktop ones: a rule for your desktop never
-starts a cluster child, nor the reverse. The Permissions dialog shows one cluster control instead of the
-sandboxed and unsandboxed pair. The child's repository is cloned into its pod the way any cluster
-launch clones it, and its engines are the ones the cluster has credentials for. A child pod runs
-with your engine credentials, as your own cluster sessions do. A rule or session permission can
-start one only while your sign-in behind the parent is still valid; otherwise the agent's start
-asks you on the card, and your decision authorizes it. Limits, Live, the sidebar, discard and the
-parent's end treat cluster children as they treat desktop ones; a child whose pod could not be
-launched does not count toward the start limits. A desktop session cannot start a
-cluster child, and a cluster session cannot start a desktop child. Hermes on the cluster counts as
+default there, and `--runtime cluster` asks for it explicitly. A session on your desktop can start a
+child on the cluster too, when the install has a cluster runtime: the agent asks for
+`--runtime cluster` (its children still run on the desktop by default). On a desktop-only install
+that request is refused with "this install has no cluster". A cluster session cannot start a desktop
+child. The approval card says **on the cluster**, and its **Always allow** button creates a standing
+rule for that engine on the cluster. A pod gets your credentials, which a desktop sandbox child does
+not, so a **sandboxed** desktop session asks you for each cluster child: its card offers only **Allow
+once** and **Deny**, its Cluster row in the Permissions dialog is shown off with why, and standing
+cluster rules do not start its children. An operator can change that with
+`BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN=any` ([cluster runtime](../install/k8s/CLUSTER-RUNTIME.md#desktop-sessions-cluster-children)).
+A standing cluster rule applies to the cluster children of every session of yours that may use one:
+cluster sessions and unsandboxed desktop sessions alike. Cluster rules and session permissions are separate from desktop
+ones: a rule for your desktop never starts a cluster child, nor the reverse. For a cluster session the
+Permissions dialog shows one cluster control instead of the sandboxed and unsandboxed pair; for a
+desktop session it shows all three, each row noting where its children run ("on this desktop" or
+"on the cluster"). The child's repository is cloned into its pod the way any cluster launch clones it,
+so a desktop session names it as org/name (a desktop folder name works only where the cluster has a
+default org), and its engines are the ones the cluster has credentials for. A child pod runs with
+your engine credentials, as your own cluster sessions do; they go only into the child's pod, never
+to your desktop daemon or the parent agent. A rule or session permission can start one only while
+your sign-in behind the parent is still valid (for a desktop session, the browser sign-in you
+launched it from, or your latest decision on one of its cards: allowing one cluster child, even once,
+makes your current sign-in the one its later automatic cluster starts use, until you sign out);
+otherwise the agent's start asks you
+on the card, and your decision authorizes it. Each cluster child keeps the sign-in it was started
+with: a desktop parent's message to an idle child resumes it with that sign-in, and once it has
+ended the parent is told to ask you to open the child and send the message yourself. Limits, Live,
+the sidebar, discard and the parent's end treat cluster children as they treat desktop ones; a child
+whose pod could not be launched does not count toward the start limits. Hermes on the cluster counts as
 local, for the budget and for local-only Hermes rules, when the operator's
 [shared Hermes providers](../install/k8s/CLUSTER-RUNTIME.md#shared-hermes-providers) point only at
 keyless private-network model servers and you have not saved a Hermes credential of your own (it
@@ -661,7 +783,8 @@ cron session never gets operator-supplied credentials or the shared providers.
 The parent's Live tab lists its children and pending requests. Open a child to read its conversation;
 Started sessions shows the temporary permissions and their Revoke buttons. Revoking permission
 prevents future starts; it does not stop existing children. Settings lists standing rules and lets
-you add or remove them; a cluster rule is added from the card's **Always allow** button. The sidebar groups children under their parent, and Insights shows child
+you add or remove them, desktop and cluster rules alike (the cluster runtime is offered where the
+install has one); a card's **Always allow** button adds one too. The sidebar groups children under their parent, and Insights shows child
 usage separately from the parent's own usage.
 
 A parent can have three running children and make twenty starts. Across your account, the limits
@@ -675,6 +798,24 @@ An engine already running on an offline daemon can only be stopped when that dae
 Agents use `blerg-runner budget` to read the capacity their own desktop reports, separately for each
 provider. Missing usage information is shown as unknown. A local engine is labeled local; a
 Claude budget does not imply the same capacity for Codex or another provider.
+
+In a child session, what the parent agent sends, its answers to the child's questions included, is
+labeled "↑ Parent · <parent title>", with a link to the parent session; your own messages and
+answers read "You". The runner decides this from the parent's own session token, never from what a
+caller claims. The child's header says who started it: "started by Codex agent from <parent>".
+
+The parent is told when a child's turn ends. When a child finishes its turn, asks a question, waits
+on an approval only you can give, or fails, the parent gets a short note from Blerg at its next
+step (`Child "<title>" finished its turn: "<first line>". blerg-runner session result <id>`), so it
+does not need to keep watching the child. The note shows in the parent's chat as a Blerg note. It is
+sent once per child turn, never to a parent that has ended, and no caller or agent can write one
+(its source, `child_turn`, is refused from every caller like Blerg's other relayed notes).
+
+A sandboxed child works in a clone of its own, never in its parent's checkout, and has no write
+access to the repository's `.git` (every Local sandbox session does). Its commits land on the
+branch `wip/<child-id>` of the repository on your desktop: the daemon fetches that one branch back
+at the end of each of the child's turns and when it stops, with any work it left uncommitted at the
+stop committed for it first. A host child (`--runtime daemon`) works in the checkout itself. See [What a sandbox works in](sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land).
 
 Host sessions share the daemon's home directory. A host session can therefore read another host
 session's token file; session-token API checks do not provide isolation from code running on the

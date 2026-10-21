@@ -15,6 +15,7 @@ import (
 // valid GitHub org/name survive, and the map is capped.
 func TestSetRepoRemotesSanitizes(t *testing.T) {
 	dc := &DaemonConn{}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	if _, ok := dc.RepoRemote("x"); ok {
 		t.Fatal("zero-value DaemonConn must know no remotes")
 	}
@@ -88,6 +89,7 @@ func getRepos(t *testing.T, api *API) map[string]RepoInfo {
 func TestHandleGetReposLocalFolderUsesReportedRemote(t *testing.T) {
 	hub := NewHub()
 	d1 := &DaemonConn{ID: "d1", Name: "desk"}
+	d1.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d1.SetCheckedOutRepos([]string{"entertainment", "scratch", "shared", "split"})
 	d1.SetRepoRemotes(map[string]string{
 		"entertainment": "example-org/example-repo",
@@ -96,6 +98,7 @@ func TestHandleGetReposLocalFolderUsesReportedRemote(t *testing.T) {
 	})
 	hub.Register(d1)
 	d2 := &DaemonConn{ID: "d2", Name: "laptop"}
+	d2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d2.SetCheckedOutRepos([]string{"shared", "split"})
 	d2.SetRepoRemotes(map[string]string{
 		"shared": "example-org/shared",
@@ -135,6 +138,7 @@ func TestHandleGetReposLocalFolderUsesReportedRemote(t *testing.T) {
 func TestHandleGetReposWithoutRemoteReport(t *testing.T) {
 	hub := NewHub()
 	d := &DaemonConn{ID: "d1", Name: "desk"}
+	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"example-repo"})
 	hub.Register(d)
 	api := NewAPI(hub, nil, "", nil, "")
@@ -154,6 +158,7 @@ func TestPostSessionsClusterResolvesBareRepoViaRequestedDaemon(t *testing.T) {
 	jm.GitURLBase = "https://github.com"
 	hub.SetJobManager(jm)
 	d := &DaemonConn{ID: "d1", Name: "desk", send: make(chan []byte, 8)}
+	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"entertainment"})
 	d.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo"})
 	hub.Register(d)
@@ -180,10 +185,12 @@ func TestPostSessionsClusterBackstopOnlyUsesRequestedDaemon(t *testing.T) {
 	jm.GitHubOrg = ""
 	hub.SetJobManager(jm)
 	other := &DaemonConn{ID: "d2", Name: "laptop", send: make(chan []byte, 8)}
+	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	other.SetCheckedOutRepos([]string{"entertainment"})
 	other.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo"})
 	hub.Register(other)
 	asked := &DaemonConn{ID: "d1", Name: "desk", send: make(chan []byte, 8)}
+	asked.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	asked.SetCheckedOutRepos([]string{"entertainment"})
 	hub.Register(asked)
 	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
@@ -200,5 +207,29 @@ func TestPostSessionsClusterBackstopOnlyUsesRequestedDaemon(t *testing.T) {
 	}
 	if len(f.created) != 0 {
 		t.Error("no Job should have been created")
+	}
+}
+
+// The launch sheet names the desktop, but a configured default org is the install's answer for a
+// bare name and wins over that desktop's reported remote.
+func TestPostSessionsClusterDefaultOrgWinsOverRequestedDaemon(t *testing.T) {
+	hub := NewHub()
+	f := &fakeK8s{}
+	jm := newTestJobManager(t, f) // default org "org", base https://github.com/org
+	hub.SetJobManager(jm)
+	d := &DaemonConn{ID: "d1", Name: "desk", send: make(chan []byte, 8)}
+	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	d.SetCheckedOutRepos([]string{"entertainment"})
+	d.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo"})
+	hub.Register(d)
+	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+
+	rec := postSpawn(t, api, map[string]any{"repo": "entertainment", "runtime": "cluster", "kind": "agent", "daemon_id": "d1"})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ := json.Marshal(f.created)
+	if !strings.Contains(string(raw), "https://github.com/org/entertainment.git") || strings.Contains(string(raw), "example-org/example-repo") {
+		t.Errorf("the default org did not decide the repository: %s", raw)
 	}
 }

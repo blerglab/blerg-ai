@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // sandboxImage returns the Docker image "Local sandbox" sessions run in.
@@ -47,7 +48,27 @@ func dockerContainerName(sessionID string) string {
 // shape every sandbox lifecycle call (run/rm, and the in-image engine check)
 // needs. A package var so tests can record invocations, or stub them, without
 // a Docker daemon.
-var dockerRun = func(args ...string) error { return exec.Command("docker", args...).Run() } //nolint:gosec // literal docker binary, args assembled by the daemon (no shell)
+var dockerRun = func(args ...string) error {
+	timeout := dockerCallTimeout
+	if len(args) > 0 && args[0] == "exec" {
+		timeout = sandboxTmuxTimeout // a command inside a container: the session's to stall
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...) //nolint:gosec // literal docker binary, args assembled by the daemon (no shell)
+	cmd.WaitDelay = time.Second
+	return cmd.Run()
+}
+
+// dockerCallTimeout bounds every dockerRun and dockerOutput call: no docker call may hold a
+// spawn, a kill or the reattach pass for ever. sandboxTmuxTimeout bounds a tmux call or any other
+// short command (dockerRun "exec") inside a sandbox, and sandboxProbeTimeout the tmux probe of the
+// reattach and cleanup passes.
+var (
+	dockerCallTimeout   = 3 * time.Minute
+	sandboxTmuxTimeout  = 15 * time.Second
+	sandboxProbeTimeout = 10 * time.Second
+)
 
 // dockerRunEnv is dockerRun with extra environment for the docker client
 // process itself. It exists for `docker run -e NAME` (no `=value`): docker
@@ -59,15 +80,22 @@ var dockerRunEnv = func(env []string, args ...string) error {
 	if len(env) == 0 {
 		return dockerRun(args...)
 	}
-	cmd := exec.Command("docker", args...) //nolint:gosec // literal docker binary, argv assembled by the daemon (no shell); container name is generated, remote and image come from validated config
+	ctx, cancel := context.WithTimeout(context.Background(), dockerCallTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...) //nolint:gosec // literal docker binary, argv assembled by the daemon (no shell); container name is generated, remote and image come from validated config
 	cmd.Env = append(os.Environ(), env...)
+	cmd.WaitDelay = time.Second
 	return cmd.Run()
 }
 
 // dockerOutput is dockerRun's sibling for the calls whose stdout matters
 // (`docker ps`). Same reason for being a var: tests stub it.
 var dockerOutput = func(args ...string) ([]byte, error) {
-	return exec.Command("docker", args...).Output() //nolint:gosec // literal docker binary, args assembled by the daemon (no shell)
+	ctx, cancel := context.WithTimeout(context.Background(), dockerCallTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...) //nolint:gosec // literal docker binary, args assembled by the daemon (no shell)
+	cmd.WaitDelay = time.Second
+	return cmd.Output()
 }
 
 // sandboxRegistry maps a sandboxed session's ID to its container name, so the
@@ -96,7 +124,13 @@ func sandboxContainer(sessionID string) (string, bool) {
 func runTmuxFor(sessionID string, args ...string) *exec.Cmd {
 	if container, ok := sandboxContainer(sessionID); ok {
 		full := append([]string{"exec", container, "tmux"}, args...)
-		return exec.Command("docker", full...) //nolint:gosec,noctx // literal docker binary, `exec <container> tmux ...` argv assembled by the daemon (no shell); noctx: short-lived tmux helper invoked from synchronous daemon code without a context
+		// Bounded: the tmux inside a sandbox is the session's to break (a socket that never
+		// answers), and none of these calls may hold the daemon's reattach, poll or kill paths.
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxTmuxTimeout)
+		context.AfterFunc(ctx, cancel)
+		cmd := exec.CommandContext(ctx, "docker", full...) //nolint:gosec // literal docker binary, `exec <container> tmux ...` argv assembled by the daemon (no shell)
+		cmd.WaitDelay = time.Second
+		return cmd
 	}
 	return tmuxCmd(args...)
 }
@@ -355,9 +389,10 @@ func codexHomeMountArg(path string) string {
 // sandboxRunExtras are the per-start additions to `docker run` that depend on
 // the host's state at spawn time rather than on the session.
 type sandboxRunExtras struct {
-	gitMetadata *sandboxGitMetadata
-	network     string // --network <name>; "" = default bridge
-	cliPath     string // host path of the messaging CLI to mount; "" = none
+	// cloneObjects is the read-only mount of a sandbox clone's borrowed objects (sandboxclone.go); "" = none.
+	cloneObjects string
+	network      string // --network <name>; "" = default bridge
+	cliPath      string // host path of the messaging CLI to mount; "" = none
 	// claudeOnly mounts only the claude login (a restricted session runs no other engine).
 	claudeOnly       bool
 	restrictedEngine string
@@ -391,6 +426,9 @@ type sandboxRunExtras struct {
 func sandboxRunArgs(container, hostProjectPath, home string, env []string, extras sandboxRunExtras, extraEnvArgs ...string) []string {
 	args := []string{
 		"run", "-d", "--name", container,
+		// Never an in-band pull under the bounded run: the preflight requires the image to be
+		// local, and a missing one fails at once ("No such image") instead.
+		"--pull=never",
 		// Hardening (desktop-security I7): the container is a containment
 		// boundary for the engine's shell, so it gets no capabilities, no
 		// setuid escalation, and a process/memory ceiling. No --restart: a
@@ -403,8 +441,8 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 		"--mount", sandboxBindMount(hostProjectPath, sandboxWorkdir),
 		"-w", sandboxWorkdir,
 	}
-	if extras.gitMetadata != nil {
-		args = append(args, "--mount", extras.gitMetadata.mountArg())
+	if extras.cloneObjects != "" {
+		args = append(args, "--mount", extras.cloneObjects)
 	}
 	if extras.network != "" {
 		args = append(args, "--network", extras.network)
@@ -534,9 +572,18 @@ func createDockerSandbox(sessionID, hostProjectPath string, inner, env []string,
 // every start, not once at daemon start: the compose stack that creates it can
 // come up (or be upgraded to declare it) after the daemon did.
 func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred sandboxCredential, opts SandboxOptions) (string, error) {
-	metadata, err := sandboxWorktreeGit(hostProjectPath)
-	if err != nil {
+	// Only this session's own clone is ever mounted: never the person's checkout or its .git.
+	if err := sandboxMountRefusal(hostProjectPath, sessionID); err != nil {
 		return "", err
+	}
+	// The clone borrows the repository's objects: they are mounted read-only, from the daemon's
+	// own record of the clone (never from the clone's session-writable alternates file).
+	var cloneObjects string
+	if isSandboxClone(hostProjectPath, sessionID) {
+		var err error
+		if cloneObjects, err = sandboxCloneMount(sessionID); err != nil {
+			return "", err
+		}
 	}
 	container := dockerContainerName(sessionID)
 	// A container from an earlier life of this session (a daemon restart that
@@ -546,7 +593,7 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	// to a session that is being recreated right now either way.
 	forceRemoveContainer(container)
 	home, _ := os.UserHomeDir()
-	extras := sandboxRunExtras{gitMetadata: metadata, cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly, restrictedEngine: opts.RestrictedEngine, pluginCache: opts.PluginCache, codexHome: opts.CodexHome, codexSourceHome: opts.CodexSourceHome}
+	extras := sandboxRunExtras{cloneObjects: cloneObjects, cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly, restrictedEngine: opts.RestrictedEngine, pluginCache: opts.PluginCache, codexHome: opts.CodexHome, codexSourceHome: opts.CodexSourceHome}
 	if opts.Network != "" {
 		exists, err := sandboxNetworkState(opts.Network)
 		if err != nil {
@@ -565,9 +612,6 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	// afterwards leaves a window — however short — in which a concurrent
 	// reconnect could `docker rm -f` the container this spawn just created.
 	// Claiming the name first closes it; the failure path below gives it back.
-	if err := metadata.validate(); err != nil {
-		return "", err
-	}
 	registerSandbox(sessionID, container)
 	if err := dockerRunEnv(cred.clientEnv, sandboxRunArgs(container, hostProjectPath, home, env, extras, cred.args...)...); err != nil {
 		// A half-created container (run failed after the name was taken) would
@@ -636,12 +680,24 @@ func sweepOrphanSandboxContainers(isLive func(sessionID string) bool) {
 		}
 		// Last: it costs a `docker exec` per candidate, and the two cheap
 		// checks above have already excused every live session.
-		if containerHasTmuxServer(name) {
+		if has, known := tmuxProbe(name); has || !known {
 			continue
 		}
 		log.Printf("sandbox: removing orphaned container %s (no live session)", name)
-		forceRemoveContainer(name)
+		// Its clone's leftover work is committed in it and brought back first.
+		finishSandbox(id)
 	}
+}
+
+// containerWorkspaceSource is the host folder a container has mounted at /workspace; ok is false
+// when docker cannot say.
+var containerWorkspaceSource = func(container string) (string, bool) {
+	out, err := dockerOutput("inspect", "--format", `{{range .Mounts}}{{if eq .Destination "`+sandboxWorkdir+`"}}{{.Source}}{{end}}{{end}}`, container)
+	if err != nil {
+		return "", false
+	}
+	source := strings.TrimSpace(string(out))
+	return source, source != "" && filepath.IsAbs(source)
 }
 
 // listSandboxContainers returns the names of the running containers this
@@ -784,7 +840,7 @@ func interruptTurnPID(p sandboxExec, cmd *exec.Cmd, pidFile string) {
 // sandbox image — what preflight checks for a sandboxed agent-kind spawn,
 // since the host PATH says nothing about what the container can run.
 func engineInSandboxImage(bin string) error {
-	return dockerRun("run", "--rm", sandboxImage(), "which", bin)
+	return dockerRun("run", "--rm", "--pull=never", sandboxImage(), "which", bin)
 }
 
 // sandboxImageAvailable reports whether the sandbox image is present on this host,
@@ -811,7 +867,7 @@ func sandboxImageAvailable() bool {
 func listSandboxedTmuxSessions() []string {
 	ids := []string{}
 	for _, name := range listSandboxContainers() {
-		if !containerHasTmuxServer(name) {
+		if has, known := tmuxProbe(name); !has || !known {
 			continue
 		}
 		id := strings.TrimPrefix(name, sandboxContainerPrefix)
@@ -821,8 +877,26 @@ func listSandboxedTmuxSessions() []string {
 	return ids
 }
 
-// containerHasTmuxServer reports whether a sandbox container runs a tmux
-// server (i.e. it hosts a terminal session, not an agent one).
-func containerHasTmuxServer(container string) bool {
-	return dockerRun("exec", container, "tmux", "ls") == nil
+// tmuxProbe reports whether a sandbox container runs a tmux server (it hosts a terminal session,
+// not an agent one). known is false when the probe did not answer within sandboxProbeTimeout: the
+// tmux in a container is the session's own, and one that never answers must not hold the
+// reattach pass, the orphan sweep or a session's end. Callers leave such a container alone.
+func tmuxProbe(container string) (has, known bool) {
+	timedOut, err := dockerProbe(sandboxProbeTimeout, "exec", container, "tmux", "ls")
+	if timedOut {
+		log.Printf("sandbox: container %s did not answer the tmux probe within %s; left alone this pass", container, sandboxProbeTimeout)
+		return false, false
+	}
+	return err == nil, true
+}
+
+// dockerProbe runs `docker <args>` bounded by timeout and says whether it timed out. A var so
+// tests can stub it.
+var dockerProbe = func(timeout time.Duration, args ...string) (timedOut bool, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...) //nolint:gosec // literal docker binary, daemon-built argv
+	cmd.WaitDelay = time.Second
+	err = cmd.Run()
+	return ctx.Err() != nil, err
 }

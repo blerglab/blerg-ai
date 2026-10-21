@@ -14,6 +14,7 @@ import (
 func (fx *topicFx) agentOn() *DaemonConn {
 	fx.t.Helper()
 	dc := &DaemonConn{ID: topicDaemonID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 32)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetInputReceipts(true)
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
@@ -44,7 +45,7 @@ func TestApprovedFilingIsDeliveredToTheAgent(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("agent got %d proposal messages, want 1: %q", len(msgs), msgs)
 	}
-	for _, want := range []string{"Proposal " + p.ID + " approved: A #7 'Read back' created", "blerg-runner ticket status " + p.ID} {
+	for _, want := range []string{"Proposal " + p.ID + " approved: board \"A\" #7 \"Read back\" created", "blerg-runner ticket status " + p.ID} {
 		if !strings.Contains(msgs[0], want) {
 			t.Fatalf("message %q lacks %q", msgs[0], want)
 		}

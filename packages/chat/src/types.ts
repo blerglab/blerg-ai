@@ -11,6 +11,7 @@ export type AgentEventKind =
   | 'assistant_thinking'
   | 'thinking_started'
   | 'thinking_done'
+  | 'thinking_progress'
   | 'tool_call'
   | 'tool_result'
   | 'provider_blocks'
@@ -65,7 +66,9 @@ export interface AgentEvent {
 // message_id: on an ask_answer, the ask (messages API id) it answers.
 export interface SessionUploadPayload { name: string; size: number; artifact_id: string; from_session_id: string; from_title: string }
 
-export interface UserMessagePayload { text: string; source: string; client_id?: string; message_id?: string }
+// answered_by: "session" on an ask_answer the parent session gave its child (set by the runner from
+// the parent's own token); absent on the person's answer.
+export interface UserMessagePayload { text: string; source: string; client_id?: string; message_id?: string; answered_by?: string }
 // parent_call_id (on assistant text, thinking, tool calls and results): the event belongs to a
 // subagent, started by the tool call with this call id (its subagent_started child_id). Absent on
 // the main agent's own events, and on every event of a daemon older than the field.
@@ -74,7 +77,7 @@ export interface AssistantTextPayload { text: string; done: boolean; parent_call
 export interface AssistantThinkingPayload { text: string; parent_call_id?: string }
 /** kinds "thinking_started" / "thinking_done": a thinking block opened or closed. Transient (sent
  *  live only, never held in the transcript) and without text; model/workingActivity reads them. */
-export interface ThinkingPayload { parent_call_id?: string }
+export interface ThinkingPayload { parent_call_id?: string; tokens?: number }
 export interface ToolCallPayload { tool: string; call_id: string; input: unknown; parent_call_id?: string }
 export interface ToolResultPayload { call_id: string; output: string; is_error: boolean; duration_ms: number; parent_call_id?: string }
 export interface StatusPayload { status: string; reason: string }
@@ -82,7 +85,9 @@ export interface CheckInPayload { phase: string; summary: string }
 // kinds ask | update | note: what the agent sent the person (blerg-runner ask/update/note, or the
 // native loop's tools). message_id: the messages API id (an ask's answer names it); absent on
 // older events and on native updates and notes.
-export interface MessagingPayload { body: string; message_id?: string }
+// no_wait: a question the agent does not wait on (`blerg-runner ask --no-wait`): only an answer
+// addressed to it (its card, the host's Needs you) answers it, never the composer's next message.
+export interface MessagingPayload { body: string; message_id?: string; owner_only?: boolean; no_wait?: boolean }
 export interface ModelChangedPayload { model: string; effort: string; source: string }
 // kinds subagent_started | subagent_update | subagent_done. The optional fields come from a Claude
 // Code session: an update carries the subagent's model and running totals; a done carries the
@@ -134,6 +139,8 @@ export interface TicketComment { author?: string; at?: string; body: string }
 export interface Ticket {
   source: string
   key: string
+  /** A Blerg Board card's board (source "blerg-board", key "#<number>"): the host can show it live. */
+  board_id?: string
   url?: string
   title: string
   status?: string
@@ -418,6 +425,8 @@ export interface DelegationRequestPayload {
     capped_until?: string | null
     note?: string
   }
+  /** Board levels the session passes down to the child (never above its own); absent when none. */
+  boards?: { board: string; name?: string; level: string }[]
   /** The choices the server offers this person for this request. */
   offered: DelegationChoice[]
   expires_at: string

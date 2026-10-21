@@ -245,7 +245,8 @@ func TestHermesApprovalQuestionIsPostedOwnerOnly(t *testing.T) {
 	for _, approval := range []bool{true, false} {
 		r, _, w := hermesSecurityRun(t)
 		r.begin()
-		r.d.AskUser = codexQuestionHandler(server.URL, "fixture-token", "session", &collectEmitter{})
+		em := &collectEmitter{}
+		r.d.AskUser = codexQuestionHandler(server.URL, "fixture-token", "session", em)
 		if approval {
 			params, _ := json.Marshal(map[string]any{"session_id": "owned-runtime", "request_id": "approval-o", "command": "true", "choices": []string{"once", "deny"}})
 			r.request(hermesFrame{ID: json.RawMessage(`"srq-o"`), Method: "approval", Params: params})
@@ -263,6 +264,22 @@ func TestHermesApprovalQuestionIsPostedOwnerOnly(t *testing.T) {
 			t.Fatalf("approval=%v posted owner_only=%v: %v", approval, body["owner_only"], body)
 		}
 		waitUntil(t, "native reply", func() bool { return strings.Contains(w.snapshot(), `"result"`) })
+		found := false
+		for _, ev := range em.snapshot() {
+			if ev.Kind == "ask" {
+				raw, _ := json.Marshal(ev.Payload)
+				var payload map[string]any
+				_ = json.Unmarshal(raw, &payload)
+				if got, _ := payload["owner_only"].(bool); got != approval {
+					t.Fatalf("approval=%v event owner_only=%v", approval, payload["owner_only"])
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("no visible ask")
+		}
+
 	}
 }
 

@@ -100,3 +100,43 @@ func TestCodexChildQuestionKeepsIndependentPrivateRoute(t *testing.T) {
 		t.Fatalf("child question bound to unrelated root turn: %q", route)
 	}
 }
+
+// An owner-only approval that could not be posted says why: the runner-key explanation only on
+// the server's 409, a delivery failure otherwise (a server error, an unreachable server).
+func TestOwnerOnlyApprovalFailureSaysWhy(t *testing.T) {
+	refusing := func(status int) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "refused", status)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+	for name, tc := range map[string]struct {
+		base      string
+		runnerKey bool
+	}{
+		"409":         {refusing(http.StatusConflict), true},
+		"500":         {refusing(http.StatusInternalServerError), false},
+		"unreachable": {closedURL, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			em := &collectEmitter{}
+			ask := codexQuestionHandler(tc.base, "fixture-token", "session", em)
+			if _, err := ask(withOwnerOnlyAsk(t.Context()), "Allow rm?"); err == nil {
+				t.Fatal("an undelivered approval was answered")
+			}
+			var msg string
+			for _, ev := range em.snapshot() {
+				if p, ok := ev.Payload.(agent.ErrorPayload); ok && ev.Kind == "error" {
+					msg = p.Message
+				}
+			}
+			if msg == "" || strings.Contains(strings.ToLower(msg), "runner-key") != tc.runnerKey {
+				t.Fatalf("error %q, want runner-key explanation %v", msg, tc.runnerKey)
+			}
+		})
+	}
+}

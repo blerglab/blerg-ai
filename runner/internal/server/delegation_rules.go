@@ -20,7 +20,7 @@ import (
 const (
 	msgRuleSignIn     = "sign in again to change this"
 	msgRuleNotFound   = "not found"
-	msgRuleBody       = `the body is {"engine", "runtime": "docker" | "daemon", "daemon_id", "local_only"?}`
+	msgRuleBody       = `the body is {"engine", "runtime": "docker" | "daemon" | "cluster", "daemon_id" (not for "cluster"), "local_only"?}`
 	maxRuleBodyBytes  = 4 << 10
 	ruleCreatedViaSet = "settings"
 )
@@ -106,7 +106,10 @@ type postDelegationRuleBody struct {
 
 // HandlePostDelegationRule is POST /api/delegation-rules: a rule from Settings. local_only
 // defaults on for Hermes and OpenClaw. The daemon must be a workstation the server knows (it may be
-// offline: rules outlive a sleeping laptop).
+// offline: rules outlive a sleeping laptop); a cluster rule (runtime "cluster", on an install with a
+// cluster runtime) names no daemon and is keyed on the cluster's, as a card's "Always allow … on the
+// cluster" is. It applies to the cluster children of every direct session of the person, desktop or
+// cluster.
 func (a *API) HandlePostDelegationRule(w http.ResponseWriter, r *http.Request) {
 	account, ok := a.ruleOwner(w, r)
 	if !ok {
@@ -129,19 +132,33 @@ func (a *API) HandlePostDelegationRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "unknown engine")
 		return
 	}
-	if body.Runtime != runnerRuntimeDocker && body.Runtime != runnerRuntimeDaemon {
-		writeError(w, http.StatusUnprocessableEntity, childRuntimeMessage)
+	if body.Runtime != runnerRuntimeDocker && body.Runtime != runnerRuntimeDaemon && body.Runtime != runnerRuntimeCluster {
+		writeError(w, http.StatusUnprocessableEntity, childRuntimeMessageCluster)
 		return
 	}
 	if !containsString(desc.Runtimes, body.Runtime) {
 		writeError(w, http.StatusUnprocessableEntity, engineLabel(desc.ID)+" does not run in "+body.Runtime)
 		return
 	}
-	if !validSessionID(body.DaemonID) || body.DaemonID == clusterDaemonID {
+	if body.Runtime == runnerRuntimeCluster {
+		if a.hub.JobManager() == nil {
+			writeError(w, http.StatusUnprocessableEntity, "this install has no cluster")
+			return
+		}
+		if body.DaemonID != "" && body.DaemonID != clusterDaemonID {
+			writeError(w, http.StatusUnprocessableEntity, "a cluster rule names no daemon")
+			return
+		}
+		body.DaemonID = clusterDaemonID
+		// The rule names the cluster's daemon row, which no cluster session may have made yet.
+		if err := db.UpsertDaemon(r.Context(), a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+			writeDatabaseFailure(w, "check the daemon", "delegation cluster daemon", err)
+			return
+		}
+	} else if !validSessionID(body.DaemonID) || body.DaemonID == clusterDaemonID {
 		writeError(w, http.StatusUnprocessableEntity, "unknown daemon")
 		return
-	}
-	if _, host, err := db.HostDaemonName(r.Context(), a.dbPool, body.DaemonID); err != nil {
+	} else if _, host, err := db.HostDaemonName(r.Context(), a.dbPool, body.DaemonID); err != nil {
 		writeDatabaseFailure(w, "check the daemon", "delegation HostDaemonName", err)
 		return
 	} else if !host {

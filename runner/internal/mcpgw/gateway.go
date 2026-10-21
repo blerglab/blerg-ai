@@ -122,6 +122,10 @@ type Gateway struct {
 	trustedMu sync.RWMutex
 	trusted   []netip.Prefix
 	lookups   *lookupBudget
+	recent    recentGrants
+	// unrevoked are the session board credentials whose revoke failed, per account, until they
+	// expire (CallBoard stops minting past maxUnrevokedBoardTokens).
+	unrevoked unrevokedBoardTokens
 }
 
 // SetTrustedProxies sets the proxies (BLERG_RUNNER_TRUSTED_PROXIES) whose X-Forwarded-For and
@@ -222,10 +226,12 @@ func (g *Gateway) Handler() http.Handler {
 //   - Every refusal before a grant is accepted (no token, a malformed, unknown or stale one, a grant
 //     accept refuses, a path that does not name the grant's connection) is the same JSON-RPC 401,
 //     so the route never tells whether a token exists.
+//     When accept cannot answer (its database failed) the request gets a retryable 503 instead:
+//     the token stays in the recent-grant cache and no failure is counted against it.
 //   - A client is the real one behind a trusted proxy (SetTrustedProxies). A malformed token from
 //     an address over its failure allowance is turned away; a well-formed one is still looked up,
 //     within a global budget, so a valid token is served.
-func (g *Gateway) PublicHandler(accept func(context.Context, *db.MCPGrant) bool) http.Handler {
+func (g *Gateway) PublicHandler(accept func(context.Context, *db.MCPGrant) (bool, error)) http.Handler {
 	mux := http.NewServeMux()
 	m := &mount{accept: accept, public: true}
 	mux.HandleFunc(PathPrefix+"{name}", func(w http.ResponseWriter, r *http.Request) { g.serve(w, r, m) })
@@ -234,7 +240,7 @@ func (g *Gateway) PublicHandler(accept func(context.Context, *db.MCPGrant) bool)
 
 // mount is how the gateway is mounted: nil is its own listener (Handler).
 type mount struct {
-	accept func(context.Context, *db.MCPGrant) bool
+	accept func(context.Context, *db.MCPGrant) (bool, error)
 	public bool
 }
 
@@ -433,7 +439,7 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, m *mount)
 		tooMany()
 		return nil, ""
 	}
-	if public && g.ipLimiter.blocked(ip) && !g.lookups.take() {
+	if public && g.ipLimiter.blocked(ip) && !g.recent.contains(sum, g.now()) && !g.lookups.take() {
 		// The public route: an address over its allowance still has a well-formed token looked
 		// up, so a valid one is served, but only within a global budget that bounds the lookups
 		// a flood can cause.
@@ -442,6 +448,7 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, m *mount)
 	}
 	gr, err := db.MCPGrantByTokenHash(r.Context(), g.cfg.DB, sum[:])
 	if errors.Is(err, db.ErrMCPGrantNotFound) {
+		g.recent.forget(sum)
 		// A well-formed token that matches nothing counts against the address as well as the pair,
 		// and past the address allowance is turned away with 429, so spraying distinct plausible
 		// tokens is bounded too. A valid token never reaches here, so it is never turned away.
@@ -462,6 +469,7 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, m *mount)
 		return nil, ""
 	}
 	if subtle.ConstantTimeCompare(gr.TokenHash, sum[:]) != 1 {
+		g.recent.forget(sum)
 		unauthorized(key)
 		return nil, ""
 	}
@@ -474,8 +482,25 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, m *mount) {
 		return
 	}
 	if m != nil && m.public {
+		accepted := true
+		if m.accept != nil {
+			ok, err := m.accept(r.Context(), gr)
+			if err != nil {
+				// The runner could not tell: not a refusal, so the token keeps its place in the
+				// recent-grant cache and nothing counts against it. Accept runs before the path check,
+				// so a valid token on another connection's path also gets this 503 while the database
+				// is down, not the 401: only a holder of a valid token can see that, and no caller can
+				// cause the database error.
+				log.Printf("mcpgw: public route accept: %v", err)
+				w.Header().Set("Retry-After", "5")
+				writeRPCError(w, http.StatusServiceUnavailable, nil, codeGateway, "unavailable")
+				return
+			}
+			accepted = ok
+		}
 		// Refused exactly like an unknown token, and counted the same way.
-		if (m.accept != nil && !m.accept(r.Context(), gr)) || r.PathValue("name") != gr.Name {
+		if !accepted || r.PathValue("name") != gr.Name {
+			g.recent.forget(sha256.Sum256([]byte(bearer(r))))
 			ip := publicClientIP(r, g.trustedProxies())
 			if g.ipLimiter.blocked(ip) {
 				// From a throttled address every unsuccessful token gets the same 429, a token
@@ -490,6 +515,9 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, m *mount) {
 			writeRPCError(w, http.StatusUnauthorized, nil, codeUnauthorized, "unauthorized")
 			return
 		}
+	}
+	if m != nil && m.public {
+		g.recent.remember(sha256.Sum256([]byte(bearer(r))), g.now())
 	}
 	// One token per (session, connection): the path names the connection and must agree.
 	if r.PathValue("name") != gr.Name {
@@ -841,6 +869,13 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 		unknown := refuse(mode, p.Name, "refused", codeInvalidParams, "unknown tool")
 		if mode == "off" {
 			return unknown
+		}
+		if gr.Builtin != "" {
+			// The session's board level (0.4.4), read on every call: lowering or revoking it holds
+			// at the agent's next call.
+			if level := g.boardGrantLevel(ctx, gr); !BoardLevelAllows(level, p.Name) {
+				return refuse(mode, p.Name, "refused", codeInvalidParams, BoardLevelRefusal(gr.BuiltinRef, level, p.Name))
+			}
 		}
 		if gr.Builtin == "" {
 			if !entry.IsListed() {

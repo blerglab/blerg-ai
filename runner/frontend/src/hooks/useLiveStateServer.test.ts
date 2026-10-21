@@ -57,7 +57,7 @@ describe('useLiveStateServer', () => {
     expect(fetchMock).toHaveBeenCalledWith(URL_OF, { headers: {} })
     expect(result.current.status).toBe('ready')
     if (result.current.status !== 'ready') return
-    expect(result.current.view.counts).toEqual({ needsYou: 1, running: 0 })
+    expect(result.current.view.counts).toEqual({ needsYou: 1 })
     fetchMock.mockResolvedValueOnce(res(304, ''))
     rerender({ k: 'b' })
     await wait(GAP)
@@ -127,7 +127,7 @@ describe('useLiveStateServer', () => {
     if (result.current.status !== 'ready') return
     expect(result.current.view.asks.map(a => a.question)).toEqual(['Ship it?'])
     expect(result.current.view.subagents.map(s => s.key)).toEqual(['k1'])
-    expect(result.current.view.counts).toEqual({ needsYou: 1, running: 1 })
+    expect(result.current.view.counts).toEqual({ needsYou: 1 })
     ingest('user_message', { source: 'ask_answer', message_id: 'm1', text: 'yes' })
     expect(result.current.status === 'ready' && result.current.view.asks).toEqual([])
     // The next read covers them: nothing is folded twice.

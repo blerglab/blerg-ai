@@ -118,7 +118,7 @@ func TestStartSandboxContainerSetsNoProxyOnTheNetwork(t *testing.T) {
 	calls := recordDockerRun(t, true)
 	t.Cleanup(func() { unregisterSandbox("s-noproxy") })
 
-	if _, err := startSandboxContainer("s-noproxy", t.TempDir(), []string{"BLERG_RUNNER_SESSION_ID=s1"},
+	if _, err := startSandboxContainer("s-noproxy", sandboxTestClone(t, "s-noproxy"), []string{"BLERG_RUNNER_SESSION_ID=s1"},
 		sandboxCredential{}, SandboxOptions{Network: "blerg-sandbox"}); err != nil {
 		t.Fatalf("startSandboxContainer: %v", err)
 	}

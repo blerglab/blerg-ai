@@ -27,6 +27,7 @@ func mdl(id string, efforts ...string) models.Model {
 
 func reportingDaemon(hub *Hub, id string, reports map[string]models.Report) *DaemonConn {
 	dc := &DaemonConn{ID: id, Name: "host-" + id, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetCheckedOutRepos([]string{"app"})
 	dc.SetEngineModels(reports)
 	hub.Register(dc)
@@ -36,6 +37,7 @@ func reportingDaemon(hub *Hub, id string, reports map[string]models.Report) *Dae
 // A daemon's report is re-validated on arrival, whatever the daemon did.
 func TestDaemonConnSanitizesReportedModels(t *testing.T) {
 	dc := &DaemonConn{ID: "d1"}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetEngineModels(map[string]models.Report{
 		"codex": {Models: []models.Model{
 			{ID: "--dangerously-bypass-approvals-and-sandbox", Efforts: []string{"high"}},

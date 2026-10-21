@@ -63,6 +63,7 @@ func TestProgressEndpointRejectsOtherSessionsAndMalformedScopes(t *testing.T) {
 func TestProgressOriginBrokerRejectsWrongDaemonSessionAndTimeout(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
 	result := make(chan error, 1)
@@ -95,6 +96,7 @@ func TestProgressOriginBrokerRejectsWrongDaemonSessionAndTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := NewHub()
 		dc := &DaemonConn{ID: "old", send: make(chan []byte, 8)}
+		dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 		h.Register(dc)
 		h.SetSessionOwner("session", dc.ID)
 		start := time.Now()
@@ -108,6 +110,7 @@ func TestProgressOriginBrokerRejectsWrongDaemonSessionAndTimeout(t *testing.T) {
 func TestProgressEndpointResolvesChildAndNeverFallsBackToRoot(t *testing.T) {
 	fx := newWorkFx(t)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 16)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	fx.event(fx.sess, "subagent_started", map[string]any{"child_id": "child", "summary": "Child work"})
@@ -174,6 +177,7 @@ func TestProgressEndpointResolvesChildAndNeverFallsBackToRoot(t *testing.T) {
 func TestProgressPermanentAuthorityRefusalReleasesOnlyMatchingIngestHold(t *testing.T) {
 	fx := newWorkFx(t)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	id := newUUID()
 	fx.api.hub.ingest.failed(fx.sess, id, errors.New("fixture transient database failure"))
@@ -205,6 +209,7 @@ func TestProgressRuntimeRotationBetweenOriginAndSessionLockRefusesAppend(t *test
 		t.Fatal(err)
 	}
 	dc := &DaemonConn{ID: topicDaemonID, RuntimeTokenID: runtimeToken.ID, BoundSessionID: fx.sess, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	block, err := fx.pool.Begin(t.Context())

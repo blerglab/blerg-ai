@@ -525,7 +525,7 @@ func ListChildSessions(ctx context.Context, pool *pgxpool.Pool, parentID string)
 		SELECT s.id::text, COALESCE(s.title, ''), COALESCE(s.engine, ''), COALESCE(s.model, ''),
 		       COALESCE(s.effort, ''), COALESCE(s.runtime, ''), s.status, COALESCE(s.delegation_via, ''),
 		       s.started_at, s.ended_at, s.keep_running,
-		       (SELECT count(*) FROM messages m WHERE m.session_id = s.id AND m.kind = 'ask' AND m.status = 'open'),
+		       (SELECT count(*) FROM messages m WHERE m.session_id = s.id AND m.kind = 'ask' AND m.status = 'open' AND NOT m.no_wait),
 		       COALESCE(s.spawning_account_id,'')
 		  FROM sessions s
 		 WHERE s.parent_session_id = $1::uuid AND s.archived_at IS NULL
@@ -567,7 +567,7 @@ func ReadChildrenDigest(ctx context.Context, pool *pgxpool.Pool, parentID string
 		       COALESCE(max(e.seq), 0)::bigint
 		  FROM sessions s
 		  LEFT JOIN LATERAL (SELECT count(*) AS n FROM messages m
-		                      WHERE m.session_id = s.id AND m.kind = 'ask' AND m.status = 'open') a ON true
+		                      WHERE m.session_id = s.id AND m.kind = 'ask' AND m.status = 'open' AND NOT m.no_wait) a ON true
 		  LEFT JOIN LATERAL (SELECT max(ev.seq) AS seq FROM agent_events ev WHERE ev.session_id = s.id) e ON true
 		 WHERE s.parent_session_id = $1::uuid`, parentID,
 	).Scan(&d.Count, &d.Statuses, &d.MaxEndedAt, &d.OpenAsks, &d.MaxSeq)

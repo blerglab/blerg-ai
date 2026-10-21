@@ -541,20 +541,20 @@ func mcpGatewayPublic(v string) bool {
 }
 
 // publicGrantUsable is the public route's accept: the grant was issued for it, its session runs on
-// a daemon, and it is within its idle limit (which this use renews).
-func (a *API) publicGrantUsable(ctx context.Context, gr *db.MCPGrant) bool {
+// a daemon, and it is within its idle limit (which this use renews). A database error is returned,
+// not read as a refusal: the gateway answers 503 and leaves the token's standing alone.
+func (a *API) publicGrantUsable(ctx context.Context, gr *db.MCPGrant) (bool, error) {
 	if a.dbPool == nil || gr == nil {
-		return false
+		return false, nil
 	}
 	row, err := db.GetSession(ctx, a.dbPool, gr.SessionID)
-	if err != nil || row == nil || row.DaemonID == clusterDaemonID || derefOrEmpty(row.Runtime) == runnerRuntimeCluster {
-		return false
-	}
-	ok, err := db.UsePublicMCPGrant(ctx, a.dbPool, gr.TokenHash, publicGrantIdle)
 	if err != nil {
-		log.Printf("mcp gateway public route: %v", err)
+		return false, fmt.Errorf("public route session %s: %w", gr.SessionID, err)
 	}
-	return ok
+	if row == nil || row.DaemonID == clusterDaemonID || derefOrEmpty(row.Runtime) == runnerRuntimeCluster {
+		return false, nil
+	}
+	return db.UsePublicMCPGrant(ctx, a.dbPool, gr.TokenHash, publicGrantIdle)
 }
 
 // gatewayViaServer reports whether a grant delivered to dc should be dialled through the server's

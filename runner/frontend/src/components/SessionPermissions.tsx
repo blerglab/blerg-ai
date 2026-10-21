@@ -11,14 +11,15 @@ import { useSessionBoards } from '../lib/sessionBoards'
 import type { LiveDelegationGrant } from '../lib/liveState'
 import { refreshChildren } from '../hooks/useChildrenSignal'
 import { useChildApproval } from '../hooks/useChildApproval'
-import { grantDetail, grantScope, grantTarget, inactiveLabel, readPermissions, type ProposalGrant, type PermissionsView } from '../lib/sessionPermissions'
-import { changeSummary, delegationKey, sessionChildOption, toolKey, type PermissionChanges } from '../lib/permissionsModal'
+import { boardCaps, boardChip, boardDetail, boardName, boardScope, grantDetail, grantScope, grantTarget, inactiveLabel, ownLevel, readPermissions, type BoardAccess, type ProposalGrant, type PermissionsView } from '../lib/sessionPermissions'
+import { CHILD_APPROVAL_NOTE, changeSummary, delegationKey, sessionChildOption, toolKey, type PermissionChanges } from '../lib/permissionsModal'
 import PermissionsModal, { type ActiveEntry, type Loadable, type SaveOutcome } from './PermissionsModal'
 import './SessionPermissions.css'
 
 // Board and tool permissions could not be read: the modal still manages children, and says why
 // the rest is missing.
-const UNREADABLE: PermissionsView = { can_grant: false, reason: 'Board and tool permissions could not be loaded. Close this and use Refresh in the panel.', grants: [], mcp_tools: [] }
+const UNREADABLE: PermissionsView = { can_grant: false, reason: 'Board and tool permissions could not be loaded. Close this and use Refresh in the panel.', grants: [], mcp_tools: [], boards: [] }
+const SIGNED_OUT = 'Needs you signed in: Renew it, or choose another level'
 
 interface ChildGroup { key: string; label: string; chip: string; ids: string[] }
 
@@ -26,9 +27,10 @@ interface ChildGroup { key: string; label: string; chip: string; ids: string[] }
  *  permission a person recognizes, however many engines it covers. */
 function childGroups(grants: LiveDelegationGrant[]): ChildGroup[] {
   const groups = new Map<string, ChildGroup & { engines: string[]; where: string }>()
-  const multipleDaemons = new Set(grants.map(g => g.daemon_id ?? '')).size > 1
+  // The cluster is one place, named by its runtime; only desktops need their names told apart.
+  const multipleDaemons = new Set(grants.filter(g => g.runtime !== 'cluster').map(g => g.daemon_id ?? '')).size > 1
   for (const g of grants) {
-    const where = `${RUNTIME_LABELS[g.runtime] ?? g.runtime}${multipleDaemons ? ` · ${g.daemon_name || g.daemon_id || 'Unknown desktop'}` : ''}`
+    const where = `${RUNTIME_LABELS[g.runtime] ?? g.runtime}${multipleDaemons && g.runtime !== 'cluster' ? ` · ${g.daemon_name || g.daemon_id || 'Unknown desktop'}` : ''}`
     const engine = ENGINE_LABELS[g.engine] ?? g.engine
     const key = delegationKey(g.runtime, where)
     const group = groups.get(key) ?? { key, label: '', chip: '', ids: [], engines: [], where }
@@ -117,6 +119,9 @@ function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest,
     finally { await load(); setBusy(null) }
   }
   const revoke = (id: string) => change(id, () => apiFetch(`/api/proposal-grants/${encodeURIComponent(id)}/revoke`, { method: 'POST' }), 'Could not revoke the permission. Try again.')
+  // A board's × lowers it to propose (every board's default), the launch board included.
+  const revokeBoard = (b: BoardAccess) => change(`b:${b.board_id}`, () => apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/board-access`,
+    { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ board_id: b.board_id, level: 'propose' }) }), 'Could not revoke the board access. Try again.')
   // Every grant of the row is revoked, and all of them are waited for before another try.
   const revokeChildren = (ids: string[]) => change(ids[0], async () => {
     const results = await Promise.allSettled(ids.map(id => apiFetch(`/api/delegation-grants/${encodeURIComponent(id)}/revoke`, { method: 'POST' })))
@@ -127,10 +132,14 @@ function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest,
 
   const groups = useMemo(() => childGroups(delegationGrants), [delegationGrants])
   if (state === 'hidden') return null
-  const allGrants = view?.grants ?? []
+  // Board permissions are listed by board (with their level); grants here are the MCP tools.
+  const allGrants = (view?.grants ?? []).filter(g => g.kind === 'mcp_tool')
   const grants = allGrants.filter(g => g.active !== false)
   const dormant = allGrants.filter(g => g.active === false)
-  const count = groups.length + grants.length
+  const allBoards = view?.boards ?? []
+  const boards = allBoards.filter(b => b.active !== false)
+  const dormantBoards = allBoards.filter(b => b.active === false)
+  const count = groups.length + boards.length + grants.length
 
   return (
     <section className="rail-section perm-block" aria-labelledby={headId} data-testid="rail-permissions">
@@ -142,15 +151,18 @@ function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest,
       <div role="group" aria-label="Session permissions" className="perm-group">
         {state === 'loading' && !view && <p className="child-approval-note">Loading permissions…</p>}
         {view && !view.can_grant && view.reason && <p className="child-approval-note" data-testid="perm-reason">{view.reason}</p>}
-        {state === 'ready' && count === 0 && dormant.length === 0 && <p className="child-approval-note">None yet: this session asks you each time.</p>}
+        {state === 'ready' && count === 0 && dormant.length + dormantBoards.length === 0 && <p className="child-approval-note">None yet: this session asks you each time.</p>}
         {count > 0 && <ul className="perm-chips" data-testid="perm-active" aria-label="Active permissions">
           {groups.map(c => <Chip key={c.key} glyph="↳" text={c.chip} scope={c.label} title={`${c.label} without asking`} disabled={busy !== null} onRevoke={() => { void revokeChildren(c.ids) }} />)}
-          {grants.map(g => <Chip key={g.id} testId="perm-grant" glyph={g.kind === 'board_file' ? '▦' : '⚙'} text={grantTarget(g)} scope={grantScope(g)} title={`${grantScope(g)} · ${grantDetail(g)}`} disabled={busy !== null} onRevoke={() => { void revoke(g.id) }} />)}
+          {boards.map(b => <Chip key={`b:${b.board_id}`} testId="perm-board" glyph="▦" text={boardChip(b)} scope={boardScope(b)} title={`${boardScope(b)} · ${boardDetail(b)}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
+          {grants.map(g => <Chip key={g.id} testId="perm-grant" glyph="⚙" text={grantTarget(g)} scope={grantScope(g)} title={`${grantScope(g)} · ${grantDetail(g)}`} disabled={busy !== null} onRevoke={() => { void revoke(g.id) }} />)}
         </ul>}
-        {dormant.length > 0 && <div className="perm-dormant-list" data-testid="perm-inactive">
+        {dormant.length + dormantBoards.length > 0 && <div className="perm-dormant-list" data-testid="perm-inactive">
           <p className="perm-dormant-head">Not approving now</p>
           <ul className="perm-chips">
-            {dormant.map(g => <Chip key={g.id} dormant glyph={g.kind === 'board_file' ? '▦' : '⚙'} text={grantTarget(g)} scope={grantScope(g)}
+            {dormantBoards.map(b => <Chip key={`b:${b.board_id}`} dormant glyph="▦" text={boardChip(b)} scope={boardScope(b)} why="Needs you signed in"
+              title={`${boardScope(b)}. ${SIGNED_OUT}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
+            {dormant.map(g => <Chip key={g.id} dormant glyph="⚙" text={grantTarget(g)} scope={grantScope(g)}
               why={g.inactive === 'tool_changed' ? 'tool changed' : 'Needs you signed in'} title={`${grantScope(g)}. ${inactiveLabel(g)}`} disabled={busy !== null} onRevoke={() => { void revoke(g.id) }} />)}
           </ul>
         </div>}
@@ -180,44 +192,53 @@ function SessionPermissionsModal({ sessionId, view, groups, refreshKey, initialF
 }) {
   const approval = useChildApproval(sessionId, true, refreshKey)
   const boardsRead = useSessionBoards(view.can_grant)
-  const allGrants = view.grants
+  const allGrants = view.grants.filter(g => g.kind === 'mcp_tool')
   const grants = allGrants.filter(g => g.active !== false)
   const dormant = allGrants.filter(g => g.active === false)
+  const levels = view.boards
 
   const children: Loadable<{ options: ReturnType<typeof sessionChildOption>[]; note: string }> = approval.loading ? { state: 'loading' }
     : approval.value ? { state: 'ready', value: {
       options: approval.value.runtimes.map(sessionChildOption),
-      note: `Children of this session ${approval.value.runtimes.some(r => r.runtime === 'cluster') ? 'on the cluster' : 'on this desktop'}, in any repository, with the engines listed; a newly available engine asks again. Turning one off stops new automatic starts; running children keep running. This does not change desktop rules.`,
+      note: CHILD_APPROVAL_NOTE,
     } }
       : approval.error ? { state: 'failed', message: approval.error, retry: approval.refresh } : { state: 'none' }
-  // Boards the person can file to, and any granted board discovery no longer lists.
+  // The person's boards, and any board with a level that their board discovery no longer lists.
   const boardRows = useMemo(() => {
     const listed = boardsRead.state === 'ready' ? boardsRead.boards : []
-    const extra = allGrants.filter((g, i, all) => g.kind === 'board_file' && all.findIndex(x => x.board_id === g.board_id) === i && !listed.some(b => b.id === g.board_id)).map(g => ({ id: g.board_id ?? '', name: g.board_name || g.board_id || '' }))
+    const extra = levels.filter(b => !listed.some(x => x.id === b.board_id)).map(b => ({ id: b.board_id, name: boardName(b) }))
     return [...listed, ...extra]
-  }, [boardsRead, allGrants])
+  }, [boardsRead, levels])
+  const nameOf = (b: BoardAccess) => b.board_name || boardRows.find(x => x.id === b.board_id)?.name || b.board_id
+  const boardInfo = Object.fromEntries(levels.map(b => [b.board_id, { launch: b.launch, dormant: b.active === false ? SIGNED_OUT : undefined }]))
   const boards: Loadable<{ id: string; name: string }[]> = boardsRead.state === 'loading' ? { state: 'loading' }
     : boardsRead.state === 'failed' ? { state: 'failed', message: 'Boards are unavailable.', retry: boardsRead.retry } : { state: 'ready', value: boardRows }
   const tools = view.mcp_tools.map(t => ({ ...t, changed: dormant.some(g => g.kind === 'mcp_tool' && g.inactive === 'tool_changed' && g.connection_id === t.connection_id && g.tool === t.tool) }))
   // The modal keeps the person's changes as overrides on this, so a refresh under it keeps them.
   const initial = {
-    boards: grants.filter(g => g.kind === 'board_file').map(g => g.board_id ?? ''),
+    // A started session's own level: Save changes it; the parent's level caps it.
+    boards: Object.fromEntries(levels.map(b => [b.board_id, ownLevel(b)])),
     tools: grants.filter(g => g.kind === 'mcp_tool').map(g => toolKey(g.connection_id ?? '', g.tool ?? '')),
     revokeDelegations: [], revokeDormant: [],
   }
   const active: ActiveEntry[] = [
     ...groups.map(c => ({ key: c.key, kind: 'child' as const, label: c.label, detail: 'Allowed for this session', target: { delegation: c.key } })),
-    ...grants.map(g => ({ key: g.id, kind: g.kind === 'board_file' ? 'board' as const : 'tool' as const, label: grantScope(g), detail: grantDetail(g),
-      target: g.kind === 'board_file' ? { board: g.board_id ?? '' } : { tool: toolKey(g.connection_id ?? '', g.tool ?? '') } })),
-    ...dormant.map(g => ({ key: g.id, kind: g.kind === 'board_file' ? 'board' as const : 'tool' as const, label: grantScope(g), detail: grantDetail(g),
+    ...levels.map(b => ({ key: `b:${b.board_id}`, kind: 'board' as const, label: boardChip({ ...b, board_name: nameOf(b) }), detail: boardDetail(b),
+      dormant: b.active === false ? SIGNED_OUT : undefined, target: { board: b.board_id } })),
+    ...grants.map(g => ({ key: g.id, kind: 'tool' as const, label: grantScope(g), detail: grantDetail(g),
+      target: { tool: toolKey(g.connection_id ?? '', g.tool ?? '') } })),
+    ...dormant.map(g => ({ key: g.id, kind: 'tool' as const, label: grantScope(g), detail: grantDetail(g),
       dormant: g.inactive === 'tool_changed' ? 'Tool changed: allow it again to approve the new version' : 'Needs you signed in: allow it again', target: { dormant: g.id } })),
   ]
-  const dormantScopes = Object.fromEntries(dormant.map(g => [g.id, g.kind === 'board_file' ? { board: g.board_id } : { tool: toolKey(g.connection_id ?? '', g.tool ?? '') }]))
+  const dormantScopes = Object.fromEntries(dormant.map(g => [g.id, { tool: toolKey(g.connection_id ?? '', g.tool ?? '') }]))
+
+  const caps = boardCaps(view.started_by)
+  const boardCap = caps && view.started_by ? { by: view.started_by.title || 'the session that started it', levels: caps } : undefined
 
   async function save(_: unknown, c: PermissionChanges): Promise<SaveOutcome> {
     const errors: string[] = []
     // What did not apply, in the diff's own shape: the modal keeps exactly these as changes.
-    const failed: PermissionChanges = { children: [], grantBoards: [], revokeBoards: [], grantTools: [], revokeTools: [], revokeDelegations: [], revokeDormant: [] }
+    const failed: PermissionChanges = { children: [], boardLevels: [], grantTools: [], revokeTools: [], revokeDelegations: [], revokeDormant: [] }
     const post = (url: string, body?: unknown) => apiFetch(url, body === undefined ? { method: 'POST' } : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const run = async (r: () => Promise<Response>, fallback: string): Promise<boolean> => {
       try { const res = await r(); if (res.ok) return true; errors.push(await failure(res, fallback)) } catch { errors.push(fallback) }
@@ -242,10 +263,12 @@ function SessionPermissionsModal({ sessionId, view, groups, refreshKey, initialF
     const grantOf = (pred: (g: ProposalGrant) => boolean) => grants.find(pred)?.id
     const revokeGrant = (id: string | undefined) => id ? run(() => post(`/api/proposal-grants/${encodeURIComponent(id)}/revoke`), 'Could not revoke a permission.') : Promise.resolve(true)
     for (const id of c.revokeDormant) if (!await revokeGrant(id)) failed.revokeDormant.push(id)
-    for (const b of c.revokeBoards) if (!await revokeGrant(grantOf(g => g.kind === 'board_file' && g.board_id === b))) failed.revokeBoards.push(b)
+    const put = (url: string, body: unknown) => apiFetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    for (const b of c.boardLevels) {
+      if (!await run(() => put(`/api/sessions/${encodeURIComponent(sessionId)}/board-access`, { board_id: b.board, level: b.level }), 'Could not set a board level.')) failed.boardLevels.push(b)
+    }
     for (const t of c.revokeTools) if (!await revokeGrant(grantOf(g => g.kind === 'mcp_tool' && g.connection_id === t.connection_id && g.tool === t.tool))) failed.revokeTools.push(t)
     const grantUrl = `/api/sessions/${encodeURIComponent(sessionId)}/proposal-grants`
-    for (const b of c.grantBoards) if (!await run(() => post(grantUrl, { kind: 'board_file', board_id: b }), 'Could not allow a board.')) failed.grantBoards.push(b)
     for (const t of c.grantTools) if (!await run(() => post(grantUrl, { kind: 'mcp_tool', connection_id: t.connection_id, tool: t.tool }), 'Could not allow a tool.')) failed.grantTools.push(t)
     if (c.children.length || c.revokeDelegations.length) refreshChildren(sessionId)
     await reload()
@@ -254,5 +277,5 @@ function SessionPermissionsModal({ sessionId, view, groups, refreshKey, initialF
   }
 
   return <PermissionsModal mode="session" onClose={onClose} initialFocus={initialFocus} childSessions={children} boards={boards} tools={tools}
-    canGrant={view.can_grant} grantReason={view.reason} initial={initial} active={active} dormantScopes={dormantScopes} onSave={save} />
+    canGrant={view.can_grant} grantReason={view.reason} initial={initial} active={active} dormantScopes={dormantScopes} boardInfo={boardInfo} boardCap={boardCap} onSave={save} />
 }

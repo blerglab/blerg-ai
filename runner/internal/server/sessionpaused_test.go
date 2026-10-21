@@ -47,7 +47,9 @@ func TestSessionPausedByARestart(t *testing.T) {
 	browser := &BrowserConn{ID: "b1", send: make(chan []byte, 32)}
 	hub.RegisterBrowser(browser)
 	dc := &DaemonConn{ID: daemonID, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	other := &DaemonConn{ID: otherID, send: make(chan []byte, 8)}
+	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	told := func(kind string) []string {
 		var out []string
 		for {
@@ -204,6 +206,7 @@ func TestMessageForAPausedSessionIsHeldAndEndsThePause(t *testing.T) {
 		t.Errorf("the held message did not end the pause for every browser: %q", row.PausedReason)
 	}
 	dc2 := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte, 8)}
+	dc2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc2)
 	hub.deliverHeld(t.Context(), dc2)
 	select {
@@ -254,6 +257,7 @@ func TestMessageForAPausedSessionIsHeldAndEndsThePause(t *testing.T) {
 
 	// A message the daemon's full queue refuses was not sent: the session stays paused.
 	full := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte)}
+	full.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(full)
 	if _, err := db.SetSessionPaused(ctx, pool, sessionID, protocol.PausedByRestart); err != nil {
 		t.Fatal(err)

@@ -86,3 +86,20 @@ func TestRevokeTreatsGoneAsDone(t *testing.T) {
 		t.Errorf("unconfigured: %v", err)
 	}
 }
+
+// Core answers 503 both when its mint key is unset and when an operator switched minting off;
+// the switch carries a header, so the board can say which (review M4).
+func TestMintSwitchedOffIsNotMissingKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Blerg-Mint-Disabled", "1")
+		http.Error(w, "board automation minting disabled", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "k", nil).Mint(context.Background(), "a", "b", "n", "t")
+	if !errors.Is(err, ErrSwitchedOff) || errors.Is(err, ErrDisabled) {
+		t.Fatalf("switched off: err = %v, want ErrSwitchedOff", err)
+	}
+	if !strings.Contains(err.Error(), "BLERG_CORE_BOARD_MINT_DISABLED") {
+		t.Fatalf("switched off: %q does not name the setting", err)
+	}
+}

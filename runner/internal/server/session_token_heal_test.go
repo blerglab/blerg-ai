@@ -518,6 +518,7 @@ func TestSessionStartedFromAnotherDaemonIsNotHealed(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := &DaemonConn{ID: otherID, Name: "other", send: make(chan []byte, 8)}
+	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	other.SetSessionTokenFile(true)
 	hub.Register(other)
 

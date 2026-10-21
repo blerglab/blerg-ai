@@ -761,18 +761,81 @@ describe('Automated sessions', () => {
 
 describe('started-session sidebar nesting', () => {
   beforeEach(() => localStorage.clear())
-  it('lists a child only under its parent and the count chip toggles it', () => {
+  it('lists a child only under its parent, and a chevron control outside the card hides and shows it', () => {
     localStorage.removeItem('blerg-runner.sidebar.childrenClosed')
-    seed([makeDaemon()], [makeSession({ id: 'parent', title: 'Parent' }), makeSession({ id: 'child', title: 'Child review', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent' } })])
+    seed([makeDaemon()], [makeSession({ id: 'parent', title: 'Parent' }), makeSession({ id: 'child', title: 'Child review', status: 'idle', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent' } })])
     renderList()
     expect(screen.getAllByText('Child review')).toHaveLength(1)
     expect(screen.getByTestId('nested-sessions')).toHaveTextContent('Child review')
     // Nested under its parent, the child does not repeat "from Parent".
     expect(screen.getByTestId('nested-sessions').querySelector('[data-testid="started-by-chip"]')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '1 started sessions, hide' }))
+    // The control is a small round chevron button in the card's second line; beside the plain "↳ 1" chip.
+    const toggle = screen.getByRole('button', { name: 'Hide 1 started session' })
+    expect(toggle).toHaveAttribute('title', 'Hide 1 started session')
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(toggle.closest('[data-testid="children-bar"]')).toBeNull()
+    expect(screen.queryByTestId('children-count')).toBeNull()
+    const chip = screen.getByTestId('hidden-children')
+    expect(chip.tagName).toBe('SPAN')
+    expect(chip).toHaveTextContent('↳ 1')
+    expect(chip).toHaveAttribute('data-state', 'idle')
+    fireEvent.click(toggle)
     expect(screen.queryByText('Child review')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '1 started sessions, show' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Show 1 started session' }))
     expect(screen.getByText('Child review')).toBeInTheDocument()
+  })
+
+  it('the chevron toggles the children without opening or selecting the card', () => {
+    localStorage.removeItem('blerg-runner.sidebar.childrenClosed')
+    seed([makeDaemon()], [makeSession({ id: 'parent', title: 'Parent' }), makeSession({ id: 'child', title: 'Child review', status: 'idle', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent' } })])
+    render(<MemoryRouter><Routes><Route path="/sessions/:id" element={<div data-testid="opened" />} /><Route path="*" element={<SessionList variant="sidebar" />} /></Routes></MemoryRouter>)
+    fireEvent.click(screen.getByTestId('children-toggle'))
+    expect(screen.queryByText('Child review')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('children-toggle'))
+    expect(screen.getByText('Child review')).toBeInTheDocument()
+    expect(screen.queryByTestId('opened')).toBeNull()
+    fireEvent.click(screen.getByText('Parent'))
+    expect(screen.getByTestId('opened')).toBeInTheDocument()
+  })
+
+  it('a collapsed parent still surfaces a grandchild that needs the person', () => {
+    localStorage.setItem('blerg-runner.sidebar.childrenClosed', JSON.stringify(['parent']))
+    seed([makeDaemon()], [
+      makeSession({ id: 'parent', title: 'Parent' }),
+      makeSession({ id: 'mid', title: 'Idle middle', status: 'idle', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent' } }),
+      makeSession({ id: 'deep', title: 'Asking grandchild', status: 'waiting', parent_session_id: 'mid', started_by: { kind: 'session', name: 'Idle middle' } }),
+    ])
+    renderList()
+    expect(screen.queryByText('Idle middle')).not.toBeInTheDocument()
+    expect(screen.getByTestId('kept-child')).toHaveTextContent('Asking grandchild')
+    expect(screen.getByTestId('hidden-children')).toHaveAttribute('aria-label', '1 needs you, hidden (1 started session)')
+  })
+
+  it('collapsed, then reloaded: the parent says what is hidden, and a child that needs the person stays visible', () => {
+    localStorage.removeItem('blerg-runner.sidebar.childrenClosed')
+    seed([makeDaemon()], [
+      makeSession({ id: 'parent', title: 'Parent' }),
+      makeSession({ id: 'idle', title: 'Idle worker', status: 'idle', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent' } }),
+      makeSession({ id: 'asking', title: 'Asking worker', status: 'waiting', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent' } }),
+      makeSession({ id: 'busy', title: 'Busy worker', status: 'running', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent' } }),
+    ])
+    const first = renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'Hide 3 started sessions' }))
+    first.unmount()
+    // A reload: the choice is kept.
+    renderList()
+    expect(screen.getByRole('button', { name: 'Show 3 started sessions' })).toHaveAttribute('aria-expanded', 'false')
+    const glyph = screen.getByTestId('hidden-children')
+    expect(glyph).toHaveAttribute('aria-label', '1 needs you, 1 running, hidden (3 started sessions)')
+    expect(glyph).toHaveAttribute('data-state', 'waiting')
+    expect(glyph).toHaveTextContent('↳? 3')
+    // The idle one is hidden; the one that needs the person and the running one stay, one line each.
+    expect(screen.queryByText('Idle worker')).not.toBeInTheDocument()
+    const kept = screen.getAllByTestId('kept-child')
+    expect(kept.map(k => k.textContent)).toEqual(['?Asking worker', 'Busy worker'])
+    expect(within(kept[0]).getByRole('img', { name: 'needs you' })).toBeInTheDocument()
+    expect(within(kept[1]).getByRole('img', { name: 'running' })).toBeInTheDocument()
+    expect(screen.queryByTestId('nested-sessions')).toBeNull()
   })
   it('keeps the "from {parent}" chip on a child shown on its own', () => {
     seed([makeDaemon()], [makeSession({ id: 'orphan', title: 'Lone child', parent_session_id: 'gone', started_by: { kind: 'session', name: 'Parent' } })])
@@ -836,4 +899,14 @@ it('keeps discarded parents and their children in History, including a stale run
   fireEvent.click(screen.getByRole('button',{name:/History/}))
   expect(screen.getAllByText('Archived parent')).toHaveLength(1)
   expect(screen.getAllByText('Archived worker')).toHaveLength(1)
+})
+
+it('discarding a running session from its sidebar card asks first, and says it is running', () => {
+  localStorage.clear()
+  seed([makeDaemon()], [makeSession({ id: 'parent', title: 'Busy parent', status: 'running' })])
+  renderList()
+  fireEvent.click(screen.getByRole('button', { name: 'Actions for Busy parent' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Discard session and children' }))
+  expect(screen.getByRole('dialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
+  expect(screen.getByTestId('discard-running')).toHaveTextContent('It is running now.')
 })

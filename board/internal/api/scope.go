@@ -62,6 +62,7 @@ type routeScope struct {
 // routeScopes is keyed by the exact mux pattern.
 var routeScopes = map[string]routeScope{
 	"POST /api/boards/{id}/file-card":              {scopeBoard, "one approved card, signed intent/digest and account bound; no other permission granted"},
+	"GET /api/boards/{id}/run-targets":             {scopeBoard, "execution targets for this board; handler requires card.write and only its automation owner can choose"},
 	"GET /api/boards/{id}/launch-options":          {scopeBoard, "board-scoped discovery under its stored automation identity"},
 	"GET /api/runner-sessions/{id}/launch-options": {scopeSession, "existing session discovery; handler additionally requires a human and card.write"},
 	"POST /api/chat/sessions/{id}/model":           {scopeSession, "chat model control; handler additionally requires a human and card.write"},

@@ -44,8 +44,16 @@ cat <<'EOF'
 {"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}
 {"type":"result","subtype":"success","is_error":false,"session_id":"cc-sess-1","result":"Done."}
 EOF
-# record how we were called so the test can assert --resume
-echo "$@" >> "$FAKE_CLAUDE_LOG"
+# record how we were called so the test can assert --resume; a system prompt passed as a file is
+# logged as its text, so the prompt reads the same whichever way it came
+args=()
+for a in "$@"; do
+  case "$a" in
+    --append-system-prompt-file=*) args+=("--append-system-prompt=$(cat "${a#*=}")") ;;
+    *) args+=("$a") ;;
+  esac
+done
+echo "${args[@]}" >> "$FAKE_CLAUDE_LOG"
 `
 	path := filepath.Join(dir, "claude")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

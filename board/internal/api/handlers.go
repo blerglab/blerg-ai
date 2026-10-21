@@ -195,6 +195,10 @@ func (a *API) handleUpdateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 	body, err := decode[struct {
 		db.BoardParams
 		AutomationToken *string `json:"automation_token"`
+		RunRuntime      *string `json:"run_runtime"`
+		RunDaemonID     *string `json:"run_daemon_id"`
+		// RunHostAcknowledged must be true to save a host ("This machine") target.
+		RunHostAcknowledged bool `json:"run_host_acknowledged"`
 	}](r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -204,6 +208,47 @@ func (a *API) handleUpdateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 		// Refuse the whole PATCH before a token is stored alongside a bad engine.
 		writeError(w, http.StatusUnprocessableEntity, "automation_engine: must be \"claude\", \"codex\" or \"hermes\"")
 		return
+	}
+	if body.RunRuntime != nil || body.RunDaemonID != nil {
+		if body.RunRuntime == nil || body.RunDaemonID == nil {
+			writeError(w, 422, "run_runtime and run_daemon_id must be saved together")
+			return
+		}
+		board, err := db.GetBoard(r.Context(), a.Pool, boardID)
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		if !runTargetChooser(p, board) {
+			writeError(w, 403, msgRunTargetOwnerOnly)
+			return
+		}
+		target := runTarget{Runtime: *body.RunRuntime, DaemonID: *body.RunDaemonID}
+		if status, msg := a.checkRunTarget(p, board, target); status != 0 {
+			writeError(w, status, msg)
+			return
+		}
+		if target.Runtime == "daemon" && !body.RunHostAcknowledged {
+			writeError(w, 422, msgHostAckRequired)
+			return
+		}
+		if target != (runTarget{}) {
+			if err := a.requireRunTarget(r.Context(), boardID, target); err != nil {
+				writeStartError(w, err)
+				return
+			}
+		}
+		account := ""
+		if target != (runTarget{}) {
+			account = p.HumanAccountID()
+		}
+		body.BoardParams.RunRuntime, body.BoardParams.RunDaemonID = body.RunRuntime, body.RunDaemonID
+		body.RunTargetAccount = &account
+		ackBy := ""
+		if target.Runtime == "daemon" {
+			ackBy = account
+		}
+		body.RunHostAckBy = &ackBy
 	}
 	var auto *db.AutomationTokenUpdate
 	if body.AutomationToken != nil {
@@ -231,12 +276,8 @@ func (a *API) handleDeleteBoard(w http.ResponseWriter, r *http.Request, p auth.P
 		writeError(w, http.StatusForbidden, "board deletion requires a human with board.admin")
 		return
 	}
-	minted, err := db.BoardMintedAutomation(r.Context(), a.Pool, r.PathValue("id"))
+	minted, err := db.DeleteBoardWithAutomation(r.Context(), a.Pool, r.PathValue("id"))
 	if err != nil {
-		writeDBError(w, err)
-		return
-	}
-	if err := db.DeleteBoard(r.Context(), a.Pool, r.PathValue("id")); err != nil {
 		writeDBError(w, err)
 		return
 	}

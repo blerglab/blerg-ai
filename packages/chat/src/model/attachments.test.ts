@@ -34,4 +34,18 @@ describe('attachment note', () => {
       expect(splitAttachmentNote(t)).toEqual({ body: t, files: [] })
     }
   })
+  it('round-trips IDs with duplicate and punctuation-heavy names', () => {
+    const files = [{ id: 'first', name: 'image, (draft).png', size: 104000 }, { id: 'second', name: 'image, (draft).png', size: 280000 }]
+    expect(splitAttachmentNote(composeMessage('Compare', files))).toEqual({ body: 'Compare', files: [
+      { id: 'first', name: 'image, (draft).png', size: '102 KB' }, { id: 'second', name: 'image, (draft).png', size: '273 KB' },
+    ] })
+  })
+
+  it('leaves malformed identified notes as plain text', () => {
+    for (const value of ['[]', '[{"id":"first","name":"x","size":-1}]', '[{"name":"x","size":1}]', '[bad]']) {
+      const text = NOTE + value
+      expect(splitAttachmentNote(text)).toEqual({ body: text, files: [] })
+    }
+  })
+
 })

@@ -6,6 +6,7 @@ import { createCardRegistry, defineCard, type CardProps } from '../cards/registr
 import { createFakeTransport } from '../test/fakeTransport'
 import { COMPACT, SESSION, ev, ingest, meta, resetChatState, seed } from '../test/chat'
 import { useChat, type ChatContextValue } from './context'
+import { splitAttachmentNote } from '../model/attachments'
 import type { ArtifactInfo } from '../transport/types'
 
 describe('ChatView', () => {
@@ -176,9 +177,14 @@ describe('ChatView feedback', () => {
     })
     expect(ok).toBe(true)
     expect(t.files!.uploads.map(u => u.file.name)).toEqual(['report.md.review.json', 'report.md'])
-    expect(t.sent).toEqual([
-      'Review of report.md (v3): 1 request.\n\nAttached files (fetch them with: blerg-runner fetch --all): report.md.review.json (13 B), report.md (8 B)',
-    ])
+    // The note names each upload by its ID, so the message's previews stay on these exact files.
+    const idOf = (name: string) => t.files!.items.find(a => a.name === name)?.id
+    expect(t.sent).toHaveLength(1)
+    expect(splitAttachmentNote(t.sent[0])).toEqual({ body: 'Review of report.md (v3): 1 request.', files: [
+      { id: idOf('report.md.review.json'), name: 'report.md.review.json', size: '13 B' },
+      { id: idOf('report.md'), name: 'report.md', size: '8 B' },
+    ] })
+    expect(idOf('report.md')).toBeTruthy()
     expect(t.files!.listCalls).toBeGreaterThan(before)
     expect(screen.getByTestId('queued-message')).toHaveTextContent('Review of report.md')
   })

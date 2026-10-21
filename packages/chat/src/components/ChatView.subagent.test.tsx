@@ -179,6 +179,14 @@ describe('subagent card', () => {
     expect(screen.queryByText('no end recorded')).toBeNull()
   })
 
+  it('a subagent with no effort of its own shows the session\'s, never "unknown"', () => {
+    seed(...subagentRun())
+    render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={meta({ status: 'idle', effort: 'high' })} />)
+    expect(row().getAttribute('title')).toContain("configured effort: high (the session's)")
+    fireEvent.click(row())
+    expect(within(card()).getByTestId('subagent-effort')).toHaveTextContent("Configured effort: high (the session's)")
+  })
+
   it('is one row, the title and one state glyph, until it is opened', () => {
     seed(...subagentRun())
     mount()

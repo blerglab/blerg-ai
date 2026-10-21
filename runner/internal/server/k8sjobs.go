@@ -36,6 +36,8 @@ import (
 // using the in-cluster service account. It deliberately speaks plain HTTP to
 // the API server (no client-go dependency) — the two calls we need are tiny.
 type JobManager struct {
+	// Tests replace the network read; nil uses the guarded Git HTTP precheck.
+	repositoryRead func(context.Context, string, string) error
 	// Optional owner for start watchers; nil retains process-lifetime defaults.
 	startWatches  *clusterWatchLifetime
 	codexCatalog  clusterCodexCatalogCache
@@ -1244,6 +1246,10 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 		personalKeys[gitTokenKey] = true
 	}
 
+	if err := j.precheckRepository(spec, cloneURL, sessionData, personalKeys, gitOperatorOK); err != nil {
+		return err
+	}
+
 	// secretCreated tracks whether this call actually created a per-session
 	// Secret — the signal every cleanup/adoption path below keys off, since a
 	// Secret can now exist purely for the prompt/ExtraEnv even when no
@@ -1736,7 +1742,7 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 		// An owner-authorized new request uses its exact live proof. Revoking
 		// the launch token must not strand a session after the owner remints it.
 		if len(inputs) > 0 {
-			if !inputs[0].Proof.valid() {
+			if !inputs[0].Proof.valid() && jm.personalCredentialsWired() {
 				return errNoLivenessProof
 			}
 			tokenID, authSessionID = inputs[0].Proof.TokenID, inputs[0].Proof.SessionID
@@ -1766,7 +1772,8 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 	if err := db.TouchSessionStatusChanged(ctx, pool, sessionID); err != nil {
 		log.Printf("resume %s: touch status clock: %v", sessionID, err)
 	}
-	// The owner's newest proof is the one a child this session starts is authorized with.
+	// The owner's newest proof is the one a child this session starts is authorized with. (A
+	// child's is recorded once its new pod exists, below.)
 	if spawningAccountID != "" && !isChildSession(row) {
 		recordLaunchAuthSession(ctx, pool, sessionID, authSessionID)
 	}
@@ -1847,6 +1854,11 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 		return errors.New("cluster resume was not accepted")
 	}
 	clusterJobCreated(ctx, h, pool, sessionID, 0)
+	// A child resumed by its owner keeps that sign-in as its own proof: the one its desktop parent
+	// resumes it with next (delegateChild). Only once the pod exists: a failed resume changes nothing.
+	if spawningAccountID != "" && isChildSession(row) {
+		recordLaunchAuthSession(ctx, pool, sessionID, authSessionID)
+	}
 	return nil
 }
 

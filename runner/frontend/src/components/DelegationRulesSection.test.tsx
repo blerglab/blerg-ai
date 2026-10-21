@@ -42,6 +42,23 @@ describe('session-starting rules', () => {
     expect(screen.getByRole('option', { name: 'desktop sandbox' })).toBeDisabled()
     expect(screen.getByText(/full filesystem access/)).toBeInTheDocument()
   })
+  it('offers the cluster where the install has one, and adds a cluster rule that names no daemon', async () => {
+    apiFetch.mockImplementation((path: string, init?: RequestInit) => init?.method ? json({}) : path === '/api/daemons' ? json([{ id: 'host', name: 'Workstation', mode: 'workstation', available_engines: ['codex', 'openclaw'] }])
+      : path === '/api/cluster/status' ? json({ configured: true, available_engines: ['claude', 'codex'] }) : json({ rules: [rule], limits }))
+    render(<DelegationRulesSection />)
+    fireEvent.change(await screen.findByLabelText('Rule runtime'), { target: { value: 'cluster' } })
+    expect(screen.queryByLabelText('Rule daemon')).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'OpenClaw' })).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Rule engine'), { target: { value: 'claude' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add rule' }))
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/delegation-rules', expect.objectContaining({ method: 'POST', body: JSON.stringify({ engine: 'claude', runtime: 'cluster', local_only: false }) })))
+  })
+  it('offers no cluster on a desktop-only install', async () => {
+    render(<DelegationRulesSection />)
+    await screen.findByRole('button', { name: 'Add rule' })
+    expect(apiFetch).toHaveBeenCalledWith('/api/cluster/status')
+    expect(screen.queryByRole('option', { name: 'on the cluster' })).not.toBeInTheDocument()
+  })
   it('fails visibly on a missing or malformed rules response', async () => {
     apiFetch.mockImplementation(() => json({}))
     render(<DelegationRulesSection />)

@@ -64,7 +64,7 @@ Every session runs in exactly one place, chosen on the launch sheet:
 
 | Runtime | Where | Default on | Sees |
 |---|---|---|---|
-| **Local sandbox** | A hardened container on the daemon's host: capabilities dropped, memory and processes limited | the desktop install | the repository at `/workspace`, and the engine logins mounted in so the engine can work |
+| **Local sandbox** | A hardened container on the daemon's host: capabilities dropped, memory and processes limited | the desktop install | a clone of its own of the repository at `/workspace` (never the checkout or its `.git`; commits come back on `wip/<session-id>`), and the engine logins mounted in so the engine can work |
 | **Cluster** | A throwaway Kubernetes Job in its own namespace, with the credentials of the person who launched it | the Kubernetes install | the repository, and the credentials core fetched for that person |
 | **This machine** | The daemon's host, unsandboxed, as the person running the daemon | never; needs an acknowledgement | everything that person can see |
 

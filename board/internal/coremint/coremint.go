@@ -32,6 +32,9 @@ var (
 	ErrUnauthorized = errors.New("blerg-core refused the board's mint key (BLERG_CORE_BOARD_MINT_KEY must be the same on core and board)")
 	// ErrDisabled: core has no mint key configured.
 	ErrDisabled = errors.New("blerg-core has run as me turned off (BLERG_CORE_BOARD_MINT_KEY is not set on core)")
+	// ErrSwitchedOff: an operator switched new mints off on core (its 503 carries
+	// mintDisabledHeader). Revoking still works.
+	ErrSwitchedOff = errors.New("blerg-core has new run as me tokens switched off (BLERG_CORE_BOARD_MINT_DISABLED is set on core)")
 	// ErrRefused: core did not accept the person's proof — the browser session ended, the
 	// account changed, or the token is not a person's. Signing in again fixes the usual case.
 	ErrRefused = errors.New("blerg-core did not accept your sign-in as live")
@@ -104,6 +107,10 @@ func errClass(err error) string {
 	return "connection failed"
 }
 
+// mintDisabledHeader is set on core's 503 when BLERG_CORE_BOARD_MINT_DISABLED switched minting
+// off, which tells it apart from a core with no mint key. Core sets the same name.
+const mintDisabledHeader = "Blerg-Mint-Disabled"
+
 // statusErr maps core's answer to a sentinel. The response body is never read into an error.
 func statusErr(code int) error {
 	switch code {
@@ -136,6 +143,9 @@ func (c *Client) Mint(ctx context.Context, accountID, boardID, boardName, access
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		if resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get(mintDisabledHeader) != "" {
+			return Minted{}, ErrSwitchedOff
+		}
 		return Minted{}, statusErr(resp.StatusCode)
 	}
 	var out struct {

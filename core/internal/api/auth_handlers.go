@@ -128,6 +128,12 @@ func (d Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many failed logins — try again later", http.StatusTooManyRequests)
 		return
 	}
+	// The mark comes before the password check, so a password change or log-out-everywhere
+	// that commits while this login is in flight refuses it (IssueRefreshTokenSince).
+	mark, ok := d.beginLogin(w, r, "local", subject)
+	if !ok {
+		return
+	}
 	acc, err := local.Callback(r.Context(), r)
 	if err != nil {
 		d.LoginLimiter.Fail(ip, subject)
@@ -135,7 +141,7 @@ func (d Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.LoginLimiter.Reset(ip, subject)
-	if d.startHumanSession(w, r, acc.ID) {
+	if d.startHumanSession(w, r, acc.ID, &mark) {
 		w.WriteHeader(http.StatusOK)
 	}
 }
@@ -209,12 +215,17 @@ func (d Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid oauth state", http.StatusBadRequest)
 		return
 	}
+	// The account is only known after the provider's check, so the mark is its start time.
+	mark, ok := d.beginLogin(w, r, "", "")
+	if !ok {
+		return
+	}
 	acc, err := d.AuthProvider.Callback(r.Context(), r)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !d.startHumanSession(w, r, acc.ID) {
+	if !d.startHumanSession(w, r, acc.ID, &mark) {
 		return
 	}
 	origin := d.publicOrigin(r)
@@ -249,11 +260,46 @@ func (d Deps) clientIP(r *http.Request) string {
 	return host
 }
 
-// startHumanSession refuses disabled accounts, clears any stale "sub" revocation (a
-// successful login IS the re-enable signal), issues a refresh token and sets it as the
+// beginLogin takes a sign-in's mark (identity.Service.BeginLogin) before its credential is
+// checked. Returns false when a response was written.
+func (d Deps) beginLogin(w http.ResponseWriter, r *http.Request, provider, subject string) (identity.LoginMark, bool) {
+	svc, ok := d.identitySvc()
+	if !ok {
+		http.Error(w, "identity service unavailable", http.StatusInternalServerError)
+		return identity.LoginMark{}, false
+	}
+	mark, err := svc.BeginLogin(r.Context(), provider, subject)
+	if err != nil {
+		writeSessionStartError(w, err)
+		return identity.LoginMark{}, false
+	}
+	return mark, true
+}
+
+// writeSessionStartError answers a sign-in whose session could not be issued.
+func writeSessionStartError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, identity.ErrSessionBusy):
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "session busy, try again", http.StatusServiceUnavailable)
+	case errors.Is(err, identity.ErrAccountDisabled):
+		http.Error(w, "account disabled", http.StatusForbidden)
+	case errors.Is(err, identity.ErrLoginSuperseded):
+		http.Error(w, "you were signed out everywhere while signing in; sign in again", http.StatusConflict)
+	default:
+		log.Printf("auth: start session: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+// startHumanSession refuses disabled accounts, then atomically clears the stale "sub"
+// revocation and issues a refresh token under the account session fence. It sets the token as the
 // HttpOnly session cookie. It writes no success status — callers decide between 200
 // (form login) and a redirect (OAuth callback). Returns false when a response was written.
-func (d Deps) startHumanSession(w http.ResponseWriter, r *http.Request, accountID string) bool {
+//
+// mark is the sign-in's start (beginLogin); a session that follows no credential check
+// (first-run setup) passes nil.
+func (d Deps) startHumanSession(w http.ResponseWriter, r *http.Request, accountID string, mark *identity.LoginMark) bool {
 	svc, ok := d.identitySvc()
 	if !ok {
 		http.Error(w, "identity service unavailable", http.StatusInternalServerError)
@@ -268,13 +314,14 @@ func (d Deps) startHumanSession(w http.ResponseWriter, r *http.Request, accountI
 		http.Error(w, "account disabled", http.StatusForbidden)
 		return false
 	}
-	if err := svc.Unrevoke(r.Context(), "sub", accountID); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return false
+	var raw string
+	if mark != nil {
+		raw, err = svc.IssueRefreshTokenSince(r.Context(), *mark, accountID, r.UserAgent(), d.clientIP(r))
+	} else {
+		raw, err = svc.IssueRefreshToken(r.Context(), accountID, r.UserAgent(), d.clientIP(r))
 	}
-	raw, err := svc.IssueRefreshToken(r.Context(), accountID, r.UserAgent(), d.clientIP(r))
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeSessionStartError(w, err)
 		return false
 	}
 	http.SetCookie(w, d.cookie(refreshCookieName, raw, http.SameSiteStrictMode, d.sessionCookieMaxAge()))
@@ -322,7 +369,8 @@ func (d Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	access, newRefresh, err := svc.RefreshAccessToken(r.Context(), cookie.Value, audience)
 	if errors.Is(err, identity.ErrSessionBusy) {
-		// Nothing was written and the cookie is still good: a retry, not a sign-out. The cookie
+		// A lock wait that ran out, or a deadlock or serialization abort: nothing was written
+		// and the cookie is still good, so it is a retry, not a sign-out. The cookie
 		// is left alone, and a hidden renewal frame reads core's own error page as "no answer"
 		// and tries again shortly.
 		log.Printf("auth: refresh busy: %v", err)
@@ -644,7 +692,7 @@ func (d Deps) returnToAllowed(r *http.Request, returnTo string) bool {
 // against — stops verifying immediately, not just on its next refresh) and this browser's own
 // refresh cookie is cleared: the response tells the caller to sign in again with the new
 // password rather than trying to keep the current request's session alive. A subsequent
-// successful login clears the "sub" revocation (startHumanSession's existing Unrevoke call).
+// successful login clears the "sub" revocation (IssueRefreshTokenSince, under the session fence).
 //
 // An optional "provider_subject" in the body is the username the person chose on that page:
 // it is validated and applied in the same transaction as the password (a refused one changes
@@ -750,7 +798,7 @@ func (d Deps) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// already minted on some OTHER device must stop verifying immediately (via the shared
 	// revocations table's "sub" entry), not merely fail its next refresh. This browser's own
 	// cookie is cleared below so the current caller re-authenticates immediately too. A
-	// subsequent successful login clears the "sub" revocation (startHumanSession's Unrevoke call)
+	// subsequent successful login clears the "sub" revocation (IssueRefreshTokenSince, under the session fence)
 	// — it is not a permanent lockout.
 	http.SetCookie(w, d.cookie(refreshCookieName, "", http.SameSiteStrictMode, -1))
 	w.WriteHeader(http.StatusOK)

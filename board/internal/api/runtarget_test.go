@@ -86,7 +86,7 @@ func TestRunCardTargetRefusals(t *testing.T) {
 	}{
 		{"someone else's automation", "someone-else", map[string]any{"runtime": "docker", "daemon_id": "daemon-laptop"}, http.StatusForbidden},
 		{"unknown runtime", humanSub, map[string]any{"runtime": "kubernetes"}, http.StatusUnprocessableEntity},
-		{"this machine", humanSub, map[string]any{"runtime": "daemon", "daemon_id": "daemon-laptop"}, http.StatusUnprocessableEntity},
+		{"host without daemon", humanSub, map[string]any{"runtime": "daemon"}, http.StatusUnprocessableEntity},
 		{"daemon without runtime", humanSub, map[string]any{"daemon_id": "daemon-laptop"}, http.StatusUnprocessableEntity},
 		{"cluster with a daemon", humanSub, map[string]any{"runtime": "cluster", "daemon_id": "daemon-laptop"}, http.StatusUnprocessableEntity},
 		{"malformed daemon", humanSub, map[string]any{"runtime": "docker", "daemon_id": "../x y"}, http.StatusUnprocessableEntity},
@@ -123,7 +123,8 @@ func TestRunTargetsForCard(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &got); err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("run-targets: %d %s", resp.StatusCode, raw)
 	}
-	// The cluster and the desktop's sandbox; never its bare host.
+	// The cluster and the desktop's sandbox, owned by the automation account. The desktop's host
+	// is not offered for a single run until the board's own target is that acknowledged host.
 	if !got.CanChoose || len(got.Targets) != 2 {
 		t.Fatalf("owner's targets = %+v", got)
 	}

@@ -1656,9 +1656,35 @@
   outline: none;
 }
 
+/* The viewer scales with the screen: a plain file takes up to 1400px (prose keeps its own measure,
+   below), a review or a diff about the whole viewport (review.css, diff.css), and the maximize
+   toggle all of it. */
 .artifact-viewer {
-  width: min(960px, 100%);
-  height: min(84vh, 960px);
+  box-sizing: border-box;
+  width: min(1400px, 94vw);
+  height: min(90vh, 1600px);
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.artifact-overlay.is-maximized {
+  padding: 0;
+}
+
+.artifact-dialog.artifact-viewer.is-maximized {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border: none;
+  border-radius: 0;
+}
+
+/* Prose reads at a measure, centered, however wide the viewer is. */
+.artifact-viewer .artifact-body > .artifact-markdown {
+  width: 100%;
+  max-width: 75ch;
+  margin-inline: auto;
 }
 
 @media (max-width: 899px) {
@@ -2541,6 +2567,18 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   color: var(--chat-warning);
 }
 
+/* The author is a place in the host (the parent session): a link that keeps the label's look. */
+.agent-card .card-author-link {
+  color: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.agent-card .card-author-link:hover,
+.agent-card .card-author-link:focus-visible {
+  text-decoration-style: solid;
+}
+
 /* The prompt a session was started with: one dim line that opens. */
 .agent-card.brief {
   align-self: stretch;
@@ -2934,6 +2972,12 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
 
 .delegation-name {
   font-weight: 600;
+}
+
+/* The board access the new session gets ("with Blerg · Full"): a grant, so it reads plainly. */
+.delegation-boards {
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .delegation-prompt {

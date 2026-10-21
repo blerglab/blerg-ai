@@ -569,7 +569,7 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     expect(unsandboxed).toBeDisabled()
     expect(within(dialog).getByTestId('pm-children-daemon')).toHaveTextContent("A sandboxed session can't pre-approve unsandboxed children.")
     fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Start sandboxed children without asking' }))
-    fireEvent.click(await within(dialog).findByRole('checkbox', { name: 'File cards on Product without asking' }))
+    fireEvent.change(await within(dialog).findByRole('combobox', { name: 'Access to Product' }), { target: { value: 'read' } })
     expect(within(dialog).getByTestId('pm-summary')).toHaveTextContent('Grant 2')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
@@ -577,13 +577,14 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     // Held until launch: reopening shows them selected, and Cancel keeps them.
     fireEvent.click(screen.getByRole('button', { name: 'Permissions… (2)' }))
     const again = screen.getByRole('dialog', { name: 'Permissions' })
-    expect(within(again).getByRole('checkbox', { name: 'File cards on Product without asking' })).toBeChecked()
+    expect(within(again).getByRole('combobox', { name: 'Access to Product' })).toHaveValue('read')
+    expect(within(again).getAllByTestId('pm-active-row')[1]).toHaveTextContent('Product · Read')
     expect(within(again).getAllByTestId('pm-active-row')).toHaveLength(2)
     fireEvent.click(within(again).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.permissions).toEqual({ children: ['docker'], boards: ['b1'], mcp_tools: [] })
+    expect(captureBody.value!.permissions).toEqual({ children: ['docker'], board_levels: [{ board_id: 'b1', level: 'read' }], mcp_tools: [] })
   })
 
   it('sends no permissions when none are ticked', async () => {

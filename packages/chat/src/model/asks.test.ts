@@ -56,6 +56,26 @@ describe('askStates', () => {
     expect(askStates([ask, ev('user_message', { text: 'use the second', source: 'session' })], NONE, false).byEvent.get(ask.client_event_id)).toEqual({ open: false, answer: 'use the second' })
   })
 
+  it('a question the agent did not wait on stays open, but the composer never answers it', () => {
+    const waited = ev('ask', { body: 'blocking?', message_id: 'w1' })
+    const q = ev('ask', { body: 'Ship blue?', message_id: 'q1', no_wait: true })
+    const both = askStates([waited, q], NONE, false)
+    expect(both.open).toBe(waited)
+    expect(both.anyOpen).toBe(true)
+    const only = askStates([q, ev('user_message', { text: 'also fix the footer', source: 'chat' }), ev('turn_done', { stop_reason: 'end_turn' })], NONE, false)
+    expect(only.open).toBeNull()
+    expect(only.anyOpen).toBe(true)
+    expect(only.byEvent.get(q.client_event_id)).toEqual({ open: true, answer: '' })
+    // A bare ask_answer goes to an ask the composer answers, never to the question.
+    expect(askStates([q, ev('user_message', { text: 'x', source: 'ask_answer' })], NONE, false).byEvent.get(q.client_event_id)?.open).toBe(true)
+    // The answer Blerg sends on to the agent closes nothing; the answer naming it does.
+    const old = ev('ask', { body: 'no id' })
+    expect(askStates([old, ev('user_message', { text: 'Answer to your question q1', source: 'question_answer' })], NONE, false).open).toBe(old)
+    const done = askStates([q, ev('user_message', { text: 'yes', source: 'ask_answer', message_id: 'q1' })], NONE, false)
+    expect(done.anyOpen).toBe(false)
+    expect(done.byEvent.get(q.client_event_id)).toEqual({ open: false, answer: 'yes' })
+  })
+
   it('the newest open ask is the one the composer answers', () => {
     const a = ev('ask', { body: 'first', message_id: 'a' })
     const b = ev('ask', { body: 'second', message_id: 'b' })

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,11 +22,26 @@ type LoginLimiter struct {
 	now       func() time.Time
 	byIP      map[string][]time.Time
 	bySubject map[string][]time.Time
+	lastSweep time.Time
+	// maxKeys bounds each map; 0 means unbounded. At capacity a new key evicts the key whose
+	// window ends first, so a full map never refuses a newcomer.
+	maxKeys int
 }
 
+// NewLoginLimiter builds the shared login limiter. It has no key bound: a bound that refused
+// newcomers would let a spray of distinct identities lock every new sign-in out, and one that
+// evicted would let a spray reset a targeted account's count. Inactive keys are swept instead.
 func NewLoginLimiter(limit int, window time.Duration) *LoginLimiter {
 	return &LoginLimiter{max: limit, window: window, now: time.Now,
 		byIP: map[string][]time.Time{}, bySubject: map[string][]time.Time{}}
+}
+
+// NewBoardMintLimiter builds the "Run as me" mint limiter, keyed by account id. Its memory is
+// bounded by maxLimiterKeys; at capacity it evicts the soonest-expiring account.
+func NewBoardMintLimiter(limit int, window time.Duration) *LoginLimiter {
+	l := NewLoginLimiter(limit, window)
+	l.maxKeys = maxLimiterKeys
+	return l
 }
 
 func (l *LoginLimiter) enabled() bool { return l != nil && l.max > 0 && l.window > 0 }
@@ -55,34 +72,133 @@ func (l *LoginLimiter) Allow(ip, subject string) (bool, time.Duration) {
 	if !l.enabled() {
 		return true, 0
 	}
+	ip, subject = limiterKey(ip), limiterKey(subject)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	now := l.now()
-	l.byIP[ip] = l.prune(l.byIP[ip], now)
-	l.bySubject[subject] = l.prune(l.bySubject[subject], now)
-	for _, b := range [][]time.Time{l.byIP[ip], l.bySubject[subject]} {
-		if len(b) >= l.max {
-			return false, b[0].Add(l.window).Sub(now)
+	return l.allowLocked(ip, subject, l.now())
+}
+
+const maxLimiterKeys = 4096
+
+// maxLimiterKeyLen bounds a stored key. The login subject is whatever the caller sent, up to the
+// 16 KiB form cap, so a key longer than this is stored as its SHA-256 instead. A hashed key is
+// longer than any verbatim one, so the two kinds never meet, and distinct subjects keep distinct
+// buckets: the bound saves memory under a spray without merging usernames.
+const maxLimiterKeyLen = len(hashedKeyPrefix) + sha256.Size*2
+
+const hashedKeyPrefix = "sha256:"
+
+func limiterKey(s string) string {
+	if len(s) <= maxLimiterKeyLen-len(hashedKeyPrefix)-1 {
+		return s
+	}
+	sum := sha256.Sum256([]byte(s))
+	return hashedKeyPrefix + hex.EncodeToString(sum[:])
+}
+
+// sweepLocked forgets inactive identities.
+func (l *LoginLimiter) sweepLocked(now time.Time) {
+	if !l.lastSweep.IsZero() && now.Sub(l.lastSweep) < time.Minute {
+		return
+	}
+	for _, buckets := range []map[string][]time.Time{l.byIP, l.bySubject} {
+		for key, times := range buckets {
+			if times = l.prune(times, now); len(times) == 0 {
+				delete(buckets, key)
+			} else {
+				buckets[key] = times
+			}
+		}
+	}
+	l.lastSweep = now
+}
+
+func (l *LoginLimiter) allowLocked(ip, subject string, now time.Time) (bool, time.Duration) {
+	l.sweepLocked(now)
+	for _, entry := range []struct {
+		b   map[string][]time.Time
+		key string
+	}{{l.byIP, ip}, {l.bySubject, subject}} {
+		times := l.prune(entry.b[entry.key], now)
+		if len(times) == 0 {
+			delete(entry.b, entry.key)
+		} else {
+			entry.b[entry.key] = times
+		}
+		if len(times) >= l.max {
+			return false, times[0].Add(l.window).Sub(now)
 		}
 	}
 	return true, 0
+}
+
+func (l *LoginLimiter) recordLocked(ip, subject string, now time.Time) {
+	l.sweepLocked(now)
+	for _, entry := range []struct {
+		b   map[string][]time.Time
+		key string
+	}{{l.byIP, ip}, {l.bySubject, subject}} {
+		times := l.prune(entry.b[entry.key], now)
+		if _, tracked := entry.b[entry.key]; !tracked && l.maxKeys > 0 && len(entry.b) >= l.maxKeys {
+			evictSoonestLocked(entry.b)
+		}
+		if len(times) < l.max {
+			entry.b[entry.key] = append(times, now)
+		}
+	}
+}
+
+// evictSoonestLocked drops the key whose newest attempt is oldest: its window ends first.
+func evictSoonestLocked(b map[string][]time.Time) {
+	var victim string
+	var oldest time.Time
+	found := false
+	for key, times := range b {
+		last := time.Time{}
+		if len(times) > 0 {
+			last = times[len(times)-1]
+		}
+		if !found || last.Before(oldest) {
+			victim, oldest, found = key, last, true
+		}
+	}
+	if found {
+		delete(b, victim)
+	}
+}
+
+// Take atomically checks and charges an attempt. Minting charges every attempt,
+// so it must use this instead of the login failure-only Allow/Fail pair.
+func (l *LoginLimiter) Take(ip, subject string) (bool, time.Duration) {
+	if !l.enabled() {
+		return true, 0
+	}
+	ip, subject = limiterKey(ip), limiterKey(subject)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	allowed, retry := l.allowLocked(ip, subject, now)
+	if allowed {
+		l.recordLocked(ip, subject, now)
+	}
+	return allowed, retry
 }
 
 func (l *LoginLimiter) Fail(ip, subject string) {
 	if !l.enabled() {
 		return
 	}
+	ip, subject = limiterKey(ip), limiterKey(subject)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	now := l.now()
-	l.byIP[ip] = append(l.prune(l.byIP[ip], now), now)
-	l.bySubject[subject] = append(l.prune(l.bySubject[subject], now), now)
+	l.recordLocked(ip, subject, l.now())
 }
 
 func (l *LoginLimiter) Reset(ip, subject string) {
 	if !l.enabled() {
 		return
 	}
+	ip, subject = limiterKey(ip), limiterKey(subject)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.byIP, ip)

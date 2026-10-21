@@ -29,7 +29,7 @@ func (a *API) BoardLaunchOptions(ctx context.Context, p auth.Principal, id strin
 	if !ok {
 		return out, fmt.Errorf("%w: launch option discovery", runner.ErrUnsupported)
 	}
-	token, _, err := a.startIdentity(ctx, id)
+	token, err := a.startIdentity(ctx, id)
 	if err != nil {
 		return out, err
 	}
@@ -37,7 +37,15 @@ func (a *API) BoardLaunchOptions(ctx context.Context, p auth.Principal, id strin
 	if len(board.Repos) > 0 {
 		repo = board.Repos[0]
 	}
-	out, err = discover.Discover(ctx, token, repo, refresh)
+	target, targetErr := a.resolveBoardTarget(ctx, id, runTarget{})
+	if targetErr != nil {
+		return out, targetErr
+	}
+	if placed, ok := a.runner.Driver.(runner.PlacementDiscoverer); ok && target != (runTarget{}) {
+		out, err = placed.DiscoverAt(ctx, token, repo, target.Runtime, target.DaemonID, refresh)
+	} else {
+		out, err = discover.Discover(ctx, token, repo, refresh)
+	}
 	if err != nil {
 		return runner.LaunchOptions{}, fmt.Errorf("runner discovery unavailable")
 	}
@@ -86,7 +94,7 @@ func (a *API) handleSessionLaunchOptions(w http.ResponseWriter, r *http.Request,
 		writeDBError(w, err)
 		return
 	}
-	token, _, err := a.startIdentity(r.Context(), boardID)
+	token, err := a.startIdentity(r.Context(), boardID)
 	if err != nil {
 		writeStartError(w, err)
 		return

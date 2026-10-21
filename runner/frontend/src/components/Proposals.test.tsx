@@ -63,7 +63,7 @@ beforeEach(() => {
   })
 })
 
-const renderPage = (entry = '/proposals') => render(<MemoryRouter initialEntries={[entry]}><Proposals /></MemoryRouter>)
+const renderPage = (entry = '/proposals?view=pending') => render(<MemoryRouter initialEntries={[entry]}><Proposals /></MemoryRouter>)
 const posts = () => calls.filter(c => c.method === 'POST')
 const APPROVE = '/api/proposals/p1/approve'
 const OPEN = '/api/proposals?scope=open'
@@ -124,15 +124,16 @@ describe('Proposals list', () => {
     expect(args.querySelector('img')).toBeNull()
   })
 
-  it('offers to expand long argument values in the card instead of truncating silently', async () => {
+  it('keeps long exact values intact under Show exact request', async () => {
     const long = 'x'.repeat(2000)
     items = [prop({ arguments: { text: long } })]
     renderPage()
     const args = await screen.findByTestId('proposal-args-p1')
-    expect(args.textContent).toContain('text')
-    expect(args.textContent!.length).toBeLessThan(2000)
-    fireEvent.click(screen.getByRole('button', { name: /show all/i }))
-    expect(screen.getByTestId('proposal-args-p1').textContent).toContain(long)
+    expect(args.textContent).toContain(long)
+    const details = args.closest('details')!
+    expect(details.open).toBe(false)
+    fireEvent.click(within(details).getByText('Show exact request'))
+    expect(details.open).toBe(true)
   })
 
   it('shows the stored JSON text: big integers, 1.10 and key order are not re-serialised', async () => {
@@ -191,6 +192,27 @@ describe('Proposals list', () => {
 })
 
 describe('Scopes', () => {
+  it('the Pending tab counts what still waits on you: a proposal past its deadline is listed, not counted', async () => {
+    items = [prop({ id: 'waiting', expires_at: new Date(Date.now() + 86400_000).toISOString() }),
+      prop({ id: 'overdue', expires_at: new Date(Date.now() - 60_000).toISOString() })]
+    renderPage()
+    await screen.findByTestId('proposal-waiting')
+    expect(screen.getByTestId('proposal-overdue')).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Pending (1)' })).toBeTruthy()
+  })
+
+  it('decides "past its deadline" by the server\'s clock, not this browser\'s', async () => {
+    // The browser runs ten minutes fast: by its clock the proposal expired a minute ago; by the
+    // server's it has nine minutes left.
+    items = [prop({ id: 'skewed', expires_at: new Date(Date.now() - 60_000).toISOString() })]
+    action = (url: string) => url === OPEN
+      ? res({ proposals: items, decided_next: null, pending_count: 1, tool_changes_pending: 0, server_time: new Date(Date.now() - 10 * 60_000).toISOString() })
+      : null
+    renderPage()
+    await screen.findByTestId('proposal-skewed')
+    expect(screen.getByRole('tab', { name: 'Pending (1)' })).toBeTruthy()
+  })
+
   it('the Pending tab uses scope=open and never the unscoped list', async () => {
     items = [prop()]
     renderPage()
@@ -291,14 +313,14 @@ describe('Approve', () => {
     items = [prop({ arguments: { text: long, n: 2 } })]
     renderPage()
     const before = await screen.findByTestId('proposal-args-p1')
-    expect(before.textContent).not.toContain(long)
+    expect(before.textContent).toContain(long)
+    expect(before.closest('details')!.open).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
     const after = screen.getByTestId('proposal-args-p1')
     expect(after.textContent).toContain(long)
     expect(after.textContent).not.toMatch(/more characters/)
     expect(screen.queryByRole('button', { name: /show all|collapse long values/i })).toBeNull()
-    expect(after.style.maxHeight).not.toBe('')
-    expect(after.style.overflowY).toBe('auto')
+    expect(after.closest('details')!.open).toBe(true)
   })
 
   it('sends one approve request, shows busy, ignores double clicks, then shows the result as plain text', async () => {
@@ -515,4 +537,36 @@ describe('plugin application status',()=>{
   expect(within(card).getByTestId('proposal-state')).toHaveTextContent('queued')
   expect(within(card).getByText('Waiting for idle.')).toBeInTheDocument()
  })
+})
+
+
+describe('readable proposal attention and history', () => {
+  it('renders the complete proposed card before its exact JSON', async () => {
+    items = [prop({ kind: 'board_file', tool: 'file_ticket', arguments: { board_id: 'b1', title: 'Fix the export', type: 'bug', repos: ['example-org/example-repo'], body: '## Reproduction\n\n' + 'Details. '.repeat(100) + '\n\nThe final expected result.' } })]
+    renderPage()
+    expect(await screen.findByRole('heading', { name: 'Fix the export' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Reproduction' })).toBeTruthy()
+    expect(within(screen.getByRole('heading', { name: 'Fix the export' }).closest('article')!).getByText(/The final expected result/)).toBeTruthy()
+    expect(screen.getByText('example-org/example-repo')).toBeTruthy()
+    expect(screen.getByText('Show exact request')).toBeTruthy()
+  })
+  it('warns about an approaching deadline and offers an extension', async () => {
+    items = [prop({ expires_at: new Date(Date.now() + 60 * 60_000).toISOString() })]
+    renderPage()
+    expect(await screen.findByText(/Expires soon/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Extend 7 days' })).toBeTruthy()
+  })
+  it('opens the audit history by default and names the decider and permission without raw ids', async () => {
+    items = [prop({ state: 'done', decided_by: 'account-fixture', decided_by_you: true, approved_by_grant: 'permission-fixture',
+      approved_permission: { id: 'permission-fixture', kind: 'board_file', account_id: 'account-fixture', board_name: 'Product', level: 'file', created_via: 'panel', created_at: '2026-01-01T00:00:00Z', revoked_at: '2026-01-02T00:00:00Z', granted_by_you: true },
+      extensions: [{ extended_at: '2026-01-06T00:00:00Z', previous_expires_at: '2026-01-08T00:00:00Z', expires_at: '2026-01-15T00:00:00Z', by_you: true }] })]
+    renderPage('/proposals')
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Decided' }).getAttribute('aria-selected')).toBe('true'))
+    expect(await screen.findByText('Decided by you')).toBeTruthy()
+    const permission = screen.getByTestId('proposal-permission-p1')
+    expect(permission.textContent).toMatch(/Product · file · set by you in the session’s Permissions/)
+    expect(permission.textContent).toMatch(/since revoked/)
+    expect(within(screen.getByTestId('proposal-extensions-p1')).getByText(/Extended by you/)).toBeTruthy()
+    expect(document.body.textContent).not.toMatch(/account-fixture|permission-fixture/)
+  })
 })

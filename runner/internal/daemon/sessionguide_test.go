@@ -12,7 +12,7 @@ import (
 
 func assertSessionWorkGuide(t *testing.T, text string) {
 	t.Helper()
-	for _, line := range []string{childSessionGuideLine, workGuideLine, topicGuideLine, checklistWorkMapGuideLine} {
+	for _, line := range []string{childSessionGuideLine, workGuideLine, topicGuideLine, checklistWorkMapGuideLine, boardAccessGuideLine} {
 		if !strings.Contains(text, line) {
 			t.Fatalf("missing shared guidance: %s", line)
 		}

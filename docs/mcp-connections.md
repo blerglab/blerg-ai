@@ -65,6 +65,13 @@ The fixed tools read boards, columns and cards, and create, update, move, commen
 Writes to the chosen board are direct. Archiving, column changes and board administration are not
 included. The panel's Capabilities tab lists `board` alongside other connections.
 
+The launch board appears in the session's Permissions as **Full**. Lowering it there (to Read, or
+to Propose to revoke it) holds at the agent's next call: the gateway reads the board's level on
+every list and call, and refuses a tool the level does not allow. Crons and board-started sessions
+have no such level and keep the full tool set. A running session without a launch board can be
+given a board in the Permissions dialog instead; see
+[Board access](talking-to-an-agent.md#board-access-from-the-permissions-dialog).
+
 In a launched session, `blerg-runner board show` and the supported `ticket` commands use that same
 gateway grant, including its limits and revocation. They never hold Core's upstream credential.
 The older Runner-only board commands retain their behavior when no gateway is configured. Gateway

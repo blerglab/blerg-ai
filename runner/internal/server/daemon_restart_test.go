@@ -63,6 +63,7 @@ func TestDaemonBackWithinGraceLeavesSessionsAlone(t *testing.T) {
 
 	// The daemon is back: the hello reconciles, registers, and hands over what was held.
 	dc2 := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte, 8)}
+	dc2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	reconcileSessions(ctx, hub, pool, dc.ID, []string{sessionID}, nil)
 	hub.Register(dc2)
 	hub.deliverHeld(t.Context(), dc2)

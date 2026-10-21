@@ -57,16 +57,16 @@ func pauseAt(svc *Service, point string) (reached <-chan struct{}, release func(
 	return r, func() { releaseOnce.Do(func() { close(gate) }) }
 }
 
-// waitForLockWait returns once some other backend of this test's database is blocked on a
+// waitForLockWait returns once the specified query in this test's database is blocked on a
 // lock. It polls a condition, so it establishes the ordering without depending on timing.
-func waitForLockWait(t *testing.T, st db.Store) {
+func waitForLockWait(t *testing.T, st db.Store, query string) {
 	t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		var waiting int
 		if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
-			WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'`).
+			WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND starts_with(query, $1) AND cardinality(pg_blocking_pids(pid)) > 0`, query).
 			Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
@@ -164,7 +164,7 @@ func TestChainRevocationEndsConcurrentRotation(t *testing.T) {
 
 	revoked := make(chan error, 1)
 	go func() { revoked <- svc.RevokeChain(ctx, chainID, "reuse") }()
-	waitForLockWait(t, st)
+	waitForLockWait(t, st, "SELECT pg_advisory_xact_lock(hashtextextended('human_sessions:'")
 	release()
 
 	res := waitFor(t, refreshed, "the rotation")
@@ -195,7 +195,7 @@ func TestRevokeAllSessionsEndsConcurrentRotation(t *testing.T) {
 
 	revoked := make(chan error, 1)
 	go func() { revoked <- svc.RevokeAllSessions(ctx, acct) }()
-	waitForLockWait(t, st)
+	waitForLockWait(t, st, "SELECT pg_advisory_xact_lock(hashtextextended('human_sessions:'")
 	release()
 
 	res := waitFor(t, refreshed, "the rotation")
@@ -227,7 +227,7 @@ func TestRotationWaitingOnChainRevocationIsRefused(t *testing.T) {
 		a, r, err := svc.RefreshAccessToken(ctx, raw, "blerg-core")
 		refreshed <- refreshResult{a, r, err}
 	}()
-	waitForLockWait(t, st)
+	waitForLockWait(t, st, "SELECT pg_advisory_xact_lock(hashtextextended('human_sessions:'")
 	release()
 
 	if err := waitFor(t, revoked, "the chain revocation"); err != nil {
@@ -268,7 +268,7 @@ func TestLogoutEndsConcurrentRotationOfTheSameCookie(t *testing.T) {
 
 	loggedOut := make(chan error, 1)
 	go func() { loggedOut <- svc.RevokeHumanSession(ctx, raw) }()
-	waitForLockWait(t, st)
+	waitForLockWait(t, st, "SELECT pg_advisory_xact_lock(hashtextextended('human_sessions:'")
 	release()
 
 	res := waitFor(t, refreshed, "the rotation")
@@ -476,5 +476,90 @@ func TestSessionLockTimeoutIsAtLeastOneMillisecond(t *testing.T) {
 	}
 	if got != "1ms" {
 		t.Fatalf("lock_timeout = %q, want 1ms", got)
+	}
+}
+
+// A lost response redone while a second tab presents the original cookie must leave
+// one unused live head, and both responses must remain recoverable by that browser.
+func TestLostRotationRedoInterleaving(t *testing.T) {
+	svc, st := fenceSvc(t)
+	ctx := t.Context()
+	_, raw, _ := issueChain(t, svc, st, "redo-interleave")
+	if _, _, err := svc.RefreshAccessToken(ctx, raw, "blerg-core"); err != nil {
+		t.Fatal(err)
+	}
+	reached, release := pauseAt(svc, "redo")
+	defer release()
+	first, second := make(chan refreshResult, 1), make(chan refreshResult, 1)
+	run := func(ch chan<- refreshResult) {
+		a, r, err := svc.RefreshAccessToken(ctx, raw, "blerg-core")
+		ch <- refreshResult{a, r, err}
+	}
+	go run(first)
+	waitFor(t, reached, "redo before commit")
+	go run(second)
+	waitForLockWait(t, st, "SELECT pg_advisory_xact_lock(hashtextextended('human_sessions:'")
+	release()
+	a, b := waitFor(t, first, "first redo"), waitFor(t, second, "second redo")
+	if a.err != nil || b.err != nil || a.refresh == b.refresh {
+		t.Fatalf("redo results: %v %v", a.err, b.err)
+	}
+	svc.beforeSessionCommit = nil
+	if _, _, err := svc.RefreshAccessToken(ctx, a.refresh, "blerg-core"); err != nil {
+		t.Fatalf("out-of-order response must heal: %v", err)
+	}
+}
+
+// The serialization point is the account fence. A login holding it commits first
+// and is ended by a concurrent logout; a login queued after logout is a new login.
+func TestLoginAndLogoutEverywhereOrder(t *testing.T) {
+	for _, first := range []string{"issue", "logout_all"} {
+		t.Run(first, func(t *testing.T) {
+			svc, st := fenceSvc(t)
+			acct, _, _ := issueChain(t, svc, st, "login-logout-order")
+			reached, release := pauseAt(svc, first)
+			defer release()
+			login, logout := make(chan refreshResult, 1), make(chan error, 1)
+			issue := func() {
+				raw, err := svc.IssueRefreshToken(t.Context(), acct, "", "")
+				login <- refreshResult{refresh: raw, err: err}
+			}
+			revoke := func() { logout <- svc.RevokeAccountEverywhere(t.Context(), acct) }
+			if first == "issue" {
+				go issue()
+			} else {
+				go revoke()
+			}
+			waitFor(t, reached, "first writer before commit")
+			if first == "issue" {
+				go revoke()
+			} else {
+				go issue()
+			}
+			waitForLockWait(t, st, "SELECT pg_advisory_xact_lock(hashtextextended('human_sessions:'")
+			release()
+			result := waitFor(t, login, "login")
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			if err := waitFor(t, logout, "logout"); err != nil {
+				t.Fatal(err)
+			}
+			svc.beforeSessionCommit = nil
+			_, _, err := svc.RefreshAccessToken(t.Context(), result.refresh, "blerg-core")
+			if first == "issue" && !errors.Is(err, ErrSessionRevoked) {
+				t.Fatalf("login before logout survived: %v", err)
+			}
+			if first == "logout_all" && err != nil {
+				t.Fatalf("fresh login after logout failed: %v", err)
+			}
+			var sub int
+			if err := st.Pool().QueryRow(t.Context(), `SELECT count(*) FROM revocations WHERE kind='sub' AND value=$1`, acct).Scan(&sub); err != nil {
+				t.Fatal(err)
+			}
+			if first == "logout_all" && sub != 0 {
+				t.Fatal("fresh login did not clear sub revocation atomically")
+			}
+		})
 	}
 }

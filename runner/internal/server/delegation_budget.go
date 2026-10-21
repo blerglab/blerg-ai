@@ -117,11 +117,13 @@ func (a *API) HandleGetSessionBudget(w http.ResponseWriter, r *http.Request) {
 		notFound()
 		return
 	}
-	if onClusterParent(row) && a.hub.JobManager() != nil {
-		delegate := a.delegatePrincipalFor(r.Context(), row, "")
+	// A desktop session's cluster children (?runtime=cluster) are budgeted like a cluster parent's.
+	desktopCluster := r.URL.Query().Get("runtime") == runnerRuntimeCluster && onDesktopDaemon(row)
+	if (onClusterParent(row) || desktopCluster) && a.hub.JobManager() != nil {
+		delegate := a.delegateFor(r.Context(), row, runnerRuntimeCluster, "")
 		available, known := a.clusterAvailableEngines(r.Context(), delegate)
 		local := a.clusterLocalEngines(r.Context(), row, delegate)
-		writeJSON(w, http.StatusOK, budgetForCluster(a.hub.FindDaemonForSession(row.ID), available, known, local, time.Now()))
+		writeJSON(w, http.StatusOK, budgetForCluster(clusterParentPod(a.hub, row), available, known, local, time.Now()))
 		return
 	}
 	var dc *DaemonConn

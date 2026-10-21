@@ -86,6 +86,9 @@ type Deps struct {
 	// board never holds the key that fetches engine credentials. Empty disables the routes (503).
 	BoardMintKey string
 
+	// BoardMintDisabled stops new mints while retaining revocation for existing tokens.
+	BoardMintDisabled bool
+
 	// BoardMintLimiter bounds "Run as me" mints per account (every attempt counts). Nil disables
 	// the limit; main.go always sets one (BoardMintLimit per BoardMintWindow).
 	BoardMintLimiter *LoginLimiter

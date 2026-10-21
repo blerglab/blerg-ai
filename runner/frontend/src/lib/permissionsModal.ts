@@ -8,11 +8,26 @@ import { childRuntimesFor } from './launchPermissions'
 import type { RunRuntime } from './runtimes'
 
 export type ChildState = 'on' | 'off' | 'partial'
+
+/** A board's access level in a session, lowest first; each includes the ones below it. */
+export type BoardLevel = 'propose' | 'read' | 'file' | 'full'
+export const BOARD_LEVELS: BoardLevel[] = ['propose', 'read', 'file', 'full']
+export const BOARD_LEVEL_LABELS: Record<BoardLevel, string> = { propose: 'Propose', read: 'Read', file: 'File without asking', full: 'Full' }
+/** What each level adds, said once in the Boards section. */
+export const BOARD_LEVEL_NOTE = 'Propose (every board): search and propose cards, each asking you. Read: also list and read every card. File without asking: also file cards at once. Full: also create, update, move and comment.'
+export const boardLevelRank = (l: BoardLevel) => BOARD_LEVELS.indexOf(l)
+export const isBoardLevel = (v: unknown): v is BoardLevel => typeof v === 'string' && (BOARD_LEVELS as string[]).includes(v)
+/** "Product · Full": a board and its level, as a chip says it. */
+export const boardLevelChip = (name: string, level: BoardLevel) => `${name} · ${BOARD_LEVEL_LABELS[level]}`
+
 export interface PermissionsDraft {
   /** Per runtime: allowed for every engine, none, or (as the server reports it) some engines only. */
   children: Partial<Record<ChildRuntime, ChildState>>
-  /** Boards cards may be filed on without asking. */
-  boards: string[]
+  /** Each board's level above propose (a board not here is at propose). */
+  boards: Record<string, BoardLevel>
+  /** Boards whose level no longer acts (its sign-in ended) to set again at the same level, which
+   *  renews it from the current sign-in. */
+  renewBoards?: string[]
   /** MCP tools (toolKey) that may run without asking. */
   tools: string[]
   /** Per-engine child grants (delegationKey) to revoke. */
@@ -20,7 +35,8 @@ export interface PermissionsDraft {
   /** Grants that no longer approve (signed out, tool changed) to revoke. */
   revokeDormant: string[]
 }
-export const EMPTY_DRAFT: PermissionsDraft = { children: {}, boards: [], tools: [], revokeDelegations: [], revokeDormant: [] }
+export const EMPTY_DRAFT: PermissionsDraft = { children: {}, boards: {}, tools: [], revokeDelegations: [], revokeDormant: [] }
+export const levelOf = (d: Pick<PermissionsDraft, 'boards'>, board: string): BoardLevel => d.boards[board] ?? 'propose'
 
 const SEP = '\u0000'
 export const toolKey = (connectionId: string, tool: string) => `${connectionId}${SEP}${tool}`
@@ -31,8 +47,8 @@ const delegationRuntime = (key: string) => key.slice(0, key.indexOf(SEP))
 
 export interface PermissionChanges {
   children: { runtime: ChildRuntime; enabled: boolean }[]
-  grantBoards: string[]
-  revokeBoards: string[]
+  /** Boards whose level Save sets: raising or renewing one (the same level) counts as a grant, lowering it as a revoke. */
+  boardLevels: { board: string; from: BoardLevel; level: BoardLevel }[]
   grantTools: { connection_id: string; tool: string }[]
   revokeTools: { connection_id: string; tool: string }[]
   revokeDelegations: string[]
@@ -50,26 +66,34 @@ export function diffPermissions(initial: PermissionsDraft, next: PermissionsDraf
   }
   const turnedOff = new Set(children.filter(c => !c.enabled).map(c => c.runtime as string))
   const added = <T,>(a: T[], b: T[]) => b.filter(x => !a.includes(x))
-  const grantBoards = added(initial.boards, next.boards)
+  const boardLevels: PermissionChanges['boardLevels'] = []
+  for (const board of new Set([...Object.keys(initial.boards), ...Object.keys(next.boards)])) {
+    const from = levelOf(initial, board)
+    const level = levelOf(next, board)
+    if (from !== level) boardLevels.push({ board, from, level })
+  }
+  for (const board of next.renewBoards ?? []) {
+    const level = levelOf(next, board)
+    if (level !== 'propose' && !boardLevels.some(b => b.board === board)) boardLevels.push({ board, from: level, level })
+  }
   const grantTools = added(initial.tools, next.tools)
   return {
     children,
-    grantBoards,
-    revokeBoards: added(next.boards, initial.boards),
+    boardLevels,
     grantTools: grantTools.map(splitToolKey),
     revokeTools: added(next.tools, initial.tools).map(splitToolKey),
     revokeDelegations: next.revokeDelegations.filter(k => !turnedOff.has(delegationRuntime(k))),
     revokeDormant: next.revokeDormant.filter(id => {
       const scope = dormant[id]
-      return !(scope?.board && grantBoards.includes(scope.board)) && !(scope?.tool && grantTools.includes(scope.tool))
+      return !(scope?.board && boardLevels.some(b => b.board === scope.board)) && !(scope?.tool && grantTools.includes(scope.tool))
     }),
   }
 }
 
 export function changeCounts(c: PermissionChanges) {
   return {
-    grant: c.children.filter(x => x.enabled).length + c.grantBoards.length + c.grantTools.length,
-    revoke: c.children.filter(x => !x.enabled).length + c.revokeBoards.length + c.revokeTools.length + c.revokeDelegations.length + c.revokeDormant.length,
+    grant: c.children.filter(x => x.enabled).length + c.boardLevels.filter(b => boardLevelRank(b.level) >= boardLevelRank(b.from)).length + c.grantTools.length,
+    revoke: c.children.filter(x => !x.enabled).length + c.boardLevels.filter(b => boardLevelRank(b.level) < boardLevelRank(b.from)).length + c.revokeTools.length + c.revokeDelegations.length + c.revokeDormant.length,
   }
 }
 
@@ -116,7 +140,15 @@ export interface ChildOption {
 
 const childLabel = (runtime: ChildRuntime) => runtime === 'cluster' ? 'Start children on the cluster without asking'
   : runtime === 'docker' ? 'Start sandboxed children without asking' : 'Start unsandboxed children without asking'
-const childNote = (runtime: ChildRuntime) => runtime === 'daemon' ? 'Unsandboxed children run as you with full filesystem access.' : undefined
+/** Where a row's children run, said on the row itself: a desktop session's rows can be on the desktop
+ *  or on the cluster, so the dialog never says it for all of them at once. */
+export const childWhere = (runtime: ChildRuntime) => runtime === 'cluster' ? 'On the cluster.' : 'On this desktop.'
+const childNote = (runtime: ChildRuntime) => runtime === 'daemon' ? `${childWhere(runtime)} Unsandboxed children run as you with full filesystem access.`
+  : runtime === 'cluster' ? `${childWhere(runtime)} Each child is a pod with your engine credentials.` : childWhere(runtime)
+/** The dialog's one note on child approvals; where each row's children run is on the row. */
+export const CHILD_APPROVAL_NOTE = 'Children of this session, in any repository, with the engines listed; a newly available engine asks again. Turning one off stops new automatic starts; running children keep running. This does not change your standing rules.'
+export const LAUNCH_CHILD_NOTE = 'Children of this session, in any repository, with the engines listed. This does not change your standing rules.'
+
 
 /** A running session's runtime row, from the server's snapshot. */
 export function sessionChildOption(r: ApprovalRuntime): ChildOption {
@@ -131,17 +163,22 @@ export function sessionChildOption(r: ApprovalRuntime): ChildOption {
 }
 
 export const SANDBOXED_PARENT_REASON = "A sandboxed session can't pre-approve unsandboxed children."
+/** The cluster row's reason for a sandboxed desktop session (the runner's default, "once"). */
+export const SANDBOXED_CLUSTER_REASON = 'A sandboxed session asks you for each cluster child, because the pod gets your credentials.'
 
 /** The launch sheet's runtime rows: a cluster session starts cluster children; a sandboxed one is
- *  shown the unsandboxed row disabled, with the reason. */
-export function launchChildOptions(runtime: RunRuntime, engines: string[] = []): ChildOption[] {
-  const allowed = childRuntimesFor(runtime) as ChildRuntime[]
-  const rows: ChildRuntime[] = runtime === 'cluster' ? ['cluster'] : ['docker', 'daemon']
+ *  shown the unsandboxed row disabled, with the reason; a desktop one also gets the cluster row where
+ *  the install has a cluster (`cluster`, with the cluster's engines), disabled for a sandboxed one
+ *  unless the runner allows it (`cluster.sandboxAny`). */
+export function launchChildOptions(runtime: RunRuntime, engines: string[] = [], cluster?: { engines: string[]; sandboxAny?: boolean }): ChildOption[] {
+  const allowed = childRuntimesFor(runtime, !!cluster, !!cluster?.sandboxAny) as ChildRuntime[]
+  const rows: ChildRuntime[] = runtime === 'cluster' ? ['cluster'] : cluster ? ['docker', 'daemon', 'cluster'] : ['docker', 'daemon']
   return rows.map(r => {
     const ok = allowed.includes(r)
     return {
-      runtime: r, label: childLabel(r), note: childNote(r), engines, grantedEngines: [], standingEngines: [],
-      state: 'off', canEnable: ok, disabled: !ok, reason: ok ? '' : SANDBOXED_PARENT_REASON,
+      runtime: r, label: childLabel(r), note: childNote(r), engines: r === 'cluster' && runtime !== 'cluster' ? cluster?.engines ?? [] : engines,
+      grantedEngines: [], standingEngines: [], state: 'off', canEnable: ok, disabled: !ok,
+      reason: ok ? '' : r === 'cluster' ? SANDBOXED_CLUSTER_REASON : SANDBOXED_PARENT_REASON,
     }
   })
 }
@@ -157,15 +194,17 @@ export function nextChildState(o: ChildOption, current: ChildState): ChildState 
 export function launchDraft(v: LaunchPermissionsValue): PermissionsDraft {
   const children: PermissionsDraft['children'] = {}
   for (const c of v.children) children[c as ChildRuntime] = 'on'
-  return { ...EMPTY_DRAFT, children, boards: [...v.boards], tools: v.mcp_tools.map(t => toolKey(t.connection_id, t.tool)) }
+  const boards: PermissionsDraft['boards'] = {}
+  for (const b of v.board_levels) if (b.level !== 'propose') boards[b.board_id] = b.level
+  return { ...EMPTY_DRAFT, children, boards, tools: v.mcp_tools.map(t => toolKey(t.connection_id, t.tool)) }
 }
 
 /** The launch value the draft stands for, limited to what the sheet still offers. */
-export function draftToLaunch(d: PermissionsDraft, now: { runtime: RunRuntime; boards: { id: string }[]; tools: { connection_id: string; tool: string }[] }): LaunchPermissionsValue {
-  const runtimes = childRuntimesFor(now.runtime)
+export function draftToLaunch(d: PermissionsDraft, now: { runtime: RunRuntime; boards: { id: string }[]; tools: { connection_id: string; tool: string }[]; clusterConfigured?: boolean; sandboxClusterAny?: boolean }): LaunchPermissionsValue {
+  const runtimes = childRuntimesFor(now.runtime, now.clusterConfigured, now.sandboxClusterAny)
   return {
     children: runtimes.filter(r => d.children[r as ChildRuntime] === 'on'),
-    boards: d.boards.filter(b => now.boards.some(x => x.id === b)),
+    board_levels: Object.entries(d.boards).filter(([id, level]) => level !== 'propose' && now.boards.some(x => x.id === id)).map(([board_id, level]) => ({ board_id, level })),
     mcp_tools: d.tools.map(splitToolKey).filter(t => now.tools.some(x => x.connection_id === t.connection_id && x.tool === t.tool)),
   }
 }

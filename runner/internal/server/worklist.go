@@ -248,6 +248,11 @@ func (a *API) HandlePostTickets(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// A Blerg Board card's address is the runner's to set: the Board's page for it, inside
+		// Blerg, never a link the agent wrote.
+		if board, number, ok := ticket.BoardCard(t); ok {
+			t.URL = a.boardCardURL(r.Context(), board, number)
+		}
 	case "unpin":
 	default:
 		writeError(w, http.StatusBadRequest, `action must be "pin" or "unpin"`)
@@ -278,7 +283,7 @@ func (a *API) HandlePostTickets(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p = ticket.Payload{Ticket: t, Action: "pin"}
-		if old := findPin(pinned, t.Source, t.Key); old != nil {
+		if old := findPin(pinned, t.Source, t.Key, t.BoardID); old != nil {
 			p.Action = "update"
 			p.Previous = &ticket.Previous{Status: old.Status, Title: old.Title}
 		} else if len(pinned) >= ticket.MaxPinned {
@@ -291,7 +296,7 @@ func (a *API) HandlePostTickets(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, msg)
 			return
 		}
-		p = ticket.Payload{Ticket: ticket.Ticket{Source: target.Source, Key: target.Key, Title: target.Title, Status: target.Status, URL: target.URL}, Action: "unpin"}
+		p = ticket.Payload{Ticket: ticket.Ticket{Source: target.Source, Key: target.Key, BoardID: target.BoardID, Title: target.Title, Status: target.Status, URL: target.URL}, Action: "unpin"}
 	}
 	raw, err := json.Marshal(p)
 	if err != nil {
@@ -305,13 +310,15 @@ func (a *API) HandlePostTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	after := ticket.Pinned(append(rows, ticket.Row{Seq: seq, EventID: eventID, Ts: at, Action: p.Action,
-		Source: p.Ticket.Source, Key: p.Ticket.Key, Title: p.Ticket.Title, Status: p.Ticket.Status, URL: p.Ticket.URL}))
+		Source: p.Ticket.Source, Key: p.Ticket.Key, BoardID: p.Ticket.BoardID, Title: p.Ticket.Title, Status: p.Ticket.Status, URL: p.Ticket.URL}))
 	writeJSON(w, http.StatusCreated, ticketReply{Payload: p, Pinned: after})
 }
 
-func findPin(pinned []ticket.Summary, source, key string) *ticket.Summary {
+// findPin is the pin (source, key, board) names; board is a Blerg Board card's board ("" for any
+// other tracker).
+func findPin(pinned []ticket.Summary, source, key, board string) *ticket.Summary {
 	for i := range pinned {
-		if pinned[i].Source == source && pinned[i].Key == key {
+		if pinned[i].Source == source && pinned[i].Key == key && pinned[i].BoardID == board {
 			return &pinned[i]
 		}
 	}
@@ -330,8 +337,23 @@ func unpinTarget(pinned []ticket.Summary, source, key string) (*ticket.Summary, 
 	case key == "":
 		return nil, "Name the ticket as <source>:<key>, or give neither to unpin the current one."
 	case source != "":
-		if p := findPin(pinned, source, key); p != nil {
-			return p, ""
+		// A Blerg Board card may be named with its board: blerg-board:<board id>#<number>.
+		board := ""
+		if b, n, ok := strings.Cut(key, "#"); ok && b != "" && source == ticket.SourceBoard {
+			board, key = b, "#"+n
+		}
+		var match *ticket.Summary
+		for i := range pinned {
+			p := &pinned[i]
+			if p.Source == source && p.Key == key && (board == "" || p.BoardID == board) {
+				if match != nil {
+					return nil, fmt.Sprintf("Two pinned cards are %s; name it as %s:<board id>%s.", key, source, key)
+				}
+				match = p
+			}
+		}
+		if match != nil {
+			return match, ""
 		}
 		return nil, fmt.Sprintf("%s:%s is not pinned.", source, key)
 	}

@@ -72,6 +72,7 @@ func TestRuntimeCannotRebindProjectThroughOwnStartedFrame(t *testing.T) {
 func TestHostDaemonSelectorsNeverChooseSessionPods(t *testing.T) {
 	hub := NewHub()
 	pod := &DaemonConn{ID: "00000000-0000-4000-8000-000000000001", Mode: "runner", Name: "runner-fixture", RuntimeTokenID: "fixture-current-launch", BoundSessionID: "fixture-session"}
+	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	pod.SetCheckedOutRepos([]string{"victim-repository"})
 	pod.SetSandboxAvailable(true)
 	hub.Register(pod)

@@ -282,6 +282,7 @@ func newMCPFx(t *testing.T) *mcpFx {
 		t.Fatal(err)
 	}
 	fx.dc = &DaemonConn{ID: daemonID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
+	fx.dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.dc.SetMCPGateway(true)
 	fx.dc.SetRestrictTools(true)
 	fx.dc.SetSandboxAvailable(true)

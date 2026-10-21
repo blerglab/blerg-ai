@@ -15,7 +15,7 @@ var errRecoveryAuthorityUnavailable = errors.New("recovery authority unavailable
 // with another owner's token cannot transfer a native conversation.
 func (a *API) messageOnRunner(ctx context.Context, boardID, ext, text, source, clientID string) error {
 	if c, ok := a.runner.Driver.(runner.IdentityController); ok {
-		token, _, err := a.startIdentity(ctx, boardID)
+		token, err := a.startIdentity(ctx, boardID)
 		if err != nil {
 			return err
 		}
@@ -29,7 +29,7 @@ func (a *API) messageOnRunner(ctx context.Context, boardID, ext, text, source, c
 
 func (a *API) statusOnRunner(ctx context.Context, boardID, ext string) (runner.Status, error) {
 	if c, ok := a.runner.Driver.(runner.IdentityController); ok {
-		token, _, err := a.startIdentity(ctx, boardID)
+		token, err := a.startIdentity(ctx, boardID)
 		if err != nil {
 			// Poll lifecycle even when recovery authority is unavailable, but never
 			// advertise recovery that the board cannot authorize.

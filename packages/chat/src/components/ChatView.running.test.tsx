@@ -269,6 +269,42 @@ describe('what the working line says the agent is on', () => {
   const words = () => screen.getByTestId('working-words').textContent
   const startTurn = () => seed(ev('user_message', { text: 'go' }, NOW - 10 * S), ev('status_changed', { status: 'running' }, NOW - 10 * S))
 
+  it('shows reported reasoning tokens live, then clears them on text and a new block', () => {
+    startTurn()
+    const { t } = mount()
+    arrive(t, live('thinking_started'), live('thinking_progress', { tokens: 12 }))
+    expect(screen.getByTestId('working')).toHaveTextContent('Thinking… 12 tokens')
+    arrive(t, live('thinking_progress', { tokens: 21 }))
+    expect(screen.getByTestId('working')).toHaveTextContent('Thinking… 21 tokens')
+    arrive(t, live('thinking_progress', { tokens: 999, parent_call_id: 'child' }))
+    expect(screen.getByTestId('working')).not.toHaveTextContent('999')
+    arrive(t, live('assistant_text', { text: 'Ready', done: false }))
+    expect(screen.getByTestId('working-compact')).not.toHaveTextContent('tokens')
+    arrive(t, live('thinking_started'))
+    expect(screen.getByTestId('working-compact')).not.toHaveTextContent('tokens')
+  })
+
+  it('shows the clock, not the count, to a viewer who may not see token counts', () => {
+    startTurn()
+    const t = createFakeTransport()
+    render(<ChatView session={SESSION} transport={t.transport} meta={base} reasoningTokens={false} />)
+    arrive(t, live('thinking_started'))
+    tick(83 * S)
+    arrive(t, live('thinking_progress', { tokens: 4321 }))
+    expect(screen.getByTestId('working')).toHaveTextContent('Thinking… 1:23')
+    expect(screen.getByTestId('working')).not.toHaveTextContent('4,321')
+  })
+
+  it('uses the reasoning phase clock when no token count is reported', () => {
+    startTurn()
+    const { t } = mount()
+    arrive(t, live('thinking_started'))
+    tick(83 * S)
+    expect(screen.getByTestId('working')).toHaveTextContent('Thinking… 1:23')
+    arrive(t, live('thinking_progress', { tokens: -4 }))
+    expect(screen.getByTestId('working')).toHaveTextContent('Thinking… 1:23')
+  })
+
   it('says "Thinking…" while a thinking block is open, until it closes', () => {
     startTurn()
     const { t } = mount()

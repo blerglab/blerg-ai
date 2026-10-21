@@ -95,6 +95,9 @@ func (a *API) readChildrenSnapshot(ctx context.Context, parent *db.SessionRow, a
 		daemonNames := make(map[string]string)
 		for _, g := range grants {
 			name, known := daemonNames[g.DaemonID]
+			if !known && g.DaemonID == clusterDaemonID {
+				name, known = clusterDaemonLabel, true
+			}
 			if !known {
 				var err error
 				name, _, err = db.HostDaemonName(ctx, a.dbPool, g.DaemonID)

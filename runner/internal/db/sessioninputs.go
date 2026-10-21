@@ -134,3 +134,33 @@ func SettleSessionInput(ctx context.Context, pool *pgxpool.Pool, sessionID, clie
 	_, err := pool.Exec(ctx, `UPDATE session_inputs SET settled_at=COALESCE(settled_at,now()) WHERE session_id=$1 AND client_id=$2`, sessionID, clientID)
 	return err
 }
+
+// RecordSettledSessionInput records clientID as already settled, for an input that has no outbox
+// entry of its own: one delivered live to a host without input receipts, or one given up on. Either
+// way it is then never queued or delivered again under that id. With errorPayload, an "error" event
+// saying why is appended in the same transaction (seq is its sequence). fresh is false, and nothing
+// is appended, when the id was already recorded.
+func RecordSettledSessionInput(ctx context.Context, pool *pgxpool.Pool, sessionID, clientID, frame, eventID, errorPayload string) (int64, bool, error) {
+	if clientID == "" || len(clientID) > SessionInputMaxClientIDBytes {
+		return 0, false, ErrSessionInputID
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `INSERT INTO session_inputs(session_id,client_id,frame,event_id,settled_at) VALUES($1,$2,$3,$4,now()) ON CONFLICT DO NOTHING`, sessionID, clientID, frame, eventID)
+	if err != nil || tag.RowsAffected() == 0 {
+		return 0, false, err
+	}
+	var seq int64
+	if errorPayload != "" {
+		if seq, _, err = appendAgentEvent(ctx, tx, sessionID, eventID, "error", errorPayload, time.Now()); err != nil {
+			return 0, false, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE session_inputs SET event_seq=$3 WHERE session_id=$1 AND client_id=$2`, sessionID, clientID, seq); err != nil {
+			return 0, false, err
+		}
+	}
+	return seq, true, tx.Commit(ctx)
+}

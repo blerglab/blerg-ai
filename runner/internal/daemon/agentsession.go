@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -126,6 +127,9 @@ type AgentHost struct {
 
 type agentSession struct {
 	requireRecoveryReady bool
+	// incomingNoted: the session was told once that its commits go to wip/<id>.incoming while
+	// the person has wip/<id> checked out.
+	incomingNoted atomic.Bool
 	// workspace is the host folder mounted at /workspace for sandbox sessions.
 	// It stays bound to this launch even if the daemon's repos root changes.
 	workspace     string
@@ -291,6 +295,11 @@ type wsEmitter struct {
 	// onEvent lets the host observe events (status tracking) without a
 	// second emitter wrapper.
 	onEvent func(agent.Event)
+
+	// markerNonce is the session's marker code: emit replaces it in every payload, so a tool
+	// result (a `ps` listing, the agent reading its own transcript), the model's text or an echo
+	// never carries it to the server or a viewer.
+	markerNonce string
 }
 
 func newWSEmitter(sender Sender, sessionID string, onEvent func(agent.Event)) *wsEmitter {
@@ -313,6 +322,7 @@ func (e *wsEmitter) emit(ev agent.Event, observe bool) {
 		log.Printf("agent %s: marshal %s payload: %v", e.sessionID, ev.Kind, err)
 		return
 	}
+	payload = agent.ScrubCodeJSON(payload, e.markerNonce)
 	// A NUL in tool output would make the server's jsonb insert fail forever (see protocol.StripNUL).
 	payload = protocol.StripNUL(payload)
 	transient := agent.IsTransient(ev)
@@ -435,14 +445,28 @@ type httpMessenger struct {
 	onAnswer  func(answer string) // called from the answer-poll goroutine
 	onPollEnd func()              // optional: lets native requests stop waiting when the ask expires
 	ownerOnly bool                // asks are answerable only by the session's signed-in owner (approvals)
+	// markerNonce is the session's marker code, taken out of every body posted (the model's
+	// update, note or question).
+	markerNonce string
 
 	pollMu sync.Mutex
 	polls  map[string]context.CancelFunc // ask id → its answer poll, while it runs
 }
 
+// messagesAPIError is a refusal from POST /api/messages, with its status, so a caller can tell
+// the server's answer (409: an owner-only approval in a runner-key session) from a failure.
+type messagesAPIError struct {
+	status int
+	body   string
+}
+
+func (e *messagesAPIError) Error() string {
+	return fmt.Sprintf("messages api: %d: %s", e.status, e.body)
+}
+
 func (m *httpMessenger) post(kind, body string) (string, error) {
 	fields := map[string]any{
-		"session_id": m.sessionID, "kind": kind, "body": body, "turn_id": m.turnID,
+		"session_id": m.sessionID, "kind": kind, "body": agent.ScrubCode(body, m.markerNonce), "turn_id": m.turnID,
 	}
 	if m.ownerOnly && kind == "ask" {
 		fields["owner_only"] = true
@@ -465,7 +489,7 @@ func (m *httpMessenger) post(kind, body string) (string, error) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("messages api: %d: %s", resp.StatusCode, raw)
+		return "", &messagesAPIError{status: resp.StatusCode, body: string(raw)}
 	}
 	var out struct {
 		ID string `json:"id"`
@@ -646,6 +670,13 @@ func (h *AgentHost) SpawnResumed(msg protocol.SpawnSession, events []agent.Resto
 // initial prompt, no state change — and a refusal is returned in ad instead of being sent as the
 // session's error.
 func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEvent, note string, ad *adoptRequest) {
+	// A clone made for this spawn is removed if the spawn fails before the session exists.
+	clonePath := ""
+	defer func() {
+		if clonePath != "" {
+			discardSandboxClone(clonePath, msg.SessionID)
+		}
+	}()
 	fail := func(reason string) {
 		if ad != nil {
 			ad.failed = reason
@@ -687,6 +718,23 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	if workspaceErr != nil {
 		fail(fmt.Sprintf("workspace not found for repo %q: %s is missing — clone it under this daemon's repos root", msg.Repo, workDir))
 		return
+	}
+	// Every sandboxed session works in a clone of its own (sandboxclone.go), never in the
+	// person's checkout and with no write access to the repository's .git: a launch-sheet or board
+	// or cron sandbox as much as a child. Made once, at the start; a recovery (ad) already has the
+	// clone's path in its record. No fallback: a session that cannot have its own clone does not
+	// start.
+	if msg.Sandbox && ad == nil && !isSandboxClone(workDir, msg.SessionID) {
+		clone, err := createSandboxClone(workDir, msg.SessionID, h.cfg.reposRoot())
+		if err != nil {
+			fail(err.Error())
+			return
+		}
+		clonePath, workDir = clone, clone
+		if workspaceInfo, workspaceErr = os.Stat(workDir); workspaceErr != nil {
+			fail("the session's clone disappeared before the session started")
+			return
+		}
 	}
 
 	// Which driver runs this session is one decision (chooseAgentDriver),
@@ -768,6 +816,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// initial prompt look busy — spinner, working indicator — while it was
 	// really waiting for its first message.
 	sess.status.Store("idle")
+	// The session's marker code for relayed decisions (markernonce.go): only the engine is told it,
+	// and the emitter takes it out of every event before the event leaves the daemon.
+	markerNonce := sessionMarkerNonce(h.markerKeyDirFor(), msg.SessionID)
 	emitter := newWSEmitter(h.sender, msg.SessionID, func(ev agent.Event) {
 		if native != nil && native.observe(ev) != nil {
 			if sess.inputFault.CompareAndSwap(false, true) {
@@ -797,6 +848,29 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			if p, ok := ev.Payload.(agent.StatusPayload); ok {
 				sess.status.Store(p.Status)
 				sess.record.setStatus(p.Status)
+			}
+		}
+		if ev.Kind == "turn_done" && isSandboxClone(workDir, msg.SessionID) {
+			// The session's commits reach the repository before its turn's end does, so a person
+			// (or a parent) told the turn ended finds them on wip/<id>.
+			err := syncSandboxAtTurnEnd(workDir, msg.SessionID)
+			var checkedOut *sandboxCheckedOutError
+			if errors.As(err, &checkedOut) {
+				// Fetched, to wip/<id>.incoming: said once, not at every turn.
+				if sess.incomingNoted.CompareAndSwap(false, true) && sess.emitter != nil {
+					sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{
+						Message: err.Error(), Retryable: true, Code: agent.ErrorCodeChildSync}})
+				}
+				err = nil
+			}
+			if err != nil {
+				log.Printf("agent session %s: %v", msg.SessionID, err)
+				// Said in the session's transcript, and for a child in the parent's turn-end note
+				// (the server reads this code), before the turn's end leaves the daemon.
+				if sess.emitter != nil {
+					sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{
+						Message: "This turn's commits were not brought back to " + sandboxBranch(msg.SessionID) + ": " + err.Error(), Retryable: true, Code: agent.ErrorCodeChildSync}})
+				}
 			}
 		}
 		if ev.Kind == "turn_done" && h.cfg.OnTurnDone != nil {
@@ -842,10 +916,11 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		// one would end a session that is still alive.
 		if ev.Kind == "error" {
 			if p, ok := ev.Payload.(agent.ErrorPayload); ok && !p.Retryable && p.Message != "" {
-				h.sendError(msg.SessionID, p.Message)
+				h.sendError(msg.SessionID, agent.ScrubCode(p.Message, markerNonce))
 			}
 		}
 	})
+	emitter.markerNonce = markerNonce
 	sess.emitter = emitter
 
 	model := msg.Model
@@ -1030,7 +1105,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	}
 	// Whether a person is reading the chat as the session works: the driver says so in the
 	// system prompt of every unrestricted turn ("" from an older server is interactive).
-	ccOpts = append(ccOpts, withInteraction(msg.Interaction))
+	ccOpts = append(ccOpts, withInteraction(msg.Interaction), withMarkerNonce(markerNonce))
 	if len(pluginDirs) > 0 {
 		ccOpts = append(ccOpts, withPluginDirs(pluginDirs))
 	}
@@ -1077,11 +1152,11 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		log.Printf("agent session %s: %s driver", msg.SessionID, spec.DisplayName)
 		driver = spec.NewAgentDriver(AgentDriverOpts{
 			CredentialSource: h.cfg.CredentialSource, Spec: spec, WorkDir: workDir, Model: model, Effort: msg.Effort,
-			SessionID: msg.SessionID, Emitter: emitter, Env: env,
+			SessionID: msg.SessionID, MarkerNonce: markerNonce, Emitter: emitter, Env: env,
 		})
 		if cx, ok := driver.(*codexDriver); ok {
 			cx.DeveloperInstructions = ccSystemPromptFor(msg.Interaction)
-			cx.AskUser = codexQuestionHandler(h.cfg.ServerHTTP, h.cfg.DaemonToken, msg.SessionID, emitter, func() string { cx.mu.Lock(); defer cx.mu.Unlock(); return cx.usageTurnID })
+			cx.AskUser = h.questionAsker(msg.SessionID, emitter, markerNonce, func() string { cx.mu.Lock(); defer cx.mu.Unlock(); return cx.usageTurnID })
 			cx.CodexHome = pluginHome
 			if pluginConfig != nil {
 				cx.RuntimeConfig = pluginConfig
@@ -1149,7 +1224,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 					hx.adoptionNote += "\n\n" + h.restartCauseWords(ad.rec)
 				}
 			}
-			hx.AskUser = codexQuestionHandler(h.cfg.ServerHTTP, h.cfg.DaemonToken, msg.SessionID, emitter)
+			hx.AskUser = h.questionAsker(msg.SessionID, emitter, markerNonce, nil)
 		}
 	case useClaudeCode:
 		log.Printf("agent session %s: claude-code driver (the engine's own login)", msg.SessionID)
@@ -1182,7 +1257,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		// enabled plugins' SessionStart hook context) are built here, after the engine decision:
 		// a CLI engine never uses them, and preparing them runs plugin hook commands.
 		messenger := &httpMessenger{
-			base: h.cfg.ServerHTTP, token: h.cfg.DaemonToken, sessionID: msg.SessionID,
+			base: h.cfg.ServerHTTP, token: h.cfg.DaemonToken, sessionID: msg.SessionID, markerNonce: markerNonce,
 			client: &http.Client{Timeout: 60 * time.Second},
 			ctx:    ctx,
 			onAnswer: func(answer string) {
@@ -1191,10 +1266,12 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				}
 			},
 		}
-		loop = agent.NewLoop(h.nativeLoopConfig(msg, nativeLoopInputs{
+		loopCfg := h.nativeLoopConfig(msg, nativeLoopInputs{
 			workDir: workDir, env: env, model: model, skills: skillList, agentTypes: agentTypes,
 			emitter: emitter, messenger: messenger, confined: msg.Sandbox || msg.RestrictTools || prefix.enabled(),
-		}))
+		})
+		loopCfg.MarkerNonce = markerNonce
+		loop = agent.NewLoop(loopCfg)
 		loop.AddTool(agent.AgentTool(loop, agentTypes, agent.DefaultSpawn))
 		loop.InstallMessagingTools()
 		driver = loop
@@ -1251,6 +1328,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	h.mu.Lock()
 	h.sessions[msg.SessionID] = sess
 	h.mu.Unlock()
+	clonePath = "" // the session owns it now: kill releases it
 
 	// Periodic resend covers lost acks and transient server-side persist
 	// failures (the server acks only after a successful DB append).
@@ -1520,9 +1598,10 @@ func (h *AgentHost) kill(sessionID string, exitCode int) {
 		sess.codexRestricted.Close()
 	}
 	if sess.sandboxed {
-		// Same teardown a terminal sandbox gets on kill (killTmuxSession): the
-		// container outlives nothing.
-		removeSandboxContainer(sessionID)
+		// The clone's leftover work is committed inside the container before it goes, the
+		// container is removed, then the branch is fetched into the repository and the clone
+		// removed if it holds nothing else (sandboxclone.go). Work is never deleted.
+		finishSandbox(sessionID)
 	}
 	if sess.pluginHome {
 		h.cfg.Plugins.releaseCodex(sessionID)

@@ -67,7 +67,7 @@ func readProposalOutcome(p *db.Proposal) proposalOutcome {
 
 // proposalDecisionMessage is what the session reads about a decided proposal, for example
 //
-//	Proposal <id> approved: Launch Night #6 'Live check' created.
+//	Proposal <id> approved: board "Launch Night" #6 "Live check" created.
 //	Proposal <id> rejected: Duplicate of #3. No card was created.
 //	Proposal <id> could not be confirmed: …
 func proposalDecisionMessage(p *db.Proposal) string {
@@ -84,13 +84,13 @@ func proposalDecisionMessage(p *db.Proposal) string {
 	case db.ProposalDone:
 		switch {
 		case board && o.Card != nil:
-			name := o.Card.BoardName
-			if name == "" {
-				name = "the board"
+			name := "the board"
+			if o.Card.BoardName != "" {
+				name = "board " + quotedName(o.Card.BoardName)
 			}
 			fmt.Fprintf(&b, "%s approved%s: %s #%d", head, by, name, o.Card.Number)
 			if o.Card.Title != "" {
-				fmt.Fprintf(&b, " '%s'", o.Card.Title)
+				b.WriteString(" " + quotedName(o.Card.Title))
 			}
 			b.WriteString(" created.")
 		case board:
@@ -170,9 +170,9 @@ func (a *API) deliverProposalDecision(ctx context.Context, p *db.Proposal) {
 	}
 	var apiErr *APIError
 	if clientID != "" {
-		_, apiErr = a.SendMessage(ctx, principal, p.SessionID, text, "proposal", clientID)
+		apiErr = a.sendRelay(ctx, principal, p.SessionID, text, "proposal", clientID)
 	} else {
-		_, apiErr = a.SendMessage(ctx, principal, p.SessionID, text, "proposal")
+		apiErr = a.sendRelay(ctx, principal, p.SessionID, text, "proposal")
 	}
 	if apiErr != nil {
 		log.Printf("proposals: deliver %s to %s: %s", p.ID, p.SessionID, apiErr.Message)

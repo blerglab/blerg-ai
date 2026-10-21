@@ -1,3 +1,4 @@
+import { useTranscriptStore } from '../hooks/useTranscriptStore'
 import { modelDisplayName } from '../model/modelDisplay'
 // ChatView: a whole chat with one session over a Transport — the toolbar, the transcript, the
 // composer, the Files panel and viewer. The host adds what is its own through slots (a model
@@ -10,9 +11,9 @@ import { useSession, type PendingTurn, type SessionHandle } from '../hooks/useSe
 import { useBackgroundLiveStore } from '../hooks/useBackgroundTasks'
 import { useChatReportStore, type ChatFiles } from '../hooks/useLiveState'
 import { useTicker } from '../hooks/useTicker'
-import { findLatest, groupArtifacts, fileCount } from '../model/artifacts'
+import { attachmentAt, findLatest, groupArtifacts, fileCount } from '../model/artifacts'
 import { resolveArtifactLink } from '../model/artifactLinks'
-import { MAX_ATTACHMENT_BYTES } from '../model/attachments'
+import { MAX_ATTACHMENT_BYTES, type MessageAttachment } from '../model/attachments'
 import { backgroundTasks, runningTasks } from '../model/backgroundTasks'
 import { ClockOffsetContext } from '../model/clockOffset'
 import { liveTurn, oldestLive } from '../model/liveCalls'
@@ -34,7 +35,7 @@ import ArtifactViewer from './ArtifactViewer'
 import { loadDiffSummary } from '../model/artifactPreview'
 import WorkspaceFileViewer from './WorkspaceFileViewer'
 import Composer from './Composer'
-import { AskContext, type AskContextValue } from './askContext'
+import { AskContext, type AskContextValue, type OwnerOnlyAnswer } from './askContext'
 import { DelegationContext, type DelegationContextValue } from './delegationContext'
 import { delegationStates } from '../model/delegations'
 import { proposalStates } from '../model/proposals'
@@ -140,6 +141,16 @@ export interface ChatViewProps {
    *  (the route refuses anyone else). Needs a transport with the read (the runner's). Absent or
    *  false: nothing changes. */
   canOpenWorkspaceFiles?: boolean
+  /** The viewer may see token counts: a live reasoning count ("Thinking… 1,234 tokens") shows only
+   *  then; otherwise the working line keeps the reasoning clock. Default true (a host that shows
+   *  tokens to everyone, or has no such rule). */
+  reasoningTokens?: boolean
+  /** Whether this viewer may answer an owner-only approval (an ask with owner_only): the host's
+   *  say, true only for the session's signed-in owner (the server refuses anyone else). true:
+   *  the card has a reply box; false: it says only the owner can answer; null: not known yet (the
+   *  host is still loading it), no box and no hint; absent: this host never answers approvals,
+   *  the card says to answer from the session in Runner. */
+  canAnswerApprovals?: boolean | null
   /** Where the chat shows what the agent left running in the background: 'none' (the only
    *  choice) leaves the list to the host — a side panel reading useBackgroundTasks, say. The
    *  working line names running tasks either way. */
@@ -195,6 +206,12 @@ export function ReadyCard({ meta, readyAt, children }: { meta: SessionMeta; read
       </dl>
     </div>
   )
+}
+
+function ownerOnlyAnswer(can: boolean | null | undefined): OwnerOnlyAnswer {
+  if (can === true) return 'yes'
+  if (can === false) return 'no'
+  return can === null ? 'unknown' : 'elsewhere'
 }
 
 export default function ChatView(props: ChatViewProps) {
@@ -297,9 +314,11 @@ export default function ChatView(props: ChatViewProps) {
   const checklistItems = props.checklistItems ?? checklist?.items ?? NO_CHECKLIST_ITEMS
   const currentChecklistItems = useMemo(() => safeChecklistAssignments(checklistItems, events), [checklistItems, events])
   const onOpenChecklistItem = props.onOpenChecklistItem
+  const sessionEffort = meta?.effort || undefined
   const chatContext = useMemo<ChatContextValue>(() => ({
     sessionId,
     sessionOver,
+    sessionEffort,
     checklistItems: currentChecklistItems,
     onOpenChecklistItem,
     // A checklist item's "View diff" (or one of its sha chips) opens the diff the CLI published of
@@ -322,15 +341,18 @@ export default function ChatView(props: ChatViewProps) {
     } : undefined,
     artifactLink: href => files ? resolveArtifactLink(href, publishedSessionUrl, artifacts.items) : null,
     latestVersion: (a: ArtifactPayload) => latestVersions.get(`${a.origin === 'user' ? 'user' : 'agent'}\0${a.name}`),
+    attachmentById: (id: string) => artifacts.items.find(a => a.id === id && a.origin === 'user'),
+    attachmentAt: (name: string, at: string | undefined) => attachmentAt(artifacts.items, name, at),
     byName: (name: string) => findLatest(artifacts.items, { name, origin: 'user' }),
     // The review and mark-up modes send the way the composer does: every file uploaded first, then
     // the message with the attachment note, then the list read again for the new versions.
     submitFeedback: async (text: string, toUpload: File[]) => {
       if (!files) return false
-      const uploaded: Array<{ name: string; size: number }> = []
+      const uploaded: MessageAttachment[] = []
       for (const f of toUpload) {
         const up = await files.upload(sessionId, f)
-        uploaded.push({ name: up.name, size: up.size })
+        // The ID goes in the note, so the message previews this exact upload (a mark-up's picture).
+        uploaded.push({ id: up.id, name: up.name, size: up.size })
       }
       const r = await send(text, uploaded)
       refreshArtifacts()
@@ -364,7 +386,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!a) return
       setAutoplay(false); setDiffAnchor(null); setReviewing(a.id); setViewing(a)
     } : undefined,
-  }), [sessionId, sessionOver, currentChecklistItems, onOpenChecklistItem, canOpenWorkspace, files, latestVersions, artifacts.items, send, refreshArtifacts, publishedSessionUrl])
+  }), [sessionId, sessionOver, sessionEffort, currentChecklistItems, onOpenChecklistItem, canOpenWorkspace, files, latestVersions, artifacts.items, send, refreshArtifacts, publishedSessionUrl])
   const consumeLink = props.onLinkedArtifactConsumed
   function closeViewer() {
     setAutoplay(false)
@@ -429,6 +451,10 @@ export default function ChatView(props: ChatViewProps) {
   // the model's API (its notice is the newest word of the turn, and nothing live has come since).
   const retryNotice = useMemo(() => modelRetry(events, status === 'running'), [events, status])
   const retry = s.answering ? null : retryNotice
+  const observedReasoning = useTranscriptStore(st => st.sessions[sessionId]?.reasoning?.[''])
+  const showReasoningTokens = props.reasoningTokens !== false
+  const reasoning = useMemo(() => observedReasoning && !showReasoningTokens ? { ...observedReasoning, tokens: null } : observedReasoning,
+    [observedReasoning, showReasoningTokens])
   const activity = working ? activityLabel(s.thinking, retry) : null
 
   // ─── Background tasks ─────────────────────────────────────────────────────
@@ -562,7 +588,7 @@ export default function ChatView(props: ChatViewProps) {
         return r.queued
       }
     : undefined, [canAnswer, transport, send])
-  const askContext = useMemo<AskContextValue>(() => ({ states: asks.byEvent, answer: answerAsk }), [asks.byEvent, answerAsk])
+  const askContext = useMemo<AskContextValue>(() => ({ states: asks.byEvent, answer: answerAsk, ownerOnly: ownerOnlyAnswer(props.canAnswerApprovals) }), [asks.byEvent, answerAsk, props.canAnswerApprovals])
   const delegationFns = useMemo(() => ({
     decide: transport.decideDelegation && !props.readOnly ? transport.decideDelegation.bind(transport) : undefined,
     fullPrompt: transport.delegationRequest ? async (id: string) => (await transport.delegationRequest!(id)).prompt : undefined,
@@ -609,7 +635,7 @@ export default function ChatView(props: ChatViewProps) {
       } : undefined,
     }
   }, [shownEvents, reviewList, sessionId, transport, props.readOnly, files, artifacts.items])
-  const askOpen = asks.open !== null && !!transport.answersAsks
+  const askOpen = asks.open !== null && !!transport.answersAsks && (!(asks.open.payload as { owner_only?: boolean })?.owner_only || props.canAnswerApprovals === true)
 
   // What a view beside the chat (useLiveState: the host's side panel) reads about this session:
   // whether a call can be in flight, whether it can run or ask anything, the asks the server
@@ -697,7 +723,7 @@ export default function ChatView(props: ChatViewProps) {
             <span className="tb-label">Compact tool calls</span>
           </label>
         )}
-        {working && streaming && <WorkingIndicator since={since} now={now} waitingOn={waitingOn} activity={activity} compact />}
+        {working && streaming && <WorkingIndicator since={since} now={now} waitingOn={waitingOn} activity={activity} reasoning={s.thinking ? reasoning : null} compact />}
         {busy && interrupt && (
           <button className="agent-stop" onClick={interrupt} aria-label="Stop" title="Stop (Esc)">
             <span className="tb-icon" aria-hidden="true">⏹</span>
@@ -782,6 +808,7 @@ export default function ChatView(props: ChatViewProps) {
         since={turnSince}
         waitingOn={waitingOn}
         activity={activity}
+        reasoning={s.thinking ? reasoning : null}
         background={background}
         queued={s.queued}
         queueState={queueState}

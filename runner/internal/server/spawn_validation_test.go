@@ -31,6 +31,7 @@ func TestRuntimeNameMapsEveryRuntimeToItself(t *testing.T) {
 func TestPostSessionsRejectsTraversalRepo(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", ReposRoot: "/home/dev/repos", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
 	mint := enableBrowserAuth(t, api)
@@ -56,6 +57,7 @@ func TestPostSessionsRejectsTraversalRepo(t *testing.T) {
 func TestPostSessionsAcceptsPlainRepoName(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
@@ -82,6 +84,7 @@ func TestPostSessionsAcceptsPlainRepoName(t *testing.T) {
 func TestForwardBrowserSpawnRejectsTraversalRepo(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	bc := &BrowserConn{ID: "b1"}
 
@@ -102,6 +105,7 @@ func TestForwardBrowserSpawnRejectsTraversalRepo(t *testing.T) {
 func TestForwardBrowserSpawnAcceptsPlainRepoName(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	bc := &BrowserConn{ID: "b1"}
 
@@ -143,6 +147,7 @@ func TestValidateRepoNameAllowsOneOrgSegment(t *testing.T) {
 func TestPostSessionsAcceptsOrgQualifiedRepo(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
@@ -283,6 +288,7 @@ func runtimeTestAPI(t *testing.T) (*API, *DaemonConn) {
 	t.Helper()
 	hub := NewHub()
 	dc := &DaemonConn{ID: "d1", Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	return NewAPI(hub, nil, "daemon-tok-1234567890", nil, ""), dc
 }

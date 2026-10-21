@@ -92,13 +92,16 @@ function CappedMarkdown({ text, cards }: { text: string; cards?: CardRegistry })
 }
 
 /** A message's text, with a trailing attachment note shown as chips instead of raw text, and an
- *  inline preview for each attached image, video or audio file the session's Files list knows. */
-export function MessageText({ text, cards }: { text: string; cards?: CardRegistry }) {
+ *  inline preview for each attached image, video or audio file the session's Files list knows.
+ *  `at`: the message's time (for an older note that names files only by name). */
+export function MessageText({ text, cards, at }: { text: string; cards?: CardRegistry; at?: string }) {
   const chat = useChat()
   const { body, files } = splitAttachmentNote(text)
   if (files.length === 0) return <CappedMarkdown text={text} cards={cards} />
   const previews = chat?.files
-    ? files.map(f => chat.byName(f.name)).filter((a): a is NonNullable<typeof a> => !!a && previewKind(a.view, a.size) !== null)
+    // A note with IDs names its files exactly; an older name-only note gets the newest upload of
+    // that name made at or before the message (`at`), never a later one.
+    ? files.map(f => f.id ? chat.attachmentById?.(f.id) : chat.attachmentAt?.(f.name, at)).filter((a): a is NonNullable<typeof a> => !!a && previewKind(a.view, a.size) !== null)
     : []
   return (
     <>

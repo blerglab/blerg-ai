@@ -71,6 +71,11 @@ without a database. To deploy, use the installers in
 [`install/`](../install). See [CONTRIBUTING.md](CONTRIBUTING.md) for branch
 and lint conventions.
 
+On phones, board columns stack vertically and card sheets fill the screen. The board session
+and card session views keep a full-width chat with touch-sized controls; desktop card sheets
+keep the side-by-side conversation. The workspace Chromium suite covers these pages at 390 px
+and 3840 px: from the repository root run `npm run test:browser -w runner/frontend -- ../../board/web/src/Mobile.browser.test.tsx --maxWorkers=1`.
+
 ## Configuration
 
 Every env var the server and CLI read — gate backends, the runner, deploy
@@ -130,3 +135,17 @@ waits for the person's [proposal approval](../docs/proposals.md#filing-a-board-c
 ## License
 
 Apache License 2.0 — see [`LICENSE`](../LICENSE).
+
+### Where a board runs
+
+In board settings under **Automation → Where it runs**, the automation owner can choose the
+cluster, a desktop's Local sandbox, or that desktop's This machine host. The setting applies to
+board chat, card runs, and automated workers and reviews. A single run's **Where it runs** choice
+overrides it. Choosing the host needs an explicit acknowledgement, recorded with who gave it and
+when: the board's sessions then run unattended, without a sandbox, as the person who runs that
+desktop, and anyone who can write cards puts prompts there. A single run uses a desktop's host only
+when the board's own target is that acknowledged host. Unavailable desktops are labeled with a
+reason; a chosen target never falls back elsewhere. On an install with desktops and no cluster, the
+board runs on a desktop without requiring a setting: the only one, or the one that has the board's
+repository (none or several is refused with a message saying so). After changing the automation
+owner, save its target again.

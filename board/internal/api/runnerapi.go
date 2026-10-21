@@ -93,6 +93,7 @@ func (a *API) SetRunner(cfg RunnerConfig) { a.runner = &cfg }
 func (a *API) runnerRoutes(mux *http.ServeMux, authed func(func(http.ResponseWriter, *http.Request, auth.Principal)) http.HandlerFunc) {
 	mux.HandleFunc("POST /api/cards/{id}/spawn", authed(a.handleSpawnFromCard))
 	mux.HandleFunc("GET /api/cards/{id}/run-targets", authed(a.handleCardRunTargets))
+	mux.HandleFunc("GET /api/boards/{id}/run-targets", authed(a.handleBoardRunTargets))
 	mux.HandleFunc("GET /api/cards/{id}/runner-sessions", authed(a.handleCardRunnerSessions))
 	mux.HandleFunc("GET /api/boards/{id}/active-sessions", authed(a.handleBoardActiveSessions))
 	mux.HandleFunc("GET /api/runner-sessions/{id}/events", authed(a.handleRunnerSessionEvents))
@@ -150,6 +151,10 @@ func (a *API) handleSpawnFromCard(w http.ResponseWriter, r *http.Request, p auth
 	target := runTarget{Runtime: req.Runtime, DaemonID: req.DaemonID}
 	if status, msg := a.checkRunTarget(p, board, target); status != 0 {
 		writeError(w, status, msg)
+		return
+	}
+	if target.Runtime == "daemon" && !hostAcknowledged(board, target.DaemonID) {
+		writeError(w, http.StatusUnprocessableEntity, msgHostRunNeedsBoardAck)
 		return
 	}
 	// Before the claim below: a board with no usable automation identity
@@ -331,9 +336,10 @@ func (a *API) spawnSessionAt(ctx context.Context, board db.Board, card db.Card, 
 		GitURL: boardGitURL(board, card.Repos[0]),
 		// By role: a discussion has its person in the chat, a run or a
 		// review does not.
-		Interaction: interactionForRole(role),
-		Runtime:     target.Runtime,
-		DaemonID:    target.DaemonID,
+		Interaction:   interactionForRole(role),
+		Runtime:       target.Runtime,
+		DaemonID:      target.DaemonID,
+		TargetAccount: targetAccount(board, target),
 		Env: map[string]string{
 			"BLERG_BOARD_URL":   a.runner.AgentURL,
 			"BLERG_BOARD_TOKEN": rawTok,

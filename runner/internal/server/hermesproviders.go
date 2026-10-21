@@ -61,22 +61,7 @@ type HermesSharedConfig struct {
 	// JobManager's engineCacheMu, like the other Secret-sweep caches.
 	operatorEnvAt time.Time
 	operatorEnv   bool
-	// personal caches personalHermesCredential's answer per owner and proof (same lock).
-	personal map[string]hermesPersonalEntry
 }
-
-type hermesPersonalEntry struct {
-	has, ok bool
-	until   time.Time
-}
-
-// hermesPersonalTTL is how long an owner's credential-kind answer is reused; a failed lookup is
-// retried sooner. hermesPersonalCacheMax bounds the map.
-const (
-	hermesPersonalTTL      = 30 * time.Second
-	hermesPersonalFailTTL  = 5 * time.Second
-	hermesPersonalCacheMax = 256
-)
 
 // hermesSharedFromEnv reads the fragment from the server's environment. Blank
 // means not configured; an oversized fragment is ignored, with a log line that
@@ -219,7 +204,7 @@ func (j *JobManager) HermesSharedLocal(ctx context.Context) bool {
 //     "not local";
 //   - when the parent itself is a connected Hermes pod, its own report can only take "local"
 //     away, never grant it: its files are the agent's to edit, and a child gets the owner's saved
-//     .env, not the parent's copy.
+//     .env, not the parent's copy. A desktop parent's report says nothing about the cluster.
 func (a *API) clusterLocalEngines(ctx context.Context, parent *db.SessionRow, p runnerPrincipal) []string {
 	jm := a.hub.JobManager()
 	if jm == nil || parent == nil {
@@ -228,7 +213,7 @@ func (a *API) clusterLocalEngines(ctx context.Context, parent *db.SessionRow, p 
 	personal := func(ctx context.Context) (bool, bool) {
 		return jm.personalHermesCredential(ctx, p.spawningAccountID(), p.proof())
 	}
-	if hermesLocalOnCluster(ctx, jm, a.hub.FindDaemonForSession(parent.ID), models.NormalizeEngine(derefOrEmpty(parent.Engine)), personal) {
+	if hermesLocalOnCluster(ctx, jm, clusterParentPod(a.hub, parent), models.NormalizeEngine(derefOrEmpty(parent.Engine)), personal) {
 		return []string{"hermes"}
 	}
 	return nil
@@ -251,37 +236,14 @@ func hermesLocalOnCluster(ctx context.Context, j *JobManager, pod *DaemonConn, p
 // personalHermesCredential asks core whether account saved a Hermes credential, with proof. With no
 // personal credentials wired in none can reach a pod: (false, true). No account or proof, or a core
 // that cannot answer: (false, false).
-// The answer is cached for hermesPersonalTTL per account and proof.
+// Read metadata on every use: a saved or removed credential must affect the next
+// pod immediately. Credential contents themselves are fetched separately at launch.
 func (j *JobManager) personalHermesCredential(ctx context.Context, account string, proof coreProof) (has, ok bool) {
 	if !j.personalCredentialsWired() {
 		return false, true
 	}
-	key := account + "\x00" + proof.TokenID + "\x00" + proof.SessionID
-	j.engineCacheMu.Lock()
-	if e, hit := j.Hermes.personal[key]; hit && time.Now().Before(e.until) {
-		j.engineCacheMu.Unlock()
-		return e.has, e.ok
-	}
-	j.engineCacheMu.Unlock()
 	kinds, err := listCorePersonalKinds(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, account, proof)
-	entry := hermesPersonalEntry{has: slices.Contains(kinds, "hermes"), ok: err == nil, until: time.Now().Add(hermesPersonalTTL)}
-	if err != nil {
-		entry = hermesPersonalEntry{until: time.Now().Add(hermesPersonalFailTTL)}
-	}
-	j.engineCacheMu.Lock()
-	if j.Hermes.personal == nil || len(j.Hermes.personal) >= hermesPersonalCacheMax {
-		j.Hermes.personal = map[string]hermesPersonalEntry{}
-	}
-	j.Hermes.personal[key] = entry
-	j.engineCacheMu.Unlock()
-	return entry.has, entry.ok
-}
-
-// expireHermesPersonalCache drops every cached owner answer (tests, and a changed configuration).
-func (j *JobManager) expireHermesPersonalCache() {
-	j.engineCacheMu.Lock()
-	j.Hermes.personal = nil
-	j.engineCacheMu.Unlock()
+	return slices.Contains(kinds, "hermes"), err == nil
 }
 
 // agentBundleHasHermesConfig reports whether the stored agent-config bundle

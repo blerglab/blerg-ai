@@ -3,8 +3,8 @@ package server
 // A session's live state: what needs the person and what runs, read from the whole event log
 // (runner/internal/livestate), for the session panel's Live tab, its header badge and its auto-open.
 //
-//   GET /api/sessions/{id}/live — for a person who may see the session, as /topics. The ETag is four
-//     cheap reads (the newest seq, the session row, the viewer's pending tool changes on it, the
+//   GET /api/sessions/{id}/live — for a person who may see the session, as /topics. The ETag is five
+//     cheap reads (the newest seq, the session row, the viewer's pending tool changes and proposals on it, the
 //     session's ask rows), so an unchanged state answers 304 without reading the events. Beside the
 //     lists it carries the session's checklist, the engine's plan and its pinned tickets (worklist.go).
 
@@ -42,6 +42,9 @@ type liveReply struct {
 	workState
 	liveDelegation
 	ToolChanges int `json:"tool_changes"`
+	// Proposals is how many of the viewer's proposals from this session wait for a decision
+	// (proposals.go): Needs you. The list itself is the owner's queue, GET /api/proposals.
+	Proposals int `json:"proposals"`
 	// ReviewRequests are the session's pending review requests (reviewrequests.go): Needs you.
 	ReviewRequests []liveReviewRequest `json:"review_requests"`
 	Counts         liveCounts          `json:"counts"`
@@ -52,14 +55,14 @@ type liveReply struct {
 
 // liveETag names a live state without building it: the newest event, the session's status (a
 // foreground subagent runs only while a turn does), the viewer's pending tool changes on the
-// session, the session's ask rows (an ask closed on the Messages page or by expiry writes no event)
+// session and pending proposals from it, the session's ask rows (an ask closed on the Messages page or by expiry writes no event)
 // and the viewer class (tokens shown or hidden).
-func liveETag(through int64, status string, toolChanges int, asks db.AskRows, showTokens bool, childrenDigest string) string {
+func liveETag(through int64, status string, toolChanges, proposals int, asks db.AskRows, showTokens bool, childrenDigest string) string {
 	class := "h"
 	if showTokens {
 		class = "t"
 	}
-	return `"` + strconv.FormatInt(through, 10) + "." + status + "." + strconv.Itoa(toolChanges) + "." +
+	return `"` + strconv.FormatInt(through, 10) + "." + status + "." + strconv.Itoa(toolChanges) + "." + strconv.Itoa(proposals) + "." +
 		strconv.Itoa(asks.Open) + "/" + strconv.Itoa(asks.Total) + "." + class + "." + childrenDigest + `"`
 }
 
@@ -117,6 +120,11 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 		fail("CountPendingToolChangesForSession", err)
 		return
 	}
+	proposals, err := db.CountPendingProposalsForSession(ctx, a.dbPool, p.Sub, sid)
+	if err != nil {
+		fail("CountPendingProposalsForSession", err)
+		return
+	}
 	asks, err := db.ReadAskRows(ctx, a.dbPool, sid)
 	if err != nil {
 		fail("ReadAskRows", err)
@@ -140,8 +148,10 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	reasoning := a.hub.liveReasoning(sid, snapshot.Rows, p.Sub, showTokens, p.Has(insightsAdminCap))
+	reasoningJSON, _ := json.Marshal(reasoning)
 	priceJSON, _ := json.Marshal(prices)
-	etag := liveETag(through, row.Status, toolChanges, asks, showTokens, snapshot.digest()+"."+childrenDigestBytes(priceJSON)+"."+reviewsDigest(reviews))
+	etag := liveETag(through, row.Status, toolChanges, proposals, asks, showTokens, snapshot.digest()+"."+childrenDigestBytes(reasoningJSON)+"."+childrenDigestBytes(priceJSON)+"."+reviewsDigest(reviews))
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-store")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
@@ -175,11 +185,12 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 		fail("liveChildren", err)
 		return
 	}
+	applyReasoning(&st, children, sid, reasoning)
 	a.addChecklistCommitURLs(row, &ws)
 	writeJSON(w, http.StatusOK, liveReply{
-		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, workState: ws, ToolChanges: toolChanges, liveDelegation: liveDelegation{Children: children, DelegationRequests: snapshot.Requests, DelegationGrants: snapshot.Grants},
+		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, workState: ws, ToolChanges: toolChanges, Proposals: proposals, liveDelegation: liveDelegation{Children: children, DelegationRequests: snapshot.Requests, DelegationGrants: snapshot.Grants},
 		ReviewRequests:   reviews,
-		Counts:           liveCounts{NeedsYou: len(st.Asks) + toolChanges + len(snapshot.Requests) + len(reviews), Running: len(st.Subagents) + len(st.Tasks) + runningChildren(children)},
+		Counts:           liveCounts{NeedsYou: len(st.Asks) + toolChanges + proposals + len(snapshot.Requests) + len(reviews), Running: len(st.Subagents) + len(st.Tasks) + runningChildren(children)},
 		CanReleasePrompt: ownsSession(p.Sub, row),
 	})
 }

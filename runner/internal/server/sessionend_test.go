@@ -65,6 +65,7 @@ func newEndFixture(t *testing.T, status string, sendBuf int) *endFixture {
 		t.Fatal(err)
 	}
 	dc := &DaemonConn{ID: endTestDaemonID, Name: "desktop", send: make(chan []byte, sendBuf)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/sessions/{id}", api.HandleDeleteSession)
 	mux.HandleFunc("GET /api/sessions", api.HandleGetSessions)

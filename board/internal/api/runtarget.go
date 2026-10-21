@@ -7,31 +7,37 @@ import (
 
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
-	"github.com/blerglab/blerg-ai/board/internal/runner"
 )
 
 // Run targets: where a person's Run of a card goes.
 //
-// By default a card runs where the board's runner is configured to start sessions
-// (BLERG_BOARD_RUNNER_RUNTIME, or the runner's own choice). The person who runs a card may
-// instead pick the cluster or one of the connected desktop daemons' sandboxes. The bare host
-// (This machine) is not offered: a card's run is unattended and its prompt is card text any board
-// writer can edit, which the runner's launch sheet only allows on the host after an explicit
-// acknowledgement. The start still goes through the one start path (spawnSessionAt →
-// startOnRunnerConfigured) under the board's automation token, so the session runs as that
-// token's owner with their credentials, exactly as a launch from the runner would. That is why
-// only the owner may choose: a desktop is a person's own machine, and a session placed there
-// must be theirs. Automated runs never choose; a respawn of the card's worker keeps the last
-// choice (cardRunTarget) while the board's automation still runs as the account that made it.
+// Board placement is selected by the automation owner. A single Run can override it; worker
+// respawns keep that override. An unavailable chosen target never falls back to another machine.
 
 // runTarget is a chosen execution target; the zero value is the board's default.
 type runTarget struct {
-	Runtime  string // "cluster" | "docker" | "" (the default)
-	DaemonID string // the connected daemon, for docker
+	Runtime  string // "cluster" | "docker" | "daemon" | "" (the default)
+	DaemonID string // the selected desktop
 }
 
 // validDaemonID bounds a daemon id from a request before it reaches the runner.
 var validDaemonID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+
+// msgHostAckRequired: a host target is saved only with the owner's explicit acknowledgement.
+const msgHostAckRequired = "running a board on This machine needs your acknowledgement: it runs card writers' prompts unattended and without a sandbox, as the person who runs that desktop"
+
+// msgHostRunNeedsBoardAck: a single run may use a desktop's host only where the board's own,
+// acknowledged target is that host.
+const msgHostRunNeedsBoardAck = "a card runs on This machine only when the board's Where it runs is that machine, acknowledged in board settings"
+
+// hostAcknowledged reports whether the board's stored target is the host of daemonID, acknowledged
+// by the account it is recorded against, which is the board's current automation owner (a
+// previous owner's acknowledgement never lets the next owner's runs onto that host).
+func hostAcknowledged(board db.Board, daemonID string) bool {
+	return board.RunRuntime == "daemon" && board.RunDaemonID == daemonID && board.RunHostAckAt != nil &&
+		board.RunHostAckBy != "" && board.RunHostAckBy == board.RunTargetAccount &&
+		board.AutomationAccountID != nil && board.RunTargetAccount == *board.AutomationAccountID
+}
 
 const msgRunTargetOwnerOnly = "only the owner of this board's automation token can choose where a card runs: the session runs as them"
 
@@ -53,16 +59,14 @@ func (a *API) checkRunTarget(p auth.Principal, board db.Board, t runTarget) (int
 		if t.DaemonID != "" {
 			return http.StatusUnprocessableEntity, "daemon_id does not apply to the cluster"
 		}
-	case "docker":
+	case "docker", "daemon":
 		if !validDaemonID.MatchString(t.DaemonID) {
-			return http.StatusUnprocessableEntity, "daemon_id is required for a desktop sandbox, and must be a daemon id"
+			return http.StatusUnprocessableEntity, "daemon_id is required for a desktop runtime, and must be a daemon id"
 		}
-	case "daemon":
-		return http.StatusUnprocessableEntity, "a card does not run on This machine from the board: choose a desktop's sandbox or the cluster"
 	case "":
 		return http.StatusUnprocessableEntity, "daemon_id needs a runtime (docker)"
 	default:
-		return http.StatusUnprocessableEntity, `runtime must be "cluster" or "docker"`
+		return http.StatusUnprocessableEntity, `runtime must be "cluster", "docker", or "daemon"`
 	}
 	if !runTargetChooser(p, board) {
 		return http.StatusForbidden, msgRunTargetOwnerOnly
@@ -72,9 +76,12 @@ func (a *API) checkRunTarget(p auth.Principal, board db.Board, t runTarget) (int
 
 // runTargetOption is one entry of a card's run menu.
 type runTargetOption struct {
-	Runtime  string `json:"runtime"`
-	DaemonID string `json:"daemon_id,omitempty"`
-	Label    string `json:"label"`
+	Runtime     string `json:"runtime"`
+	DaemonID    string `json:"daemon_id,omitempty"`
+	Label       string `json:"label"`
+	Unavailable string `json:"unavailable,omitempty"`
+	// DesktopName names a desktop target's machine, for the host acknowledgement's wording.
+	DesktopName string `json:"desktop_name,omitempty"`
 }
 
 // runtimeLabel names a runtime the way the runner's launch sheet does.
@@ -110,8 +117,19 @@ func (a *API) handleCardRunTargets(w http.ResponseWriter, r *http.Request, p aut
 		writeDBError(w, err)
 		return
 	}
-	out := map[string]any{"default_runtime": "", "can_choose": false, "targets": []runTargetOption{}}
-	if d, ok := a.runner.Driver.(interface{ DefaultRuntime() string }); ok {
+	repo := ""
+	if len(card.Repos) > 0 {
+		repo = card.Repos[0]
+	}
+	a.writeBoardRunTargets(w, r, p, board, repo, true)
+}
+
+// writeBoardRunTargets lists where the board (or, forCard, a single run of one of its cards) may
+// run. A single run is offered a desktop's host only where the board's own acknowledged target is
+// that host.
+func (a *API) writeBoardRunTargets(w http.ResponseWriter, r *http.Request, p auth.Principal, board db.Board, repo string, forCard bool) {
+	out := map[string]any{"default_runtime": board.RunRuntime, "default_daemon_id": board.RunDaemonID, "can_choose": false, "targets": []runTargetOption{}}
+	if d, ok := a.runner.Driver.(interface{ DefaultRuntime() string }); ok && board.RunRuntime == "" {
 		out["default_runtime"] = d.DefaultRuntime()
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
@@ -119,7 +137,7 @@ func (a *API) handleCardRunTargets(w http.ResponseWriter, r *http.Request, p aut
 	// may fix it (a board admin, on an install that can mint) beside the card's Run button.
 	out["board_id"] = board.ID
 	out["can_run_as_me"] = false
-	if _, _, err := a.startIdentity(r.Context(), board.ID); err != nil {
+	if _, err := a.startIdentity(r.Context(), board.ID); err != nil {
 		if !isAutomationErr(err) {
 			writeDBError(w, err)
 			return
@@ -132,27 +150,16 @@ func (a *API) handleCardRunTargets(w http.ResponseWriter, r *http.Request, p aut
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
-	discover, ok := a.runner.Driver.(runner.Discoverer)
-	if !ok {
-		out["reason"] = "this runner cannot list where sessions run"
-		writeJSON(w, http.StatusOK, out)
-		return
-	}
-	token, _, err := a.startIdentity(r.Context(), board.ID)
-	if err != nil {
-		out["reason"] = automationErrText(err)
-		writeJSON(w, http.StatusOK, out)
-		return
-	}
-	repo := ""
-	if len(card.Repos) > 0 {
-		repo = card.Repos[0]
-	}
-	options, err := discover.Discover(r.Context(), token, repo, false)
+	options, err := a.discoverRunTargets(r.Context(), board.ID, repo)
 	if err != nil {
 		out["reason"] = "the runner could not list where sessions run; retry"
-		writeJSON(w, http.StatusOK, out)
+		writeJSON(w, 200, out)
 		return
+	}
+	if board.RunRuntime == "" {
+		if target, ok, problem := defaultDesktop(options, a.defaultRunRuntime(), repo); ok && problem == nil && target != (runTarget{}) {
+			out["default_runtime"], out["default_daemon_id"] = target.Runtime, target.DaemonID
+		}
 	}
 	targets := []runTargetOption{}
 	for _, t := range options.Targets {
@@ -163,10 +170,21 @@ func (a *API) handleCardRunTargets(w http.ResponseWriter, r *http.Request, p aut
 			switch {
 			case rt == "cluster" && t.DaemonID == "":
 				targets = append(targets, runTargetOption{Runtime: rt, Label: runtimeLabel(rt)})
-			case rt == "docker" && validDaemonID.MatchString(t.DaemonID):
-				targets = append(targets, runTargetOption{Runtime: rt, DaemonID: t.DaemonID, Label: t.Name + " · " + runtimeLabel(rt)})
+			case rt == "daemon" && forCard && !hostAcknowledged(board, t.DaemonID):
+				continue
+			case (rt == "docker" || rt == "daemon") && validDaemonID.MatchString(t.DaemonID):
+				targets = append(targets, runTargetOption{Runtime: rt, DaemonID: t.DaemonID, DesktopName: t.Name, Label: t.Name + " · " + runtimeLabel(rt)})
 			}
 		}
+	}
+	if board.RunRuntime != "" && !targetAvailable(runTarget{Runtime: board.RunRuntime, DaemonID: board.RunDaemonID}, options) {
+		label, reason := runtimeLabel(board.RunRuntime), "Desktop is disconnected or this runtime is unavailable."
+		if board.RunDaemonID != "" {
+			label = board.RunDaemonID + " · " + label
+		} else {
+			reason = "Cluster runtime is not configured."
+		}
+		targets = append(targets, runTargetOption{Runtime: board.RunRuntime, DaemonID: board.RunDaemonID, Label: label, Unavailable: reason})
 	}
 	out["can_choose"] = true
 	out["targets"] = targets
@@ -201,6 +219,8 @@ func (a *API) cardRunTarget(ctx context.Context, board db.Board, cardID string) 
 	case t.Runtime == "cluster" && t.DaemonID == "":
 		return t
 	case t.Runtime == "docker" && validDaemonID.MatchString(t.DaemonID):
+		return t
+	case t.Runtime == "daemon" && validDaemonID.MatchString(t.DaemonID) && hostAcknowledged(board, t.DaemonID):
 		return t
 	}
 	return runTarget{}

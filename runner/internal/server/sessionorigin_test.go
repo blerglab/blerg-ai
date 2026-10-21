@@ -15,6 +15,7 @@ import (
 func TestSessionOriginBrokerRejectsForeignSupersededAndWrongSessionReplies(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
 	done := make(chan error, 1)
@@ -43,6 +44,7 @@ func TestSessionOriginBrokerRejectsForeignSupersededAndWrongSessionReplies(t *te
 		t.Fatal(err)
 	}
 	next := &DaemonConn{ID: dc.ID, send: make(chan []byte, 8)}
+	next.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(next)
 	reply.RequestID = req.RequestID
 	h.deliverSessionOriginResult(dc, reply)
@@ -54,6 +56,7 @@ func TestSessionOriginBrokerRejectsForeignSupersededAndWrongSessionReplies(t *te
 func TestSessionOriginBrokerOldPeerTimeoutAndReplyBounds(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
@@ -77,6 +80,7 @@ func TestSessionOriginBrokerOldPeerTimeoutAndReplyBounds(t *testing.T) {
 func TestSessionOriginBrokerBoundsConcurrentSessionRequestsAndRejectsInvalidSHA(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
 	done := make(chan error, 1)
@@ -100,6 +104,7 @@ func TestSessionOriginLookupRechecksDatabaseOwnershipAfterReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
+	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	lookup := func(changeOwner bool) (string, error) {
@@ -147,6 +152,7 @@ func TestSessionOriginBrokerBoundsPerDaemonAndGlobally(t *testing.T) {
 			var daemons []*DaemonConn
 			for d := 0; d < tc.daemonCount; d++ {
 				dc := &DaemonConn{ID: fmt.Sprintf("daemon-%d", d), send: make(chan []byte, 8)}
+				dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 				h.Register(dc)
 				daemons = append(daemons, dc)
 				for n := 0; n < tc.perDaemon; n++ {
@@ -162,6 +168,7 @@ func TestSessionOriginBrokerBoundsPerDaemonAndGlobally(t *testing.T) {
 			target := daemons[0]
 			if tc.daemonCount > 1 {
 				target = &DaemonConn{ID: "extra", send: make(chan []byte, 8)}
+				target.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 				h.Register(target)
 			}
 			h.SetSessionOwner("new-session", target.ID)

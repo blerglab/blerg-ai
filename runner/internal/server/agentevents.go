@@ -316,6 +316,19 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		// It runs after the append above, so the transcript the result reports
 		// already contains the turn that ended the session.
 		h.AutoStopOnTurnDone(msg.SessionID)
+		// A child's parent is told its turn ended (child_turn_notes.go); one the parent or the
+		// person interrupted is not news to them.
+		var p struct {
+			StopReason string `json:"stop_reason"`
+		}
+		_ = json.Unmarshal(msg.Payload, &p)
+		switch p.StopReason {
+		case "interrupted":
+		case "error":
+			h.ChildTurnEnded(msg.SessionID, childTurnFailed, "")
+		default:
+			h.ChildTurnEnded(msg.SessionID, childTurnFinished, "")
+		}
 	case "ask":
 		// The agent asked the person something: that question's own notice says so, and a
 		// deferred idle notice (notices.go) would only repeat it.

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   HTML_ARTIFACT_CSP,
+  attachmentAt,
   downloadFileName,
   fileCount,
   filenameFromDisposition,
@@ -184,5 +185,29 @@ describe('versions', () => {
     expect(findLatest(items, items[1])?.id).toBe('b')
     expect(findLatest(items, items[2])?.id).toBe('u')
     expect(findLatest(items, info('z', 'gone.md', 1))).toBeUndefined()
+  })
+})
+
+describe('attachmentAt (legacy name-only attachment notes)', () => {
+  const up = (id: string, created_at: string | undefined, over: Partial<ArtifactInfo> = {}): ArtifactInfo => ({
+    id, name: 'image.png', size: 1, content_type: 'image/png', view: 'image', origin: 'user', created_at, ...over,
+  })
+  it('takes the newest upload of that name at or before the message, never a later one', () => {
+    const items = [up('later', '2026-10-20T10:10:00Z'), up('newest-before', '2026-10-20T10:05:00Z'), up('older', '2026-10-20T10:00:00Z')]
+    expect(attachmentAt(items, 'image.png', '2026-10-20T10:06:00Z')?.id).toBe('newest-before')
+    expect(attachmentAt(items, 'image.png', '2026-10-20T10:05:00Z')?.id).toBe('newest-before')
+    expect(attachmentAt(items, 'image.png', '2026-10-20T10:04:59Z')?.id).toBe('older')
+    expect(attachmentAt(items, 'image.png', '2026-10-20T09:59:59Z')).toBeUndefined()
+  })
+  it('compares instants, not strings, and ignores the order of the list', () => {
+    const items = [up('a', '2026-10-20T10:00:00.5Z'), up('b', '2026-10-20T12:00:01+02:00')]
+    expect(attachmentAt(items, 'image.png', '2026-10-20T10:00:02Z')?.id).toBe('b')
+    expect(attachmentAt([...items].reverse(), 'image.png', '2026-10-20T10:00:02Z')?.id).toBe('b')
+  })
+  it('skips agent files, other names, and uploads with no usable time, and needs a message time', () => {
+    const items = [up('agent', '2026-10-20T10:00:00Z', { origin: 'agent' }), up('other', '2026-10-20T10:00:00Z', { name: 'b.png' }), up('untimed', undefined), up('bad', 'nope')]
+    expect(attachmentAt(items, 'image.png', '2026-10-20T11:00:00Z')).toBeUndefined()
+    expect(attachmentAt([up('ok', '2026-10-20T10:00:00Z')], 'image.png', undefined)).toBeUndefined()
+    expect(attachmentAt([up('ok', '2026-10-20T10:00:00Z')], 'image.png', 'nope')).toBeUndefined()
   })
 })

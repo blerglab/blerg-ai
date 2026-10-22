@@ -47,6 +47,7 @@ func TestSandboxLinkedWorktreeCommitAndBuild(t *testing.T) {
 	if os.Getenv("BLERG_SANDBOX_CHILD_TEST") != "1" {
 		t.Skip("set BLERG_SANDBOX_CHILD_TEST=1 with a built sandbox image")
 	}
+	labelTestContainers(t)
 	repo, child := sandboxGitFixture(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(DaemonStateDirEnv, t.TempDir())
@@ -63,7 +64,7 @@ func TestSandboxLinkedWorktreeCommitAndBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fixture sandbox failed: %v", err)
 	}
-	t.Cleanup(func() { removeSandboxContainer(id) })
+	t.Cleanup(func() { releaseTestSandbox(id) })
 	script := `set -eu
 printf 'child\n' > child.txt
 git add child.txt

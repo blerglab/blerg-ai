@@ -1,0 +1,116 @@
+/* ConfirmPopover: a small card under its anchor; on a phone, a bottom sheet over a dimmed page. */
+.confirm-popover-scrim {
+  position: fixed;
+  inset: 0;
+  /* Above the app's dialogs and lists (the bell's list 1500, Discard 1800), below hovercards. */
+  z-index: 2000;
+  background: transparent;
+}
+
+.confirm-popover {
+  position: fixed;
+  z-index: 2001;
+  box-sizing: border-box;
+  width: min(300px, calc(100vw - 16px));
+  padding: 12px 14px;
+  background: var(--chat-surface-2);
+  color: var(--chat-fg);
+  border: 1px solid var(--chat-border);
+  border-radius: 10px;
+  box-shadow: 0 10px 24px rgb(0 0 0 / 0.35);
+  font-family: inherit;
+  text-align: left;
+}
+
+.confirm-popover-title {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.confirm-popover-text {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--chat-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Cancel, then the action on the right, as the app's other confirmations. */
+.confirm-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.confirm-popover-btn {
+  min-height: 30px;
+  padding: 4px 12px;
+  background: none;
+  color: var(--chat-fg);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.confirm-popover-btn:hover {
+  border-color: var(--chat-muted);
+}
+
+.confirm-popover-btn:focus-visible {
+  outline: 2px solid var(--chat-fg);
+  outline-offset: 2px;
+}
+
+/* The only red: the action that cannot be undone. */
+.confirm-popover-btn.danger {
+  background: var(--chat-danger);
+  border-color: var(--chat-danger);
+  color: var(--chat-bg);
+}
+
+.confirm-popover-btn.danger:hover {
+  background: color-mix(in srgb, var(--chat-danger) 85%, var(--chat-fg));
+}
+
+@media (max-width: 640px) {
+  .confirm-popover-scrim {
+    background: color-mix(in srgb, var(--chat-bg) 60%, transparent);
+  }
+
+  .confirm-popover {
+    top: auto !important;
+    left: 0 !important;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    border-radius: 14px 14px 0 0;
+    border-width: 1px 0 0;
+  }
+
+  /* Stacked as a phone's action sheet: End session on top, Cancel last, nearest the thumb. */
+  .confirm-popover-actions {
+    flex-direction: column-reverse;
+  }
+
+  .confirm-popover-btn {
+    min-height: 44px;
+    font-size: 15px;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) and (max-width: 640px) {
+  .confirm-popover {
+    animation: confirm-popover-up 0.16s ease-out;
+  }
+}
+
+@keyframes confirm-popover-up {
+  from { transform: translateY(16px); opacity: 0.6; }
+  to { transform: none; opacity: 1; }
+}

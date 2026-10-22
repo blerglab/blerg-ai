@@ -71,8 +71,9 @@ export interface SubscribeHandlers {
    *  transport has resubscribed from the last seq it saw. */
   onConnection: (connected: boolean) => void
   /** Optional: the server says one of the session's asks was answered or closed (its messages
-   *  API id, and the answer: '' when it closed without one, an expiry). */
-  onAskClosed?: (messageId: string, answer: string) => void
+   *  API id, and the answer: '' when it closed without one, an expiry; dismissed: the person
+   *  dismissed it from Needs you). */
+  onAskClosed?: (messageId: string, answer: string, dismissed?: boolean, dismissedBy?: 'you' | 'other') => void
   /** Optional: the transport gave up replaying forward from what is held (too far behind) and is
    *  loading the transcript again from its end, as on a first visit. Drop the events held; the
    *  newest page follows with an `older` onReplayDone, and older pages come through loadOlder.
@@ -108,13 +109,46 @@ export interface WorkspaceFile {
   blob: Blob
 }
 
+/** A commit read from the session's own workspace (the runner's commit route): every field
+ *  bounded by the server. */
+export interface CommitDetails {
+  sha: string
+  short: string
+  subject: string
+  body: string
+  body_truncated?: boolean
+  author: string
+  /** ISO 8601. */
+  author_date: string
+  parents: string[]
+  files: { path: string; old_path?: string; adds: number; dels: number; binary?: boolean }[]
+  files_truncated?: boolean
+  adds: number
+  dels: number
+}
+
+/** A commit's diff read on demand: its text, 'large' when it is over the server's cap, null when it
+ *  cannot be read (the session's workspace or daemon is gone, the commit is unknown, no access). */
+export type CommitDiff = { text: string } | 'large' | null
+
 export interface TransportFiles {
+  /** A commit by sha (7 to 64 hex digits), read from the session's workspace; null when it cannot be
+   *  read, for whatever reason (there is nothing to tell the person). Absent on a transport
+   *  without the route. */
+  commit?(sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDetails | null>
+  /** The commit's diff, generated on demand (see CommitDiff). Absent with `commit`. */
+  commitDiff?(sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDiff>
   /** Reads a file by its path in the session's folder (owner only; absent on a transport without
    *  the route). Throws WorkspaceFileError for a refusal; honours `signal`. */
   workspaceFile?(sessionId: string, path: string, signal?: AbortSignal): Promise<WorkspaceFile>
   list(sessionId: string): Promise<ArtifactInfo[]>
   /** The bytes through the authenticated route, never a bare URL. */
   raw(sessionId: string, id: string): Promise<Blob>
+  /** The bytes, only when they are at most `max`: null when the file is larger (its Content-Length
+   *  says so, or the stream passes `max`, which then stops the download), and null when the size
+   *  cannot be told without reading it all (no Content-Length and no stream). Optional: a
+   *  transport without it gets no previews of files of unknown size. */
+  rawCapped?(sessionId: string, id: string, max: number): Promise<Blob | null>
   /** Saves the file through the browser (an anchor on an object URL). */
   download(sessionId: string, id: string): Promise<void>
   remove(sessionId: string, id: string): Promise<void>

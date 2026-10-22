@@ -229,8 +229,8 @@ func TestPrivateSession_ListAndPerSessionRoutes(t *testing.T) {
 	if rec := privDo(f.api.HandlePatchSession, "PATCH", "/x", f.privSession, tokA, `{"title":"mine"}`); rec.Code != http.StatusNoContent {
 		t.Errorf("PATCH by owner: %d %s", rec.Code, rec.Body.String())
 	}
-	// Non-private: another human still may (unchanged).
-	if rec := privDo(f.api.HandlePatchSession, "PATCH", "/x", f.pubSession, tokB, `{"title":"shared"}`); rec.Code != http.StatusNoContent {
+	// Non-private: another human sees it but cannot rename it (0.4.5: owner or administrator only).
+	if rec := privDo(f.api.HandlePatchSession, "PATCH", "/x", f.pubSession, tokB, `{"title":"shared"}`); rec.Code != http.StatusForbidden {
 		t.Errorf("PATCH non-private by B: %d %s", rec.Code, rec.Body.String())
 	}
 

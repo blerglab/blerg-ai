@@ -1,4 +1,4 @@
-import { isFromParentSession, modelDisplayNames, type FiledCard } from '@blerglab/chat'
+import { isFromParentSession, modelDisplayNames, type ChatRefs, type FiledCard, type Ticket } from '@blerglab/chat'
 // Chat/timeline view for agent-kind sessions: the runner's page over @blerglab/chat's ChatView.
 // The package draws the transcript, composer, files and viewer; this file adds what is the
 // runner's own — the model and effort pickers, the Rules panel, the ready card's repo line — and
@@ -8,8 +8,11 @@ import { useNavigate } from 'react-router-dom'
 import { memo, useEffect, useMemo, useState } from 'react'
 import {
   ChatView,
+  CommitViewerHost,
+  HovercardProvider,
   McpHoldLine,
   ReadyCard,
+  type CardTarget,
   type McpHold,
   type ChecklistItem,
   type SessionMeta,
@@ -19,6 +22,10 @@ import '@blerglab/chat/blerg.css'
 import * as ws from '../ws'
 import { blergTransport } from '../lib/chatTransport'
 import { boardCardUrl, useBoardOrigin } from '../lib/boardLink'
+import { cardPreview, signedInAccount } from '../lib/liveBoardCard'
+import { boardCardsReader } from '../lib/cardRefs'
+import { useLoadSessionBoard } from '../lib/sessionBoard'
+import { PinnedTicketModal } from './BoardCardView'
 import ProposalEditSheet from './ProposalEditSheet'
 import { apiFetch } from '../apiFetch'
 import { effectiveEffort, modelCatalogTarget, useEngineModels } from '../lib/engineModels'
@@ -136,6 +143,19 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
   // The board-card draft open in the editor sheet (the chat card's Edit), and a nudge for the
   // cards to read their proposal again after the sheet approved it.
   const [editingProposal, setEditingProposal] = useState<string | null>(null)
+  // Card numbers and commit hashes in messages (#153): a number is a card only on the session's
+  // one board, when the card exists there (its live read, cached); a hash is a commit only when the
+  // session's repository says so, a read only its owner may make. The chat batches and keeps both.
+  const refBoard = useLoadSessionBoard(sessionId, true)
+  const [refTicket, setRefTicket] = useState<Ticket | null>(null)
+  const refs = useMemo<ChatRefs>(() => ({
+    cards: refBoard ? boardCardsReader(refBoard, sessionId) : undefined,
+    openCard: t => setRefTicket({ source: 'blerg-board', key: t.key, title: t.title ?? '', ...(t.boardId ? { board_id: t.boardId } : {}), ...(t.status ? { status: t.status } : {}) } as Ticket),
+    // A pin row in the chat opens the same live dialog as the panel (#96): the Board card read live,
+    // in the two-column layout; another tracker's ticket as pinned.
+    openTicket: t => setRefTicket(t),
+    commits: canReleasePrompt === true,
+  }), [refBoard, sessionId, canReleasePrompt])
   const [proposalRevision, setProposalRevision] = useState(0)
   // The server's per-file limit (initial_state): the chat refuses a larger attachment before sending it.
   const maxFileBytes = useSessionStore(s => s.maxFileBytes)
@@ -227,8 +247,11 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
     ),
   }), [session.archived_at, session.model, session.effort, session.repo, sessionId, currentModel, engineModels, modelNames, sessionEfforts, showRules, engine, runtime, mcpHold, canReleasePrompt])
 
+  // A Blerg Board card's hovercard in the chat (a pinned ticket) reads the card as the board has it.
+  const hover = useMemo(() => ({ card: (t: CardTarget) => cardPreview(t, sessionId), repo: () => session.repo, account: signedInAccount }), [sessionId, session.repo])
   return (
-    <>
+    <HovercardProvider value={hover}>
+    <CommitViewerHost files={transport.files} repo={() => session.repo}>
     <ChatView
       session={sessionId}
       transport={transport}
@@ -254,9 +277,12 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
       onOpenBoardCard={card => openBoardCard(card, boardBase)}
       onManagePermissions={session.archived_at ? undefined : onManageChildApproval}
       proposalRevision={proposalRevision}
+      refs={refs}
     />
+    {refTicket && <PinnedTicketModal ticket={refTicket} sessionId={sessionId} onClose={() => setRefTicket(null)} />}
     {editingProposal && <ProposalEditSheet proposalId={editingProposal} onClose={() => setEditingProposal(null)} onDecided={() => setProposalRevision(n => n + 1)} />}
-    </>
+    </CommitViewerHost>
+    </HovercardProvider>
   )
 }
 

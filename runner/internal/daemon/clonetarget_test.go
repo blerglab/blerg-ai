@@ -24,9 +24,29 @@ import (
 )
 
 const fakeGit = `
-if [ "$1" = "--version" ]; then echo "git version ${FAKE_GIT_VERSION:-2.40.0}"; exit 0; fi
+here="$(dirname "$0")"
+# The hardened runner's global options: --no-pager and -c key=value pairs, recorded as CFG lines.
+cfgs=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-pager) shift ;;
+    -c) cfgs="$cfgs
+CFG $2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+if [ "$1" = "--version" ]; then echo "git version ${FAKE_GIT_VERSION:-$(cat "$here/version" 2>/dev/null || echo 2.40.0)}"; exit 0; fi
+FAKE_GIT_DIR="${FAKE_GIT_DIR:-$here}"
 calls="$FAKE_GIT_DIR/calls"
+if [ "$1" = clone ]; then
+  shift
+  opts=""
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do opts="$opts $1"; shift; done
+  set -- clone "$@"
+  echo "CLONEOPTS$opts" >> "$calls"
+fi
 echo "ARGS $*" >> "$calls"
+[ -n "$cfgs" ] && echo "$cfgs" | sed '/^$/d' >> "$calls"
 if [ -n "$FAKE_GIT_SLOW" ]; then
   # A clone that never finishes, with a helper child the way git forks
   # git-remote-https: both must die on a kill.

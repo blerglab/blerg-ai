@@ -7,6 +7,13 @@ metadata:
     app: blerg-core
 spec:
   replicas: 1
+  # On SIGTERM the server keeps serving for 5 s with /readyz at 503 (what a preStop sleep would
+  # do; the image is distroless), then shuts down gracefully within the default 30 s grace period.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: blerg-core
@@ -120,13 +127,13 @@ spec:
                 configMapKeyRef: { name: blerg-config, key: BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS, optional: true }
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 2
+            timeoutSeconds: 3
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: 8080
             initialDelaySeconds: 15
             periodSeconds: 20

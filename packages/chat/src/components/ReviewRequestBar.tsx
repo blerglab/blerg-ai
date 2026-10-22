@@ -8,7 +8,8 @@ import type { ReviewRequestPayload } from '../types'
 import { reviewOutcomeLine } from '../model/reviewRequests'
 import { useReviewRequests, type ReviewDecision } from './reviewRequestContext'
 
-export default function ReviewRequestBar({ artifact }: { artifact: ArtifactInfo }) {
+/** hideAsk: the ask is shown elsewhere (a diff review's Conversation body); the bar keeps the rest. */
+export default function ReviewRequestBar({ artifact, hideAsk = false }: { artifact: ArtifactInfo; hideAsk?: boolean }) {
   const ctx = useReviewRequests()
   const fromCtx = ctx?.forArtifact(artifact.id) ?? null
   const [local, setLocal] = useState<ReviewRequestPayload | null>(null)
@@ -39,7 +40,7 @@ export default function ReviewRequestBar({ artifact }: { artifact: ArtifactInfo 
     <section className={`review-request-bar status-${r.state}`} data-testid="review-request-bar" aria-label="Review request">
       <div className="review-request-bar-text">
         <span className="review-request-bar-label">{pending ? 'Review requested' : reviewOutcomeLine(r)}</span>
-        {r.ask && <span className="review-request-bar-ask" data-testid="review-request-bar-ask">{r.ask}</span>}
+        {r.ask && !hideAsk && <span className="review-request-bar-ask" data-testid="review-request-bar-ask">{r.ask}</span>}
         {!pending && r.note && r.state !== 'withdrawn' && <span className="review-request-bar-note">{r.note}</span>}
       </div>
       {pending && decide && !noting && (

@@ -432,6 +432,29 @@ runner's stricter list silently wins at install time. Two saves racing on the sa
 gets `409`. A plugin, once installed, acts with the session's full access — the allow-list is the
 control.
 
+### Board call limits
+
+An administrator (`account.manage`) sets how much board traffic sessions may make under Settings →
+**Board call limits** (`GET`/`PUT /api/settings/board-limits`; a `PUT` needs a live sign-in). Four
+numbers, stored in `board_call_limits` (migration 023; no row means the defaults):
+
+| Limit | Default | Range | Enforced by |
+|---|---|---|---|
+| `calls_per_minute`: board requests a session may make in a rolling minute | 600 | 1 to 10000 | runner |
+| `calls_in_flight`: board calls one session may run at once | 8 | 1 to 64 | runner |
+| `unrevoked_per_account`: credentials still live after a failed revoke before the runner stops minting for the account | 20 | 1 to 1000 | runner |
+| `live_exchange_tokens`: live exchange tokens per account | 100 | 10 to 10000 | core |
+
+`unrevoked_per_account` and `calls_in_flight` must each be below `live_exchange_tokens`. Calls at
+once are per session and live tokens per account, so busy sessions × `calls_in_flight` counts against
+`live_exchange_tokens`: at 64 calls at once, two busy sessions of one account use all 100, and that
+account's other board calls and launch-board connections wait for calls to finish (the settings page
+shows the number for the values you enter). Core reads
+`live_exchange_tokens` on every exchange, so a change applies to the next one. The runner reads the
+other three with `POST /internal/board-limits` (`X-Internal-Key`; no account data in the reply) and
+keeps them for a minute, so a change reaches each runner within a minute; when core cannot be asked
+it keeps the values it read last (its own defaults before the first read).
+
 ### MCP connections and cron tokens
 
 A person's remote MCP servers (`mcp_connections`, migration 015) and the tokens that let a scheduled

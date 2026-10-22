@@ -107,7 +107,7 @@ describe('the view table', () => {
     for (const v of ['none', '', 'hologram', 'constructor', '__proto__', 'toString']) expect(isViewable(v)).toBe(false)
   })
   it('gives blobs only allow-listed types, and a pdf is always a pdf', () => {
-    expect(blobTypeFor('image', 'image/svg+xml')).toBe('image/svg+xml')
+    expect(blobTypeFor('image', 'image/svg+xml')).toBe('application/octet-stream') // never a typed SVG blob: (mediaUrl)
     expect(blobTypeFor('image', 'image/png; charset=x')).toBe('image/png')
     expect(blobTypeFor('image', 'text/html')).toBe('application/octet-stream')
     expect(blobTypeFor('pdf', 'text/html')).toBe('application/pdf')

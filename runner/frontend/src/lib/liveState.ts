@@ -14,8 +14,11 @@ import {
 /** Engine-neutral progress supplied by the server; no command-output inference. */
 export interface LiveProgress { completed: number; total: number; label: string; updated_at?: string }
 export type ProgressSubagent = SubagentLive & { progress?: LiveProgress; reasoning?: Reasoning }
-export type SessionPanelLiveState = Omit<LiveState, 'subagents'> & {
+/** The checklist with the names of its assignees, keyed "<kind>:<id>" (the server reads them). */
+export type PanelChecklist = ChecklistLive & { workerTitles?: Record<string, string> }
+export type SessionPanelLiveState = Omit<LiveState, 'subagents' | 'checklist'> & {
   subagents: ProgressSubagent[]
+  checklist?: PanelChecklist | null
   progress?: LiveProgress | null
   /** The viewer may see token counts; absent (the chat's own reading): no live reasoning count. */
   reasoningTokens?: boolean
@@ -30,8 +33,9 @@ export function readProgress(value: unknown): LiveProgress | null {
     ...(typeof p.updated_at === 'string' ? { updated_at: p.updated_at } : {}) }
 }
 
-/** no_wait: a question the agent does not wait on (`blerg-runner ask --no-wait`). */
-export interface LiveAskReply { event_id: string; message_id: string; question: string; asked_at: string; seq: number; no_wait?: boolean }
+/** no_wait: a question the agent does not wait on (`blerg-runner ask --no-wait`); owner_only: only
+ *  the session's owner may answer it (without no_wait, an engine command approval). */
+export interface LiveAskReply { event_id: string; message_id: string; question: string; asked_at: string; seq: number; no_wait?: boolean; owner_only?: boolean }
 
 export interface LiveSubagentReply {
  reasoning?: Reasoning
@@ -55,7 +59,7 @@ export interface LiveSubagentReply {
 
 export interface LiveTaskReply { task_id: string; call_id: string; kind: string; description: string; command?: string; started_at: string; seq: number }
 
-export interface LiveChecklistReply { items: ChecklistItem[]; event_id: string; updated_at: string; commit_urls?: Record<string, string> }
+export interface LiveChecklistReply { items: ChecklistItem[]; event_id: string; updated_at: string; commit_urls?: Record<string, string>; worker_titles?: Record<string, string> }
 export interface LivePlanReply { items: { text: string; status: PlanStatus; active?: string }[]; updated_at: string }
 export interface LiveTicketSummaryReply { source: string; key: string; title: string; status: string; url: string; board_id?: string; event_id: string; seq: number; updated_at: string }
 export type LiveTicketReply = Ticket & { event_id: string; updated_at: string }
@@ -66,6 +70,8 @@ export interface LiveChildSession {
   /** Reported current-turn telemetry, separate from the completed-turn billing ledger. */
   usage_status?: 'pending' | 'reported' | 'hidden'; tool_calls?: number; activity?: string
   activity_since?: string; last_activity_at?: string; local?: boolean
+  /** The ticket the started session pinned last (its current pin), when it has one. */
+  ticket?: { source: string; key: string; title: string; status: string; board_id?: string; url?: string } | null
 }
 export interface LiveDelegationRequest { request_id: string; engine: string; title: string; expires_at: string }
 /** A pending review request (blerg-runner review request): Needs you shows one row per request. */
@@ -143,7 +149,7 @@ export interface LiveView {
   toolChanges: number
   counts: { needsYou: number }
   /** The agent's checklist; null when it has none. */
-  checklist: ChecklistLive | null
+  checklist: PanelChecklist | null
   /** The engine's plan (only the server reads it); null when there is none. */
   plan: PlanLive | null
   progress: LiveProgress | null
@@ -219,10 +225,11 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
     tasks.set(t.task_id, { taskId: t.task_id, callId: t.call_id, kind: t.kind, description: t.description, command: t.command ?? '', startedAt: parseTs(t.started_at), done: null })
   }
   const initialChecklist = reply.checklist ? readChecklist(reply.checklist, reply.checklist.event_id) : null
-  let checklist: ChecklistLive | null = reply.checklist && initialChecklist?.items.length
+  let checklist: PanelChecklist | null = reply.checklist && initialChecklist?.items.length
     ? {
         items: initialChecklist.items, eventId: reply.checklist.event_id, updatedAt: parseTs(reply.checklist.updated_at),
         ...(reply.checklist.commit_urls ? { commitUrls: reply.checklist.commit_urls } : {}),
+        ...(reply.checklist.worker_titles ? { workerTitles: reply.checklist.worker_titles } : {}),
       }
     : null
   let mcp: McpLive | null = readMcp(reply.mcp)
@@ -232,7 +239,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
     tickets: (reply.tickets ?? []).map(t => ({ source: t.source, key: t.key, title: t.title, status: t.status, url: t.url, ...(t.board_id ? { boardId: t.board_id } : {}), eventId: t.event_id, updatedAt: parseTs(t.updated_at) })),
     ticket: reply.ticket ? (({ event_id, updated_at, ...t }) => ({ ...t, eventId: event_id, updatedAt: parseTs(updated_at) }))(reply.ticket) : null,
   }
-  const asks: AskLive[] = (reply.asks ?? []).map(a => ({ eventId: a.event_id, messageId: a.message_id, question: a.question, askedAt: parseTs(a.asked_at), ...(a.no_wait ? { noWait: true } : {}) }))
+  const asks: AskLive[] = (reply.asks ?? []).map(a => ({ eventId: a.event_id, messageId: a.message_id, question: a.question, askedAt: parseTs(a.asked_at), ...(a.no_wait ? { noWait: true } : {}), ...(a.owner_only ? { ownerOnly: true } : {}) }))
 
   const promote = (native: string, call: string) => {
     if (!native || !call || native === call || subs.has(native)) return
@@ -257,7 +264,8 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         // The pages of the commits the reply knew stay; a newer commit has none until the next read.
         if (c) {
           assignmentFences.clear()
-          checklist = c.items.length ? { items: c.items, eventId: ev.client_event_id, updatedAt: at, ...(checklist?.commitUrls ? { commitUrls: checklist.commitUrls } : {}) } : null
+          // So do the names of the workers it knew; a new one is named by the next read (a checklist event brings one).
+          checklist = c.items.length ? { items: c.items, eventId: ev.client_event_id, updatedAt: at, ...(checklist?.commitUrls ? { commitUrls: checklist.commitUrls } : {}), ...(checklist?.workerTitles ? { workerTitles: checklist.workerTitles } : {}) } : null
         }
         break
       }
@@ -330,7 +338,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         break
       case 'ask':
         if (!asks.some(a => a.eventId === ev.client_event_id)) {
-          asks.push({ eventId: ev.client_event_id, messageId: str(p.message_id), question: str(p.body), askedAt: at, ...(p.no_wait === true && str(p.message_id) ? { noWait: true } : {}) })
+          asks.push({ eventId: ev.client_event_id, messageId: str(p.message_id), question: str(p.body), askedAt: at, ...(p.no_wait === true && str(p.message_id) ? { noWait: true } : {}), ...(p.owner_only === true ? { ownerOnly: true } : {}) })
         }
         break
       case 'user_message': {

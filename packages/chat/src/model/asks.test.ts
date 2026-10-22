@@ -17,7 +17,7 @@ describe('askStates', () => {
     expect(open.byEvent.get(ask.client_event_id)).toEqual({ open: true, answer: '' })
     const done = askStates([ask, ev('user_message', { text: 'yes', source: 'ask_answer', message_id: 'm1' })], NONE, false)
     expect(done.open).toBeNull()
-    expect(done.byEvent.get(ask.client_event_id)).toEqual({ open: false, answer: 'yes' })
+    expect(done.byEvent.get(ask.client_event_id)).toMatchObject({ open: false, answer: 'yes', by: 'you' })
   })
 
   it('an answer to another ask, or a plain message, leaves an ask with an id open', () => {
@@ -73,7 +73,7 @@ describe('askStates', () => {
     expect(askStates([old, ev('user_message', { text: 'Answer to your question q1', source: 'question_answer' })], NONE, false).open).toBe(old)
     const done = askStates([q, ev('user_message', { text: 'yes', source: 'ask_answer', message_id: 'q1' })], NONE, false)
     expect(done.anyOpen).toBe(false)
-    expect(done.byEvent.get(q.client_event_id)).toEqual({ open: false, answer: 'yes' })
+    expect(done.byEvent.get(q.client_event_id)).toMatchObject({ open: false, answer: 'yes', by: 'you' })
   })
 
   it('the newest open ask is the one the composer answers', () => {
@@ -109,7 +109,7 @@ describe('askStates and the call that asked', () => {
     const call = ev('tool_call', { tool: 'ask', call_id: 'a1', input: { question: 'Which?' } })
     const ask = ev('ask', { body: 'Which?', message_id: 'm2' })
     const r = askStates([call, ask, ev('user_message', { text: 'the first', source: 'ask_answer', message_id: 'm2' }), ev('tool_result', { call_id: 'a1', output: 'the first', is_error: false, duration_ms: 1 })], NONE, false)
-    expect(r.byEvent.get(ask.client_event_id)).toEqual({ open: false, answer: 'the first' })
+    expect(r.byEvent.get(ask.client_event_id)).toMatchObject({ open: false, answer: 'the first' })
   })
 
   it('another call returning leaves it open', () => {

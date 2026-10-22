@@ -35,11 +35,11 @@ describe('the live board card dialog in Chromium', () => {
     if (width === 3840) expect(dialog.width).toBeCloseTo(1400, 0)
     else expect(dialog.width).toBeGreaterThan(width - 40)
     expect(live.scrollWidth).toBeLessThanOrEqual(live.clientWidth + 1)
-    for (const el of live.querySelectorAll<HTMLElement>('select, button, a')) {
+    for (const el of live.querySelectorAll<HTMLElement>('button, a')) {
       const box = el.getBoundingClientRect()
       expect(box.right).toBeLessThanOrEqual(width)
       if (width === 390 && el.tagName !== 'A') expect(box.height).toBeGreaterThanOrEqual(44)
     }
-    expect(screen.getByLabelText('Move to column')).toBeTruthy()
+    expect(screen.getByRole('group', { name: 'Status' })).toBeTruthy()
   })
 })

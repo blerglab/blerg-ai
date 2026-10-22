@@ -130,6 +130,22 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
     localStorage.removeItem(THINKING_KEY)
   })
 
+  it('names the header control "End session" and the composer control "Stop"', async () => {
+    seed({ status: 'running', model: 'claude-opus-5-5', effort: 'high' })
+    await renderPage()
+    expect(within(toolbar()).getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'End session' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Stop' })).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Stop session' })).toBeNull()
+    // The header button draws an X; the composer's Stop keeps its own glyph.
+    const end = screen.getByRole('button', { name: 'End session' })
+    expect(end.querySelector('.end-session-x')).not.toBeNull()
+    expect(end.classList.contains('danger')).toBe(true)
+    const stop = within(toolbar()).getByRole('button', { name: 'Stop' })
+    expect(stop.querySelector('.end-session-x')).toBeNull()
+    expect(stop.textContent).toContain('⏹')
+  })
+
   it('the toolbar keeps model, effort, Rules and Stop: no Files, Skills & plugins, Show thinking or Compact tool calls', async () => {
     seed({ status: 'running', model: 'claude-opus-5-5', effort: 'high' })
     await renderPage()

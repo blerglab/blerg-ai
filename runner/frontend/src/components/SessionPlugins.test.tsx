@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { PluginPicker, PluginRequests, SessionPluginChatRequests } from './SessionPlugins'
+import { useState } from 'react'
+import { PluginAddButton, PluginAddForm, PluginRequests, SessionPluginChatRequests } from './SessionPlugins'
 import { useSessionPlugins } from '../hooks/useSessionPlugins'
 import type { SessionPluginSettings } from '../lib/sessionPlugins'
 const apiFetch = vi.fn()
@@ -19,9 +20,11 @@ const reply = (body: unknown, status = 200) =>
   Promise.resolve({ ok: status < 400, status, json: async () => body })
 function Harness({ session = 's1' }: { session?: string }) {
   const model = useSessionPlugins(session, true)
+  const [open, setOpen] = useState(false)
   return (
     <MemoryRouter>
-      <PluginPicker model={model} />
+      <PluginAddButton open={open} onToggle={() => setOpen(o => !o)} controls="add-form" />
+      {open && <PluginAddForm model={model} id="add-form" />}
       <PluginRequests model={model} />
     </MemoryRouter>
   )

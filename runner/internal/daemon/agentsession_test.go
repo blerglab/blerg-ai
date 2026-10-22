@@ -398,6 +398,35 @@ func TestHTTPMessengerAskFlow(t *testing.T) {
 	}
 }
 
+// Card #155 review M5: a waited question the person dismissed reaches the engine as a dismissal,
+// with the hint that they may have answered in the chat, not as a bare close.
+func TestHTTPMessengerDismissedAsk(t *testing.T) {
+	answered := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/messages":
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "msg-7"})
+		case r.Method == "GET" && r.URL.Path == "/api/messages/msg-7/answer":
+			_ = json.NewEncoder(w).Encode(map[string]any{"answered": true, "answer": "", "dismissed": true})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	m := &httpMessenger{base: srv.URL, token: "tok", sessionID: "s1", client: &http.Client{Timeout: 5 * time.Second}, onAnswer: func(a string) { answered <- a }}
+	if _, err := m.SendAsk("pick a color"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case a := <-answered:
+		if a != askDismissedAnswer || !strings.Contains(a, "may have answered in the chat") {
+			t.Fatalf("answer = %q", a)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("answer never delivered")
+	}
+}
+
 func TestBuildSystemPromptLayers(t *testing.T) {
 	workDir, homeDir := t.TempDir(), t.TempDir()
 	if err := os.MkdirAll(filepath.Join(homeDir, ".claude"), 0o755); err != nil {

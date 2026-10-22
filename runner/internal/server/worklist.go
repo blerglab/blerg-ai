@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,12 +47,14 @@ func (a *API) RegisterWorklistRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sessions/{id}/board-options", a.HandleFilingBoards)
 	mux.HandleFunc("GET /api/sessions/{id}/board-search", a.HandleFilingSearch)
 	mux.HandleFunc("POST /api/sessions/{id}/file-ticket", a.HandleFileTicket)
+	mux.HandleFunc("POST /api/sessions/{id}/board-create", a.HandleProposeBoard)
 	mux.HandleFunc("GET /api/sessions/{id}/proposals/{pid}", a.HandleSessionProposalStatus)
 	mux.HandleFunc("POST /api/sessions/{id}/filing-tools", a.HandleFilingTools)
 	mux.HandleFunc("GET /api/sessions/{id}/plugins", a.HandleSessionPlugins)
 	mux.HandleFunc("POST /api/sessions/{id}/plugins", a.HandleAddSessionPlugin)
 	mux.HandleFunc("POST /api/sessions/{id}/plugin-requests", a.HandleSessionPluginRequest)
 	mux.HandleFunc("POST /api/sessions/{id}/checklist", a.HandlePostChecklist)
+	mux.HandleFunc("POST /api/sessions/{id}/title", a.HandleRenameOwnSession)
 	mux.HandleFunc("GET /api/sessions/{id}/checklist/workers", a.HandleChecklistWorkers)
 	mux.HandleFunc("POST /api/sessions/{id}/progress", a.HandlePostProgress)
 	mux.HandleFunc("POST /api/sessions/{id}/tickets", a.HandlePostTickets)
@@ -331,45 +334,81 @@ func unpinTarget(pinned []ticket.Summary, source, key string) (*ticket.Summary, 
 	if len(pinned) == 0 {
 		return nil, "No ticket is pinned."
 	}
-	switch {
-	case key == "" && source == "":
-		return &pinned[0], ""
-	case key == "":
+	if key == "" {
+		if source == "" {
+			return &pinned[0], ""
+		}
 		return nil, "Name the ticket as <source>:<key>, or give neither to unpin the current one."
-	case source != "":
-		// A Blerg Board card may be named with its board: blerg-board:<board id>#<number>.
-		board := ""
-		if b, n, ok := strings.Cut(key, "#"); ok && b != "" && source == ticket.SourceBoard {
-			board, key = b, "#"+n
-		}
-		var match *ticket.Summary
-		for i := range pinned {
-			p := &pinned[i]
-			if p.Source == source && p.Key == key && (board == "" || p.BoardID == board) {
-				if match != nil {
-					return nil, fmt.Sprintf("Two pinned cards are %s; name it as %s:<board id>%s.", key, source, key)
-				}
-				match = p
-			}
-		}
-		if match != nil {
-			return match, ""
-		}
-		return nil, fmt.Sprintf("%s:%s is not pinned.", source, key)
 	}
 	var match *ticket.Summary
+	// unknownBoard: a legacy card pin with the asked number but no recorded board at all (no
+	// board ID, no board name in its key), asked for on a named board: it may or may not be on
+	// that board, so when no other pin matches, the unpin is refused rather than guessed.
+	unknownBoard := false
 	for i := range pinned {
-		if pinned[i].Key == key {
-			if match != nil {
-				return nil, fmt.Sprintf("Two pinned tickets have the key %s; name it as <source>:%s.", key, key)
-			}
-			match = &pinned[i]
+		p := &pinned[i]
+		if source != "" && p.Source != source {
+			continue
 		}
+		matches := p.Key == key
+		if p.Source == ticket.SourceBoard {
+			prefix, number, ok := boardUnpinKey(key)
+			oldPrefix, oldNumber, oldOK := boardUnpinKey(p.Key)
+			if ok && oldOK && number == oldNumber {
+				// Old pins kept a display name in Key, sometimes with no BoardID. A qualified key
+				// names the recorded board ID or the stored board name; a pin with neither
+				// recorded matches only a bare #number.
+				switch {
+				case prefix == "":
+					matches = true
+				case p.BoardID != "" && prefix == p.BoardID:
+					matches = true
+				case oldPrefix != "":
+					matches = prefix == oldPrefix
+				case p.BoardID == "":
+					matches, unknownBoard = false, true
+				default:
+					matches = false
+				}
+			} else if ok && oldOK {
+				matches = false
+			}
+		}
+		if !matches {
+			continue
+		}
+		if match != nil {
+			if source == ticket.SourceBoard {
+				return nil, fmt.Sprintf("Two pinned cards are %s; name it as %s:<board id or board name>#<number>.", key, source)
+			}
+			return nil, fmt.Sprintf("Two pinned tickets have the key %s; name it as <source>:<key> (with a board id or name for Blerg cards).", key)
+		}
+		match = p
 	}
-	if match == nil {
-		return nil, fmt.Sprintf("%s is not pinned.", key)
+	// Refused only when nothing else matched: a pin recorded on the named board is the one meant,
+	// and the board-less pin can still be unpinned by its bare #number afterwards.
+	if match == nil && unknownBoard {
+		_, number, _ := boardUnpinKey(key)
+		return nil, fmt.Sprintf("A pinned card #%d has no recorded board, so it cannot be told apart by %s; unpin it as #%d.", number, key, number)
 	}
-	return match, ""
+	if match != nil {
+		return match, ""
+	}
+	if source != "" {
+		return nil, fmt.Sprintf("%s:%s is not pinned.", source, key)
+	}
+	return nil, fmt.Sprintf("%s is not pinned.", key)
+}
+
+// boardUnpinKey compares a modern #number with a legacy "Board name #number".
+// The caller retains the stored key and board ID in the unpin event so replay removes it.
+func boardUnpinKey(key string) (prefix string, number int, ok bool) {
+	prefix, raw, found := strings.Cut(strings.TrimSpace(key), "#")
+	if !found {
+		raw, prefix = prefix, ""
+	}
+	number, err := strconv.Atoi(strings.TrimSpace(raw))
+	return strings.TrimSpace(prefix), number, err == nil && number > 0
 }
 
 // liveChecklist is the live state's checklist: the newest list, when it has items.
@@ -379,6 +418,8 @@ type liveChecklist struct {
 	UpdatedAt time.Time        `json:"updated_at"`
 	// CommitURLs maps a commit sha the items hold to its web page, when the repository is known.
 	CommitURLs map[string]string `json:"commit_urls,omitempty"`
+	// WorkerTitles names the items' assignees, keyed "<kind>:<id>" (checklistWorkerTitles).
+	WorkerTitles map[string]string `json:"worker_titles,omitempty"`
 }
 
 // liveTicket is the current pin in full (its event's ticket), with the event that pinned it last.
@@ -412,7 +453,14 @@ func readWorkState(ctx context.Context, q db.Querier, sid string, through int64)
 				return ws, resolveErr
 			}
 			checklistCanonicalAssignments(p.Items, resolved)
+			titles, titleErr := checklistWorkerTitles(ctx, q, sid, p.Items, through)
+			if titleErr != nil {
+				return ws, titleErr
+			}
 			ws.Checklist = &liveChecklist{Items: p.Items, EventID: latest.ClientEventID, UpdatedAt: latest.Ts}
+			if len(titles) > 0 {
+				ws.Checklist.WorkerTitles = titles
+			}
 		}
 	}
 	planRows, err := db.ListPlanEvents(ctx, q, sid, through)

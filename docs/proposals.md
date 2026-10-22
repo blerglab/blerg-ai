@@ -74,6 +74,24 @@ A completed filing returns the card reference. An **unknown** result is not an i
 again: Blerg never retries it automatically. Check the target board and resolve the existing
 proposal before proposing another card.
 
+## Proposing a new board
+
+`blerg-runner board create "<name>" [--repo R ...] [--template T | --columns A,B,C]
+[--description D] [--access read|file|full]` proposes a new Board for the person to approve. The
+preview shows the board's name, description, repositories, columns or template, and the access
+the session asks for on it (Full by default). The proposal cannot be edited; on **Proposals** and in
+Needs you, the person may lower the access before approving, or reject it.
+
+- **Approve** creates the board with the approving person's authority: Core issues a one-use
+  credential bound to the exact approved draft, only to an administrator who is signed in, and Board
+  consumes it once. A session never holds board administration. Approving twice creates one board.
+- The proposing session, and no other, is then given access to the new board at the approved level,
+  as if the person had set it in the session's Permissions. A session another session started is
+  capped by that session's level, which is Propose on a board it did not create.
+- **Reject**, or expiry, creates nothing. "Allow for this session" never applies.
+- The same command repeated with its idempotency key (or the same draft without one, within 15
+  minutes) is the same proposal.
+
 ## Plugin requests
 
 `blerg-runner request-plugin <name> "<why>"` queues a private request for a plugin or its bundled

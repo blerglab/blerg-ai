@@ -144,7 +144,10 @@ type agentSession struct {
 	skills  []skills.Skill
 	// sandboxed marks a session whose engine runs inside a container, so Kill
 	// tears the container down the way killTmuxSession does for a terminal one.
-	sandboxed         bool
+	sandboxed bool
+	// sandboxCheck asks the watch of a sandboxed session's container (watchSandbox) to look now: an
+	// engine failure may be the container's. nil when the session has no sandbox.
+	sandboxCheck      chan struct{}
 	plugins           bool                                     // holds a Claude plugin snapshot in the workshop (released on Kill)
 	pluginSpecs       []pluginspec.Entry                       // applied specs, guarded by AgentHost.mu
 	pluginRequests    map[string]protocol.SessionPluginsResult // guarded by AgentHost.mu
@@ -162,6 +165,25 @@ type agentSession struct {
 	record     *recordKeeper
 	inputs     *inputJournal
 	inputFault atomic.Bool
+	// stopReason is the non-retryable error the engine reported since its last turn started:
+	// what the session is said to have ended with when its runtime stops (trackStopReason).
+	stopReason atomic.Pointer[string]
+}
+
+// trackStopReason keeps stopReason to the error that caused a stop: a non-retryable error is
+// remembered (reason, already scrubbed), and a turn that starts after it forgets it, since an
+// error the engine went on from cannot be why it stops later.
+func (sess *agentSession) trackStopReason(ev agent.Event, reason string) {
+	switch p := ev.Payload.(type) {
+	case agent.ErrorPayload:
+		if ev.Kind == "error" && !p.Retryable && reason != "" {
+			sess.stopReason.Store(&reason)
+		}
+	case agent.StatusPayload:
+		if ev.Kind == "status_changed" && p.Status == "running" {
+			sess.stopReason.Store(nil)
+		}
+	}
 }
 
 // The two reasons a sandboxed agent-kind spawn is refused: the Claude
@@ -204,9 +226,9 @@ type sandboxCredential struct {
 // authenticates, and whether any credential exists at all.
 //
 // Three sources, in preference order:
-//   - a `claude` subscription login on this host: ~/.claude(.json) is already
-//     bind-mounted into the container, so nothing has to be passed — this is
-//     the path the launch sheet's default assumes;
+//   - a `claude` subscription login on this host: the session's sandbox home
+//     carries a copy of it (sandboxhome.go), so nothing has to be passed — this
+//     is the path the launch sheet's default assumes;
 //   - CLAUDE_CODE_OAUTH_TOKEN, or
 //   - ANTHROPIC_API_KEY on the daemon.
 //
@@ -214,7 +236,7 @@ type sandboxCredential struct {
 // that ever enter a sandbox, and only on this path: with the engine running
 // inside the container, a credential the host-side driver would have read from
 // its own environment has to travel with it, and that is the same exposure as
-// the login directory mounted right beside it. The daemon master token is not
+// the login copy in the session's sandbox home. The daemon master token is not
 // among them and never will be.
 func sandboxClaudeCredentialEnv(apiKey string) (sandboxCredential, bool) {
 	if claudeAvailable() {
@@ -569,6 +591,10 @@ func (m *httpMessenger) CloseAsk(id, answer string) {
 	}()
 }
 
+// askDismissedAnswer is what an engine reads for a question the person dismissed (the words of
+// `blerg-runner ask`'s exit 4).
+const askDismissedAnswer = "[the person dismissed this question without answering it; they may have answered in the chat instead. Ask again if you still need an answer]"
+
 // pollAnswer long-polls the answer endpoint (the CLI's protocol) and delivers
 // the reply into the loop. Terminates on session shutdown (ctx), on a
 // non-retryable HTTP status (message expired/deleted), or on the answer.
@@ -603,8 +629,9 @@ func (m *httpMessenger) pollAnswer(ctx context.Context, id string) {
 		// Server shape: {"answered": bool, "answer": string|null} (long-poll
 		// holds the request ≤25s while open).
 		var out struct {
-			Answered bool    `json:"answered"`
-			Answer   *string `json:"answer"`
+			Answered  bool    `json:"answered"`
+			Answer    *string `json:"answer"`
+			Dismissed bool    `json:"dismissed"`
 		}
 		decodeErr := json.NewDecoder(resp.Body).Decode(&out)
 		_ = resp.Body.Close()
@@ -621,7 +648,11 @@ func (m *httpMessenger) pollAnswer(ctx context.Context, id string) {
 			if out.Answer != nil {
 				answer = *out.Answer
 			}
-			if answer == "" {
+			switch {
+			case out.Dismissed:
+				// The person dismissed it from Needs you (card #155): the CLI's words, not a bare close.
+				answer = askDismissedAnswer
+			case answer == "":
 				answer = "[ask closed without an answer]"
 			}
 			if m.onAnswer != nil {
@@ -844,8 +875,21 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				}()
 			}
 		}
+		// An engine failure in a sandbox may be its container's: the watch looks at once rather than
+		// at its next tick, so the session hears the real reason before an engine retries.
+		switch p := ev.Payload.(type) {
+		case agent.ErrorPayload:
+			if ev.Kind == "error" && p.SandboxExit == nil {
+				askSandboxCheck(sess.sandboxCheck)
+			}
+		case agent.StatusPayload:
+			if ev.Kind == "status_changed" && p.Reason == "engine_unavailable" {
+				askSandboxCheck(sess.sandboxCheck)
+			}
+		}
 		if ev.Kind == "status_changed" {
 			if p, ok := ev.Payload.(agent.StatusPayload); ok {
+				sess.trackStopReason(ev, "")
 				sess.status.Store(p.Status)
 				sess.record.setStatus(p.Status)
 			}
@@ -916,7 +960,13 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		// one would end a session that is still alive.
 		if ev.Kind == "error" {
 			if p, ok := ev.Payload.(agent.ErrorPayload); ok && !p.Retryable && p.Message != "" {
-				h.sendError(msg.SessionID, agent.ScrubCode(p.Message, markerNonce))
+				reason := agent.ScrubCode(p.Message, markerNonce)
+				sess.trackStopReason(ev, reason)
+				// A runtime that has stopped for good ends the session (runtimeStopped,
+				// once its driver returns), and the end carries this reason.
+				if p.Code != agent.ErrorCodeRuntimeStopped {
+					h.sendError(msg.SessionID, reason)
+				}
 			}
 		}
 	})
@@ -1039,10 +1089,10 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 		var err error
 		if runtimeHome == "" {
-			runtimeHome, err = prepareCodexInteractiveHome(ctx, grantSource, runtimeWork)
+			runtimeHome, err = prepareCodexInteractiveHomeFor(ctx, grantSource, runtimeWork, msg.Sandbox)
 			standaloneGrantHome = runtimeHome
 		} else {
-			err = sanitizeCodexInteractiveHome(ctx, runtimeHome, grantSource, runtimeWork)
+			err = sanitizeCodexInteractiveHomeFor(ctx, runtimeHome, grantSource, runtimeWork, msg.Sandbox)
 		}
 		if err != nil {
 			cancel()
@@ -1074,8 +1124,8 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			sbOpts.CodexHome = runtimeHome
 			sbOpts.CodexSourceHome = grantSource
 		}
-		sbOpts.ClaudeOnly = msg.RestrictTools || (!useCodex && msg.MCPGateway != nil)
-		if useCodex && sbOpts.ClaudeOnly {
+		sbOpts.Engine = msg.Engine
+		if useCodex && msg.RestrictTools {
 			sbOpts.RestrictedEngine = "codex"
 		}
 		if len(pluginDirs) > 0 {
@@ -1086,11 +1136,17 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		if err != nil {
 			cancel()
 			releasePlugins()
+			releaseSandboxHome(msg.SessionID)
 			fail("could not start the sandbox container: " + err.Error())
 			return
 		}
 		prefix = sandboxExecPrefix(container)
 		sess.sandboxed = true
+		sess.sandboxCheck = make(chan struct{}, 1)
+		// The session hears it when the sign-in its sandbox got needs refreshing on this machine.
+		setSandboxHomeNotifier(msg.SessionID, func(text string) {
+			emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: text, Retryable: true}})
+		})
 	}
 
 	// The MCP gateway config file, written before any turn (inside the
@@ -1106,6 +1162,16 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// Whether a person is reading the chat as the session works: the driver says so in the
 	// system prompt of every unrestricted turn ("" from an older server is interactive).
 	ccOpts = append(ccOpts, withInteraction(msg.Interaction), withMarkerNonce(markerNonce))
+	if !msg.Sandbox && !msg.RestrictTools {
+		// Claude Code's own sandbox, when the person runs it: the session's settings let the
+		// messaging CLI through (claudesandbox.go). A restricted session has no shell to need it.
+		sandboxSettings, note := claudeSandboxException(env, h.cfg.HomeDir, workDir)
+		ccOpts = append(ccOpts, withClaudeSandboxSettings(sandboxSettings))
+		if note != "" {
+			log.Printf("agent session %s: %s", msg.SessionID, note)
+			emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: note, Retryable: true}})
+		}
+	}
 	if len(pluginDirs) > 0 {
 		ccOpts = append(ccOpts, withPluginDirs(pluginDirs))
 	}
@@ -1387,6 +1453,10 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		gated.SetRecoveryInputGate(h.waitRecoveryReady, h.recoveryInputReady)
 	}
 	driver.Start()
+	if prefix.enabled() {
+		// A container that stops ends the session with Docker's reason, whatever the engine.
+		go h.watchSandbox(ctx, msg.SessionID, sess, prefix.container(), sess.sandboxCheck)
+	}
 	if source, ok := driver.(mcpStatusSource); ok {
 		if gate, supported := driver.(interface{ SetMCPInputGate(func(context.Context)) }); supported {
 			engine := msg.Engine
@@ -1403,11 +1473,16 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	}
 	nativeOwned = true
 	go func() {
-		defer close(runDone)
-		if native != nil {
-			defer func() { _ = native.root.Close() }()
+		func() {
+			defer close(runDone)
+			if native != nil {
+				defer func() { _ = native.root.Close() }()
+			}
+			driver.Run(ctx)
+		}()
+		if ctx.Err() == nil {
+			h.runtimeStopped(msg.SessionID, sess)
 		}
-		driver.Run(ctx)
 	}()
 	if ad != nil {
 		h.finishAdoption(ad, sess, driver, msg)
@@ -1570,7 +1645,10 @@ var agentDriverStopTimeout = 5 * time.Second
 // Kill stops the session entirely.
 func (h *AgentHost) Kill(sessionID string) { h.kill(sessionID, 0) }
 
-func (h *AgentHost) kill(sessionID string, exitCode int) {
+func (h *AgentHost) kill(sessionID string, exitCode int) { h.killWith(sessionID, exitCode, "") }
+
+// killWith is kill with the reason a failed session's end carries (SessionEnded.Message).
+func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
 	h.mu.Lock()
 	sess := h.sessions[sessionID]
 	delete(h.sessions, sessionID)
@@ -1615,7 +1693,31 @@ func (h *AgentHost) kill(sessionID string, exitCode int) {
 	sess.record.delete() // killed for good: nothing to host again after a restart
 	sess.inputs.close()
 	removeSessionTokenFile(DaemonStateDir(), sessionID)
-	_ = h.sender.Send(protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: exitCode})
+	_ = h.sender.Send(protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: exitCode, Message: reason})
+}
+
+// runtimeStoppedReason is what a session whose engine runtime stopped by itself is said to have
+// ended with when the engine gave no reason of its own.
+const runtimeStoppedReason = "The engine runtime stopped; start a new session to continue the work"
+
+// runtimeStopped ends a session whose driver returned while the session was still meant to run:
+// the engine gave up (Codex's app-server failed three times in a row, for example because its
+// sandbox container is gone, or the Hermes gateway could not be kept). Nothing is left to take a
+// turn, so the session must not stay listed: a daemon that still reports it has its server revive
+// it to "running" at every heartbeat, and a parent watching it waits for a turn that never comes.
+// It ends with a non-zero exit and the engine's reason, so its row ends as "error"
+// (process_failed) with that reason, its parent is told, and its recovery record is deleted. A
+// retryable failure the driver recovers from never gets here: only a Run that returned does.
+func (h *AgentHost) runtimeStopped(sessionID string, sess *agentSession) {
+	if h.get(sessionID) != sess {
+		return // already killed (or replaced) by someone else
+	}
+	reason := runtimeStoppedReason
+	if p := sess.stopReason.Load(); p != nil && *p != "" {
+		reason = *p
+	}
+	log.Printf("agent session %s: the engine runtime stopped (%s); ending the session", sessionID, reason)
+	h.killWith(sessionID, 1, reason)
 }
 
 // HandleAck removes a server-persisted event from the pending buffer.

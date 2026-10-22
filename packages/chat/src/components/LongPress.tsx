@@ -30,7 +30,7 @@ interface Target {
   plain: string
 }
 
-const CARDS = '.md-codeblock, .ticket-card, .checklist-row, .agent-card.assistant, .agent-card.user'
+const CARDS = '.md-codeblock, .ticket-row, .checklist-row, .agent-card.assistant, .agent-card.user'
 
 // The text as the person reads it. jsdom has no innerText; textContent is close enough there.
 const readText = (el: Element) => ((el as HTMLElement).innerText ?? el.textContent ?? '').trim()
@@ -45,10 +45,10 @@ function payloadOf(card: Element): Omit<Target, 'plain'> & { plain?: string } | 
     return { text: src(), html, plain: md ? readText(md) : undefined }
   }
   if (card.matches('.md-codeblock')) return src ? { text: src(), html: '' } : null
-  if (card.matches('.ticket-card')) {
+  if (card.matches('.ticket-row')) {
     const key = card.getAttribute('data-ticket-key') ?? ''
-    const title = card.querySelector('.ticket-title')?.textContent ?? ''
-    const url = card.querySelector('a.ticket-key')?.getAttribute('href') ?? ''
+    const title = card.querySelector('.ticket-row-title')?.textContent ?? ''
+    const url = card.getAttribute('data-ticket-url') ?? ''
     const text = [`${key} ${title}`.trim(), url].filter(Boolean).join('\n')
     return text ? { text, html: '' } : null
   }

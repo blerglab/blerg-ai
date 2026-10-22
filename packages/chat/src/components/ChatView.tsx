@@ -9,6 +9,7 @@ import type { CardRegistry } from '../cards/registry'
 import { useAttachments } from '../hooks/useAttachments'
 import { useSession, type PendingTurn, type SessionHandle } from '../hooks/useSession'
 import { useBackgroundLiveStore } from '../hooks/useBackgroundTasks'
+import { useWorkingLineStore } from '../hooks/useWorkingLine'
 import { useChatReportStore, type ChatFiles } from '../hooks/useLiveState'
 import { useTicker } from '../hooks/useTicker'
 import { attachmentAt, findLatest, groupArtifacts, fileCount } from '../model/artifacts'
@@ -47,6 +48,8 @@ import FilesPanel from './FilesPanel'
 import Transcript, { WINDOW, type BackgroundLine } from './Transcript'
 import WorkingIndicator from './WorkingIndicator'
 import type { DescribeUserMessage, MessageFooter } from './cards/EventCards'
+import { RefContext, type RefContextValue } from './RefLinks'
+import { refStoreFor, type ChatRefs } from '../model/refs'
 import './chat.css'
 
 // How long a sent message may go unanswered — no status change, no event —
@@ -85,6 +88,9 @@ export interface ChatViewProps {
   onEditProposal?: (proposalId: string) => void
   /** Opens a card a proposal created, in the host's board. Absent: the ticket card has no Open. */
   onOpenBoardCard?: (card: FiledCard) => void
+  /** Card numbers and commit hashes in messages, linked once confirmed (model/refs.ts). Absent: the
+   *  text stays text. */
+  refs?: ChatRefs
   /** Opens the session's permissions (where an automatic approval's permission is revoked). */
   onManagePermissions?: () => void
   /** Bump when a proposal changed outside the chat (the host's editor approved it). */
@@ -233,6 +239,18 @@ export default function ChatView(props: ChatViewProps) {
   const catchingUp = !painted
   const shownEvents = catchingUp ? NO_EVENTS : events
   const files = transport.files ?? null
+  // References in messages: one store per session (lookups batched and kept); its readers follow
+  // the host's (the board, once known) and the transport's commit read, for a viewer who may use it.
+  const refStore = refStoreFor(sessionId)
+  const refsProp = props.refs
+  const commitRead = refsProp?.commits && files?.commit ? files : null
+  useEffect(() => {
+    refStore.setResolvers({
+      cards: refsProp?.cards,
+      commit: commitRead ? (sha: string) => commitRead.commit!(sessionId, sha).then(d => d?.sha ?? null) : null,
+    })
+  }, [refStore, refsProp?.cards, commitRead, sessionId])
+  const refContext = useMemo<RefContextValue | null>(() => (refsProp ? { store: refStore, sessionId, refs: refsProp } : null), [refStore, sessionId, refsProp])
 
   const [draft, setDraftState] = useState(() => getDraft(storage, sessionId))
   // Another session: its own draft.
@@ -332,8 +350,8 @@ export default function ChatView(props: ChatViewProps) {
     view: (a: ArtifactInfo, opts?: { autoplay?: boolean }) => { setAutoplay(!!opts?.autoplay); setDiffAnchor(null); setViewing(a) },
     // A bare name (no folder) that is a file published in this session opens that file: an agent that
     // says "open `plan.md`" means the one it published, not one at the top of its folder.
-    openWorkspaceFile: canOpenWorkspace ? (path: string, line?: number) => {
-      const published = files && !path.includes('/')
+    openWorkspaceFile: canOpenWorkspace ? (path: string, line?: number, opts?: { folder?: boolean }) => {
+      const published = files && !path.includes('/') && !opts?.folder
         ? findLatest(artifacts.items, { name: path, origin: 'agent' }) ?? findLatest(artifacts.items, { name: path, origin: 'user' })
         : undefined
       if (published) { setAutoplay(false); setDiffAnchor(null); setViewing(published); return }
@@ -491,6 +509,14 @@ export default function ChatView(props: ChatViewProps) {
   // A view elsewhere on the page (useBackgroundTasks) reads whether the session is live from here.
   const setBackgroundLive = useBackgroundLiveStore(st => st.setLive)
   useEffect(() => { setBackgroundLive(sessionId, live) }, [setBackgroundLive, sessionId, live])
+  // The working line's inputs, for a view elsewhere on the page (the host's Running now "Main" row):
+  // the same call, words and clock, so the two never disagree. Cleared when this view goes.
+  const setWorkingLine = useWorkingLineStore(st => st.setLine)
+  const lineSince = working ? turnSince : null
+  useEffect(() => {
+    setWorkingLine(sessionId, working ? { since: lineSince, waitingOn, activity } : null)
+  }, [setWorkingLine, sessionId, working, lineSince, waitingOn, activity])
+  useEffect(() => () => setWorkingLine(sessionId, null), [setWorkingLine, sessionId])
 
   // Give up on a sent message nothing has answered.
   const answered = pending !== null && (
@@ -687,11 +713,12 @@ export default function ChatView(props: ChatViewProps) {
     () => (starting ? (attempt ?? placeholderAttempt(startedAt)) : null),
     [starting, attempt, startedAt],
   )
-  const transcriptSession = useMemo(() => (status ? { id: sessionId, status } : undefined), [sessionId, status])
+  const transcriptSession = useMemo(() => (status ? { id: sessionId, status, runtime: meta?.runtime } : undefined), [sessionId, status, meta?.runtime])
 
   return (
     <ClockOffsetContext.Provider value={clockOffset}>
     <ChatContext.Provider value={chatContext}>
+    <RefContext.Provider value={refContext}>
     <div className={`agent-chat${props.className ? ` ${props.className}` : ''}`} data-testid="agent-chat" style={props.theme ? themeStyle(props.theme) : undefined} onCopy={e => handleChatCopy(e.nativeEvent, e.currentTarget)} {...dropProps}>
       {dragging && <div className="drop-zone" role="status" data-testid="drop-zone">Drop files to attach</div>}
       <div className="agent-toolbar">
@@ -882,6 +909,7 @@ export default function ChatView(props: ChatViewProps) {
         actions={slots.composerActions}
       />}
     </div>
+    </RefContext.Provider>
     </ChatContext.Provider>
     </ClockOffsetContext.Provider>
   )

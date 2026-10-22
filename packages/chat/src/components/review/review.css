@@ -40,8 +40,9 @@
 }
 
 .review-bar .artifact-btn[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--chat-accent) 18%, transparent);
-  border-color: color-mix(in srgb, var(--chat-accent) 55%, transparent);
+  background: var(--chat-selected-bg);
+  border-color: var(--chat-selected-border);
+  color: var(--chat-selected-text);
 }
 
 .review-spacer {
@@ -350,6 +351,7 @@
 }
 
 .review-diff-hint { color: var(--chat-muted); font-size: .8rem; margin: 0; }
+.review-hidden-banner { margin: 0; padding: 6px 10px; font-size: var(--chat-text-sm); color: var(--chat-fg); background: color-mix(in srgb, var(--chat-warning) 14%, transparent); border: 1px solid color-mix(in srgb, var(--chat-warning) 45%, transparent); border-radius: 6px; }
 .review-diff-mode .review-page-col { min-width: 0; flex: 1; }
 .review-diff-mode .review-panes { grid-template-columns: minmax(0, 1fr) 18rem; }
 @media (max-width: 760px) {
@@ -408,20 +410,23 @@
    tall as the visible panes at any dialog size. (Elsewhere a size container could collapse.) */
 .artifact-viewer .document-review .document-scroll { container-type: size; }
 .artifact-viewer .document-review .review-source { height: 100cqh; }
-/* Markdown: the page reads at a 75ch measure with its comments right beside it, the two centered as
-   one group. Without the source the group is centered in the panes; with it, the source takes the
+/* Markdown: the page is GitHub's box (1078px: its 1012px text column, padding and border, as in the
+   viewer) with its comments right beside it, the two centered as one group. Without the source the group is centered in the panes; with it, the source takes the
    left (up to half, growing first) and the group is centered in the rest, between two flexible
    spacer columns. PDF and diff reviews keep the page at full width. */
-.document-review.review-markdown .document-scroll { grid-template-columns: minmax(0, 75ch) 300px; justify-content: center; }
+.document-review.review-markdown .document-scroll { grid-template-columns: minmax(0, 1078px) 300px; justify-content: center; }
 .document-review.review-markdown.document-source-mode .document-scroll {
-  grid-template-columns: minmax(180px, 50%) minmax(0, 1fr) minmax(0, 75ch) 300px minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 50%) minmax(0, 1fr) minmax(0, 1078px) 300px minmax(0, 1fr);
   justify-content: stretch;
   column-gap: 0; /* the spacers stay equal; the source and the page carry the gaps */
 }
 .document-review.review-markdown.document-source-mode .review-source { grid-column: 1; margin-right: 12px; }
 .document-review.review-markdown.document-source-mode .review-page-col { grid-column: 3; margin-right: 12px; }
 .document-review.review-markdown.document-source-mode .document-margin { grid-column: 4; }
-.review-markdown .review-page-col > * { box-sizing: border-box; width: 100%; max-width: 75ch; margin-inline: auto; }
+.review-markdown .review-page-col > * { box-sizing: border-box; width: 100%; max-width: 1078px; margin-inline: auto; }
+/* The page column is the size container the document box's narrow rule reads (markdown.css): beside
+   the source, or on a phone, the box gives up its border and padding. */
+.review-markdown .review-page-col { container-type: inline-size; }
 .document-margin { position: relative; min-width: 0; }
 .document-margin-card { position: absolute; left: 0; right: 0; }
 .document-margin-card::before { content: ''; position: absolute; top: 14px; right: 100%; width: 12px; border-top: 1px solid var(--chat-border); }
@@ -452,9 +457,125 @@
 .document-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 4px; border: 1px solid transparent; border-radius: 4px; color: var(--chat-fg); background: transparent; cursor: pointer; }
 .document-icon-btn:hover, .document-icon-btn:focus-visible { background: var(--chat-surface-2); border-color: var(--chat-border); }
 .document-icon-btn:focus-visible { outline: 2px solid var(--chat-accent); outline-offset: 1px; }
-.document-icon-btn[aria-pressed='true'] { background: color-mix(in srgb, var(--chat-accent) 18%, transparent); border-color: var(--chat-accent); }
+.document-icon-btn[aria-pressed='true'] { background: var(--chat-selected-bg); border-color: var(--chat-selected-border); color: var(--chat-selected-text); }
 .document-icon-btn:disabled { opacity: .4; cursor: default; }
 .document-link-editor { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px; border: 1px solid var(--chat-border); border-radius: 6px; }
 .document-link-editor label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 160px; }
 .document-link-editor input { flex: 1; min-width: 0; color: var(--chat-fg); background: var(--chat-bg); border: 1px solid var(--chat-border); padding: 6px; border-radius: 4px; }
 .document-link-editor p { width: 100%; margin: 0; color: var(--chat-danger); }
+
+/* the glyph chips replace the words on a phone only */
+.review-summary-chips { display: none; }
+
+/* A phone: the review bar is one compact row (the counts shrink, not wrap) so the diff keeps the height. */
+@media (max-width: 699px) {
+  .review-inline-mode .review-bar { flex-wrap: wrap; padding-top: 0; gap: 4px; }
+  .review-inline-mode .review-bar .artifact-btn { padding-inline: 8px; white-space: nowrap; }
+  .review-inline-mode .review-spacer { display: none; }
+  .review-inline-mode .review-summary { flex: none; margin-left: auto; white-space: nowrap; }
+  .review-inline-mode .review-summary-words { display: none; }
+  .review-inline-mode .review-summary-chips { display: inline-flex; gap: 6px; }
+  .review-inline-mode .review-resolved-toggle { white-space: nowrap; }
+}
+
+/* A resolved or rejected diff thread: one bar on its line ("✓ Resolved · conversation by the agent
+   · Show"), opened in place. */
+.review-inline-mode .review-thread-collapsed { padding: 4px 8px; }
+.review-thread-bar { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--chat-text-xs); color: var(--chat-muted); }
+.review-thread-bar-state { flex: none; font-weight: 600; white-space: nowrap; }
+.review-thread-bar-state.status-done { color: var(--chat-success); }
+.review-thread-bar-state.status-declined { color: var(--chat-muted-2); }
+.review-thread-bar-who { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.review-thread-bar .review-outdated { flex: none; white-space: nowrap; }
+.review-thread-bar .review-thread-summary { flex: 1 1 0; min-width: 2ch; margin: 0; color: var(--chat-fg); }
+.review-thread-bar .review-thread-bar-show { flex: none; margin-left: auto; padding-block: 2px; }
+
+/* ── a diff review's Conversation | Files tabs ───────────────────────────────── */
+.review-tabs { display: inline-flex; }
+.review-tabs .artifact-btn { border-radius: 0; }
+.review-tabs .artifact-btn:first-child { border-radius: 6px 0 0 6px; }
+.review-tabs .artifact-btn:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+.review-tabs .artifact-btn[aria-selected="true"] {
+  background: var(--chat-selected-bg);
+  border-color: var(--chat-selected-border);
+  color: var(--chat-selected-text);
+}
+.review-files-notice { margin: 0 0 6px; font-size: var(--chat-text-sm); color: var(--chat-muted); flex-shrink: 0; }
+
+/* The Conversation: the body, then the timeline down a rail; on a wide screen a summary column. It
+   takes the whole dialog (no fixed width), so a 4K display reads it at 4K. */
+.review-conversation {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 16px;
+  padding: 2px 2px 16px;
+}
+.review-conv-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.review-conv-side { display: none; }
+@media (min-width: 1400px) {
+  .review-conversation { grid-template-columns: minmax(0, 1fr) clamp(14rem, 16vw, 32rem); }
+  .review-conv-side { display: block; position: sticky; top: 0; align-self: start; padding-left: 16px; border-left: 1px solid var(--chat-border); font-size: var(--chat-text-sm); }
+  .review-conv-side h3 { margin: 4px 0; font-size: var(--chat-text-xs); color: var(--chat-muted); text-transform: uppercase; letter-spacing: .04em; }
+  .review-conv-side p, .review-conv-side ul { margin: 0 0 12px; }
+  .review-conv-side ul { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+}
+.review-conv-body { border: 1px solid var(--chat-border); border-radius: 8px; background: var(--chat-surface); }
+.review-conv-body-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 8px 12px; background: var(--chat-surface-2); border-bottom: 1px solid var(--chat-border); border-radius: 8px 8px 0 0; font-size: var(--chat-text-sm); }
+.review-conv-body-text { padding: 4px 12px; overflow-wrap: anywhere; }
+.review-conv-placeholder { margin: 0; padding: 10px 12px; color: var(--chat-muted); font-style: italic; font-size: var(--chat-text-sm); }
+.review-conv-meta { color: var(--chat-muted); font-size: var(--chat-text-xs); }
+.review-conv-timeline { list-style: none; margin: 0 0 0 11px; padding: 0 0 0 22px; border-left: 2px solid var(--chat-border); }
+.review-conv-entry { position: relative; padding: 6px 0 12px; min-width: 0; }
+.review-conv-line { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: var(--chat-text-sm); overflow-wrap: anywhere; }
+.review-conv-icon {
+  position: absolute; left: -35px; top: 4px; width: 22px; height: 22px; box-sizing: border-box;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--chat-border); border-radius: 50%; background: var(--chat-surface-2); color: var(--chat-muted);
+  font-size: var(--chat-text-xs);
+}
+.review-conv-decision.state-approved .review-conv-icon { color: var(--chat-success); border-color: color-mix(in srgb, var(--chat-success) 55%, transparent); }
+.review-conv-decision.state-changes_requested .review-conv-icon { color: var(--chat-warning); border-color: color-mix(in srgb, var(--chat-warning) 55%, transparent); }
+.review-conv-time { float: right; margin-left: 8px; font-size: var(--chat-text-xs); color: var(--chat-muted); }
+.review-conv-subline { margin: 4px 0 0; color: var(--chat-muted); font-size: var(--chat-text-sm); overflow-wrap: anywhere; }
+.review-conv-commits { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.review-conv-commits li { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: var(--chat-text-sm); }
+.review-conv-commit-subject { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-conv-threads { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.review-conv-thread { min-width: 0; border: 1px solid var(--chat-border); border-radius: 8px; overflow: hidden; background: var(--chat-surface); }
+.review-conv-thread-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; background: var(--chat-surface-2); border-bottom: 1px solid var(--chat-border); font-size: var(--chat-text-xs); }
+.review-conv-where { padding: 0; border: 0; background: none; color: var(--chat-accent); font: var(--chat-text-xs)/1.4 var(--chat-font-mono); text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.review-conv-where:disabled { color: var(--chat-fg); cursor: default; }
+.review-conv-where:not(:disabled):hover { text-decoration: underline; }
+.review-conv-outdated { padding: 0 7px; border: 1px solid color-mix(in srgb, var(--chat-warning) 45%, transparent); border-radius: 999px; color: var(--chat-warning); }
+.review-conv-excerpt { overflow-x: auto; border-bottom: 1px solid var(--chat-border); }
+.review-conv-excerpt.is-link { cursor: pointer; }
+.review-conv-excerpt.is-link:hover { background: color-mix(in srgb, var(--chat-accent) 6%, transparent); }
+.review-conv-excerpt .diff-table { width: 100%; }
+.review-conv-excerpt .diff-code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-conv-thread .review-quote { margin: 8px 10px; }
+.review-inline-mode .review-conv-thread-body .review-inline-thread { margin: 0; border: 0; border-radius: 0; }
+.review-conversation > .review-conv-main > .review-form { margin: 0; }
+@media (max-width: 699px) {
+  .review-tabs .artifact-btn { padding-inline: 8px; }
+  .review-conv-timeline { margin-left: 9px; padding-left: 16px; }
+  .review-conv-icon { left: -27px; width: 18px; height: 18px; }
+  .review-conv-time { float: none; display: block; margin: 2px 0 0; }
+}
+
+/* A phone keeps the comment readable in a collapsed bar: "conversation by the agent" goes to the
+   state's tooltip. */
+@media (max-width: 699px) {
+  .review-thread-bar-who { display: none; }
+  .review-thread-bar .review-thread-summary { min-width: 8ch; }
+}
+.review-conv-error { margin: 0; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--chat-danger) 45%, transparent); border-radius: 8px; color: var(--chat-danger); font-size: var(--chat-text-sm); }
+
+/* The person's own actions on a thread: Reply, Resolve, Reject (open) or Reply, Reopen (settled). */
+.review-thread-controls { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; margin-top: 6px; }
+.review-thread-controls > .review-form { flex: 1 1 100%; }
+.review-thread-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.review-reply.is-person::before { content: "↪ "; }

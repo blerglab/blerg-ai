@@ -243,6 +243,26 @@ describe('BoardView', () => {
     })
   })
 
+  describe('Assist start errors', () => {
+    it('shows why a refused Assist start failed, and clears it on the next try', async () => {
+      vi.mocked(boardApi.spawnAssist).mockRejectedValueOnce(new Error('no daemon connected'))
+      renderBoardView('b1')
+      await waitFor(() => expect(screen.getByText('Sprint Board')).toBeInTheDocument())
+
+      fireEvent.click(screen.getByTestId('assist-button'))
+
+      const alert = await screen.findByTestId('assist-error')
+      expect(alert).toHaveAttribute('role', 'alert')
+      expect(alert).toHaveTextContent('Assist failed: no daemon connected')
+      expect(screen.getByTestId('assist-button')).toHaveTextContent('Assist')
+      expect(screen.getByTestId('location')).not.toHaveTextContent('/sessions/')
+
+      fireEvent.click(screen.getByTestId('assist-button'))
+      await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/sessions/sess-assist-1'))
+      expect(screen.queryByTestId('assist-error')).not.toBeInTheDocument()
+    })
+  })
+
   describe('add column', () => {
     it('renders an "Add column" control in the header area', async () => {
       renderBoardView('b1')

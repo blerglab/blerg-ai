@@ -162,9 +162,12 @@ func viewOfProposal(p *db.Proposal) proposalView {
 		DecidedAt: p.DecidedAt, DecidedBy: p.DecidedBy, Result: p.Result,
 		Extendable: p.State == db.ProposalPending && db.ProposalExtendable(p), MaxExpiresAt: db.ProposalMaxDeadline(p),
 	}
-	if db.IsBoardFilingProposal(p) {
+	switch {
+	case db.IsBoardFilingProposal(p):
 		v.Kind = "board_file"
-	} else if db.IsSessionPluginProposal(p) {
+	case db.IsBoardCreateProposal(p):
+		v.Kind = "board_create"
+	case db.IsSessionPluginProposal(p):
 		v.Kind = "plugin_request"
 		var args sessionPluginArguments
 		if json.Unmarshal(p.Arguments, &args) == nil {
@@ -468,6 +471,13 @@ func (h *proposalsHandler) approve(w http.ResponseWriter, r *http.Request) {
 		h.approveSessionPlugin(w, r, who, p, http.StatusOK)
 		return
 	}
+	if db.IsBoardCreateProposal(p) {
+		// A proposed board is approved by its owner only, never for the session: its own body
+		// carries the reviewed arguments and, optionally, a lower access level.
+		h.approveBoardCreate(r.Context(), w, who, p, raw)
+		h.api.announceProposalDecision(context.WithoutCancel(r.Context()), p.AccountID, p.ID)
+		return
+	}
 	var body approveBody
 	if len(bytes.TrimSpace(raw)) > 0 {
 		if filingDecode(raw, &body) != nil {
@@ -546,6 +556,10 @@ func (h *proposalsHandler) execute(ctx context.Context, w http.ResponseWriter, w
 	}
 	if db.IsSessionPluginProposal(p) {
 		writeError(w, http.StatusConflict, "a plugin request is approved by a person only")
+		return
+	}
+	if db.IsBoardCreateProposal(p) {
+		writeError(w, http.StatusConflict, "a proposed board is approved by a person only")
 		return
 	}
 	cfg := h.api.hub.mcpStart.get()

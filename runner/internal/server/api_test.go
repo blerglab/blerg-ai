@@ -391,8 +391,7 @@ func TestPostSessionsRecordsRuntimeAndKind(t *testing.T) {
 	}{
 		{"agent in the sandbox", "docker", "agent", "docker", "agent"},
 		{"agent on the host", "daemon", "agent", "daemon", "agent"},
-		{"terminal in the sandbox", "docker", "", "docker", "tmux"},
-		{"legacy caller, no runtime", "", "", "daemon", "tmux"},
+		{"agent, no runtime", "", "agent", "daemon", "agent"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -430,7 +429,14 @@ func TestGetSessionsReportsRuntimeAndKind(t *testing.T) {
 	ctx := context.Background()
 
 	sandboxed := postSpawnSessionID(t, api, dc.ID, "docker", "agent")
-	host := postSpawnSessionID(t, api, dc.ID, "daemon", "")
+	// A Terminal row from before deprecation remains visible and usable.
+	host := newUUID()
+	if err := db.InsertSession(ctx, pool, host, dc.ID, "running", "/repos/my-app", "my-app", "Existing terminal", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionPosture(ctx, pool, host, "daemon", false); err != nil {
+		t.Fatal(err)
+	}
 
 	clusterID := "00000000-0000-4000-8000-00000000c1c1"
 	if err := db.UpsertDaemon(ctx, pool, clusterDaemonID, "cluster", "runner", ""); err != nil {

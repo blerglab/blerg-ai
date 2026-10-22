@@ -140,6 +140,24 @@ owner sees these links, because the route refuses everyone else. A refusal is on
 the server's text: not found, files that usually hold secrets, other paths Blerg won't open, a session
 that isn't running, a busy reader (try again), or a file too large. The board's chat does not open them.
 
+## Cards and commits the messages name
+
+In a message, the agent's or yours, a card number (`#147`) and a commit hash (`08025f2c`) become the
+same chips as elsewhere once Blerg has confirmed them: a hovercard on hover, and a click opens the
+ticket dialog or the commit viewer. A number is a card only when the session's board is known (the
+one board the session has access to) and the card exists there; a hash (7 to 40 hex digits) is a
+commit only when the session's repository says so, which only the session's owner can ask, so
+someone the session is shared with sees plain text. Until then the text is drawn exactly as written,
+so nothing moves when it turns into a link. "#1 priority" with no card #1, a hex word that is no
+commit, anything in a fenced code block and anything inside a link stay text; inline code links only
+when it holds nothing but a hash. The lookups are batched and each reference is asked once per
+session.
+
+The same goes for the checklist, on Plan and on Live's checklist line: an item that names a card
+("#155 Dismiss in Needs you") links to it once the card is confirmed on the session's board, and the
+card's state glyph (✓ ◐ ○) shows beside the item when it differs from the item's own. An unticked
+item whose card is done is a plan that has fallen behind, visible at a glance.
+
 ## When the agent asks, updates or leaves a note
 
 An agent reaches you with `blerg-runner ask`, `blerg-runner update` and `blerg-runner note`, and
@@ -197,8 +215,14 @@ Code and files are drawn to be read, not to fill the screen:
 
 - A closed `mermaid` code fence draws a diagram; a `vega-lite` fence draws an inline-data chart
   with tooltips. Use **Source**, **Copy** or **Open** to inspect it or zoom. Invalid or refused
-  visual output stays code. The same renderer works in published Markdown previews, the viewer
-  and review page, and for `.mmd`, `.vl.json` and Vega-Lite schema JSON files in Files.
+  visual output stays code, with the reason above it (Mermaid's parse error, or the line and
+  what is not allowed there). Mermaid color styling (`classDef`, `class`, `style`, `linkStyle`
+  with fill, stroke, color, stroke-width, stroke-dasharray, font-weight, font-style and opacity)
+  is drawn, and so are `A@{ shape: … }` blocks with plain keys; image and icon shapes, URLs,
+  links and click actions are refused. Mermaid draws in a sandboxed frame that cannot load
+  anything from the network, so a diagram never makes your browser call out. The same renderer works in published Markdown previews, the viewer
+  and review page, and for `.mmd`, `.vl.json` and Vega-Lite schema JSON files in Files; a
+  published `.mmd` also draws in the chat, on its file card.
   Diagrams and charts use the chat’s colors and fonts, update when its theme changes, and
   fit the message width; Open provides a larger, zoomable view.
   External resources and executable HTML or JavaScript are refused. Charts support single plots
@@ -248,14 +272,20 @@ not restart the agent: its context is kept.
 
 ## Pausing a cluster session
 
-A cluster session costs a pod while it runs. **Pause** (next to Kill in the session header, for a live
+A cluster session costs a pod while it runs. **Pause** (in the session header's ⋯ menu, for a live
 cluster session) frees the pod and keeps the session: its conversation is kept and it shows as having no
 pod. Send it a message and a new pod resumes it, exactly as after an eviction. A paused session waits 24
 hours for a message and is then ended ("not resumed"). Whatever the agent was doing when you paused is
 cut off.
 
-**Kill** ends a session for good: an ended session cannot be resumed, the chat says so, and the message
-box is locked.
+**End session** (the red ✕ in the session header; click it twice) ends a session for good: an ended
+session cannot be resumed, the chat says so, and the message box is locked. **Discard**, in the ⋯ menu,
+ends and archives it (with its children); its history and URL are kept.
+
+The header's controls are icons, their names in the tooltips: the star, Insights, the side panel, Stop
+and ⋯. The app has one Notifications bell, beside **+ New** at the top of the session list (on a phone, in a
+session's header, where Insights moves into ⋯): what needs you (proposals and questions) and, at its
+foot, the switch that turns push notifications for this browser on or off.
 
 ## Long conversations
 
@@ -365,7 +395,13 @@ Terminal sessions have no panel.
 - **Needs you**: the agent's open questions, each with how long it has been waiting and a box that
   answers it (the same answer as the ask card's), and the MCP tool changes waiting on your decision
   for this session, with a link to the Proposals page showing that session's proposals and tool
-  changes (with a link back to all of them).
+  changes (with a link back to all of them). A question or a review request you answered some
+  other way (in the chat, say) has **Dismiss**: it leaves Needs you and the bell at once, a toast
+  offers **Undo** for 5 seconds, and then the agent is told ("The person dismissed the review
+  request for <file>; they may have answered in the chat instead."). A dismissal is neither an
+  answer nor an approval: a waiting `blerg-runner ask` and `review wait` / `review status` exit 4,
+  and the agent may ask again. History shows it as "dismissed by you". The bell lists your pending
+  review requests too.
 - **Running now**: the subagents at work, each with its task, type, model, tokens, what it is doing
   and how long it has run; and the background tasks. When the session or a subagent has a plan,
   its row also shows a short progress bar, the completed/total count and the current step's label
@@ -544,6 +580,30 @@ session, repository, verified commit when available, and engine. Nothing is writ
 approval, and an ambiguous **unknown** result is never retried automatically. See
 [Board filing proposals](proposals.md#filing-a-board-card-from-a-session).
 
+### Asking a session to make a board
+
+The most natural way to get a new board is to ask a session for one ("make a board for the
+launch, with the app and web repos"). The agent proposes it:
+
+```sh
+blerg-runner board create "Launch" --repo team/app --repo team/web --columns Todo,Doing,Done
+blerg-runner board create "Errands" --template focus-board --access read
+```
+
+Nothing is created yet. The proposal waits in **Needs you** (and on **Proposals**, and as a card in
+the chat) with the board's name, description, repositories (the first is its primary repository),
+its columns or template, and the access the session asks for on the new board: **Full** by default,
+**File without asking**, or **Read**. When you approve, you can lower that access (or give none).
+Approving creates the board with your own authority, so only an administrator can approve one, and
+gives the proposing session, and no other, access to the new board at the level you approved. A
+session another session started is capped by its parent, which has no access to a board it did not
+create, so such a session gets none until you set it in its Permissions. Rejecting, or letting the
+proposal expire, creates nothing. Approving twice creates one board.
+
+A board made this way starts no sessions of its own until someone chooses **Run as me** in its
+settings. Cron, restricted and board-started sessions cannot be given board access, so they cannot
+propose a board. See [Proposing a new board](proposals.md#proposing-a-new-board).
+
 ### Board access from the Permissions dialog
 
 A session without a board can still search your boards and propose cards; each proposal asks you.
@@ -557,13 +617,22 @@ launch sheet's **Permissions…**). Each level includes the ones below it:
 | **File without asking** | also file its proposals at once (the 0.4.3 board filing permission) |
 | **Full** | also create, update, move, link and comment: what choosing the board at launch gives |
 
-Session board access allows 240 HTTP requests per rolling minute. A CLI command can make several
-requests: a named card move uses one access lookup and six board-tool calls. Access is checked
-fresh for every command. At most four board-tool calls run at once. A rate refusal includes the
-remaining wait in seconds and a `Retry-After` header. A refused request is not counted (it never
-was), so retrying does not extend the window. Each call's board credential is revoked right after
-it; while revokes fail, an account stops starting board calls once 20 unrevoked credentials are
-still live, and answers 503 until they expire (at most 10 minutes).
+Session board access allows 600 HTTP requests per rolling minute by default. A CLI command can make
+several requests: a named card move uses one access lookup and six board-tool calls. Access is
+checked fresh for every command. At most eight board-tool calls run at once by default. A rate
+refusal includes the remaining wait in seconds and a `Retry-After` header. A refused request is not
+counted (it never was), so retrying does not extend the window. Each call's board credential is
+revoked right after it; while revokes fail, an account stops starting board calls once 20 unrevoked
+credentials are still live (by default), and answers 503 until they expire (at most 10 minutes).
+Each call in flight holds one of the account's live exchange tokens at core, 100 by default.
+
+An administrator can change these four limits in Blerg's main Settings, under **Board call limits**
+(signed in, with the administrator role). Calls at once are per session and live tokens per account,
+so busy sessions × calls at once counts against the cap: at 64 calls at once, two busy sessions of
+one account use all 100 tokens. Core's live-token cap applies at the next exchange; the
+runner reads the other three from core and uses a change within a minute, at each session's next
+board call. If core cannot be asked, the runner keeps the limits it read last (its defaults before
+the first read).
 
 Columns, archiving and board settings are never available to an agent at any level. A board you
 chose at launch shows as Full; lower it, or set it to Propose to revoke it, like any other.
@@ -605,18 +674,22 @@ no longer has. No new credential is minted: the child gets a level of its own, a
 through the runner with its own session token like any session's, acting with the parent's sign-in
 for that board. Desktop and cluster children, sandboxed or not, read and change cards the same way.
 
-**A desktop child cannot file proposals yet.** Filing (`blerg-runner ticket file`, `blerg_ticket_file`,
-and so filing without asking at **File without asking**) needs a board sign-in recorded when the
-session starts, and a child started on a desktop has none: its filings are refused with "no retained
-Board discovery proof". Passing **File without asking** to a desktop child therefore gives it only
-**Read**; pass **Full** if it should create cards (`ticket create` goes through its board access), or
-have the parent file. Whether a child may file with its parent's sign-in is an open decision.
+**A child files proposals with its parent's sign-in.** Filing (`blerg-runner ticket file`,
+`blerg_ticket_file`) works from any child, desktop or cluster: it lists boards, searches for
+duplicates and prepares the card with the sign-in of the session that started it, as its other board
+calls do. What happens to the filing follows the child's level under the parent's cap: at **Propose**
+(the default for a board you did not pass down) it waits for you in **Needs you**; at **File without
+asking** or **Full** it is filed without asking, acting with the parent's current sign-in for that
+board. Both are checked again right before the filing runs, so a parent you lowered in between turns
+it into a proposal for you. A child's filing is refused when the parent's sign-in has ended (sign in
+again and renew the parent's level), or when the parent was stopped for good or discarded.
 
 **Each child has its own limits.** A child's board calls count against its own limits, not its
-parent's: 4 board calls at once and 240 board requests a minute per session, and at most 20 filings
-an hour approved without asking per permission. A parent runs at most 3 children at once and an
-account at most 6, so with children an account can have up to 24 more board calls in flight, and a
-parent at **File without asking** and its children together up to 80 filings an hour without asking.
+parent's: 8 board calls at once and 600 board requests a minute per session (the defaults; see above),
+and at most 20 filings an hour approved without asking per permission. A parent runs at most 3
+children at once and an account at most 6, so with children an account can have up to 48 more board
+calls in flight, and a parent at **File without asking** and its children together up to 80 filings
+an hour without asking.
 
 Every board call of the child is checked against the lower of its own level and the parent's level
 at that moment. Lowering or revoking the parent's level lowers every child at its next call, and
@@ -643,26 +716,74 @@ ran out, or you chose to. Later messages never wait.
 
 ### History
 
-The panel's second tab lists the pieces of work the agent marked (topics), newest first. The agent
-marks one with `blerg-runner topic "<title>"` when it starts something you asked for that takes
-several steps, and `blerg-runner topic --done "<outcome>"` when it is finished or dropped, naming the
-commits the work landed with `--commit <sha>`; the chat shows each as a thin divider. Only the agent
-makes topics: nothing is guessed from your messages. Everything done outside a topic (before the
-first, between two, or in a session where the agent marked nothing: an older daemon, a cron,
-another engine) is one line after the cards, "Unmarked work · 42 agents · 8 files", that opens onto
-those files, with their version chips, and one line per subagent (its status, title, model and
-tokens). With no topics the tab says "No topics yet" and how the agent marks one, above that line.
+The panel's second tab is a compact feed of the session's major strokes, newest first, one line each:
+a glyph, a short text, chips and the time.
 
-A card gives the title, the outcome, when it ran ("10:42–11:30 · 48 min") and how many files,
-subagents and commits it has. Open it for its timeline: your message that led to it (when you sent
-it in the same turn; otherwise the marker), each file the topic published with every
-version of it (a filled chip was published in this topic, an outlined one elsewhere, a struck one was
-deleted; a chip opens the file), each subagent with its status, model, tokens and time, and how the
-topic ended, with a chip per commit the agent named (its first seven characters; the full sha on
-hover). A chip links to the commit when the runner knows the session's repository (the one it
-cloned, or the folder's origin as the daemon reports it); otherwise a click copies the sha. "Show in conversation" jumps to a row the chat has loaded; an older row shows its time
-instead (scroll up in the chat to load it). A loaded row older than the rows the chat has drawn says
-so when you pick it; scroll up to reach it.
+- ◆ **Decision**: a ruling you marked yourself. ◇ is a decision line the agent wrote: one it made
+  itself, which you can overrule, or its account of a ruling of yours (the tooltip says which).
+- ? **Attention**: what was asked of you and how it was resolved: questions (`ask`, `ask --no-wait`),
+  approvals of child sessions, proposals, review requests and the review rounds you sent, with their
+  decision ("→ Allowed once", "→ Changes requested: …", the answer you gave). One still waiting is
+  drawn in amber; a question the agent did not wait on reads "unanswered", and so do a question or a
+  child-session start still pending when the session ended. A proposal or a review request can still
+  be decided after the session ends (a cron session ends right after it queues its proposals), so it
+  stays waiting until you decide it or it expires. A run of three or more consecutive strokes of one kind in a topic folds into one
+  line: "Filed 26 cards → approved, 1 rejected", their cards as chips that wrap under it and their
+  span (17:53–18:30); a tap on the words opens one line per stroke (the newest 50 and every waiting
+  one, then "and N earlier"). Proposals, command approvals, child-session starts, review requests and
+  review rounds fold this way; questions, decisions, milestones and findings never do. Any other
+  stroke between them ends a run. A fold with something still waiting stays amber, and its time
+  jumps to the waiting one.
+- ✓ **Milestone**: merged, deployed, released, a card done, and each topic finished with commits.
+- ⚠ **Finding**: a problem that changed the plan.
+
+Each item still waiting on you is pinned above the feed, under **Waiting on you**, however far back
+it is: the item itself with its own words, never a fold's line. In its place in the feed a small
+"↑ pinned" marker remains. The glyph's meaning is in its tooltip and read out by a screen reader. Filter chips above the feed
+(◆ ? ✓ ⚠, each with its count) show only the kinds you press; none pressed shows all. The newest
+100 lines show first; **Show earlier** adds more. A line's time
+jumps to its moment in the conversation; a line older than what the chat has loaded shows only its
+time. A card chip (#115) opens the card on its Board page in Blerg, with its hovercard, when the board
+is known: the chip's own, else the session's board when it has exactly one; otherwise the chip
+stays the number and its hovercard says "board unknown". A commit chip shows the short sha and copies the full one.
+
+Questions, approvals, proposals, reviews and topics with commits come from what Blerg already
+records. Decisions, milestones and findings are the agent's marks:
+`blerg-runner mark decision|milestone|finding "<one line>" [--by person|agent] [--commit <sha>]
+[--card <n>] [--at <time>]`, which the session guide asks for after you decide something, at merges,
+deploys and releases, and on findings that change the plan. Nothing is summarised by a model: a line
+says what the agent wrote, as plain text. `blerg-runner mark --import <file.jsonl>` imports earlier
+strokes, one `{"at", "kind", "by", "text", "card", "board_id", "commit"}` per line. Every line is checked
+before anything is sent; if the server refuses a later chunk, the CLI names the lines recorded before
+it. Importing a file again records nothing new. Only the session's own agent, or you as its owner, can mark it; a child session cannot
+mark its parent. Someone you share the session with sees the same feed, and nothing the transcript
+does not already show them.
+
+The pieces of work the agent marked (topics) are the feed's section headers. The agent marks one with
+`blerg-runner topic "<title>"` when it starts something you asked for that takes several steps, and
+`blerg-runner topic --done "<outcome>"` when it is finished or dropped, naming the commits the work
+landed with `--commit <sha>`; the chat shows each as a thin divider. Only the agent makes topics:
+nothing is guessed from your messages. A header gives the title, when it ran ("10:42–11:30 · 48 min"),
+or for the open topic the checklist's progress ("7 of 17"), and its files, subagents, commits and
+cards as small glyphs (📄 ↳ ⎇ ▤, their words in the tooltip). Everything done outside a topic (before
+the first, between two, or in a session where the agent marked nothing: an older daemon, a cron,
+another engine) is one line after the feed, "Unmarked work · 42 agents · 8 files", that opens onto
+those files, with their version chips, and one line per subagent (its status, title, model and
+tokens). With no topics and no strokes the tab says "No topics yet" and how the agent marks one.
+
+Open a header for one compact line per kind of thing the topic holds, never the chat replayed: 💬
+your messages (how many, each a time that jumps to it, its start in the tooltip), ↳ its subagents
+(how many, a chip each with its status, ✓ ✗ ■ or a spinner, that jumps to it, and their tokens and
+time), 📄 its files (a chip each that opens the version the topic published; a gone one is struck),
+⎇ its commits (a chip each, a click copies the sha), ▤ the cards it filed and ✎ its renames. Each
+line's time jumps to its first item in the conversation; a line older than what the chat has loaded
+shows only its time (scroll up in the chat to load it), and one the chat has loaded but not drawn says
+so when you pick it.
+
+Each rename of the session is a row too, in the topic that was open (else under the unmarked line):
+"Renamed by the parent: Worker → Fix the login flow" when the session that started it renamed it,
+"Renamed by the agent: …" when its own agent did (`blerg-runner title "<title>"`), and "Renamed: …"
+when you or an administrator renamed it in the app.
 
 Tokens follow the Insights rule: only the session's owner and an administrator see them. The tab
 asks the server only while it is on screen. A runner server older than the tab says "History needs a
@@ -737,6 +858,12 @@ or stopping children already running. Turning it off does not remove standing de
 the controls show those separately, and you can remove them in Settings. A partial state can come
 from an earlier **Allow for this session** for one engine. Only your own current browser login can
 edit this permission; the agent cannot turn it on for you.
+
+Children are reusable workers, so a child's title can go stale when its parent hands it new work.
+The parent renames it (`blerg-runner session rename <child> "<title>"`, its own children only, never
+another session), and an agent can rename its own session (`blerg-runner title "<title>"`); each
+rename is in the session's History. In the app only the session's owner, or an administrator, can
+rename a session: someone it is shared with can read it but not rename it.
 
 Only sessions you launched directly can use preapproval. Board, cron, private, and agent-started
 parents ask for each start; a child cannot start another generation of children. New child starts
@@ -903,15 +1030,54 @@ code, **Insert suggestion** prefills an editable replacement for the selected li
 The suggestion is sent to the agent for checking and applying; the browser does not
 edit source files.
 
-Agent replies show **Resolved** or **Rejected**, with their explanation. **Reopen**
-queues the same thread for another review round and retains previous replies.
-Use **Collapse thread** to keep just its summary, or **Hide resolved** to hide
-resolved and rejected threads together. Open requests stay visible; neither control
-changes the review or deletes replies.
+Agent replies show **Resolved** or **Rejected**, with their explanation. A resolved or
+rejected thread stays on its line, collapsed to one bar ("✓ Resolved · conversation by
+the agent · Show"); **Show** opens it in place and **Hide** collapses it again.
+**Reopen** queues the same thread for another review round and retains previous
+replies. **Hide resolved** hides resolved and rejected threads together. Open requests
+stay visible; neither control changes the review or deletes replies.
+You can also act on a thread yourself, as a reviewer does on GitHub: **Reply** adds a
+comment, and on an open thread **Resolve** and **Reject** settle it, from Files or the
+Conversation. A reply on a thread the agent resolved or rejected opens it again. Each is
+sent with your next **Submit** (**Undo** takes a pending one back before that), and the agent reads it in that
+review message ("Open thread; the person replied", "Resolved by the person"). Your
+resolve or reject stands: an answer the agent sent earlier cannot change it, and
+one it sends afterwards is shown in the thread but does not change your status. The agent
+can reopen a settled thread to ask you something: it shows as "Reopened by the agent"
+with its reason, the thread is open again, and its question (one per reopen, listing the
+threads) shows under **Needs you**;
+answer it with **Reply**, or **Resolve** it again. The thread stays open until you act on
+it: until then the agent cannot settle it again, and a Submit about other threads does
+not count as an answer. A
+settled bar says who settled it ("conversation by the person" or "by the agent"), and
+the thread and the Conversation's timeline show who did what, and when.
 Publish updated patches under the **same diff title** so the review follows their
-versions. Unchanged, unambiguous passages keep their inline threads; changed or
-ambiguous passages remain under **Earlier revision comments**, marked **Outdated**,
-with the original code and responses intact.
+versions. A thread whose code is unchanged in the new version stays inline, on that
+code. A thread whose code changed is **Outdated**: as on GitHub, it is not drawn in the
+new version's **Files**; it lives in the **Conversation** with its original code, and
+Files shows one line, "N outdated conversations · view". An Outdated thread keeps its
+state: an open one still counts as open, is sent with every review, and can be
+answered by the agent and reopened from the Conversation. Opening the version it was
+written on (its `file:line`, or **View v1**) shows it inline on its original line.
+
+A diff review has two tabs, **Conversation** and **Files**, as a pull request does, and
+opens on **Conversation** (on **Files** when opened at a commit, from a checklist chip).
+The left and right arrow keys move between the tabs. **Files** is the diff with its
+threads inline; a thread from a later version than the one open is listed as "from a
+later version", not Outdated. **Conversation** starts with the body:
+what the agent asked when it requested the review (`blerg-runner review request <file>
+--ask "…"`, or `blerg-runner diff … --request-review "…"`), or a quiet placeholder when it
+asked nothing. Beneath it is the timeline, oldest first: each version of the diff
+(its files, +/− and commits, each commit a chip that opens the diff at that commit),
+each review request and its decision, and each review you submitted with the threads it
+started. A thread shows the few lines of code it is attached to, from the version it was
+written on, with its file and line, marked **Outdated** when a later version changed
+that code (or **Not in vN** when its file is not in the newest version at all); click
+the code, or its `file:line` button, to jump to the thread in **Files**. While the
+Conversation is open, the review-request bar keeps Approve and Request changes but not
+the ask, which is the body. On a wide screen a summary
+column lists the thread counts and the versions; **Maximize** gives the review the whole
+window. Markdown and image reviews do not have a Conversation tab yet.
 
 
 ### Reviewing documents and images

@@ -487,7 +487,7 @@ func TestGetTopicsUnmarkedWork(t *testing.T) {
 
 func TestTopicsETagIgnoresTheTurnStatus(t *testing.T) {
 	at := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
-	tag := func(status string) string { return topicsETag(7, 1, at, status, nil, "", true) }
+	tag := func(status string) string { return topicsETag(7, 1, at, status, nil, "", true, "0.0") }
 	if tag("running") != tag("idle") || tag("idle") != tag("waiting") {
 		t.Errorf("a turn's status must not bust the tag: %s %s %s", tag("running"), tag("idle"), tag("waiting"))
 	}

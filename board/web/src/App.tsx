@@ -18,6 +18,7 @@ import { Tokens } from "./Tokens";
 import { NotFound } from "./NotFound";
 import { SessionPage } from "./SessionPage";
 import { DiffPage } from "./DiffPage";
+import { NewBoardRepos } from "./NewBoardRepos";
 
 
 // CORE_URL: the control-plane landing — coreOrigin() (shared across core,
@@ -171,6 +172,7 @@ function Boards() {
   const [creating, setCreating] = useState(linked !== null);
   const [name, setName] = useState("");
   const [template, setTemplate] = useState(linked ?? "");
+  const [repos, setRepos] = useState<string[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [createNote, setCreateNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -202,7 +204,7 @@ function Boards() {
     try {
       const created = await api<{ name?: string; automation_error?: string }>("/api/boards", {
         json: {
-          name: name.trim(), require_repo: false, ...(template ? { template } : {}),
+          name: name.trim(), require_repo: false, ...(template ? { template } : {}), ...(repos.length ? { repos } : {}),
           ...(offerRunAsMe ? { run_as_me: runAsMe } : {}),
         },
       });
@@ -218,7 +220,7 @@ function Boards() {
       return;
     }
     setSaving(false);
-    setName(""); setTemplate(""); setRunAsMeChoice(null); setCreating(false); load().catch(() => {});
+    setName(""); setTemplate(""); setRepos([]); setRunAsMeChoice(null); setCreating(false); load().catch(() => {});
   };
 
   if (!boards) return null;
@@ -232,7 +234,7 @@ function Boards() {
         </button>
       </div>
       {creating && (
-        <form className="stack" onSubmit={create} style={{ marginBottom: 16 }}>
+        <form className="stack new-board" onSubmit={create} style={{ marginBottom: 16 }}>
           <input type="text" placeholder="board name" value={name} autoFocus
             onChange={(e) => setName(e.target.value)} />
           <label htmlFor="board-template">Template</label>
@@ -244,6 +246,7 @@ function Boards() {
             {BOARD_TEMPLATES.find((t) => t.id === template)?.description
               ?? "The default columns (inbox, ready, in progress, done) and no custom fields."}
           </p>
+          <NewBoardRepos value={repos} onChange={setRepos} />
           {offerRunAsMe && (
             <label className="run-as-creator" style={{ display: "flex", gap: 8, fontSize: 13, alignItems: "center" }}>
               <input type="checkbox" checked={runAsMe} onChange={(e) => setRunAsMeChoice(e.target.checked)} />
@@ -310,6 +313,11 @@ function Boards() {
   );
 }
 
+// overlayOpen: whether anything is open over the page (every one of them is a dialog).
+function overlayOpen(): boolean {
+  return document.querySelector('[role="dialog"], [aria-modal="true"]') != null;
+}
+
 function BoardRoute() {
   const { id } = useParams();
   return id ? <BoardView boardId={id} /> : null;
@@ -342,7 +350,14 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
       const el = document.activeElement;
       const typing = el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA");
       if (!typing && (e.key === "/" || ((e.ctrlKey || e.metaKey) && e.key === "k"))) {
-        e.preventDefault(); setSearchOpen(true);
+        // The one guard for the search shortcut: while any dialog, popover or drawer is open
+        // (a card, Metrics, Board settings, the board chat, the Filter choices, the search
+        // dialog itself), it does nothing, rather than reach behind the overlay.
+        if (overlayOpen()) return;
+        e.preventDefault();
+        // An open board takes the search into its own toolbar field (it cancels this event);
+        // everywhere else the search dialog opens.
+        if (window.dispatchEvent(new Event("blerg-board:search-inline", { cancelable: true }))) setSearchOpen(true);
       }
     };
     const onOpen = () => setSearchOpen(true);

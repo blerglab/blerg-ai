@@ -103,6 +103,14 @@ describe('useSessionStore', () => {
     expect(get().sessions[0].end_reason).toBe('process_exited')
   })
 
+  it('shows a session whose runtime stopped as failed, with the reason', () => {
+    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'idle' })] })
+    wsMock.emit({ type: 'session_ended', session_id: 'sess-a', exit_code: 1, message: 'Codex app-server repeatedly failed', end_reason: 'process_failed' })
+    expect(get().sessions[0].status).toBe('error')
+    expect(get().sessions[0].error_reason).toBe('Codex app-server repeatedly failed')
+    expect(get().sessions[0].end_reason).toBe('process_failed')
+  })
+
   it('follows a session\'s background-task count, and an end clears it', () => {
     wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'idle', background_tasks: 1 }), makeSession({ id: 'sess-b' })] })
     wsMock.emit({ type: 'session_background_changed', session_id: 'sess-a', background_tasks: 2 })

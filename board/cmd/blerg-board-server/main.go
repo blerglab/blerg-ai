@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/blerglab/blerg-ai/board/internal/api"
 	"github.com/blerglab/blerg-ai/board/internal/auth"
@@ -24,6 +23,7 @@ import (
 	"github.com/blerglab/blerg-ai/board/internal/localinfer"
 	"github.com/blerglab/blerg-ai/board/internal/mcp"
 	"github.com/blerglab/blerg-ai/board/internal/runner"
+	"github.com/blerglab/blerg-ai/contracts/health"
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/contracts/logsafe"
 	"github.com/blerglab/blerg-ai/contracts/secrets"
@@ -133,7 +133,12 @@ func main() {
 	if dbURL == "" {
 		log.Fatal("DATABASE_URL required")
 	}
-	pool, err := db.Connect(ctx, dbURL)
+	addr := env("BLERG_BOARD_ADDR", ":8080")
+	srv, err := health.Listen(ctx, addr)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	pool, err := openDatabase(ctx, dbURL, &srv.Gate)
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
@@ -268,14 +273,16 @@ func main() {
 		http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
 	})
 	mux.HandleFunc("GET /healthz", healthzHandler(pool))
+	mux.HandleFunc("GET /readyz", health.Handler(func(ctx context.Context) error { return db.Ready(ctx, pool) }))
 
-	addr := env("BLERG_BOARD_ADDR", ":8080")
+	srv.SetHandler(mux)
 	log.Printf("blerg-board-server listening on %s", addr)
-	// ReadHeaderTimeout bounds how long a client may take to send its request
-	// headers. There is deliberately no WriteTimeout: the event streams are
-	// long-lived responses.
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	log.Fatal(srv.ListenAndServe())
+	// On SIGTERM: drain, then shut down gracefully (health.ServeUntilSignal), so a rolling update
+	// does not cut requests the ingress still sends here.
+	if err := srv.ServeUntilSignal(ctx, log.Printf); err != nil {
+		log.Fatal(err)
+	}
+
 }
 
 // gateAccountAudiences are the agent-token audiences BLERG_BOARD_GATE_ACCOUNT_TOKEN

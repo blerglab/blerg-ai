@@ -16,6 +16,9 @@
   --chat-success: var(--lichen, #63d68b);
   --chat-warning: var(--amber, #e8b13d);
   --chat-info: var(--batch, #4c9bff);
+  --chat-selected-border: var(--selected-border, #4c9bff);
+  --chat-selected-bg: var(--selected-bg, #4c9bff29);
+  --chat-selected-text: var(--selected-text, #6aadff);
   --chat-danger: var(--danger, #ff6b63);
   --chat-border: var(--stone, #313d4f);
   --chat-radius: 10px;
@@ -60,6 +63,9 @@
     --chat-success: var(--lichen, #2f8a52);
     --chat-warning: var(--amber, #b7791f);
     --chat-info: var(--batch, #2f6fd6);
+    --chat-selected-border: var(--selected-border, #2f6fd6);
+    --chat-selected-bg: var(--selected-bg, #2f6fd61f);
+    --chat-selected-text: var(--selected-text, #2559b0);
     --chat-danger: var(--danger, #d24747);
     --chat-border: var(--stone, #d4dbe5);
     --chat-radius: 10px;
@@ -101,6 +107,9 @@
   --chat-success: var(--lichen, #2f8a52);
   --chat-warning: var(--amber, #b7791f);
   --chat-info: var(--batch, #2f6fd6);
+  --chat-selected-border: var(--selected-border, #2f6fd6);
+  --chat-selected-bg: var(--selected-bg, #2f6fd61f);
+  --chat-selected-text: var(--selected-text, #2559b0);
   --chat-danger: var(--danger, #d24747);
   --chat-border: var(--stone, #d4dbe5);
   --chat-card-user-bg: color-mix(in srgb, var(--blaze, #d9531e) 10%, var(--scree-2, #ffffff));
@@ -134,6 +143,9 @@
   --chat-success: var(--lichen, #63d68b);
   --chat-warning: var(--amber, #e8b13d);
   --chat-info: var(--batch, #4c9bff);
+  --chat-selected-border: var(--selected-border, #4c9bff);
+  --chat-selected-bg: var(--selected-bg, #4c9bff29);
+  --chat-selected-text: var(--selected-text, #6aadff);
   --chat-danger: var(--danger, #ff6b63);
   --chat-border: var(--stone, #313d4f);
   --chat-card-user-bg: color-mix(in srgb, var(--blaze, #ff6a3d) 10%, var(--scree-2, #1e2633));

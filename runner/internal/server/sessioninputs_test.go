@@ -88,3 +88,48 @@ func TestSessionInputNonReceiptDoesNotBlockIngestion(t *testing.T) {
 		}
 	}
 }
+
+// Card #156: the input_accepted event says whose message it is, so the chat never draws Blerg's
+// relay of an answer as the person's queued bubble; the message the agent gets is unchanged.
+func TestSessionInputAcceptanceNamesItsSource(t *testing.T) {
+	f := newIngestFixture(t)
+	row := db.MessageRow{ID: "7b5dcd88-7c6a-4a6d-b093-d6417264f6d2", Body: "Favorite color?", Kind: "ask", NoWait: true}
+	text := questionAnswerText(row, "orange")
+	if text != `Answer to your question 7b5dcd88-7c6a-4a6d-b093-d6417264f6d2 ("Favorite color?"): orange` {
+		t.Fatalf("the agent's message changed: %q", text)
+	}
+	relay := protocol.AgentUserMessage{Type: "agent_user_message", SessionID: f.sessionID, Text: text, ClientID: questionAnswerClientID(row.ID), Source: questionAnswerSource}
+	person := protocol.AgentUserMessage{Type: "agent_user_message", SessionID: f.sessionID, Text: "hi", ClientID: "browser-1"}
+	for _, msg := range []protocol.AgentUserMessage{relay, person} {
+		if _, err := acceptSessionInput(f.ctx, f.hub, f.pool, msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := f.pool.Query(f.ctx, `SELECT payload FROM agent_events WHERE session_id=$1 AND kind='input_accepted' ORDER BY seq`, f.sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []map[string]any
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var p map[string]any
+		_ = json.Unmarshal(raw, &p)
+		got = append(got, p)
+	}
+	if len(got) != 2 || got[0]["source"] != questionAnswerSource || got[0]["text"] != text {
+		t.Fatalf("relay acceptance = %v", got)
+	}
+	if _, ok := got[1]["source"]; ok {
+		t.Fatalf("a person's message gained a source: %v", got[1])
+	}
+	// The frame the agent is sent (replayed from the outbox) is the relay as it was.
+	replayPendingSessionInputs(f.ctx, f.hub, f.pool, f.dc, []string{f.sessionID})
+	var replay protocol.AgentUserMessage
+	if err := json.Unmarshal(<-f.dc.send, &replay); err != nil || replay.Text != text || replay.Source != questionAnswerSource {
+		t.Fatalf("the agent got %+v %v", replay, err)
+	}
+}

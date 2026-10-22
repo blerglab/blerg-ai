@@ -17,4 +17,7 @@ export const chatAliases = [
 export default defineConfig({
   plugins: [react()],
   resolve: { alias: chatAliases },
+  // Keep license comments (/*! … */, @license) when minifying: Vite drops them by default, and the
+  // bundle carries code adapted under licenses that ask for their notice (THIRD_PARTY_NOTICES.md).
+  build: { rolldownOptions: { output: { comments: { legal: true } } } },
 })

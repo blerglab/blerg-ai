@@ -1,5 +1,5 @@
-// Settings: what applies across sessions, in a dialog over the current page. Chat: Show thinking and Compact
-// tool calls, which act at once (kept per browser). Code colors: the syntax-color theme for dark mode and
+// Settings: what applies across sessions, in a dialog over the current page. Chat: Show thinking, Compact
+// tool calls and Hover previews, which act at once (kept per browser). Code colors: the syntax-color theme for dark mode and
 // for light mode, optional changes to single colors, and a live preview of real chat code blocks (ts, go,
 // python, json, a diff) in the choice as it stands. Colors change nothing in the app until Save; closing
 // throws the draft away.
@@ -7,7 +7,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   CODE_THEMES, CODE_TOKEN_KEYS, CODE_TOKEN_LABELS, CODE_TOKEN_NAMES, Markdown, applyCodeColours, currentCodeMode,
-  isHexColour, resolveCodeTokens, useBackdropClose, type CodeColours, type CodeMode, type CodeTokenKey,
+  isHexColour, resolveCodeTokens, setHovercardsEnabled, useBackdropClose, useHovercardsEnabled, type CodeColours, type CodeMode, type CodeTokenKey,
 } from '@blerglab/chat'
 import { saveCodeColours, useCodeColours } from '../lib/codeColours'
 import { useCompact, useThinking } from '../lib/sessionRail'
@@ -65,6 +65,7 @@ function toHex(v: string): string {
 export default function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [thinking, setThinking] = useThinking()
   const [compact, setCompact] = useCompact()
+  const hovercards = useHovercardsEnabled()
   const saved = useCodeColours()
   const [draft, setDraft] = useState<CodeColours>(saved)
   const [mode, setMode] = useState<CodeMode>(currentCodeMode)
@@ -158,6 +159,11 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
                 <span>Compact tool calls</span>
               </label>
               <p className="st-hint">Fold runs of tool calls into one summary row.</p>
+              <label className="st-check">
+                <input type="checkbox" data-testid="settings-hovercards" checked={hovercards} onChange={e => setHovercardsEnabled(e.target.checked)} />
+                <span>Hover previews</span>
+              </label>
+              <p className="st-hint">Preview a ticket, file or commit when the pointer rests on its chip (on a device with a mouse or trackpad).</p>
             </section>
 
             <DelegationRulesSection />
@@ -166,7 +172,7 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
               {(['dark', 'light'] as const).map(m => (
                 <label key={m} className="cc-field">
                   <span>{m === 'dark' ? 'Dark mode' : 'Light mode'}</span>
-                  <select value={draft[m]} onChange={e => setTheme(m, e.target.value)} data-testid={`cc-theme-${m}`}>
+                  <select className="select" value={draft[m]} onChange={e => setTheme(m, e.target.value)} data-testid={`cc-theme-${m}`}>
                     {CODE_THEMES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </label>
@@ -209,8 +215,8 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         <footer className="cc-footer">
-          <button type="button" className="cc-btn" onClick={onClose}>Done</button>
-          <button type="button" className="cc-btn cc-primary" disabled={!dirty || saving} onClick={() => void save()}>
+          <button type="button" className="btn" onClick={onClose}>Done</button>
+          <button type="button" className="btn primary" disabled={!dirty || saving} onClick={() => void save()}>
             {saving ? 'Saving…' : 'Save colors'}
           </button>
         </footer>

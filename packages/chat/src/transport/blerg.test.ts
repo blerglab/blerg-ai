@@ -661,7 +661,19 @@ describe('createBlergTransport messages', () => {
       { id: 'm2', session_id: 's1', kind: 'ask', status: 'answered' },
       { id: 'm3', session_id: 's1', kind: 'ask', status: 'open' },
     ] })
-    expect(onAskClosed.mock.calls).toEqual([['m1', 'yes'], ['m2', '']])
+    expect(onAskClosed.mock.calls).toEqual([['m1', 'yes', false, undefined], ['m2', '', false, undefined]])
+  })
+
+  // Card #155 review: a dismissal says whether this viewer made it.
+  it('says who dismissed a question, as this viewer reads it', () => {
+    const socket = fakeSocket()
+    const { t } = make(socket, { viewerId: () => 'acct-me' })
+    const onAskClosed = vi.fn()
+    t.subscribe('s1', {}, { ...handlers(), onAskClosed })
+    socket.emit({ type: 'message_answered', message: { id: 'm1', session_id: 's1', kind: 'ask', status: 'answered', answer: '', dismissed: true, dismissed_by: 'acct-me' } })
+    socket.emit({ type: 'message_answered', message: { id: 'm2', session_id: 's1', kind: 'ask', status: 'answered', answer: '', dismissed: true, dismissed_by: 'acct-other' } })
+    socket.emit({ type: 'message_answered', message: { id: 'm3', session_id: 's1', kind: 'ask', status: 'answered', answer: '', dismissed: true } })
+    expect(onAskClosed.mock.calls).toEqual([['m1', '', true, 'you'], ['m2', '', true, 'other'], ['m3', '', true, undefined]])
   })
 
   it('setModel sends set_session_model with only the fields given', async () => {
@@ -750,6 +762,14 @@ describe('createBlergTransport files', () => {
     const e = await t.files!.workspaceFile!('s1', 'x.md').catch((x: unknown) => x)
     expect(e).toBeInstanceOf(WorkspaceFileError)
     expect(e).toMatchObject({ status: 404, errorId: 'e-1', serverText: 'The workspace file was not found.' })
+  })
+
+  it('workspaceFile keeps the server’s machine-readable reason (code), and only a well-formed one', async () => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'The workspace file reader is busy.', code: 'busy', error_id: 'e-2' }), { status: 409 }))
+    expect(await t.files!.workspaceFile!('s1', 'x.png').catch((x: unknown) => x)).toMatchObject({ status: 409, code: 'busy' })
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Busy.', code: 'Busy <b>' }), { status: 409 }))
+    expect((await t.files!.workspaceFile!('s1', 'x.png').catch((x: unknown) => x) as WorkspaceFileError).code).toBeUndefined()
   })
 
   it('workspaceFile can be cancelled', async () => {

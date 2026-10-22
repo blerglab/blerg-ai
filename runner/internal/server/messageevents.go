@@ -107,7 +107,8 @@ func fanOutServerEvent(h *Hub, sessionID, clientEventID, kind string, raw []byte
 	if err == nil {
 		h.FanOutAgentEvent(sessionID, seq, msg)
 		switch kind {
-		case "ask", "user_message", "delegation_request", "delegation_decided":
+		// A pin ("ticket") too: the parent's panel shows a child's current card on its row.
+		case "ask", "user_message", "delegation_request", "delegation_decided", "ticket":
 			h.ChildActivity(sessionID)
 		}
 	}

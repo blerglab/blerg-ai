@@ -18,7 +18,7 @@ if grep -rn '\${' "$tmp"/*.yaml; then echo "FAIL: unsubstituted placeholder"; fa
 for want in BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE BLERG_CORE_INTERNAL_KEY BLERG_RUNNER_CORE_INTERNAL_KEY BLERG_CORE_LOCAL_KEY BLERG_BOARD_SECRET_KEY \
             BLERG_CORE_BOARD_MINT_KEY BLERG_BOARD_DEFAULT_RUN_AS_CREATOR \
             BLERG_CORE_PUBLIC_URL BLERG_BOARD_PUBLIC_URL BLERG_BOARD_AGENT_URL RUNNER_UI_BASE \
-            BLERG_RUNNER_DATA_DIR proxy-body-size runAsNonRoot 'path: /healthz' 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; do
+            BLERG_RUNNER_DATA_DIR proxy-body-size runAsNonRoot 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; do
   grep -rqF -- "$want" "$tmp" || { echo "FAIL: $want not wired"; fail=1; }
 done
 grep -q 'https://board.blerg.example' "$tmp/configmap.yaml" || { echo "FAIL: SCHEME not applied to public URLs"; fail=1; }
@@ -195,12 +195,62 @@ grep -qF 'blerg-runner-mcp-gateway' "$here/CLUSTER-RUNTIME.md" || { echo "FAIL: 
 grep -vE '^\s*#' "$here/networkpolicy-sessions.example.yaml" | grep -qE 'app: blerg-(core|board)' && { echo "FAIL: networkpolicy-sessions.example.yaml lets session pods reach core or the board by default"; fail=1; }
 
 # The runner's data directory is a persistent claim, not an emptyDir: the database indexes the
-# files in it, so it must survive a restart. The claim is ReadWriteOnce, so the Deployment must
-# Recreate (a rolling update deadlocks on it); deploy.sh creates it before applying the Deployment,
+# files in it, so it must survive a restart. A rolling surge shares the volume on the same node;
+# deploy.sh creates it before applying the Deployment,
 # never re-applies or deletes it, and it stays out of the kustomization.
 runner_doc="$(awk 'BEGIN{RS="\n---\n"} /kind: Deployment/ && /name: blerg-runner\n/ {print}' "$tmp/runner-deployment.yaml" | grep -vE '^\s*#')"
 [ -n "$runner_doc" ] || { echo "FAIL: could not isolate the runner Deployment"; fail=1; }
-grep -qE '^\s+type: Recreate\s*$' <<<"$runner_doc" || { echo "FAIL: the runner Deployment's strategy is not Recreate"; fail=1; }
+# Rolling updates, read from the parsed manifests (a comment cannot satisfy these): each
+# Deployment surges one ready pod before the old one goes, readiness is /readyz and liveness
+# /livez, the runner's surge lands on the data volume's node, and the runner has no preStop hook
+# (it must exit at once; see runner-deployment.yaml).
+command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null \
+  || { echo "FAIL: python3 with PyYAML is needed to check the Deployments"; fail=1; }
+python3 - "$tmp" <<'PY' || fail=1
+import sys, yaml
+tmp = sys.argv[1]
+bad = []
+for component in ("runner", "core", "board"):
+    name = f"blerg-{component}"
+    with open(f"{tmp}/{component}-deployment.yaml") as f:
+        docs = [d for d in yaml.safe_load_all(f) if isinstance(d, dict)]
+    deps = [d for d in docs if d.get("kind") == "Deployment" and d.get("metadata", {}).get("name") == name]
+    if len(deps) != 1:
+        bad.append(f"{component}: {len(deps)} Deployments named {name}")
+        continue
+    spec = deps[0]["spec"]
+    strategy = spec.get("strategy") or {}
+    rolling = strategy.get("rollingUpdate") or {}
+    if strategy.get("type") != "RollingUpdate":
+        bad.append(f"{component}: strategy.type is {strategy.get('type')!r}, not RollingUpdate")
+    if rolling.get("maxUnavailable") != 0:
+        bad.append(f"{component}: maxUnavailable is {rolling.get('maxUnavailable')!r}, not 0")
+    if rolling.get("maxSurge") != 1:
+        bad.append(f"{component}: maxSurge is {rolling.get('maxSurge')!r}, not 1")
+    pod = spec["template"]["spec"]
+    containers = [c for c in pod.get("containers", []) if c.get("name") == name]
+    if len(containers) != 1:
+        bad.append(f"{component}: no container named {name}")
+        continue
+    container = containers[0]
+    for probe, path in (("readinessProbe", "/readyz"), ("livenessProbe", "/livez")):
+        got = ((container.get(probe) or {}).get("httpGet") or {}).get("path")
+        if got != path:
+            bad.append(f"{component}: {probe} path is {got!r}, not {path}")
+    if component == "runner":
+        if (container.get("lifecycle") or {}).get("preStop") is not None:
+            bad.append("runner: has a preStop hook; it must exit at once")
+        terms = (((pod.get("affinity") or {}).get("podAffinity") or {})
+                 .get("requiredDuringSchedulingIgnoredDuringExecution") or [])
+        if not any(t.get("topologyKey") == "kubernetes.io/hostname" and
+                   (t.get("labelSelector") or {}).get("matchLabels", {}).get("app") == "blerg-runner" for t in terms):
+            bad.append("runner: surge is not required on the same node as a blerg-runner pod")
+    elif (pod.get("terminationGracePeriodSeconds") or 30) < 26:
+        bad.append(f"{component}: terminationGracePeriodSeconds is below the 5 s drain plus 20 s shutdown")
+for line in bad:
+    print("FAIL: " + line)
+sys.exit(1 if bad else 0)
+PY
 grep -qE 'emptyDir' <<<"$runner_doc" && { echo "FAIL: the runner Deployment still mounts an emptyDir"; fail=1; }
 grep -qE '^\s+claimName: blerg-runner-data\s*$' <<<"$runner_doc" || { echo "FAIL: the runner's data volume is not the blerg-runner-data claim"; fail=1; }
 grep -A1 -E '^\s+- name: data\s*$' <<<"$runner_doc" | grep -qE '^\s+mountPath: /data\s*$' \

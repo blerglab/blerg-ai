@@ -27,6 +27,9 @@ export default defineConfig({
     },
     rollupOptions: {
       external: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client'],
+      // Keep license comments (/*! … */) when minifying: the Markdown styling is adapted under MIT
+      // (THIRD_PARTY_NOTICES.md, also in the tarball).
+      output: { comments: { legal: true } },
     },
     sourcemap: true,
   },

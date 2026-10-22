@@ -215,9 +215,12 @@ describe('diff review submission in Chromium', () => {
     ]
     const existing: ReviewFile = {version: 1, file: {name: 'change.patch', artifactId: 'diff1'}, requests}
     const value: ChatContextValue = {sessionId: 'diff-review-browser', files: null, view: vi.fn(), latestVersion: () => undefined, byName: () => undefined, reviewFor: async () => existing, submitFeedback: vi.fn()}
-    const {container, getByRole} = render(<ChatContext.Provider value={value}>
+    const {container, getByRole, findByRole} = render(<ChatContext.Provider value={value}>
       <ReviewMode artifact={{id: 'diff1', name: 'change.patch', size: PATCH.length, view: 'diff', content_type: 'text/x-diff'}} text={PATCH} onClose={() => {}} />
     </ChatContext.Provider>)
+    // Settled threads stay on their lines, collapsed to a bar; Show opens them in place.
+    await userEvent.click(await findByRole('button', {name: 'Show thread: Rename this'}))
+    await userEvent.click(getByRole('button', {name: 'Show thread: Remove this'}))
     await waitFor(() => expect(container.textContent).toContain('Renamed as requested.'))
     expect(container.textContent).toContain('Resolved')
     expect(container.textContent).toContain('Rejected')

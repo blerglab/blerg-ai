@@ -80,7 +80,9 @@ type DaemonConn struct {
 	plugins              bool        // honours SpawnSession.Plugins (hello plugins)
 	sessionPluginEngines []string
 	pluginEngines        []string
-	hostTokenClone       bool // owner allows personal-token clones on the bare host (hello)
+	pluginCatalogEngines []string // engines answered by read_plugin_catalog (hello plugin_catalog_engines)
+	mcpSignInEngines     []string // engines answered by mcp_sign_in (hello mcp_sign_in_engines)
+	hostTokenClone       bool     // owner allows personal-token clones on the bare host (hello)
 	sandboxAvailable     bool
 	hostClaude           hostClaudeCaps
 	availableEngines     []string                        // engine IDs detected as configured/usable on this daemon's host
@@ -417,6 +419,8 @@ type Hub struct {
 	reposRootReqs      reposRootRequests
 	workspaceFileReqs  workspaceFileRequests
 	sessionOriginReqs  sessionOriginRequests
+	commitReqs         commitRequests
+	extReqs            extRequests
 	progressOriginReqs progressOriginRequests
 	// privacy reads which sessions are private (privacy.go). Guarded by mu.
 	privacy privacyGate

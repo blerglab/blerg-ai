@@ -31,6 +31,9 @@ func postSession(t *testing.T, body map[string]any) (int, *protocol.SpawnSession
 	if _, ok := body["runtime"]; !ok {
 		body["runtime"] = "docker"
 	}
+	if _, ok := body["kind"]; !ok {
+		body["kind"] = "agent"
+	}
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(raw)))
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -49,7 +52,7 @@ func postSession(t *testing.T, body map[string]any) (int, *protocol.SpawnSession
 }
 
 func TestPostSessionsCarriesModelAndEffort(t *testing.T) {
-	for _, kind := range []string{"", "agent"} {
+	for _, kind := range []string{"agent"} {
 		code, msg := postSession(t, map[string]any{"kind": kind, "model": "claude-opus-5-5", "effort": "xhigh"})
 		if code != http.StatusAccepted || msg == nil {
 			t.Fatalf("kind %q: status %d, msg %v", kind, code, msg)

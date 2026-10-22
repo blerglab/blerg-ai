@@ -11,6 +11,7 @@ func (d Deps) registerInternalTokenRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /internal/tokens/status", d.handleInternalTokenStatus)
 	mux.HandleFunc("POST /internal/tokens/exchange", d.handleInternalTokenExchange)
 	mux.HandleFunc("POST /internal/tokens/exchange/board-create", d.handleInternalBoardCreateExchange)
+	mux.HandleFunc("POST /internal/tokens/exchange/board-new", d.handleInternalNewBoardExchange)
 	mux.HandleFunc("POST /internal/tokens/exchange/revoke", d.handleInternalTokenExchangeRevoke)
 	mux.HandleFunc("POST /internal/tokens/board-automation", d.handleBoardAutomationMint)
 	mux.HandleFunc("POST /internal/tokens/board-automation/revoke", d.handleBoardAutomationRevoke)

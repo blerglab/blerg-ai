@@ -45,6 +45,8 @@ describe('diff review uses the existing feedback path',()=>{
   show(()=>new Promise(resolve=>{finish=resolve}))
   request(1,'Keep local')
   await act(async()=>{finish({version:1,file:{name:'change.diff',artifactId:'diff1'},requests:[]})})
+  // The mocked diff draws no threads: the Conversation lists every thread.
+  fireEvent.click(screen.getByRole('tab',{name:'Conversation'}))
   expect(screen.getByText('Keep local')).toBeInTheDocument()
   expect(screen.getByRole('button',{name:'Submit'})).toBeEnabled()
  })
@@ -55,6 +57,7 @@ describe('diff review uses the existing feedback path',()=>{
   fireEvent.click(screen.getByRole('button',{name:'Submit'}))
   request(2,'Next batch')
   await act(async()=>{finish(true)})
+  fireEvent.click(screen.getByRole('tab',{name:'Conversation'}))
   expect(screen.getByRole('button',{name:'Submit'})).toBeEnabled()
   expect(screen.getByRole('button',{name:'Delete request: Next batch'})).toBeInTheDocument()
   expect(screen.queryByRole('button',{name:'Delete request: First batch'})).toBeNull()

@@ -19,7 +19,10 @@ import (
 // leave the machine.
 //
 //   - Codex: read from `codex app-server` (limits_codex.go) at start, every
-//     10 minutes, and a few seconds after a Codex agent turn ends.
+//     10 minutes, and a few seconds after a Codex agent turn ends. No Codex
+//     session is needed: a fresh install shows its meter after the first read.
+//     An account with no window (a usage-based work plan without a spend
+//     limit, or an API key) is reported as such (Note "no_windows").
 //   - Claude: read from the account usage endpoint the CLI's own usage view
 //     calls, with the CLI's sign-in (limits_claude_usage.go), at start, every
 //     10 minutes and a few seconds after a Claude Code turn ends. Claude also
@@ -42,6 +45,15 @@ const (
 // worth a log line (an engine that is not installed, a setting that is off, or
 // a source that already logged why itself). Wrapped errors count too.
 var errNoUsageLimits = errors.New("no usage limits")
+
+// The notes a report with no windows carries (protocol.UsageLimits.Note).
+const (
+	// usageNoteNoWindows: the provider answered, and its account has no limit window.
+	usageNoteNoWindows = "no_windows"
+	// usageNoteNotRead: this daemon does not read the provider's limits (errNoUsageLimits: turned
+	// off, no sign-in it can read, the engine not installed).
+	usageNoteNotRead = "not_read"
+)
 
 // errUsageUnchanged: the source chose not to read this time (it is backing off) and what the meter
 // shows still holds. Not a failure: nothing is sent, logged or counted toward the withdraw.
@@ -67,6 +79,7 @@ type UsageLimitsTracker struct {
 
 	mu         sync.Mutex
 	polled     map[string][]protocol.UsageWindow
+	notes      map[string]string // provider → why it has no windows ("no_windows"), when it answered so
 	fetched    map[string]time.Time
 	capped     map[string]time.Time // provider → when its cap lifts
 	capTimers  map[string]*time.Timer
@@ -110,6 +123,7 @@ func newUsageLimitsTracker(send func(msg any) error, sources []limitSource) *Usa
 		connected:  make(chan struct{}, 1),
 		failures:   map[string]int{},
 		polled:     map[string][]protocol.UsageWindow{},
+		notes:      map[string]string{},
 		fetched:    map[string]time.Time{},
 		capped:     map[string]time.Time{},
 		capTimers:  map[string]*time.Timer{},
@@ -271,20 +285,50 @@ func (t *UsageLimitsTracker) poll(ctx context.Context, only map[string]bool) {
 			continue
 		}
 		t.mu.Lock()
+		// The provider answered that its account has no window: a report of its own (Note), so the
+		// sidebar says so rather than nothing. Not a failure.
+		note := ""
+		if errors.Is(err, errNoLimitWindows) {
+			err, windows, note = nil, []protocol.UsageWindow{}, usageNoteNoWindows
+		}
 		if err != nil {
-			if !errors.Is(err, errNoUsageLimits) && !t.failLogged[s.provider] {
+			unread := errors.Is(err, errNoUsageLimits)
+			if !unread && !t.failLogged[s.provider] {
 				t.failLogged[s.provider] = true
 				t.logf("usage limits: %s: %v (nothing reported; retried later)", s.provider, err)
 			}
 			t.failures[s.provider]++
-			_, shown := t.polled[s.provider]
+			polled, shown := t.polled[s.provider]
+			// The source does not read this provider (turned off, no sign-in it can read, the engine
+			// not installed): with no windows to keep, say so once ("not_read"), so the sidebar does
+			// not promise a meter that will not come.
+			if unread && len(polled) == 0 {
+				if shown && t.notes[s.provider] == usageNoteNotRead {
+					t.mu.Unlock()
+					continue
+				}
+				t.polled[s.provider] = []protocol.UsageWindow{}
+				t.notes[s.provider] = usageNoteNotRead
+				t.fetched[s.provider] = time.Now().UTC()
+				msg := t.reportLocked(s.provider)
+				t.mu.Unlock()
+				_ = t.send(msg)
+				continue
+			}
 			if !shown || t.failures[s.provider] < usageLimitsWithdrawAfter {
 				t.mu.Unlock()
 				continue
 			}
-			// Reads keep failing: the last percentages are no longer the truth. Withdraw them.
+			// Reads keep failing: the last percentages are no longer the truth. Withdraw them (or,
+			// when the source has stopped reading, say that).
 			delete(t.polled, s.provider)
+			delete(t.notes, s.provider)
 			delete(t.fetched, s.provider)
+			if unread {
+				t.polled[s.provider] = []protocol.UsageWindow{}
+				t.notes[s.provider] = usageNoteNotRead
+				t.fetched[s.provider] = time.Now().UTC()
+			}
 			msg := t.reportLocked(s.provider)
 			t.mu.Unlock()
 			_ = t.send(msg)
@@ -293,6 +337,7 @@ func (t *UsageLimitsTracker) poll(ctx context.Context, only map[string]bool) {
 		t.failLogged[s.provider] = false
 		t.failures[s.provider] = 0
 		t.polled[s.provider] = windows
+		t.notes[s.provider] = note
 		t.fetched[s.provider] = time.Now().UTC()
 		msg := t.reportLocked(s.provider)
 		t.mu.Unlock()
@@ -324,7 +369,8 @@ func (t *UsageLimitsTracker) providersLocked() []string {
 }
 
 // reportLocked is provider's message: its polled windows, plus "capped" while
-// a cap holds. Empty windows withdraw what was shown.
+// a cap holds. Empty windows withdraw what was shown, unless the provider said
+// it has none (Note "no_windows"), which the sidebar shows as such.
 func (t *UsageLimitsTracker) reportLocked(provider string) protocol.UsageLimits {
 	windows := append([]protocol.UsageWindow{}, t.polled[provider]...)
 	if reset, ok := t.capped[provider]; ok {
@@ -336,5 +382,9 @@ func (t *UsageLimitsTracker) reportLocked(provider string) protocol.UsageLimits 
 	if fetched.IsZero() {
 		fetched = time.Now().UTC()
 	}
-	return protocol.UsageLimits{Type: "usage_limits", Provider: provider, Windows: windows, FetchedAt: fetched}
+	msg := protocol.UsageLimits{Type: "usage_limits", Provider: provider, Windows: windows, FetchedAt: fetched}
+	if len(windows) == 0 {
+		msg.Note = t.notes[provider]
+	}
+	return msg
 }

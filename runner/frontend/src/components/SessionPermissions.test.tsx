@@ -44,9 +44,29 @@ describe('the panel summary', () => {
     expect(within(block).getByRole('heading', { name: 'Permissions' })).toBeInTheDocument()
     expect(await within(block).findByTestId('perm-count')).toHaveTextContent('3 active')
     const chips = within(within(block).getByTestId('perm-active')).getAllByRole('listitem')
-    expect(chips.map(c => c.textContent)).toEqual(['↳Codex · Local sandbox×', '▦Product · File without asking×', '▦Ops · Full×'])
+    expect(chips.map(c => c.textContent)).toEqual(['⑂Codex · Local sandbox×', '▦Product · File without asking×', '▦Ops · Full×'])
     // No long list of toggles in the panel any more.
     expect(within(block).queryByRole('checkbox')).toBeNull()
+  })
+
+  // Owner ruling (#132): ↳ means "runs inside Main" in Running now, so no permission uses it. A child
+  // grant ("can start sessions") is the fork ⑂, in the chips and in the Permissions dialog alike.
+  it('never draws a permission with ↳; a child grant is ⑂, with its words in the title', async () => {
+    serve({ perms: perms({ boards: [boardFile], grants: [toolGrant, { ...toolGrant, id: 'g3', tool: 'archive', active: false, inactive: 'signed_out' }] }) })
+    mount([{ id: 'd1', engine: 'codex', runtime: 'docker' }])
+    const block = screen.getByTestId('rail-permissions')
+    await within(block).findByTestId('perm-count')
+    const glyphs = Array.from(block.querySelectorAll('.perm-chip-glyph')).map(g => g.textContent)
+    expect(glyphs.length).toBeGreaterThanOrEqual(4)
+    expect(glyphs).not.toContain('↳')
+    expect(block.textContent).not.toContain('↳')
+    const child = within(within(block).getByTestId('perm-active')).getAllByRole('listitem')[0]
+    expect(child.querySelector('.perm-chip-glyph')?.textContent).toBe('⑂')
+    expect(child.querySelector('.perm-chip-glyph')?.getAttribute('aria-hidden')).toBe('true')
+    expect(child.getAttribute('title')).toMatch(/without asking/)
+    const dialog = await openModal()
+    expect(dialog.textContent).not.toContain('↳')
+    expect(within(dialog).getByRole('heading', { name: 'Child sessions' }).textContent).toBe('⑂Child sessions')
   })
 
   it('counts one permission per kind of child and place, however many engines it covers', async () => {
@@ -54,7 +74,7 @@ describe('the panel summary', () => {
     mount([{ id: 'd1', engine: 'claude', runtime: 'docker' }, { id: 'd2', engine: 'codex', runtime: 'docker' }, { id: 'd3', engine: 'codex', runtime: 'daemon' }])
     expect(await screen.findByTestId('perm-count')).toHaveTextContent('2 active')
     const chips = within(screen.getByTestId('perm-active')).getAllByRole('listitem')
-    expect(chips.map(c => c.textContent)).toEqual(['↳Claude, Codex · Local sandbox×', '↳Codex · This machine×'])
+    expect(chips.map(c => c.textContent)).toEqual(['⑂Claude, Codex · Local sandbox×', '⑂Codex · This machine×'])
     fireEvent.click(screen.getByRole('button', { name: 'Revoke: Start Claude and Codex children · Local sandbox' }))
     await waitFor(() => {
       for (const id of ['d1', 'd2']) expect(request).toHaveBeenCalledWith(`/api/delegation-grants/${id}/revoke`, { method: 'POST' })
@@ -67,7 +87,7 @@ describe('the panel summary', () => {
     mount([{ id: 'd1', engine: 'claude', runtime: 'docker', daemon_id: 'laptop', daemon_name: 'Laptop' }, { id: 'd2', engine: 'codex', runtime: 'cluster', daemon_id: 'cluster', daemon_name: 'the cluster' }])
     expect(await screen.findByTestId('perm-count')).toHaveTextContent('2 active')
     const chips = within(screen.getByTestId('perm-active')).getAllByRole('listitem')
-    expect(chips.map(c => c.textContent)).toEqual(['↳Claude · Local sandbox×', '↳Codex · Cluster pod×'])
+    expect(chips.map(c => c.textContent)).toEqual(['⑂Claude · Local sandbox×', '⑂Codex · Cluster pod×'])
   })
 
   it('revokes a chip inline with ×: a board goes back to propose, a tool permission is revoked', async () => {

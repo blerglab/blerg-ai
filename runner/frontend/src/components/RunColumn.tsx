@@ -2,7 +2,6 @@ import type { ReactNode, CSSProperties } from 'react'
 import {
   RUNTIME_CARDS,
   ENGINE_LABELS,
-  TERMINAL_NEEDS_DAEMON,
   AGENT_NO_PROMPTS,
   runtimeDisabledReason,
 } from '../lib/runtimes'
@@ -46,10 +45,10 @@ const warnStyle: CSSProperties = {
 
 function pillStyle(selected: boolean, dimmed = false): CSSProperties {
   return {
-    background: selected ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--scree)',
-    border: `1px ${dimmed ? 'dashed' : 'solid'} ${selected ? 'var(--blaze)' : dimmed ? 'var(--fog-dim)' : 'var(--stone)'}`,
+    background: selected ? 'var(--selected-bg)' : 'var(--scree)',
+    border: `1px ${dimmed ? 'dashed' : 'solid'} ${selected ? 'var(--selected-border)' : dimmed ? 'var(--fog-dim)' : 'var(--stone)'}`,
     borderRadius: 6,
-    color: selected ? 'var(--amber)' : dimmed ? 'var(--fog-dim)' : 'var(--fog)',
+    color: selected ? 'var(--selected-text)' : dimmed ? 'var(--fog-dim)' : 'var(--fog)',
     opacity: dimmed ? 0.6 : 1,
     padding: '5px 14px',
     cursor: 'pointer',
@@ -84,6 +83,9 @@ export interface RunColumnProps {
   onEffortChange?: (e: string) => void
   // Free-text model name, offered by the picker when no list was reported.
   modelFreeText?: ModelPickerFreeText
+  // The person's model or effort is not what will run here (card #151): said beside the field,
+  // which is highlighted. Never a silent swap.
+  modelNotice?: string | null
 
   daemons: RunDaemon[]
   selectedDaemon: RunDaemon | null
@@ -131,7 +133,6 @@ export default function RunColumn(props: RunColumnProps) {
     (daemons.length === 1 && !!selectedDaemon && selectedDaemon.id !== daemons[0].id)
   const sandboxImageMissing =
     runtime === 'docker' && !!selectedDaemon && !selectedDaemon.sandbox_available
-  const terminalDisabledReason = runtime === 'cluster' ? TERMINAL_NEEDS_DAEMON : null
 
   return (
     <div className="launch-col-run" data-testid="launch-col-run" data-phone-order="2">
@@ -155,8 +156,8 @@ export default function RunColumn(props: RunColumnProps) {
                   display: 'block',
                   width: '100%',
                   textAlign: 'left',
-                  background: selected ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--scree)',
-                  border: `1px solid ${selected ? 'var(--blaze)' : 'var(--stone)'}`,
+                  background: selected ? 'var(--selected-bg)' : 'var(--scree)',
+                  border: `1px solid ${selected ? 'var(--selected-border)' : 'var(--stone)'}`,
                   borderRadius: 8,
                   padding: '10px 12px',
                   marginBottom: 6,
@@ -166,7 +167,7 @@ export default function RunColumn(props: RunColumnProps) {
                   fontFamily: 'inherit',
                 }}
               >
-                <span style={{ fontWeight: 600, fontSize: '0.9rem', color: selected ? 'var(--amber)' : 'var(--chalk)' }}>
+                <span style={{ fontWeight: 600, fontSize: '0.9rem', color: selected ? 'var(--selected-text)' : 'var(--chalk)' }}>
                   {card.title}
                 </span>
                 <span style={{ display: 'block', fontSize: '0.75rem', marginTop: 3, color: 'var(--fog)' }}>
@@ -212,8 +213,8 @@ export default function RunColumn(props: RunColumnProps) {
                   display: 'block',
                   width: '100%',
                   textAlign: 'left',
-                  background: selectedDaemon?.id === d.id ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--scree)',
-                  border: `1px solid ${selectedDaemon?.id === d.id ? 'var(--blaze)' : 'var(--stone)'}`,
+                  background: selectedDaemon?.id === d.id ? 'var(--selected-bg)' : 'var(--scree)',
+                  border: `1px solid ${selectedDaemon?.id === d.id ? 'var(--selected-border)' : 'var(--stone)'}`,
                   borderRadius: 8,
                   padding: '8px 12px',
                   marginBottom: 6,
@@ -281,27 +282,17 @@ export default function RunColumn(props: RunColumnProps) {
       <div style={{ marginBottom: 20 }}>
         <span style={sectionLabel}>Session type</span>
         <div role="radiogroup" aria-label="Session type" style={{ display: 'flex', gap: 6 }}>
-          {([['agent', 'Agent'], ['tmux', 'Terminal']] as const).map(([k, label]) => {
-            const disabled = k === 'tmux' && terminalDisabledReason !== null
-            return (
-              <button
-                key={k}
-                type="button"
-                role="radio"
-                data-testid={`kind-${k}`}
-                aria-checked={kind === k}
-                disabled={disabled}
-                onClick={() => onKindChange(k)}
-                style={{ ...pillStyle(kind === k), cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1 }}
-              >
-                {label}
-              </button>
-            )
-          })}
+          <button
+            type="button"
+            role="radio"
+            data-testid="kind-agent"
+            aria-checked={kind === 'agent'}
+            onClick={() => onKindChange('agent')}
+            style={pillStyle(kind === 'agent')}
+          >
+            Agent
+          </button>
         </div>
-        {terminalDisabledReason && (
-          <p data-testid="terminal-disabled-reason" style={noteStyle}>{terminalDisabledReason}</p>
-        )}
       </div>
 
       {/* Only target-available engines are actionable; a sole engine needs no selector. */}
@@ -363,6 +354,14 @@ export default function RunColumn(props: RunColumnProps) {
         {modelsError}{' '}
         {onModelsRetry && <button type="button" onClick={onModelsRetry}>Retry</button>}
       </p>}
+      {props.modelNotice && (
+        <p role="status" data-testid="model-keep-notice" className="model-keep-notice"
+          style={{ ...noteStyle, margin: '0 0 6px', padding: '4px 8px', borderLeft: '3px solid var(--amber)', background: 'var(--scree-2)', color: 'var(--chalk)' }}>
+          {props.modelNotice}
+        </p>
+      )}
+      <div data-testid="model-field" data-notice={props.modelNotice ? 'true' : undefined}
+        style={props.modelNotice ? { outline: '2px solid var(--amber)', outlineOffset: 2, borderRadius: 6 } : undefined}>
       <ModelPicker
         models={models}
         loading={modelsLoading}
@@ -376,6 +375,7 @@ export default function RunColumn(props: RunColumnProps) {
         noteStyle={noteStyle}
         pillStyle={s => pillStyle(s)}
       />
+      </div>
 
       </>}
 

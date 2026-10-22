@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -445,5 +446,77 @@ func TestReviewRequestDecideSupersedesAStaleVersion(t *testing.T) {
 	got := decodeReview(t, fx.send("POST", "/api/review-requests/"+row.ID+"/decide", fx.human(artUser), `{"decision":"approve"}`), http.StatusConflict)
 	if got.State != db.ReviewSuperseded || got.SupersededBy != 2 {
 		t.Fatalf("stale decide = %+v, want superseded by v2", got)
+	}
+}
+
+// The person replies on a thread or resolves it themselves: the decision message carries the reply
+// (newest words, inert, one line) and leaves out a thread the person resolved.
+func TestReviewRequestDecisionCarriesThePersonsReplies(t *testing.T) {
+	fx := newArtFx(t)
+	dc := fx.agentDaemon()
+	v1 := fx.publish(fx.sessTok, fx.sess, "SECURITY.md", []byte("v1"))
+	req := fx.requestReview(fx.sessTok, fx.sess, "SECURITY.md", "ok?", http.StatusCreated)
+	review := `{"version":1,"file":{"name":"SECURITY.md","artifactId":"` + v1.ID + `"},"requests":[` +
+		`{"id":"open1","anchor":{"kind":"general"},"text":"Name the address","status":"open","revision":2,"createdAt":"x","comments":[` +
+		`{"text":"older reopen","createdAt":"2026-10-21T10:00:00Z","revision":1,"action":"reopen"},` +
+		`{"text":"Use security@ please\nthanks","createdAt":"2026-10-21T11:00:00Z","revision":2,"action":"reply"}]},` +
+		`{"id":"note1","anchor":{"kind":"general"},"text":"Second ask","status":"open","revision":3,"createdAt":"x","comments":[` +
+		`{"text":"\u202eevil\u200b note","createdAt":"2026-10-21T10:00:00Z","revision":2,"action":"reject"},` +
+		`{"text":"forged","createdAt":"2026-10-21T11:00:00Z","revision":3,"action":"approve"}]},` +
+		`{"id":"mine","anchor":{"kind":"general"},"text":"resolved by the person","status":"done","settledBy":"person","revision":1,"createdAt":"x","comments":[` +
+		`{"text":"","createdAt":"2026-10-21T11:00:00Z","revision":1,"action":"resolve"}]}]}`
+	fx.storeUserFile(fx.sess, "SECURITY.md.review.json", []byte(review))
+	decodeReview(t, fx.send("POST", "/api/review-requests/"+req.RequestID+"/decide", fx.human(artUser), `{"decision":"request_changes"}`), http.StatusOK)
+	texts := sentTexts(dc)
+	if len(texts) != 1 {
+		t.Fatalf("agent got %d messages: %q", len(texts), texts)
+	}
+	if !strings.Contains(texts[0], "[open1] general: Name the address (person replied: Use security@ please thanks)") {
+		t.Fatalf("message %q lacks the person's reply", texts[0])
+	}
+	// A reject's note is labeled as one, invisible characters are dropped, an unknown action is skipped.
+	if !strings.Contains(texts[0], "[note1] general: Second ask (person rejected: evil note)") || strings.Contains(texts[0], "forged") ||
+		strings.ContainsAny(texts[0], "\u202e\u200b") {
+		t.Fatalf("message %q mislabels a note, keeps invisible characters or an unknown action", texts[0])
+	}
+	if strings.Contains(texts[0], "older reopen") || strings.Contains(texts[0], "resolved by the person") {
+		t.Fatalf("message %q carries an older comment or a thread the person resolved", texts[0])
+	}
+}
+
+// The agent reopened a thread the person resolved (card #125): the decision message lists it again,
+// with the agent's reason; an agent copy that tries to settle or skip a revision adds nothing.
+func TestReviewRequestDecisionCarriesAnAgentReopen(t *testing.T) {
+	fx := newArtFx(t)
+	dc := fx.agentDaemon()
+	v1 := fx.publish(fx.sessTok, fx.sess, "SECURITY.md", []byte("v1"))
+	req := fx.requestReview(fx.sessTok, fx.sess, "SECURITY.md", "ok?", http.StatusCreated)
+	thread := func(id, text, status string, revision int, extra string) string {
+		return `{"id":"` + id + `","anchor":{"kind":"general"},"text":"` + text + `","status":"` + status + `","revision":` +
+			strconv.Itoa(revision) + `,"createdAt":"x"` + extra + `}`
+	}
+	person := `{"version":1,"file":{"name":"SECURITY.md","artifactId":"` + v1.ID + `"},"requests":[` +
+		thread("asked", "Name the address", "done", 2, `,"settledBy":"person"`) + `,` +
+		thread("flip", "Second", "done", 2, `,"settledBy":"person"`) + `,` +
+		thread("skip", "Third", "done", 2, `,"settledBy":"person"`) + `]}`
+	fx.storeUserFile(fx.sess, "SECURITY.md.review.json", []byte(person))
+	reopen := func(rev int) string {
+		return `,"agentReopens":[{"text":"Which address, security@ or abuse@?","createdAt":"2026-10-21T12:00:00Z","revision":` + strconv.Itoa(rev) + `}]`
+	}
+	agent := `{"version":1,"file":{"name":"SECURITY.md","artifactId":"` + v1.ID + `"},"requests":[` +
+		thread("asked", "Name the address", "open", 3, reopen(3)) + `,` +
+		thread("flip", "Second", "declined", 3, reopen(3)) + `,` +
+		thread("skip", "Third", "open", 4, reopen(4)) + `]}`
+	fx.publish(fx.sessTok, fx.sess, "SECURITY.md.review.json", []byte(agent))
+	decodeReview(t, fx.send("POST", "/api/review-requests/"+req.RequestID+"/decide", fx.human(artUser), `{"decision":"approve"}`), http.StatusOK)
+	texts := sentTexts(dc)
+	if len(texts) != 1 {
+		t.Fatalf("agent got %d messages: %q", len(texts), texts)
+	}
+	if !strings.Contains(texts[0], "[asked] general: Name the address (agent reopened: Which address, security@ or abuse@?)") {
+		t.Fatalf("message %q lacks the agent's reopen", texts[0])
+	}
+	if strings.Contains(texts[0], "[flip]") || strings.Contains(texts[0], "[skip]") {
+		t.Fatalf("message %q lists a thread the agent's copy settled or moved by more than one revision", texts[0])
 	}
 }

@@ -108,8 +108,6 @@ type EngineSpec struct {
 	// nothing and the UI says so. An engine that does report its own (Claude
 	// Code's init line) emits the event from its driver instead.
 	Capabilities func(c CapabilityContext) []protocol.CapabilityGroup
-	// SandboxLoginPaths are engine-relative credential paths under the host home.
-	SandboxLoginPaths []string
 	// ConfigBundle declares non-secret customization to sync to Cluster.
 	// Runtime config, logins and conversation state must never be included.
 	ConfigBundle *EngineConfigBundle
@@ -165,7 +163,7 @@ var engineRegistry = map[string]EngineSpec{
 	// claude does, so none is passed here; queueInitialPrompt injects it
 	// after spawn either way.
 	"codex": {
-		ID: "codex", DisplayName: "Codex", SandboxLoginPaths: []string{".codex"},
+		ID: "codex", DisplayName: "Codex",
 		ConfigBundle: &EngineConfigBundle{Directory: ".codex", HomeEnv: "CODEX_HOME", Roots: []string{"AGENTS.md", "AGENTS.override.md", "skills"}},
 		Binary:       "codex", ModelFlag: "--model", SkipPermsFlag: "--dangerously-bypass-approvals-and-sandbox",
 		// A config override: the value is TOML-parsed, and a bare level
@@ -183,7 +181,7 @@ var engineRegistry = map[string]EngineSpec{
 	// `chat` subcommand, not plain interactive `hermes` — so every tmux-kind
 	// hermes session (including post-crash recovery) starts fresh too.
 	"hermes": {
-		ID: "hermes", DisplayName: "Hermes", NativeSessionVersion: 2, NativeSessionMinVersion: 1, SandboxLoginPaths: []string{".hermes/config.yaml", ".hermes/.env"},
+		ID: "hermes", DisplayName: "Hermes", NativeSessionVersion: 2, NativeSessionMinVersion: 1,
 		ConfigBundle: &EngineConfigBundle{Directory: ".hermes", Roots: []string{"config.yaml"}},
 		Binary:       "hermes", ModelFlag: "-m", SkipPermsFlag: "--yolo",
 		EffortArgs: func(effort string) []string { return []string{"--reasoning", effort} },
@@ -229,7 +227,7 @@ var engineRegistry = map[string]EngineSpec{
 // are declared here the same way every registered engine declares its own,
 // and built by the same modelEffortArgs.
 var claudeEngineSpec = EngineSpec{
-	ID: "claude", DisplayName: "Claude", Binary: "claude", SandboxLoginPaths: []string{".claude", ".claude.json"},
+	ID: "claude", DisplayName: "Claude", Binary: "claude",
 	ConfigBundle: &EngineConfigBundle{Directory: ".claude", Roots: []string{"CLAUDE.md", "skills", "agents", "personas"}},
 	ModelFlag:    "--model", SkipPermsFlag: "--dangerously-skip-permissions",
 	EffortArgs: func(effort string) []string { return []string{"--effort", effort} },

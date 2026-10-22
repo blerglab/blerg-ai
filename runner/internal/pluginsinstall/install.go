@@ -205,6 +205,11 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 // The command runs in its own process group and a timeout kills the whole group: the CLI spawns
 // git and node children, and a survivor would keep writing into $HOME/.claude/plugins while the
 // next command runs.
+//
+// Indirect host git (card #136): `claude plugin marketplace add` clones the marketplace with the
+// CLI's own git, outside internal/hostgit. Its URL is one the operator allow-listed (never a
+// session's), its environment is the allow-listed one, and it clones into the CLI's own plugin
+// directory, not a session's repository; the hardened runner's overrides do not apply to it.
 func (p *installer) execRunner(ctx context.Context, name string, args ...string) (string, error) {
 	scratch, err := os.MkdirTemp("", "blerg-plugins-")
 	if err != nil {
@@ -396,4 +401,19 @@ func scrubSecret(s, secret string) string {
 		s = strings.ReplaceAll(s, strings.TrimPrefix(esc, "u:"), "REDACTED")
 	}
 	return s
+}
+
+// ErrNotAllowed: a marketplace source that is malformed or not on the operator's allow-list.
+var ErrNotAllowed = errors.New("marketplace is not allowed by this install")
+
+// AddMarketplace adds one marketplace source with `claude plugin marketplace add <source>`: the
+// argument list is fixed, the source must be a GitHub owner/repo the allow-list names (checked
+// here again, whatever the caller did), and the run has the per-command timeout.
+func AddMarketplace(ctx context.Context, o Options, source string) error {
+	p := newInstaller(o)
+	if !pluginspec.ValidMarketplaceSource(source) || !p.allow.Allows(source) {
+		return ErrNotAllowed
+	}
+	_, err := p.step(ctx, "marketplace add "+source, "plugin", "marketplace", "add", source)
+	return err
 }

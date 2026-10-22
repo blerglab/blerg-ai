@@ -10,16 +10,19 @@ function ToastItem({ toast }: { toast: Toast }) {
   const navigate = useNavigate()
   const removeToast = useToastStore((s) => s.removeToast)
   const isMessage = toast.variant === 'message'
+  const hasAction = !!toast.action
 
   useEffect(() => {
-    if (isMessage) {
+    if (hasAction) {
+      // A toast with an action (Undo) answers the person's own click: no sound.
+    } else if (isMessage) {
       playMessageSound()
     } else {
       playToastSound()
     }
-    const timer = setTimeout(() => removeToast(toast.id), TOAST_TTL_MS)
+    const timer = setTimeout(() => removeToast(toast.id), toast.ttlMs ?? TOAST_TTL_MS)
     return () => clearTimeout(timer)
-  }, [toast.id, removeToast, isMessage])
+  }, [toast.id, removeToast, isMessage, hasAction, toast.ttlMs])
 
   const clickable = !!toast.url
   return (
@@ -54,6 +57,21 @@ function ToastItem({ toast }: { toast: Toast }) {
         {toast.title}
       </div>
       <div style={{ color: 'var(--fog-dim)', fontSize: '12px', marginTop: '2px' }}>{toast.body}</div>
+      {toast.action && (
+        <button
+          type="button"
+          className="toast-action"
+          data-testid="toast-action"
+          onClick={event => {
+            event.stopPropagation()
+            toast.action!.onClick()
+            removeToast(toast.id)
+          }}
+          style={{ marginTop: '6px', minHeight: '28px', padding: '2px 10px', fontSize: '12px' }}
+        >
+          {toast.action.label}
+        </button>
+      )}
     </div>
   )
 }
@@ -75,7 +93,8 @@ export default function ToastContainer() {
         display: 'flex',
         flexDirection: 'column',
         gap: '8px',
-        zIndex: 1000,
+        // Above the phone's rail drawer (1000): a toast's Undo must stay reachable there.
+        zIndex: 1100,
         pointerEvents: 'none',
       }}
     >

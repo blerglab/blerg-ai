@@ -129,8 +129,11 @@ describe('independent diff review asynchronous state safety', () => {
     const older=storedReview('older-target', 'diff-version-one')
     older.requests[0].anchor.quote='previous code that changed'
     show(context(async () => older))
-    await screen.findByText('Earlier review request')
+    // An outdated thread is never drawn on the current code; the Conversation lists it.
+    expect(await screen.findByTestId('review-unplaced-notice')).toHaveTextContent('1 outdated conversation (1 open)')
     expect(screen.getByTestId('diff-highlight-targets')).not.toHaveTextContent('older-target')
+    fireEvent.click(screen.getByRole('tab', {name: 'Conversation'}))
+    expect(await screen.findByText('Earlier review request')).toBeInTheDocument()
   })
 
   it('renders hostile filenames as text without creating links, images or executable markup', async () => {
@@ -138,8 +141,11 @@ describe('independent diff review asynchronous state safety', () => {
     const path = 'src/<img src="https://example.com/track" onerror="alert(1)"> [open](https://example.com).ts'
     review.requests[0].anchor.diff!.file = path
     const shown = show(context(async () => review))
+    // The mocked diff places nothing: the thread is in the Conversation, with its file as text.
+    await screen.findByTestId('review-unplaced-notice')
+    fireEvent.click(screen.getByRole('tab', {name: 'Conversation'}))
     await screen.findByText('Earlier review request')
-    expect(screen.getByTestId('review-request')).toHaveTextContent(path)
+    expect(screen.getByTestId('conversation-thread')).toHaveTextContent(path)
     expect(shown.container.querySelector('img,a,script,iframe')).toBeNull()
   })
 

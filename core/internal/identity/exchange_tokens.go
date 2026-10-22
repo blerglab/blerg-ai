@@ -18,9 +18,10 @@ const AgentTokenKindExchange = "exchange"
 // ExchangeTokenTTL is how long an exchanged token lives. The runner re-exchanges as it nears expiry.
 const ExchangeTokenTTL = 10 * time.Minute
 
-// maxLiveExchangeTokens bounds the live exchange tokens of one account. They are exempt from the
-// user cap (maxLiveAgentTokens) because the runner mints and revokes them automatically, but a
-// runaway caller still must not accumulate rows without bound.
+// maxLiveExchangeTokens is the default bound on the live exchange tokens of one account
+// (BoardLimits.LiveExchangeTokens; an administrator can change it under Settings). They are exempt
+// from the user cap (maxLiveAgentTokens) because the runner mints and revokes them automatically,
+// but a runaway caller still must not accumulate rows without bound.
 const maxLiveExchangeTokens = 100
 
 // ExchangeRevocationMargin is how long past its exp an exchange token's row and its "sub"
@@ -82,6 +83,10 @@ func (s *Service) CreateExchangeToken(ctx context.Context, accountID, target, pr
 		return AgentTokenRecord{}, "", ErrNoExchangeCaps
 	}
 
+	limits, err := s.BoardLimits(ctx)
+	if err != nil {
+		return AgentTokenRecord{}, "", err
+	}
 	var live int
 	if err := s.st.Pool().QueryRow(ctx,
 		`SELECT count(*) FROM agent_tokens
@@ -89,7 +94,7 @@ func (s *Service) CreateExchangeToken(ctx context.Context, accountID, target, pr
 		accountID, AgentTokenKindExchange).Scan(&live); err != nil {
 		return AgentTokenRecord{}, "", err
 	}
-	if live >= maxLiveExchangeTokens {
+	if live >= limits.LiveExchangeTokens {
 		return AgentTokenRecord{}, "", ErrTooManyTokens
 	}
 

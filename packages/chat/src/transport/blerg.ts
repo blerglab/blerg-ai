@@ -20,7 +20,7 @@ import type { OlderPage, SessionMeta, SubscribeHandlers, SubscribeOptions, Trans
 
 /** A message the session sent the person (the runner's MessageInfo), as initial_state and
  *  message_answered carry it. */
-interface MessageInfo { id: string; session_id: string; kind: string; status: string; answer?: string | null }
+interface MessageInfo { id: string; session_id: string; kind: string; status: string; answer?: string | null; dismissed?: boolean; dismissed_by?: string }
 
 /** The messages a chat sends the runner over its socket (a subset of the runner's BrowserMessage). */
 export type ChatBrowserMessage = SubscribeAgentEvents | UnsubscribeSession | AgentUserMessage | SetSessionModel | InterruptSession
@@ -47,6 +47,9 @@ export interface BlergTransportOptions {
   /** A route answered 401: the token is gone for good and the host should sign the person in. */
   onUnauthorized?: () => void
   fetch?: typeof fetch
+  /** The account signed in (its token's subject), so a question someone else dismissed does not
+   *  read "dismissed by you"; '' or absent: not known. */
+  viewerId?: () => string
 }
 
 /** The newest events shown at once on opening a transcript; the rest follow in pages of the same
@@ -106,6 +109,12 @@ function toMeta(s: SessionInfo): SessionMeta {
 }
 
 export function createBlergTransport(opts: BlergTransportOptions): Transport {
+  // Who dismissed a question, as this viewer reads it: undefined when either side is not known.
+  const dismissedBy = (m: MessageInfo): 'you' | 'other' | undefined => {
+    const viewer = opts.viewerId?.() ?? ''
+    if (!m.dismissed || !m.dismissed_by || !viewer) return undefined
+    return m.dismissed_by === viewer ? 'you' : 'other'
+  }
   const baseUrl = (opts.baseUrl ?? '').replace(/\/$/, '')
   const fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis)
   const socket: BlergSocket = opts.socket ?? createBrowserSocket({ baseUrl, getToken: opts.getToken })
@@ -317,13 +326,13 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       if (s) h.onStatus(s.status)
       // The session's asks that are no longer open (answered elsewhere, expired while away).
       for (const m of state.messages ?? []) {
-        if (m && m.session_id === sessionId && m.kind === 'ask' && m.status !== 'open') h.onAskClosed?.(m.id, m.answer ?? '')
+        if (m && m.session_id === sessionId && m.kind === 'ask' && m.status !== 'open') h.onAskClosed?.(m.id, m.answer ?? '', m.dismissed === true, dismissedBy(m))
       }
     }))
 
     offs.push(socket.onMessage('message_answered', (msg: never) => {
       const m = (msg as { message?: MessageInfo }).message
-      if (m && m.session_id === sessionId && typeof m.id === 'string') h.onAskClosed?.(m.id, m.answer ?? '')
+      if (m && m.session_id === sessionId && typeof m.id === 'string') h.onAskClosed?.(m.id, m.answer ?? '', m.dismissed === true, dismissedBy(m))
     }))
 
     // Subscribe on every (re)connection, resuming from lastSeq (or, mid-replay, from where the
@@ -545,6 +554,7 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       headers: bearer,
       check,
       workspace: true,
+      commits: true,
     }),
   }
 }

@@ -18,24 +18,206 @@
   color: var(--chat-warning, var(--amber));
 }
 
-.board-card-move {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+/* The live card as the Board's sheet lays it out: the description and the trail in the main column,
+   the card's fields beside it; under the title, before the description, in a narrow dialog (a phone,
+   or any dialog under 640 px: the width that decides is the dialog's). */
+.board-card-sheet-wrap {
+  container-type: inline-size;
 }
 
-.board-card-move-label {
+.board-card-sheet {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
+  column-gap: 40px;
+  row-gap: 20px;
+  padding-top: 20px;
+  min-width: 0;
+}
+
+.board-card-main {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.board-card-side {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 0;
+  padding-left: 24px;
+  border-left: 1px solid var(--chat-border);
+  min-width: 0;
+}
+
+@container (max-width: 640px) {
+  .board-card-sheet {
+    grid-template-columns: minmax(0, 1fr);
+    padding-top: 12px;
+  }
+  .board-card-side {
+    grid-column: 1;
+    grid-row: 1;
+    padding: 0 0 16px;
+    border-left: none;
+    border-bottom: 1px solid var(--chat-border);
+  }
+  .board-card-main {
+    grid-row: 2;
+  }
+  /* Folded: each field one line, its label beside it, so the description is not pushed far down. */
+  .board-card-side {
+    gap: 10px;
+  }
+  .board-card-side .board-card-field {
+    display: grid;
+    grid-template-columns: 76px minmax(0, 1fr);
+    align-items: baseline;
+    column-gap: 10px;
+  }
+}
+
+/* A field: a quiet label over its value (the Board names its fields the same small way). */
+.board-card-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.board-card-field dt {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--chat-muted-2, var(--fog-dim));
+}
+
+.board-card-field dd {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--chat-text-sm, 13px);
+  color: var(--chat-fg, var(--chalk));
+  overflow-wrap: anywhere;
+}
+
+.board-card-field .board-card-note {
+  margin: 6px 0 0;
+}
+
+.board-card-chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+
+/* The Board's chip: a quiet rounded pill. */
+.board-card-chip {
   display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  max-width: 100%;
+  padding: 2px 9px;
+  border: 1px solid var(--chat-border);
+  border-radius: 999px;
+  font-size: var(--chat-text-xs, 12px);
+  line-height: 20px;
+  color: var(--chat-fg, var(--chalk));
+  overflow-wrap: anywhere;
+}
+
+.board-card-chip code {
+  padding: 0;
+  background: none;
+  font-size: inherit;
+}
+
+.board-card-chip-note {
+  color: var(--chat-muted-2, var(--fog-dim));
+  white-space: pre;
+}
+
+.board-card-worker {
   font-size: var(--chat-text-sm, 13px);
 }
 
-.board-card-move select,
-.board-card-move button {
-  min-height: 32px;
-  max-width: 100%;
+/* Status: the board's columns as pills, the card's own pressed in the selected blue (#128); a click on
+   another moves the card there. */
+.board-card-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.board-card-column {
+  min-height: 28px;
+  padding: 2px 10px;
+  background: none;
+  border: 1px solid var(--chat-border);
+  border-radius: 999px;
+  color: var(--chat-muted, var(--fog));
+  font: inherit;
+  font-size: var(--chat-text-xs, 12px);
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+
+.board-card-column:hover:not(:disabled):not([aria-pressed='true']) {
+  border-color: var(--chat-muted, var(--fog));
+  color: var(--chat-fg, var(--chalk));
+}
+
+.board-card-column:focus-visible {
+  outline: 2px solid var(--selected-border);
+  outline-offset: 1px;
+}
+
+.board-card-column[aria-pressed='true'] {
+  border-color: var(--selected-border);
+  background: var(--selected-bg);
+  color: var(--selected-text);
+  cursor: default;
+}
+
+.board-card-column:disabled {
+  cursor: progress;
+}
+
+.board-card-column:disabled:not([aria-pressed='true']) {
+  opacity: 0.6;
+}
+
+/* The description: the whole main column, as the Board's sheet. */
+.board-card-sheet .ticket-description.md.md-doc {
+  max-width: none;
+}
+
+.board-card-main > .board-card-pinned-note {
+  margin: 0 0 12px;
+}
+
+.board-card-section {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--chat-border);
+}
+
+.board-card-section-title {
+  margin: 0 0 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--chat-muted-2, var(--fog-dim));
+}
+
+.board-card-main > .ticket-more {
+  margin-top: 16px;
 }
 
 .board-card-trail {
@@ -68,9 +250,9 @@
   font-size: var(--chat-text-xs, 12px);
 }
 
-@media (max-width: 600px) {
-  .board-card-move select,
-  .board-card-move button {
+@media (max-width: 640px) {
+  .board-card-column {
     min-height: 44px;
+    padding: 2px 14px;
   }
 }

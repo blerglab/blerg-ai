@@ -114,6 +114,17 @@ func (a *API) filingBoards(ctx context.Context, p mcpgw.Proof, project string) (
 	}
 	return out, nil
 }
+
+// sessionFilingBoards is filingBoards for a session's own discovery and filing (row's filingProof):
+// for a child, whose proof is its parent's sign-in, an ended sign-in says whose it is.
+func (a *API) sessionFilingBoards(ctx context.Context, row *db.SessionRow, p mcpgw.Proof, project string) ([]SessionBoard, error) {
+	boards, err := a.filingBoards(ctx, p, project)
+	var apiErr *APIError
+	if err != nil && isChildSession(row) && errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+		return nil, apiErrorf(http.StatusConflict, "%s", msgChildFilingSignedOut)
+	}
+	return boards, err
+}
 func selectFilingBoard(boards []SessionBoard, name string) (SessionBoard, error) {
 	for _, b := range boards {
 		if b.ID == name {
@@ -137,11 +148,11 @@ func selectFilingBoard(boards []SessionBoard, name string) (SessionBoard, error)
 	return found, apiErrorf(404, "That board is not available to this account.")
 }
 func (a *API) HandleFilingBoards(w http.ResponseWriter, r *http.Request) {
-	_, p, project, ok := a.filingRead(w, r)
+	row, p, project, ok := a.filingRead(w, r)
 	if !ok {
 		return
 	}
-	boards, err := a.filingBoards(r.Context(), p, project)
+	boards, err := a.sessionFilingBoards(r.Context(), row, p, project)
 	if err != nil {
 		writeFilingError(w, err)
 		return
@@ -149,7 +160,7 @@ func (a *API) HandleFilingBoards(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"configured": true, "boards": boards})
 }
 func (a *API) HandleFilingSearch(w http.ResponseWriter, r *http.Request) {
-	_, p, project, ok := a.filingRead(w, r)
+	row, p, project, ok := a.filingRead(w, r)
 	if !ok {
 		return
 	}
@@ -158,7 +169,7 @@ func (a *API) HandleFilingSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "Search is limited to 1000 characters.")
 		return
 	}
-	boards, err := a.filingBoards(r.Context(), p, project)
+	boards, err := a.sessionFilingBoards(r.Context(), row, p, project)
 	if err != nil {
 		writeFilingError(w, err)
 		return
@@ -216,7 +227,7 @@ func (a *API) HandleFileTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "Provide a board and a valid ticket draft.")
 		return
 	}
-	boards, err := a.filingBoards(r.Context(), p, project)
+	boards, err := a.sessionFilingBoards(r.Context(), row, p, project)
 	if err != nil {
 		writeFilingError(w, err)
 		return

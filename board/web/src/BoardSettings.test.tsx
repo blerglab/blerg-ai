@@ -8,6 +8,7 @@ let catalog: unknown = { state: "known", engines: [] };
 let me: unknown = { kind: "service", is_admin: true, is_human: true };
 let targets: unknown = {};
 let runAsMeRefusal: string | null = null;
+let remote: unknown = {};
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
   return {
@@ -16,6 +17,7 @@ vi.mock("./api", async (importOriginal) => {
       if (path.endsWith("/automation/run-as-me") && runAsMeRefusal) {
         return Promise.reject(new actual.ApiError(403, { error: runAsMeRefusal }));
       }
+      if (path.includes("/repo-remote?")) return Promise.resolve(remote);
       return Promise.resolve(path === "/api/me" ? me : path.includes("/launch-options") ? catalog : path.endsWith("/run-targets") ? targets : {});
     }),
   };
@@ -242,5 +244,59 @@ describe('BoardSettings originating component metadata', () => {
     open(board({ include_component_version: true }));
     expect(await screen.findByText('Component version collection: on')).toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: 'Include component version on filed tickets' })).not.toBeInTheDocument();
+  });
+});
+
+describe("BoardSettings bare repos", () => {
+  const owned = () => board({ repos: ["app"], automation_token_set: true, automation_account_id: "owner-fixture" });
+  beforeEach(() => {
+    vi.mocked(api).mockClear();
+    catalog = { state: "known", engines: [] };
+    me = { is_admin: true, is_human: true, account_id: "owner-fixture" };
+    targets = { can_choose: true, default_runtime: "cluster", unresolved_repos: ["app"], targets: [
+      { runtime: "cluster", label: "Cluster", unavailable: "app is a desktop folder name" },
+      { runtime: "docker", daemon_id: "desktop-a", desktop_name: "Workstation", label: "Workstation · Local sandbox" },
+      { runtime: "daemon", daemon_id: "desktop-a", desktop_name: "Workstation", label: "Workstation · This machine" },
+      { runtime: "docker", daemon_id: "desktop-b", desktop_name: "Laptop", label: "Laptop · Local sandbox" },
+    ] };
+  });
+
+  it("looks a bare repo up on the desktop the person picks, shows the owner/name, and saves it once confirmed", async () => {
+    remote = { repo: "app", daemon_id: "desktop-b", desktop_name: "Laptop", has_folder: true, full_name: "example-org/app" };
+    const onChanged = open(owned());
+    const pick = await screen.findByRole("combobox", { name: "Desktop for app" });
+    // Each desktop once; nothing is asked until the person chooses one.
+    expect(screen.getAllByRole("option", { name: "Workstation" })).toHaveLength(1);
+    // Desktops have no owner: the copy asks for the desktop the folder lives on, not "yours".
+    expect(screen.getByRole("option", { name: "Pick the desktop this folder lives on…" })).toBeInTheDocument();
+    expect(screen.getByText(/pick the desktop this folder lives on and look up its remote/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Look up app" })).toBeDisabled();
+    expect(screen.getByRole("option", { name: /Cluster.*desktop folder name/ })).toBeDisabled();
+    fireEvent.change(pick, { target: { value: "desktop-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Look up app" }));
+    expect(await screen.findByText("app → example-org/app")).toBeInTheDocument();
+    expect(api).toHaveBeenCalledWith("/api/boards/b1/repo-remote?repo=app&daemon_id=desktop-b");
+    expect(api).not.toHaveBeenCalledWith("/api/boards/b1/repos/resolve", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "Save example-org/app" }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/boards/b1/repos/resolve", { method: "POST", json: { repo: "app", daemon_id: "desktop-b", full_name: "example-org/app" } }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+
+  it("says plainly that a folder with no remote runs on a desktop, and offers nothing to save", async () => {
+    remote = { repo: "app", daemon_id: "desktop-a", desktop_name: "Workstation", has_folder: true, problem: "this folder has no remote, so the cluster can't clone it; run it on a desktop" };
+    open(board({ repos: ["app"], automation_token_set: true, automation_account_id: "owner-fixture", run_runtime: "docker", run_daemon_id: "desktop-a" }));
+    // The board's own desktop is the preset choice.
+    const pick = await screen.findByRole("combobox", { name: "Desktop for app" });
+    expect((pick as HTMLSelectElement).value).toBe("desktop-a");
+    fireEvent.click(screen.getByRole("button", { name: "Look up app" }));
+    expect(await screen.findByText("this folder has no remote, so the cluster can't clone it; run it on a desktop")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Save .*\// })).toBeNull();
+  });
+
+  it("shows no prompt when every repo is owner/name", async () => {
+    targets = { ...(targets as object), unresolved_repos: [] };
+    open(owned());
+    await screen.findByRole("combobox", { name: "Where this board runs" });
+    expect(screen.queryByText("Repos for the cluster")).toBeNull();
   });
 });

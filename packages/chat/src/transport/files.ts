@@ -2,7 +2,8 @@
 // browser API and on the proxy contract (list, raw, download, delete, upload), only the prefix and
 // the authentication differ. Ported from the runner's lib/artifacts.ts, lib/attachments.ts and
 // apiFetch.ts; the pure helpers (grouping, versions, size text) live in the model, not here.
-import type { ArtifactInfo, TransportFiles, UploadedFile, WorkspaceFile } from './types'
+import type { ArtifactInfo, CommitDetails, CommitDiff, TransportFiles, UploadedFile, WorkspaceFile } from './types'
+import { imageBlobType } from '../model/markdownHtml'
 
 export interface FilesOptions {
   /** The session's route prefix, e.g. `/api/sessions/<id>` or `/blerg/sessions/<id>`. */
@@ -21,6 +22,37 @@ export interface FilesOptions {
   checkUpload?: (res: Response) => void
   /** Offer `workspaceFile` (the runner's workspace-file route). Off for a proxy contract without it. */
   workspace?: boolean
+  /** Offer `commit` and `commitDiff` (the runner's commit routes). Off for a proxy contract without them. */
+  commits?: boolean
+}
+
+/** What a commit route takes: 7 to 64 hex digits (the server refuses anything else). */
+const COMMIT_SHA = /^[0-9a-f]{7,64}$/
+
+/** The largest commit diff read (the server's own cap, 2 MB): past it the read stops. */
+export const COMMIT_DIFF_MAX = 2 << 20
+
+function commitDetails(j: unknown): CommitDetails | null {
+  const c = j as Partial<CommitDetails> | null
+  if (!c || typeof c !== 'object' || typeof c.sha !== 'string' || typeof c.subject !== 'string') return null
+  const num = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : 0)
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  return {
+    sha: c.sha,
+    short: str(c.short) || c.sha.slice(0, 7),
+    subject: c.subject,
+    body: str(c.body),
+    ...(c.body_truncated ? { body_truncated: true } : {}),
+    author: str(c.author),
+    author_date: str(c.author_date),
+    parents: Array.isArray(c.parents) ? c.parents.filter((p): p is string => typeof p === 'string') : [],
+    files: (Array.isArray(c.files) ? c.files : [])
+      .filter(f => !!f && typeof f === 'object' && typeof f.path === 'string')
+      .map(f => ({ path: f.path, ...(typeof f.old_path === 'string' && f.old_path ? { old_path: f.old_path } : {}), adds: num(f.adds), dels: num(f.dels), ...(f.binary ? { binary: true } : {}) })),
+    ...(c.files_truncated ? { files_truncated: true } : {}),
+    adds: num(c.adds),
+    dels: num(c.dels),
+  }
 }
 
 const enc = encodeURIComponent
@@ -76,7 +108,7 @@ function withoutControls(text: string): string {
 /** The sentence and error id of an error reply: the runner's JSON `{error, error_id}`, or the
  *  text of one that is not JSON (an app's proxy answers `http.Error` in plain text), on one line;
  *  nothing for an empty reply or a web page. */
-async function replyDetail(r: Response): Promise<{ detail: string; errorId?: string }> {
+async function replyDetail(r: Response): Promise<{ detail: string; errorId?: string; code?: string }> {
   let text: string
   try {
     text = await r.text()
@@ -87,8 +119,13 @@ async function replyDetail(r: Response): Promise<{ detail: string; errorId?: str
     const j: unknown = JSON.parse(text)
     const err = (j as { error?: unknown } | null)?.error
     const id = (j as { error_id?: unknown } | null)?.error_id
+    const code = (j as { code?: unknown } | null)?.code
     if (typeof err === 'string' && err.trim()) {
-      return typeof id === 'string' && id ? { detail: err.trim(), errorId: id } : { detail: err.trim() }
+      return {
+        detail: err.trim(),
+        ...(typeof id === 'string' && id ? { errorId: id } : {}),
+        ...(typeof code === 'string' && /^[a-z_]{1,40}$/.test(code) ? { code } : {}),
+      }
     }
     return { detail: '' }
   } catch { /* not JSON */ }
@@ -112,12 +149,16 @@ export class WorkspaceFileError extends Error {
   readonly status: number
   readonly errorId?: string
   readonly serverText: string
-  constructor(status: number, serverText: string, errorId?: string) {
+  /** The server's machine-readable reason (busy, daemon_timeout, changed, not_running, …): what
+   *  retries branch on (model/imageQueue.ts). Absent from an older server. */
+  readonly code?: string
+  constructor(status: number, serverText: string, errorId?: string, code?: string) {
     super(`workspace file refused (HTTP ${status})`)
     this.name = 'WorkspaceFileError'
     this.status = status
     this.serverText = serverText
     if (errorId) this.errorId = errorId
+    if (code) this.code = code
   }
 }
 
@@ -216,6 +257,36 @@ export function uploadWithProgress(
   })
 }
 
+/** A reply's body when it is at most `max` bytes, else null, the download stopped as soon as that is
+ *  known: by Content-Length, else by the stream passing `max`. Without either (no length, no
+ *  stream) the size cannot be told without reading it all: null. */
+export async function readCapped(r: Response, max: number, abort?: AbortController): Promise<Blob | null> {
+  const stop = () => { abort?.abort(); void r.body?.cancel().catch(() => {}) }
+  const length = Number(r.headers.get('Content-Length') ?? '')
+  const known = r.headers.has('Content-Length') && Number.isFinite(length)
+  if (known && length > max) { stop(); return null }
+  const type = r.headers.get('Content-Type') ?? ''
+  if (!r.body) {
+    if (!known) return null
+    return r.blob()
+  }
+  const reader = r.body.getReader()
+  const parts: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > max) {
+      await reader.cancel().catch(() => {})
+      abort?.abort()
+      return null
+    }
+    parts.push(value)
+  }
+  return new Blob(parts as BlobPart[], type ? { type } : undefined)
+}
+
 export function createFiles(opts: FilesOptions): TransportFiles {
   const fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis)
   const artifacts = (sessionId: string) => `${opts.base(sessionId)}/artifacts`
@@ -230,8 +301,8 @@ export function createFiles(opts: FilesOptions): TransportFiles {
   const workspaceFile = async (sessionId: string, path: string, signal?: AbortSignal): Promise<WorkspaceFile> => {
     const r = await request(`${opts.base(sessionId)}/workspace-file?path=${enc(path)}`, { signal })
     if (!r.ok) {
-      const { detail, errorId } = await replyDetail(r)
-      throw new WorkspaceFileError(r.status, detail, errorId)
+      const { detail, errorId, code } = await replyDetail(r)
+      throw new WorkspaceFileError(r.status, detail, errorId, code)
     }
     const j = (await r.json().catch(() => null)) as Partial<WorkspaceFile> & { content_b64?: unknown } | null
     if (!j || typeof j.content_b64 !== 'string' || typeof j.view !== 'string') throw new WorkspaceFileError(502, '')
@@ -242,12 +313,44 @@ export function createFiles(opts: FilesOptions): TransportFiles {
       view: j.view,
       content_type: typeof j.content_type === 'string' ? j.content_type : '',
       mtime: typeof j.mtime === 'string' ? j.mtime : '',
-      blob: new Blob([bytes]),
+      // An image's bytes keep their type, so an <img> draws an SVG (it does not sniff one).
+      blob: new Blob([bytes], typeof j.content_type === 'string' && imageBlobType(j.content_type) ? { type: imageBlobType(j.content_type) } : undefined),
+    }
+  }
+
+  const commitUrl = (sessionId: string, sha: string) => `${opts.base(sessionId)}/commits/${enc(sha)}`
+
+  /** The commit's summary; null for every refusal (no access, no workspace, unknown sha). */
+  const commit = async (sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDetails | null> => {
+    const s = sha.toLowerCase()
+    if (!COMMIT_SHA.test(s)) return null
+    const r = await request(commitUrl(sessionId, s), { signal })
+    if (!r.ok) return null
+    const c = commitDetails(await r.json().catch(() => null))
+    return c && c.sha.startsWith(s) ? c : null
+  }
+
+  /** The commit's diff, read no further than COMMIT_DIFF_MAX. */
+  const commitDiff = async (sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDiff> => {
+    const s = sha.toLowerCase()
+    if (!COMMIT_SHA.test(s)) return null
+    const abort = new AbortController()
+    const stop = () => abort.abort()
+    signal?.addEventListener('abort', stop)
+    try {
+      const r = await request(`${commitUrl(sessionId, s)}/diff`, { signal: abort.signal })
+      if (r.status === 413) return 'large'
+      if (!r.ok) return null
+      const blob = await readCapped(r, COMMIT_DIFF_MAX, abort)
+      return blob ? { text: await blob.text() } : 'large'
+    } finally {
+      signal?.removeEventListener('abort', stop)
     }
   }
 
   return {
     ...(opts.workspace ? { workspaceFile } : {}),
+    ...(opts.commits ? { commit, commitDiff } : {}),
     /** The session's artifacts, newest first. Throws when the list cannot be read. */
     async list(sessionId) {
       const r = await request(artifacts(sessionId))
@@ -262,6 +365,13 @@ export function createFiles(opts: FilesOptions): TransportFiles {
       const r = await request(`${artifacts(sessionId)}/${enc(id)}/raw`)
       if (!r.ok) throw await readFailure(r, `Couldn’t load this file (HTTP ${r.status}).`)
       return r.blob()
+    },
+
+    async rawCapped(sessionId, id, max) {
+      const abort = new AbortController()
+      const r = await request(`${artifacts(sessionId)}/${enc(id)}/raw`, { signal: abort.signal })
+      if (!r.ok) throw await readFailure(r, `Couldn’t load this file (HTTP ${r.status}).`)
+      return readCapped(r, max, abort)
     },
 
     /** Saves the file: fetched with the credentials (a plain link could not carry a token), then

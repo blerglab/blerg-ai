@@ -4,7 +4,7 @@ import { modelDisplayName } from '../../model/modelDisplay'
 import { memo, useState, type ReactNode } from 'react'
 import type { CardRegistry } from '../../cards/registry'
 import { isRetryNotice } from '../../model/notices'
-import { topicDividerText } from '../../model/topicMarker'
+import { markRowText, topicDividerText } from '../../model/topicMarker'
 import { isReviewStateEvent } from '../../model/reviewRounds'
 import { automationAuthor, isFromParentSession, userMessageShape } from '../../model/userMessages'
 import { parseTs, turnDuration } from '../../model/timeLabel'
@@ -16,6 +16,7 @@ import type {
   CheckInPayload,
   CompactionPayload,
   ErrorPayload,
+  MarkPayload,
   MessagingPayload,
   ModelChangedPayload,
   StatusPayload,
@@ -120,9 +121,21 @@ function AskCard({ ev, cards }: { ev: AgentEvent; cards?: CardRegistry }) {
         <Markdown text={body} className="message-body" cards={cards} />
         {open
           ? blocked ? blockedHint && <span className="ask-hint" data-testid="ask-owner-only">{blockedHint}</span> : (!answer || p.no_wait) && <span className="ask-hint">{hint}</span>
-          : <span className="ask-hint" data-testid="ask-closed">{state?.answer ? 'answered' : 'closed'}</span>}
+          : !state?.answer && !state?.dismissed ? <span className="ask-hint" data-testid="ask-closed">closed</span> : null}
         <TimeLabel ts={ev.ts} className="card-time-end" />
       </div>
+      {!open && state?.answer && (
+        // Answered in place: what, by whom and when (the chat draws the answer as one short row).
+        <div className="ask-outcome" data-testid="ask-closed">
+          <span className="ask-outcome-label">Answered:</span> <span className="ask-outcome-text">{state.answer}</span>
+          <span className="ask-outcome-meta"> · {state.by === 'parent' ? 'by the parent session' : 'by you'}{state.at && <> · <TimeLabel ts={state.at} /></>}</span>
+        </div>
+      )}
+      {!open && !state?.answer && state?.dismissed && (
+        <div className="ask-outcome dismissed" data-testid="ask-closed">
+          {state.by === 'you' ? 'Dismissed by you' : state.by === 'other' ? 'Dismissed by another person' : 'Dismissed'} (maybe answered in the chat)
+        </div>
+      )}
       {open && answer && <AskReply answer={answer} messageId={p.message_id || undefined} />}
     </div>
   )
@@ -425,6 +438,15 @@ export function renderEvent(
           {topicDividerText(ev.payload as TopicPayload)}
         </div>
       )
+    case 'mark': {
+      const text = markRowText(ev.payload as MarkPayload)
+      if (!text) return null
+      return (
+        <div key={key} className="agent-card marker topic-divider mark-row" data-testid="mark-row" data-event-id={key}>
+          {text}
+        </div>
+      )
+    }
     case 'checklist':
       return <ChecklistRow key={key} ev={ev} />
     case 'ticket':

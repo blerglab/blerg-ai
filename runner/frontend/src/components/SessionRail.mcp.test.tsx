@@ -222,10 +222,10 @@ describe('session panel: MCP servers, the held first message, checklist commits'
     expect(within(line).queryByRole('button')).toBeNull()
   })
 
-  it('an item of the checklist shows its shas, never linked out of Blerg even when the server knows the repository', async () => {
+  it('an item of the checklist shows its commits as one chip, never linked out of Blerg even when the server knows the repository', async () => {
     stubFetch(0, liveReply({
       checklist: {
-        items: [{ text: 'Fix', done: true, commits: ['abcdef1234', '1234567'] }, { text: 'Ship', done: false }],
+        items: [{ text: 'Fix', done: false, commits: ['abcdef1234', '1234567'] }, { text: 'Ship', done: false }],
         event_id: 'c1', updated_at: iso(0), commit_urls: { '1234567': 'https://forge.example.test/c/1234567' },
       },
     }))
@@ -234,9 +234,10 @@ describe('session panel: MCP servers, the held first message, checklist commits'
     await renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: /Plan/ }))
     const sec = await screen.findByTestId('rail-checklist')
-    const shas = within(sec).getAllByTestId('reel-commit')
-    expect(shas.map(s => s.textContent)).toEqual(['abcdef1', '1234567'])
-    expect(shas.map(s => s.tagName)).toEqual(['BUTTON', 'BUTTON'])
+    const shas = within(sec).getAllByTestId('rail-plan-commit')
+    expect(shas.map(s => s.textContent)).toEqual(['abcdef1+1'])
+    expect(shas[0]).toHaveAccessibleName('Copy commits abcdef1, 1234567')
+    expect(shas[0].tagName).toBe('BUTTON')
     expect(sec.querySelector('a')).toBeNull()
     expect(within(sec).queryByRole('button', { name: /View diff/ })).toBeNull()
   })

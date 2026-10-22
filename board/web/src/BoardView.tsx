@@ -1,11 +1,18 @@
 import { RestrictedMarker } from "./CardOrigin";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError, Board, Card, Column, boardSocket, pendingBlockers } from "./api";
 import { CardSheet } from "./CardSheet";
 import { BoardChat } from "./BoardChat";
 import { MetricsModal } from "./MetricsPage";
 import { BoardSettings } from "./BoardSettings";
+import { BoardFilterBar } from "./BoardFilterBar";
+import { BoardSearch } from "./BoardSearch";
+import { ActiveFilters, FilterMenu } from "./FilterMenu";
+import {
+  BoardFilter, chipsFor, countLabel, forgetTab, isFiltering, loadFilter, loadTab, matchesFilter, pickColumn,
+  saveFilter, saveTab, swipeStep, words,
+} from "./boardFilter";
 
 // indicatorFor: what a card's top-right glyph means.
 //   spinner  — a session is actively churning (starting/running)
@@ -152,11 +159,83 @@ export function BoardView({ boardId }: { boardId: string }) {
   const [dragSrc, setDragSrc] = useState<{ colId: string; index: number } | null>(null);
   const [dragHeight, setDragHeight] = useState(72);
 
+  // The in-place filter, kept per board for the browser session, and the column a phone shows,
+  // remembered per board. Both follow a switch to another board (state adjusted during render).
+  const [filterBoard, setFilterBoard] = useState(boardId);
+  const [filter, setFilterState] = useState<BoardFilter>(() => loadFilter(boardId));
+  const [tabPick, setTabPick] = useState<string | null>(() => loadTab(boardId));
+  if (filterBoard !== boardId) {
+    setFilterBoard(boardId); setFilterState(loadFilter(boardId)); setTabPick(loadTab(boardId));
+  }
+  const setFilter = (f: BoardFilter) => { setFilterState(f); saveFilter(boardId, f); };
+  // The box shows every keystroke at once; the cards follow at a lower priority, so typing stays
+  // smooth on a big board.
+  const applied = useDeferredValue(filter);
+  const filtering = isFiltering(applied);
+  // Each column's shown cards (stale-first, narrowed by the filter) and size, and the chips:
+  // worked out once per board change or filter change, not once per render.
+  const view = useMemo(() => {
+    const q = words(applied.q);
+    const on = isFiltering(applied);
+    const byColumn = new Map<string, { shown: Card[]; total: number }>();
+    for (const col of columns) {
+      const all = columnCards(cards, col.id);
+      byColumn.set(col.id, { shown: on ? all.filter((c) => matchesFilter(c, applied, q)) : all, total: all.length });
+    }
+    return { byColumn, chips: chipsFor(cards, applied) };
+  }, [cards, columns, applied]);
+  // shownCards: a column's cards as the board shows them. Render and commitDrop both use it, so a
+  // drop's index means the same card on screen and here.
+  const shownCards = (colId: string) => view.byColumn.get(colId)?.shown ?? [];
+  const activeColumn = pickColumn(columns, tabPick);
+  // a remembered column that was deleted is forgotten, not kept forever
+  // (pickColumn already shows the first column in its place)
+  useEffect(() => {
+    if (tabPick && columns.length > 0 && !columns.some((c) => c.id === tabPick)) forgetTab(boardId);
+  }, [boardId, columns, tabPick]);
+  const isPhone = useSyncExternalStore(subscribePhone, phoneNow, () => false);
+  // The search field: "/" (or Ctrl/⌘-K) on a board opens it here instead of the search dialog the
+  // other pages use; on a phone it is a full-width row under the column tabs.
+  const [searchSignal, setSearchSignal] = useState(0);
+  const [phoneSearch, setPhoneSearch] = useState(false);
+  useEffect(() => {
+    // App asks only while no dialog or popover is open (see App's shortcut guard)
+    const onAsk = (e: Event) => {
+      e.preventDefault();
+      if (phoneNow()) setPhoneSearch(true);
+      setSearchSignal((n) => n + 1);
+    };
+    window.addEventListener("blerg-board:search-inline", onAsk);
+    return () => window.removeEventListener("blerg-board:search-inline", onAsk);
+  }, []);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const pickColumnTab = (id: string) => {
+    setTabPick(id); saveTab(boardId, id);
+    // a new column starts at its top, just under the sticky strip, not mid-way down
+    const top = sentinelRef.current?.getBoundingClientRect().top;
+    if (top != null && top < 0) window.scrollTo({ top: window.scrollY + top });
+  };
+  const swipeRef = useRef<{ x: number; y: number } | null>(null);
+  const onSwipeEnd = (x: number, y: number) => {
+    const start = swipeRef.current; swipeRef.current = null;
+    if (!start || dragging || !phoneNow()) return;
+    // pinch-zoomed in, a sideways drag pans the zoomed page: it is not a swipe
+    if ((window.visualViewport?.scale ?? 1) > 1.01) return;
+    const step = swipeStep(x - start.x, y - start.y);
+    const i = columns.findIndex((c) => c.id === activeColumn);
+    const next = columns[i + step];
+    if (step !== 0 && next) pickColumnTab(next.id);
+  };
+
   // FLIP: whenever the layout changes (drag projection, drops, reloads),
   // cards animate from their previous position instead of teleporting.
   const rectsRef = useRef(new Map<string, { x: number; y: number }>());
+  const flipFilterRef = useRef(applied);
   useLayoutEffect(() => {
     const prev = rectsRef.current;
+    // A new filter re-lays the board at once: sliding every card on each keystroke is noise.
+    const still = flipFilterRef.current !== applied;
+    flipFilterRef.current = applied;
     const next = new Map<string, { x: number; y: number }>();
     const boardEl = document.querySelector<HTMLElement>(".board");
     document.querySelectorAll<HTMLElement>("[data-card-id]").forEach((el) => {
@@ -165,6 +244,9 @@ export function BoardView({ boardId }: { boardId: string }) {
       // mid-animation rect re-triggers the animation forever (the flicker)
       el.getAnimations().forEach((a) => a.cancel());
       const r = el.getBoundingClientRect();
+      // A card that is not laid out (a phone's hidden columns) has no position: neither record nor
+      // animate it, so a column a tab brings into view appears in place instead of flying in.
+      if (r.width === 0 && r.height === 0) return;
       // CONTENT-space coordinates: add back every scroll offset. Client
       // rects are viewport-relative, and scrolling doesn't re-render — so
       // a refresh after a scroll would see every card "moved" by the
@@ -176,7 +258,7 @@ export function BoardView({ boardId }: { boardId: string }) {
       };
       next.set(id, pos);
       const old = prev.get(id);
-      if (old && (Math.abs(old.y - pos.y) > 1 || Math.abs(old.x - pos.x) > 1)) {
+      if (!still && old && (Math.abs(old.y - pos.y) > 1 || Math.abs(old.x - pos.x) > 1)) {
         el.animate(
           [{ transform: `translate(${old.x - pos.x}px, ${old.y - pos.y}px)` }, { transform: "translate(0, 0)" }],
           { duration: 280, easing: "cubic-bezier(0.25, 0.1, 0.25, 1)" },
@@ -193,8 +275,12 @@ export function BoardView({ boardId }: { boardId: string }) {
     if (!dragging || !dragOver) { endDrag(); return; }
     if (dragSrc && dragOver.colId === dragSrc.colId &&
         dragOver.index === dragSrc.index) { endDrag(); return; }
-    const target = columnCards(cards, dragOver.colId).filter((c) => c.id !== dragging.id);
-    const before = target[dragOver.index]?.id ?? null;
+    // The drop index counts the cards on screen. With a filter on, cards are hidden in between:
+    // dropping after the last shown card lands right after it, not at the column's very end.
+    const all = columnCards(cards, dragOver.colId).filter((c) => c.id !== dragging.id);
+    const target = shownCards(dragOver.colId).filter((c) => c.id !== dragging.id);
+    let before = target[dragOver.index]?.id ?? null;
+    if (!before && target.length > 0) before = all[all.indexOf(target[target.length - 1]) + 1]?.id ?? null;
     const card = dragging;
     // optimistic: place it locally so the slide happens now
     setCards((cs) => {
@@ -402,7 +488,19 @@ export function BoardView({ boardId }: { boardId: string }) {
           💬 Board session
         </button>
         <button className="btn ghost small" onClick={() => nav(`/boards/${boardId}/metrics`)}>📊 Metrics</button>
-        <button className="btn ghost small" onClick={() => window.dispatchEvent(new Event("blerg-board:search"))} title="search (/)">🔍</button>
+        {/* search, Filter and the active filters stay together: they never split across rows */}
+        <div className="tb-find">
+        {isPhone ? (
+          <button type="button" className="btn ghost small tb-search-btn" aria-label="Search cards"
+            aria-expanded={phoneSearch || filter.q !== ""}
+            onClick={() => { setPhoneSearch(true); setSearchSignal((n) => n + 1); }}>🔍</button>
+        ) : (
+          <BoardSearch boardId={boardId} value={filter.q} onChange={(q) => setFilter({ ...filter, q })}
+            cards={cards} onOpenCard={openSheet} collapsible focusSignal={searchSignal} />
+        )}
+        <FilterMenu chips={view.chips} filter={filter} onFilter={setFilter} sheet={isPhone} />
+        {!isPhone && <ActiveFilters filter={filter} onFilter={setFilter} />}
+        </div>
         {board.deploy_url && (
           <a className="live-chip" href={board.deploy_url} target="_blank" rel="noreferrer"
             title="this project is deployed — open it">
@@ -427,9 +525,30 @@ export function BoardView({ boardId }: { boardId: string }) {
           </p>
         </div>
       )}
-      <div className={`board${dragging ? " drag-active" : ""}`}>
+      <div ref={sentinelRef} aria-hidden="true" />
+      <BoardFilterBar
+        counts={columns.map((column) => ({
+          column, shown: shownCards(column.id).length, total: view.byColumn.get(column.id)?.total ?? 0,
+        }))}
+        activeColumn={activeColumn} onPickColumn={pickColumnTab} applied={applied}
+      >
+        {isPhone && (phoneSearch || filter.q !== "") && (
+          <div className="phone-search">
+            <BoardSearch boardId={boardId} value={filter.q} onChange={(q) => setFilter({ ...filter, q })}
+              cards={cards} onOpenCard={openSheet} collapsible={false} focusSignal={searchSignal}
+              onDismiss={() => setPhoneSearch(false)} />
+          </div>
+        )}
+        {isPhone && <ActiveFilters filter={filter} onFilter={setFilter} />}
+      </BoardFilterBar>
+      <div className={`board${dragging ? " drag-active" : ""}`}
+        onTouchStart={(e) => { const t = e.touches[0]; swipeRef.current = e.touches.length === 1 && t ? { x: t.clientX, y: t.clientY } : null; }}
+        onTouchEnd={(e) => { const t = e.changedTouches[0]; if (t) onSwipeEnd(t.clientX, t.clientY); }}
+        onTouchCancel={() => { swipeRef.current = null; }}
+      >
         {columns.map((col) => {
-          const colCards = columnCards(cards, col.id);
+          const colCards = shownCards(col.id);
+          const total = view.byColumn.get(col.id)?.total ?? 0;
           const visible = colCards.filter((c) => c.id !== dragging?.id);
           const indicatorIdx = !dragging ? null
             : dragOver?.colId === col.id ? dragOver.index
@@ -439,8 +558,11 @@ export function BoardView({ boardId }: { boardId: string }) {
             indicatorIdx === dragSrc.index;
           return (
             <section
-              className={`column${col.is_terminal ? " terminal" : ""}`}
-              key={col.id}
+              className={`column${col.is_terminal ? " terminal" : ""}${col.id === activeColumn ? " picked" : ""}`}
+              key={col.id} id={`column-${col.id}`}
+              // on a phone the picked column is the tab panel its tab names; on a desktop each
+              // column is a region named by its heading
+              {...(isPhone ? { role: "tabpanel", "aria-labelledby": `tab-${col.id}` } : { "aria-labelledby": `colname-${col.id}` })}
               onDragOver={(e) => {
                 e.preventDefault();
                 if (!dragging) return;
@@ -469,8 +591,8 @@ export function BoardView({ boardId }: { boardId: string }) {
             >
               <header>
                 <span className="blaze" />
-                <h3>{col.name}</h3>
-                <span className="count">{visible.length}</span>
+                <h3 id={`colname-${col.id}`}>{col.name}</h3>
+                <span className="count">{countLabel(visible.length, total, filtering)}</span>
               </header>
               <div className="cards">
                 {(() => { let vi = 0; return colCards.flatMap((card) => {
@@ -558,7 +680,9 @@ export function BoardView({ boardId }: { boardId: string }) {
                   <div className="card ghost-slot" style={{ height: dragHeight }} />
                 )}
                 {visible.length === 0 && indicatorIdx == null && (
-                  <div className="empty" style={{ padding: "18px 8px", fontSize: 13 }}>—</div>
+                  <div className="empty" style={{ padding: "18px 8px", fontSize: 13 }}>
+                    {filtering && total > 0 ? `No match among ${total}` : "—"}
+                  </div>
                 )}
               </div>
             </section>
@@ -575,6 +699,15 @@ export function BoardView({ boardId }: { boardId: string }) {
       )}
     </>
   );
+}
+
+// The phone layout's breakpoint, the same as the stylesheet's.
+const phoneQuery = "(max-width: 640px)";
+function phoneNow(): boolean { return window.matchMedia?.(phoneQuery).matches ?? false; }
+function subscribePhone(onChange: () => void): () => void {
+  const mq = window.matchMedia?.(phoneQuery);
+  mq?.addEventListener?.("change", onChange);
+  return () => mq?.removeEventListener?.("change", onChange);
 }
 
 // latestOnly hands out one ticket per call; a ticket says whether a newer one has been handed out

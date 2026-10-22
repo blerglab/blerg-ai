@@ -32,9 +32,9 @@ const control: CSSProperties = {
   padding: '8px 12px', boxSizing: 'border-box', fontFamily: 'inherit',
 }
 const pill = (selected: boolean): CSSProperties => ({
-  background: selected ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--scree)',
-  border: `1px solid ${selected ? 'var(--blaze)' : 'var(--stone)'}`,
-  borderRadius: 6, color: selected ? 'var(--amber)' : 'var(--fog)', padding: '5px 14px', cursor: 'pointer',
+  background: selected ? 'var(--selected-bg)' : 'var(--scree)',
+  border: `1px solid ${selected ? 'var(--selected-border)' : 'var(--stone)'}`,
+  borderRadius: 6, color: selected ? 'var(--selected-text)' : 'var(--fog)', padding: '5px 14px', cursor: 'pointer',
   fontSize: '0.85rem', fontFamily: 'inherit', fontWeight: selected ? 700 : 400,
 })
 

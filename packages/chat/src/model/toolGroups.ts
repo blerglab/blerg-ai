@@ -1,8 +1,10 @@
 // Grouping and summarising of tool activity for the agent transcript's
 // compact view. Pure functions: nothing here touches React.
-import type { AgentEvent, SubagentPayload, ToolCallPayload, ToolResultPayload } from '../types'
+import type { AgentEvent, MarkPayload, SubagentPayload, ToolCallPayload, ToolResultPayload } from '../types'
+import { markRowText } from './topicMarker'
 import { isShownUserMessage } from './userMessages'
 import { reviewRounds } from './reviewRounds'
+import { foldTicketRun } from './worklist'
 
 // Event kinds hidden from the timeline (raw context plumbing).
 // start_stage renders as the start panel, capabilities as the Skills &
@@ -19,7 +21,7 @@ export const HIDDEN_KINDS = new Set([
 const CARD_KINDS = new Set([
   'user_message', 'assistant_text', 'assistant_thinking', 'check_in', 'ask', 'update', 'note',
   'model_changed', 'subagent_started', 'subagent_done', 'turn_done', 'error', 'compaction', 'artifact',
-  'topic', 'checklist', 'ticket', 'delegation_request', 'proposal_request', 'review_requested', 'session_upload',
+  'topic', 'mark', 'checklist', 'ticket', 'delegation_request', 'proposal_request', 'review_requested', 'session_upload',
 ])
 
 // Tools whose result is a link or image worth seeing at once: they stay full
@@ -116,7 +118,14 @@ export function parentCallOf(ev: AgentEvent): string {
 export function isVisibleEvent(ev: AgentEvent): boolean {
   if (ev.kind === 'tool_call') return true
   if (HIDDEN_KINDS.has(ev.kind) || !CARD_KINDS.has(ev.kind)) return false
+  if (ev.kind === 'mark') return isDrawnMark(ev)
   return ev.kind !== 'user_message' || isShownUserMessage(ev.payload)
+}
+
+/** A mark draws a row unless it is back-dated (an import: it records another moment, which History
+ *  shows), so a back-dated one never splits a run of tool calls. */
+function isDrawnMark(ev: AgentEvent): boolean {
+  return markRowText(ev.payload as Partial<MarkPayload>) !== null
 }
 
 // Whether two runs of tool entries show the same calls with the same results.
@@ -302,6 +311,7 @@ function fold(
     }
     if (HIDDEN_KINDS.has(ev.kind) || !CARD_KINDS.has(ev.kind)) continue
     if (ev.kind === 'user_message' && !isShownUserMessage(ev.payload)) continue
+    if (ev.kind === 'mark' && !isDrawnMark(ev)) continue
     flush()
     // Consecutive checklist changes with nothing drawn between them are one row: the latest (its
     // payload holds the whole list).
@@ -309,6 +319,14 @@ function fold(
     if (ev.kind === 'checklist' && last?.type === 'event' && last.ev.kind === 'checklist') {
       items[items.length - 1] = { type: 'event', ev }
       continue
+    }
+    // Consecutive pins (or unpins) are one row: "📌 Pinned #157, #158".
+    if (ev.kind === 'ticket' && last?.type === 'event') {
+      const run = foldTicketRun(last.ev, ev)
+      if (run) {
+        items[items.length - 1] = { type: 'event', ev: run }
+        continue
+      }
     }
     items.push({ type: 'event', ev })
   }

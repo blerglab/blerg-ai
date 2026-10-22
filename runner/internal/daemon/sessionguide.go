@@ -28,6 +28,12 @@ const reviewRequestGuideLine = "To ask the person to approve a file or diff you 
 // have just given: levels change while the session runs (the session's Permissions, Boards).
 const boardAccessGuideLine = "The person can give this session access to a board, or change its level, in the session's Permissions while you work. If a board tool you need is not listed or a board call is refused, call the blerg_board tool with {\"tool\":\"access\"} (or run `blerg-runner board access`) before telling the person you lack permission, and use blerg_board (or `blerg-runner board ...`) for anything the level allows."
 
+// markGuideLine asks the agent to mark the major strokes of the session (a decision, a milestone, a
+// finding) for the History tab; the first paragraph of `blerg-runner mark --help` (MARK_LINE).
+const markGuideLine = "Mark the major strokes for the person's History tab with `blerg-runner mark decision|milestone|finding \"<one line>\"`: " +
+	"after the person decides something (`--by person`; a call of your own is `--by agent`, which they can overrule), " +
+	"at merges, deploys and releases (`--commit <sha>`, `--card <n>`), and on a finding that changes the plan. One line each, not every step."
+
 const visualGuideLine = "Use mermaid fences for diagrams and vega-lite fences for charts with inline data only; external resources and executable HTML or JavaScript are refused. Publish .mmd or .vl.json files to open them in the same viewer."
 
 func sessionWorkGuideLines() []sessionGuideLine {
@@ -38,6 +44,7 @@ func sessionWorkGuideLines() []sessionGuideLine {
 		{Text: checklistWorkMapGuideLine, ManagedPrefix: "- Checklist work map — "},
 		{Text: reviewRequestGuideLine, ManagedPrefix: "- `blerg-runner review request` — "},
 		{Text: boardAccessGuideLine, ManagedPrefix: "- Board access — "},
+		{Text: markGuideLine, ManagedPrefix: "- `blerg-runner mark` — "},
 		{Text: diffGuideLine, ManagedPrefix: "- `blerg-runner diff` — "},
 		{Text: workGuideLine, ManagedPrefix: "- `blerg-runner checklist` / `blerg-runner pin` — "},
 		{Text: topicGuideLine, ManagedPrefix: "- `blerg-runner topic` — mark a piece of work for the History tab of the session page. ", ManagedSuffix: " Without markers the History tab shows only a summary."},

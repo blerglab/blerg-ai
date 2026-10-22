@@ -126,20 +126,18 @@ describe('checklist rows', () => {
   })
 })
 
-describe('ticket cards', () => {
+describe('ticket rows (#159): a pin is one compact system row', () => {
   it('draws untrusted tracker data as text: no html, no card fences, no images, no javascript link', async () => {
     seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: evil } }))
     mount()
-    const card = await screen.findByTestId('ticket-card')
-    expect(card).toHaveTextContent('Pinned ticket')
-    expect(card).toHaveTextContent('JIRA')
-    expect(card).toHaveTextContent('Crash <img src=x onerror=alert(1)>')
-    expect(card.querySelector('img, script')).toBeNull()
-    expect(card.querySelector('[data-card-kind]')).toBeNull()
-    expect(within(card).getByText('ABC-1').tagName).toBe('SPAN') // the javascript: url links nothing
-    for (const a of card.querySelectorAll('a')) expect(a.getAttribute('href')).toMatch(/^https:/)
+    const row = await screen.findByTestId('ticket-card')
+    expect(row).toHaveTextContent('Pinned')
+    expect(row).toHaveTextContent('JIRA')
+    expect(row).toHaveTextContent('Crash <img src=x onerror=alert(1)>')
+    expect(row.querySelector('img, script, a')).toBeNull() // the javascript: url links nothing
+    expect(row.querySelector('[data-card-kind]')).toBeNull()
     expect((window as unknown as { pwned?: number }).pwned).toBeUndefined()
-    fireEvent.click(within(card).getByRole('button', { name: 'Open ticket' }))
+    fireEvent.click(within(row).getByTestId('ticket-chip'))
     const dialog = screen.getByRole('dialog')
     expect(dialog.querySelector('img, script')).toBeNull()
     expect(dialog.querySelector('[data-card-kind]')).toBeNull()
@@ -148,27 +146,23 @@ describe('ticket cards', () => {
     expect((window as unknown as { pwned?: number }).pwned).toBeUndefined()
   })
 
-  it('the card is a summary: header, title, one meta line, an excerpt; no fields, comments or criteria', async () => {
-    seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: { ...evil, url: 'https://tracker.example.test/ABC-1', type: 'Task', priority: 'High', assignee: 'Release owner', description: 'First line\n\n## Second\n\nThird' } } }))
+  it('is one line: 📌, Pinned, the key as a chip, the state glyph, the title, the source; no Open ticket, no summary', async () => {
+    seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: { ...evil, url: 'https://tracker.example.test/ABC-1', type: 'Task', priority: 'High', assignee: 'Release owner', description: 'First line' } } }))
     mount()
-    const card = await screen.findByTestId('ticket-card')
-    const chip = within(card).getByTestId('ticket-status')
-    expect(chip).toHaveTextContent('In Progress')
-    expect(chip).toHaveAttribute('data-tone', 'active')
-    expect(within(card).getByTestId('ticket-meta')).toHaveTextContent('Task · High · Release owner')
-    expect(within(card).getByTestId('ticket-excerpt')).toHaveTextContent('First line')
-    expect(card).not.toHaveTextContent('Sprint')
-    expect(card).not.toHaveTextContent('No crash')
-    expect(card).not.toHaveTextContent('seen it')
-    expect(card.querySelector('.ticket-fields, .ticket-comments, .ticket-acceptance')).toBeNull()
-    expect(within(card).getByRole('link', { name: 'ABC-1' })).toHaveAttribute('href', 'https://tracker.example.test/ABC-1')
+    const row = await screen.findByTestId('ticket-card')
+    expect(row).toHaveClass('agent-card', 'marker', 'ticket-row')
+    expect(row.textContent).toMatch(/^📌PinnedABC-1◐Crash <img src=x onerror=alert\(1\)>· JIRA/)
+    expect(within(row).getByTestId('ticket-chip')).toHaveTextContent('ABC-1')
+    expect(within(row).queryByRole('button', { name: 'Open ticket' })).toBeNull()
+    expect(row.querySelector('[data-testid="ticket-meta"], [data-testid="ticket-excerpt"], [data-testid="ticket-status"], .ticket-fields')).toBeNull()
+    expect(row).not.toHaveTextContent('First line')
   })
 
-  it('Open ticket opens the modal; it closes and gives the focus back', async () => {
+  it('the chip opens the modal; it closes and gives the focus back', async () => {
     seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: evil } }))
     mount()
-    const card = await screen.findByTestId('ticket-card')
-    const open = within(card).getByRole('button', { name: 'Open ticket' })
+    const row = await screen.findByTestId('ticket-card')
+    const open = within(row).getByTestId('ticket-chip')
     open.focus()
     fireEvent.click(open)
     const dialog = screen.getByRole('dialog', { name: evil.title })
@@ -179,24 +173,48 @@ describe('ticket cards', () => {
     expect(document.activeElement).toBe(open)
   })
 
-  it('a re-pin says what changed, from its own payload; an unpin is a line', async () => {
+  it('opens the host’s ticket dialog when the host lends one (the runner’s live card), not the pinned copy', async () => {
+    const openTicket = vi.fn()
+    seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: { source: 'blerg-board', key: '#157', board_id: 'b1', title: 'Card chips', status: 'in progress' } } }))
+    const t = createFakeTransport({ files: { items: [] } })
+    render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'idle' })} refs={{ openTicket }} />)
+    fireEvent.click(within(await screen.findByTestId('ticket-card')).getByTestId('ticket-chip'))
+    expect(openTicket).toHaveBeenCalledWith(expect.objectContaining({ source: 'blerg-board', key: '#157', board_id: 'b1' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a refresh says what changed on one line; an unpin is one line too', async () => {
     seed(
       ev({ seq: 1, kind: 'ticket', payload: { action: 'update', ticket: { source: 'bugzilla', key: '77', title: 'Crash', status: 'RESOLVED' }, previous: { status: 'NEW', title: 'Crash' } } }),
-      ev({ seq: 2, kind: 'ticket', payload: { action: 'unpin', ticket: { source: 'bugzilla', key: '77', title: 'Crash' } } }),
+      ev({ seq: 2, kind: 'ticket', payload: { action: 'unpin', ticket: { source: 'blerg-board', key: '#127', board_id: 'b1', title: 'Hovercards', status: 'Done' } } }),
     )
     mount()
     expect(await screen.findByTestId('ticket-changes')).toHaveTextContent('status NEW → RESOLVED')
-    expect(screen.getByTestId('ticket-card')).toHaveTextContent('Updated')
-    expect(screen.getByTestId('ticket-status')).toHaveAttribute('data-tone', 'done')
-    expect(screen.getByTestId('ticket-unpinned')).toHaveTextContent('Unpinned Bugzilla 77 · Crash')
+    expect(screen.getByTestId('ticket-card').textContent).toMatch(/^📌Updated77✓Crash· status NEW → RESOLVED· Bugzilla/)
+    expect(screen.getByTestId('ticket-unpinned').textContent).toMatch(/^📌Unpinned#127\(done\)/)
   })
 
-  it('a canceled ticket has its title struck through', async () => {
+  it('a canceled ticket reads as done', async () => {
     seed(ev({ seq: 1, kind: 'ticket', payload: { action: 'pin', ticket: { source: 'jira', key: 'K-2', title: 'Dropped', status: "Won't Do" } } }))
     mount()
-    const card = await screen.findByTestId('ticket-card')
-    expect(within(card).getByTestId('ticket-status')).toHaveAttribute('data-tone', 'canceled')
-    expect(within(card).getByText('Dropped')).toHaveClass('canceled')
+    expect((await screen.findByTestId('ticket-card')).textContent).toContain('K-2✓Dropped')
+  })
+
+  it('folds consecutive pins (and consecutive unpins) into one row; a refresh or anything drawn between keeps them apart', async () => {
+    const pin = (seq: number, n: number, action = 'pin') => ev({ seq, kind: 'ticket', payload: { action, ticket: { source: 'blerg-board', key: `#${n}`, board_id: 'b1', title: `Card ${n}`, status: 'Done' } } })
+    seed(
+      pin(1, 157), pin(2, 158),
+      ev({ seq: 3, kind: 'user_message', payload: { text: 'between', source: 'chat' } }),
+      pin(4, 159),
+      pin(5, 127, 'unpin'), pin(6, 128, 'unpin'),
+      pin(7, 160, 'update'),
+    )
+    mount()
+    await screen.findByText('between')
+    const rows = screen.getAllByTestId(/^ticket-(card|unpinned)$/)
+    expect(rows.map(r => within(r).getAllByTestId('ticket-chip').map(c => c.textContent).join(','))).toEqual(['#157,#158', '#159', '#127,#128', '#160'])
+    expect(rows[0].textContent).toMatch(/^📌Pinned#157, #158(?!.*Card 157)/)
+    expect(rows[2].textContent).toMatch(/^📌Unpinned#127, #128/)
   })
 
   it('a malformed ticket event draws nothing', async () => {

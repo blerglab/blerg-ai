@@ -1,6 +1,8 @@
 import { Markdown } from '@blerglab/chat'
 import type { ProposalInfo } from '../types'
 import { formatArguments } from '../lib/proposals'
+import { BOARD_LEVEL_LABELS } from '../lib/permissionsModal'
+import { requestedBoardAccess } from '../lib/boardCreate'
 import './ProposalAttention.css'
 
 const text = (value: unknown) => typeof value === 'string' ? value : ''
@@ -18,12 +20,36 @@ export function ProposalAction({ proposal: p }: { proposal: ProposalInfo }) {
 }
 
 // A readable projection of the saved request, never the agent's summary. Exact JSON stays available.
+const strings = (value: unknown) => Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+
+// A proposed board: its name, what it is for, its repositories (the first is primary), its columns or
+// template, and the access the session asks for on it. Every field is the agent's, shown as text.
+function BoardProposalPreview({ proposal: p }: { proposal: ProposalInfo }) {
+  const repos = strings(p.arguments.repos)
+  const columns = strings(p.arguments.columns)
+  const template = text(p.arguments.template)
+  const description = text(p.arguments.description)
+  return <article className="proposal-card-preview proposal-board-preview" aria-label="Board the agent proposes">
+    <p className="proposal-agent-label">Board the agent proposes</p>
+    <h3>{text(p.arguments.name) || 'Unnamed board'}</h3>
+    <dl>
+      {description && <><dt>Description</dt><dd className="proposal-board-description">{description}</dd></>}
+      <dt>Repositories</dt>
+      <dd>{repos.length ? <ol className="proposal-board-repos">{repos.map((r, i) => <li key={r}><code>{r}</code>{i === 0 && repos.length > 1 ? <span className="proposal-board-primary"> primary</span> : null}</li>)}</ol> : 'None'}</dd>
+      <dt>{template ? 'Template' : 'Columns'}</dt>
+      <dd>{template ? <code>{template}</code> : columns.length ? columns.join(' · ') : 'The default columns (inbox, ready, in progress, done)'}</dd>
+      <dt>Access the session asks for</dt>
+      <dd data-testid={`proposal-board-access-${p.id}`}>{BOARD_LEVEL_LABELS[requestedBoardAccess(p)]}, for this session only</dd>
+    </dl>
+  </article>
+}
+
 export default function ProposalPreview({ proposal: p, complete = false }: { proposal: ProposalInfo; complete?: boolean }) {
   const board = p.kind === 'board_file'
   const title = agentTitle(p)
   return <div className="proposal-preview">
     <ProposalAction proposal={p} />
-    {board ? <article className="proposal-card-preview" aria-label="Card the agent proposes">
+    {p.kind === 'board_create' ? <BoardProposalPreview proposal={p} /> : board ? <article className="proposal-card-preview" aria-label="Card the agent proposes">
       <p className="proposal-agent-label">Card the agent wrote</p>
       <h3>{title || 'Untitled card'}</h3>
       <dl><dt>Type</dt><dd>{text(p.arguments.type) || 'issue'}</dd>

@@ -37,7 +37,8 @@ func newTrackerHarness(t *testing.T) *trackerHarness {
 			}
 			return []protocol.UsageWindow{{ID: "5h", UsedPercent: float64(n)}}, nil
 		}},
-		{provider: "claude", read: func(context.Context) ([]protocol.UsageWindow, error) { return nil, errNoUsageLimits }},
+		// A Claude source that never has anything new: these tests watch Codex alone.
+		{provider: "claude", read: func(context.Context) ([]protocol.UsageWindow, error) { return nil, errUsageUnchanged }},
 	})
 	h.tr.interval = time.Hour
 	h.tr.turnDelay = 50 * time.Millisecond
@@ -52,6 +53,18 @@ func (h *trackerHarness) next() protocol.UsageLimits {
 		return m
 	case <-time.After(15 * time.Second):
 		h.t.Fatal("nothing sent")
+	}
+	return protocol.UsageLimits{}
+}
+
+// recvLimits is the next report on sent, failing the test after 15 s rather than hanging.
+func recvLimits(t *testing.T, sent chan protocol.UsageLimits) protocol.UsageLimits {
+	t.Helper()
+	select {
+	case m := <-sent:
+		return m
+	case <-time.After(15 * time.Second):
+		t.Fatal("nothing sent")
 	}
 	return protocol.UsageLimits{}
 }
@@ -154,6 +167,94 @@ func TestUsageLimitsTrackerWithdrawsAfterThreeFailures(t *testing.T) {
 	h.tr.CodexTurnEnded()
 	if m := h.next(); len(m.Windows) != 1 {
 		t.Fatalf("after recovery = %+v", m)
+	}
+}
+
+// Codex answering that its account has no window is reported as that ("no_windows"), not dropped
+// and not counted as a failure; once windows come, the note is gone, and Resend says it again.
+func TestUsageLimitsTrackerReportsAnAccountWithNoWindows(t *testing.T) {
+	sent := make(chan protocol.UsageLimits, 8)
+	var windows atomic.Bool
+	tr := newUsageLimitsTracker(func(msg any) error { sent <- msg.(protocol.UsageLimits); return nil }, []limitSource{
+		{provider: "codex", read: func(context.Context) ([]protocol.UsageWindow, error) {
+			if windows.Load() {
+				return []protocol.UsageWindow{{ID: "5h", UsedPercent: 4}}, nil
+			}
+			return nil, fmt.Errorf("codex app-server: %w", errNoLimitWindows)
+		}},
+	})
+	logged := 0
+	tr.logf = func(string, ...any) { logged++ }
+	tr.poll(context.Background(), nil)
+	m := recvLimits(t, sent)
+	if m.Provider != "codex" || len(m.Windows) != 0 || m.Note != "no_windows" {
+		t.Fatalf("report = %+v, want codex with note no_windows", m)
+	}
+	if logged != 0 {
+		t.Fatalf("an account with no window is not a failure to log (%d lines)", logged)
+	}
+	tr.Resend()
+	if m := recvLimits(t, sent); m.Note != "no_windows" {
+		t.Fatalf("resend = %+v", m)
+	}
+	windows.Store(true)
+	tr.poll(context.Background(), nil)
+	if m := recvLimits(t, sent); len(m.Windows) != 1 || m.Note != "" {
+		t.Fatalf("after windows came = %+v", m)
+	}
+}
+
+// A provider this daemon does not read (Claude's usage turned off, no sign-in file, the engine not
+// installed) is reported once as "not_read", so the sidebar does not promise a meter; it is not a
+// failure to log, it is not sent again on every read, and a later reading replaces it. Windows
+// already shown that the source stops reading become "not_read" after three reads.
+func TestUsageLimitsTrackerReportsAProviderItDoesNotRead(t *testing.T) {
+	sent := make(chan protocol.UsageLimits, 8)
+	var mode atomic.Int32 // 0 not read, 1 windows
+	tr := newUsageLimitsTracker(func(msg any) error { sent <- msg.(protocol.UsageLimits); return nil }, []limitSource{
+		{provider: "claude", read: func(context.Context) ([]protocol.UsageWindow, error) {
+			if mode.Load() == 1 {
+				return []protocol.UsageWindow{{ID: "5h", UsedPercent: 9}}, nil
+			}
+			return nil, fmt.Errorf("%w: no credential file", errNoUsageLimits)
+		}},
+	})
+	logged := 0
+	tr.logf = func(string, ...any) { logged++ }
+	tr.poll(context.Background(), nil)
+	if m := recvLimits(t, sent); m.Provider != "claude" || len(m.Windows) != 0 || m.Note != "not_read" {
+		t.Fatalf("report = %+v, want claude not_read", m)
+	}
+	tr.poll(context.Background(), nil)
+	select {
+	case m := <-sent:
+		t.Fatalf("not_read sent again: %+v", m)
+	default:
+	}
+	if logged != 0 {
+		t.Fatalf("a provider not read is not a failure to log (%d lines)", logged)
+	}
+	tr.Resend()
+	if m := recvLimits(t, sent); m.Note != "not_read" {
+		t.Fatalf("resend = %+v", m)
+	}
+	mode.Store(1)
+	tr.poll(context.Background(), nil)
+	if m := recvLimits(t, sent); len(m.Windows) != 1 || m.Note != "" {
+		t.Fatalf("after a reading = %+v", m)
+	}
+	mode.Store(0)
+	for i := 0; i < 2; i++ {
+		tr.poll(context.Background(), nil)
+	}
+	select {
+	case m := <-sent:
+		t.Fatalf("shown windows replaced before three reads: %+v", m)
+	default:
+	}
+	tr.poll(context.Background(), nil)
+	if m := recvLimits(t, sent); len(m.Windows) != 0 || m.Note != "not_read" {
+		t.Fatalf("after three unread reads = %+v", m)
 	}
 }
 

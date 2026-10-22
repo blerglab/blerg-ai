@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -69,13 +70,13 @@ func TestWorkspaceFileOwnerOnlyAndOldDaemonTimeout(t *testing.T) {
 	}
 	for _, tok := range []string{fx.token(topicOther, "human"), fx.token(topicOwner, "agent"), fx.token(topicOwner, "service")} {
 		rec := get(fx.sess, tok)
-		if rec.Code != http.StatusForbidden || len(dc.send) != 0 {
-			t.Fatalf("nonowner/kind access=%d queued=%d", rec.Code, len(dc.send))
+		if rec.Code != http.StatusForbidden || len(dc.send) != 0 || workspaceProblemCode(t, rec.Body.Bytes()) != workspaceCodeForbidden {
+			t.Fatalf("nonowner/kind access=%d queued=%d %s", rec.Code, len(dc.send), rec.Body)
 		}
 	}
 	fx.api.hub.SetSessionOwner(fx.sess, "missing-daemon")
-	if rec := get(fx.sess, fx.token(topicOwner, "human")); rec.Code != http.StatusConflict {
-		t.Fatalf("missing daemon %d", rec.Code)
+	if rec := get(fx.sess, fx.token(topicOwner, "human")); rec.Code != http.StatusConflict || workspaceProblemCode(t, rec.Body.Bytes()) != workspaceCodeNotRunning {
+		t.Fatalf("missing daemon %d %s", rec.Code, rec.Body)
 	}
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+fx.sess+"/workspace-file?path=README.md", nil)
@@ -85,9 +86,22 @@ func TestWorkspaceFileOwnerOnlyAndOldDaemonTimeout(t *testing.T) {
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	fx.mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
+	if rec.Code != http.StatusConflict || workspaceProblemCode(t, rec.Body.Bytes()) != workspaceCodeDaemonTimeout {
 		t.Fatalf("old daemon=%d %s", rec.Code, rec.Body)
 	}
+}
+
+// The reason a read was refused, as a client branches on it (the "code" beside the sentence).
+func workspaceProblemCode(t *testing.T, body []byte) string {
+	t.Helper()
+	var p struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil || p.Error == "" {
+		t.Fatalf("not a problem body: %q %v", body, err)
+	}
+	return p.Code
 }
 
 func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
@@ -381,8 +395,8 @@ func TestWorkspaceReadLeaseHeldUntilHTTPResponseCompletes(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	fx.mux.ServeHTTP(rec, req)
-	if rec.Code != 409 || len(dc.send) != 0 {
-		t.Fatalf("completed RPC released active response lease: status=%d queued=%d", rec.Code, len(dc.send))
+	if rec.Code != 409 || len(dc.send) != 0 || workspaceProblemCode(t, rec.Body.Bytes()) != workspaceCodeBusy {
+		t.Fatalf("completed RPC released active response lease: status=%d queued=%d %s", rec.Code, len(dc.send), rec.Body)
 	}
 	release()
 	for range 2 {
@@ -392,7 +406,7 @@ func TestWorkspaceReadLeaseHeldUntilHTTPResponseCompletes(t *testing.T) {
 			t.Fatal("response write did not finish")
 		}
 	}
-	acquire, ok := fx.api.hub.acquireWorkspaceFileRead(dc)
+	acquire, ok := fx.api.hub.acquireWorkspaceFileRead(dc, "someone")
 	if !ok {
 		t.Fatal("response lease leaked")
 	}
@@ -407,26 +421,68 @@ func TestWorkspaceReadLeaseGlobalAndReconnectLimits(t *testing.T) {
 			release()
 		}
 	}()
-	for _, id := range []string{"first", "first"} {
-		release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: id})
+	for i, id := range []string{"first", "first"} {
+		release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: id}, fmt.Sprintf("user-%d", i))
 		if !ok {
 			t.Fatal("lease refused below cap")
 		}
 		releases = append(releases, release)
 	}
-	if release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: "fourth"}); ok {
+	if release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: "first"}, "user-9"); ok {
+		release()
+		t.Fatal("reconnect reset the per-daemon cap")
+	}
+	for i, id := range []string{"second", "third"} {
+		release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: id}, fmt.Sprintf("other-%d", i))
+		if !ok {
+			t.Fatal("lease refused below the global cap")
+		}
+		releases = append(releases, release)
+	}
+	if release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: "fourth"}, "user-10"); ok {
 		release()
 		t.Fatal("global active response cap ignored")
 	}
-	if release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: "first"}); ok {
-		release()
-		t.Fatal("reconnect reset active response cap")
-	}
 	releases[len(releases)-1]()
 	releases = releases[:len(releases)-1]
-	release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: "first"})
+	release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: "fourth"}, "user-10")
 	if !ok {
 		t.Fatal("completed response did not release capacity")
+	}
+	releases = append(releases, release)
+}
+
+// One person's reads (a README full of images) hold at most two slots: another person still gets
+// one, and the first person's next read waits until one of theirs finishes.
+func TestWorkspaceReadLeasePerUserLimit(t *testing.T) {
+	h := NewHub()
+	var releases []func()
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	for _, id := range []string{"a", "b"} {
+		release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: id}, "alice")
+		if !ok {
+			t.Fatal("alice refused below her cap")
+		}
+		releases = append(releases, release)
+	}
+	if release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: "c"}, "alice"); ok {
+		release()
+		t.Fatal("alice took a third slot")
+	}
+	release, ok := h.acquireWorkspaceFileRead(&DaemonConn{ID: "c"}, "bob")
+	if !ok {
+		t.Fatal("bob was blocked by alice's reads")
+	}
+	releases = append(releases, release)
+	releases[0]()
+	releases = releases[1:]
+	release, ok = h.acquireWorkspaceFileRead(&DaemonConn{ID: "c"}, "alice")
+	if !ok {
+		t.Fatal("alice's finished read did not free her slot")
 	}
 	releases = append(releases, release)
 }
@@ -457,7 +513,7 @@ func TestWorkspaceFileTimeoutReturnsJSONOverRealHTTP(t *testing.T) {
 	}
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)
-	if err != nil || res.StatusCode != http.StatusConflict || !strings.Contains(string(body), `"error_id"`) {
+	if err != nil || res.StatusCode != http.StatusConflict || !strings.Contains(string(body), `"error_id"`) || workspaceProblemCode(t, body) != workspaceCodeDaemonTimeout {
 		t.Fatalf("timeout response %d %q %v", res.StatusCode, body, err)
 	}
 }

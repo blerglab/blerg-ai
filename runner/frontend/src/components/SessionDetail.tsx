@@ -1,7 +1,6 @@
 import { useProposalInbox } from '../hooks/useProposalInbox'
 import { useProposalsWaiting } from '../hooks/useProposalsWaiting'
-import { ProposalBell } from './ProposalNotifications'
-import { modelDisplayName } from '@blerglab/chat'
+import { ConfirmPopover, endSessionText, modelDisplayName } from '@blerglab/chat'
 import type { ChecklistItem } from '@blerglab/chat'
 import { useParams, useNavigate } from 'react-router-dom'
 import { isAutomated, startedByLabel } from '../lib/startedBy'
@@ -21,18 +20,25 @@ import AgentChatView from './AgentChatView'
 import { ParentDiscardAction, ChildDiscardAction } from './ChildDiscard'
 import { MessageThread } from './MessageThread'
 import { apiFetch } from '../apiFetch'
-import { StartProgress, placeholderAttempt, describeSessionEnd } from '@blerglab/chat'
+import { StartProgress, placeholderAttempt, describeSessionEnd, useWorkingLineStore } from '@blerglab/chat'
 import CapabilitiesPanel from './CapabilitiesPanel'
 import SessionInsights from './SessionInsights'
 import StatusPill from './StatusPill'
 import { backgroundCount, displayState } from '../lib/displayState'
 import { childIsWorking } from '../lib/liveState'
-import SessionRail, { PanelIcon } from './SessionRail'
+import SessionRail from './SessionRail'
+import { ProposalBell } from './ProposalNotifications'
+import { IconMenu, IconMenuItem, InsightsIcon, PanelToggleIcon, StarIcon, EndSessionIcon } from './IconButton'
 import { readRailPref, useCompact, useThinking, writeRailPref } from '../lib/sessionRail'
 import { isNoRepo, repoLabel } from '../lib/noRepo'
 
 // Below this width the side panel is a drawer over the chat rather than a column beside it.
 const RAIL_DRAWER_QUERY = '(max-width: 1023px)'
+
+// The ⋯ menu's Discard, in one line.
+const DISCARD_HINT = 'End the session and archive it; history and URL kept'
+// At work now: discarding it stops that work, and its confirmation says so.
+const WORKING_STATES = new Set(['starting', 'running', 'waiting', 'background'])
 
 // PendingStart is the start panel shown before the server has announced the
 // session; its clock starts when it first shows.
@@ -114,11 +120,23 @@ export default function SessionDetail() {
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
   const [saving, setSaving] = useState(false)
-  const [killArmed, setKillArmed] = useState(false)
+  // End session asks first, in a small confirmation anchored to the ✕ (ConfirmPopover).
+  const [confirmEnd, setConfirmEnd] = useState(false)
+  const endRef = useRef<HTMLButtonElement>(null)
+  // An End on its way: the ✕ waits, so it cannot be sent twice (a second DELETE would answer 404 and
+  // toast a false "may still be running").
+  const [ending, setEnding] = useState(false)
+  // After a failed End the focus goes back to the ✕ (enabled again), to try again.
+  const refocusEnd = useRef(false)
+  useEffect(() => {
+    if (ending || !refocusEnd.current) return
+    refocusEnd.current = false
+    endRef.current?.focus()
+  }, [ending])
   // A terminal session's Skills & plugins dialog (an agent session's are the panel's Capabilities tab).
   const [showCaps, setShowCaps] = useState(false)
   const [showInsights, setShowInsights] = useState(false)
-  const killTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const moreRef = useRef<HTMLButtonElement>(null)
 
   // ─── The side panel (agent sessions) ──────────────────────────────────────
   // What needs the person and what runs, read once here: the header badge counts it, the panel
@@ -196,6 +214,10 @@ export default function SessionDetail() {
   // A background subagent is listed (and counted) once, as a subagent.
   const needsYou = liveState.openAsks.length + toolChanges + sessionProposalsWaiting.length + (sessionLive.delegationRequests?.length ?? 0) + (sessionLive.reviewRequests?.length ?? 0)
   const runningNow = liveState.subagents.length + liveState.backgroundRunning + (sessionLive.children ?? []).filter(childIsWorking).length
+  // The badge, its label and its announcement also count the main agent while it works (the panel's
+  // Main card); opening the panel by itself does not, so a turn starting never opens it.
+  const mainWorking = useWorkingLineStore(s => !!sessionId && !!s.lines[sessionId]) && !session?.archived_at
+  const runningBadge = runningNow + (mainWorking ? 1 : 0)
   if (agentSession && sessionId) {
     if (railPref === null && needsYou + runningNow > 0 && autoOpenFor !== sessionId) {
       setAutoOpenFor(sessionId)
@@ -314,6 +336,7 @@ export default function SessionDetail() {
     : null
   const shownState = displayState(session, liveRunning)
   const shownTasks = backgroundCount(session, liveRunning)
+  const working = WORKING_STATES.has(shownState)
   const canPause = !session.archived_at && session.runtime === 'cluster' && ['running', 'idle', 'waiting'].includes(session.status)
 
   async function handlePauseClick() {
@@ -326,24 +349,26 @@ export default function SessionDetail() {
     }
   }
 
-  async function handleKillClick() {
-    if (!sessionId) return
-    if (killArmed) {
-      if (killTimerRef.current) clearTimeout(killTimerRef.current)
-      setKillArmed(false)
-      try {
-        const res = await apiFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
-        if (res.ok) {
-          navigate('/sessions')
-        } else {
-          addToast({ title: 'Kill failed', body: `Server returned ${res.status}. The session may still be running.` })
-        }
-      } catch {
-        addToast({ title: 'Kill failed', body: 'Network error. The session may still be running.' })
+  async function endSession() {
+    if (!sessionId || ending) return
+    setConfirmEnd(false)
+    setEnding(true)
+    let ended = false
+    try {
+      const res = await apiFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
+      if (res.ok) {
+        ended = true
+        navigate('/sessions')
+      } else {
+        addToast({ title: 'Ending the session failed', body: `Server returned ${res.status}. The session may still be running.` })
       }
-    } else {
-      setKillArmed(true)
-      killTimerRef.current = setTimeout(() => setKillArmed(false), 3000)
+    } catch {
+      addToast({ title: 'Ending the session failed', body: 'Network error. The session may still be running.' })
+    } finally {
+      if (!ended) {
+        refocusEnd.current = true
+        setEnding(false)
+      }
     }
   }
 
@@ -429,75 +454,6 @@ export default function SessionDetail() {
             {session.effort && <span className="rail-chip rail-effort" title="Configured effort">{session.effort}</span>}
           </div>
         </div>
-        <button
-          data-testid="star-toggle"
-          data-starred={session.starred ? 'true' : 'false'}
-          onClick={() => send({ type: 'set_session_star', session_id: session.id, starred: !session.starred })}
-          style={{
-            background: 'none',
-            border: 'none',
-            cursor: 'pointer',
-            padding: 0,
-            flexShrink: 0,
-            fontSize: '1rem',
-            lineHeight: 1,
-            color: session.starred ? 'var(--blaze)' : 'var(--fog-dim)',
-            fontFamily: 'inherit',
-          }}
-        >
-          {session.starred ? '★' : '☆'}
-        </button>
-        {/* This session's figures: time, work, subagents, tokens and cost. */}
-        <button
-          type="button"
-          className="caps-toggle"
-          data-testid="session-insights-toggle"
-          aria-haspopup="dialog"
-          title="This session's time, work, tokens and cost"
-          aria-label={isMobile ? 'Insights' : undefined}
-          onClick={() => setShowInsights(true)}
-          style={{ flexShrink: 0, ...(isMobile ? { padding: '4px 7px' } : null) }}
-        >
-          {/* on a phone the header has no room for the word: a small bar chart stands in for it */}
-          {isMobile ? (
-            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="currentColor">
-              <rect x="1" y="7" width="3" height="6" rx="0.5" />
-              <rect x="5.5" y="3" width="3" height="10" rx="0.5" />
-              <rect x="10" y="5" width="3" height="8" rx="0.5" />
-            </svg>
-          ) : 'Insights'}
-        </button>
-        {showInsights && (
-          <SessionInsights
-            sessionId={session.id}
-            title={session.title || repoLabel(session.repo)}
-            live={isActive}
-            background={shownState === 'background'}
-            onClose={() => setShowInsights(false)}
-          />
-        )}
-        {/* Agent sessions have this in their side panel (its Capabilities tab); a terminal
-            session has no structured report to show, and says so. */}
-        {!isAgent && (
-          <button
-            type="button"
-            data-testid="capabilities-toggle-terminal"
-            aria-haspopup="dialog"
-            aria-label="Skills & plugins"
-            title="Skills & plugins"
-            onClick={() => setShowCaps(true)}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0, fontSize: '1rem', lineHeight: 1, color: 'var(--fog-dim)', fontFamily: 'inherit' }}
-          >
-            🧩
-          </button>
-        )}
-        {showCaps && !isAgent && (
-          <CapabilitiesPanel
-            report={null}
-            unavailable="Not available for terminal sessions. A terminal session runs the engine's interactive CLI, which doesn't report what it loaded; start an agent session to see its skills, plugins and MCP servers here."
-            onClose={() => setShowCaps(false)}
-          />
-        )}
         {!isMobile && !isAgent && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             {(['up', 'down', 'left', 'right'] as const).map(dir => (
@@ -548,72 +504,117 @@ export default function SessionDetail() {
             ))}
           </div>
         )}
-        {canPause && (
-          <button
-            onClick={handlePauseClick}
-            title="Free the pod but keep the session — send a message to resume it"
-            style={{
-              background: 'var(--basalt)',
-              border: '1px solid var(--scree)',
-              borderRadius: 6,
-              color: 'var(--chalk)',
-              cursor: 'pointer',
-              fontSize: 13,
-              fontWeight: 700,
-              padding: '4px 10px',
-              fontFamily: 'inherit',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            ⏸ Pause
-          </button>
-        )}
-        {isActive && (
-          <button
-            onClick={handleKillClick}
-            title={killArmed ? 'Click again to confirm' : 'Kill session'}
-            style={{
-              background: killArmed ? 'color-mix(in srgb, var(--danger) 35%, var(--scree))' : 'color-mix(in srgb, var(--danger) 22%, var(--basalt))',
-              border: `1px solid ${killArmed ? 'var(--danger)' : 'color-mix(in srgb, var(--danger) 35%, var(--scree))'}`,
-              borderRadius: 6,
-              color: 'var(--danger)',
-              cursor: 'pointer',
-              fontSize: 13,
-              fontWeight: 700,
-              padding: '4px 10px',
-              fontFamily: 'inherit',
-              whiteSpace: 'nowrap',
-              transition: 'background 0.15s, border-color 0.15s',
-            }}
-          >
-            {killArmed ? '✕ Confirm kill?' : '✕ Kill'}
-          </button>
-        )}
-        {!session.archived_at && (session.parent_session_id
-          ? <ChildDiscardAction key={session.id} parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'}/>
-          : <ParentDiscardAction key={session.id} sessionId={session.id} title={session.title || 'Untitled session'} onDiscarded={() => navigate('/sessions')}/>)}
-        <ProposalBell inbox={proposalInbox} />
-        {/* The side panel: what needs you, what runs, this session. The badge counts the first two. */}
-        {isAgent && (
+        {/* The header's controls, one style (IconButton): the view first (star, insights, the
+            panel), then End session, the one action that changes the session, then ⋯ with the rarer ones. */}
+        <div className="icon-btn-group" data-testid="session-header-controls">
           <button
             type="button"
-            className="caps-toggle rail-toggle"
-            data-testid="rail-toggle"
-            aria-expanded={railOpen}
-            aria-controls={railId}
-            aria-label={railLabel(needsYou, runningNow)}
-            title={railOpen ? 'Hide the session panel' : 'Show the session panel: what needs you, what is running, this session'}
-            onClick={toggleRail}
-            style={{ flexShrink: 0, ...(isMobile ? { padding: '4px 7px' } : null) }}
+            className={session.starred ? 'icon-btn starred' : 'icon-btn'}
+            data-testid="star-toggle"
+            data-starred={session.starred ? 'true' : 'false'}
+            aria-pressed={!!session.starred}
+            aria-label={session.starred ? 'Unstar' : 'Star'}
+            title={session.starred ? 'Starred: kept at the top of the list. Click to unstar' : 'Star: keep it at the top of the list'}
+            onClick={() => send({ type: 'set_session_star', session_id: session.id, starred: !session.starred })}
           >
-            <PanelIcon />
-            {needsYou + runningNow > 0 && (
-              <span className={`rail-badge${needsYou > 0 ? ' attention' : ''}`} data-testid="rail-badge" aria-hidden="true">{needsYou + runningNow}</span>
-            )}
+            <StarIcon filled={!!session.starred} />
           </button>
+          {/* This session's figures: time, work, subagents, tokens and cost. On a phone it is in ⋯,
+              to leave the title room beside the bell. */}
+          {!isMobile && (
+            <button
+              type="button"
+              className="icon-btn"
+              data-testid="session-insights-toggle"
+              aria-haspopup="dialog"
+              aria-label="Insights"
+              title="Insights: this session's time, work, tokens and cost"
+              onClick={() => setShowInsights(true)}
+            >
+              <InsightsIcon />
+            </button>
+          )}
+          {/* The side panel: what needs you, what runs, this session. The badge counts the first two. */}
+          {isAgent && (
+            <button
+              type="button"
+              className="icon-btn"
+              data-testid="rail-toggle"
+              aria-expanded={railOpen}
+              aria-controls={railId}
+              aria-label={railLabel(needsYou, runningBadge)}
+              title={railOpen ? 'Hide the session panel' : 'Show the session panel: what needs you, what is running, this session'}
+              onClick={toggleRail}
+            >
+              <PanelToggleIcon />
+              {needsYou + runningBadge > 0 && (
+                <span className={`icon-btn-count${needsYou > 0 ? ' attention' : ''}`} data-testid="rail-badge" aria-hidden="true">{needsYou + runningBadge}</span>
+              )}
+            </button>
+          )}
+          {/* On a phone the session page has no sidebar, so the app's one Notifications bell is here
+              (on a wide screen it is in the sidebar, beside + New). */}
+          {isMobile && <ProposalBell inbox={proposalInbox} />}
+          {/* disconnected (cluster pod gone) still offers End session: the server deletes the Job and marks
+              the session stopped. It asks first, in a confirmation anchored to the ✕. */}
+          {isActive && (
+            <button
+              ref={endRef}
+              type="button"
+              className="icon-btn danger"
+              data-testid="stop-session"
+              aria-label="End session"
+              aria-haspopup="dialog"
+              aria-expanded={confirmEnd}
+              aria-busy={ending || undefined}
+              disabled={ending}
+              title="End session: the history stays"
+              onClick={() => setConfirmEnd(true)}
+            >
+              <EndSessionIcon />
+            </button>
+          )}
+          {isActive && confirmEnd && (
+            <ConfirmPopover anchor={endRef} title="End this session?" description={endSessionText(session.runtime, !isAgent)}
+              confirmLabel="End session" onConfirm={() => void endSession()} onCancel={() => setConfirmEnd(false)} testId="end-session-confirm" />
+          )}
+          {(isMobile || canPause || !isAgent || !session.archived_at) && (
+            <IconMenu label="More actions" testId="session-more" triggerRef={moreRef}>
+              {isMobile && (
+                <IconMenuItem label="Insights" hint="This session's time, work, tokens and cost" testId="session-insights-toggle" onSelect={() => setShowInsights(true)} />
+              )}
+              {canPause && (
+                <IconMenuItem label="Pause" hint="Free the pod, keep the session; a message resumes it" testId="pause-session" onSelect={() => void handlePauseClick()} />
+              )}
+              {/* Agent sessions have this in their side panel (its Capabilities tab); a terminal
+                  session has no structured report to show, and says so. */}
+              {!isAgent && (
+                <IconMenuItem label="Skills & plugins" hint="What the engine loaded" testId="capabilities-toggle-terminal" onSelect={() => setShowCaps(true)} />
+              )}
+              {!session.archived_at && (session.parent_session_id
+                ? <ChildDiscardAction key={session.id} menu hint={DISCARD_HINT} focusTarget={moreRef} running={working} parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'}/>
+                : <ParentDiscardAction key={session.id} menu hint={DISCARD_HINT} focusTarget={moreRef} running={working} sessionId={session.id} title={session.title || 'Untitled session'} onDiscarded={() => navigate('/sessions')}/>)}
+            </IconMenu>
+          )}
+        </div>
+        {showInsights && (
+          <SessionInsights
+            sessionId={session.id}
+            title={session.title || repoLabel(session.repo)}
+            live={isActive}
+            background={shownState === 'background'}
+            onClose={() => setShowInsights(false)}
+          />
+        )}
+        {showCaps && !isAgent && (
+          <CapabilitiesPanel
+            report={null}
+            unavailable="Not available for terminal sessions. A terminal session runs the engine's interactive CLI, which doesn't report what it loaded; start an agent session to see its skills, plugins and MCP servers here."
+            onClose={() => setShowCaps(false)}
+          />
         )}
         {/* What the badge counts, said to a screen reader when it changes. */}
-        {isAgent && <span className="rail-announce" role="status" aria-live="polite" data-testid="rail-announce">{railLabel(needsYou, runningNow)}</span>}
+        {isAgent && <span className="rail-announce" role="status" aria-live="polite" data-testid="rail-announce">{railLabel(needsYou, runningBadge)}</span>}
       </div>
 
       {/* Below the header: the session's column (banners, the chat or terminal) and, for an agent
@@ -667,7 +668,7 @@ export default function SessionDetail() {
             padding: '7px 16px',
             background: 'none',
             border: 'none',
-            borderBottom: activeTab === 'terminal' ? '2px solid var(--blaze)' : '2px solid transparent',
+            borderBottom: activeTab === 'terminal' ? '2px solid var(--selected-border)' : '2px solid transparent',
             color: activeTab === 'terminal' ? 'var(--chalk)' : 'var(--fog-dim)',
             cursor: 'pointer',
             fontSize: 13,
@@ -685,7 +686,7 @@ export default function SessionDetail() {
             padding: '7px 16px',
             background: 'none',
             border: 'none',
-            borderBottom: activeTab === 'chat' ? '2px solid var(--blaze)' : '2px solid transparent',
+            borderBottom: activeTab === 'chat' ? '2px solid var(--selected-border)' : '2px solid transparent',
             color: activeTab === 'chat' ? 'var(--chalk)' : 'var(--fog-dim)',
             cursor: 'pointer',
             fontSize: 13,

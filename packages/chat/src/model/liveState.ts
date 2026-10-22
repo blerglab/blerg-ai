@@ -44,6 +44,9 @@ export interface AskLive {
   askedAt: number | null
   /** A question the agent does not wait on (`blerg-runner ask --no-wait`). */
   noWait?: boolean
+  /** Only the session's owner may answer it; without noWait it is an engine command approval
+   *  (allowed or denied, never dismissed). */
+  ownerOnly?: boolean
 }
 
 /** What the chat showing the session says about it (see ChatView). */
@@ -124,6 +127,7 @@ export function openAsks(events: AgentEvent[], report: Pick<LiveReport, 'ended' 
       question: typeof p.body === 'string' ? p.body : '',
       askedAt: parseTs(ev.ts),
       ...(p.no_wait === true ? { noWait: true } : {}),
+      ...(p.owner_only === true ? { ownerOnly: true } : {}),
     })
   }
   return out

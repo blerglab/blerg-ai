@@ -6,14 +6,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
 
 func sanitizeCodexInteractiveHome(ctx context.Context, home, source, workDir string) error {
+	return sanitizeCodexInteractiveHomeFor(ctx, home, source, workDir, false)
+}
+
+// sanitizeCodexInteractiveHomeFor is sanitizeCodexInteractiveHome; for a sandboxed session the
+// person's config.toml first goes through the sandbox allowlist (sanitizeCodexConfig), so no notify
+// command, shell environment, provider header or token reaches the container through this home.
+func sanitizeCodexInteractiveHomeFor(ctx context.Context, home, source, workDir string, sandboxed bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -27,6 +37,9 @@ func sanitizeCodexInteractiveHome(ctx context.Context, home, source, workDir str
 	if err != nil && !os.IsNotExist(err) {
 		return errors.New("codex interactive settings could not be read")
 	}
+	if sandboxed {
+		raw = sanitizeCodexConfig(raw)
+	}
 	if len(raw) > 0 && toml.Unmarshal(raw, &config) != nil {
 		return errors.New("codex interactive settings could not be parsed")
 	}
@@ -36,12 +49,9 @@ func sanitizeCodexInteractiveHome(ctx context.Context, home, source, workDir str
 	if err != nil {
 		return err
 	}
-	// Never write through the normal-home config symlink.
-	path := filepath.Join(home, "config.toml")
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.WriteFile(path, body, 0600); err != nil {
+	// A new file renamed over the name: whatever is there (the normal home's config symlink, a link
+	// or FIFO a sandboxed session planted in a reused snapshot) is replaced, never followed or opened.
+	if err := replaceInDir(home, "config.toml", body); err != nil {
 		return err
 	}
 	return sanitizeCodexPluginMCP(home)
@@ -97,7 +107,7 @@ func sanitizeCodexPluginMCP(home string) error {
 		if d.Name() != "plugin.json" && d.Name() != ".mcp.json" && d.Name() != "mcp.json" {
 			return nil
 		}
-		raw, err := root.ReadFile(path)
+		raw, err := readRootRegular(root, path, credentialMax)
 		if err != nil {
 			return err
 		}
@@ -114,11 +124,68 @@ func sanitizeCodexPluginMCP(home string) error {
 		if err != nil {
 			return err
 		}
-		return root.WriteFile(path, body, 0600)
+		return replaceInRoot(root, path, body)
 	})
 }
 
+// readRootRegular reads a regular file inside root (the snapshot a sandboxed session may have
+// written to): opened non-blocking, so a FIFO cannot hold the start, checked on the handle to be the
+// very file looked at (no link swapped in), and bounded.
+func readRootRegular(root *os.Root, path string, limit int64) ([]byte, error) {
+	info, err := root.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, errors.New("codex plugin snapshot holds something that is not a regular file")
+	}
+	f, err := root.OpenFile(path, os.O_RDONLY|nonBlockFlag, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(opened, info) {
+		return nil, errors.New("codex plugin snapshot changed while it was read")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || int64(len(raw)) > limit {
+		return nil, errors.New("codex plugin snapshot file is too large")
+	}
+	return raw, nil
+}
+
+// replaceInRoot puts data at path inside root (0600) through a new file in the same directory and a
+// rename: a link or FIFO at path is replaced, never followed or opened.
+func replaceInRoot(root *os.Root, path string, data []byte) error {
+	tmp := filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s.blerg-%d.tmp", filepath.Base(path), time.Now().UnixNano()))
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = root.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	if err := root.Rename(tmp, path); err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func prepareCodexInteractiveHome(ctx context.Context, source, workDir string) (string, error) {
+	return prepareCodexInteractiveHomeFor(ctx, source, workDir, false)
+}
+
+// prepareCodexInteractiveHomeFor is prepareCodexInteractiveHome; sandboxed: see
+// sanitizeCodexInteractiveHomeFor.
+func prepareCodexInteractiveHomeFor(ctx context.Context, source, workDir string, sandboxed bool) (string, error) {
 	home, err := os.MkdirTemp("", "blerg-codex-granted-")
 	if err != nil {
 		return "", err
@@ -145,7 +212,7 @@ func prepareCodexInteractiveHome(ctx context.Context, source, workDir string) (s
 			return "", err
 		}
 	}
-	if err := sanitizeCodexInteractiveHome(ctx, home, source, workDir); err != nil {
+	if err := sanitizeCodexInteractiveHomeFor(ctx, home, source, workDir, sandboxed); err != nil {
 		return "", err
 	}
 	success = true

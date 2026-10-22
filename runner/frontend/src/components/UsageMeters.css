@@ -103,3 +103,10 @@
 @media (hover: none), (max-width: 600px) {
   .usage-meter__reset { display: inline; }
 }
+
+/* A provider with nothing to draw: not read yet ("…") or no window on its account ("—"). The row's
+   tooltip says which, and when it will appear. */
+.usage-meters__empty {
+  color: var(--fog-dim);
+  cursor: help;
+}

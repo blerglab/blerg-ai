@@ -141,25 +141,30 @@ describe('a pinned board card shows the live card', () => {
     seedEvents(user())
     await renderPage()
     const panel = await screen.findByTestId('session-rail')
-    // The Live summary's chip: the card's column now, not the agent's "In progress".
-    const chip = await within(panel).findByTestId('rail-plan-summary-ticket')
-    await waitFor(() => expect(within(chip).getByTestId('ticket-status')).toHaveTextContent('inbox'))
-    expect(within(chip).getByRole('img', { name: 'live from the board' })).toBeInTheDocument()
-    expect(fetchMock.mock.calls.some(c => String(c[0]) === '/api/board-cards/board-a/12?session=sess-a')).toBe(true)
+    // The card's column now (Inbox: not started), not the agent's "In progress": Live, which lists
+    // only the cards being worked on, has no line for it; Plan has it, ○ not started.
     fireEvent.click(within(panel).getByRole('tab', { name: /Plan/ }))
     const row = within(panel).getByTestId('rail-ticket-row')
-    expect(row).toHaveAttribute('data-live', 'true')
+    await waitFor(() => expect(row).toHaveAttribute('data-live', 'true'))
+    expect(row).toHaveAttribute('data-state', 'todo')
+    expect(within(row).getByTestId('rail-ticket-open')).toHaveAccessibleName(/Not started \(inbox\)/)
+    expect(within(panel).queryByTestId('rail-pin')).toBeNull()
+    expect(fetchMock.mock.calls.some(c => String(c[0]) === '/api/board-cards/board-a/12?session=sess-a')).toBe(true)
     expect(row).toHaveTextContent('Fix the flaky test (live)')
     fireEvent.click(within(row).getByTestId('rail-ticket-open'))
     const modal = await screen.findByTestId('ticket-modal')
     const live = within(modal).getByTestId('board-card-live')
     expect(within(modal.querySelector('header')!).getByTestId('ticket-status')).toHaveTextContent('inbox')
     expect(live).toHaveTextContent('The agent pinned it as “In progress”')
-    expect(within(live).getByTestId('ticket-modal-details')).toHaveTextContent('flaky')
+    expect(within(live).getByTestId('board-card-tags')).toHaveTextContent('flaky')
     expect(within(live).getByTestId('board-card-origin')).toHaveTextContent('example-org/app')
     expect(within(live).getByTestId('board-card-repos')).toHaveTextContent('primary')
     expect(within(live).getByTestId('board-card-trail')).toHaveTextContent('Seen on main')
-    expect(within(live).getByTestId('board-card-open')).toHaveAttribute('href', 'https://board.example.test/boards/board-a/cards/12')
+    // One "Open in Board": the header's (card #96).
+    const opens = within(modal).getAllByRole('link', { name: /Open in Board/ })
+    expect(opens).toHaveLength(1)
+    expect(opens[0]).toHaveAttribute('href', 'https://board.example.test/boards/board-a/cards/12')
+    expect(modal.querySelector('header')!.contains(opens[0])).toBe(true)
     expect(live).not.toHaveTextContent('agent copy')
     // The filer wrote the origin's address: another host is shown as text, never a link.
     const originSession = within(live).getByTestId('board-card-origin-session')
@@ -167,8 +172,11 @@ describe('a pinned board card shows the live card', () => {
     expect(originSession).toHaveTextContent('https://runner.example.test/sessions/s0')
     const reads = () => fetchMock.mock.calls.filter(c => String(c[0]).startsWith('/api/board-cards/') && !String(c[0]).includes('/move')).length
     const before = reads()
-    fireEvent.change(within(live).getByLabelText('Move to column'), { target: { value: 'col-doing' } })
-    await act(async () => { fireEvent.click(within(live).getByRole('button', { name: 'Move' })) })
+    // Status is the board's columns; one click on another moves the card (no select, no Move button).
+    expect(live.querySelector('select')).toBeNull()
+    const status = within(live).getByRole('group', { name: 'Status' })
+    expect(within(status).getByRole('button', { name: 'inbox' })).toHaveAttribute('aria-pressed', 'true')
+    await act(async () => { fireEvent.click(within(status).getByRole('button', { name: 'In progress' })) })
     const move = fetchMock.mock.calls.find(c => String(c[0]).includes('/move'))!
     expect(String(move[0])).toBe('/api/board-cards/board-a/12/move?session=sess-a')
     expect(JSON.parse(String((move[1] as RequestInit).body))).toEqual({ column_id: 'col-doing' })
@@ -184,7 +192,8 @@ describe('a pinned board card shows the live card', () => {
     seedEvents(user())
     await renderPage()
     const panel = await screen.findByTestId('session-rail')
-    fireEvent.click(await within(panel).findByTestId('rail-plan-summary-ticket'))
+    // The agent's copy says In progress: on Live.
+    fireEvent.click(await within(panel).findByTestId('rail-pin-open'))
     const modal = await screen.findByTestId('ticket-modal')
     await waitFor(() => expect(within(modal).getByTestId('board-card-failed')).toHaveTextContent('Your sign-in cannot read this card'))
     expect(modal).toHaveTextContent('agent copy')
@@ -197,7 +206,9 @@ describe('a pinned board card shows the live card', () => {
     seedEvents(user())
     await renderPage()
     const panel = await screen.findByTestId('session-rail')
-    fireEvent.click(await within(panel).findByTestId('rail-plan-summary-ticket'))
+    // Open: not started, so on Plan only.
+    fireEvent.click(within(panel).getByRole('tab', { name: /Plan/ }))
+    fireEvent.click(await within(panel).findByTestId('rail-ticket-open'))
     const modal = await screen.findByTestId('ticket-modal')
     expect(modal).toHaveTextContent('Steps')
     expect(within(modal).getByTestId('ticket-modal-details')).toHaveTextContent('Type Bug')

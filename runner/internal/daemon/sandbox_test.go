@@ -88,9 +88,8 @@ func TestTmuxAttachCommandRouting(t *testing.T) {
 // no-new-privileges, pids/memory limits, no --restart, only the engine
 // config dirs that actually exist under home get mounted, and env
 // forwarding never leaks the host HOME/PATH or the daemon master token.
-// A restricted session (a cron, a grant) runs claude with file tools only: another engine's login
-// (codex, hermes) has no business inside its container, so only the claude login is mounted.
-func TestSandboxRunArgsClaudeOnlyMountsNoOtherEngineLogin(t *testing.T) {
+// A sandbox gets the login and configuration of the one engine it runs, never another's.
+func TestSandboxRunArgsMountOnlyTheSessionsEngine(t *testing.T) {
 	home := t.TempDir()
 	for _, p := range []string{".claude", ".codex", ".hermes"} {
 		if err := os.MkdirAll(filepath.Join(home, p), 0o755); err != nil {
@@ -102,22 +101,29 @@ func TestSandboxRunArgsClaudeOnlyMountsNoOtherEngineLogin(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	all := " " + strings.Join(sandboxRunArgs("c", "/p", home, nil, sandboxRunExtras{}), " ") + " "
-	for _, want := range []string{"/.claude:", "/.claude.json:", "/.codex:", "/.hermes/.env:"} {
-		if !strings.Contains(all, want) {
-			t.Errorf("an ordinary sandbox lost the %s mount: %s", want, all)
+	sb := "/state/sandbox-homes/c"
+	for engine, want := range map[string][]string{
+		"":       {"dst=/home/agent/.claude ", "dst=/home/agent/.claude.json,readonly"},
+		"claude": {"dst=/home/agent/.claude ", "dst=/home/agent/.claude.json,readonly"},
+		"codex":  {"dst=/home/agent/.codex "},
+		"hermes": {"dst=/home/agent/.hermes/.env,readonly", "dst=/home/agent/.hermes/config.yaml,readonly"},
+	} {
+		args := " " + strings.Join(sandboxRunArgs("c", "/p", home, nil, sandboxRunExtras{engine: engine, sandboxHome: sb}), " ") + " "
+		for _, w := range want {
+			if !strings.Contains(args, w) {
+				t.Errorf("%q: missing %s: %s", engine, w, args)
+			}
+		}
+		for _, other := range []string{"/home/agent/.claude", "/home/agent/.codex", "/home/agent/.hermes"} {
+			mine := (engine == "" || engine == "claude") && other == "/home/agent/.claude" ||
+				engine == "codex" && other == "/home/agent/.codex" || engine == "hermes" && other == "/home/agent/.hermes"
+			if !mine && strings.Contains(args, other) {
+				t.Errorf("%q: another engine's %s is mounted: %s", engine, other, args)
+			}
 		}
 	}
-	only := " " + strings.Join(sandboxRunArgs("c", "/p", home, nil, sandboxRunExtras{claudeOnly: true}), " ") + " "
-	for _, want := range []string{"/.claude:", "/.claude.json:"} {
-		if !strings.Contains(only, want) {
-			t.Errorf("a restricted sandbox needs the claude login (%s): %s", want, only)
-		}
-	}
-	for _, bad := range []string{"/.codex:", "/.hermes"} {
-		if strings.Contains(only, bad) {
-			t.Errorf("a restricted sandbox must not mount %s: %s", bad, only)
-		}
+	if args := strings.Join(sandboxRunArgs("c", "/p", home, nil, sandboxRunExtras{engine: "openclaw", sandboxHome: sb}), " "); strings.Contains(args, "/home/agent/.") {
+		t.Errorf("OpenClaw got a login: %s", args)
 	}
 }
 
@@ -126,24 +132,29 @@ func TestSandboxRunArgsAreHardened(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	args := sandboxRunArgs("blerg-sandbox-c1", "/home/dev/repos/app", home,
 		[]string{"BLERG_RUNNER_SESSION_ID=s1", "BLERG_RUNNER_DAEMON_TOKEN=leak", "HOME=/x", "PATH=/usr/bin",
 			// A board-started session that explicitly chose the sandbox: its
 			// board linkage travels in, even though reaching a host-side board
 			// from the container is still follow-up work.
-			"BLERG_BOARD_BOARD=b1", "BLERG_BOARD_TOKEN=bt"}, sandboxRunExtras{})
+			"BLERG_BOARD_BOARD=b1", "BLERG_BOARD_TOKEN=bt"}, sandboxRunExtras{sandboxHome: "/state/sandbox-homes/c1"})
 	joined := " " + strings.Join(args, " ") + " "
 	for _, want := range []string{
 		" run -d --name blerg-sandbox-c1 ", " --cap-drop ALL ", " --security-opt no-new-privileges ",
-		" --pids-limit 512 ", " --memory 4g ", " --mount type=bind,src=/home/dev/repos/app,dst=/workspace ", " -w /workspace ",
-		" -v " + home + "/.claude:/home/agent/.claude ", " -e BLERG_RUNNER_SESSION_ID=s1 ",
+		" --init ", " --pids-limit 512 ", " --memory 4g ", " --mount type=bind,src=/home/dev/repos/app,dst=/workspace ", " -w /workspace ",
+		" --mount type=bind,src=/state/sandbox-homes/c1/claude,dst=/home/agent/.claude ",
+		" --mount type=bind,src=/state/sandbox-homes/c1/claude-settings.json,dst=/home/agent/.claude/settings.json,readonly ",
+		" -e BLERG_RUNNER_SESSION_ID=s1 ",
 		" -e BLERG_BOARD_BOARD=b1 ", " -e BLERG_BOARD_TOKEN=bt ", " sleep infinity ",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in %s", want, joined)
 		}
 	}
-	for _, bad := range []string{"--restart", "BLERG_RUNNER_DAEMON_TOKEN", "HOME=/x", "PATH=/usr/bin", "/.codex:"} {
+	for _, bad := range []string{"--restart", "BLERG_RUNNER_DAEMON_TOKEN", "HOME=/x", "PATH=/usr/bin", "/.codex:", " -v ", "src=" + home + "/.claude,", "src=" + home + "/.claude.json"} {
 		if strings.Contains(joined, bad) {
 			t.Errorf("must not contain %q: %s", bad, joined)
 		}
@@ -720,16 +731,16 @@ func TestSandboxRestrictedEngineMountsOnlySelectedLogin(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	args := strings.Join(sandboxRunArgs("container", "/workspace", home, nil, sandboxRunExtras{restrictedEngine: "codex"}), " ")
-	if !strings.Contains(args, "/.codex:/home/agent/.codex") {
+	args := strings.Join(sandboxRunArgs("container", "/workspace", home, nil, sandboxRunExtras{restrictedEngine: "codex", sandboxHome: "/state/sandbox-homes/container"}), " ")
+	if !strings.Contains(args, "src=/state/sandbox-homes/container/codex,dst=/home/agent/.codex") {
 		t.Fatal("Codex login missing")
 	}
-	for _, bad := range []string{"/.claude:", "/.claude.json:", "/.hermes/"} {
+	for _, bad := range []string{"/home/agent/.claude", "/home/agent/.hermes/"} {
 		if strings.Contains(args, bad) {
 			t.Fatalf("unrelated login mounted: %s", bad)
 		}
 	}
-	unknown := strings.Join(sandboxRunArgs("container", "/workspace", home, nil, sandboxRunExtras{restrictedEngine: "unknown"}), " ")
+	unknown := strings.Join(sandboxRunArgs("container", "/workspace", home, nil, sandboxRunExtras{restrictedEngine: "unknown", sandboxHome: "/state/sandbox-homes/container"}), " ")
 	if strings.Contains(unknown, "/home/agent/.codex") || strings.Contains(unknown, "/home/agent/.claude") {
 		t.Fatal("unknown restricted engine broadened login mounts")
 	}

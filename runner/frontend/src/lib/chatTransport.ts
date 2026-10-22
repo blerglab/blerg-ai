@@ -5,7 +5,9 @@ import { createBlergTransport, type Transport } from '@blerglab/chat'
 import * as ws from '../ws'
 import { ensureFreshToken, getAccessToken } from '../authClient'
 import { bounceToRefresh } from '../signIn'
-import { tokenExpired } from '../claims'
+import { tokenExpired, tokenSubject } from '../claims'
+import { checkAccount } from './liveBoardCard'
+import { notifyReviewRequestsChanged } from '../hooks/useMyReviewRequests'
 
 let shared: Transport | null = null
 export function blergTransport(): Transport {
@@ -15,11 +17,26 @@ export function blergTransport(): Transport {
     getToken: async () => {
       const tok = getAccessToken()
       if (!tok || tokenExpired(tok)) await ensureFreshToken()
+      // A renewal may have signed in someone else: what was read under the other account goes.
+      checkAccount()
       return getAccessToken()
     },
     onUnauthorized: () => {
       bounceToRefresh()
     },
+    // Who is signed in: a question someone else dismissed says so (not "dismissed by you").
+    viewerId: () => tokenSubject(getAccessToken()),
   })
+  // A review decided in the viewer leaves the bell at once, not at its next minute's read.
+  const decide = shared.decideReview?.bind(shared)
+  if (decide) {
+    shared.decideReview = async (...args) => {
+      try {
+        return await decide(...args)
+      } finally {
+        notifyReviewRequestsChanged()
+      }
+    }
+  }
   return shared
 }

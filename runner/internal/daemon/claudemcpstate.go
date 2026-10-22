@@ -222,3 +222,76 @@ func claudeMCPGeneration(gen int) uint64 {
 	}
 	return uint64(gen)
 }
+
+// ccMCPAuthTimeout bounds mcp_authenticate: the engine discovers the server's authorization
+// server (and may register a client) before it answers with the URL.
+var ccMCPAuthTimeout = 30 * time.Second
+
+// ccMCPAuthReply is the part of Claude Code's mcp_authenticate answer Blerg uses. state and
+// callbackPort are deliberately not decoded: the engine keeps its own flow.
+type ccMCPAuthReply struct {
+	AuthURL            string `json:"authUrl"`
+	RequiresUserAction bool   `json:"requiresUserAction"`
+	CallbackExpected   bool   `json:"callbackExpected"`
+}
+
+// mcpAuthenticate sends Claude Code's own stream-json control request mcp_authenticate (the SDK's
+// mcpAuthenticate) for one server: the engine starts its OAuth flow without opening a browser,
+// listens for the callback on localhost and answers with the authorization URL. The token it gets
+// stays in the engine's own credential store; the engine reconnects the server itself.
+func (d *claudeCodeDriver) mcpAuthenticate(ctx context.Context, server string) (ccMCPAuthReply, bool, error) {
+	d.sm.Lock()
+	legacy, closed := d.steer.legacy, d.steer.closed
+	d.sm.Unlock()
+	if legacy || closed {
+		return ccMCPAuthReply{}, false, errors.New("claude control requests are unavailable")
+	}
+	p, err := d.ensureProc(ctx)
+	if err != nil {
+		return ccMCPAuthReply{}, false, errors.New("claude process preparation failed")
+	}
+	rpcCtx, cancel := context.WithTimeout(ctx, ccMCPAuthTimeout)
+	defer cancel()
+	id := ccMCPRequestPrefix + ccUUID()
+	response := make(chan ccMCPReply, 1)
+	d.sm.Lock()
+	if d.steer.closed || d.steer.proc != p || p.dying || p.stdinClosed {
+		d.sm.Unlock()
+		return ccMCPAuthReply{}, false, errors.New("claude process changed")
+	}
+	if len(p.mcpWait) >= 8 {
+		d.sm.Unlock()
+		return ccMCPAuthReply{}, false, errors.New("claude MCP query capacity reached")
+	}
+	if p.mcpWait == nil {
+		p.mcpWait = make(map[string]chan ccMCPReply)
+	}
+	p.mcpWait[id] = response
+	d.sm.Unlock()
+	defer func() { d.sm.Lock(); delete(p.mcpWait, id); d.sm.Unlock() }()
+	line, _ := json.Marshal(map[string]any{"type": "control_request", "request_id": id,
+		"request": map[string]any{"subtype": "mcp_authenticate", "serverName": server}})
+	select {
+	case p.writeCh <- append(line, '\n'):
+	case <-p.done:
+		return ccMCPAuthReply{}, false, errors.New("claude process exited")
+	case <-rpcCtx.Done():
+		return ccMCPAuthReply{}, false, rpcCtx.Err()
+	}
+	select {
+	case reply := <-response:
+		if !reply.ok {
+			// The engine's error text is not passed on: it can name paths and endpoints.
+			return ccMCPAuthReply{}, false, nil
+		}
+		var out ccMCPAuthReply
+		if len(reply.body) > 64<<10 || json.Unmarshal(reply.body, &out) != nil {
+			return ccMCPAuthReply{}, false, errors.New("claude mcp_authenticate reply invalid")
+		}
+		return out, true, nil
+	case <-p.done:
+		return ccMCPAuthReply{}, false, errors.New("claude process exited")
+	case <-rpcCtx.Done():
+		return ccMCPAuthReply{}, false, rpcCtx.Err()
+	}
+}

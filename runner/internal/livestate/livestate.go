@@ -62,6 +62,9 @@ type Ask struct {
 	Seq       int64     `json:"seq"`
 	// NoWait: the agent did not wait for the answer (`blerg-runner ask --no-wait`).
 	NoWait bool `json:"no_wait,omitempty"`
+	// OwnerOnly: only the session's owner may answer it; without NoWait it is an engine command
+	// approval, which is allowed or denied, never dismissed (card #155).
+	OwnerOnly bool `json:"owner_only,omitempty"`
 }
 
 // Subagent is a top-level subagent still at work. Key is its child_id (the Agent call's id, or for a
@@ -387,12 +390,13 @@ func runningTasks(events []Event, now time.Time) []Task {
 }
 
 type askAcc struct {
-	ev     Event
-	id     string // message id
-	native bool   // closes with its turn (not one the server holds open)
-	open   bool
-	q      string
-	noWait bool
+	ev        Event
+	id        string // message id
+	native    bool   // closes with its turn (not one the server holds open)
+	open      bool
+	q         string
+	noWait    bool
+	ownerOnly bool
 }
 
 // openAsks is the chat's askStates read without the tool calls: an ask the server recorded for
@@ -432,7 +436,7 @@ func openAsks(events []Event, opt Options) []Ask {
 				continue
 			}
 			server := p.MessageID != "" && opt.ServerAsk != nil && opt.ServerAsk(ev.ID, p.MessageID)
-			all = append(all, &askAcc{ev: ev, id: p.MessageID, native: !server, open: true, q: p.Body, noWait: p.NoWait})
+			all = append(all, &askAcc{ev: ev, id: p.MessageID, native: !server, open: true, q: p.Body, noWait: p.NoWait, ownerOnly: p.OwnerOnly})
 		case "user_message":
 			var p agent.UserMessagePayload
 			if json.Unmarshal(ev.Payload, &p) != nil {
@@ -471,7 +475,7 @@ func openAsks(events []Event, opt Options) []Ask {
 		if !a.open || (a.id != "" && opt.Closed[a.id]) {
 			continue
 		}
-		out = append(out, Ask{EventID: a.ev.ID, MessageID: a.id, Question: a.q, AskedAt: a.ev.Ts, Seq: a.ev.Seq, NoWait: a.noWait})
+		out = append(out, Ask{EventID: a.ev.ID, MessageID: a.id, Question: a.q, AskedAt: a.ev.Ts, Seq: a.ev.Seq, NoWait: a.noWait, OwnerOnly: a.ownerOnly})
 	}
 	return out
 }

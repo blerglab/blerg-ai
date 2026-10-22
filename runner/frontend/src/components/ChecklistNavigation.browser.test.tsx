@@ -71,7 +71,7 @@ it.each(['mouse', 'keyboard'])('opens Plan by %s, scrolls the exact assigned row
   expect(getComputedStyle(row).backgroundColor).toBe('rgba(0, 0, 0, 0)')
 })
 
-it.each([1280, 390])('keeps assigned titles full width, one compact metadata line, and subtle item dividers at %ipx', async width => {
+it.each([1280, 390])('keeps an assigned item on one line, its glyph beside the title, with subtle dividers at %ipx', async width => {
   await page.viewport(width, 700)
   render(<div style={{ height: '100vh' }}><MemoryRouter initialEntries={['/sessions/sess-a']}>
     <Routes><Route path="/sessions/:id" element={<SessionDetail />} /></Routes>
@@ -81,17 +81,17 @@ it.each([1280, 390])('keeps assigned titles full width, one compact metadata lin
   await userEvent.click(await within(rail).findByRole('tab', { name: /Plan/ }))
   const row = rail.querySelector('[data-checklist-id="item-44"]') as HTMLElement
   const text = row.querySelector('.checklist-text') as HTMLElement
-  const assigned = row.querySelector('.rail-checklist-assignees') as HTMLElement
+  const assigned = row.querySelector('.rail-plan-assignees') as HTMLElement
   await waitFor(() => {
     const r = row.getBoundingClientRect(), t = text.getBoundingClientRect(), a = assigned.getBoundingClientRect()
-    expect(t.width).toBeGreaterThan(r.width - 35)
-    expect(a.top).toBeGreaterThanOrEqual(t.bottom - 1)
-    expect(a.height).toBeLessThan(25)
+    expect(t.width).toBeGreaterThan(r.width - 80)
+    expect(a.left).toBeGreaterThanOrEqual(t.right - 1)
+    expect(a.top).toBeGreaterThanOrEqual(r.top - 1)
     expect(a.right).toBeLessThanOrEqual(r.right + 1)
-    expect(r.height).toBeLessThan(t.height + a.height + 10)
+    expect(r.height).toBeLessThan(32)
   })
-  expect(getComputedStyle(assigned).whiteSpace).toBe('nowrap')
-  expect(getComputedStyle(assigned).textOverflow).toBe('ellipsis')
+  expect(getComputedStyle(text).whiteSpace).toBe('nowrap')
+  expect(getComputedStyle(text).textOverflow).toBe('ellipsis')
   expect(getComputedStyle(row).borderTopWidth).toBe('1px')
   expect(getComputedStyle(rail.querySelector('.checklist-items li')!).borderTopWidth).toBe('0px')
 })

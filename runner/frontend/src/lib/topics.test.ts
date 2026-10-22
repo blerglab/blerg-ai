@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent, SessionTranscript } from '@blerglab/chat'
-import { EMPTY_HISTORY, countsLabel, hm, isHeld, shownVersion, spanLabel, unmarkedLabel, usageTotal, type TopicItem } from './topics'
+import { EMPTY_HISTORY, countsLabel, hm, isHeld, shownVersion, spanLabel, strokeWords, unmarkedLabel, usageTotal, type TopicItem } from './topics'
 
 const at = (h: number, m: number, day = 15) => new Date(2026, 9, day, h, m)
 
@@ -45,7 +45,7 @@ describe('unmarkedLabel', () => {
     expect(unmarkedLabel(u(2, 0))).toBe('Unmarked work · 2 agents')
   })
   it('the empty state names the marker command', () => {
-    expect(EMPTY_HISTORY).toBe('No topics yet. The agent marks a topic when it starts a piece of work: blerg-runner topic "<title>".')
+    expect(EMPTY_HISTORY).toBe('No topics yet. The agent marks a topic when it starts a piece of work: blerg-runner topic "<title>", and a decision, milestone or finding with blerg-runner mark decision "<text>".')
   })
 })
 
@@ -84,5 +84,12 @@ describe('shownVersion and usageTotal', () => {
   })
   it('hm is hours and minutes, padded', () => {
     expect(hm(at(9, 5))).toBe('09:05')
+  })
+})
+
+describe('dismissed strokes (card #155)', () => {
+  it('say the person dismissed it', () => {
+    expect(strokeWords({ kind: 'attention', by: 'person', state: 'expired', source: 'review' })).toBe('Asked of you · dismissed by you')
+    expect(strokeWords({ kind: 'attention', state: 'expired', source: 'ask' })).toBe('Asked of you · closed')
   })
 })

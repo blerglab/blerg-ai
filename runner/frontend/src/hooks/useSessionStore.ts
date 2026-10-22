@@ -274,7 +274,9 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     set((state) => ({
       sessions: state.sessions.map(s =>
         s.id === msg.session_id
-          ? { ...s, status: 'stopped', end_reason: msg.end_reason ?? s.end_reason, ended_by: msg.ended_by ?? s.ended_by, background_tasks: 0 }
+          // A non-zero exit is a failure (its engine runtime stopped): the server records it as
+          // "error" with the reason, and the card and session page show it as one.
+          ? { ...s, status: msg.exit_code ? 'error' : 'stopped', error_reason: msg.exit_code ? (msg.message || s.error_reason) : s.error_reason, end_reason: msg.end_reason ?? s.end_reason, ended_by: msg.ended_by ?? s.ended_by, background_tasks: 0 }
           : s
       ),
       statusChangedAt: { ...state.statusChangedAt, [msg.session_id]: Date.now() },

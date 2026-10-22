@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { diffArtifacts, hasPlanTab, planList, planSummary, planTabLabel } from './railPlan'
+import { assigneeName, diffArtifacts, hasPlanTab, planList, planRows, planSummary, planTabLabel } from './railPlan'
 
 const item = (text: string, done: boolean) => ({ text, done })
 const art = (id: string, view: string, at: string, extra = {}) => ({ id, name: `${id}.diff`, size: 1, content_type: 'text/x-diff', view, created_at: at, version: 1, latest_version: 1, ...extra })
@@ -31,5 +31,27 @@ describe('railPlan', () => {
   it('lists diffs newest first, skipping other files and missing ones', () => {
     const out = diffArtifacts([art('old', 'diff', '2026-10-01T10:00:00Z'), art('doc', 'markdown', '2026-10-03T10:00:00Z'), art('new', 'diff', '2026-10-02T10:00:00Z'), art('gone', 'diff', '2026-10-04T10:00:00Z', { missing: true })])
     expect(out.map(a => a.id)).toEqual(['new', 'old'])
+  })
+
+  it('lays the open items before the done ones and shows a shared commit once, on the first', () => {
+    const { open, done } = planRows([
+      { text: 'a', done: true, commits: ['abc1234'], diff: 'd1' },
+      { text: 'b', done: false, commits: ['abc1234'], diff: 'd1' },
+      { text: 'c', done: true, commits: ['abc1234'], diff: 'd1' },
+      { text: 'd', done: true, commits: ['fff0000'] },
+      { text: 'e', done: false },
+    ])
+    expect(open.map(r => r.item.text)).toEqual(['b', 'e'])
+    expect(done.map(r => r.item.text)).toEqual(['a', 'c', 'd'])
+    expect(open[0].chip).toEqual({ commits: ['abc1234'], diff: 'd1', covers: 3 })
+    expect(done.map(r => r.chip?.covers ?? null)).toEqual([null, null, 1])
+  })
+  it('names an assignee, never by its id', () => {
+    const titles = { 'subagent:toolu_1': 'Audit' }
+    expect(assigneeName({ kind: 'subagent', id: 'toolu_1' }, titles, [], [])).toBe('Audit')
+    expect(assigneeName({ kind: 'subagent', id: 'toolu_2' }, titles, [{ key: 'toolu_2', title: 'Running one' }], [])).toBe('Running one')
+    expect(assigneeName({ kind: 'subagent', id: 'toolu_3' }, titles, [{ key: 'toolu_3', title: 'Subagent · started earlier' }], [])).toBe('a subagent')
+    expect(assigneeName({ kind: 'child_session', id: 'u-1' }, undefined, [], [{ id: 'u-1', title: 'Child' }])).toBe('Child')
+    expect(assigneeName({ kind: 'child_session', id: 'u-2' }, undefined, [], [{ id: 'u-2', title: '' }])).toBe('a started session')
   })
 })

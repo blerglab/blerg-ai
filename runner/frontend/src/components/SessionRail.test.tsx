@@ -302,7 +302,8 @@ describe('session side panel', () => {
       expect(rail()).not.toHaveAttribute('role', 'dialog')
       expect(toggle()).toHaveAttribute('aria-controls', rail()!.id)
       expect(within(rail()!).getByTestId('rail-needs')).toHaveTextContent('Nothing needs you.')
-      expect(within(rail()!).getByTestId('rail-running')).toHaveTextContent('Nothing is running.')
+      expect(within(rail()!).getByTestId('rail-running')).toHaveTextContent('Idle.')
+      expect(within(rail()!).queryByTestId('rail-main')).toBeNull()
 
       fireEvent.click(toggle())
       expect(rail()).not.toBeVisible()
@@ -396,11 +397,11 @@ describe('session side panel', () => {
       expect(within(panel).getByTestId('rail-tool-changes')).toHaveTextContent('1 tool change waits on your decision')
       const [sub, resumed] = within(panel).getAllByTestId('rail-subagent')
       // A resumed subagent's run says so.
-      expect(within(resumed).getByTestId('rail-sub-resumed')).toHaveTextContent('resumed')
+      expect(within(resumed).getByTestId('rail-sub-resumed')).toHaveAccessibleName('Resumed')
       expect(within(sub).queryByTestId('rail-sub-resumed')).toBeNull()
       expect(sub).toHaveTextContent('Watch the deploy')
       expect(sub).toHaveClass('background')
-      expect(within(sub).getByTestId('rail-sub-tokens')).toHaveTextContent('2.5k tokens')
+      expect(within(sub).getByTestId('rail-sub-tokens')).toHaveAccessibleName('2.5k tokens')
       expect(within(sub).getByTestId('rail-sub-doing')).toHaveTextContent('running Bash · kubectl get pods')
       expect(within(sub).getByTestId('rail-elapsed')).toHaveTextContent(/^1:(29:5\d|30:0\d)$/)
       const t = within(panel).getByTestId('rail-task')
@@ -421,13 +422,14 @@ describe('session side panel', () => {
       seedSession({ status: 'running' })
       seedEvents(user(), ask(), ...subagent())
       await renderPage()
-      expect(screen.queryByTestId('rail-badge')).toBeNull()
+      // Only the main agent at work (the working line) counts before the server answers.
+      expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
       await act(async () => {
         answer({ ok: true, status: 200, headers: new Headers({ 'Content-Type': 'application/json' }), json: () => Promise.resolve(liveReply({ through_seq: seq, tool_changes: 3 })) })
         for (let k = 0; k < 10; k++) await Promise.resolve()
       })
       // The server's reading wins: it holds no ask or subagent, whatever the transcript drew.
-      expect(screen.getByTestId('rail-badge')).toHaveTextContent('3')
+      expect(screen.getByTestId('rail-badge')).toHaveTextContent('4')
     })
 
     it('moves at once with what comes after the server\'s reply, before it reads again', async () => {
@@ -437,10 +439,11 @@ describe('session side panel', () => {
       await renderPage()
       await waitFor(() => expect(fetchCalls().some(u => u.includes('/live'))).toBe(true))
       act(() => { useTranscriptStore.getState().ingest(ev('subagent_started', { child_id: 'A9', agent_type: 'Explore', summary: 'Survey the repo' }, 0)) })
-      await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('1'))
+      await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('2'))
       expect(within(rail()!).getByTestId('rail-subagent')).toHaveTextContent('Survey the repo')
       act(() => { useTranscriptStore.getState().ingest(ev('subagent_done', { child_id: 'A9', summary: 'ok' }, 0)) })
-      expect(screen.queryByTestId('rail-badge')).toBeNull()
+      // The main agent still works: it alone is left in the badge.
+      expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
     })
 
     it('says what the badge counts to a screen reader as it changes', async () => {
@@ -461,10 +464,14 @@ describe('session side panel', () => {
       await renderPage()
       const panel = rail()!
       await waitFor(() => expect(within(panel).getByTestId('rail-needs-count')).toHaveTextContent('2'))
-      expect(within(panel).getByTestId('rail-running-count')).toHaveTextContent('2')
-      expect(screen.getByTestId('rail-badge')).toHaveTextContent('4')
+      // The main agent at work counts in Running now (its subagent and task under it) and in the
+      // header's badge, its label and announcement.
+      expect(within(panel).getByTestId('rail-running-count')).toHaveTextContent('3')
+      expect(within(panel).getByTestId('rail-main')).toHaveAttribute('data-state', 'working')
+      expect(screen.getByTestId('rail-badge')).toHaveTextContent('5')
       expect(screen.getByTestId('rail-badge')).toHaveClass('attention')
-      expect(toggle()).toHaveAccessibleName('Session panel: 2 need you, 2 running')
+      expect(toggle()).toHaveAccessibleName('Session panel: 2 need you, 3 running')
+      expect(screen.getByTestId('rail-announce')).toHaveTextContent('Session panel: 2 need you, 3 running')
 
       const askRow = within(panel).getByTestId('rail-ask')
       expect(askRow).toHaveTextContent('Deploy to staging first?')
@@ -477,9 +484,10 @@ describe('session side panel', () => {
 
       const sub = within(panel).getByTestId('rail-subagent')
       expect(sub).toHaveTextContent('Survey the repo')
-      expect(within(sub).getByTestId('rail-sub-type')).toHaveTextContent('Explore')
-      expect(within(sub).getByTestId('rail-sub-model')).toHaveTextContent('haiku-5')
-      expect(within(sub).getByTestId('rail-sub-tokens')).toHaveTextContent('12k tokens')
+      // The type is in the title's tooltip; the model and tokens are glyphs with their words in tooltips.
+      expect(within(sub).getByTestId('rail-show').getAttribute('title')).toContain('Explore')
+      expect(within(sub).getByTestId('rail-sub-model')).toHaveAccessibleName('Model: haiku-5')
+      expect(within(sub).getByTestId('rail-sub-tokens')).toHaveAccessibleName('12k tokens')
       expect(within(sub).getByTestId('rail-sub-doing')).toHaveTextContent('running Bash · npm test')
       expect(within(sub).getByTestId('rail-elapsed')).toHaveTextContent('04:00')
       // A foreground subagent keeps the solid border.
@@ -488,7 +496,7 @@ describe('session side panel', () => {
 
       const t = within(panel).getByTestId('rail-task')
       expect(t).toHaveTextContent('Wait for the deploy')
-      expect(t).toHaveTextContent('started')
+      expect(within(t).getByTestId('rail-show').getAttribute('title')).toContain('started')
       expect(within(t).getByTestId('rail-elapsed')).toHaveTextContent('01:05')
       expect(within(t).getByRole('img', { name: 'Background command' })).toBeInTheDocument()
 
@@ -521,17 +529,18 @@ describe('session side panel', () => {
       const t = within(rail()!).getByTestId('rail-task')
       expect(within(t).getByRole('img', { name: 'Background command' })).toHaveTextContent('>_')
       expect(within(t).getByTestId('rail-command')).toHaveTextContent('$ bash /srv/app/run.sh --wait')
-      expect(t.getAttribute('title')).toContain('$ bash /srv/app/run.sh --wait')
+      const tip = within(t).getByTestId('rail-show').getAttribute('title')
+      expect(tip).toContain('$ bash /srv/app/run.sh --wait')
       expect(within(t).getByTestId('rail-task-note')).toHaveTextContent('Wait for the deploy')
-      expect(within(t).getByTestId('rail-shell-kind')).toHaveTextContent('shell')
+      expect(tip).toContain('shell · running')
       expect(within(t).getByTestId('rail-elapsed')).toHaveTextContent(/^01:0\d$/)
-      expect(within(t).getByTestId('rail-shell-status')).toHaveTextContent('running')
+      expect(within(t).getByRole('img', { name: 'Running' })).toBeInTheDocument()
       expect(t).not.toHaveTextContent(/effort/)
       // The subagent keeps its own look: the agent glyph, model, effort.
       const sub = within(rail()!).getByTestId('rail-subagent')
       expect(within(sub).getByRole('img', { name: 'Subagent' })).toHaveTextContent('🤖')
       // It reports no effort of its own: it runs at the session's, which is said, never "unknown".
-      expect(within(sub).getByTestId('rail-sub-effort')).toHaveTextContent("effort: high (session's)")
+      expect(within(sub).getByTestId('rail-show').getAttribute('title')).toContain("effort: high (session's)")
     })
 
     it('an older start with only a description shows that as the command line', async () => {
@@ -613,6 +622,43 @@ describe('session side panel', () => {
       expect(rail()).toBeVisible()
     })
 
+    it('a Running now card is two lines, has no separate link, and a click anywhere on it brings it into view', async () => {
+      seedSession()
+      seedEvents(user(), ...subagent(), ...task())
+      await renderPage()
+      const panel = rail()!
+      const sub = within(panel).getByTestId('rail-subagent')
+      expect(sub.querySelectorAll(':scope > .rail-run-line')).toHaveLength(2)
+      expect(within(panel).queryByText('Show in conversation')).toBeNull()
+      // The title is the control, named for what it does, the rest in its description.
+      expect(within(sub).getByTestId('rail-show')).toHaveAttribute('aria-description', expect.stringMatching(/^Runs inside Main\. Show in conversation\. /))
+      scrolled.mockClear()
+      fireEvent.click(within(sub).getByTestId('rail-elapsed'))
+      expect((scrolled.mock.contexts.at(-1) as HTMLElement).dataset.testid).toBe('subagent-card')
+      // A tap on the step line shows it whole in place instead (touch has no tooltip), and folds it again.
+      scrolled.mockClear()
+      const step = within(sub).getByTestId('rail-sub-doing')
+      fireEvent.click(step)
+      expect(step).toHaveAttribute('aria-expanded', 'true')
+      expect(scrolled).not.toHaveBeenCalled()
+      fireEvent.click(step)
+      expect(step).toHaveAttribute('aria-expanded', 'false')
+      scrolled.mockClear()
+      fireEvent.click(within(panel).getByTestId('rail-task').querySelector('.rail-clock')!)
+      expect((scrolled.mock.contexts.at(-1) as HTMLElement).dataset.callId).toBe('c1')
+    })
+
+    it('a control of its own on a Running now card does not jump', async () => {
+      seedSession({ status: 'idle' })
+      seedEvents(user(), ev('background_task_started', { task_id: 'b9', call_id: 'c9', kind: 'bash', description: 'Run it', command: 'make it', started_at: new Date(Date.now() - MIN).toISOString() }, MIN),
+        ev('background_task_done', { task_id: 'b9', call_id: 'c9', kind: 'bash', status: 'failed', summary: 'exit 2' }, 0))
+      await renderPage()
+      const t = within(rail()!).getByTestId('rail-task')
+      scrolled.mockClear()
+      fireEvent.click(within(t).getByRole('button', { name: 'Dismiss' }))
+      expect(scrolled).not.toHaveBeenCalled()
+    })
+
     it('says so when the row is not in the part of the conversation the chat has drawn', async () => {
       seedSession({ status: 'idle' })
       // A task whose call is on an older page: only its start is held.
@@ -678,7 +724,8 @@ describe('session side panel', () => {
       )
       await renderPage()
       expect(within(rail()!).getAllByTestId('rail-subagent')).toHaveLength(1)
-      expect(within(rail()!).getByTestId('rail-subagent')).toHaveTextContent('in the background')
+      expect(within(within(rail()!).getByTestId('rail-subagent')).getByRole('img', { name: 'Running in the background' })).toBeInTheDocument()
+      expect(within(within(rail()!).getByTestId('rail-subagent')).getByTestId('rail-show').getAttribute('title')).toContain('in the background')
       // Dashed, like its card in the transcript.
       expect(within(rail()!).getByTestId('rail-subagent')).toHaveClass('background')
       expect(within(rail()!).getByTestId('rail-subagent')).toHaveAttribute('data-status', 'background')
@@ -725,6 +772,30 @@ describe('session side panel', () => {
         expect(rail()).not.toBeVisible()
       })
 
+      // Card #155 review I2: an engine command approval (owner-only, waited on) is allowed or denied,
+      // never dismissed, so it offers no Dismiss; a question anyone may answer does.
+      it('offers Dismiss on a question, never on an engine command approval', async () => {
+        seedSession({ status: 'waiting' })
+        seedEvents(user())
+        stubFetch(0, liveReply({ through_seq: seq, can_release_prompt: true, asks: [
+          { ...replyAsk(-3 * MIN), owner_only: true },
+          { ...replyAsk(-2 * MIN), event_id: 'srv-m2', message_id: 'm2', question: 'Which name?' },
+        ] }))
+        await renderPage()
+        await waitFor(() => expect(within(rail()!).getAllByTestId('rail-ask')).toHaveLength(2))
+        expect(within(rail()!).queryByRole('button', { name: /^Dismiss question: Deploy to staging/ })).toBeNull()
+        expect(within(rail()!).getByRole('button', { name: /^Dismiss question: Which name\?/ })).toBeInTheDocument()
+      })
+
+      it('offers no Dismiss on an owner-only question to someone who is not the owner', async () => {
+        seedSession({ status: 'waiting' })
+        seedEvents(user())
+        stubFetch(0, liveReply({ through_seq: seq, asks: [{ ...replyAsk(-3 * MIN), owner_only: true, no_wait: true }] }))
+        await renderPage()
+        await within(rail()!).findByTestId('rail-ask')
+        expect(within(rail()!).queryByRole('button', { name: /^Dismiss question/ })).toBeNull()
+      })
+
       it('answers a question the server listed, and the answer\'s echo takes it off', async () => {
         seedSession({ status: 'waiting' })
         seedEvents(user())
@@ -738,7 +809,9 @@ describe('session side panel', () => {
         expect(sent?.answer_message_id).toBe('m1')
         act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'yes, staging', source: 'ask_answer', message_id: 'm1', client_id: sent!.client_id }, 0)) })
         expect(within(rail()!).queryByTestId('rail-ask')).toBeNull()
-        expect(screen.queryByTestId('rail-badge')).toBeNull()
+        // Nothing needs you; the answer sent sets the main agent to work, as the working line says.
+        expect(screen.getByTestId('rail-badge')).not.toHaveClass('attention')
+        expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
       })
 
       it('lists a question the agent did not wait on until the answer naming it; only the owner answers it', async () => {
@@ -915,14 +988,143 @@ describe('session side panel', () => {
     expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent('1')
     const card = within(screen.getByTestId('rail-running')).getByTestId('rail-child')
     expect(card).toHaveTextContent('Codex review')
-    expect(card).toHaveTextContent('high')
+    expect(within(card).getByTestId('rail-child-open').getAttribute('title')).toContain('effort: high')
+    expect(within(card).getByRole('img', { name: 'Model: fixture' })).toBeInTheDocument()
     expect(within(card).getByRole('button', { name: /Discard/ })).toBeInTheDocument()
     expect(screen.getAllByTestId('rail-child')).toHaveLength(1)
-    expect(screen.getByTestId('rail-running')).not.toHaveTextContent('Nothing is running.')
+    expect(screen.getByTestId('rail-running')).not.toHaveTextContent('Idle.')
     expect(within(screen.getByTestId('rail-started')).queryByTestId('rail-child')).toBeNull()
     expect(within(screen.getByTestId('rail-started')).getByTestId('rail-started-running')).toHaveTextContent('1 running ↑')
     expect(screen.getByTestId('rail-needs-count')).toHaveTextContent('1')
     expect(screen.getByTestId('rail-needs')).toHaveTextContent('Another review')
+  })
+
+  describe('Running now: the main agent', () => {
+    const bash = (agoMs: number) => ev('tool_call', { tool: 'Bash', call_id: 'ff1', input: { command: 'git merge --ff-only feature', description: 'Fast-forward main to the feature branch' } }, agoMs)
+
+    it('heads Running now while it works, with the working line\'s call, words and clocks, and counts', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-10-01T00:00:00Z'))
+      seedSession({ status: 'running' })
+      seedEvents(ev('user_message', { text: 'go', source: 'chat' }, 281_000), ev('status_changed', { status: 'running' }, 280_000), bash(249_000))
+      await renderPage()
+      const running = screen.getByTestId('rail-running')
+      expect(running).not.toHaveTextContent('Nothing is running')
+      expect(within(running).getByTestId('rail-running-count')).toHaveTextContent('1')
+      const main = within(running).getByTestId('rail-main')
+      expect(running.querySelector('.rail-list')!.firstElementChild).toBe(main)
+      expect(main).toHaveAttribute('data-state', 'working')
+      expect(within(main).getByTestId('rail-main-title')).toHaveTextContent(/^Main$/)
+      expect(within(main).getByTestId('rail-main-engine')).toHaveAccessibleName('Engine: Claude')
+      expect(within(main).getByRole('img', { name: 'Working' })).toBeInTheDocument()
+      // The working line under the chat and the Main row say the same: the call, what it does, its clock.
+      const line = screen.getByTestId('waiting-on').textContent!
+      expect(line).toContain('waiting on Bash · Fast-forward main to the feature branch 4:09')
+      expect(within(main).getByTestId('rail-main-doing')).toHaveTextContent('Bash: Fast-forward main to the feature branch')
+      expect(within(main).getByTestId('rail-main-step-elapsed')).toHaveTextContent('4:09')
+      expect(within(main).getByTestId('rail-elapsed')).toHaveTextContent(screen.getByTestId('working').querySelector('.agent-working-time')!.textContent!)
+      const title = within(main).getByTestId('rail-main-show')
+      expect(title.getAttribute('title')).toContain("The agent you're talking to. Indented rows run inside it; child sessions run on their own.")
+      expect(title.getAttribute('aria-description')).toContain("The agent you're talking to. Indented rows run inside it; child sessions run on their own.")
+      expect(title.getAttribute('title')).not.toContain('This session')
+    })
+
+    it('says "Working…" or what the agent is on when no call is named, as the working line does', async () => {
+      seedSession({ status: 'running', engine: 'codex' })
+      seedEvents(user())
+      await renderPage()
+      const main = within(screen.getByTestId('rail-running')).getByTestId('rail-main')
+      expect(screen.getByTestId('working-words')).toHaveTextContent('Working…')
+      expect(within(main).getByTestId('rail-main-doing')).toHaveTextContent('Working…')
+      expect(within(main).getByTestId('rail-main-engine')).toHaveAccessibleName('Engine: Codex')
+    })
+
+    it('indents subagents and background commands under Main; a started session sits at Main\'s level', async () => {
+      seedSession({ status: 'running' })
+      seedEvents(user())
+      stubFetch(0, liveReply({
+        subagents: [{ key: 'S1', title: 'Survey the repo', type: 'Explore', model: '', tokens: null, doing: '', started_at: iso(-MIN), active_at: iso(0), background: false, seq: 2 }],
+        tasks: [{ task_id: 'b1', call_id: 'c1', kind: 'bash', description: 'Wait for the deploy', started_at: iso(-MIN), seq: 3 }],
+        children: [{ id: 'c-run', title: 'Parallel worker', engine: 'codex', model: 'fixture', status: 'running', started_at: iso(-MIN), ended_at: null, asking: false, tokens: null }] }))
+      await renderPage()
+      const running = screen.getByTestId('rail-running')
+      await waitFor(() => expect(within(running).getByTestId('rail-child')).toBeInTheDocument())
+      const rows = [...running.querySelector('.rail-list')!.children] as HTMLElement[]
+      expect(rows.map(r => r.dataset.testid)).toEqual(['rail-main', 'rail-subagent', 'rail-task', 'rail-child'])
+      for (const r of rows.slice(1, 3)) {
+        expect(r).toHaveClass('rail-nested')
+        expect(r.querySelector('.rail-run-nest')).toHaveTextContent('↳')
+      }
+      expect(rows[0]).not.toHaveClass('rail-nested')
+      const child = rows[3]
+      expect(child).not.toHaveClass('rail-nested')
+      expect(child.querySelector('.rail-run-nest')).toBeNull()
+      expect(within(child).getByRole('img', { name: 'Engine: Codex' })).toBeInTheDocument()
+      expect(within(running).getByTestId('rail-running-count')).toHaveTextContent('4')
+    })
+
+    it('says "Idle." when the agent is idle and nothing runs; with a background command, Main is idle (Zz) and not counted', async () => {
+      seedSession({ status: 'idle' })
+      seedEvents(user())
+      await renderPage()
+      expect(screen.getByTestId('rail-running')).toHaveTextContent('Idle.')
+      expect(screen.getByTestId('rail-running')).not.toHaveTextContent('Nothing is running')
+      expect(screen.queryByTestId('rail-main')).toBeNull()
+      act(() => { for (const e of task()) useTranscriptStore.getState().ingest(e) })
+      const main = await within(screen.getByTestId('rail-running')).findByTestId('rail-main')
+      expect(main).toHaveAttribute('data-state', 'idle')
+      expect(within(main).getByRole('img', { name: 'Idle' })).toHaveTextContent('Zz')
+      expect(within(main).queryByTestId('rail-main-doing')).toBeNull()
+      expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent('1')
+      expect(within(screen.getByTestId('rail-running')).getByTestId('rail-task')).toHaveClass('rail-nested')
+    })
+
+    it.each(['stopped', 'ended', 'error', 'starting', 'disconnected'] as const)('a %s session keeps "Nothing is running." and has no Main card, even with a leftover progress value', async status => {
+      seedSession({ status })
+      seedEvents(user())
+      stubFetch(0, liveReply({ progress: { completed: 2, total: 5, label: 'Leftover' } }))
+      await renderPage()
+      await waitFor(() => expect(fetchCalls().some(u => u.includes('/live'))).toBe(true))
+      const running = screen.getByTestId('rail-running')
+      expect(running).toHaveTextContent('Nothing is running.')
+      expect(running).not.toHaveTextContent('Idle')
+      expect(within(running).queryByTestId('rail-main')).toBeNull()
+      expect(within(running).queryByTestId('rail-session-progress')).toBeNull()
+      expect(within(running).getByTestId('rail-running-count')).toHaveTextContent('0')
+    })
+
+    it('an idle session with a progress value shows it on an idle Main card (Zz)', async () => {
+      seedSession({ status: 'idle' })
+      seedEvents(user())
+      stubFetch(0, liveReply({ progress: { completed: 2, total: 5, label: 'Verify' } }))
+      await renderPage()
+      const main = await within(screen.getByTestId('rail-running')).findByTestId('rail-main')
+      expect(main).toHaveAttribute('data-state', 'idle')
+      expect(within(main).getByTestId('rail-session-progress')).toHaveTextContent('2/5')
+      expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent('0')
+    })
+
+    it('counts in the header badge, its label and announcement, but a turn starting never opens the panel by itself', async () => {
+      viewport(390)
+      seedSession({ status: 'running' })
+      seedEvents(user())
+      await renderPage()
+      // A phone, no saved choice: the drawer opens by itself only for something that needs you or runs beside the chat.
+      expect(rail()).toBeNull()
+      expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
+      expect(screen.getByTestId('rail-badge')).not.toHaveClass('attention')
+      expect(toggle()).toHaveAccessibleName('Session panel: 1 running')
+      expect(screen.getByTestId('rail-announce')).toHaveTextContent('Session panel: 1 running')
+      expect(screen.queryByRole('dialog', { name: 'Session panel' })).toBeNull()
+    })
+
+    it('says "Waiting on you." while the agent waits on an answer and nothing runs', async () => {
+      seedSession({ status: 'waiting' })
+      seedEvents(user(), ask())
+      await renderPage()
+      expect(screen.getByTestId('rail-running')).toHaveTextContent('Waiting on you.')
+      expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent('0')
+    })
   })
 
   it('an idle child does not badge or announce the panel toggle as running', async () => {
@@ -963,7 +1165,11 @@ describe('session side panel', () => {
     fireEvent.click(within(started).getByTestId('rail-started-running'))
     expect(running.scrollIntoView).toHaveBeenCalled()
     expect(document.activeElement).toBe(running)
-    fireEvent.click(rows[0].querySelector('.rail-child-button')!)
+    fireEvent.click(within(rows[0]).getByTestId('rail-child-open'))
+    expect(opened).toHaveBeenCalledWith('c-run')
+    // A click anywhere on the card (here its clock) opens it too.
+    opened.mockClear()
+    fireEvent.click(rows[0].querySelector('.rail-clock')!)
     expect(opened).toHaveBeenCalledWith('c-run')
   })
 
@@ -974,7 +1180,8 @@ it('keeps archived sessions free of live management controls despite stale runni
   await renderPage()
   expect(screen.queryByRole('group',{name:'Session permissions'})).toBeNull()
   expect(screen.queryByRole('checkbox',{name:'Resume when limit resets'})).toBeNull()
-  expect(screen.queryByTitle('Kill session')).toBeNull()
+  expect(screen.queryByRole('button',{name:'End session'})).toBeNull()
+  expect(screen.queryByRole('menuitem',{name:/Discard/,hidden:true})).toBeNull()
   expect(screen.queryByRole('button',{name:/Discard/})).toBeNull()
   expect(fetchCalls().filter(url=>url.endsWith('/limit-resume'))).toEqual([])
   expect(screen.getByTestId('rail-needs')).toHaveTextContent('Nothing needs you.')

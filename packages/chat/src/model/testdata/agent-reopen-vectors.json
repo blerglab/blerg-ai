@@ -1,0 +1,405 @@
+{
+  "about": "Shared vectors for the agent-reopen rule: packages/chat (TypeScript), blerg-runner (Python) and runner/internal/server (Go) all test against this file. text: a reason is valid when it has at most 2000 code points and something is left after removing Unicode Cc, Cf and Z characters (repeat: the text repeated that many times). revision: the JSON literal of a revision; valid when it is a number with an integral value from 1 to 1000000. applies: a person's thread and the agent's copy, as JSON; whether the agent's reopen applies. Cn (unassigned) characters count as invisible too, so a writer on older Unicode tables is never more lenient than a reader on newer ones. parse: one request of a review file; whether a reader accepts the file (the browser and blerg-runner).",
+  "text": [
+    {
+      "text": "Which limit, 3 or 5?",
+      "valid": true
+    },
+    {
+      "text": "",
+      "valid": false
+    },
+    {
+      "text": " ",
+      "valid": false
+    },
+    {
+      "text": "\u001f",
+      "valid": false
+    },
+    {
+      "text": "\ufeff",
+      "valid": false
+    },
+    {
+      "text": "\u200b\u2028\u3000\u00a0",
+      "valid": false
+    },
+    {
+      "text": "\t\r\n\u0085",
+      "valid": false
+    },
+    {
+      "text": "a\u202eb",
+      "valid": true
+    },
+    {
+      "text": "x",
+      "repeat": 2000,
+      "valid": true
+    },
+    {
+      "text": "x",
+      "repeat": 2001,
+      "valid": false
+    },
+    {
+      "text": "\ud83d\ude00",
+      "repeat": 2000,
+      "valid": true
+    },
+    {
+      "text": "\ud83d\ude00",
+      "repeat": 2001,
+      "valid": false
+    },
+    {
+      "text": "\u0890",
+      "valid": false
+    },
+    {
+      "text": "\u0891",
+      "valid": false
+    },
+    {
+      "text": "\ud80d\udc39\ud80d\udc3a\ud80d\udc3b\ud80d\udc3c\ud80d\udc3d\ud80d\udc3e\ud80d\udc3f",
+      "valid": false
+    },
+    {
+      "text": "\ud80d\udc39",
+      "valid": false
+    },
+    {
+      "text": "\ud80d\udc3f",
+      "valid": false
+    },
+    {
+      "text": "\u0378",
+      "valid": false
+    },
+    {
+      "text": "a\u0890",
+      "valid": true
+    }
+  ],
+  "revision": [
+    {
+      "json": "3",
+      "valid": true
+    },
+    {
+      "json": "3.0",
+      "valid": true
+    },
+    {
+      "json": "1e2",
+      "valid": true
+    },
+    {
+      "json": "1000000",
+      "valid": true
+    },
+    {
+      "json": "3.5",
+      "valid": false
+    },
+    {
+      "json": "\"3\"",
+      "valid": false
+    },
+    {
+      "json": "true",
+      "valid": false
+    },
+    {
+      "json": "null",
+      "valid": false
+    },
+    {
+      "json": "0",
+      "valid": false
+    },
+    {
+      "json": "-1",
+      "valid": false
+    },
+    {
+      "json": "1000001",
+      "valid": false
+    }
+  ],
+  "applies": [
+    {
+      "name": "a settled thread, open one revision up with a reason there",
+      "person": {
+        "status": "declined",
+        "revision": 2
+      },
+      "agent": {
+        "status": "open",
+        "revision": 3,
+        "agentReopens": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 3
+          }
+        ]
+      },
+      "applies": true
+    },
+    {
+      "name": "revisions written as 3.0",
+      "person": {
+        "status": "done",
+        "revision": 2.0
+      },
+      "agent": {
+        "status": "open",
+        "revision": 3.0,
+        "agentReopens": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 3.0
+          }
+        ]
+      },
+      "applies": true
+    },
+    {
+      "name": "two revisions up",
+      "person": {
+        "status": "done",
+        "revision": 2
+      },
+      "agent": {
+        "status": "open",
+        "revision": 4,
+        "agentReopens": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 4
+          }
+        ]
+      },
+      "applies": false
+    },
+    {
+      "name": "the person's thread is open",
+      "person": {
+        "status": "open",
+        "revision": 2
+      },
+      "agent": {
+        "status": "open",
+        "revision": 3,
+        "agentReopens": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 3
+          }
+        ]
+      },
+      "applies": false
+    },
+    {
+      "name": "the agent's copy settles it instead",
+      "person": {
+        "status": "done",
+        "revision": 2
+      },
+      "agent": {
+        "status": "declined",
+        "revision": 3,
+        "agentReopens": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 3
+          }
+        ]
+      },
+      "applies": false
+    },
+    {
+      "name": "an invisible reason",
+      "person": {
+        "status": "done",
+        "revision": 2
+      },
+      "agent": {
+        "status": "open",
+        "revision": 3,
+        "agentReopens": [
+          {
+            "text": "\ufeff\u200b",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 3
+          }
+        ]
+      },
+      "applies": false
+    },
+    {
+      "name": "a control-character reason",
+      "person": {
+        "status": "done",
+        "revision": 2
+      },
+      "agent": {
+        "status": "open",
+        "revision": 3,
+        "agentReopens": [
+          {
+            "text": "\u001f",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 3
+          }
+        ]
+      },
+      "applies": false
+    },
+    {
+      "name": "a fractional revision",
+      "person": {
+        "status": "done",
+        "revision": 2
+      },
+      "agent": {
+        "status": "open",
+        "revision": 3,
+        "agentReopens": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 3.5
+          }
+        ]
+      },
+      "applies": false
+    },
+    {
+      "name": "no record at the new revision",
+      "person": {
+        "status": "done",
+        "revision": 2
+      },
+      "agent": {
+        "status": "open",
+        "revision": 3,
+        "agentReopens": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 2
+          }
+        ]
+      },
+      "applies": false
+    },
+    {
+      "name": "past the revision cap",
+      "person": {
+        "status": "done",
+        "revision": 1000000
+      },
+      "agent": {
+        "status": "open",
+        "revision": 1000001,
+        "agentReopens": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 1000001
+          }
+        ]
+      },
+      "applies": false
+    }
+  ],
+  "parse": [
+    {
+      "name": "a reply revision written as 3.0",
+      "request": {
+        "status": "done",
+        "revision": 3,
+        "replies": [
+          {
+            "status": "done",
+            "text": "Fixed",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 3.0
+          }
+        ]
+      },
+      "parses": true
+    },
+    {
+      "name": "a fractional reply revision",
+      "request": {
+        "status": "done",
+        "revision": 3,
+        "replies": [
+          {
+            "status": "done",
+            "text": "Fixed",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 2.5
+          }
+        ]
+      },
+      "parses": false
+    },
+    {
+      "name": "a comment revision written as 2.0",
+      "request": {
+        "status": "open",
+        "revision": 2,
+        "comments": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 2.0,
+            "action": "reply"
+          }
+        ]
+      },
+      "parses": true
+    },
+    {
+      "name": "a comment above its thread's revision",
+      "request": {
+        "status": "open",
+        "revision": 2,
+        "comments": [
+          {
+            "text": "Why?",
+            "createdAt": "2026-10-21T12:00:00Z",
+            "revision": 3,
+            "action": "reply"
+          }
+        ]
+      },
+      "parses": false
+    },
+    {
+      "name": "a thread revision written as 2.0",
+      "request": {
+        "status": "open",
+        "revision": 2.0
+      },
+      "parses": true
+    },
+    {
+      "name": "a fractional thread revision",
+      "request": {
+        "status": "open",
+        "revision": 2.5
+      },
+      "parses": false
+    }
+  ]
+}

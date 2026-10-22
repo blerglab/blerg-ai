@@ -7,6 +7,9 @@ import { proposalsChanged } from '../hooks/useProposalInbox'
 import { approveFailureMessage } from '../lib/proposals'
 import type { ProposalInfo } from '../types'
 import ProposalPreview from './ProposalPreview'
+import BoardCreateAccess from './BoardCreateAccess'
+import { requestedBoardAccess } from '../lib/boardCreate'
+import type { BoardLevel } from '../lib/permissionsModal'
 
 async function responseError(res: Response) {
   const body = await res.json().catch(() => ({})) as { error?: string }
@@ -48,11 +51,15 @@ export function PendingProposal({ proposal: p, refresh }: { proposal: ProposalIn
   const [busy, setBusy] = useState(false)
   const inFlight = useRef(false)
   const [error, setError] = useState('')
+  const boardCreate = p.kind === 'board_create'
+  const [access, setAccess] = useState<BoardLevel>(() => requestedBoardAccess(p))
+  const exact = p.kind === 'board_file' || p.kind === 'plugin_request' || boardCreate
   async function decide(action: 'approve' | 'reject') {
     if (inFlight.current) return
     inFlight.current = true; setBusy(true); setError('')
-    const body = action === 'approve' && (p.kind === 'board_file' || p.kind === 'plugin_request')
-      ? { expected_arguments_raw: p.arguments_raw, ...(p.kind === 'plugin_request' ? { scope: p.plugin_session_apply ? 'session' : 'always' } : {}) } : {}
+    const body = action === 'approve' && exact
+      ? { expected_arguments_raw: p.arguments_raw, ...(p.kind === 'plugin_request' ? { scope: p.plugin_session_apply ? 'session' : 'always' } : {}),
+          ...(boardCreate && access !== requestedBoardAccess(p) ? { access } : {}) } : {}
     try {
       const res = await apiFetch(`/api/proposals/${encodeURIComponent(p.id)}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       if (!res.ok) throw new Error(action === 'approve' ? approveFailureMessage(res.status, await responseError(res)) : await responseError(res))
@@ -65,11 +72,12 @@ export function PendingProposal({ proposal: p, refresh }: { proposal: ProposalIn
     <ProposalExpiry proposal={p} onChanged={refresh} />
     <div className="proposal-attention-actions">
       {confirm ? <>
-        <p>Approve this exact request{p.kind === 'plugin_request' ? p.plugin_session_apply ? ' for this session only' : ' for new sessions' : ''}?</p>
+        {boardCreate && <BoardCreateAccess proposal={p} value={access} onChange={setAccess} disabled={busy} />}
+        <p>{boardCreate ? 'Create this board with your access?' : <>Approve this exact request{p.kind === 'plugin_request' ? p.plugin_session_apply ? ' for this session only' : ' for new sessions' : ''}?</>}</p>
         <button type="button" disabled={busy} onClick={() => void decide('approve')}>Confirm approve</button>
         <button type="button" disabled={busy} onClick={() => setConfirm(false)}>Cancel</button>
       </> : <>
-        <button type="button" disabled={busy || (p.kind === 'board_file' || p.kind === 'plugin_request') && !p.arguments_raw} onClick={() => setConfirm(true)}>Approve</button>
+        <button type="button" disabled={busy || exact && !p.arguments_raw} onClick={() => setConfirm(true)}>Approve</button>
         <button type="button" disabled={busy} onClick={() => void decide('reject')}>Reject</button>
         <Link to={`/proposals?id=${encodeURIComponent(p.id)}`}>Review{p.kind === 'board_file' ? ' or edit' : ''}</Link>
       </>}

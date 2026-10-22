@@ -18,6 +18,21 @@ export interface AskState {
   open: boolean
   /** The answer, when it is known (empty: closed without one). */
   answer: string
+  /** Who answered or dismissed it ('you': the person; 'parent': the parent session; 'other':
+   *  another person, for a dismissal), when known. */
+  by?: 'you' | 'parent' | 'other'
+  /** When it was answered (the answer's event time), when known. */
+  at?: string
+  /** The person dismissed it from Needs you (they may have answered in the chat). */
+  dismissed?: boolean
+}
+
+/** In the closed-asks map: a person dismissed it (no answer); who, when known, follows (dismissedAsk). */
+export const DISMISSED_ASK = '\u0000dismissed'
+
+/** The closed-asks map's value for a dismissal by who ('you', 'other'; undefined: not known). */
+export function dismissedAsk(by?: 'you' | 'other'): string {
+  return by ? `${DISMISSED_ASK}:${by}` : DISMISSED_ASK
 }
 
 export interface Asks {
@@ -72,8 +87,8 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
   const nativeCalls = new Set<string>()
   // Whether a call returning, or the turn ending, closes the ask: never for one the server holds.
   const endsWithCall = (a: { id: string; native: boolean }) => a.id === '' || a.native
-  const close = (a: { state: AskState }, answer: string) => {
-    a.state = { open: false, answer }
+  const close = (a: { state: AskState }, answer: string, by?: AskState['by'], at?: string) => {
+    a.state = { open: false, answer, ...(by ? { by } : {}), ...(at ? { at } : {}) }
   }
   const newestOpen = (pred: (a: { id: string; noWait: boolean }) => boolean) => {
     for (let i = asks.length - 1; i >= 0; i--) if (asks[i].state.open && pred(asks[i])) return asks[i]
@@ -111,7 +126,7 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
       if (p.source === 'ask_answer') {
         const id = str(p.message_id)
         const a = id ? asks.find(x => x.id === id) : newestOpen(x => !x.noWait)
-        if (a) close(a, str(p.text))
+        if (a) close(a, str(p.text), p.answered_by === 'session' ? 'parent' : 'you', ev.ts)
       } else if (p.source !== 'system' && p.source !== 'question_answer' && !isBlergRelaySource(p.source) && !closesNoAsk(p.source)) {
         const a = newestOpen(x => x.id === '')
         if (a) close(a, str(p.text))
@@ -124,7 +139,14 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
   let open: AgentEvent | null = null
   let anyOpen = false
   for (const a of asks) {
-    if (a.state.open && (ended || (a.id && closed.has(a.id)))) close(a, a.id ? closed.get(a.id) ?? '' : '')
+    if (a.state.open && (ended || (a.id && closed.has(a.id)))) {
+      const answer = a.id ? closed.get(a.id) ?? '' : ''
+      if (answer.startsWith(DISMISSED_ASK)) {
+        const by = answer.slice(DISMISSED_ASK.length + 1)
+        a.state = { open: false, answer: '', dismissed: true, ...(by === 'you' || by === 'other' ? { by } : {}) }
+      }
+      else close(a, answer)
+    }
     byEvent.set(a.ev.client_event_id, a.state)
     if (a.state.open) {
       anyOpen = true

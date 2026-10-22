@@ -67,9 +67,9 @@ export default function BoardFilterBar({
               fontSize: '0.7rem',
               padding: '2px 8px',
               borderRadius: 4,
-              border: active ? '1px solid var(--blaze)' : '1px solid var(--stone)',
-              background: active ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
-              color: active ? 'var(--amber)' : 'var(--fog)',
+              border: active ? '1px solid var(--selected-border)' : '1px solid var(--stone)',
+              background: active ? 'var(--selected-bg)' : 'var(--basalt)',
+              color: active ? 'var(--selected-text)' : 'var(--fog)',
               cursor: 'pointer',
               fontFamily: 'inherit',
             }}
@@ -93,13 +93,18 @@ export default function BoardFilterBar({
               fontSize: '0.7rem',
               padding: '2px 8px',
               borderRadius: 4,
-              border: `1px solid ${active ? col : 'var(--stone)'}`,
-              background: active ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
-              color: active ? col : 'var(--fog)',
+              border: active ? '1px solid var(--selected-border)' : '1px solid var(--stone)',
+              background: active ? 'var(--selected-bg)' : 'var(--basalt)',
+              color: active ? 'var(--selected-text)' : 'var(--fog)',
               cursor: 'pointer',
               fontFamily: 'inherit',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
             }}
           >
+            {/* the priority's own color is a dot, in both states: the chip itself is selected blue when on */}
+            <span data-testid={`filter-priority-dot-${p}`} aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: col, flexShrink: 0 }} />
             {p}
           </button>
         )
@@ -118,9 +123,9 @@ export default function BoardFilterBar({
               fontSize: '0.7rem',
               padding: '2px 8px',
               borderRadius: 4,
-              border: active ? '1px solid var(--lichen)' : '1px solid var(--stone)',
-              background: active ? 'color-mix(in srgb, var(--lichen) 22%, var(--basalt))' : 'var(--basalt)',
-              color: active ? 'var(--lichen)' : 'var(--fog)',
+              border: active ? '1px solid var(--selected-border)' : '1px solid var(--stone)',
+              background: active ? 'var(--selected-bg)' : 'var(--basalt)',
+              color: active ? 'var(--selected-text)' : 'var(--fog)',
               cursor: 'pointer',
               fontFamily: 'inherit',
             }}

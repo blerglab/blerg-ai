@@ -429,7 +429,9 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	if pluginsCapability() {
 		hello.SessionPluginEngines = []string{"claude"}
 	}
-	hello.Plugins = pluginsCapability() // SpawnSession.Plugins (pluginworkshop.go)
+	hello.Plugins = pluginsCapability()             // SpawnSession.Plugins (pluginworkshop.go)
+	hello.PluginCatalogEngines = extensionEngines() // ReadPluginCatalog (engineextensions.go)
+	hello.MCPSignInEngines = extensionEngines()     // MCPSignIn (engineextensions.go)
 	hello.InputReceipts = true
 	hello.SandboxClones = true    // every Sandbox spawn works in its own clone (sandboxclone.go)
 	hello.SessionTokenFile = true // SessionToken → SessionTokenResult (sessiontoken.go)

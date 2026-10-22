@@ -149,3 +149,14 @@ reason; a chosen target never falls back elsewhere. On an install with desktops 
 board runs on a desktop without requiring a setting: the only one, or the one that has the board's
 repository (none or several is refused with a message saying so). After changing the automation
 owner, save its target again.
+
+A board repo given as a desktop folder name (for example `app`) runs on a desktop, which finds the
+folder, but the cluster clones `owner/name`. Unless the install has a default organization or git
+base (or the board has a git base), **Where it runs** shows **Repos for the cluster**: pick the
+desktop this folder lives on, see `app → owner/app` from that desktop's git remote, and save it; the
+board and its cards then name `owner/app`, in the same place (the board's first repo stays its
+sessions' working directory). Only the picked desktop is asked. Desktops have no owner in the runner,
+so the board cannot check whose desktop it is: resolving is kept to a signed-in board admin who owns
+the board's automation token, and nothing is saved until they confirm. A folder with no remote stays
+desktop-only, and the cluster is not offered for it. A board's repos keep the order they were given;
+the first is the working directory of board sessions.

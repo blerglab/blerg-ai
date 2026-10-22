@@ -49,3 +49,47 @@ export function planSummary(list: PlanList): string {
   const head = `${list.kind} · ${list.done} of ${list.total}`
   return list.doing?.length ? `${head} · Doing: ${list.doing.join('; ')}` : list.next ? `${head} · Next: ${list.next}` : head
 }
+
+/** An item's commits as the Plan tab shows them: one chip, once per distinct commit set (the first
+ *  row that holds it), with how many items it covers. */
+export interface PlanChip { commits: string[]; diff?: string; covers: number }
+export interface PlanRow { item: ChecklistItem; index: number; chip: PlanChip | null }
+
+/** The checklist as the Plan tab lays it out: the open and doing items first (in their order), then
+ *  the done ones. Items that share their commits (the same diff, else the same shas) show the chip
+ *  once, on the first of them in that order. */
+export function planRows(items: readonly ChecklistItem[]): { open: PlanRow[]; done: PlanRow[] } {
+  const ordered = [...items.map((item, index) => ({ item, index }))].sort((a, b) => Number(a.item.done) - Number(b.item.done) || a.index - b.index)
+  const keyOf = (it: ChecklistItem) => it.diff ? `diff:${it.diff}` : it.commits?.length ? `sha:${it.commits.join(',')}` : null
+  const covers = new Map<string, number>()
+  for (const { item } of ordered) {
+    const k = keyOf(item)
+    if (k) covers.set(k, (covers.get(k) ?? 0) + 1)
+  }
+  const seen = new Set<string>()
+  const rows = ordered.map(({ item, index }): PlanRow => {
+    const k = keyOf(item)
+    if (!k || seen.has(k)) return { item, index, chip: null }
+    seen.add(k)
+    return { item, index, chip: { commits: item.commits ?? [], ...(item.diff ? { diff: item.diff } : {}), covers: covers.get(k) ?? 1 } }
+  })
+  return { open: rows.filter(r => !r.item.done), done: rows.filter(r => r.item.done) }
+}
+
+/** Who an item is assigned to, by name, never by id: the name the server recorded, else the running
+ *  subagent's or started session's title, else what kind of worker it is. */
+export function assigneeName(
+  a: { kind: string; id: string },
+  titles: Readonly<Record<string, string>> | undefined,
+  subagents: readonly { key: string; childId?: string; title: string }[],
+  children: readonly { id: string; title: string }[],
+): string {
+  const recorded = titles?.[`${a.kind}:${a.id}`]
+  if (recorded) return recorded
+  const live = a.kind === 'subagent'
+    ? subagents.find(s => (s.childId || s.key) === a.id)?.title
+    : children.find(c => c.id === a.id)?.title
+  // The chat's placeholder for a subagent it never saw start says nothing more than the kind.
+  if (live && !live.startsWith('Subagent · ')) return live
+  return a.kind === 'subagent' ? 'a subagent' : 'a started session'
+}

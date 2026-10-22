@@ -912,9 +912,10 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "enum": ["agent"]
             },
-            "description": "agent (default) or tmux"
+            "description": "agent, the default and the only kind a new session can be"
           },
           {
             "name": "restricted",
@@ -1579,6 +1580,22 @@
                 "has_repo": {
                   "type": "boolean",
                   "description": "A desktop, when the request names a repo: whether it has a folder for that repo."
+                },
+                "repo_origin": {
+                  "type": "object",
+                  "description": "Only the desktop named by daemon_id, for a bare repo folder it has: the hosted repository its origin remote points at. Absent when the folder has no recognised remote. No other desktop's remote is reported.",
+                  "properties": {
+                    "provider": {
+                      "type": "string"
+                    },
+                    "full_name": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "resolves_bare_repos": {
+                  "type": "boolean",
+                  "description": "The cluster: the install has a default organization or git base, so a bare repo name resolves on the cluster without owner/name."
                 }
               }
             }

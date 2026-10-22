@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/ticket"
 )
 
 type liveChild struct {
@@ -29,6 +30,19 @@ type liveChild struct {
 	Asking         bool       `json:"asking"`
 	Tokens         *int64     `json:"tokens"`
 	CostUSD        *float64   `json:"cost_usd,omitempty"`
+	// Ticket is the started session's current pin (the newest it pinned and still holds): the
+	// parent's panel shows it on the child's row.
+	Ticket *liveChildTicket `json:"ticket,omitempty"`
+}
+
+// liveChildTicket is a child's current pin, the summary fields only.
+type liveChildTicket struct {
+	Source  string `json:"source"`
+	Key     string `json:"key"`
+	BoardID string `json:"board_id,omitempty"`
+	Title   string `json:"title"`
+	Status  string `json:"status"`
+	URL     string `json:"url,omitempty"`
 }
 
 type liveDelegationRequest struct {
@@ -135,6 +149,14 @@ func (a *API) liveChildren(ctx context.Context, rows []db.ChildLiveRow, account 
 			return nil, nil, err
 		}
 		progress := childTelemetry(&c, snapshot)
+		pins, err := db.ListTicketRows(ctx, a.dbPool, row.ID, row.MaxSeq)
+		if err != nil {
+			return nil, nil, err
+		}
+		if cur := ticket.Pinned(pins); len(cur) > 0 {
+			p := cur[0]
+			c.Ticket = &liveChildTicket{Source: p.Source, Key: p.Key, BoardID: p.BoardID, Title: p.Title, Status: p.Status, URL: p.URL}
+		}
 		c.UsageStatus = "hidden"
 		if showTokens && (admin || account != "" && account == row.Owner) {
 			usage, err := db.ListSessionTokenUsageThrough(ctx, a.dbPool, row.ID, row.MaxSeq)

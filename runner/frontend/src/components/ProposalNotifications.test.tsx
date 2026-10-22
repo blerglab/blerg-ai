@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { BrandHeader } from '../App'
-import { ProposalBell } from './ProposalNotifications'
+import ProposalNotifications, { ProposalBell } from './ProposalNotifications'
 import { resetProposalWarnings } from '../lib/proposalAttention'
 import { useToastStore } from '../hooks/useToastStore'
 import { useMessageStore } from '../hooks/useMessageStore'
 import type { ProposalInfo } from '../types'
+import { DISMISS_UNDO_MS, useDismissStore } from '../lib/needsYouDismiss'
 
 const apiFetch = vi.fn()
 vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }))
@@ -21,7 +21,7 @@ beforeEach(() => {
 })
 afterEach(() => vi.useRealTimers())
 async function mount() {
-  render(<MemoryRouter><BrandHeader /></MemoryRouter>)
+  render(<MemoryRouter><ProposalNotifications /></MemoryRouter>)
   await act(async () => { for (let i = 0; i < 12; i++) await Promise.resolve() })
 }
 describe('questions in the bell', () => {
@@ -44,6 +44,67 @@ describe('questions in the bell', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].textContent).toContain('Ship the blue one?')
     expect(screen.getByRole('link', { name: 'Answer in the session' }).getAttribute('href')).toBe('/sessions/sess-q')
+  })
+})
+
+describe('review requests and Dismiss in the bell (card #155)', () => {
+  afterEach(() => { useMessageStore.setState({ messages: [] }); useDismissStore.setState({ hidden: new Set() }) })
+  it('lists my pending review requests beside questions, and Dismiss closes each after its Undo time', async () => {
+    items = []
+    const review = { request_id: 'r1', session_id: 'sess-q', artifact_id: 'a1', artifact_name: 'plan.md', artifact_version: 2, ask: 'Approve the plan?', url: '/sessions/sess-q?artifact=a1' }
+    apiFetch.mockImplementation(async (url: string) => ({ ok: true, status: 200,
+      json: async () => (url === '/api/review-requests' ? { review_requests: [review] } : { proposals: items }) }))
+    useMessageStore.setState({ messages: [
+      { id: 'q1', session_id: 'sess-q', kind: 'ask', body: 'Ship the blue one?', status: 'open', created_at: new Date().toISOString(), no_wait: true, answerable: true },
+    ] })
+    await mount()
+    const bell = screen.getByRole('button', { name: /Notifications/ })
+    expect(bell.getAttribute('aria-label')).toContain('1 question, 1 review')
+    fireEvent.click(bell)
+    const row = screen.getByTestId('bell-review')
+    expect(row.textContent).toContain('plan.md v2: Approve the plan?')
+    expect(screen.getByRole('link', { name: 'Review in the session' }).getAttribute('href')).toBe('/sessions/sess-q?artifact=a1')
+    vi.useFakeTimers()
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss review request: plan.md' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss question: Ship the blue one?' }))
+    expect(screen.queryByTestId('bell-review')).toBeNull()
+    expect(screen.queryByTestId('bell-question')).toBeNull()
+    expect(useToastStore.getState().toasts.map(t => [t.title, t.action?.label])).toEqual([['Dismissed', 'Undo'], ['Dismissed', 'Undo']])
+    const posted = () => apiFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST').map(([url, init]) => [url, (init as RequestInit).body ?? null])
+    expect(posted()).toEqual([])
+    await act(async () => { vi.advanceTimersByTime(DISMISS_UNDO_MS) })
+    expect(posted()).toEqual([['/api/review-requests/r1/decide', '{"decision":"dismiss"}'], ['/api/messages/q1/dismiss', null]])
+  })
+
+  it('Undo brings it back and sends nothing; a refused dismissal comes back with the reason', async () => {
+    items = []
+    useMessageStore.setState({ messages: [
+      { id: 'q1', session_id: 'sess-q', kind: 'ask', body: 'Ship it?', status: 'open', created_at: new Date().toISOString(), no_wait: true, answerable: true },
+    ] })
+    await mount()
+    fireEvent.click(screen.getByRole('button', { name: /Notifications/ }))
+    vi.useFakeTimers()
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss question: Ship it?' }))
+    expect(screen.queryByTestId('bell-question')).toBeNull()
+    act(() => useToastStore.getState().toasts[0].action!.onClick())
+    expect(screen.getByTestId('bell-question')).toBeTruthy()
+    await act(async () => { vi.advanceTimersByTime(DISMISS_UNDO_MS * 2) })
+    expect(apiFetch.mock.calls.some(([url]) => String(url).includes('/dismiss'))).toBe(false)
+    apiFetch.mockImplementation(async (url: string) => (String(url).includes('/dismiss')
+      ? { ok: false, status: 500, json: async () => ({ error: 'update failed' }) }
+      : { ok: true, status: 200, json: async () => ({ proposals: items }) }))
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss question: Ship it?' }))
+    await act(async () => { vi.advanceTimersByTime(DISMISS_UNDO_MS); for (let i = 0; i < 6; i++) await Promise.resolve() })
+    expect(screen.getByTestId('bell-question')).toBeTruthy()
+    expect(useToastStore.getState().toasts.some(t => t.title === 'Could not dismiss' && t.body.includes('update failed'))).toBe(true)
+    // Already closed elsewhere (409): nothing to say (card #155 review M3).
+    useToastStore.setState({ toasts: [] })
+    apiFetch.mockImplementation(async (url: string) => (String(url).includes('/dismiss')
+      ? { ok: false, status: 409, json: async () => ({ error: 'message already answered or not open' }) }
+      : { ok: true, status: 200, json: async () => ({ proposals: items }) }))
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss question: Ship it?' }))
+    await act(async () => { vi.advanceTimersByTime(DISMISS_UNDO_MS); for (let i = 0; i < 6; i++) await Promise.resolve() })
+    expect(useToastStore.getState().toasts.some(t => t.title === 'Could not dismiss')).toBe(false)
   })
 })
 

@@ -99,21 +99,26 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
     }
   }, [])
 
-  // Redraw the overlay from the vector state whenever anything that shows on it changes.
+  // Redraw the overlay from the vector state whenever anything that shows on it changes. The
+  // canvas first takes the image's exact box inside the stage (the stage can be wider than a
+  // height-capped image), then draws in image pixels at one uniform scale.
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || !natural) return
-    const rect = canvas.getBoundingClientRect()
+    const img = imgRef.current
+    if (!canvas || !img || !natural) return
+    const box = imageBox(img, natural)
+    placeCanvas(canvas, img, box)
     const dpr = window.devicePixelRatio || 1
-    const w = Math.max(1, Math.round((rect.width || natural.w) * dpr))
-    const h = Math.max(1, Math.round((rect.height || natural.h) * dpr))
+    const w = Math.max(1, Math.round((box.width || natural.w) * dpr))
+    const h = Math.max(1, Math.round((box.height || natural.h) * dpr))
     if (canvas.width !== w) canvas.width = w
     if (canvas.height !== h) canvas.height = h
     const ctx = canvas.getContext('2d')
     if (!ctx) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, w, h)
-    ctx.scale(w / natural.w, h / natural.h)
+    const k = box.width ? (box.scale * dpr) : Math.min(w / natural.w, h / natural.h)
+    ctx.scale(k, k)
     drawMarks(ctx, natural, draft ? [...shapes, draft] : shapes, exportPins, colorsOf(rootRef.current))
     if (selectedLayer && !selectedLayer.hidden) drawSelection(ctx, selectedLayer.shape, natural, colorsOf(rootRef.current).accent)
   }, [natural, shapes, exportPins, draft, layout, selectedLayer])
@@ -125,6 +130,8 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
     const bump = () => setLayout(n => n + 1)
     const ro = new ResizeObserver(bump)
     ro.observe(img)
+    // The image can move inside the stage without changing size (the stage grows around it).
+    if (img.parentElement) ro.observe(img.parentElement)
     window.addEventListener('resize', bump)
     return () => {
       ro.disconnect()
@@ -147,14 +154,15 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
     setNatural({ w: img.naturalWidth || rect.width || 1, h: img.naturalHeight || rect.height || 1 })
   }
 
-  // Pointer position in image pixels.
+  // Pointer position in image pixels, measured against the image's own box (not the stage's),
+  // with one scale factor for both axes.
   const toImage = useCallback((e: React.PointerEvent): Point | null => {
-    const canvas = canvasRef.current
-    if (!canvas || !natural) return null
-    const rect = canvas.getBoundingClientRect()
-    if (!rect.width || !rect.height) return null
-    const x = ((e.clientX - rect.left) / rect.width) * natural.w
-    const y = ((e.clientY - rect.top) / rect.height) * natural.h
+    const img = imgRef.current
+    if (!img || !natural) return null
+    const box = imageBox(img, natural)
+    if (!box.scale) return null
+    const x = (e.clientX - box.left) / box.scale
+    const y = (e.clientY - box.top) / box.scale
     return { x: clamp(x, 0, natural.w), y: clamp(y, 0, natural.h) }
   }, [natural])
 
@@ -176,7 +184,7 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
     if (!p) return
     e.preventDefault()
     if (tool === 'select') {
-      const layer = [...layers].reverse().find(layer => !layer.hidden && hitShape(layer.shape, p, 10 * natural!.w / e.currentTarget.getBoundingClientRect().width))
+      const layer = [...layers].reverse().find(layer => !layer.hidden && hitShape(layer.shape, p, 10 / (imageBox(imgRef.current!, natural!).scale || 1)))
       selectLayer(layer?.n ?? null)
       return
     }
@@ -429,6 +437,30 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
       </div>
     </div>
   )
+}
+
+type ImageBox = { left: number; top: number; width: number; height: number; scale: number }
+
+/** Where the image's pixels are on screen: the <img> box, with the natural size fitted into it
+ *  at one uniform scale (centered if the box's aspect ever differs from the image's). */
+function imageBox(img: HTMLImageElement, natural: { w: number; h: number }): ImageBox {
+  const rect = img.getBoundingClientRect()
+  if (!rect.width || !rect.height) return { left: rect.left, top: rect.top, width: 0, height: 0, scale: 0 }
+  const scale = Math.min(rect.width / natural.w, rect.height / natural.h)
+  const width = natural.w * scale
+  const height = natural.h * scale
+  return { left: rect.left + (rect.width - width) / 2, top: rect.top + (rect.height - height) / 2, width, height, scale }
+}
+
+/** Puts the overlay canvas exactly over the image's pixels inside the (positioned) stage. */
+function placeCanvas(canvas: HTMLCanvasElement, img: HTMLImageElement, box: ImageBox) {
+  const stage = img.offsetParent instanceof HTMLElement ? img.offsetParent : img.parentElement
+  if (!stage || !box.width) return
+  const s = stage.getBoundingClientRect()
+  canvas.style.left = `${box.left - s.left - stage.clientLeft}px`
+  canvas.style.top = `${box.top - s.top - stage.clientTop}px`
+  canvas.style.width = `${box.width}px`
+  canvas.style.height = `${box.height}px`
 }
 
 function layerPin(layer: Layer, natural: {w: number; h: number} | null): Pin {

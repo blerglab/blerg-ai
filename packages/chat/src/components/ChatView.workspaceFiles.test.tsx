@@ -4,9 +4,10 @@ import ChatView from './ChatView'
 import { createFakeTransport } from '../test/fakeTransport'
 import { ev, meta, resetChatState, seed, SESSION } from '../test/chat'
 import { WorkspaceFileError } from '../transport/files'
+import { resetImageQueueBackoff } from '../model/imageQueue'
 import type { ArtifactInfo, WorkspaceFile } from '../transport/types'
 
-beforeEach(resetChatState)
+beforeEach(() => { resetChatState(); resetImageQueueBackoff() })
 
 const file = (over: Partial<WorkspaceFile> & { body?: string } = {}): WorkspaceFile => {
   const { body = '# Hello', ...rest } = over
@@ -98,15 +99,40 @@ describe('files the agent names', () => {
     expect(document.getElementById('p')).toBeNull()
   })
 
-  it('draws svg only through <img> on a blob URL', async () => {
+  it('draws svg only through <img> on a data: URL, never a same-origin blob: one', async () => {
     const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x')
     mount('`logo.svg`', { reply: async path => file({ path, view: 'image', content_type: 'image/svg+xml', body: '<svg onload="x()"></svg>' }) })
     fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
     const img = await screen.findByRole('img', { name: 'logo.svg' })
-    expect(img.getAttribute('src')).toBe('blob:x')
+    expect(img.getAttribute('src')).toMatch(/^data:image\/svg\+xml;base64,/)
     expect(document.querySelector('svg[onload]')).toBeNull()
-    expect((create.mock.calls[0][0] as Blob).type).toBe('image/svg+xml')
+    expect(create).not.toHaveBeenCalled()
     create.mockRestore()
+  })
+
+  it('on a timeout still says what the server said, not only that it took too long', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      mount('`README.md`', { reply: async () => { throw new WorkspaceFileError(409, 'The workspace file reader is busy.', 'err-busy', 'busy') } })
+      fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+      await vi.advanceTimersByTimeAsync(25_000)
+      const box = await screen.findByTestId('workspace-error')
+      expect(box.textContent).toContain('The file reader is busy')
+      expect(box.textContent).not.toContain('took too long')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('waits out a busy reader (409 busy) and opens the file', async () => {
+    let calls = 0
+    mount('`README.md`', { reply: async path => {
+      if (++calls === 1) throw new WorkspaceFileError(409, 'The workspace file reader is busy.', 'err-busy', 'busy')
+      return file({ path, body: '# Opened after the wait' })
+    } })
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    expect(await screen.findByRole('heading', { name: 'Opened after the wait' }, { timeout: 5000 })).toBeInTheDocument()
+    expect(calls).toBe(2)
   })
 
   it.each([
@@ -114,7 +140,6 @@ describe('files the agent names', () => {
     [403, 'Blerg doesn\'t open files that usually hold secrets (restricted filename).', 'Blerg doesn’t open files that usually hold secrets'],
     [403, 'Blerg could not safely open that workspace file.', 'Blerg can’t open that path'],
     [409, 'The session has no live workspace daemon.', 'The session isn’t running, so its files can’t be read'],
-    [409, 'The workspace file reader is busy.', 'busy'],
     [413, 'The workspace file is larger than its configured size limit.', 'Too large to open here'],
   ])('maps %i to a sentence of its own, with the error id and not the raw text', async (status, text, want) => {
     mount('`README.md`', { reply: async () => { throw new WorkspaceFileError(status, text, 'err-77') } })
@@ -144,5 +169,30 @@ describe('files the agent names', () => {
     expect(files!.uploads).toHaveLength(1)
     expect(files!.uploads[0].file.name).toBe('a.txt')
     expect(await files!.uploads[0].file.text()).toBe('kept')
+  })
+
+  it('renders a folder README’s HTML: its images from the folder beside it, its links to the folder’s files', async () => {
+    const realCreate = URL.createObjectURL
+    URL.createObjectURL = vi.fn(() => 'blob:http://localhost/banner')
+    try {
+      const readme = '<p align="center"><img src="brand/banner.png" alt="Banner" width="100%"></p>\n\nSee <a href="AGENTS.md">AGENTS.md</a>.\n'
+      const plan: ArtifactInfo = { id: 'p1', name: 'AGENTS.md', size: 20, content_type: 'text/markdown', view: 'markdown', origin: 'agent' }
+      const { read } = mount('Open `docs/README.md`.', {
+        published: [plan],
+        reply: async path => path === 'docs/brand/banner.png'
+          ? file({ path, view: 'image', content_type: 'image/png', body: 'png' })
+          : file({ path, body: path === 'docs/README.md' ? readme : '# Agents' }),
+      })
+      fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+      const dialog = await screen.findByRole('dialog', { name: /docs\/README\.md/ })
+      const img = await within(dialog).findByAltText('Banner')
+      expect(img.getAttribute('src')).toBe('blob:http://localhost/banner')
+      expect(read.mock.calls.map(c => c[1])).toContain('docs/brand/banner.png')
+      // A relative link opens the folder's file beside the README, not the published file of that name.
+      fireEvent.click(within(dialog).getByText('AGENTS.md'))
+      await waitFor(() => expect(read.mock.calls.map(c => c[1])).toContain('docs/AGENTS.md'))
+    } finally {
+      URL.createObjectURL = realCreate
+    }
   })
 })

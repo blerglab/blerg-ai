@@ -46,9 +46,9 @@
 }
 
 .markup-tool[aria-pressed='true'] {
-  background: var(--chat-accent);
-  border-color: var(--chat-accent);
-  color: var(--chat-accent-fg);
+  background: var(--chat-selected-bg);
+  border-color: var(--chat-selected-border);
+  color: var(--chat-selected-text);
 }
 
 .markup-tool:disabled {
@@ -91,8 +91,8 @@
 }
 
 .markup-width[aria-pressed='true'] {
-  border-color: var(--chat-accent);
-  background: color-mix(in srgb, var(--chat-accent) 18%, transparent);
+  border-color: var(--chat-selected-border);
+  background: var(--chat-selected-bg);
 }
 
 .markup-width-dot {
@@ -238,7 +238,7 @@
 .markup-sidebar h3 { margin: 0; font-size: var(--chat-text-sm); }
 .markup-layers { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
 .markup-layer { border: 1px solid var(--chat-border); border-radius: var(--chat-radius); padding: 8px; min-width: 0; }
-.markup-layer.is-selected { border-color: var(--chat-accent); }
+.markup-layer.is-selected { border-color: var(--chat-selected-border); }
 .markup-layer.is-hidden { border-style: dashed; }
 .markup-layer-heading { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
 .markup-layer .markup-note { box-sizing: border-box; width: 100%; }

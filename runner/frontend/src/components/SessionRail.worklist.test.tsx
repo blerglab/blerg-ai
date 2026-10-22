@@ -131,7 +131,7 @@ describe('session panel: ticket, checklist and plan', () => {
     seedSession(); seedEvents(user()); await renderPage()
     const panel = screen.getByTestId('session-rail')
     const reference = within(within(panel).getByTestId('rail-subagent')).getByTestId('rail-checklist-reference')
-    expect(reference).toHaveTextContent('Assigned work')
+    expect(reference).toHaveAccessibleName('Plan · Assigned work')
     fireEvent.click(reference)
     await waitFor(() => expect(document.activeElement).toHaveAttribute('data-checklist-id','native-work'))
     expect(within(panel).getByRole('tab',{name:/Plan/})).toHaveAttribute('aria-selected','true')
@@ -236,8 +236,12 @@ describe('session panel: ticket, checklist and plan', () => {
     expect(within(panel).getByTestId('rail-checklist-meta')).toHaveTextContent('1 of 3 done')
     expect(within(panel).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '1')
     const rows = within(panel).getAllByTestId('rail-ticket-row')
-    expect(within(rows[0]).getByRole('link', { name: 'ABC-1' })).toHaveAttribute('href', 'https://jira.example.test/browse/ABC-1')
+    // One compact line each (card #134), with its state's glyph; no link out of Blerg in the line
+    // (the ticket's dialog has "Open in Jira").
+    expect(rows.map(r => r.dataset.state)).toEqual(['doing', 'todo'])
+    expect(within(rows[0]).queryByRole('link')).toBeNull()
     expect(within(rows[1]).queryByRole('link')).toBeNull()
+    expect(within(panel).getByTestId('rail-ticket-done')).toHaveTextContent('0 of 2 done')
     fireEvent.click(within(rows[0]).getByTestId('rail-ticket-open'))
     const modal = await screen.findByTestId('ticket-modal')
     expect(modal).toHaveTextContent('Steps to reproduce')
@@ -245,7 +249,7 @@ describe('session panel: ticket, checklist and plan', () => {
     expect(screen.queryByTestId('ticket-modal')).toBeNull()
   })
 
-  it('gives an item whose commits have a published diff a View diff, and none to an item without', async () => {
+  it('gives an item whose commits have a published diff a chip that opens it; one commit without a diff opens it from the workspace', async () => {
     const diff = 'd'.repeat(32)
     stubFetch(0, liveReply({
       checklist: { items: [{ text: 'Fix', done: true, commits: ['abcdef1'], diff }, { text: 'Ship', done: true, commits: ['1234567'] }], event_id: 'c1', updated_at: iso(0) },
@@ -256,13 +260,11 @@ describe('session panel: ticket, checklist and plan', () => {
     const panel = await screen.findByTestId('session-rail')
     fireEvent.click(await within(panel).findByRole('tab', { name: /Plan/ }))
     const list = within(panel).getByTestId('rail-checklist')
-    const buttons = within(list).getAllByRole('button', { name: /View diff/ })
-    expect(buttons).toHaveLength(1)
-    // The item with a diff opens it at a sha; the one without copies its sha.
-    expect(within(list).getByRole('button', { name: 'Open commit abcdef1 in the diff' })).toBeTruthy()
-    expect(within(list).getByRole('button', { name: 'Copy commit 1234567' })).toBeTruthy()
+    fireEvent.click(within(list).getByTestId('rail-plan-done-toggle'))
+    expect(within(list).getByRole('button', { name: /^Open the diff of commit abcdef1/ })).toBeTruthy()
+    // No published diff: the commit's diff generated on demand from the session (card #131).
+    expect(within(list).getByRole('button', { name: 'Open the diff of commit 1234567' })).toBeTruthy()
     expect(list.querySelector('a')).toBeNull()
-    fireEvent.click(buttons[0])
   })
 
   it('shows the engine\'s plan when there is no checklist, labelled by what is in progress', async () => {

@@ -20,15 +20,20 @@ describe('a running child shows once, in Chromium', () => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     const show = vi.fn()
     const { container, getByTestId, getAllByTestId } = render(<MemoryRouter><div style={{ width: 'min(420px, 100%)' }}>
-      <section data-testid="running"><ul className="rail-list"><ChildSessionRow child={base} now={now} parentId="parent" /></ul></section>
+      <section data-testid="running"><ul className="rail-list"><ChildSessionRow variant="run" child={base} now={now} parentId="parent" /></ul></section>
       <StartedSessions sessionId="parent" children={[base, stopped]} now={now} onShowRunning={show} />
     </div></MemoryRouter>)
     expect(getAllByTestId('rail-child')).toHaveLength(2)
     const card = getByTestId('running').querySelector('[data-testid="rail-child"]') as HTMLElement
-    expect(card.textContent).toContain('high')
+    // Its words are the title's description (the row's hovercard shows them; card #129).
+    expect(card.querySelector('[data-testid="rail-child-open"]')!.getAttribute('aria-description')).toContain('effort: high')
     expect(card.textContent).toContain('Bash · npm test')
     expect(card.querySelector(".rail-clock")?.textContent).toBe("2 min")
-    const button = card.querySelector('.rail-child-button')!.getBoundingClientRect()
+    // The current activity keeps its own clock, on the step line.
+    expect(card.querySelector('.rail-run-second .rail-clock')?.getAttribute('title')).toBe('Current activity elapsed')
+    expect(card.querySelectorAll('.rail-run-line')).toHaveLength(2)
+    expect(card.getBoundingClientRect().height).toBeLessThan(64)
+    const button = card.querySelector('.rail-run-line')!.getBoundingClientRect()
     const discard = card.querySelector('.child-discard-trigger')!.getBoundingClientRect()
     expect(discard.left).toBeGreaterThanOrEqual(button.right)
     expect(discard.right).toBeLessThanOrEqual(width)

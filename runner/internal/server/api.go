@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -23,7 +22,6 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/scratch"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -137,9 +135,10 @@ type API struct {
 	// Deliberately the API's own copy rather than the JobManager's: the
 	// JobManager exists only in-cluster with an agent image configured,
 	// while this endpoint must answer on every deployment shape.
-	coreURL         string         // BLERG_CORE_URL
-	coreInternalKey string         // BLERG_RUNNER_CORE_INTERNAL_KEY
-	siteBoard       siteBoardCache // GET /api/site-board: core's browser-facing Board URL (site_board.go)
+	coreURL         string           // BLERG_CORE_URL
+	coreInternalKey string           // BLERG_RUNNER_CORE_INTERNAL_KEY
+	siteBoard       siteBoardCache   // GET /api/site-board: core's browser-facing Board URL (site_board.go)
+	boardLimits     boardLimitsCache // the session board call limits core's settings set (board_limits.go)
 
 	// ssePollInterval/sseKeepaliveInterval pace the agent-contract SSE stream
 	// (events_stream.go). Zero means the production defaults; tests shorten
@@ -409,14 +408,16 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 // answer/answered_at (answer may be nil for an update).
 func messageRowToInfo(row db.MessageRow) protocol.MessageInfo {
 	info := protocol.MessageInfo{
-		ID:        row.ID,
-		SessionID: row.SessionID,
-		Kind:      row.Kind,
-		Body:      row.Body,
-		Status:    row.Status,
-		Answer:    row.Answer,
-		CreatedAt: row.CreatedAt.UTC().Format(time.RFC3339),
-		NoWait:    row.NoWait,
+		ID:          row.ID,
+		SessionID:   row.SessionID,
+		Kind:        row.Kind,
+		Body:        row.Body,
+		Status:      row.Status,
+		Answer:      row.Answer,
+		CreatedAt:   row.CreatedAt.UTC().Format(time.RFC3339),
+		NoWait:      row.NoWait,
+		Dismissed:   row.Dismissed,
+		DismissedBy: row.DismissedBy,
 	}
 	if row.AnsweredAt != nil {
 		s := row.AnsweredAt.UTC().Format(time.RFC3339)
@@ -699,7 +700,7 @@ type spawnSessionRequest struct {
 	NewRepo bool `json:"new_repo,omitempty"`
 	// Visibility of a cluster NewRepo: "private" (default) or "public".
 	Visibility string `json:"visibility,omitempty"`
-	Kind       string `json:"kind,omitempty"`    // "" (tmux) | "agent"
+	Kind       string `json:"kind,omitempty"`    // "agent"; legacy "" and "tmux" starts are deprecated
 	Runtime    string `json:"runtime,omitempty"` // "" (daemon) | "docker" | "cluster"
 	Engine     string `json:"engine,omitempty"`  // "" (claude) | "codex" | "hermes" | "openclaw" (openclaw: daemon runtime only, not cluster)
 	// Provider is the git provider Repo lives on — a registered gitprovider
@@ -780,6 +781,11 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if problem := newSessionKindProblem(req.Kind); problem != "" {
+		writeError(w, http.StatusUnprocessableEntity, problem)
+		return
+	}
+	req.Title = cleanSessionTitle(req.Title) // as every title is stored (session_rename.go)
 	// Only a signed-in person may attach MCP connections: refuse anyone else before
 	// anything else is looked at.
 	if len(req.MCP) > 0 || req.BoardID != "" {
@@ -1647,52 +1653,6 @@ type patchSessionRequest struct {
 	Title string `json:"title"`
 }
 
-// HandlePatchSession updates the title of the given session.
-func (a *API) HandlePatchSession(w http.ResponseWriter, r *http.Request) {
-	principal, ok := a.authBrowser(w, r)
-	if !ok {
-		return
-	}
-	sessionID := r.PathValue("id")
-	if sessionID == "" {
-		writeError(w, http.StatusBadRequest, "session id required")
-		return
-	}
-	if !a.browserCanSee(r.Context(), principal.Sub, sessionID) {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	var req patchSessionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-
-	if req.Title == "" {
-		writeError(w, http.StatusUnprocessableEntity, "title is required")
-		return
-	}
-
-	if a.dbPool == nil {
-		writeError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
-	if err := db.UpdateSessionTitle(r.Context(), a.dbPool, sessionID, req.Title); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "session not found")
-			return
-		}
-		log.Printf("api patch session title: %v", err)
-		writeError(w, http.StatusInternalServerError, "update failed")
-		return
-	}
-
-	a.hub.BroadcastTitleChanged(sessionID, req.Title)
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // ─── GET /api/push/vapid-public-key ──────────────────────────────────────────
 
 // HandleGetVapidPublicKey returns the VAPID public key for push subscription.
@@ -1734,6 +1694,38 @@ func (a *API) HandlePostPushSubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+// ─── DELETE /api/push/subscribe ───────────────────────────────────────────────
+
+// HandleDeletePushSubscribe removes a browser push subscription by its endpoint: the browser
+// turned push off (the bell's Push notifications setting). The endpoint is the subscription's
+// unguessable URL; an unknown one is a no-op.
+func (a *API) HandleDeletePushSubscribe(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.authBrowser(w, r); !ok {
+		return
+	}
+	var req struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.Endpoint == "" {
+		writeError(w, http.StatusUnprocessableEntity, "endpoint is required")
+		return
+	}
+	if a.dbPool == nil {
+		writeError(w, http.StatusServiceUnavailable, "database not available")
+		return
+	}
+	if err := db.DeletePushSubscription(r.Context(), a.dbPool, req.Endpoint); err != nil {
+		log.Printf("DeletePushSubscription: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to remove subscription")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // recordLaunchEffort stores the effort a session was launched with, so the

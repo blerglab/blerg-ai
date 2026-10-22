@@ -94,7 +94,7 @@ func TestBoardRateWindowAndRetryDeadline(t *testing.T) {
 	delete(boardCallLimit.m, sid)
 	boardCallLimit.Unlock()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	allowed := func(now time.Time) bool { return boardCallRetryAfter(sid, now) == 0 }
+	allowed := func(now time.Time) bool { return boardCallRetryAfter(sid, now, boardCallsPerMinute) == 0 }
 	if !allowed(start) || !allowed(start.Add(time.Second)) {
 		t.Fatal("initial calls refused")
 	}

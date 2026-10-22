@@ -41,7 +41,9 @@ const (
 // capabilities blerg-core treats as sensitive; board only needs to recognise
 // the ones it can itself be asked to honor.
 func SensitiveCaps(capability string) bool {
-	if strings.HasPrefix(capability, "card.create_once:") {
+	// The one-card and one-board approval capabilities act with a person's authority (a new board
+	// with an administrator's): refused while the revocation view is stale, like board.admin.
+	if strings.HasPrefix(capability, "card.create_once:") || strings.HasPrefix(capability, "board.create_once:") {
 		return true
 	}
 	switch capability {

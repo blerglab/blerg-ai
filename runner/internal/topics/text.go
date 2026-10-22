@@ -82,8 +82,9 @@ var harness = func() harnessMarkers {
 }()
 
 // CleanText makes agent-written text safe to draw: whitespace (any kind) becomes one space; C0, DEL,
-// C1, bidi controls (U+202A–E, U+2066–9) and zero-width characters (U+200B–F, U+FEFF) go; the
-// result is cut to max runes with "…".
+// C1 and every Unicode format character (category Cf: bidi controls, zero-width characters, U+FEFF,
+// U+061C, U+00AD, U+2060–2064, tag characters U+E0000–E007F, …) go, so nothing invisible survives;
+// the result is cut to max runes with "…".
 func CleanText(s string, limit int) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -91,7 +92,7 @@ func CleanText(s string, limit int) string {
 		case unicode.IsSpace(r):
 			b.WriteRune(' ')
 		case r < 0x20, r >= 0x7f && r <= 0x9f:
-		case r >= 0x200b && r <= 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0xfeff:
+		case unicode.Is(unicode.Cf, r), r >= 0x200b && r <= 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0xfeff:
 		default:
 			b.WriteRune(r)
 		}

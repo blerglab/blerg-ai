@@ -14,6 +14,9 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
 import ToolChanges from './ToolChanges'
 import BoardFileDraft from './BoardFileDraft'
+import BoardCreateAccess from './BoardCreateAccess'
+import { requestedBoardAccess } from '../lib/boardCreate'
+import type { BoardLevel } from '../lib/permissionsModal'
 import {pluginApplication,pluginState,type PluginScope} from '../lib/sessionPlugins'
 import {
   PROPOSALS_POLL_MS, applyPendingCount, applyPendingChanges, approveFailureMessage, beginCountRequest, beginChangesRequest, isAwaitingYou, resultText,
@@ -58,7 +61,7 @@ interface CardProps {
   error: string | undefined
   onAsk: () => void
   onCancel: () => void
-  onApprove: (scope?: PluginScope) => void
+  onApprove: (scope?: PluginScope, access?: BoardLevel) => void
   onReject: () => void
   onResolve: (outcome: 'done' | 'failed') => void
   onSavedDraft: (updated: ProposalInfo) => void
@@ -69,6 +72,8 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
   const boardFile = p.kind === 'board_file'
   const [pluginScope, setPluginScope] = useState<PluginScope>(p.plugin_session_apply ? 'session' : 'always')
   const isPlugin = p.kind === 'plugin_request'
+  const boardCreate = p.kind === 'board_create'
+  const [access, setAccess] = useState<BoardLevel>(() => requestedBoardAccess(p))
   const scope = p.plugin_session_apply ? pluginScope : 'always'
   const stateLabel = pluginState(p)
   const stateColor = stateLabel === 'queued' || stateLabel === 'installing' ? PILL.executing : stateLabel === 'failed' ? PILL.failed : PILL[p.state]
@@ -76,7 +81,7 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
   return (
     <div
       id={`proposal-card-${p.id}`} data-testid={`proposal-${p.id}`} data-focused={focused ? 'true' : undefined}
-      style={{ border: focused ? '2px solid var(--blaze)' : '1px solid var(--stone)', borderRadius: 8, background: 'var(--scree)', padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}
+      style={{ border: focused ? '2px solid var(--selected-border)' : '1px solid var(--stone)', borderRadius: 8, background: 'var(--scree)', padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}
     >
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <span style={{ color: 'var(--chalk)', fontWeight: 700, fontFamily: 'var(--mono, monospace)' }}>{p.tool}</span>
@@ -84,6 +89,7 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
         <span data-testid="proposal-state" style={{ marginLeft: 'auto', color: stateColor, border: `1px solid ${stateColor}`, borderRadius: 10, padding: '0 8px', fontSize: 12 }}>{stateLabel === 'new_sessions' ? 'new sessions only' : stateLabel}</span>
       </div>
       {boardFile && <div>File a ticket on {typeof p.arguments.board_name === 'string' ? p.arguments.board_name : String(p.arguments.board_id ?? '')}</div>}
+      {boardCreate && <div>Create a board{typeof p.arguments.name === 'string' ? <> named <b>{p.arguments.name}</b></> : null}</div>}
       <ProposalPreview proposal={p} complete={confirming} />
       <ProposalExpiry proposal={p} />
       {boardFile && p.state === 'pending' && (editing
@@ -142,21 +148,24 @@ function ProposalCard({ p, focused, busy, confirming, error, onAsk, onCancel, on
 
       {p.state === 'pending' && !confirming && !editing && (
         <div style={{ display: 'flex', gap: 8 }}>
-          <button type="button" style={primary} disabled={busy || boardFile && !p.arguments_raw} onClick={onAsk}>Approve</button>
+          <button type="button" style={primary} disabled={busy || (boardFile || boardCreate) && !p.arguments_raw} onClick={onAsk}>Approve</button>
           <button type="button" style={button} disabled={busy} onClick={onReject}>Reject</button>
         </div>
       )}
       {p.state === 'pending' && confirming && !editing && (
         <div data-testid={`approve-confirm-${p.id}`} style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid var(--stone)', paddingTop: 8 }}>
           <div style={{ color: 'var(--chalk)', fontSize: 13 }}>
-            {isPlugin ? 'Approve this exact plugin request. It will be installed only after your confirmation.' : <>This will run {p.tool} on {p.connection_name} with exactly these arguments, shown in full above. It can take up to a minute.</>}
+            {isPlugin ? 'Approve this exact plugin request. It will be installed only after your confirmation.'
+              : boardCreate ? 'This creates the board above with your own access (only an administrator can), then gives the proposing session the access you choose.'
+              : <>This will run {p.tool} on {p.connection_name} with exactly these arguments, shown in full above. It can take up to a minute.</>}
           </div>
+          {boardCreate && <BoardCreateAccess proposal={p} value={access} onChange={setAccess} disabled={busy} />}
           {isPlugin && <>
             <label>Apply plugin<select aria-label="Apply plugin" value={scope} onChange={e=>setPluginScope(e.target.value as PluginScope)} disabled={busy}><option value="session" disabled={!p.plugin_session_apply}>This session only</option><option value="always">Always on</option></select></label>
             <p style={muted}>{scope === 'session' ? 'Loads between turns; account settings stay unchanged.' : p.plugin_session_apply ? 'Saves to account settings and loads between turns.' : 'Saves for new sessions; this session keeps its current plugins.'}</p>
           </>}
           <div style={{ display: 'flex', gap: 8 }}>
-            <button type="button" style={primary} disabled={busy || (isPlugin && typeof p.arguments_raw !== 'string')} onClick={()=>onApprove(isPlugin ? scope : undefined)}>{busy ? 'Running…' : isPlugin ? 'Add plugin' : 'Run it'}</button>
+            <button type="button" style={primary} disabled={busy || (isPlugin && typeof p.arguments_raw !== 'string')} onClick={()=>onApprove(isPlugin ? scope : undefined, boardCreate ? access : undefined)}>{busy ? 'Running…' : isPlugin ? 'Add plugin' : boardCreate ? 'Create board' : 'Run it'}</button>
             <button type="button" style={button} disabled={busy} onClick={onCancel}>Cancel</button>
           </div>
         </div>
@@ -380,7 +389,7 @@ export default function Proposals() {
   const tabButton = (id: Tab, label: string): React.ReactNode => (
     <button
       type="button" role="tab" aria-selected={tab === id} onClick={() => setTab(id)}
-      style={{ ...button, ...(tab === id ? { color: 'var(--amber)', borderColor: 'var(--blaze)', fontWeight: 700 } : {}) }}
+      style={{ ...button, ...(tab === id ? { color: 'var(--selected-text)', borderColor: 'var(--selected-border)', background: 'var(--selected-bg)', fontWeight: 700 } : {}) }}
     >
       {label}
     </button>
@@ -415,11 +424,12 @@ export default function Proposals() {
           p={p}
           focused={p.id === focusId}
           busy={busy === p.id}
-          confirming={confirming === p.id && ((p.kind !== 'board_file' && p.kind !== 'plugin_request') || confirmedRaw[p.id] === p.arguments_raw)}
+          confirming={confirming === p.id && ((p.kind !== 'board_file' && p.kind !== 'plugin_request' && p.kind !== 'board_create') || confirmedRaw[p.id] === p.arguments_raw)}
           error={errors[p.id]}
           onAsk={() => { setConfirmedRaw(previous => ({ ...previous, [p.id]: p.arguments_raw })); setConfirming(p.id) }}
           onCancel={() => setConfirming(null)}
-          onApprove={scope => void act(p.id, 'approve', p.kind === 'plugin_request' ? {scope,expected_arguments_raw:confirmedRaw[p.id]} : p.kind === 'board_file' ? {expected_arguments_raw:confirmedRaw[p.id]} : undefined, p.kind === 'plugin_request' ? (_status, message) => `Plugin change was not accepted: ${message}` : approveFailureMessage)}
+          onApprove={(scope, access) => void act(p.id, 'approve', p.kind === 'plugin_request' ? {scope,expected_arguments_raw:confirmedRaw[p.id]} : p.kind === 'board_file' ? {expected_arguments_raw:confirmedRaw[p.id]}
+            : p.kind === 'board_create' ? {expected_arguments_raw:confirmedRaw[p.id], ...(access && access !== requestedBoardAccess(p) ? { access } : {})} : undefined, p.kind === 'plugin_request' ? (_status, message) => `Plugin change was not accepted: ${message}` : approveFailureMessage)}
           onReject={() => void act(p.id, 'reject', undefined, (_s, m) => m)}
           onSavedDraft={updated => {
             ++openSeq.current

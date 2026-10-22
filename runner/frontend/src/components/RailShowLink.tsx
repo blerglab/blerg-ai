@@ -9,3 +9,8 @@ export default function RailShowLink({ onShow, missing }: { onShow: () => void; 
     </>
   )
 }
+
+/** The note alone, for a card whose own title brings it into view. */
+export function ShowMissing() {
+  return <span className="rail-missing" role="status">Not in the part of the conversation the chat has drawn. Scroll up in the chat to reach it.</span>
+}

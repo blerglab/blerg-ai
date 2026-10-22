@@ -179,7 +179,7 @@ func TestEffortCheckedAgainstTheDaemonsReportedList(t *testing.T) {
 	api.SetModelSources(NewModelSources(nil, hub))
 	tok := enableBrowserAuth(t, api)("session.start")
 	post := func(body map[string]any) int {
-		body["daemon_id"], body["repo"], body["runtime"], body["engine"] = "d1", "app", "docker", "codex"
+		body["daemon_id"], body["repo"], body["runtime"], body["engine"], body["kind"] = "d1", "app", "docker", "codex", "agent"
 		raw, _ := json.Marshal(body)
 		req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(raw)))
 		req.Header.Set("Authorization", "Bearer "+tok)

@@ -84,7 +84,7 @@ it.each([390, 1280])('Needs you lists the review, and the viewer bar approves it
   // The Needs you count includes it.
   expect(within(screen.getByTestId('rail-needs')).getByText('3')).toBeTruthy()
 
-  await userEvent.click(within(row).getByRole('button'))
+  await userEvent.click(within(row).getByRole('button', { name: /Review: SECURITY\.md/ }))
   const bar = await screen.findByTestId('review-request-bar')
   expect(within(bar).getByTestId('review-request-bar-ask').textContent).toBe(ASK)
   const approve = await within(bar).findByRole('button', { name: 'Approve' })

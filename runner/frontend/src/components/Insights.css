@@ -8,7 +8,7 @@
 .insights-controls { display: flex; gap: 10px; flex-wrap: wrap; }
 .insights .seg { display: inline-flex; border: 1px solid var(--stone); border-radius: 8px; overflow: hidden; }
 .insights .seg button { background: transparent; color: var(--fog); border: 0; padding: 6px 12px; font: inherit; font-size: 0.82rem; cursor: pointer; }
-.insights .seg button.on { background: color-mix(in srgb, var(--blaze) 22%, var(--basalt)); color: var(--amber); font-weight: 700; }
+.insights .seg button.on { background: var(--selected-bg); color: var(--selected-text); box-shadow: inset 0 0 0 1px var(--selected-border); font-weight: 700; }
 .insights-note { margin: 10px 0; color: var(--fog); font-size: 0.88rem; line-height: 1.5; }
 .insights-error { color: var(--danger, #e5484d); }
 .insights-error button { margin-left: 6px; }

@@ -1,8 +1,13 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { renderMermaid } from './mermaid'
+import { mermaidReason, renderMermaid } from './mermaid'
 
 const api = vi.hoisted(() => ({initialize: vi.fn(), render: vi.fn()}))
-vi.mock('mermaid', () => ({default: api}))
+// Mermaid itself runs in a sandboxed frame (mermaidFrame.ts, tested in Chromium); here the frame
+// is a stand-in that hands the config and source to a mock Mermaid.
+vi.mock('./mermaidFrame', () => ({renderInFrame: async (source: string, config: unknown) => {
+  api.initialize(config)
+  return (await api.render('blerg-diagram', source)).svg
+}}))
 const originalDecode = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'decode')
 const decode = vi.fn<() => Promise<void>>()
 Object.defineProperty(HTMLImageElement.prototype, 'decode', {configurable: true, value: decode})
@@ -33,7 +38,7 @@ describe('Mermaid rendering lifetime and image errors', () => {
   it('propagates image decode failures to the component fallback and cleans scratch DOM', async () => {
     decode.mockRejectedValue(new Error('image blocked'))
     const host = document.createElement('div')
-    await expect(renderMermaid('flowchart LR; A-->B', host)).rejects.toThrow('image blocked')
+    await expect(renderMermaid('flowchart LR; A-->B', host)).rejects.toThrow('the browser could not display the drawn diagram')
     expect(host.children).toHaveLength(0)
     expect(document.querySelector('[aria-hidden="true"]')).toBeNull()
   })
@@ -86,4 +91,10 @@ describe('Mermaid rendering lifetime and image errors', () => {
     dispose()
   })
 
+  it('says what Mermaid could not parse, on one line', async () => {
+    api.render.mockRejectedValueOnce(new Error("Parse error on line 3:\n...B --> --> C\n-------^\nExpecting 'AMP', 'ALPHA', got 'LINK'"))
+    await expect(renderMermaid('flowchart LR\n A --> B\n B --> --> C', document.createElement('div'))).rejects.toThrow("Mermaid: Parse error on line 3: Expecting 'AMP', 'ALPHA', got 'LINK'")
+    expect(mermaidReason(new Error('x'.repeat(400)))).toHaveLength('Mermaid: '.length + 240)
+    expect(mermaidReason(undefined)).toBe('Mermaid could not draw it')
+  })
 })

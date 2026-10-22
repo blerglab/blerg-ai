@@ -290,15 +290,21 @@ describe('SessionList', () => {
     expect(screen.getByText(/daemon\/install\.sh status/)).toBeInTheDocument()
   })
 
-  it('offers notifications as a small bell beside + New, not as a row of its own', () => {
+  it('has the app\'s one Notifications bell beside + New, an icon whose word is in its label, with push inside', () => {
     vi.stubGlobal('Notification', { permission: 'default', requestPermission: vi.fn() })
     seed()
     renderList({ variant: 'sidebar' })
-    const bell = screen.getByRole('button', { name: 'Enable notifications' })
-    expect(bell.title).toBe('Enable notifications')
+    const bells = screen.getAllByRole('button', { name: /Notifications/ })
+    expect(bells).toHaveLength(1)
+    const bell = bells[0]
+    expect(bell).toHaveClass('icon-btn')
+    expect(bell.title).toMatch(/^Notifications/)
     expect(bell.textContent).toBe('')
-    expect(bell.parentElement).toContainElement(screen.getByText('+ New'))
-    expect(screen.queryByText('Enable notifications')).toBeNull()
+    expect(bell.closest('div')!.parentElement).toContainElement(screen.getByText('+ New'))
+    // The older push toggle is not a second bell: it is a setting inside this one.
+    expect(screen.queryByRole('button', { name: 'Enable notifications' })).toBeNull()
+    fireEvent.click(bell)
+    expect(screen.getByTestId('push-setting')).toHaveTextContent('Push notifications')
     vi.unstubAllGlobals()
   })
 

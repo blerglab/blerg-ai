@@ -40,9 +40,9 @@ recorded on the session row and returned, with `kind`, by `GET /api/sessions` �
 |---|---|---|---|
 | What it is | a throwaway Job pod in the cluster's session namespace | a hardened container on the connected daemon's host | the daemon host itself, as the user the daemon runs as |
 | Agent session | the pod runs the engine | the daemon runs the engine **inside** the container (`docker exec -i -w /workspace`) | the daemon runs the engine on the host, as you, with no permission prompts |
-| Terminal session | refused — `422 terminal sessions run on a daemon` | tmux inside the same container | tmux on the host |
+| Existing Terminal session (deprecated; removal in 0.5.0) | unavailable | tmux inside the same container | tmux on the host |
 | Needs | a configured cluster runtime (`BLERG_RUNNER_AGENT_IMAGE`; see below) | a connected daemon reporting `sandbox_available` — i.e. the sandbox image is built | a connected daemon |
-| Credentials | a per-session Secret holding the launching account's own engine + git credentials, falling back to the operator Secret | the host's `~/.claude`, `~/.claude.json`, `~/.codex` and `~/.hermes/{config.yaml,.env}`, bind-mounted read-write; for Claude with no such login, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is passed into the container | your own logins on that machine, directly |
+| Credentials | a per-session Secret holding the launching account's own engine + git credentials, falling back to the operator Secret | a sandbox home of the session's own with the current sign-in of the engine it runs (the refresh token replaced by a placeholder; re-copied from the host every 15 s, never read back) and that engine's configuration read-only, settings copied without their secrets, never the engine directories themselves (`docs/sandbox-image.md`); for Claude with no such login, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is passed into the container | your own logins on that machine, directly |
 | Refuses | terminal sessions | OpenClaw (`OpenClaw runs only on the host`); Claude with no credential the container can see | — |
 | "Bypass permission prompts" toggle | not offered | terminal sessions only (`dangerously_skip_permissions` is docker-only) | not offered |
 | Acknowledgement | none | none | required |
@@ -61,11 +61,12 @@ never on the host PATH. The engine versions in the image are pinned (`sandbox/en
 **Launch-sheet defaults.** Where it runs = **Cluster pod** when the install has a cluster runtime
 configured (even if a daemon is connected), else **Local sandbox** when a connected daemon has the
 sandbox image, else **This machine** — which then cannot be launched until the acknowledgement is
-ticked. Session type = **Agent**. Engine, model and effort are whichever were used last (Claude
+ticked. Session type = **Agent**. New Terminal sessions are refused with "Terminal sessions are deprecated and will be removed in 0.5.0"; existing Terminal sessions keep working. Engine, model and effort are whichever were used last (Claude
 first time; the model then defaults to Sonnet at its default effort). The Model picker lists what
 Claude Code's own `/model` offers, fetched live — see [Model lists](#model-lists). Unsandboxed is never a default, and a runtime or type the user picked is never overwritten
-by a later data refresh. Choosing OpenClaw forces **This machine**; choosing **Terminal** disables
-the cluster card, and choosing **Cluster pod** disables Terminal.
+by a later data refresh. Choosing OpenClaw forces **This machine**. A board's **Assist**
+still starts a Terminal session (exempt from the deprecation until it moves to an agent session in
+0.5.0). A start that names no `kind` is refused with `kind "agent" is required`.
 
 The agent-facing contract, [`POST /api/runner/start`](#starting-a-session), takes the same three
 values and, with `runtime` omitted, the same defaults: cluster where one is configured, else the
@@ -530,6 +531,33 @@ see the session; `ETag`/`If-None-Match`) returns the session's topics as the His
 a done row's `commits` are `[{"sha", "url"}]`, `url` the commit's page when the session's repository
 is known (its clone URL, else its daemon's origin for the folder) and `null` otherwise.
 
+**Strokes.** `GET /api/sessions/{id}/topics` also returns `strokes`, the History feed, newest first:
+`[{id, kind, source, by?, recorded_as?, text, state?, outcome?, at, seq, topic_id?, jump, commits?, card?, backdated?, count?}]`, the newest 300, with `strokes_truncated` counting the older ones left out.
+`kind` is `decision`, `attention`, `milestone` or `finding`; `source` is `mark`, `ask`, `delegation`,
+`proposal`, `review`, `review_round`, `topic` or `approvals` (engine command approvals, owner-only asks the agent waits on). A run of three or more consecutive attention strokes of one kind (proposals, command approvals, child-session starts, review requests, review rounds; any other stroke or a topic's edge ends a run) folds into one line with `count`, `items` (the newest 50 and every waiting one, newest first; `items_truncated` the rest), `first_at` and `cards` (the newest 50; `cards_truncated`); it is waiting when any item is and then jumps to the newest waiting one. Questions, marks and topic milestones are never folded. `state` is `unanswered` for a question the agent did not wait on, and for a question or a child-session start still pending when the session ended; a proposal or a review request stays `open` until its own decision or expiry. A fold line's `id` is `fold:<its oldest member's id>`. The cap of 300 always keeps every waiting stroke, and `strokes_truncated` counts what it left out. Each topic lists the person's newest 50 messages in it as `messages: [{seq, event_id, ts, text}]` (`messages_truncated` the rest); a mark's `by` is `person` only when the session's owner posted it, and an agent's line recording the person's ruling is `by: agent, recorded_as: person`; `jump` is `{event_id?, proposal_id?, seq}` (the
+transcript row to scroll to) or `null`. Every stroke but a mark comes from events the transcript
+already holds (an ask and its answer, a delegation request and its decision, a proposal request and its
+decision, a review request and its decision, a review round the person sent, a topic done with
+commits); an ask closed without an answer is read from its `messages` row. `blerg-runner mark` posts
+`POST /api/sessions/{id}/marks` (`{"kind","text","by"?,"commits"?,"card"?,"board_id"?,"at"?}`, or
+`{"marks":[…]}` for an import of at most 200; at most 1 MiB, else `413`), with the session's own token, the daemon token or the
+session's owner signed in (another session's token is a `403`, someone else's session a `404`); `201
+{marks, recorded, duplicates}`. `kind` is `decision`, `milestone` or `finding`; `by` is `person` or
+`agent` (`owner` reads as `person`; the default is the poster's); the text is cleaned like a title and
+cut to 240 characters; `at` (RFC 3339, not in the future) back-dates a mark, whose event id is then
+derived from what it says so an import sent twice records it once. Each mark is an event of kind
+`mark`, payload `{id, kind, by, text, commits?, card?, board_id?, at?, posted_by}`; a session holds at
+most 500, counted after the request so a duplicate never counts (over the cap, the request records nothing: `409`). A back-dated mark's id covers its kind, by, at, text, card, board and commits.
+
+**Renames.** `blerg-runner title "<title>"` posts `POST /api/sessions/{id}/title` (`{"title"}`,
+trimmed, 1 to 200 characters; the session's own token, as topics; `200 {session_id,title}`), and a
+parent renames a child through `POST /api/sessions/{id}/children/{child}/title`. `PATCH
+/api/sessions/{id}` (`{"title"}`) is the browser's: the session's owner or an administrator
+(`account.manage`) only, `403` for anyone else who can see it. Each rename that changes the title is
+an event of kind `session_renamed`, payload `{from, to, by}` (`person`, `parent` or `agent`), shown in
+`GET /api/sessions/{id}/topics` as an item `{"type":"rename","rename":{from,to,by}}` in the topic that
+was open, else in `unmarked.renames`.
+
 **Checklist.** `blerg-runner checklist` posts `POST /api/sessions/{id}/checklist` (the session's own
 token, as topics; at most 64 KiB): `{"op":"set","items":["…"]}`, `{"op":"add","item":"…"}`,
 `{"op":"tick"|"untick","index":N}` (1-based) or `{"op":"tick"|"untick","text":"…"}` (exact,
@@ -613,7 +641,9 @@ reads.
 
 The `children` list additionally carries recorded `tool_calls`, bounded `activity`,
 `activity_since`, `last_activity_at`, `usage_status` (`pending|reported|hidden`),
-reported `tokens` and optional price estimates. A `local` flag describes the
+reported `tokens` and optional price estimates, and `ticket`: the child's current pin
+`{source, key, board_id?, title, status, url?}` (absent without one; a child's pin also refreshes
+its parent's live state). A `local` flag describes the
 owning daemon's endpoint classification; it does not invent a zero dollar cost.
 Current-turn `usage_updated` snapshots are nonbilling display telemetry and are
 replaced at completion. See [Live child telemetry](../docs/telemetry.md#live-child-telemetry).
@@ -808,6 +838,7 @@ sessions all return the same `404`.
 | `GET /api/sessions/{id}/children/{child}` | Session status plus authoritative `open_asks:[{message_id,body}]`. |
 | `POST /api/sessions/{id}/children/{child}/message` | `{text,client_id?}`; `202`, including `answered_ask` when it answers an open question. An idle cluster child is resumed with the sign-in it was started with (a desktop parent's) or the parent's newest (a cluster parent's); with none live, `409` says to ask the person to send it from their browser. |
 | `POST /api/sessions/{id}/children/{child}/model` | `{model?,effort?}`; `202`. |
+| `POST /api/sessions/{id}/children/{child}/title` | `{title}` (trimmed, 1 to 200 characters); `200 {session_id,title}`. Renames that child (this parent's own children only) and records a `session_renamed` event `{from,to,by:"parent"}` in its History. |
 | `POST /api/sessions/{id}/children/{child}/interrupt` | Interrupts the current turn; `202`. |
 | `POST /api/sessions/{id}/children/{child}/stop` | Stops the child; `200 {status:"stopped"}`. |
 | `GET /api/sessions/{id}/children/{child}/result` | The runner's normal result object. |
@@ -1079,7 +1110,7 @@ arguments, which tmux ≥ 3.0 runs without a shell — required for a bracketed 
 container joins the `blerg-sandbox` network when it exists (else Docker's default bridge), and both
 are ordinary NAT'd bridge networks — `blerg-sandbox` is not an `internal` network — so outbound
 traffic to a LAN address works exactly as from the host. `~/.hermes/config.yaml` and
-`~/.hermes/.env` are mounted into the container (individually, read-write), so the session uses the
+`~/.hermes/.env` are mounted into the container (individually, read-only), so the session uses the
 same provider and `base_url` the list was probed from. The one case that differs: a `base_url` on
 `localhost`/`127.0.0.1` (a model server on the same machine) means the container itself inside the
 sandbox, so the list appears (the probe runs on the host) but a sandboxed session cannot reach it —
@@ -1178,14 +1209,26 @@ effort that fails those rules (and logs it) rather than starting a pod that woul
 
 The sidebar shows, under **Where sessions run**, a thin meter per limit window for each provider a
 workstation daemon can read: the five-hour window ("5h") and the weekly one ("week"), the share
-used, and on hover when it resets; the bar turns amber from 70 % and red from 90 %. Limits belong
+used, and on hover the share used and left and when it resets (each bar for its window, the row for
+all of them); the bar turns amber from 70 % and red from 90 %. Only shares and reset times reach the
+browser, so no money is shown. A provider a connected machine can run that has not reported yet has
+a placeholder row ("…"; a daemon from 0.4.5 on reads when it connects, every 10 minutes and a few
+seconds after that engine's turn ends, with no session needed, and says when it cannot; an older
+daemon never fills the row). A provider the daemon does not read (Claude's reader turned off, a
+sign-in it cannot read, the engine not installed) says so ("⊘", `note: "not_read"`), and one whose
+account has no window at all (an API key, or a usage-based work plan without a spend limit) says so
+("—", `note: "no_windows"`). Limits belong
 to the provider account the machine is logged in to, not to a session, so the daemon reports them
-per provider (`usage_limits {provider, windows: [{id: "5h"|"7d"|"month"|"day"|"spend-week"|"capped", used_percent,
-resets_at}], fetched_at}` over its socket). The server keeps the latest in memory, carries them in
+per provider (`usage_limits {provider, windows: [{id: "5h"|"7d"|"month"|"day"|"spend-week"|"spend"|"capped", used_percent,
+resets_at}], fetched_at, note?}` over its socket; with no windows, `note` says why: "no_windows"
+or "not_read"). The server keeps the latest in memory, carries them in
 `initial_state` as `daemons[].usage_limits` and pushes `daemon_limits_changed {daemon_id,
 usage_limits}` when they change (`GET /api/daemons` carries them too); the cluster runtime reports
 none. Codex's come from `codex app-server` (`account/rateLimits/read`), read when the daemon
-connects, every 10 minutes and a few seconds after a Codex turn ends; three failed reads in a row
+connects, every 10 minutes and a few seconds after a Codex turn ends; a usage-based work plan, which
+has no five-hour or weekly window, shows its spend limit as "spend" (the share used and its reset,
+from `individualLimit`; never the amounts), and windows only in the per-limit view
+(`rateLimitsByLimitId`, Codex's own bucket first, also when the single view is absent) are read too; three failed reads in a row
 withdraw its meters, and a window whose reset has passed is not drawn. Each bar is a progressbar with
 a spoken name ("Codex 5-hour window, 42% used, resets in 2h 10m, as of 11:50"); on a screen with no
 hover the reset shows as text ("↻2h"). Claude's come from the account usage endpoint the CLI's own
@@ -1232,13 +1275,12 @@ credential; lookup failures and revoked authority refuse startup. On a
 launcher — in the **Local sandbox** (the default for the launch sheet and for board-started
 sessions alike when there is no cluster and the daemon has the image) the engine runs inside a
 container that can see `/workspace` (a clone of its own of the repository, whose commits the daemon
-brings back to `wip/<session_id>`) and the mounted login directories and nothing else of the
-machine, with no git credentials (it can commit but not push) and, of the stack's services, a route to the
+brings back to `wip/<session_id>`), a sandbox home with the engine's current sign-in and its
+configuration read-only, and nothing else of the machine, with no git credentials (it can commit but not push) and, of the stack's services, a route to the
 board and runner only (via `blerg-sandbox`); on **This machine** it runs on the host with full filesystem
 access, which the launch sheet asks the launcher to acknowledge and a v1 start gets with
 `runtime: "daemon"` (or `BLERG_BOARD_RUNNER_RUNTIME=daemon` on the board) or on a daemon without
-the image. Either way the sandbox does not protect the engine login itself: it is mounted read-write
-so the engine can use it. Sessions started with the **static runner key** have no owning account
+the image. Either way the session can use the engine's current sign-in until it expires; it cannot renew it. Sessions started with the **static runner key** have no owning account
 at all and use the shared operator credentials.
 
 Attribution always comes from the verified credential, never from the request body.
@@ -1502,6 +1544,52 @@ and why, is at the top of `internal/server/repo_provider.go`.
 Adding one (Bitbucket, a self-managed GitLab via `NewGitLabAt`, GitHub Enterprise via
 `NewGitHubAt`) is an implementation plus a `Register` call, plus its id in core's
 `gitCredentialKinds` and a Settings entry so people can store a token for it.
+
+## Reading a commit from a session's workspace
+
+A commit chip's hovercard and its on-demand diff read the commit from the session's own workspace:
+`GET /api/sessions/{id}/commits/{sha}` (a JSON summary: `sha`, `short`, `subject`, `body`,
+`body_truncated`, `author`, `author_date`, `parents`, `files` with `path`, `old_path`, `adds`,
+`dels`, `binary`, `files_truncated`, `adds`, `dels`) and `GET /api/sessions/{id}/commits/{sha}/diff`
+(the commit's patch as `text/plain`, at most 2 MiB). Like the workspace-file route below, it is for
+the **human session owner** or a human administrator with `account.manage` only: a commit by sha
+reaches any history in the workspace's repository, so reading the transcript does not grant it.
+Anyone else gets `403`; someone else's private session answers `404` (administrators included), as
+an unknown session does; agent, service and session tokens are refused. All of this is decided
+before the daemon is asked. `{sha}` must be 7 to 64 lowercase hex digits (else `404`); nothing
+else from the request reaches Git.
+
+The session's current daemon reads it: host and container sessions from the workspace the launch
+is bound to (its directory pinned by descriptor), cluster sessions from their pod workspace. A
+sandboxed session's clone is never read by host Git (the session's container writes it); its
+commits are read from the repository the clone was made from, where each turn's end brings them
+back, so a commit made since the last turn ended is not found yet. A workspace under the sandbox
+clone root that is not the session's recognized clone is refused, never read by host Git.
+
+The workspace's own repository only: a `.git` that is a symbolic link, a `.git` file naming a
+git directory that is not a worktree registered back to this workspace, a `commondir` redirect and
+objects borrowed through `alternates` or an `objects` directory that is not a real directory of
+the daemon's user (a link to another store) are refused, and Git's own view (`--show-toplevel`,
+`--absolute-git-dir`) must match the pinned directory and that git directory.
+
+Git runs with no inherited environment, no system or global configuration, no hooks, fsmonitor,
+external diff (a submodule's included: submodules are shown short, never recursed into), text
+conversion, pager, signature check, mailmap, diff order file or attributes file, no replace refs
+or grafts,
+no network (`GIT_ALLOW_PROTOCOL=none`, which a repository cannot outrank, plus every
+`protocol.<name>.allow=never`, so a partial clone's lazy fetch cannot run a transport), bounded
+rename detection, `safe.directory` naming that directory alone, in its own process group (killed
+whole on timeout), under a 1 GiB address-space limit on Linux (a constant `sh` script runs
+`ulimit -v` and execs git; arguments are positional, never parsed), with a five-second timeout.
+The sha is resolved with `rev-parse --verify --end-of-options <sha>^{commit}` and every later call
+names the full sha. A merge is shown against its first parent. Every field is capped (subject 512
+bytes, body 4 KiB, 300 files, 16 parents), and a diff over 2 MiB is refused.
+
+Refusals: `404` for an unknown sha, `409` for a session that is not live (ended, stopped, failed,
+disconnected: its workspace is not read), a daemon that is offline, older or slow, `413` for a diff
+over the cap, `429` when too many reads wait (two per session, four per person, four per daemon,
+sixteen in all; the daemon itself runs three at a time, two per session). Responses are private and not cached on the
+server; the browser keeps what it read.
 
 ## Opening a session workspace file
 

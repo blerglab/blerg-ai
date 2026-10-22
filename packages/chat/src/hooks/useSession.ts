@@ -9,6 +9,8 @@ import type { SessionMeta, Transport } from '../transport/types'
 import type { AgentEvent, SessionStatus, UserMessagePayload } from '../types'
 import { useArtifacts, type Artifacts } from './useArtifacts'
 import { resumeSeq, useTranscriptStore } from './useTranscriptStore'
+import { dismissedAsk } from '../model/asks'
+import { isRelayInputSource } from '../model/userMessages'
 
 /** The older part of a long transcript follows the newest page in pages of this many events. */
 export const OLDER_PAGE = 200
@@ -290,9 +292,9 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
         held = null
         applyStatus(s)
       },
-      onAskClosed: (id, answer) => setClosed(cur => {
+      onAskClosed: (id, answer, dismissed, dismissedBy) => setClosed(cur => {
         const asks = new Map(cur?.sessionId === sessionId ? cur.asks : NO_CLOSED)
-        asks.set(id, answer)
+        asks.set(id, dismissed ? dismissedAsk(dismissedBy) : answer)
         return { sessionId, asks }
       }),
       onConnection: c => {
@@ -353,8 +355,11 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
     const byId = new Map(queued.map(q => [q.id, q]))
     for (const ev of events) {
       if (ev.kind !== 'input_accepted') continue
-      const p = ev.payload as { client_id?: string; text?: string }
+      const p = ev.payload as { client_id?: string; text?: string; source?: string }
       if (typeof p.client_id !== 'string' || typeof p.text !== 'string') continue
+      // Blerg's own message to the agent (a question's answer, a relayed decision) is never the
+      // person's queued bubble. An older server's event has no source: its client ids say it.
+      if (isRelayInputSource(p.source) || (p.source === undefined && /^(question|review)-/.test(p.client_id))) continue
       byId.set(p.client_id, { id: p.client_id, text: p.text, afterSeq: ev.seq ?? 0, accepted: true })
     }
     return unmatchedQueued([...byId.values()], events)

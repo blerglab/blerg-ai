@@ -173,6 +173,15 @@ func (a *API) startOnRunnerConfigured(ctx context.Context, boardID string, req r
 	if err != nil {
 		return "", runner.StartRequest{}, err
 	}
+	if target.Runtime == "cluster" && req.GitURL == "" {
+		board, err := db.GetBoard(ctx, a.Pool, boardID)
+		if err != nil {
+			return "", runner.StartRequest{}, err
+		}
+		if err := a.clusterReposProblem(ctx, board, []string{req.Repo}); err != nil {
+			return "", runner.StartRequest{}, err
+		}
+	}
 	token, engine := authority.Token, authority.Engine
 
 	req.Runtime, req.DaemonID = target.Runtime, target.DaemonID

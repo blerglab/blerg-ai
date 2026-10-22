@@ -44,3 +44,6 @@ node_modules/
 dist/
 # the chat package's packed tarball and manifest (built, served by the runner)
 dist-packages/
+
+# Video pipeline output (takes, finished videos, voice-over cache): never committed.
+/video/out/

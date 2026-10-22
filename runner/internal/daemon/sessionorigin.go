@@ -4,12 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,60 +30,39 @@ func (w *originOutput) Write(p []byte) (int, error) {
 }
 
 // readWorkspaceOrigin pins cwd by descriptor: a retargeted workspace name cannot select
-// another repository between the identity check and Git starting. No user command is executed.
+// another repository between the identity check and Git starting. No user command is executed:
+// git runs through the shared hardened runner (workspacegit.go, internal/hostgit), and only in the
+// workspace's own repository: a .git that points elsewhere (a link, a foreign gitdir, a commondir,
+// borrowed objects) reads as no verifiable HEAD.
 func readWorkspaceOrigin(parent context.Context, binding workspaceFileBinding, afterGit func()) (string, bool) {
 	if binding.live == nil || binding.info == nil || !binding.live() {
 		return "", false
 	}
-	resolved, err := filepath.EvalSymlinks(binding.root)
-	if err != nil {
+	dir, ok := pinGitDir(binding.root, binding.info)
+	if !ok {
 		return "", false
 	}
-	root, err := os.OpenRoot(resolved)
-	if err != nil {
-		return "", false
-	}
-	defer func() { _ = root.Close() }()
-	if !workspaceRootUnchanged(root, resolved, binding.info) {
-		return "", false
-	}
-	directory, err := root.Open(".")
-	if err != nil {
-		return "", false
-	}
-	defer func() { _ = directory.Close() }()
-	info, err := directory.Stat()
-	if err != nil || !os.SameFile(binding.info, info) {
-		return "", false
-	}
-	cwd := "/proc/self/fd/" + strconv.FormatUint(uint64(directory.Fd()), 10)
-	if runtime.GOOS == "darwin" {
-		cwd = "/dev/fd/" + strconv.FormatUint(uint64(directory.Fd()), 10)
-	} else if runtime.GOOS != "linux" {
-		return "", false
-	}
+	defer dir.close()
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "safe.directory="+resolved, "rev-parse", "--verify", "HEAD") //nolint:gosec // G204: fixed Git command and flags, no shell; safe.directory names the exact descriptor-pinned authorized workspace.
-	// Go changes cwd before remapping ExtraFiles, so name the inherited parent descriptor.
-	cmd.Dir = cwd
-	cmd.ExtraFiles = []*os.File{directory}
-	cmd.WaitDelay = 100 * time.Millisecond
-	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C", "GIT_CEILING_DIRECTORIES=" + filepath.Dir(resolved)}
 	output := &originOutput{}
-	cmd.Stdout = output
-	cmd.Stderr = io.Discard
-	err = cmd.Run()
+	err := errOriginNoRepository
+	if dir.vet(ctx, false) {
+		err = dir.gitWith(ctx, output, nil, "rev-parse", "--verify", "HEAD")
+	}
 	if afterGit != nil {
 		afterGit()
 	}
-	if ctx.Err() != nil || !binding.live() || !workspaceRootUnchanged(root, resolved, binding.info) {
+	if ctx.Err() != nil || !binding.live() || !workspaceRootUnchanged(dir.root, dir.resolved, binding.info) {
 		return "", false
 	}
 	// Also reject retargeting an alias used by the live launch itself.
 	final, statErr := os.Stat(binding.root)
 	if statErr != nil || !os.SameFile(binding.info, final) {
 		return "", false
+	}
+	if errors.Is(err, errOriginNoRepository) {
+		return "", true // not a repository of its own: no verifiable HEAD
 	}
 	if err != nil {
 		var exit *exec.ExitError
@@ -102,6 +77,8 @@ func readWorkspaceOrigin(parent context.Context, binding workspaceFileBinding, a
 	}
 	return commit, true
 }
+
+var errOriginNoRepository = errors.New("the workspace has no repository of its own")
 
 // readSandboxOrigin is readWorkspaceOrigin for a sandboxed session's clone: its HEAD is read as
 // plain files (readCloneHead), never by host Git, whose configuration in the clone the session

@@ -54,7 +54,11 @@ func TestLaunchSheetSandboxRefusedOnADaemonWithoutClones(t *testing.T) {
 			rec := postSpawn(t, api, map[string]any{"daemon_id": dc.ID, "repo": "my-app", "runtime": "docker", "kind": kind})
 			var out map[string]any
 			_ = json.Unmarshal(rec.Body.Bytes(), &out)
-			if rec.Code != http.StatusConflict || asString(out["error"]) != msgSandboxCloneDaemon {
+			wantCode, wantMessage := http.StatusConflict, msgSandboxCloneDaemon
+			if kind == "tmux" {
+				wantCode, wantMessage = http.StatusUnprocessableEntity, terminalDeprecationMessage
+			}
+			if rec.Code != wantCode || asString(out["error"]) != wantMessage {
 				t.Fatalf("%d %s", rec.Code, rec.Body.String())
 			}
 			if len(dc.send) != 0 {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,6 +160,22 @@ func TestANoWaitQuestionIsListedUntilItsAnswer(t *testing.T) {
 	}
 	s.answer("q1", "yes")
 	eq(t, "asks after the answer", asks(Build(s.events, s.opts("idle"))), []string{":Proceed?"})
+}
+
+// Card #155 review I2: an owner-only ask says so, so the rail never offers Dismiss on an engine
+// command approval (owner-only and waited on), which is allowed or denied, never dismissed.
+func TestAnOwnerOnlyAskSaysSo(t *testing.T) {
+	s := newScript()
+	s.addID("ask", "srv-a1", agent.MessagingPayload{Body: "Run rm -rf build?", MessageID: "a1", OwnerOnly: true})
+	s.addID("ask", "srv-q1", agent.MessagingPayload{Body: "Which name?", MessageID: "q1"})
+	got := Build(s.events, s.opts("waiting"))
+	if len(got.Asks) != 2 || !got.Asks[0].OwnerOnly || got.Asks[1].OwnerOnly {
+		t.Fatalf("asks = %+v, want a1 owner-only and q1 not", got.Asks)
+	}
+	b, _ := json.Marshal(got.Asks[0])
+	if !strings.Contains(string(b), `"owner_only":true`) {
+		t.Errorf("json = %s", b)
+	}
 }
 
 func TestAnAskTheServerClosedIsClosed(t *testing.T) {

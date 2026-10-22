@@ -107,11 +107,31 @@ var ErrBoardCallInvalid = errors.New("invalid board call")
 // credentials could not be revoked and are still live.
 var ErrBoardRevokesFailing = errors.New("board credentials could not be revoked")
 
-// maxUnrevokedBoardTokens bounds the session board credentials one account may have alive after a
-// failed revoke. Core allows each account 100 live exchange tokens across all its sessions; the
-// in-flight cap bounds live tokens while revokes work, and this bounds them while revokes fail,
-// whatever the per-minute rate, so a revoke outage cannot exhaust the account's budget.
+// maxUnrevokedBoardTokens is the default bound on the session board credentials one account may
+// have alive after a failed revoke (an administrator can change it in core's settings; the runner
+// passes it on with SetUnrevokedBoardTokenLimit). Core allows each account a number of live
+// exchange tokens across all its sessions (100 by default); the in-flight cap bounds live tokens
+// while revokes work, and this bounds them while revokes fail, whatever the per-minute rate, so a
+// revoke outage cannot exhaust the account's budget.
 const maxUnrevokedBoardTokens = 20
+
+// SetUnrevokedBoardTokenLimit sets how many of an account's session board credentials may still be
+// live after a failed revoke before CallBoard stops minting for it; n < 1 restores the default. It
+// applies to the next call.
+func (g *Gateway) SetUnrevokedBoardTokenLimit(n int) {
+	if n < 1 {
+		n = 0
+	}
+	g.unrevokedLimit.Store(int64(n))
+}
+
+// unrevokedBoardTokenLimit is the limit in force.
+func (g *Gateway) unrevokedBoardTokenLimit() int {
+	if n := g.unrevokedLimit.Load(); n > 0 {
+		return int(n)
+	}
+	return maxUnrevokedBoardTokens
+}
 
 // unrevokedBoardTokens remembers, per account, when each credential whose revoke failed expires.
 type unrevokedBoardTokens struct {
@@ -160,8 +180,8 @@ func (g *Gateway) CallBoard(ctx context.Context, c BoardCall) (json.RawMessage, 
 	if c.ReadOnly && !boardReadTools[c.Tool] {
 		return nil, ErrBoardCallInvalid
 	}
-	if g.unrevoked.live(c.Proof.AccountID, g.now()) >= maxUnrevokedBoardTokens {
-		log.Printf("mcpgw: session board call refused: %d unrevoked credentials still live", maxUnrevokedBoardTokens)
+	if limit := g.unrevokedBoardTokenLimit(); g.unrevoked.live(c.Proof.AccountID, g.now()) >= limit {
+		log.Printf("mcpgw: session board call refused: %d unrevoked credentials still live", limit)
 		return nil, ErrBoardRevokesFailing
 	}
 	ctx, cancel := context.WithTimeout(ctx, g.cfg.CallTimeout)

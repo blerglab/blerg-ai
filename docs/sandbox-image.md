@@ -81,15 +81,47 @@ other worktrees), and none to your working tree.
 
 **What the sandbox can touch.**
 
-- **Writable:** its clone, mounted at `/workspace`; the engine logins mounted for the engine
-  (`~/.claude`, `~/.claude.json`, `~/.codex`, Hermes' two files, see
-  [`DAEMON.md`](../install/desktop/DAEMON.md#local-sandbox-runtime)); and the container's own
-  filesystem.
+- **Writable:** its clone, mounted at `/workspace`; its own sandbox home (below); and the
+  container's own filesystem.
 - **Read-only:** your repository's objects directory (so the clone can read history), the
-  messaging CLI, and an always-on plugin snapshot when there is one.
+  messaging CLI, an always-on plugin snapshot when there is one, and your engines' configuration
+  (below).
 - **Not mounted at all:** your working tree, the rest of your `.git` (`config`, `hooks/`, refs,
-  `packed-refs`, `worktrees/`), your other repositories, your Git credentials, SSH keys and Git
+  `packed-refs`, `worktrees/`), your other repositories, your `~/.claude`, `~/.claude.json`,
+  `~/.codex` and `~/.hermes` directories themselves, your Git credentials, SSH keys and Git
   configuration, and everything else on the machine.
+
+**The engines' logins and configuration: a sandbox home of its own.** A sandbox never gets your
+engine directories. Settings, hooks, plugins or skills written there would run on your machine, as
+you, the next time you start Claude Code or Codex outside the sandbox. Each sandboxed session gets
+a home of its own instead, kept by the daemon in
+`~/.blerg-runner-daemon/sandbox-homes/<session-id>` and removed when the session ends (a home a
+crash left behind is removed when the daemon next starts). It holds only the engine the session
+runs: a Claude session gets nothing of Codex or Hermes, and the other way round.
+
+| Engine | In the container | What it is | Can the session change it? |
+| --- | --- | --- | --- |
+| Claude | `~/.claude` | the session's own directory: transcripts, todos, caches | yes, only its own |
+| Claude | `~/.claude/.credentials.json` | your current access token; the refresh token is replaced by a placeholder, and your MCP servers' tokens are left out | its own copy only; the daemon replaces it every 15 seconds and never reads it |
+| Claude | `~/.claude/settings.json`, `settings.local.json` | copies of yours keeping only behavior settings (permissions, model, plugins enabled, output style and the like); `env`, `apiKeyHelper`, AWS and other credential helpers are left out, and so are your hooks and status line (their commands can carry tokens): **your own Claude hooks do not run in a Local sandbox session** | no (read-only) |
+| Claude | `~/.claude/CLAUDE.md`, `keybindings.json`, `agents/`, `commands/`, `hooks/`, `output-styles/`, `personas/`, `plugins/`, `skills/` | yours, read-only (an empty read-only directory when you have none) | no |
+| Claude | `~/.claude.json` | only your account state (`oauthAccount`, `userID`, onboarding, `primaryApiKey` if you use one) and `/workspace`'s folder trust | no (read-only) |
+| Codex | `~/.codex` | the session's own directory: sessions, logs, caches | yes, only its own |
+| Codex | `~/.codex/auth.json` | your API key, or your current ChatGPT tokens with the refresh token replaced by a placeholder and the refresh time set to now (so Codex does not try to renew before the access token expires) | its own copy only; replaced every 15 seconds, never read |
+| Codex | `~/.codex/config.toml` | a copy of yours keeping only model, provider (name and address, no headers), approval, sandbox and feature settings; MCP servers, plugins, projects, `notify` and shell environment are left out. A Codex session with MCP connections gets the same allowlisted settings in its private Codex home (plus the session's own MCP bridge and its `/workspace` project setting) | no (read-only) |
+| Codex | `AGENTS.md`, `AGENTS.override.md`, `hooks.json` (when you have them), `hooks/`, `skills/`, `plugins/`, `rules/`, `prompts/`, `marketplaces/` | yours, read-only (empty read-only directories when you have none) | no |
+| Hermes | `~/.hermes/config.yaml`, `~/.hermes/.env` | yours (they are Hermes's provider login), read-only; the rest of `~/.hermes` is the image's own Hermes install | no |
+
+OpenClaw does not run in the sandbox. Where you have no `AGENTS.md`, `AGENTS.override.md`,
+`hooks.json` or `keybindings.json`, a session can create one, but only in its own home.
+
+**Signing in.** Nothing from a sandbox home is ever read back or copied to your machine. A session
+gets only the sign-in that works now: it cannot renew it, and it cannot change yours. While it runs,
+the daemon copies your current sign-in in every 15 seconds, so when Claude Code or Codex on your
+machine refreshes it, the session gets the new one. If your sign-in has expired and nothing on your
+machine has refreshed it, the session says "The Claude (or Codex) sign-in on this machine needs
+refreshing": run `claude` or `codex` once on this machine, outside the sandbox, or sign in again
+there. The daemon does not refresh a sign-in itself.
 
 **The clone.** The daemon makes it with `git clone --shared` into its state directory
 (`~/.blerg-runner-daemon/sandbox-clones/<session-id>`), on a new branch `wip/<session-id>` that
@@ -126,14 +158,28 @@ build output stays out). That `.gitignore` is the session's own: only work hidde
 left out of the snapshot and removed with the clone, and that is the session's own choice. Work on another branch or a stash in the clone is not
 moved: the clone is then kept (see below).
 
-**How the fetch is kept safe.** The fetch runs on the host with hooks, `core.fsmonitor`,
-`core.sshCommand` and submodules switched off, without system or global configuration, and checks
-the objects it receives, so the clone's own configuration and hooks (which the session controls)
-do not run on the host. The container is paused for the whole check-reset-fetch step (and always
+**How the fetch is kept safe.** The fetch runs on the host through the daemon's one hardened Git
+runner, and the clone's `upload-pack` and `pack-objects` (which also run on the host, in the clone)
+carry the same overrides on their own command line, since Git does not hand them on. Neither side
+reads system or global configuration, and nothing the clone's configuration names runs: hooks,
+`core.fsmonitor`, `core.sshCommand`, an external diff, submodules, an alternate-refs command. Only
+the file transport is allowed, and the fetch runs under a memory limit, writes no commit-graph and
+starts no maintenance.
+
+What the host still parses from the clone: its `.git/config`, refs, `packed-refs`, `shallow`, pack
+indexes and the objects themselves. The objects it receives are checked (`fsck`). Not parsed: the
+clone's commit-graph, multi-pack index and bitmaps (switched off). Refused instead, before Git runs
+and read as plain files: a `.git/info/attributes`, `.git/info/grafts` or `.git/objects/info/grafts`
+file, a `.gitattributes` anywhere under `.git` (any case: the host's `pack-objects` reads them
+there), a `.git/config.worktree`, and any `[include]` or `[includeIf]` section in the clone's
+`.git/config`. Everything under `.git` counts toward a size cap (the objects toward their own). The session's transcript then says which one to remove, and the commits come back at
+the next turn's end once it is gone.
+
+The container is paused for the whole check-reset-fetch step (and always
 unpaused after; a failed unpause is retried once and logged loudly), so the clone cannot be swapped
 while the host reads it. If the container is not known at the end of a turn, the fetch is refused
 rather than run against a clone that could be changing. The fetch reads the clone's `.git` only
-(never its working folder), through `git-upload-pack --strict`, and is refused if that `.git` is
+(never its working folder), through `git upload-pack --strict`, and is refused if that `.git` is
 missing or not a valid repository. Before fetching, the daemon walks the clone's `.git` and refuses
 the fetch if anything under it is a symbolic link or not a plain file or directory (so a session
 cannot point `objects/pack`, a loose-object directory or its ref at another repository), if the

@@ -136,17 +136,17 @@ describe('complete inline review workflow in Chromium', () => {
     const outdated = {...saved('outdated', 2, 'done'), text: 'Earlier source comment', anchor: {...resolved.anchor, quote: 'source no longer in this patch', diff: {...resolved.anchor.diff!, artifactId: 'earlier-patch'}}}
     const {value, sent} = reviewContext({version: 1, file: {name: artifact.name, artifactId: artifact.id}, requests: [resolved, rejected, outdated]})
     const {container, getByRole} = render(<ChatContext.Provider value={value}><ReviewMode artifact={artifact} text={PATCH} onClose={() => {}} /></ChatContext.Provider>)
-    await waitFor(() => expect(container.querySelectorAll('[data-testid="review-request"]')).toHaveLength(3))
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="review-request"]')).toHaveLength(2))
     const threads = [...container.querySelectorAll<HTMLElement>('[data-testid="review-request"]')]
     const done = threads.find(thread => thread.textContent?.includes('done comment'))!
     const declined = threads.find(thread => thread.textContent?.includes('declined comment'))!
-    const old = threads.find(thread => thread.textContent?.includes('Earlier source comment'))!
-    expect(done.textContent).toContain('Resolved')
-    expect(declined.textContent).toContain('Rejected')
+    expect(done.textContent).toContain('✓ Resolved')
+    expect(declined.textContent).toContain('✕ Rejected')
     expect(done.closest('tr')).not.toBeNull()
-    expect(old.closest('tr')).toBeNull()
-    expect(old.textContent).toContain('Outdated')
-    expect(old.textContent).toContain('source no longer in this patch')
+    // The outdated thread is not in Files (GitHub's behavior): one line points to the Conversation.
+    expect(container.querySelector('[data-testid="review-unplaced-notice"]')?.textContent).toContain('1 outdated conversation')
+    expect(container.textContent).not.toContain('Earlier source comment')
+    await userEvent.click(getByRole('button', {name: 'Show thread: done comment'}))
     await userEvent.click(within(done).getByRole('button', {name: 'Reopen'}))
     expect(within(done).getByRole('button', {name: 'Reopen with comment'})).toBeDisabled()
     await userEvent.fill(within(done).getByRole('textbox', {name: 'Reason for reopening'}), '   ')
@@ -166,7 +166,7 @@ describe('complete inline review workflow in Chromium', () => {
     await waitFor(() => expect(sent).toHaveLength(1))
     const review = JSON.parse(await sent[0]!.files[0]!.text()) as ReviewFile
     expect(review.requests.find(request => request.id === 'resolved')).toMatchObject({status: 'open', revision: 1, reply: 'done agent reply'})
-    expect(review.requests.find(request => request.id === 'resolved')?.comments).toEqual([{text:'Please handle the missing edge case.',createdAt:expect.any(String),revision:1}])
+    expect(review.requests.find(request => request.id === 'resolved')?.comments).toEqual([{text:'Please handle the missing edge case.',createdAt:expect.any(String),revision:1,action:'reopen'}])
     expect(sent[0]!.text).toContain('Please handle the missing edge case.')
     expect(sent[0]!.text).not.toContain('Discarded diff explanation')
     expect(review.requests.find(request => request.id === 'rejected')?.status).toBe('declined')
@@ -197,7 +197,9 @@ describe('complete inline review workflow in Chromium', () => {
     const plus = getByRole('button', {name: 'Comment on new line 3 in f.ts'}).getBoundingClientRect()
     const line = getByRole('button', {name: 'Select new line 3 in f.ts'}).getBoundingClientRect()
     expect(plus.width).toBeGreaterThanOrEqual(24)
-    expect(plus.right).toBeLessThanOrEqual(line.left)
+    // GitHub's place: right of the line numbers, at the start of the code, on the first line.
+    expect(plus.left).toBeGreaterThanOrEqual(line.right)
+    expect(Math.abs(plus.top - line.top)).toBeLessThan(2)
   })
 
   it('keeps a desktop inline composer inside the review pane when source lines are very long', async () => {
@@ -227,11 +229,14 @@ describe('complete inline review workflow in Chromium', () => {
     expect(getByRole('button', {name: 'Select new line 2 in f.ts'}).getAttribute('aria-pressed')).toBe('true')
   })
 
-  it('exposes inline comments immediately when opening a published diff', async () => {
+  it('exposes inline comments one tab from the Conversation when opening a published diff', async () => {
     const {value} = reviewContext()
     const files: TransportFiles = {list: async () => [], raw: async () => new Blob([PATCH], {type: 'text/x-diff'}), download: async () => {}, remove: async () => {}, upload: async () => {throw new Error('Not used')}}
     value.files = files
     const {findByRole, queryByRole} = render(<ChatContext.Provider value={value}><ArtifactViewer sessionId={value.sessionId} files={files} artifact={artifact} onClose={() => {}} /></ChatContext.Provider>)
+    // The review opens on the Conversation; Files has the inline comments one tab away.
+    expect(await findByRole('tab', {name: 'Conversation'})).toHaveAttribute('aria-selected', 'true')
+    await userEvent.click(await findByRole('tab', {name: 'Files'}))
     const add = await findByRole('button', {name: 'Comment on new line 2 in f.ts'})
     expect(queryByRole('button', {name: 'Review'})).toBeNull()
     await userEvent.click(add)
@@ -246,11 +251,15 @@ describe('resolved thread controls in Chromium', () => {
     const existing: ReviewFile = {version: 1, file: {name: artifact.name, artifactId: artifact.id}, requests: [saved('resolved', 2, 'done'), saved('rejected', 3, 'declined'), {...saved('open', 2, 'open'), reply: undefined}]}
     const {value} = reviewContext(existing)
     const {getByRole, findByRole, queryByText, getByText} = render(<ChatContext.Provider value={value}><ReviewMode artifact={artifact} text={PATCH} onClose={() => {}} /></ChatContext.Provider>)
-    await userEvent.click(await findByRole('button', {name: 'Collapse thread: done comment'}))
+    const showDone = await findByRole('button', {name: 'Show thread: done comment'})
     expect(queryByText('done agent reply')).toBeNull()
     expect(getByText('done comment')).toBeVisible()
-    await userEvent.click(getByRole('button', {name: 'Expand thread: done comment'}))
+    await userEvent.click(showDone)
     expect(getByText('done agent reply')).toBeVisible()
+    await userEvent.click(getByRole('button', {name: 'Hide thread: done comment'}))
+    expect(queryByText('done agent reply')).toBeNull()
+    await userEvent.click(getByRole('button', {name: 'Show thread: done comment'}))
+    await userEvent.click(getByRole('button', {name: 'Show thread: declined comment'}))
     await userEvent.click(getByRole('checkbox', {name: 'Hide resolved'}))
     expect(queryByText('done comment')).toBeNull()
     expect(queryByText('declined comment')).toBeNull()
@@ -258,5 +267,47 @@ describe('resolved thread controls in Chromium', () => {
     await userEvent.click(getByRole('checkbox', {name: 'Hide resolved'}))
     expect(getByText('done agent reply')).toBeVisible()
     expect(getByText('declined agent reply')).toBeVisible()
+  })
+})
+
+describe('resolved threads stay on their lines in Chromium', () => {
+  // v2 of the patch: newA kept (moved down a line), newB rewritten to newC.
+  const LATER = 'diff --git a/f.ts b/f.ts\n--- a/f.ts\n+++ b/f.ts\n@@ -1,4 +1,5 @@\n same\n-oldA\n-oldB\n+inserted\n+newA\n+newC\n tail\n'
+  const fromV1 = (id: string, quote: string, line: number, status: ReviewRequest['status']): ReviewRequest =>
+    ({...saved(id, line, status), text: `${id} comment`, anchor: {kind: 'text', quote, diff: {file: 'f.ts', side: 'new', start: line, end: line, fileIndex: 1, hunk: 1, artifactId: 'patch-v1'}}})
+
+  it.each([[390, 844], [3840, 2160]])('keeps resolved and rejected threads inline as one-line bars, outdated ones in the Conversation, at %ipx', async (width, height) => {
+    await page.viewport(width, height)
+    const existing: ReviewFile = {version: 1, file: {name: artifact.name, artifactId: 'patch-v1'}, requests: [
+      fromV1('kept', 'newA', 2, 'done'),
+      fromV1('changed', 'newB', 3, 'declined'),
+    ]}
+    const {value} = reviewContext(existing)
+    const {container, getByRole, findByRole} = render(<ChatContext.Provider value={value}><ReviewMode artifact={artifact} text={LATER} onClose={() => {}} /></ChatContext.Provider>)
+    const kept = (await findByRole('button', {name: 'Show thread: kept comment'})).closest('tr')!
+    // The kept line moved to new line 3 and stays inline; the changed one is Outdated: not in Files.
+    expect(kept.previousElementSibling?.textContent).toContain('newA')
+    expect(kept.textContent).toContain('✓ Resolved')
+    expect(kept.textContent).not.toContain('Outdated')
+    expect(container.querySelectorAll('.diff-comment-row')).toHaveLength(1)
+    const notice = container.querySelector<HTMLElement>('[data-testid="review-unplaced-notice"]')!
+    expect(notice.textContent).toContain('1 outdated conversation · view')
+    expect(notice.getBoundingClientRect().right).toBeLessThanOrEqual(innerWidth)
+    for (const row of [kept]) {
+      const bar = row.querySelector('.review-thread-bar')!.getBoundingClientRect()
+      expect(bar.height).toBeLessThan(44)
+      expect(bar.right).toBeLessThanOrEqual(innerWidth)
+      expect(row.querySelector('.review-thread-bar-show')!.getBoundingClientRect().right).toBeLessThanOrEqual(innerWidth)
+    }
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(innerWidth)
+    expect(container.textContent).not.toContain('Earlier revision comments')
+    await userEvent.click(getByRole('button', {name: 'View 1 outdated conversation in the Conversation'}))
+    const card = (await findByRole('button', {name: 'Show thread: changed comment'})).closest<HTMLElement>('[data-testid="conversation-thread"]')!
+    expect(card.textContent).toContain('Outdated')
+    expect(card.textContent).toContain('✕ Rejected')
+    expect(card.querySelector('[data-testid="conversation-excerpt"]')?.textContent).toContain('newB')
+    expect(card.getBoundingClientRect().right).toBeLessThanOrEqual(innerWidth)
+    await userEvent.click(getByRole('button', {name: 'Show thread: changed comment'}))
+    expect(card.textContent).toContain('declined agent reply')
   })
 })

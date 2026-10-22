@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
-import { page } from 'vitest/browser'
+import { page, userEvent } from 'vitest/browser'
 import { ArtifactViewer, ChatContext, type TransportFiles, type ChatContextValue } from '@blerglab/chat'
 import '@blerglab/chat/blerg.css'
 import '../index.css'
+
+/** The viewer opens a diff review on its Conversation (as a pull request does); these tests are about Files. */
+async function openFiles() {
+  await waitFor(() => expect([...document.querySelectorAll('[role=tab]')].some(t => t.textContent === 'Files')).toBe(true))
+  await userEvent.click([...document.querySelectorAll<HTMLElement>('[role=tab]')].find(t => t.textContent === 'Files')!)
+}
 
 const patch = Array.from({length: 90}, (_, file) => `diff --git a/src/file-${file}.txt b/src/file-${file}.txt\n--- a/src/file-${file}.txt\n+++ b/src/file-${file}.txt\n@@ -1,1 +1,${file ? 1 : 180} @@\n-old\n${Array.from({length: file ? 1 : 180}, (_, line) => `+line-${line}-${'x'.repeat(300)}`).join('\n')}\n`).join('')
 const files: TransportFiles = {list: async () => [], raw: async () => new Blob([patch]), download: async () => {}, remove: async () => {}, upload: async () => { throw new Error('unused') }}
@@ -16,10 +22,12 @@ describe('diff review scroll boundaries', () => {
     await page.viewport(width, 800)
     const text = count === 1 ? patch.slice(0, patch.indexOf('diff --git', 10)) : patch
     render(<ChatContext.Provider value={context}><ArtifactViewer sessionId="layout-fixture" files={{...files, raw: async () => new Blob([text])}} artifact={{id: 'patch', name: 'changes.patch', size: patch.length, view: 'diff', content_type: 'text/x-diff'}} onClose={() => {}} /></ChatContext.Provider>)
-    await waitFor(() => expect(document.querySelector('.diff-files')).not.toBeNull())
-    const nav = document.querySelector<HTMLElement>('.diff-files')!
+    await openFiles()
+    const phone = width < 700
+    await waitFor(() => expect(document.querySelector(phone ? '.diff-file-picker, .diff-main' : '.diff-files')).not.toBeNull())
+    const nav = document.querySelector<HTMLElement>(phone ? '.diff-toolbar' : '.diff-files')!
     const code = document.querySelector<HTMLElement>('.diff-main')!
-    if (count > 1) expect(nav.scrollHeight).toBeGreaterThan(nav.clientHeight)
+    if (count > 1 && !phone) expect(nav.scrollHeight).toBeGreaterThan(nav.clientHeight)
     expect(code.scrollHeight).toBeGreaterThan(code.clientHeight)
     const top = nav.getBoundingClientRect().top
     code.scrollTop = 180
@@ -27,7 +35,7 @@ describe('diff review scroll boundaries', () => {
     expect(code.scrollTop).toBeGreaterThan(0)
     expect(nav.scrollTop).toBe(0)
     expect(nav.getBoundingClientRect().top).toBe(top)
-    if (count > 1) {
+    if (count > 1 && !phone) {
       nav.scrollTop = 100
       expect(nav.scrollTop).toBeGreaterThan(0)
     }

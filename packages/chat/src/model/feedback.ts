@@ -2,11 +2,57 @@
 // file, and the pins' notes with where each sits (docs/design/feedback-tools.md, "The message
 // the session gets"). The attachment note is added by the ordinary send path, not here.
 import { describePlace } from './anchor'
-import { diffAnchorLabel, reviewReplyHistory, type ReviewFile } from './review'
+import { diffAnchorLabel, reviewReplyHistory, type ReviewFile, type ReviewRequest } from './review'
 
 const QUOTE_MAX = 160
 
 const REPLY_HOW = 'Reply with `blerg-runner review reply <id> done|declined "<one line>"` per request, and publish the file again.'
+
+const COMMENT_WORD = { reply: 'reply,', reopen: 'reopening', resolve: 'resolved it,', reject: 'rejected it,' } as const
+
+/** The person's words for the agent, set off as a quote: each line starts "> ", so nothing they
+ *  wrote can pass for a line of this message, and invisible format characters (bidi controls,
+ *  zero-width) and control characters are dropped. '' when nothing is left. */
+function quoted(text: string): string {
+  // U+2028 and U+2029 are line breaks the agent may not read as such: lines like any other.
+  const clean = [...text.replace(/[\p{Cf}]/gu, '').replace(/[\u2028\u2029]/g, '\n')].filter(ch => {
+    const n = ch.charCodeAt(0)
+    return ch === '\n' || ch === '\t' || !(n < 32 || (n >= 127 && n <= 159))
+  }).join('').trim()
+  return clean ? clean.split('\n').map(line => `> ${line}`).join('\n') : ''
+}
+
+/** Someone else's words on one line, between double quotes: format and control characters
+ *  dropped, every run of whitespace (line breaks included) one space, inner double quotes single. */
+function oneLineQuote(text: string): string {
+  const words = [...text.replace(/[\p{Cf}]/gu, '')].map(ch => {
+    const n = ch.charCodeAt(0)
+    return n < 32 || (n >= 127 && n <= 159) ? ' ' : ch
+  }).join('').split(/\s+/u).filter(Boolean).join(' ')
+  return `"${words.replace(/"/g, "'")}"`
+}
+
+/** Where a thread stands after the person's latest action, for the agent. */
+function threadState(r: ReviewRequest): string {
+  if (r.status !== 'open' && r.settledBy === 'person') {
+    return `${r.status === 'done' ? 'Resolved' : 'Rejected'} by the person (revision ${r.revision}): nothing to change unless their words ask for it; a reply is optional and does not change this status.`
+  }
+  if (r.status !== 'open') return `Resolved earlier by you; the person replied (revision ${r.revision}). Answer the reply.`
+  const last = r.comments?.[r.comments.length - 1]
+  const reopen = r.agentReopens?.[r.agentReopens.length - 1]
+  if (reopen && reopen.revision >= (last?.revision ?? 0) && last?.action !== 'reply') {
+    return `Open: you reopened it (revision ${reopen.revision}); the person has not answered yet.`
+  }
+  if (reopen && last?.action === 'reply' && last.revision > reopen.revision) {
+    return `Open: the person answered your reopen (revision ${r.revision}).`
+  }
+  if (last?.action === 'reply') {
+    return reviewReplyHistory(r).length
+      ? `Open again: the person replied to your answer (revision ${r.revision}). Answer the reply.`
+      : `Open thread; the person replied (revision ${r.revision}).`
+  }
+  return `Reopened thread, revision ${r.revision}.`
+}
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
@@ -33,8 +79,18 @@ export function composeReviewMessage(review: ReviewFile, file: { name: string; v
       const ask = anchor.quote ? `"${shortQuote(anchor.quote)}" — ${r.text}` : r.text
       out.push(`${i + 1}. [${r.id}] ${where.length ? `${where.join(', ')}: ` : ''}${ask}`)
       if (r.revision) {
-        out.push(`Reopened thread, revision ${r.revision}.`)
-        for (const comment of r.comments ?? []) out.push(`Person · reopening revision ${comment.revision}:`, comment.text)
+        out.push(threadState(r))
+        // The person's comments and the agent's own reopens, in revision order.
+        const said: Array<{revision: number; lines: string[]}> = [
+          ...(r.comments ?? []).map(comment => {
+            const head = `Person · ${COMMENT_WORD[comment.action ?? 'reopen']} revision ${comment.revision}`
+            const words = quoted(comment.text)
+            return {revision: comment.revision, lines: words ? [`${head}:`, words] : [`${head}.`]}
+          }),
+          ...(r.agentReopens ?? []).map(reopen => ({revision: reopen.revision, lines: [reopen.text ? `Your reopen, revision ${reopen.revision}: ${oneLineQuote(reopen.text)}` : `Your reopen, revision ${reopen.revision}.`]})),
+        ]
+        // A stable sort: at one revision the person's words come first.
+        for (const item of said.sort((x, y) => x.revision - y.revision)) out.push(...item.lines)
         for (const reply of reviewReplyHistory(r)) out.push(`Previous agent answer · ${reply.status === 'done' ? 'Resolved' : 'Rejected'} · revision ${reply.revision ?? 0}:`, reply.text)
       }
       if (r.suggestion) {

@@ -52,6 +52,12 @@ def done():
  event('message.delta',{'text':'streamed '})
  event('message.delta',{'text':'answer'})
  event('message.complete',{'text':os.getenv('FAKE_HERMES_FINAL','streamed answer'),'status':'complete','usage':{'model':'fixture-model','input':calls*10,'output':calls*3,'total':calls*13,'calls':calls}})
+if os.getenv('FAKE_HERMES_STUBBORN'):
+ import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN)
+if os.getenv('FAKE_HERMES_BRIDGE_ERROR'):
+ event('blerg.bridge_error',{},'');sys.stdin.read()
+ if os.getenv('FAKE_HERMES_STUBBORN'):time.sleep(30)
+ sys.exit(0)
 if os.getenv('FAKE_HERMES_ENV_LOG'):
  with open(os.environ['FAKE_HERMES_ENV_LOG'],'w') as f:f.write(os.environ.get('HERMES_YOLO_MODE',''))
 event('gateway.ready',{},'')
@@ -79,6 +85,7 @@ for line in sys.stdin:
   send({'id':rid,'result':{'status':'interrupted'}});event('message.complete',{'text':'','status':'interrupted'});continue
  else:result={}
  send({'id':rid,'result':result})
+if os.getenv('FAKE_HERMES_STUBBORN'):time.sleep(30)
 `
 
 func TestHermesGatewayStreamsToolsAndUsage(t *testing.T) {

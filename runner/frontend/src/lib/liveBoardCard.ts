@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { clearHovercardCache, clearPreviewCache, type CardPreview, type CardTarget } from '@blerglab/chat'
 import { apiFetch } from '../apiFetch'
 import { getAccessToken } from '../authClient'
 import { tokenSubject } from '../claims'
@@ -30,6 +31,8 @@ export function boardCardRef(t: { source: string; key: string; boardId?: string;
 /** How long a read stands for the chip before it is read again. */
 const FRESH_MS = 30_000
 const reads = new Map<string, { at: number; read: LiveBoardRead }>()
+/** Cards whose last read failed (the agent's copy then stands; nothing is waited for). */
+const failedReads = new Set<string>()
 const inflight = new Map<string, Promise<LiveBoardRead>>()
 const listeners = new Set<() => void>()
 // Reads are the person's (their own board permissions): kept per account, and all forgotten when
@@ -41,14 +44,36 @@ function account(): string {
   if (who !== heldFor) {
     reads.clear()
     inflight.clear()
+    // What hovercards and file previews read was read under the other sign-in too.
+    if (heldFor) {
+      clearHovercardCache()
+      clearPreviewCache()
+    }
     heldFor = who
   }
   return who
 }
+
+/** Forgets every read held for another account than the tab's now (the panel calls it as it draws,
+ *  the page's transport before every request). */
+export function checkAccount(): void {
+  account()
+}
+
+/** Who is signed in now, for the hovercards' own account check (HovercardSources.account). */
+export function signedInAccount(): string {
+  return tokenSubject(getAccessToken())
+}
 const keyOf = (board: string, number: number) => `${account()}|${board}#${number}`
 
 /** Test hook: forget every read. */
-export function resetLiveBoardCardsForTest(): void { reads.clear(); inflight.clear(); heldFor = '' }
+export function resetLiveBoardCardsForTest(): void { reads.clear(); inflight.clear(); failedReads.clear(); heldFor = '' }
+
+/** Whether the card's read has settled: read, or failed. */
+export function boardReadSettled(board: string, number: number): boolean {
+  const k = keyOf(board, number)
+  return reads.has(k) || failedReads.has(k)
+}
 
 export class LiveBoardCardError extends Error {
   readonly status: number
@@ -156,4 +181,83 @@ export function useTicketView(t: { source: string; key: string; boardId?: string
   const card = ref && live.read ? live.read.card : null
   if (!card) return { status: t.status, title: t.title, live: false }
   return { status: card.archived_at ? 'Archived' : card.column_name || t.status, title: card.title || t.title, live: true }
+}
+
+/** How often the Live tab reads its pins again while it is on screen (a card moved to Done shows ✓). */
+export const PINS_REFRESH_MS = 60_000
+
+/** The live cards of several pins at once (the Live tab's list): each read when it is not held
+ *  fresh, the reads shared with the chips and the dialog. While `active` (Live on screen), they are
+ *  read again every PINS_REFRESH_MS and when the tab comes back into view. Keyed "<board>#<number>". */
+export function useLiveBoardCards(refs: readonly { board: string; number: number }[], sessionId?: string, active = false): Map<string, LiveBoardCard> {
+  const list = refs.map(r => `${r.board}#${r.number}`).join(',')
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const l = () => setTick(t => t + 1)
+    listeners.add(l)
+    return () => { listeners.delete(l) }
+  }, [])
+  useEffect(() => {
+    for (const r of refs) {
+      const c = reads.get(keyOf(r.board, r.number))
+      if (c && Date.now() - c.at < FRESH_MS) continue
+      const k = keyOf(r.board, r.number)
+      readLiveBoardCard(r.board, r.number, sessionId).then(() => { failedReads.delete(k) }, () => {
+        // The agent's copy stands; a panel waiting for this read stops waiting.
+        failedReads.add(k)
+        for (const l of listeners) l()
+      })
+    }
+    // refs is read through `list`, its identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list, sessionId])
+  useEffect(() => {
+    if (!active || !list) return
+    const again = () => {
+      if (document.visibilityState === 'hidden') return
+      for (const k of list.split(',')) {
+        const i = k.lastIndexOf('#')
+        const board = k.slice(0, i), number = Number(k.slice(i + 1))
+        const c = reads.get(keyOf(board, number))
+        if (c && Date.now() - c.at < FRESH_MS) continue
+        readLiveBoardCard(board, number, sessionId).catch(() => { /* the last read stands */ })
+      }
+    }
+    const timer = setInterval(again, PINS_REFRESH_MS)
+    const onVisible = () => { if (document.visibilityState === 'visible') again() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible) }
+  }, [active, list, sessionId])
+  return useMemo(() => {
+    const out = new Map<string, LiveBoardCard>()
+    for (const k of list ? list.split(',') : []) {
+      const i = k.lastIndexOf('#')
+      const c = reads.get(keyOf(k.slice(0, i), Number(k.slice(i + 1))))
+      if (c) out.set(k, c.read.card)
+    }
+    return out
+    // tick: a read landed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list, tick])
+}
+
+/** What a card's hovercard shows of a Blerg Board card: read when the card first opens (a read
+ *  held fresh is used as it is). null for any other tracker: the chip's own copy stands. */
+export async function cardPreview(t: CardTarget, sessionId?: string): Promise<CardPreview | null> {
+  const ref = boardCardRef(t)
+  if (!ref) return null
+  const held = reads.get(keyOf(ref.board, ref.number))
+  const card = held && Date.now() - held.at < FRESH_MS ? held.read.card : (await readLiveBoardCard(ref.board, ref.number, sessionId)).card
+  const terminal = !!card.columns?.find(c => c.id === card.column_id)?.is_terminal
+  return {
+    key: `#${card.number}`,
+    title: card.title,
+    status: card.archived_at ? 'Archived' : card.column_name || undefined,
+    done: terminal || !!card.archived_at,
+    live: true,
+    priority: card.priority || undefined,
+    type: card.type || undefined,
+    tags: card.tags ?? undefined,
+    description: card.body ?? undefined,
+  }
 }

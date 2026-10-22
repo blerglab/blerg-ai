@@ -36,6 +36,7 @@ func proposalNote(s string) string {
 // an MCP result beyond its text.
 type proposalOutcome struct {
 	Card  *filedCard
+	Board *createdBoard
 	Note  string
 	Error string
 	Text  string
@@ -59,7 +60,8 @@ func readProposalOutcome(p *db.Proposal) proposalOutcome {
 			out.Card = &card
 		}
 	}
-	if !db.IsBoardFilingProposal(p) && p.State == db.ProposalDone {
+	out.Board = readCreatedBoard(p)
+	if !db.IsBoardFilingProposal(p) && !db.IsBoardCreateProposal(p) && p.State == db.ProposalDone {
 		out.Text = clipRunes(resultText(p.Result), 1000)
 	}
 	return out
@@ -72,6 +74,9 @@ func readProposalOutcome(p *db.Proposal) proposalOutcome {
 //	Proposal <id> could not be confirmed: …
 func proposalDecisionMessage(p *db.Proposal) string {
 	o := readProposalOutcome(p)
+	if db.IsBoardCreateProposal(p) {
+		return boardCreateDecisionMessage(p, o)
+	}
 	board := db.IsBoardFilingProposal(p)
 	head := "Proposal " + p.ID
 	by := ""
@@ -212,6 +217,9 @@ func (a *API) HandleSessionProposalStatus(w http.ResponseWriter, r *http.Request
 	if o.Card != nil {
 		out["card"] = o.Card
 	}
+	if o.Board != nil {
+		out["board"] = o.Board
+	}
 	if o.Note != "" {
 		out["note"] = o.Note
 	}
@@ -226,4 +234,58 @@ func (a *API) HandleSessionProposalStatus(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, out)
+}
+
+// boardCreateDecisionMessage is what the session reads about its proposed board, for example
+//
+//	Proposal <id> approved: board "Launch" was created (board id …); your access to it: Full. …
+func boardCreateDecisionMessage(p *db.Proposal, o proposalOutcome) string {
+	head := "Proposal " + p.ID
+	var b strings.Builder
+	switch p.State {
+	case db.ProposalDone:
+		if o.Board == nil {
+			fmt.Fprintf(&b, "%s approved: the board was created.", head)
+			break
+		}
+		fmt.Fprintf(&b, "%s approved: board %s was created (board id %s); your access to it: %s.", head, quotedName(o.Board.Name), o.Board.ID, boardLevelLabels[o.Board.Access])
+		if o.Board.AccessNote != "" {
+			b.WriteString(" " + strings.TrimRight(o.Board.AccessNote, ".") + ".")
+		}
+		if o.Board.Access == db.BoardLevelPropose {
+			b.WriteString(" Propose cards on it with blerg-runner ticket file.")
+		} else {
+			b.WriteString(" Use it with blerg-runner board ... or the blerg_board tool.")
+		}
+	case db.ProposalRejected:
+		b.WriteString(head + " rejected")
+		if o.Note != "" {
+			b.WriteString(": " + strings.TrimRight(o.Note, ".") + ".")
+		} else {
+			b.WriteString(" by the person.")
+		}
+		b.WriteString(" No board was created; do not propose it again unless the person asks.")
+	case db.ProposalFailed:
+		b.WriteString(head + " failed")
+		if o.Error != "" {
+			b.WriteString(": " + strings.TrimRight(o.Error, ".") + ".")
+		} else {
+			b.WriteString(".")
+		}
+		b.WriteString(" No board was created.")
+	case db.ProposalUnknown:
+		b.WriteString(head + " could not be confirmed")
+		if o.Error != "" {
+			b.WriteString(": " + strings.TrimRight(o.Error, ".") + ".")
+		} else {
+			b.WriteString(".")
+		}
+		b.WriteString(" Do not propose it again: the person checks the Board app and records what happened.")
+	case db.ProposalExpired:
+		b.WriteString(head + " expired without a decision; no board was created.")
+	default:
+		return ""
+	}
+	b.WriteString(" Confirm with: blerg-runner ticket status " + p.ID)
+	return b.String()
 }

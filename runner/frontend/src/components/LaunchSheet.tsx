@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { randomSessionName } from '../sessionNames'
 import { useSessionStore } from '../hooks/useSessionStore'
+import { defaultSessionName } from '../lib/sessionName'
+import { keepNotice, matchModel, placeWords, type ModelPick } from '../lib/modelKeep'
 import { apiFetch } from '../apiFetch'
 import { coreOrigin } from '../authClient'
 import RunColumn from './RunColumn'
@@ -11,7 +12,7 @@ import { NO_LAUNCH_PERMISSIONS, effectiveLaunchPermissions, type LaunchPermissio
 import { useToastStore } from '../hooks/useToastStore'
 import type { McpSelectionEntry } from '../types'
 import { useBackdropClose } from '@blerglab/chat'
-import { defaultRuntime, runtimeDisabledReason, ACK_AGENT, ACK_TERMINAL } from '../lib/runtimes'
+import { ENGINE_LABELS, defaultRuntime, runtimeDisabledReason, ACK_AGENT, ACK_TERMINAL } from '../lib/runtimes'
 import type { RunRuntime, RunKind, RunEngine } from '../lib/runtimes'
 import { useLaunchOptions } from '../lib/launchOptions'
 import { useEngineModels, modelCatalogTarget, defaultModel, effectiveEffort, isModelIdFor, isEffortToken, FREE_TEXT_MODEL_ENGINES } from '../lib/engineModels'
@@ -76,8 +77,8 @@ const createPlanStyle: React.CSSProperties = {
 
 const itemSelected: React.CSSProperties = {
   ...itemBase,
-  border: '1px solid var(--blaze)',
-  background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))',
+  border: '1px solid var(--selected-border)',
+  background: 'var(--selected-bg)',
 }
 
 // Remembers the last-used Engine/Model across launches so people aren't
@@ -259,6 +260,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     Object.fromEntries([rememberedEngine()].map(e => [e, loadStored(perEngineKey(LAST_MODEL_KEY, e), v => isModelIdFor(e, v))])))
   const [explicitEfforts, setExplicitEfforts] = useState<Record<string, string | null>>(() =>
     Object.fromEntries([rememberedEngine()].map(e => [e, loadStored(perEngineKey(LAST_EFFORT_KEY, e), isEffortToken)])))
+  // The display name of each engine's pick (from the list it was picked in), to find the same model
+  // under another routing id in another place's list.
+  const [pickedNames, setPickedNames] = useState<Record<string, string>>({})
   const pickedModel = pickedModels[engine] ?? null
   const explicitEffort = explicitEfforts[engine] ?? null
   // Where a session actually runs, for both kinds (spec §2). Without cached
@@ -280,23 +284,21 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const catalogTarget = modelCatalogTarget(runtime, listDaemonId)
   const launchOptions = useLaunchOptions({ runtime, daemonId: listDaemonId, kind, enabled: open && (onCluster || !!selectedDaemon) })
   const engineKnown = launchOptions.state === 'known' && launchOptions.engines.some(e => e.id === engine)
-  const targetKey = `${runtime}\0${listDaemonId ?? ''}\0${kind}`
-  const [previousTarget, setPreviousTarget] = useState<string | null>(() => onCluster || selectedDaemon ? targetKey : null)
-  if ((onCluster || selectedDaemon) && previousTarget !== targetKey) {
-    setPreviousTarget(targetKey)
-    if (previousTarget !== null) {
-      setPickedModels({})
-      setExplicitEfforts({})
-    }
-  }
+  // Card #151: a change of where it runs keeps the person's model and effort (each place's list is
+  // matched against the pick below). It used to clear them here, so the place's default won.
+  // An engine this place does not offer gives way to one it does, said aloud; the picks are kept
+  // for when the person comes back.
+  const [engineNotice, setEngineNotice] = useState<{ text: string; engine: string } | null>(null)
   if (launchOptions.state === 'known' && launchOptions.engines.length > 0 && !launchOptions.engines.some(e => e.id === engine)) {
-    setEngine(launchOptions.engines[0].id)
-    setPickedModels({})
-    setExplicitEfforts({})
+    const to = launchOptions.engines[0]
+    setEngineNotice({ engine: to.id, text: `${ENGINE_LABELS[engine] ?? engine} isn't available ${placeWords(runtime, selectedDaemon?.name)}: switched to ${to.name || ENGINE_LABELS[to.id] || to.id}` })
+    setEngine(to.id)
   }
   const engineModels = useEngineModels(engine, catalogTarget.daemonId, { enabled: open && engineKnown, cache: launchModelsCache, runtime: catalogTarget.runtime })
   const listModels = engineModels.models
-  const selectedModel = listModels.find(m => m.id === pickedModel) ?? defaultModel(engine, listModels)
+  const pick: ModelPick | null = pickedModel ? { id: pickedModel, ...(pickedNames[engine] ? { name: pickedNames[engine] } : {}) } : null
+  const modelMatch = matchModel(pick, listModels)
+  const selectedModel = modelMatch?.model ?? defaultModel(engine, listModels)
   // No list for an engine whose CLI takes a model name (an older daemon, a
   // probe that found nothing, the cluster): an optional free-text name,
   // checked against the engine's model rule before it can be sent, and — when
@@ -315,6 +317,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const freeTextModelInvalid = freeTextModel !== '' && !isModelIdFor(engine, freeTextModel)
   const freeTextEffort = freeTextModelOffered && engineModels.engineEfforts.includes(typedHere.effort) ? typedHere.effort : undefined
   const selectedEffort = freeTextModelOffered ? freeTextEffort : effectiveEffort(selectedModel, explicitEffort)
+  // The person's model or effort is not what will run here: say so beside the field. Not while the
+  // place's list is still loading (the built-in list stands in): a late list must not count as a
+  // swap, and the pick is kept, so the list that lands brings it back.
+  const modelNotice = freeTextModelOffered || engineModels.loading || listModels.length === 0 ? null
+    : keepNotice({ pick, match: modelMatch, selected: selectedModel, explicitEffort, effort: selectedEffort, place: placeWords(runtime, selectedDaemon?.name) })
   // Once someone picks a runtime, no suggested default ever moves it again for
   // the life of this sheet. A ref, not state: nothing renders from it, and it
   // is only read inside event handlers/effects.
@@ -339,8 +346,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [unattended, setUnattended] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [autoName] = useState(() => randomSessionName())
-  const [name, setName] = useState('')
+  // The name the person typed; null until they do. Until then the field shows the default, the
+  // repository's name (it follows a change of repository), numbered past running sessions.
+  const [typedName, setTypedName] = useState<string | null>(null)
   const [clusterStatus, setClusterStatus] = useState<ClusterStatusApi | null>(() => boot.cache.cluster?.value ?? null)
   const [myCreds, setMyCreds] = useState<MyCredentialsApi | null>(() => boot.cache.creds?.value ?? null)
   // GET /api/repos answered with stale_at: a GitHub/GitLab list (usually the
@@ -576,6 +584,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   }
 
   const folderName = search.trim()
+  // The repository the session will run in, by name, for its default name.
+  const repoForName = noRepoMode ? '' : selectedRepo ? (selectedRepo.name || selectedRepo.full_name) : newFolderMode || freeTextMode ? folderName : ''
+  const runningTitles = useSessionStore(s => s.sessions).filter(s => !s.archived_at && !s.ended_at && !['ended', 'error', 'stopped'].includes(s.status)).map(s => s.title ?? '')
+  const defaultName = defaultSessionName(repoForName, runningTitles)
+  const name = typedName ?? defaultName
   // What the Repository box says, read as a repository: owner/name (on the
   // picked provider) or a pasted URL (on its host's). null for anything else.
   const typedRef: RepoRef | null = parseRepoInput(folderName, freeTextProvider)
@@ -746,6 +759,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
 
   function pickEngine(e: RunEngine) {
     setEngine(e)
+    setEngineNotice(null)
     saveDefault(LAST_ENGINE_KEY, e)
     // OpenClaw only runs on the bare daemon host — no sandbox image, no
     // cluster image. Move rather than strand the sheet on a disabled card.
@@ -758,6 +772,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
 
   function pickModel(id: string) {
     setPickedModels(p => ({ ...p, [engine]: id }))
+    const name = listModels.find(m => m.id === id)?.name
+    if (name) setPickedNames(p => ({ ...p, [engine]: name }))
     saveDefault(perEngineKey(LAST_MODEL_KEY, engine), id)
   }
 
@@ -864,7 +880,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...repoFields,
-          title: name.trim() || autoName,
+          title: name.trim() || defaultName,
           initial_prompt: initialPrompt,
           // Whatever the engine's picker selected: a full model id (for both
           // kinds — the CLI takes it as --model) and an effort only when the
@@ -1082,9 +1098,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                               borderRadius: 4,
                               cursor: 'pointer',
                               fontFamily: 'inherit',
-                              background: typedRef.provider === p ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
-                              color: typedRef.provider === p ? 'var(--amber)' : 'var(--fog)',
-                              border: `1px solid ${typedRef.provider === p ? 'var(--blaze)' : 'var(--stone)'}`,
+                              background: typedRef.provider === p ? 'var(--selected-bg)' : 'var(--basalt)',
+                              color: typedRef.provider === p ? 'var(--selected-text)' : 'var(--fog)',
+                              border: `1px solid ${typedRef.provider === p ? 'var(--selected-border)' : 'var(--stone)'}`,
                             }}
                           >
                             {PROVIDER_LABELS[p]}
@@ -1104,7 +1120,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                   onClick={selectNewFolder}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ color: newFolderMode ? 'var(--amber)' : 'var(--fog)', fontSize: '0.85rem' }}>+</span>
+                    <span style={{ color: newFolderMode ? 'var(--selected-text)' : 'var(--fog)', fontSize: '0.85rem' }}>+</span>
                     <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>
                       {runtime === 'cluster'
                         ? (newRepoRef ? `Create "${fullName(newRepoRef)}" on ${providerLabel(newRepoRef.provider)}` : 'New repository')
@@ -1133,9 +1149,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                               borderRadius: 4,
                               cursor: 'pointer',
                               fontFamily: 'inherit',
-                              background: freeTextProvider === p ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
-                              color: freeTextProvider === p ? 'var(--amber)' : 'var(--fog)',
-                              border: `1px solid ${freeTextProvider === p ? 'var(--blaze)' : 'var(--stone)'}`,
+                              background: freeTextProvider === p ? 'var(--selected-bg)' : 'var(--basalt)',
+                              color: freeTextProvider === p ? 'var(--selected-text)' : 'var(--fog)',
+                              border: `1px solid ${freeTextProvider === p ? 'var(--selected-border)' : 'var(--stone)'}`,
                             }}
                           >
                             {PROVIDER_LABELS[p]}
@@ -1157,9 +1173,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                               borderRadius: 4,
                               cursor: 'pointer',
                               fontFamily: 'inherit',
-                              background: visibility === v ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
-                              color: visibility === v ? 'var(--amber)' : 'var(--fog)',
-                              border: `1px solid ${visibility === v ? 'var(--blaze)' : 'var(--stone)'}`,
+                              background: visibility === v ? 'var(--selected-bg)' : 'var(--basalt)',
+                              color: visibility === v ? 'var(--selected-text)' : 'var(--fog)',
+                              border: `1px solid ${visibility === v ? 'var(--selected-border)' : 'var(--stone)'}`,
                             }}
                           >
                             {v === 'private' ? 'Private' : 'Public'}
@@ -1250,8 +1266,10 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               <span style={sectionLabel}>Session Name</span>
               <input
                 value={name}
-                onChange={e => setName(e.target.value)}
-                placeholder={autoName}
+                onChange={e => setTypedName(e.target.value)}
+                placeholder={defaultName}
+                data-testid="launch-session-name"
+                aria-label="Session name"
                 autoCorrect="off"
                 autoCapitalize="none"
                 autoComplete="off"
@@ -1391,6 +1409,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             onModelChange={pickModel}
             effort={selectedEffort}
             onEffortChange={pickEffort}
+            modelNotice={[engineNotice?.engine === engine ? engineNotice.text : null, modelNotice].filter(Boolean).join('. ') || null}
             modelFreeText={freeTextModelOffered
               ? {
                   value: typedHere.model, onChange: typeModel, invalid: freeTextModelInvalid,

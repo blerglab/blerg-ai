@@ -12,7 +12,7 @@ import { emptyReview, newRequestId, reviewFileName, reopenReviewRequest, type An
 import type { ArtifactInfo } from '../../transport/types'
 import MarkdownPage from './MarkdownPage'
 import DiffView from '../DiffView'
-import DiffReview from './DiffReview'
+import DiffReview, { type ReviewTab } from './DiffReview'
 import PdfPages from './PdfPages'
 import DocumentMargin from './DocumentMargin'
 import DocumentEditor, { richDocumentSupported } from './DocumentEditor'
@@ -30,6 +30,9 @@ export interface ReviewModeProps {
   onClose: () => void
   embedded?: boolean
   commit?: string | null
+  /** A diff review's first tab, and who is told when it changes (DiffReview). */
+  initialTab?: ReviewTab
+  onTabChange?: (tab: ReviewTab) => void
 }
 
 const EDIT_KEY = (id: string) => `chat.review.edit.${id}`
@@ -60,7 +63,7 @@ function isEditable(target: EventTarget | null): boolean {
 export default function ReviewMode(props: ReviewModeProps) {
   const chat = useChat()
   // Review state and pending selections belong to these exact source bytes.
-  if(props.artifact.view==='diff'&&props.text!==undefined)return <DiffReview key={`${chat?.sessionId??''}:${props.artifact.id}:${props.text}`} artifact={props.artifact} text={props.text} onClose={props.onClose} embedded={props.embedded} commit={props.commit}/>
+  if(props.artifact.view==='diff'&&props.text!==undefined)return <DiffReview key={`${chat?.sessionId??''}:${props.artifact.id}:${props.text}`} artifact={props.artifact} text={props.text} onClose={props.onClose} embedded={props.embedded} commit={props.commit} initialTab={props.initialTab} onTabChange={props.onTabChange}/>
   return <ReviewSession key={`${chat?.sessionId ?? ''}:${props.artifact.id}:${props.artifact.version ?? ''}:${props.artifact.view}:${props.text ?? ''}`} {...props} />
 }
 
@@ -90,6 +93,8 @@ function ReviewSession({ artifact, text, blob, onClose }: ReviewModeProps) {
   const visibleRequests = requests.filter(r => !hideResolved || r.status === 'open')
   const [showDiff, setShowDiff] = useState(true)
   const [sourceMode, setSourceMode] = useState(false)
+  // The rendered document hides words its source holds (MarkdownPage): say so above the page.
+  const [hiddenContent, setHiddenContent] = useState(false)
   const safeRich = richDocumentSupported(edited) && richDocumentSupported(published)
   // Requests made in this sitting and not yet submitted: the only ones that can be deleted, and
   // (with an edit) what makes Submit worth pressing.
@@ -145,6 +150,12 @@ function ReviewSession({ artifact, text, blob, onClose }: ReviewModeProps) {
   const invalidate = useCallback((ids: string[]) => {
     setInvalidIds(current => ids.every(id => current.has(id)) ? current : new Set([...current, ...ids]))
   }, [])
+
+  // Shows the source (with the page) and puts the person in it: every byte the document holds.
+  function showSource() {
+    setSourceMode(true)
+    requestAnimationFrame(() => (rootRef.current?.querySelector('.review-textarea') as HTMLTextAreaElement | null)?.focus())
+  }
 
   function changeSource(value: string) {
     if (sourceMode || !safeRich) invalidate([...requests.map(r => r.id), ...(draft ? [draft.id] : [])])
@@ -280,6 +291,12 @@ function ReviewSession({ artifact, text, blob, onClose }: ReviewModeProps) {
 
       {isDiff && <p className="review-diff-hint">Select a line number, or choose Select range and tap its first and last lines; then Request change. Shift-click also selects a range on a desktop.</p>}
       {isMarkdown && !safeRich && <p role="status">This document contains Markdown that needs source editing to preserve it. The preview remains available.</p>}
+      {isMarkdown && hiddenContent && (
+        <p className="review-hidden-banner" role="status" data-testid="review-hidden-content">
+          This document has hidden content (an HTML comment, a closed section or text the page does not show).{' '}
+          <button type="button" className="artifact-link" onClick={showSource}>Show source</button>
+        </p>
+      )}
       <div className="review-panes document-scroll" ref={rootRefForLayout}>
         {isMarkdown && (sourceMode || !safeRich) && (
           <SourcePane value={edited} published={published} onChange={changeSource} onDiscard={discardEdits} />
@@ -291,7 +308,7 @@ function ReviewSession({ artifact, text, blob, onClose }: ReviewModeProps) {
           ) : isMarkdown ? (
             safeRich && !sourceMode ? <DocumentEditor key={published} onInvalid={invalidate} invalidIds={invalidIds} eligibleIds={new Set([...requests.map(r => r.id), ...(draft ? [draft.id] : [])].filter(id => anchorSources.get(id) === edited))} requests={draft ? [...requests, {id: draft.id, anchor: draft.anchor, text: draft.text, status: 'open', createdAt: ''}] : requests} resolveRef={resolvedAnchor} value={edited} published={published} showChanges={showDiff} onChange={changeSource} rootRef={pageRef}/> : <MarkdownPage
               source={edited} published={published} showDiff={showDiff} requests={visibleRequests.filter(r => !invalidIds.has(r.id) && (anchorSources.get(r.id) ?? published) === edited)}
-              focusedId={focusedId ?? pinnedId} rootRef={pageRef}
+              focusedId={focusedId ?? pinnedId} rootRef={pageRef} onHiddenContent={setHiddenContent}
             />
           ) : blob ? (
             <PdfPages blob={blob} requests={visibleRequests.filter(r => !invalidIds.has(r.id))} focusedId={focusedId ?? pinnedId} onHover={setFocusedId} onSelection={setPdfAnchor} />

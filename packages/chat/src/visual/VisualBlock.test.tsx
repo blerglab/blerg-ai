@@ -30,9 +30,10 @@ describe('visual block controls and lifetime', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
   it('falls back to source after runtime or parsing failure', async () => {
-    renderer.mockRejectedValue(new Error('not a valid diagram'))
+    renderer.mockRejectedValue(new Error('Mermaid: Parse error on line 1: Expecting \'GRAPH\', got \'NODE_STRING\''))
     render(<VisualBlock kind="mermaid" source="invalid source" />)
-    expect(await screen.findByText('Preview unavailable; showing source.')).toBeInTheDocument()
+    // Never silently: the reason, then the source.
+    expect(await screen.findByText('Couldn’t draw this diagram: Mermaid: Parse error on line 1: Expecting \'GRAPH\', got \'NODE_STRING\'')).toBeInTheDocument()
     expect(screen.getByText('invalid source')).toBeInTheDocument()
   })
   it('isolates late StrictMode work from the current rendering and disposes both', async () => {
@@ -55,5 +56,13 @@ describe('visual block controls and lifetime', () => {
     await waitFor(() => expect(firstCleanup).toHaveBeenCalledOnce())
     unmount()
     expect(currentCleanup).toHaveBeenCalledOnce()
+  })
+  it('says why a refused diagram or a chart that cannot be drawn shows its source', async () => {
+    renderer.mockRejectedValueOnce(new Error('line 12: url() not allowed'))
+    render(<VisualBlock kind="mermaid" source="flowchart LR; A-->B" />)
+    expect(await screen.findByRole('status')).toHaveTextContent('Couldn’t draw this diagram: line 12: url() not allowed')
+    renderer.mockRejectedValueOnce('odd')
+    render(<VisualBlock kind="vega-lite" source="{}" />)
+    expect(await screen.findByText('Couldn’t draw this chart: odd')).toBeInTheDocument()
   })
 })

@@ -27,13 +27,15 @@ import {
   TEXT_PREVIEW_CAP,
   TEXT_VIEW_MAX,
   blobTypeFor,
+  mediaUrl,
+  releaseMediaUrl,
   isViewable,
   tooBigToPreview,
 } from '../model/artifactViews'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { composeMarkupMessage } from '../model/feedback'
-import { MAXIMIZED_KEY, localStorageChatStorage, type ViewerLayoutKind as LayoutKind } from '../model/storage'
+import { MAXIMIZED_KEY, isMaximizeShortcut, localStorageChatStorage, type ViewerLayoutKind as LayoutKind } from '../model/storage'
 import { FILE_GONE_MESSAGE, FileRequestError, fileErrorText, isArtifactGone } from '../transport/files'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { useChat } from './context'
@@ -41,7 +43,7 @@ import CodeLines from './CodeLines'
 import DataTable from './DataTable'
 import ErrorId from './ErrorId'
 import DiffView from './DiffView'
-import Markdown from './Markdown'
+import Markdown, { type MarkdownDocument } from './Markdown'
 import VisualBlock from './VisualBlock'
 import { visualFile } from '../model/visualKind'
 import MarkupMode from './markup/MarkupMode'
@@ -58,10 +60,6 @@ type Loaded =
 /** What the dialog's body shows: the file, its review (markdown, pdf) or a draw-over (image). */
 type Mode = 'view' | 'review' | 'markup'
 
-/** Ctrl+Alt+F, or Cmd+Alt+F on a Mac: by the physical key, since Option changes the character. */
-function isMaximizeShortcut(e: React.KeyboardEvent) {
-  return e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && (e.code === 'KeyF' || e.key.toLowerCase() === 'f')
-}
 
 interface Props {
   sessionId: string
@@ -95,6 +93,9 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
   const [mode, setMode] = useState<Mode>(review && (artifact.view === 'markdown' || artifact.view === 'pdf') ? 'review' : 'view')
   // The feedback modes send through the chat; a viewer mounted alone has no send path.
   const chat = useChat()
+  // A diff review's Conversation already shows the agent's ask as its body: the bar keeps only
+  // its decision then.
+  const [reviewTab, setReviewTab] = useState<'conversation' | 'files'>(commit ? 'files' : 'conversation')
 
   // "report.md · v2 of 3" once the file has more than one version; an older one says so.
   const lastVersion = Math.max(artifact.latest_version ?? 0, artifact.version ?? 0)
@@ -123,7 +124,10 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
         const buf = await blob.arrayBuffer()
         if (cancelled) return
         const typed = new Blob([buf], { type: blobTypeFor(view, artifact.content_type) })
-        url = URL.createObjectURL(typed)
+        // An SVG draws from a data: URL, never a same-origin blob: one (mediaUrl).
+        const made = await mediaUrl(buf, view, artifact.content_type)
+        if (cancelled) { releaseMediaUrl(made); return }
+        url = made
         setLoaded({ kind: 'blob', url, blob: typed })
       } catch (e) {
         if (cancelled) return
@@ -134,7 +138,7 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
     })()
     return () => {
       cancelled = true
-      if (url) URL.revokeObjectURL(url)
+      releaseMediaUrl(url)
     }
   }, [sessionId, files, artifact.id, artifact.content_type, artifact.missing, view, previewable, spec])
 
@@ -218,7 +222,7 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
             {latest && onOpen && <> <button type="button" className="artifact-link" onClick={() => onOpen(latest)}>View latest</button></>}
           </p>
         )}
-        <ReviewRequestBar artifact={artifact} />
+        <ReviewRequestBar artifact={artifact} hideAsk={inlineReview && reviewTab === 'conversation'} />
         {downloadError && <div className="artifact-error" role="alert">{downloadError.message}<ErrorId id={downloadError.errorId} /></div>}
         <div className="artifact-body">
           {gone ? (
@@ -230,6 +234,8 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
               artifact={artifact}
               embedded={inlineReview}
               commit={commit}
+              initialTab={commit ? 'files' : 'conversation'}
+              onTabChange={setReviewTab}
               text={loaded.kind === 'text' ? loaded.text : undefined}
               blob={loaded.kind === 'blob' ? loaded.blob : undefined}
               onClose={() => setMode('view')}
@@ -300,7 +306,10 @@ export function BlobView({ artifact, url, autoplay }: { artifact: ArtifactInfo; 
   }
 }
 
-export function TextView({ artifact, text, showAll, onShowAll, commit }: { artifact: ArtifactInfo; text: string; showAll: boolean; onShowAll: () => void; commit?: string | null }) {
+// A published file has no folder: its relative images stay placeholders (MarkdownDocument).
+const PUBLISHED_DOCUMENT: MarkdownDocument = {}
+
+export function TextView({ artifact, text, showAll, onShowAll, commit, document: doc = PUBLISHED_DOCUMENT }: { artifact: ArtifactInfo; text: string; showAll: boolean; onShowAll: () => void; commit?: string | null; document?: MarkdownDocument }) {
   if (artifact.view === 'html') {
     return (
       <iframe
@@ -326,7 +335,7 @@ export function TextView({ artifact, text, showAll, onShowAll, commit }: { artif
   return (
     <>
       {artifact.view === 'markdown'
-        ? <Markdown text={shown} className="artifact-markdown md-doc" />
+        ? <Markdown text={shown} className="artifact-markdown md-doc md-box" document={doc} html />
         : lang
           ? <CodeLines text={shown} lang={lang} />
           : <pre className="artifact-text" data-testid="artifact-text">{shown}</pre>}

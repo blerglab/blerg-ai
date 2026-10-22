@@ -1,6 +1,8 @@
 // The transport contract and the two adapters that ship with the package. (ArtifactInfo and
 // UploadedFile are the model's; the package root exports them from there.)
 export type {
+  CommitDetails,
+  CommitDiff,
   FileLimits,
   OlderPage,
   ReplayDone,
@@ -20,5 +22,5 @@ export { createBrowserSocket, browserSocketUrl } from './socket'
 export type { BrowserSocketOptions } from './socket'
 export { SseParser, openSseStream } from './sse'
 export type { SseFrame, SseStream, SseStreamOptions } from './sse'
-export { ArtifactGoneError, createFiles, FILE_GONE_MESSAGE, FileRequestError, fileErrorText, filenameFromDisposition, isArtifactGone, saveBlob, UPLOAD_CUT_OFF_MESSAGE, uploadWithProgress, WorkspaceFileError } from './files'
+export { ArtifactGoneError, COMMIT_DIFF_MAX, createFiles, FILE_GONE_MESSAGE, FileRequestError, fileErrorText, filenameFromDisposition, isArtifactGone, saveBlob, UPLOAD_CUT_OFF_MESSAGE, uploadWithProgress, WorkspaceFileError } from './files'
 export type { FilesOptions } from './files'

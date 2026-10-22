@@ -21,7 +21,7 @@ import (
 const usageResetHorizon = 31 * 24 * time.Hour
 
 // sanitizeUsageLimits checks a daemon's report: false for a provider this
-// server does not know. Unknown and repeated windows are dropped, percentages
+// server does not know. Unknown notes, unknown and repeated windows are dropped, percentages
 // clamped to 0–100, a reset in the far past or future forgotten, a fetched_at
 // in the future set to now.
 func sanitizeUsageLimits(u protocol.UsageLimits, now time.Time) (protocol.UsageLimits, bool) {
@@ -50,15 +50,28 @@ func sanitizeUsageLimits(u protocol.UsageLimits, now time.Time) (protocol.UsageL
 		}
 		out.Windows = append(out.Windows, protocol.UsageWindow{ID: w.ID, UsedPercent: pct, ResetsAt: reset})
 	}
+	// The notes known; a note means nothing beside windows.
+	if (u.Note == usageNoteNoWindows || u.Note == usageNoteNotRead) && len(out.Windows) == 0 {
+		out.Note = u.Note
+	}
 	return out, true
 }
 
+// The notes a report with no windows may carry, kept (not a withdrawal) so the sidebar can say
+// them: the provider answered and its account has no limit window (usageNoteNoWindows), or the
+// daemon does not read this provider's limits (usageNoteNotRead: turned off, no sign-in it can
+// read, the engine not installed).
+const (
+	usageNoteNoWindows = "no_windows"
+	usageNoteNotRead   = "not_read"
+)
+
 // SetUsageLimits keeps a (sanitised) report as the provider's latest; an
-// empty one withdraws the provider.
+// empty one withdraws the provider, unless it notes that there are none.
 func (dc *DaemonConn) SetUsageLimits(u protocol.UsageLimits) {
 	dc.liveMu.Lock()
 	defer dc.liveMu.Unlock()
-	if len(u.Windows) == 0 {
+	if len(u.Windows) == 0 && u.Note == "" {
 		delete(dc.usageLimits, u.Provider)
 		return
 	}

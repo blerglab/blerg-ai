@@ -117,9 +117,10 @@ another payer after a credential failure. See [credential lifecycle](design/engi
 - An **Agent** session drives the engine non-interactively: the engine's permission prompts are
   bypassed and its work streams into the chat as structured events. It is `interactive` when a
   person is reading along and `unattended` when nobody is, and the engine is told which.
-- A **Terminal** session is a `tmux` session you watch and type in, with the engine's permission
-  prompts on. It is offered by a workstation daemon only (sandbox or host), not by the cluster
-  runtime.
+- Existing **Terminal** sessions run in `tmux` with the engine's permission prompts on.
+  New Terminal sessions are deprecated and refused in 0.4.5 when a person or an agent starts
+  one; a board's Assist still starts one until it moves to an agent session in 0.5.0, when
+  Terminal support will be removed. Existing sessions keep working until that removal.
 - A **cron** is an unattended agent session on a schedule, with only the tools you chose.
 
 What a session can reach, and how messages, files and MCP tools get in and out, is described from

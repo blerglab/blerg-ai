@@ -9,6 +9,8 @@ import (
 	"io"
 	"math"
 	"os/exec"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,7 +24,8 @@ import (
 // keeping a long-lived server healthy, and a read is rare (usage_limits.go).
 //
 // The answer also names the account, its plan and its credits; only the
-// windows' percentages and reset times are kept. Nothing else is decoded.
+// windows' percentages and reset times are kept (and, for a usage-based work
+// plan's spend limit, the share left and its reset). Nothing else is decoded.
 
 const (
 	codexLimitsTimeout = 10 * time.Second
@@ -39,20 +42,40 @@ type codexRateWindow struct {
 	ResetsAt           int64    `json:"resetsAt"`
 }
 
+// codexSpendLimit is a snapshot's individualLimit: the spend control of a usage-based work plan.
+// Only its share left and reset are decoded; its used and limit amounts never are.
+type codexSpendLimit struct {
+	RemainingPercent *float64 `json:"remainingPercent"`
+	ResetsAt         int64    `json:"resetsAt"`
+}
+
+// codexRateSnapshot is one bucket of the answer: its two windows and, on a usage-based work
+// plan (which has no windows), its spend limit.
+type codexRateSnapshot struct {
+	Primary         *codexRateWindow `json:"primary"`
+	Secondary       *codexRateWindow `json:"secondary"`
+	IndividualLimit *codexSpendLimit `json:"individualLimit"`
+}
+
 type codexRPCLine struct {
 	ID     *int   `json:"id"`
 	Method string `json:"method"` // set on the server's own requests and notifications
 	Result *struct {
-		RateLimits *struct {
-			Primary   *codexRateWindow `json:"primary"`
-			Secondary *codexRateWindow `json:"secondary"`
-		} `json:"rateLimits"`
+		// RateLimits is the single-bucket view every version sends; RateLimitsByLimitId (newer
+		// versions) is keyed by the metered limit ("codex"), read when the single view is empty.
+		RateLimits          *codexRateSnapshot           `json:"rateLimits"`
+		RateLimitsByLimitID map[string]codexRateSnapshot `json:"rateLimitsByLimitId"`
 	} `json:"result"`
 	Error *struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
 }
+
+// errNoLimitWindows: Codex answered, and the account it is signed in to has no limit window to
+// show (an API key, or a work plan with neither windows nor a spend limit). The tracker reports
+// that (UsageLimits.Note "no_windows"), so the sidebar says so instead of showing nothing.
+var errNoLimitWindows = errors.New("the account reports no limit windows")
 
 // codexWindowID names a window by its length: five hours or a week. A length
 // Codex has not used so far falls back to the window's position.
@@ -183,14 +206,50 @@ func codexLimitsConversation(in io.Writer, out io.Reader) ([]protocol.UsageWindo
 	if err != nil {
 		return nil, err
 	}
-	if l.Result == nil || l.Result.RateLimits == nil {
+	if l.Result == nil || (l.Result.RateLimits == nil && l.Result.RateLimitsByLimitID == nil) {
 		return nil, errors.New("codex app-server: no rate limits in the answer")
 	}
+	var windows []protocol.UsageWindow
+	if l.Result.RateLimits != nil {
+		windows = codexSnapshotWindows(*l.Result.RateLimits)
+	}
+	if len(windows) == 0 {
+		// The single view mirrors one bucket (and may be absent); the per-limit view may have the
+		// windows it lacks:
+		// Codex's own bucket first, then the others by name.
+		ids := make([]string, 0, len(l.Result.RateLimitsByLimitID))
+		for id := range l.Result.RateLimitsByLimitID {
+			ids = append(ids, id)
+		}
+		slices.SortFunc(ids, func(a, b string) int {
+			if (a == "codex") != (b == "codex") {
+				if a == "codex" {
+					return -1
+				}
+				return 1
+			}
+			return strings.Compare(a, b)
+		})
+		for _, id := range ids {
+			if windows = codexSnapshotWindows(l.Result.RateLimitsByLimitID[id]); len(windows) > 0 {
+				break
+			}
+		}
+	}
+	if len(windows) == 0 {
+		return nil, fmt.Errorf("codex app-server: %w", errNoLimitWindows)
+	}
+	return windows, nil
+}
+
+// codexSnapshotWindows maps one bucket to its windows: the five-hour and weekly ones, and a
+// spend limit ("spend", the share used and its reset; never the amounts).
+func codexSnapshotWindows(snap codexRateSnapshot) []protocol.UsageWindow {
 	var windows []protocol.UsageWindow
 	for _, w := range []struct {
 		win      *codexRateWindow
 		fallback string
-	}{{l.Result.RateLimits.Primary, "5h"}, {l.Result.RateLimits.Secondary, "7d"}} {
+	}{{snap.Primary, "5h"}, {snap.Secondary, "7d"}} {
 		if w.win == nil || w.win.UsedPercent == nil {
 			continue
 		}
@@ -200,8 +259,12 @@ func codexLimitsConversation(in io.Writer, out io.Reader) ([]protocol.UsageWindo
 		}
 		windows = append(windows, uw)
 	}
-	if len(windows) == 0 {
-		return nil, errors.New("codex app-server: no limit window")
+	if l := snap.IndividualLimit; l != nil && l.RemainingPercent != nil {
+		uw := protocol.UsageWindow{ID: "spend", UsedPercent: usedPercent(100 - *l.RemainingPercent)}
+		if l.ResetsAt > 0 {
+			uw.ResetsAt = time.Unix(l.ResetsAt, 0).UTC()
+		}
+		windows = append(windows, uw)
 	}
-	return windows, nil
+	return windows
 }

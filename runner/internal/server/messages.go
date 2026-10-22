@@ -238,6 +238,8 @@ func (a *API) pushForMessage(sess db.SessionRow, msg db.MessageRow) {
 type answerResponse struct {
 	Answered bool    `json:"answered"`
 	Answer   *string `json:"answer"` // nil/'' distinguishes a closed message from a real empty reply
+	// Dismissed: the person closed it from Needs you without answering (the CLI exits 4).
+	Dismissed bool `json:"dismissed,omitempty"`
 }
 
 // HandleGetMessageAnswer is the `ask` short-hold poll: returns immediately if the
@@ -332,7 +334,7 @@ func (a *API) answeredNow(ctx context.Context, w http.ResponseWriter, id string)
 		return true, nil
 	}
 	if row.Status == "answered" {
-		return true, &answerResponse{Answered: true, Answer: row.Answer}
+		return true, &answerResponse{Answered: true, Answer: row.Answer, Dismissed: row.Dismissed}
 	}
 	return false, nil
 }

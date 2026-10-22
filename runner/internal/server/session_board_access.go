@@ -53,18 +53,20 @@ const (
 	msgBoardToolsUnavailable = "Board access through this session is not available: the runner has no board connection configured."
 	msgBoardToolsSession     = "This session cannot use board access from its Permissions; use the board it was started with, or propose a card (blerg-runner ticket file), which asks the person."
 	maxBoardToolArgsBytes    = 64 << 10
-	msgBoardCallsAtOnce      = "too many board calls at once from this session (at most 4 run together); wait for one to finish and retry"
+	msgBoardCallsAtOnce      = "too many board calls at once from this session (at most %d run together); wait for one to finish and retry"
 	msgBoardCallsPerMinute   = "too many board requests from this session; retry in %d seconds"
 )
 
-// Limits of one session's board requests. Each call holds a core exchange token for its length, and
-// core caps an account's live exchange tokens (100, shared with every board connection of the
-// account), so the number in flight is bounded, not only the rate. Variables for the tests.
+// Default limits of one session's board requests; an administrator can change them in core's
+// settings (board_limits.go). Each call holds a core exchange token for its length, and core caps an
+// account's live exchange tokens (100 by default, shared with every board connection of the account),
+// so the number in flight is bounded, not only the rate: at 8 a session, 12 sessions of one account
+// can each run 8 at once. Variables for the tests.
 var (
 	// Named CLI commands use several requests (a move uses seven). Leave room
 	// for ordinary interactive work; the independent in-flight cap protects exchanges.
-	boardCallsPerMinute = 240
-	boardCallsInFlight  = 4
+	boardCallsPerMinute = 600
+	boardCallsInFlight  = 8
 	boardCallWait       = 2 * time.Second
 )
 
@@ -390,7 +392,8 @@ func (a *API) boardSession(w http.ResponseWriter, r *http.Request) (*db.SessionR
 		return nil, false
 	}
 	// Counted before any work beyond the token check, refused requests included.
-	if after := boardCallRetryAfter(sid, time.Now()); after > 0 {
+	perMinute, _ := a.boardCallLimits(r.Context())
+	if after := boardCallRetryAfter(sid, time.Now(), perMinute); after > 0 {
 		w.Header().Set("Retry-After", fmt.Sprint(after))
 		writeError(w, http.StatusTooManyRequests, fmt.Sprintf(msgBoardCallsPerMinute, after))
 		return nil, false
@@ -477,7 +480,7 @@ var boardCallLimit = struct {
 }{m: map[string][]time.Time{}}
 
 // Rejected retries are not recorded: they never move the rolling one-minute window.
-func boardCallRetryAfter(sessionID string, now time.Time) int {
+func boardCallRetryAfter(sessionID string, now time.Time, perMinute int) int {
 	boardCallLimit.Lock()
 	defer boardCallLimit.Unlock()
 	cut := now.Add(-time.Minute)
@@ -487,7 +490,7 @@ func boardCallRetryAfter(sessionID string, now time.Time) int {
 			recent = append(recent, t)
 		}
 	}
-	if len(recent) >= boardCallsPerMinute {
+	if len(recent) >= perMinute {
 		boardCallLimit.m[sessionID] = recent
 		return int((recent[0].Add(time.Minute).Sub(now) + time.Second - 1) / time.Second)
 	}
@@ -597,39 +600,58 @@ var boardInFlight = struct {
 	m map[string]*boardSlots
 }{m: map[string]*boardSlots{}}
 
+// boardSlots is one session's board calls: running ones (inUse) and every caller holding or waiting
+// for a slot (users). freed is closed and replaced each time a slot is given back.
 type boardSlots struct {
-	ch    chan struct{}
-	users int
+	inUse, users int
+	freed        chan struct{}
 }
 
-// acquireBoardCall takes one of the session's boardCallsInFlight slots, waiting up to boardCallWait.
-func acquireBoardCall(ctx context.Context, sessionID string) (release func(), ok bool) {
+// acquireBoardCall takes one of the session's limit slots (calls running at once), waiting up to
+// boardCallWait. The limit is read per call, so a changed limit holds for the next call.
+func acquireBoardCall(ctx context.Context, sessionID string, limit int) (release func(), ok bool) {
 	boardInFlight.Lock()
 	s := boardInFlight.m[sessionID]
 	if s == nil {
-		s = &boardSlots{ch: make(chan struct{}, boardCallsInFlight)}
+		s = &boardSlots{freed: make(chan struct{})}
 		boardInFlight.m[sessionID] = s
 	}
 	s.users++
-	boardInFlight.Unlock()
 	done := func() {
-		boardInFlight.Lock()
 		s.users--
 		if s.users == 0 && boardInFlight.m[sessionID] == s {
 			delete(boardInFlight.m, sessionID)
 		}
-		boardInFlight.Unlock()
 	}
 	t := time.NewTimer(boardCallWait)
 	defer t.Stop()
-	select {
-	case s.ch <- struct{}{}:
-		return func() { <-s.ch; done() }, true
-	case <-t.C:
-	case <-ctx.Done():
+	for {
+		if s.inUse < limit {
+			s.inUse++
+			boardInFlight.Unlock()
+			return func() {
+				boardInFlight.Lock()
+				s.inUse--
+				close(s.freed)
+				s.freed = make(chan struct{})
+				done()
+				boardInFlight.Unlock()
+			}, true
+		}
+		freed := s.freed
+		boardInFlight.Unlock()
+		select {
+		case <-freed:
+			boardInFlight.Lock()
+			continue
+		case <-t.C:
+		case <-ctx.Done():
+		}
+		boardInFlight.Lock()
+		done()
+		boardInFlight.Unlock()
+		return nil, false
 	}
-	done()
-	return nil, false
 }
 
 func capText(s string, n int) string {
@@ -646,10 +668,11 @@ func (a *API) HandleSessionBoardTool(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	release, ok := acquireBoardCall(r.Context(), row.ID)
+	_, inFlight := a.boardCallLimits(r.Context())
+	release, ok := acquireBoardCall(r.Context(), row.ID, inFlight)
 	if !ok {
 		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusTooManyRequests, msgBoardCallsAtOnce)
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf(msgBoardCallsAtOnce, inFlight))
 		return
 	}
 	defer release()

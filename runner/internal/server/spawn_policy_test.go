@@ -28,6 +28,9 @@ func spawnPolicyAPI(t *testing.T) (*API, *DaemonConn, func(...string) string) {
 
 func postSessions(t *testing.T, api *API, tok string, body map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
+	if _, ok := body["kind"]; !ok {
+		body["kind"] = "agent"
+	}
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(raw)))
 	req.Header.Set("Authorization", "Bearer "+tok)

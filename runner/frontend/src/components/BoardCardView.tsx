@@ -2,11 +2,14 @@
 // ticket dialog. A Blerg Board card pinned with its board (source "blerg-board", board_id, key
 // "#<number>") is shown LIVE instead: the card as the board holds it now, read with the person's own
 // board permissions (lib/liveBoardCard.ts), with its column, tags, where it was filed from, repos and
-// trail, a Move that works in place, and the Board's page for the rest (Run, Discuss, Archive), inside
-// Blerg. When the board cannot be read the agent's copy is shown, and says so.
+// trail, laid out like the Board's own card sheet: the description and the trail in a main column,
+// the card's fields beside it (status as a column picker whose one click moves the card, through the
+// session's board access; type, priority, tags, repos, the worker on it, where it was filed from),
+// folded under the title on a narrow dialog. The header's "Open in Board" opens the Board's page for
+// the rest (Run, Discuss, Archive). When the board cannot be read the agent's copy is shown, and says so.
 import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { Markdown, TicketDetailChips, TicketDetails, TicketModal, TimeLabel, type Ticket } from '@blerglab/chat'
+import { Markdown, TicketDetails, TicketModal, TimeLabel, type Ticket } from '@blerglab/chat'
 import { boardCardUrl, useBoardOrigin } from '../lib/boardLink'
 import { boardCardRef, moveLiveBoardCard, useLiveBoardCard, LiveBoardCardError, type LiveBoardCard } from '../lib/liveBoardCard'
 import './BoardCardView.css'
@@ -26,105 +29,126 @@ function liveTicket(pinned: Ticket, card: LiveBoardCard | null, url: string): Ti
   }
 }
 
-function Section({ title, testId, children }: { title: string; testId?: string; children: ReactNode }) {
-  return (
-    <section className="ticket-section" data-testid={testId}>
-      <h3 className="ticket-section-title">{title}</h3>
-      {children}
-    </section>
-  )
-}
-
 function trailLine(e: { type: string; to_column?: string }): string {
   if (e.type === 'moved' || e.to_column) return `moved → ${e.to_column || 'another column'}`
   return e.type.replace(/_/g, ' ')
 }
 
-function MoveCard({ card, sessionId, onMoved }: { card: LiveBoardCard; sessionId: string; onMoved?: () => void }) {
-  const columns = (card.columns ?? []).filter(c => c.id !== card.column_id)
-  const [to, setTo] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  if (columns.length === 0 || card.archived_at) return null
-  const move = async () => {
-    if (!to || busy) return
-    setBusy(true)
-    setError(null)
-    try {
-      await moveLiveBoardCard(card.board_id, card.number, to, sessionId)
-      setTo('')
-      onMoved?.()
-    } catch (e) {
-      setError(e instanceof LiveBoardCardError ? e.message : 'The card was not moved.')
-    } finally {
-      setBusy(false)
-    }
-  }
+/** One of the card's fields beside the description: a quiet label over its value, as the Board's
+ *  sheet names them, never a section with a heading of its own. */
+function Field({ label, testId, children }: { label: string; testId?: string; children: ReactNode }) {
   return (
-    <div className="board-card-move">
-      <label className="board-card-move-label">
-        <span>Move to</span>
-        <select value={to} onChange={e => setTo(e.target.value)} aria-label="Move to column" disabled={busy}>
-          <option value="">Choose a column…</option>
-          {columns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-      </label>
-      <button type="button" onClick={() => void move()} disabled={!to || busy}>{busy ? 'Moving…' : 'Move'}</button>
-      {error && <span className="board-card-error" role="alert">{error}</span>}
+    <div className="board-card-field" data-testid={testId}>
+      <dt>{label}</dt>
+      <dd>{children}</dd>
     </div>
   )
 }
 
-function LiveCardBody({ card, pinned, sessionId, boardHref, onMoved, onShow }: {
-  card: LiveBoardCard; pinned: Ticket; sessionId: string; boardHref: string; onMoved?: () => void; onShow?: () => void
+/** Status: the board's columns, the card's own pressed. One click on another moves the card there
+ *  (through the session's board access); the card held is moved in place. */
+function ColumnPicker({ card, sessionId }: { card: LiveBoardCard; sessionId: string }) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const columns = card.columns ?? []
+  if (card.archived_at) return <span className="board-card-chip">Archived</span>
+  if (columns.length === 0) return <span className="board-card-chip">{card.column_name || 'Unknown'}</span>
+  const move = async (to: string) => {
+    if (busy || to === card.column_id) return
+    setBusy(to)
+    setError(null)
+    try {
+      await moveLiveBoardCard(card.board_id, card.number, to, sessionId)
+    } catch (e) {
+      setError(e instanceof LiveBoardCardError ? e.message : 'The card was not moved.')
+    } finally {
+      setBusy(null)
+    }
+  }
+  return (
+    <>
+      <div className="board-card-columns" role="group" aria-label="Status" data-testid="board-card-columns">
+        {columns.map(c => {
+          const on = c.id === card.column_id
+          return (
+            <button key={c.id} type="button" className="board-card-column" aria-pressed={on} aria-busy={busy === c.id || undefined}
+              disabled={busy !== null} title={on ? `In ${c.name}` : `Move to ${c.name}`} onClick={() => void move(c.id)}>
+              {c.name}
+            </button>
+          )
+        })}
+      </div>
+      {busy && <span className="board-card-note" role="status">Moving…</span>}
+      {error && <span className="board-card-error" role="alert">{error}</span>}
+    </>
+  )
+}
+
+function LiveCardBody({ card, pinned, sessionId, worker, onShow }: {
+  card: LiveBoardCard; pinned: Ticket; sessionId: string; worker?: string; onShow?: () => void
 }) {
   const trail = [...(card.trail ?? [])].reverse()
   const origin = card.origin
   const asPinned = pinned.status && pinned.status !== (card.archived_at ? 'Archived' : card.column_name)
+  const tags = card.tags ?? []
+  const repos = card.repos ?? []
+  const assignee = worker ? null : pinned.assignee
   return (
-    <div className="ticket-modal-grid">
-      <div className="ticket-main board-card-live" data-testid="board-card-live">
-        <TicketDetailChips ticket={liveTicket(pinned, card, '')} />
-        {asPinned && <p className="board-card-note">The agent pinned it as “{pinned.status}”; this is the card now.</p>}
-        <Section title="Actions" testId="board-card-actions">
-          <MoveCard card={card} sessionId={sessionId} onMoved={onMoved} />
-          <p className="board-card-note">
-            Run, discuss or archive it on the Board: <a href={boardHref} target="_blank" rel="noopener" data-testid="board-card-open">Open in Board</a>
-          </p>
-        </Section>
-        {origin && (origin.repo || origin.session_url || origin.engine) && (
-          <Section title="Filed from" testId="board-card-origin">
-            <ul className="ticket-detail-chips">
-              {origin.repo && <li className="ticket-detail-chip"><span className="ticket-detail-name">Repository</span> {origin.repo}</li>}
-              {origin.commit && <li className="ticket-detail-chip"><span className="ticket-detail-name">Commit</span> <code>{origin.commit.slice(0, 12)}</code></li>}
-              {origin.engine && <li className="ticket-detail-chip"><span className="ticket-detail-name">Engine</span> {origin.engine}</li>}
-            </ul>
-            <OriginSession url={origin.session_url} />
-          </Section>
-        )}
-        {(card.repos?.length ?? 0) > 0 && (
-          <Section title="Repos" testId="board-card-repos">
-            <ul className="ticket-detail-chips">
-              {card.repos!.map((r, i) => <li key={r} className="ticket-detail-chip">{r}{i === 0 && <span className="ticket-detail-name"> · primary</span>}</li>)}
-            </ul>
-          </Section>
-        )}
-        {card.body
-          ? <Section title="Description"><Markdown text={card.body} className="md-doc ticket-description" /></Section>
-          : <p className="ticket-empty">No description.</p>}
-        {trail.length > 0 && (
-          <Section title="Trail" testId="board-card-trail">
-            <ol className="board-card-trail">
-              {trail.map((e, i) => (
-                <li key={i} className={e.type === 'comment' ? 'comment' : undefined}>
-                  {e.type === 'comment' ? <Markdown text={e.text ?? ''} className="board-card-comment" /> : <span>{trailLine(e)}</span>}
-                  <span className="board-card-who">{e.actor} · <TimeLabel ts={e.created_at} /></span>
-                </li>
-              ))}
-            </ol>
-          </Section>
-        )}
-        {onShow && <button type="button" className="ticket-more" onClick={onShow}>Show in conversation</button>}
+    <div className="board-card-sheet-wrap">
+      <div className="board-card-sheet" data-testid="board-card-live">
+        <dl className="board-card-side" data-testid="board-card-side" aria-label="Card details">
+          <Field label="Status"><ColumnPicker card={card} sessionId={sessionId} /></Field>
+          {card.type && <Field label="Type"><span className="board-card-chip">{card.type}</span></Field>}
+          {card.priority && <Field label="Priority"><span className="board-card-chip">{card.priority}</span></Field>}
+          {tags.length > 0 && (
+            <Field label="Tags" testId="board-card-tags">
+              <ul className="board-card-chips">{tags.map(t => <li key={t} className="board-card-chip">{t}</li>)}</ul>
+            </Field>
+          )}
+          {repos.length > 0 && (
+            <Field label="Repos" testId="board-card-repos">
+              <ul className="board-card-chips">
+                {repos.map((r, i) => <li key={r} className="board-card-chip">{r}{i === 0 && <span className="board-card-chip-note"> · primary</span>}</li>)}
+              </ul>
+            </Field>
+          )}
+          {worker && (
+            <Field label="Worker" testId="board-card-worker">
+              <span className="board-card-worker" title={`${worker} works on it`}><span aria-hidden="true">↳</span> {worker}</span>
+            </Field>
+          )}
+          {assignee && <Field label="Assignee"><span>{assignee}</span></Field>}
+          {origin && (origin.repo || origin.session_url || origin.engine) && (
+            <Field label="Filed from" testId="board-card-origin">
+              <ul className="board-card-chips">
+                {origin.repo && <li className="board-card-chip">{origin.repo}</li>}
+                {origin.commit && <li className="board-card-chip"><code>{origin.commit.slice(0, 12)}</code></li>}
+                {origin.engine && <li className="board-card-chip">{origin.engine}</li>}
+              </ul>
+              <OriginSession url={origin.session_url} />
+            </Field>
+          )}
+        </dl>
+        <div className="board-card-main" data-testid="board-card-main">
+          {asPinned && <p className="board-card-note board-card-pinned-note">The agent pinned it as “{pinned.status}”; this is the card now.</p>}
+          {card.body
+            ? <div data-testid="board-card-description"><Markdown text={card.body} className="md-doc ticket-description board-card-description" /></div>
+            : <p className="ticket-empty" data-testid="board-card-description">No description.</p>}
+          {trail.length > 0 && (
+            <section className="board-card-section" data-testid="board-card-trail">
+              <h3 className="board-card-section-title">Trail</h3>
+              <ol className="board-card-trail">
+                {trail.map((e, i) => (
+                  <li key={i} className={e.type === 'comment' ? 'comment' : undefined}>
+                    {e.type === 'comment' ? <Markdown text={e.text ?? ''} className="board-card-comment" /> : <span>{trailLine(e)}</span>}
+                    <span className="board-card-who">{e.actor} · <TimeLabel ts={e.created_at} /></span>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
+          {onShow && <button type="button" className="ticket-more" onClick={onShow}>Show in conversation</button>}
+        </div>
       </div>
     </div>
   )
@@ -145,8 +169,11 @@ function OriginSession({ url }: { url?: string }) {
 }
 
 /** The ticket dialog of the session panel: a Blerg Board card live, any other pin as pinned. */
-export function PinnedTicketModal({ ticket, sessionId, onClose, onShow }: {
-  ticket: Ticket; sessionId: string; onClose: () => void; onShow?: () => void
+export function PinnedTicketModal({ ticket, sessionId, worker, onClose, onShow }: {
+  ticket: Ticket; sessionId: string
+  /** Who works on the card now (a subagent or a started session), by name: the side's ↳ Worker. */
+  worker?: string
+  onClose: () => void; onShow?: () => void
 }) {
   const ref = boardCardRef(ticket)
   const live = useLiveBoardCard(ref, sessionId)
@@ -159,7 +186,7 @@ export function PinnedTicketModal({ ticket, sessionId, onClose, onShow }: {
     body = (
       <>
         {live.state === 'failed' && <p className="board-card-error" role="alert">Could not read the card again: {live.error} <button type="button" onClick={live.refresh}>Retry</button></p>}
-        <LiveCardBody card={card} pinned={ticket} sessionId={sessionId} boardHref={boardHref} onShow={onShow} />
+        <LiveCardBody card={card} pinned={ticket} sessionId={sessionId} worker={worker} onShow={onShow} />
       </>
     )
   } else if (live.state === 'failed') {

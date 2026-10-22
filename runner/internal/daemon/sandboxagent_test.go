@@ -34,6 +34,13 @@ func fakeDocker(t *testing.T) (binDir, logPath string) {
 	dir := t.TempDir()
 	script := `#!/bin/bash
 echo "$@" >> "$FAKE_DOCKER_LOG"
+if [ "$1" = "--context" ]; then shift 2; fi
+if [ "$1" = "ps" ] && [ -n "$FAKE_DOCKER_PS_OUTPUT" ]; then
+  printf '%s' "$FAKE_DOCKER_PS_OUTPUT"; exit 0
+fi
+if [ "$1" = "inspect" ] && [ -n "$FAKE_DOCKER_INSPECT_OUTPUT" ]; then
+  printf '%s' "$FAKE_DOCKER_INSPECT_OUTPUT"; exit 0
+fi
 # A ` + "`-e NAME`" + ` credential is read by docker from its own environment, so the
 # log records that environment too — otherwise a test could not tell "passed
 # safely" from "not passed at all".
@@ -175,7 +182,7 @@ func assertSandboxRun(t *testing.T, calls, sessionID string) {
 	for _, want := range []string{
 		"run -d --name " + dockerContainerName(sessionID),
 		"--cap-drop ALL", "--security-opt no-new-privileges",
-		"--pids-limit 512", "--memory 4g", "dst=" + sandboxWorkdir,
+		"--init", "--pids-limit 512", "--memory 4g", "dst=" + sandboxWorkdir,
 		"-w " + sandboxWorkdir, sandboxImage() + " sleep infinity",
 	} {
 		if !strings.Contains(calls, want) {
@@ -222,9 +229,13 @@ func TestAgentHostSandboxedClaudeRunsClaudeCodeInContainer(t *testing.T) {
 	calls := dockerCalls(t, logPath)
 	assertSandboxRun(t, calls, "s-sbx")
 	assertExecsInContainer(t, calls, "s-sbx", "claude -p hello")
-	// The login is mounted, so no credential needs to travel in the env.
-	if !strings.Contains(calls, "-v "+filepath.Join(home, ".claude")+":/home/agent/.claude") {
-		t.Errorf("host claude login not mounted; calls:\n%s", calls)
+	// The login travels as the session's own copy, so no credential needs to travel in the env —
+	// and the person's ~/.claude is never mounted.
+	if !strings.Contains(calls, "/sandbox-homes/s-sbx/claude,dst=/home/agent/.claude ") {
+		t.Errorf("the session's claude home not mounted; calls:\n%s", calls)
+	}
+	if strings.Contains(calls, "src="+filepath.Join(home, ".claude")+",") || strings.Contains(calls, filepath.Join(home, ".claude")+":") {
+		t.Errorf("the person's ~/.claude was mounted; calls:\n%s", calls)
 	}
 	if strings.Contains(calls, "ANTHROPIC_API_KEY") {
 		t.Errorf("no API key was configured, yet one was passed:\n%s", calls)
@@ -634,7 +645,8 @@ func TestStartSandboxContainerClearsAStaleContainerFirst(t *testing.T) {
 func TestListSandboxedTmuxSessionsSkipsAgentContainers(t *testing.T) {
 	origOut, origRun := dockerOutput, dockerRun
 	dockerOutput = func(args ...string) ([]byte, error) {
-		return []byte(sandboxContainerPrefix + "term-1\n" + sandboxContainerPrefix + "agent-1\n"), nil
+		own := "\t" + sandboxOwner()
+		return []byte(sandboxContainerPrefix + "term-1" + own + "\n" + sandboxContainerPrefix + "agent-1" + own + "\n"), nil
 	}
 	origProbe := dockerProbe
 	dockerProbe = func(_ time.Duration, args ...string) (bool, error) {
@@ -650,7 +662,7 @@ func TestListSandboxedTmuxSessionsSkipsAgentContainers(t *testing.T) {
 		unregisterSandbox("agent-1")
 	})
 
-	got := listSandboxedTmuxSessions()
+	got := listSandboxedTmuxSessions(nil)
 	if len(got) != 1 || got[0] != "term-1" {
 		t.Fatalf("listSandboxedTmuxSessions() = %v, want [term-1]", got)
 	}
@@ -709,9 +721,10 @@ var errNotInImage = os.ErrNotExist
 // pull under the bounded run.
 func TestEngineInSandboxImageRunsTheCheckInTheImage(t *testing.T) {
 	var got []string
-	orig := dockerRun
+	orig, origLabels := dockerRun, sandboxTestLabels
 	dockerRun = func(args ...string) error { got = args; return nil }
-	t.Cleanup(func() { dockerRun = orig })
+	sandboxTestLabels = nil // what the daemon has
+	t.Cleanup(func() { dockerRun, sandboxTestLabels = orig, origLabels })
 
 	if err := engineInSandboxImage("codex"); err != nil {
 		t.Fatalf("engineInSandboxImage: %v", err)
@@ -754,8 +767,8 @@ func TestStartSandboxContainerClaimsTheNameBeforeRunning(t *testing.T) {
 		switch {
 		case len(args) > 1 && args[0] == "run":
 			// A reconnect sweep, racing this spawn: the container exists now.
-			dockerOutputSwap(t, sandboxContainerPrefix+"s-race")
-			sweepOrphanSandboxContainers(nil)
+			dockerOutputSwap(t, sandboxContainerPrefix+"s-race\t"+sandboxOwner())
+			sweepOrphanSandboxContainers(nil, nil)
 		case len(args) > 2 && args[0] == "exec" && args[2] == "tmux":
 			// An agent sandbox holds no tmux — the sweep's other excuse gone,
 			// so only the registration can save this container.
@@ -808,7 +821,7 @@ func TestSweepOrphanSandboxContainers(t *testing.T) {
 	dockerOutput = func(args ...string) ([]byte, error) {
 		out := ""
 		for _, n := range []string{orphan, term, managed, known} {
-			out += sandboxContainerPrefix + n + "\n"
+			out += sandboxContainerPrefix + n + "\t" + sandboxOwner() + "\n"
 		}
 		return []byte(out), nil
 	}
@@ -833,7 +846,7 @@ func TestSweepOrphanSandboxContainers(t *testing.T) {
 		unregisterSandbox(known)
 	})
 
-	sweepOrphanSandboxContainers(func(id string) bool { return id == managed })
+	sweepOrphanSandboxContainers(func(id string) bool { return id == managed }, nil)
 
 	if len(removed) != 1 || removed[0] != sandboxContainerPrefix+orphan {
 		t.Fatalf("removed = %v, want just the orphaned agent container", removed)

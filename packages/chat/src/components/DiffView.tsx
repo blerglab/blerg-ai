@@ -34,6 +34,22 @@ function useWide(): boolean {
   return wide
 }
 
+// A phone: the file list becomes a picker in the toolbar (the same breakpoint as diff.css).
+const PHONE_MAX_WIDTH = 699
+function usePhone(): boolean {
+  const query = `(max-width: ${PHONE_MAX_WIDTH}px)`
+  const get = () => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(query).matches
+  const [phone, setPhone] = useState(get)
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia(query)
+    const on = () => setPhone(mq.matches)
+    mq.addEventListener?.('change', on)
+    return () => mq.removeEventListener?.('change', on)
+  }, [query])
+  return phone
+}
+
 function tokens(list: Token[]): ReactNode[] {
   return list.map((t, i) => ('text' in t ? t.text : <span key={i} className={t.cls}>{tokens(t.kids)}</span>))
 }
@@ -123,8 +139,6 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected
     const path = side === 'old' ? file.oldPath : file.newPath
     const point = {fileIndex: index + 1, hunk, side, line}
     return <td className={classes} data-diff-focused={isFocused || undefined}>
-      {onComment && <button type="button" className="diff-comment-add" aria-label={`Comment on ${side} line ${line} in ${path ?? file.path}`}
-        onClick={() => onComment(point)}>+</button>}
       {onPick ? <button type="button" className="diff-line-select"
         aria-label={`Select ${side} line ${line} in ${path ?? file.path}`}
         aria-pressed={!!selected && contains(selected, side, line, hunk)}
@@ -139,6 +153,17 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected
         }}>{line}</button> : line}
     </td>
   }
+
+  /** The one [+] of a code cell, GitHub's way: at the start of the code, just right of the line
+   *  numbers, on the first line of a wrapped line. It comments on `side`'s line. */
+  function commentButton(side: DiffPoint['side'], line: number | undefined, hunk: number) {
+    if (!onComment || line === undefined) return null
+    const path = side === 'old' ? file.oldPath : file.newPath
+    const point = {fileIndex: index + 1, hunk, side, line}
+    return <button type="button" className="diff-comment-add" data-comment-side={side} data-comment-line={line}
+      aria-label={`Comment on ${side} line ${line} in ${path ?? file.path}`} onClick={() => onComment(point)}>+</button>
+  }
+  const commentable = onComment ? ' diff-code-commentable' : ''
 
   let budget = limit
   const body: ReactNode[] = []
@@ -185,10 +210,10 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected
         const rk = r.right ? (r.right.kind === 'add' ? ' diff-add' : '') : ' diff-empty'
         body.push(
           <tr key={`${key}:${ri}`} className="diff-row">
-            {numberCell('old', r.left?.old, hi + 1, lk)}
-            <td className={`diff-code${lk}${paint('old', r.left?.old, hi + 1)}`}>{r.left && <><span className="diff-mark" aria-hidden="true">{r.left.kind === 'del' ? '-' : ' '}</span><Code line={r.left} hl={hl} /></>}</td>
-            {numberCell('new', r.right?.new, hi + 1, rk)}
-            <td className={`diff-code${rk}${paint('new', r.right?.new, hi + 1)}`}>{r.right && <><span className="diff-mark" aria-hidden="true">{r.right.kind === 'add' ? '+' : ' '}</span><Code line={r.right} hl={hl} /></>}</td>
+            {numberCell('old', r.left?.old, hi + 1, `${lk} diff-side-old`)}
+            <td className={`diff-code diff-side-old${commentable}${lk}${paint('old', r.left?.old, hi + 1)}`}>{r.left && <>{commentButton('old', r.left.old, hi + 1)}<span className="diff-mark" aria-hidden="true">{r.left.kind === 'del' ? '-' : ' '}</span><Code line={r.left} hl={hl} /></>}</td>
+            {numberCell('new', r.right?.new, hi + 1, `${rk} diff-side-new`)}
+            <td className={`diff-code diff-side-new${commentable}${rk}${paint('new', r.right?.new, hi + 1)}`}>{r.right && <>{commentButton('new', r.right.new, hi + 1)}<span className="diff-mark" aria-hidden="true">{r.right.kind === 'add' ? '+' : ' '}</span><Code line={r.right} hl={hl} /></>}</td>
           </tr>,
         )
         appendComments(pointsFor([r.left, r.right].filter((line): line is PatchLine => line !== undefined), hi + 1))
@@ -204,7 +229,9 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected
           <tr key={`${key}:${li}`} className={`diff-row${k}`}>
             {numberCell('old', l.old, hi + 1)}
             {numberCell('new', l.new, hi + 1)}
-            <td className={`diff-code${paint('old', l.old, hi + 1)}${paint('new', l.new, hi + 1)}`}>
+            <td className={`diff-code${commentable}${paint('old', l.old, hi + 1)}${paint('new', l.new, hi + 1)}`}>
+              {/* One [+] per row: an added or unchanged line comments on its new line, a removed one on its old line. */}
+              {l.kind === 'del' ? commentButton('old', l.old, hi + 1) : commentButton('new', l.new, hi + 1)}
               <span className="diff-mark" aria-hidden="true">{l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '}</span>
               <span className="diff-sr">{l.kind === 'add' ? 'added: ' : l.kind === 'del' ? 'deleted: ' : ''}</span>
               <Code line={l} hl={hl} />
@@ -381,6 +408,7 @@ export default function DiffView({ text, commit, selection, onSelection, request
   const want = (commit ?? '').toLowerCase()
   const target = want.length >= 7 ? patch.commits.findIndex(c => c.sha.startsWith(want)) : -1
   const wide = useWide()
+  const phone = usePhone()
   const [mode, setMode] = useState<Mode>('unified')
   const [copied, setCopied] = useState(false)
   const effective: Mode = wide ? mode : 'unified'
@@ -470,6 +498,11 @@ export default function DiffView({ text, commit, selection, onSelection, request
             <button type="button" className="artifact-btn" aria-pressed={effective === 'split'} onClick={() => setMode('split')}>Side by side</button>
           </span>
         )}
+        {phone && patch.files.length > 1 && (
+          <select className="diff-file-picker" aria-label="Files" title={patchSummaryText({ files: paths.size, adds: patch.adds, dels: patch.dels })} data-testid="diff-file-picker" value={currentIndex} onChange={e => jump(Number(e.target.value))}>
+            {patch.files.map((f, i) => <option key={i} value={i}>{`${f.path} (+${f.adds} −${f.dels})`}</option>)}
+          </select>
+        )}
         {canCopy && (
           <button
             type="button"
@@ -486,14 +519,14 @@ export default function DiffView({ text, commit, selection, onSelection, request
         <button type="button" className="artifact-btn" aria-pressed={rangeMode} onClick={() => {
           setRangeMode(value => !value); startPoint.current = null; setNotice('')
         }}>Select range</button>
-        <span>Choose a line number; Shift-click for a range, or enable Select range and tap both ends.</span>
+        <span className="diff-selection-help">Choose a line number; Shift-click for a range, or enable Select range and tap both ends.</span>
         {selection && <button type="button" className="artifact-btn" onClick={() => {
           startPoint.current = null; setNotice(''); onSelection(null)
         }}>Clear line selection</button>}
         {notice && <span role="status">{notice}</span>}
       </div>}
       <div className="diff-layout">
-        <nav ref={filesRef} className="diff-files" aria-label="Files" data-testid="diff-files">
+        {!phone && <nav ref={filesRef} className="diff-files" aria-label="Files" data-testid="diff-files">
           <ul>
             {patch.files.map((f, i) => (
               <li key={i}>
@@ -505,7 +538,7 @@ export default function DiffView({ text, commit, selection, onSelection, request
               </li>
             ))}
           </ul>
-        </nav>
+        </nav>}
         <div className="diff-main" ref={mainRef}>
           {patch.files.map((f, i) => {
             const startsCommit = f.commit !== undefined && (i === 0 || patch.files[i - 1].commit !== f.commit)

@@ -104,6 +104,15 @@ func TestHermesUnverifiedCleanupDisablesReplacementAndRejectsInput(t *testing.T)
 	if !uncertain {
 		t.Fatal("unverified inner cleanup permitted replacement")
 	}
+	said := false
+	for _, e := range em.snapshot() {
+		if p, ok := e.Payload.(agent.ErrorPayload); ok && e.Kind == "error" && p.Message == "Hermes sandbox shutdown could not be verified; automatic restart is disabled" {
+			said = p.Code == agent.ErrorCodeRuntimeStopped && !p.Retryable
+		}
+	}
+	if !said {
+		t.Fatal("the unverified sandbox shutdown was not said as a runtime_stopped error")
+	}
 	done := make(chan struct{})
 	go func() { d.Run(context.Background()); close(done) }()
 	select {

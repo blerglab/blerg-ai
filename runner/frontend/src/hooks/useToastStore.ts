@@ -6,6 +6,10 @@ export interface Toast {
   body: string
   url?: string
   variant?: 'session' | 'message'
+  /** A button on the toast (Undo, say); the toast closes when it is pressed. */
+  action?: { label: string; onClick: () => void }
+  /** How long it stays, instead of the default. */
+  ttlMs?: number
 }
 
 interface ToastStore {

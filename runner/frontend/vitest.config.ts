@@ -1,7 +1,30 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { playwright } from '@vitest/browser-playwright'
+import type { Plugin } from 'vite'
 import { chatAliases } from './vite.config'
+
+// A request recorder for the browser tests that prove a diagram makes no request: anything under
+// /__beacon/ is recorded (and answered 404), and /__beacon_hits lists what was recorded.
+function beacon(): Plugin {
+  const hits: string[] = []
+  return {
+    name: 'test-beacon',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (req.url?.startsWith('/__beacon/')) {
+          hits.push(req.url)
+          res.statusCode = 404
+          res.end()
+        } else if (req.url === '/__beacon_hits') {
+          res.setHeader('content-type', 'application/json')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify(hits))
+        } else next()
+      })
+    },
+  }
+}
 
 // Two test projects:
 //   • unit    — fast, jsdom, fake timers. Pure logic + DOM-structure tests.
@@ -56,7 +79,7 @@ export default defineConfig({
         },
       },
       {
-        plugins: [react()],
+        plugins: [react(), beacon()],
         resolve: { alias: chatAliases },
         // An inline project does not inherit the root's optimizeDeps: without its own list, a cold
         // cache found react-dom/client partway through the run and reloaded the page.

@@ -211,10 +211,7 @@ func TestChildFilingIsApprovedOnlyUnderTheParentsLevel(t *testing.T) {
 	c := newChildOf(t, fx)
 	setLevel(fx, human, "board-a", db.BoardLevelFull)
 	passDown(t, fx, c.id, "board-a", "A", db.BoardLevelFile)
-	// Filing needs the session's own discovery proof (recorded at a start that carries a sign-in).
-	if err := db.SaveBoardFilingProof(t.Context(), fx.pool, c.id, "session_id", "child-start-login", ""); err != nil {
-		t.Fatal(err)
-	}
+	// The child has no board sign-in of its own: it files with its parent's (child_filing_test.go).
 	file := func(title string) (int, map[string]any) {
 		return fx.postWork("file-ticket", c.id, c.tok, map[string]any{"board": "A", "title": title, "body": "Fixture details"})
 	}
@@ -585,7 +582,7 @@ func TestChildActsWithTheParentsCurrentSignIn(t *testing.T) {
 }
 
 // The guide states the per-child limits and their bound with the numbers the runner enforces, and
-// that a desktop child cannot file.
+// that a child files with its parent's sign-in.
 func TestChildBoardDocsStateTheLimitsAndTheFilingGap(t *testing.T) {
 	raw, err := os.ReadFile("../../../docs/talking-to-an-agent.md")
 	if err != nil {
@@ -593,8 +590,8 @@ func TestChildBoardDocsStateTheLimitsAndTheFilingGap(t *testing.T) {
 	}
 	text := strings.Join(strings.Fields(string(raw)), " ")
 	for _, want := range []string{
-		"A desktop child cannot file proposals yet.",
-		fmt.Sprintf("%d board calls at once and %d board requests a minute per session", boardCallsInFlight, boardCallsPerMinute),
+		"A child files proposals with its parent's sign-in.",
+		fmt.Sprintf("%d board calls at once and %d board requests a minute per session (the defaults", boardCallsInFlight, boardCallsPerMinute),
 		fmt.Sprintf("at most %d filings an hour approved without asking per permission", defaultGrantHourlyCap),
 		fmt.Sprintf("A parent runs at most %d children at once and an account at most %d", maxRunningChildrenPerParent, maxRunningChildrenPerAccount),
 		fmt.Sprintf("up to %d more board calls in flight", maxRunningChildrenPerAccount*boardCallsInFlight),

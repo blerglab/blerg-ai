@@ -292,9 +292,14 @@ repository at the end of each turn and when it stops (work it left
 uncommitted is committed for it at the stop); nothing is merged or pushed.
 What the sandbox can and cannot touch, and how the commits come back:
 [`docs/sandbox-image.md`](../../docs/sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land).
-Your `~/.claude` and `~/.codex` are mounted read-write
-so the engine can use your login — the sandbox does NOT protect those
-credentials or your host Claude settings. Network is open. "This machine,
+Your engine directories are not mounted: each
+sandboxed session gets a home of its own with the current sign-in of the
+engine it runs (it cannot renew it or change yours) and your settings,
+without their secrets, read-only, so nothing it does there runs on your
+machine later. Your own Claude hooks and status line do not run in a Local
+sandbox session (see
+[the sandbox home](../../docs/sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land)).
+The session can use that sign-in until it expires. Network is open. "This machine,
 unsandboxed" (bare host, full filesystem access) is one click away in the
 launch sheet's Run column for anyone who wants it, behind an explicit
 acknowledgement — it is never a default while a sandbox is available.
@@ -369,9 +374,12 @@ mount point and the host path it came from means nothing to it. The driver's
 stdin/stdout/exit handling is the same code as on the host — only the command
 is wrapped.
 
-Started with `--cap-drop ALL --security-opt no-new-privileges --pids-limit
-512 --memory 4g`; no `--restart` — a sandbox stopped by a reboot is
-recreated by the daemon from its session record on the next launch.
+Started with `--cap-drop ALL --security-opt no-new-privileges --init --pids-limit
+512 --memory 4g`. Docker's init process reaps orphaned tool and test processes so
+exited children do not accumulate as zombies and exhaust the process limit.
+The limit also counts threads; live processes and threads can still reach it.
+No `--restart` — a sandbox stopped by a reboot is recreated by the daemon from
+its session record on the next launch.
 
 **Orphan cleanup.** A container is named after its session, so one left behind
 by a killed daemon, a reboot or a crash still owns that name and would make
@@ -386,8 +394,30 @@ for a resumable terminal session — which is also why an agent container needs
 cleaning up rather than adopting: nothing will ever reattach to it, and the
 engine process inside it died with the daemon that started it. So on every
 (re)connection, after reattaching and recovering everything it can, the daemon
-sweeps `blerg-sandbox-*`: any container that is not a session it is managing,
-and has no tmux server inside it, is `docker rm -f`'d. When a session ends —
+sweeps its own sandbox containers: any that is not a session it is managing,
+and has no tmux server inside it, is `docker rm -f`'d. "Its own" means the
+container carries the daemon's `blerg.runner.owner` label (set on every
+container it starts), or, for a container from before that label, that the
+daemon has a record of the session (its clone, sandbox home or session
+record). A container whose name merely starts with `blerg-sandbox-` (another
+daemon's on the same Docker, a test's) is never reattached or removed; it is
+logged once per daemon run. To find unlabeled ones left from older daemons:
+`docker ps -a --filter name=^/blerg-sandbox- --filter label!=blerg.runner.owner`.
+
+**A container that stops.** While a sandboxed agent session runs, the daemon
+looks at its container every few seconds (one `docker ps` of its own
+containers for all sessions, then `docker inspect` only for one that is not
+running) and whenever the engine fails. Every look goes to the docker context
+the container was started on, so switching your docker CLI to another context
+does not make it look removed. The `blerg.runner.docker-context` container label
+restores that pin after a daemon restart. Older containers without the label use
+the current context at rediscovery, logged once per container. A slow listing
+does not block other watchers; while a listing is in flight, peers on that
+context defer judgment until a later check. When Docker reports it stopped (a paused
+container, as during the turn-end sync, is alive), or reports it missing twice
+a few seconds apart, the session ends as failed with the container's exit
+code, OOM flag and time, recorded in the session's events; no engine is
+restarted in it. When a session ends —
 either kind — its container is `docker rm -f`'d and unregistered, by name even
 when the in-memory registry has been emptied by a restart. Note that the engine's own
 in-container conversation state does not survive that recreation; a resumed
@@ -578,6 +608,52 @@ What to check:
   service's environment (see [Files and permissions](#files-and-permissions)), and keep `localhost` in its `NO_PROXY`.
 - Only the exceptions are added. If your proxy blocks the sites a session needs (git, package
   registries, the model API), ask whoever runs it; Blerg cannot fix that.
+
+### Claude Code or Codex run with their own sandbox
+
+If you run Claude Code with its sandbox on (`"sandbox": {"enabled": true}` in your settings, or
+your organization's managed settings), its sandboxed commands have no direct route to this
+machine's `localhost`: they go out only through the sandbox's proxy, to the hosts its settings
+allow. `blerg-runner` needs two things: the runner's address (`BLERG_RUNNER_SERVER_HTTP`, for
+example `http://localhost:8083`) and a read of its token file
+(`~/.blerg-runner-daemon/session-tokens/<session-id>`, which the sandbox leaves readable). It
+writes only into the working folder. Without the address, Claude asks every time to run
+`blerg-runner` outside the sandbox.
+
+What Blerg does: when it starts a Claude session on this machine and your settings (user, project
+or managed) turn the sandbox on, the daemon adds the runner's host and port (and the board's, for
+a board session) to `sandbox.network.allowedDomains` in **that session's own** settings (Claude's
+`--settings`), always with the port. Your settings files are never changed, and no command is
+taken out of the sandbox. Inside the sandbox, `blerg-runner` dials the runner directly first and,
+when the sandbox refuses that, sends the request through the sandbox's proxy, only for the
+session's own runner and board addresses. If your organization's managed settings allow only
+managed domains (`sandbox.network.allowManagedDomainsOnly`), Blerg does not override that: the
+session says so and names the address your administrator has to add to the managed
+`sandbox.network.allowedDomains`. A Local sandbox session is not changed: Claude Code's sandbox
+does not run in the image.
+
+To run `blerg-runner` from a Claude Code you started yourself, add the same to your
+`~/.claude/settings.json` (use your runner's host and port; always keep the port, since a bare
+`localhost` would open every local port):
+
+```json
+{
+  "sandbox": {
+    "network": { "allowedDomains": ["localhost:8083"] }
+  }
+}
+```
+
+**Codex.** Codex's `workspace-write` sandbox blocks the network for the commands it runs, so
+`blerg-runner` fails there with a connection error. Blerg does not change that for you: Codex agent
+sessions run without Codex's sandbox and need nothing; for a Codex terminal (or a Codex you started
+yourself) that should reach the runner, allow the network in `~/.codex/config.toml` (this opens the
+network for all of its sandboxed commands, not only the runner):
+
+```toml
+[sandbox_workspace_write]
+network_access = true
+```
 
 ## Always-on plugins
 

@@ -14,6 +14,7 @@ import type { ArtifactsStatus } from '../hooks/useArtifacts'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { fileErrorText } from '../transport/files'
 import ErrorId from './ErrorId'
+import { Hover } from './Hovercard'
 import { TimeLabel } from './TimeLabel'
 
 const SORT_KEY = 'blerg.files.sort'
@@ -155,7 +156,9 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
       <>
         <FileGlyph view={a.view} label={gone ? 'No longer available' : kind} />
         {viewable
-          ? <button type="button" {...mainProps} aria-label={`View ${a.name}`} onClick={() => onView(a)}>{main}</button>
+          ? <Hover target={{ kind: 'file', sessionId, id: a.id, artifact: { ...a, ...(g.latest.version ? { latest_version: g.latest.version } : {}) } }}>
+              <button type="button" {...mainProps} aria-label={`View ${a.name}`} onClick={() => onView(a)}>{main}</button>
+            </Hover>
           : <div {...mainProps}>{main}</div>}
         {confirming === a.id ? (
           <div className="artifact-row-actions is-confirming">

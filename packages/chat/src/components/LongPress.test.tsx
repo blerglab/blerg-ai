@@ -93,7 +93,7 @@ describe('long-press to copy', () => {
       ev({ seq: 2, kind: 'checklist', payload: { items: [{ text: 'Read', done: true }, { text: 'Write', done: false }], op: 'set' } }),
     )
     show()
-    hold(screen.getByTestId('ticket-card').querySelector('.ticket-title')!)
+    hold(screen.getByTestId('ticket-card').querySelector('.ticket-row-title')!)
     await wait(600)
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Copy message' }))
     await wait(0)

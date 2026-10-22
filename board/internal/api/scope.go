@@ -63,6 +63,8 @@ type routeScope struct {
 var routeScopes = map[string]routeScope{
 	"POST /api/boards/{id}/file-card":              {scopeBoard, "one approved card, signed intent/digest and account bound; no other permission granted"},
 	"GET /api/boards/{id}/run-targets":             {scopeBoard, "execution targets for this board; handler requires card.write and only its automation owner can choose"},
+	"GET /api/boards/{id}/repo-remote":             {scopeBoard, "one bare board repo's remote on the desktop the person picked; handler requires a human board admin"},
+	"POST /api/boards/{id}/repos/resolve":          {scopeBoard, "saves a bare board repo as the owner/name its chosen desktop reports; handler requires a human board admin"},
 	"GET /api/boards/{id}/launch-options":          {scopeBoard, "board-scoped discovery under its stored automation identity"},
 	"GET /api/runner-sessions/{id}/launch-options": {scopeSession, "existing session discovery; handler additionally requires a human and card.write"},
 	"POST /api/chat/sessions/{id}/model":           {scopeSession, "chat model control; handler additionally requires a human and card.write"},
@@ -73,6 +75,8 @@ var routeScopes = map[string]routeScope{
 	"GET /api/me":                                  {scopeSelf, "returns the caller's own identity, incl. its board_id"},
 	"GET /api/boards":                              {scopeSelf, "handler filters the list to the token's board"},
 	"POST /api/boards":                             {scopeDeny, "creating a board is instance-wide"},
+	"POST /api/boards/create-approved":             {scopeDeny, "one approved board, signed intent/digest and account bound; never a board-scoped token"},
+	"GET /api/repo-choices":                        {scopeDeny, "the desktops' repositories, for New board; instance-wide"},
 	"GET /api/search":                              {scopeSelf, "handler forces the token's board into the query"},
 	"GET /api/overview":                            {scopeDeny, "cross-board overview"},
 	"GET /api/sessions":                            {scopeDeny, "cross-board session list"},

@@ -2,7 +2,12 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderMermaid } from './mermaid'
 
 const api = vi.hoisted(() => ({initialize: vi.fn(), render: vi.fn()}))
-vi.mock('mermaid', () => ({default: api}))
+// Mermaid itself runs in a sandboxed frame (mermaidFrame.ts, tested in Chromium); here the frame
+// is a stand-in that hands the config and source to a mock Mermaid.
+vi.mock('./mermaidFrame', () => ({renderInFrame: async (source: string, config: unknown) => {
+  api.initialize(config)
+  return (await api.render('blerg-diagram', source)).svg
+}}))
 const originalDecode = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'decode')
 const decode = vi.fn<() => Promise<void>>()
 Object.defineProperty(HTMLImageElement.prototype, 'decode', {configurable: true, value: decode})

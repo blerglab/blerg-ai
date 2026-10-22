@@ -61,26 +61,26 @@ export default function DelegationRulesSection() {
   return <section className="st-chat" aria-label="Sessions starting sessions" data-testid="delegation-rules">
     <h3 className="st-heading">Sessions starting sessions</h3>
     <p className="st-hint">Standing rules allow any repository on the selected desktop (or on the cluster) for that engine and runtime. Session approvals apply only to the parent session, selected engine and runtime on that desktop or the cluster, across repositories.</p>
-    {error && <p role="alert">{error} <button type="button" onClick={() => setReload(n => n + 1)}>Retry</button></p>}
-    {!reply && !error && <p>Loading rules…</p>}
+    {error && <p role="alert" className="st-note">{error} <button type="button" className="btn small" onClick={() => setReload(n => n + 1)}>Retry</button></p>}
+    {!reply && !error && <p className="st-note">Loading rules…</p>}
     {reply && <>
-      {!reply.rules.length && <p>No standing rules. Sessions ask before starting another session.</p>}
-      <ul>{reply.rules.map(r => <li key={r.id}>{ENGINE_LABELS[r.engine] ?? r.engine} · {runtimeName(r.runtime)}{r.runtime === 'cluster' ? '' : ` · ${r.daemon_name || r.daemon_id}`}{r.local_only ? ' · local only' : ''} · {new Date(r.created_at).toLocaleDateString()} <button type="button" disabled={busy} onClick={() => { void mutate(`/api/delegation-rules/${encodeURIComponent(r.id)}`, { method: 'DELETE' }) }}>Remove</button></li>)}</ul>
+      {!reply.rules.length && <p className="st-note">No standing rules. Sessions ask before starting another session.</p>}
+      <ul className="st-rules">{reply.rules.map(r => <li key={r.id} className="st-rule"><span className="st-rule-text">{ENGINE_LABELS[r.engine] ?? r.engine} · {runtimeName(r.runtime)}{r.runtime === 'cluster' ? '' : ` · ${r.daemon_name || r.daemon_id}`}{r.local_only ? ' · local only' : ''} · {new Date(r.created_at).toLocaleDateString()}</span> <button type="button" className="btn small danger" disabled={busy} onClick={() => { void mutate(`/api/delegation-rules/${encodeURIComponent(r.id)}`, { method: 'DELETE' }) }}>Remove</button></li>)}</ul>
       <p className="st-hint">Each session can run {reply.limits.per_parent_running} started sessions at once and start {reply.limits.per_parent_starts}; your account can run {reply.limits.per_account_running} at once and start {reply.limits.per_account_starts_per_hour} an hour.</p>
-      {!daemons.length && !cluster && <p>No workstation daemon is available. Connect one to add a rule.</p>}
-      <form onSubmit={e => {
+      {!daemons.length && !cluster && <p className="st-note">No workstation daemon is available. Connect one to add a rule.</p>}
+      <form className="st-form" onSubmit={e => {
         e.preventDefault()
         if (!canAdd) return
         const body = onCluster ? { engine: selectedEngine, runtime: 'cluster', local_only: localOnly } : { engine: selectedEngine, runtime: effectiveRuntime, daemon_id: effectiveDaemon, local_only: localOnly }
         void mutate('/api/delegation-rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       }}>
-        <label>Engine <select aria-label="Rule engine" value={selectedEngine} onChange={e => { setEngine(e.target.value); setLocalPreference(null); if (e.target.value === 'openclaw') setRuntime('daemon') }}>{engines.map(id => <option key={id} value={id}>{ENGINE_LABELS[id] ?? id}</option>)}</select></label>{' '}
-        <label>Runtime <select aria-label="Rule runtime" value={effectiveRuntime} onChange={e => setRuntime(e.target.value)}><option value="docker" disabled={selectedEngine === 'openclaw' || !daemons.length}>desktop sandbox</option><option value="daemon" disabled={!daemons.length}>desktop, unsandboxed</option>{cluster && <option value="cluster">on the cluster</option>}</select></label>{' '}
-        {!onCluster && <label>Daemon <select aria-label="Rule daemon" value={effectiveDaemon} onChange={e => setDaemonId(e.target.value)}>{daemons.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>}
+        <label className="st-field">Engine <select className="select" aria-label="Rule engine" value={selectedEngine} onChange={e => { setEngine(e.target.value); setLocalPreference(null); if (e.target.value === 'openclaw') setRuntime('daemon') }}>{engines.map(id => <option key={id} value={id}>{ENGINE_LABELS[id] ?? id}</option>)}</select></label>
+        <label className="st-field">Runtime <select className="select" aria-label="Rule runtime" value={effectiveRuntime} onChange={e => setRuntime(e.target.value)}><option value="docker" disabled={selectedEngine === 'openclaw' || !daemons.length}>desktop sandbox</option><option value="daemon" disabled={!daemons.length}>desktop, unsandboxed</option>{cluster && <option value="cluster">on the cluster</option>}</select></label>
+        {!onCluster && <label className="st-field">Daemon <select className="select" aria-label="Rule daemon" value={effectiveDaemon} onChange={e => setDaemonId(e.target.value)}>{daemons.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>}
         <label className="st-check"><input type="checkbox" checked={localOnly} onChange={e => setLocalPreference(e.target.checked)} />Local only</label>
         {effectiveRuntime === 'daemon' && <p className="st-hint">Unsandboxed sessions run as you with full filesystem access.</p>}
         {onCluster && <p className="st-hint">Cluster children run as pods with your engine credentials, for any of your sessions that can start them.</p>}
-        <button type="submit" disabled={busy || !canAdd}>Add rule</button>
+        <button type="submit" className="btn primary" disabled={busy || !canAdd}>Add rule</button>
       </form>
     </>}
   </section>

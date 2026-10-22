@@ -70,14 +70,20 @@ func TestCodexPluginHomeSnapshotsOnlySelectedPluginWithoutChangingUserConfig(t *
 }
 
 func TestCodexPluginSandboxMountsPreserveFixedPathsAndRestrictedIsolation(t *testing.T) {
-	args := sandboxRunArgs("fixture", "/workspace/project", "", nil, sandboxRunExtras{codexHome: "/private/session", codexSourceHome: "/private/login"})
+	home := t.TempDir()
+	args := sandboxRunArgs("fixture", "/workspace/project", home, nil, sandboxRunExtras{engine: "codex", codexHome: "/private/session", codexSourceHome: "/private/login", sandboxHome: "/state/sandbox-homes/fixture"})
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"type=bind,src=/private/session,dst=/private/session", "type=bind,src=/private/login,dst=/private/login"} {
+	// The private home keeps its native path; the login directory its links point to is the
+	// session's own Codex copy, never the person's directory.
+	for _, want := range []string{"type=bind,src=/private/session,dst=/private/session", "type=bind,src=/state/sandbox-homes/fixture/codex,dst=/private/login"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing native path mount %s", want)
 		}
 	}
-	args = sandboxRunArgs("fixture", "/workspace/project", "", nil, sandboxRunExtras{codexHome: "/private/restricted", codexSourceHome: "/private/login", restrictedEngine: "codex"})
+	if strings.Contains(joined, "src=/private/login") {
+		t.Fatal("the person's Codex directory was mounted into the sandbox")
+	}
+	args = sandboxRunArgs("fixture", "/workspace/project", home, nil, sandboxRunExtras{codexHome: "/private/restricted", codexSourceHome: "/private/login", restrictedEngine: "codex", sandboxHome: "/state/sandbox-homes/fixture"})
 	if strings.Contains(strings.Join(args, " "), "/private/login") {
 		t.Fatal("restricted sandbox mounted unrestricted user home")
 	}

@@ -55,7 +55,7 @@ func connectSrvTestSchemaPool(t *testing.T) *pgxpool.Pool {
 func spawnViaREST(t *testing.T, api *API, dc *DaemonConn, repo string) (string, protocol.SpawnSession) {
 	t.Helper()
 	tok := enableBrowserAuth(t, api)("session.start")
-	body, _ := json.Marshal(map[string]any{"daemon_id": dc.ID, "repo": repo, "runtime": "docker", "title": "t"})
+	body, _ := json.Marshal(map[string]any{"daemon_id": dc.ID, "repo": repo, "runtime": "docker", "title": "t", "kind": "agent"})
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
@@ -128,7 +128,7 @@ func TestForwardBrowserSpawnMintsSessionToken(t *testing.T) {
 	ctx := context.Background()
 
 	sessionID, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{
-		Type: "spawn_session", DaemonID: dc.ID, Repo: "app", Title: "t",
+		Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app", Title: "t",
 	}, pool)
 	if err != nil {
 		t.Fatalf("forwardBrowserSpawn: %v", err)
@@ -156,7 +156,7 @@ func TestForwardBrowserSpawnWithoutDBSendsNoToken(t *testing.T) {
 	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
-	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{Type: "spawn_session", DaemonID: "d1", Repo: "app"}, nil); err != nil {
+	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "d1", Repo: "app"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if msg := recvSpawn(t, dc); msg.SessionToken != "" {
@@ -271,7 +271,7 @@ func TestPostSessionsAbortsTokenWhenDaemonBufferFull(t *testing.T) {
 	hub.Register(full)
 
 	tok := enableBrowserAuth(t, api)("session.start")
-	body, _ := json.Marshal(map[string]any{"daemon_id": dc.ID, "repo": "app", "runtime": "docker"})
+	body, _ := json.Marshal(map[string]any{"daemon_id": dc.ID, "repo": "app", "runtime": "docker", "kind": "agent"})
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
@@ -295,7 +295,7 @@ func TestPostSessionsAbortsTokenWhenDaemonBufferFull(t *testing.T) {
 	}
 
 	// Same guarantee on the browser-WS path.
-	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{Type: "spawn_session", DaemonID: dc.ID, Repo: "app"}, pool); err == nil {
+	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app"}, pool); err == nil {
 		t.Fatal("expected send-channel-full error")
 	}
 	if rows, _ := db.ListSessionsByDaemon(ctx, pool, dc.ID); len(rows) != 0 {

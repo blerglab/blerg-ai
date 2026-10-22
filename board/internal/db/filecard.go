@@ -68,7 +68,7 @@ func FileApprovedCard(ctx context.Context, pool *pgxpool.Pool, boardID, account,
 	if len(draft.Repos) > 0 {
 		params.Repos = &draft.Repos
 	} else if board.RequireRepo {
-		rows, err := tx.Query(ctx, `SELECT repo FROM board_repos WHERE board_id=$1 ORDER BY repo`, boardID)
+		rows, err := tx.Query(ctx, `SELECT repo FROM board_repos WHERE board_id=$1 ORDER BY position, repo`, boardID)
 		if err != nil {
 			return FilingReceipt{}, false, err
 		}

@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { apiFetch } from "./apiFetch";
 import { getAccessToken } from "./authClient";
-import { mustChangePassword } from "./claims";
+import { mustChangePassword, tokenCaps } from "./claims";
 import PluginsSection from "./PluginsSection";
 import { useEngineDescriptors } from "./engineDescriptors";
 import ManagedCredentials, { type ManagedCredentialSummary } from "./ManagedCredentials";
 import McpConnectionsSection from "./McpConnectionsSection";
+import BoardLimitsSection from "./BoardLimitsSection";
 import Shell, { useSite, type Site } from "./Shell";
 
 // Settings: per-credential paste-in. Talks to POST/GET/DELETE /api/credentials (Task 14),
@@ -791,6 +792,8 @@ function SettingsScreen() {
   const [removing, setRemoving] = useState<Kind | null>(null);
 
   const site = useSite();
+  // UI routing only (claims.ts): the server refuses the board limits to anyone without account.manage.
+  const isAdministrator = tokenCaps(getAccessToken() ?? "").includes("account.manage");
 
   const refresh = async () => {
     setLoading(true);
@@ -932,6 +935,7 @@ function SettingsScreen() {
       <PluginsSection metadata={discovery.metadata} discoveryError={discovery.error} retryDiscovery={discovery.retry} />
       <McpConnectionsSection site={site} />
       <AgentTokens site={site} />
+      {isAdministrator && <BoardLimitsSection />}
     </Shell>
   );
 }

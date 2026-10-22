@@ -20,6 +20,8 @@ import DataTable from './DataTable'
 import { InlineDiff } from './DiffView'
 import ErrorId from './ErrorId'
 import Markdown from './Markdown'
+import VisualBlock from './VisualBlock'
+import { visualFile } from '../model/visualKind'
 import { TimeLabel } from './TimeLabel'
 import './diff.css'
 
@@ -78,6 +80,7 @@ export function MediaPreview({ sessionId, files, artifact, onOpen }: {
   }, [kind, near, sessionId, artifact, files])
 
   if (!kind || failed) return null
+  if (kind === 'text' && visualFile(artifact.name, artifact.view, '') === 'mermaid') return <DiagramPreview sessionId={sessionId} files={files} artifact={artifact} />
   if (kind && EXCERPT_KINDS.has(kind)) return <ExcerptPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
   if (kind === 'diff') return <DiffPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
   if (kind === 'pdf') return <PdfPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
@@ -143,6 +146,36 @@ function ExcerptPreview({ sessionId, files, artifact, onOpen }: {
       )}
       {!excerpt && <span className="artifact-preview-loading" />}
       <button type="button" className="artifact-preview-cover" onClick={onOpen} aria-label={`Open ${artifact.name}`} />
+    </div>
+  )
+}
+
+/** A published Mermaid file (.mmd): the diagram itself, drawn when the card nears the viewport,
+ *  or its source and the reason it was not drawn. The card's View opens it in the viewer. */
+function DiagramPreview({ sessionId, files, artifact }: {
+  sessionId: string
+  files: TransportFiles
+  artifact: ArtifactPayload
+}) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const near = useNear(ref, true)
+  const [source, setSource] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (!near) return
+    let live = true
+    loadPreviewText(sessionId, artifact.id, id => files.raw(sessionId, id)).then(
+      t => { if (live) setSource(t) },
+      () => { if (live) setFailed(true) },
+    )
+    return () => { live = false }
+  }, [near, sessionId, artifact.id, files])
+
+  if (failed) return null
+  return (
+    <div ref={ref} className="artifact-preview-diagram" data-testid="artifact-preview-diagram">
+      {source === null ? <span className="artifact-preview-loading" /> : <VisualBlock kind="mermaid" source={source.replace(/\n$/, '')} />}
     </div>
   )
 }

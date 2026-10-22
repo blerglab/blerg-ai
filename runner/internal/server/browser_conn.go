@@ -595,6 +595,9 @@ func (h *Hub) forwardBrowserSpawn(_ *BrowserConn, msg protocol.BrowserSpawnSessi
 	if err := validateRepoName(msg.Repo); err != nil {
 		return "", fmt.Errorf("rejected repo %q: %w", msg.Repo, err)
 	}
+	if problem := newSessionKindProblem(msg.Kind); problem != "" {
+		return "", errors.New(problem)
+	}
 	dc := h.GetHostDaemon(msg.DaemonID)
 	if dc == nil {
 		return "", fmt.Errorf("daemon %s not found", msg.DaemonID)
@@ -607,6 +610,7 @@ func (h *Hub) forwardBrowserSpawn(_ *BrowserConn, msg protocol.BrowserSpawnSessi
 	sessionID = newUUID()
 	fwd, err := json.Marshal(protocol.SpawnSession{
 		Type:          "spawn_session",
+		Kind:          msg.Kind,
 		SessionID:     sessionID,
 		ProjectPath:   "",
 		Repo:          msg.Repo,
@@ -786,6 +790,12 @@ func handleUnsubscribeSession(h *Hub, bc *BrowserConn, sessionID string) {
 // ask_answer itself (messageevents.go).
 func handleBrowserAgentMessage(ctx context.Context, h *Hub, bc *BrowserConn, dbPool *pgxpool.Pool, msg protocol.AgentUserMessage) {
 	msg.Source = "chat"
+	// Nor the id of one of Blerg's relays (reservedClientID): it would take the relay's place.
+	if reservedClientID(msg.ClientID) {
+		recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{
+			"message": "This message was not sent: its id is reserved for messages Blerg relays itself. Send it again.", "retryable": false, "client_id": msg.ClientID})
+		return
+	}
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	if err := withCancelledPendingLimitResumeConn(ctx, dbPool, msg.SessionID, func(conn *pgxpool.Conn) error {

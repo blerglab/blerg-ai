@@ -86,10 +86,9 @@ func TestPostSessionsDaemonCarriesPluginsOnlyWhereTheyLoad(t *testing.T) {
 		t.Fatalf("plan = %s", got)
 	}
 
-	// Terminal kind and non-Claude engines get none.
+	// Engines without a native plugin installer get none.
 	for name, body := range map[string]map[string]any{
-		"terminal": {"daemon_id": "d1", "repo": "my-app", "runtime": "docker"},
-		"codex":    {"daemon_id": "d1", "repo": "my-app", "kind": "agent", "runtime": "docker", "engine": "codex"},
+		"codex": {"daemon_id": "d1", "repo": "my-app", "kind": "agent", "runtime": "docker", "engine": "codex"},
 	} {
 		api, dc, calls = pluginAPI(t, list, nil)
 		dc.SetPlugins(true)

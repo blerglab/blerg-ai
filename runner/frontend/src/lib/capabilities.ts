@@ -2,7 +2,7 @@
 // loaded. The server already sanitizes them; this still treats the payload
 // as untrusted JSON so a malformed one renders as "nothing" instead of
 // crashing the chat view.
-import type { McpLive } from '@blerglab/chat'
+import { modelDisplayName, type McpLive } from '@blerglab/chat'
 import type { AgentEvent, CapabilitiesPayload, CapabilityGroup, CapabilityGroupId, CapabilityItem } from '../types'
 
 export const CAPABILITIES_KIND = 'capabilities'
@@ -154,4 +154,83 @@ export function withLiveMcp(payload: CapabilitiesPayload, live: McpLive | null |
   const note = live.released ? MCP_RELEASED_NOTES[live.released] : old?.note
   const group: CapabilityGroup = { id: 'mcp', label: old?.label ?? 'MCP servers', note, total: old?.total, items }
   return { ...payload, groups: old ? payload.groups.map(g => (g.id === 'mcp' ? group : g)) : [...payload.groups, group] }
+}
+
+// ─── The Capabilities header card ────────────────────────────────────────────
+
+/** A permission mode in words, and whether it lets the agent act without asking (drawn amber). The
+ *  known values of each engine are mapped; anything else shows as reported, neutral. */
+const PERMISSION_MODES: Record<string, { label: string; risky?: boolean }> = {
+  // Claude Code
+  default: { label: 'Default' },
+  acceptEdits: { label: 'Accept edits' },
+  plan: { label: 'Plan' },
+  auto: { label: 'Auto' },
+  dontAsk: { label: 'Don’t ask' },
+  bypassPermissions: { label: 'Bypass permissions', risky: true },
+  // Codex approval policies and sandboxes
+  never: { label: 'Never asks', risky: true },
+  'on-request': { label: 'Asks on request' },
+  'on-failure': { label: 'Asks on failure' },
+  untrusted: { label: 'Asks for untrusted' },
+  restricted: { label: 'Restricted' },
+  'read-only': { label: 'Read only' },
+  'workspace-write': { label: 'Workspace write' },
+  'danger-full-access': { label: 'Full access', risky: true },
+}
+
+export function permissionLabel(mode: string): { label: string; risky: boolean } {
+  const known = Object.prototype.hasOwnProperty.call(PERMISSION_MODES, mode) ? PERMISSION_MODES[mode] : undefined
+  return known ? { label: known.label, risky: known.risky === true } : { label: mode, risky: false }
+}
+
+const CLAUDE_FAMILY = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/
+
+/** A model id as a person reads it: "claude-opus-5-5" is "Opus 5.5". The catalog's name when this
+ *  build knows the id, then the Claude family pattern, then the shared chat package's display name. */
+export function humanModelName(id: string, catalog: readonly { id: string; name: string }[] = []): string {
+  const listed = catalog.find(m => m.id === id)?.name
+  if (listed) return listed
+  const m = CLAUDE_FAMILY.exec(id)
+  if (m) return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ''}${m[4] ? ' (1M)' : ''}`
+  return modelDisplayName(id)
+}
+
+/** A long path cut in the middle, so its start (where) and its end (which folder) both show. */
+export function middleTruncate(s: string, max = 24): string {
+  if (s.length <= max) return s
+  const keep = max - 1
+  const head = Math.ceil(keep * 0.4)
+  return `${s.slice(0, head)}…${s.slice(s.length - (keep - head))}`
+}
+
+/** "As of 12:05 AM" for a report from today, "As of Oct 21, 12:05 AM" for an older one, in the
+ *  browser's locale as the rest of the app's times (the locale is a parameter for tests); null when
+ *  the time cannot be read. */
+export function asOfLabel(ts: string, now: Date = new Date(), locale?: string): string | null {
+  const t = Date.parse(ts)
+  if (!Number.isFinite(t)) return null
+  const d = new Date(t)
+  const time = d.toLocaleTimeString(locale, { hour: 'numeric', minute: '2-digit' })
+  const today = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  if (today) return `As of ${time}`
+  const sameYear = d.getFullYear() === now.getFullYear()
+  const date = d.toLocaleDateString(locale, sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' })
+  return `As of ${date}, ${time}`
+}
+
+/** A row's status as one glyph and its tone; the word (statusWord) goes to the tooltip and a screen
+ *  reader only. */
+export function statusGlyph(status: string): { glyph: string; tone: 'ok' | 'off' | 'wait' | 'warn' | 'bad' | 'other' } {
+  switch (status) {
+    case 'enabled':
+    case 'connected': return { glyph: '●', tone: 'ok' }
+    case 'disabled': return { glyph: '○', tone: 'off' }
+    case 'lazy': return { glyph: '◇', tone: 'off' }
+    case 'pending': return { glyph: '◌', tone: 'wait' }
+    case 'needs-auth': return { glyph: '!', tone: 'warn' }
+    case 'failed':
+    case 'error': return { glyph: '×', tone: 'bad' }
+    default: return { glyph: '•', tone: 'other' }
+  }
 }

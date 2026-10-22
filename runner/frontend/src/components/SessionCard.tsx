@@ -250,7 +250,7 @@ export default function SessionCard({ session, active, hiddenChildren = null, ch
       }}
       style={{
         // backgroundColor (longhand) so the flash class's background-image survives.
-        backgroundColor: active ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--scree)',
+        backgroundColor: active ? 'var(--selected-bg)' : 'var(--scree)',
         borderRadius: 8,
         padding: '6px 10px',
         marginBottom: 6,
@@ -259,14 +259,14 @@ export default function SessionCard({ session, active, hiddenChildren = null, ch
         display: 'flex',
         flexDirection: 'column',
         gap: 3,
-        // Selection reads as a blaze (brand accent = "active") left bar + a
-        // soft lift — distinct from amber, which means "waiting". The status
-        // dot still shows what state the session is in.
-        borderLeft: active ? '3px solid var(--blaze)' : isWaiting || paused ? `3px solid ${statusStyle.border}` : `1px solid ${statusStyle.border}`,
+        // Selection reads as a blue (--selected) left bar + a soft lift —
+        // distinct from amber ("waiting") and from the accent (brand, actions).
+        // The status dot still shows what state the session is in.
+        borderLeft: active ? '3px solid var(--selected-border)' : isWaiting || paused ? `3px solid ${statusStyle.border}` : `1px solid ${statusStyle.border}`,
         borderTop: `1px solid ${statusStyle.border}`,
         borderRight: `1px solid ${statusStyle.border}`,
         borderBottom: `1px solid ${statusStyle.border}`,
-        boxShadow: active ? '0 0 0 1px var(--blaze-soft), 0 2px 10px rgba(0,0,0,0.45)' : undefined,
+        boxShadow: active ? '0 0 0 1px var(--selected-border), 0 2px 10px rgba(0,0,0,0.45)' : undefined,
       }}
     >
       {/* Row 1: status indicator + name (+ unread dot, star). The name gets

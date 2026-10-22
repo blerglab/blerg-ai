@@ -71,10 +71,13 @@ export interface DaemonInfo {
   last_seen_at: string;
   /** The providers' usage limits on this machine, one entry per provider that reported (absent: none). */
   usage_limits?: UsageLimits[];
+  /** The engines this machine can run ("claude", "codex", …). */
+  available_engines?: string[];
 }
 
 /** One limit window: "5h" (five hours), "7d" (the week), "month" (a monthly spend limit; "day" and
- *  "spend-week" for daily/weekly ones) or "capped" (refused, until resets_at when known). */
+ *  "spend-week" for daily/weekly ones), "spend" (Codex's spend limit on a usage-based work plan)
+ *  or "capped" (refused, until resets_at when known). */
 export interface UsageWindow {
   id: string;
   used_percent: number;
@@ -86,6 +89,8 @@ export interface UsageLimits {
   provider: string; // "codex" | "claude"
   windows: UsageWindow[];
   fetched_at?: string;
+  /** Why there are no windows: "no_windows", the provider answered that its account has none. */
+  note?: string;
 }
 
 export interface SessionInfo {
@@ -205,6 +210,7 @@ export type AgentEventKind =
   | 'capabilities'
   | 'artifact'
   | 'topic'
+  | 'mark'
   | 'checklist'
   | 'ticket'
   | 'mcp_status'
@@ -476,6 +482,8 @@ export interface SessionEnded {
   session_id: string;
   exit_code: number;
   signal?: string | null;
+  // With a non-zero exit: why the session failed (its engine runtime stopped).
+  message?: string;
   end_reason?: string;
   ended_by?: EndedBy | null;
 }
@@ -822,7 +830,7 @@ export type ProposalResult = { state: string; message?: string } | null | { cont
 export interface ProposalExtensionInfo { extended_at: string; previous_expires_at: string; expires_at: string; by_you?: boolean }
 
 export interface ProposalInfo {
-  kind?: 'board_file' | 'mcp' | 'plugin_request'
+  kind?: 'board_file' | 'board_create' | 'mcp' | 'plugin_request'
   plugin_session_apply?: boolean
   id: string
   state: ProposalState

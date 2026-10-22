@@ -576,6 +576,8 @@ type StartResponse struct {
 // argument.
 func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req RunnerStartRequest, idemKey string) (StartResponse, *APIError) {
 	ctx = withFilingProject(withCoreProof(ctx, principal.proof()), principal.Project)
+	// A title reaches people and other agents: stored one line, nothing invisible (session_rename.go).
+	req.Title = cleanSessionTitle(req.Title)
 	if req.TargetDaemonID != "" {
 		if req.Runtime != runnerRuntimeDaemon && req.Runtime != runnerRuntimeDocker {
 			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "daemon_id requires an explicit daemon or docker runtime")
@@ -627,7 +629,7 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	}
 	// Refuse env that would shadow blerg-owned variables.
 	for k := range req.Env {
-		if strings.HasPrefix(k, "BLERG_RUNNER_") || k == "ANTHROPIC_API_KEY" {
+		if strings.HasPrefix(k, "BLERG_RUNNER_") || k == "ANTHROPIC_API_KEY" || protocol.IsReservedEngineHomeEnv(k) {
 			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "env key %s is reserved", k)
 		}
 	}
@@ -1325,6 +1327,22 @@ func reservedMessageSource(source string) bool {
 	return false
 }
 
+// reservedClientIDPrefixes are the outbox ids the server gives its own relays (a question's answer
+// or dismissal, a review's or a proposal's outcome, a child's turn, a board-access change). A caller
+// may not use one: the outbox keeps one row per id, so a message under "question-<id>" would stand
+// in for the owner's answer, which would then never be sent, and the chat would draw it as a relay.
+var reservedClientIDPrefixes = []string{"question-", "review-", "proposal-", "child-turn-", "board-access-"}
+
+// reservedClientID reports whether id is one the server keeps for its own relays.
+func reservedClientID(id string) bool {
+	for _, p := range reservedClientIDPrefixes {
+		if strings.HasPrefix(id, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // sendRelay is SendMessage for a note Blerg relays in its own voice (source "review", "proposal",
 // childTurnSource or questionAnswerSource): the server's own paths only, never a caller's.
 func (a *API) sendRelay(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) *APIError {
@@ -1348,6 +1366,9 @@ func (a *API) sendRelay(ctx context.Context, principal RunnerPrincipal, sessionI
 func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) (map[string]any, *APIError) {
 	if reservedMessageSource(source) {
 		return nil, apiErrorf(http.StatusUnprocessableEntity, "source %s is reserved for text Blerg writes itself", source)
+	}
+	if len(clientIDs) > 0 && reservedClientID(clientIDs[0]) {
+		return nil, apiErrorf(http.StatusUnprocessableEntity, "message id %q is reserved for messages Blerg relays itself", clientIDs[0])
 	}
 	// "session" (a parent's message to its child, drawn as the parent's) is the server's to set,
 	// from the parent's own session token: no other caller can claim it, and a parent's message

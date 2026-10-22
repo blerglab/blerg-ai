@@ -51,6 +51,8 @@ check-scripts:
 	bash ./install/desktop/hostcheck_test.sh
 	bash ./install/desktop/daemon_install_test.sh
 	cd runner/.claude/skills/session-messaging && python3 -m unittest test_blerg_runner test_blerg_runner_review_request && python3 -m pytest -q blerg_runner_board_test.py
+	bash video/demo/demo_test.sh
+	python3 -m unittest discover -s video/demo -p 'test_*.py' && python3 -m unittest discover -s video/build -p 'test_*.py'
 	./scripts/check_lint_pin.sh
 	./scripts/scrub.sh
 	./scripts/scrub_test.sh

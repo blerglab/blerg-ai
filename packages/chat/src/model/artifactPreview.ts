@@ -6,7 +6,7 @@
 // Markdown, text and code, JSON and tables show a short excerpt; a PDF shows its first page.
 // All of these are gated by the size the list reports, so nothing big is ever fetched for a
 // preview, and only the small result (an excerpt, a thumbnail) is kept, in a bounded cache.
-import { TEXT_VIEW_MAX, blobTypeFor } from './artifactViews'
+import { TEXT_VIEW_MAX, mediaUrl, releaseMediaUrl } from './artifactViews'
 import { excerptOf, type Excerpt } from './previewExcerpt'
 import { parsePatch, patchSummary, type PatchFile, type PatchSummary } from './patch'
 import { renderPdfThumb } from '../pdf/thumb'
@@ -61,7 +61,7 @@ export function loadPreviewUrl(
   if (!p) {
     p = (async () => {
       const bytes = await raw(artifact.id)
-      return URL.createObjectURL(new Blob([bytes], { type: blobTypeFor(artifact.view, artifact.content_type) }))
+      return mediaUrl(bytes, artifact.view, artifact.content_type) // an SVG as a data: URL, never blob:
     })()
     p.catch(() => cache.delete(key))
     cache.set(key, p)
@@ -143,7 +143,7 @@ export function loadPdfThumb(sessionId: string, artifactId: string, raw: (id: st
 
 /** Forgets every cached preview (tests, or a page that leaves the session). */
 export function clearPreviewCache(): void {
-  for (const p of cache.values()) p.then(u => URL.revokeObjectURL(u)).catch(() => {})
+  for (const p of cache.values()) p.then(u => releaseMediaUrl(u)).catch(() => {})
   cache.clear()
   textCache.clear()
   excerpts.clear()

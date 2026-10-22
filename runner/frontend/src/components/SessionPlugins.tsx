@@ -8,9 +8,20 @@ import './SessionPlugins.css'
 
 type Model = ReturnType<typeof useSessionPlugins>
 
-export function PluginPicker({ model }: { model: Model }) {
+/** The Capabilities toolbar's "+ Add": opens the plugin browser (PluginBrowser), whose fallback is the add form. */
+export function PluginAddButton({ open, onToggle, controls }: { open: boolean; onToggle: () => void; controls?: string }) {
+  return (
+    <button type="button" className="caps-add" aria-label="Add plugin or skill" aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? controls : undefined}
+      onClick={onToggle} data-testid="caps-add">
+      <span className="caps-add-plus" aria-hidden="true">+</span> Add
+    </button>
+  )
+}
+
+/** Adding a plugin (skills come in plugin bundles) to the session or to the account: the form the
+ *  toolbar's "+ Add" opens. */
+export function PluginAddForm({ model, id }: { model: Model; id?: string }) {
   const { data, error, refresh, sessionId } = model
-  const [open, setOpen] = useState(false)
   const [marketplace, setMarketplace] = useState('')
   const [name, setName] = useState('')
   const [scope, setScope] = useState<PluginScope>('session')
@@ -50,95 +61,90 @@ export function PluginPicker({ model }: { model: Model }) {
     }
   }
   return (
-    <section className="session-plugins" aria-label="Session plugins">
-      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
-        Add plugin or skill
-      </button>
-      {open && (
-        <div className="session-plugin-form">
-          {error && (
-            <p role="alert">
-              {error}{' '}
-              <button type="button" onClick={() => void refresh()}>
-                Retry plugin choices
-              </button>
-            </p>
-          )}
-          {!data && !error && <p role="status">Loading plugin choices…</p>}
-          {data && !error && (
-            <>
-              {data.reason && <p>{data.reason}</p>}
-              {!data.supported ? (
-                <p>Plugins cannot be added to this session.</p>
-              ) : (
-                <>
-                  <p>
-                    Skills are included in plugin bundles. Choose a marketplace permitted by this install.
-                  </p>
-                  <label>
-                    Marketplace
-                    {data.any_marketplace ? (
-                      <input
-                        aria-label="Marketplace"
-                        value={source}
-                        maxLength={140}
-                        onChange={(e) => setMarketplace(e.target.value)}
-                      />
-                    ) : (
-                      <select
-                        aria-label="Marketplace"
-                        value={source}
-                        onChange={(e) => setMarketplace(e.target.value)}
-                      >
-                        {data.allowed_marketplaces.map((s) => (
-                          <option key={s} value={s}>
-                            {s}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                  </label>
-                  <label>
-                    Plugin name
+    <section className="session-plugins" aria-label="Session plugins" id={id}>
+      <div className="session-plugin-form">
+        {error && (
+          <p role="alert">
+            {error}{' '}
+            <button type="button" onClick={() => void refresh()}>
+              Retry plugin choices
+            </button>
+          </p>
+        )}
+        {!data && !error && <p role="status">Loading plugin choices…</p>}
+        {data && !error && (
+          <>
+            {data.reason && <p>{data.reason}</p>}
+            {!data.supported ? (
+              <p>Plugins cannot be added to this session.</p>
+            ) : (
+              <>
+                <p>
+                  Skills are included in plugin bundles. Choose a marketplace permitted by this install.
+                </p>
+                <label>
+                  Marketplace
+                  {data.any_marketplace ? (
                     <input
-                      value={name}
-                      maxLength={64}
-                      onChange={(e) => setName(e.target.value)}
-                      autoCapitalize="none"
-                      spellCheck={false}
+                      aria-label="Marketplace"
+                      value={source}
+                      maxLength={140}
+                      onChange={(e) => setMarketplace(e.target.value)}
                     />
-                  </label>
-                  <label>
-                    Apply plugin
-                    <select value={effectiveScope} onChange={(e) => setScope(e.target.value as PluginScope)}>
-                      <option value="session" disabled={!data.session_apply}>
-                        This session only
-                      </option>
-                      <option value="always">Always on</option>
+                  ) : (
+                    <select
+                      aria-label="Marketplace"
+                      value={source}
+                      onChange={(e) => setMarketplace(e.target.value)}
+                    >
+                      {data.allowed_marketplaces.map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
                     </select>
-                  </label>
-                  <p>
-                    {effectiveScope === 'session'
-                      ? 'Loads between turns; your account settings stay unchanged.'
-                      : data.session_apply
-                        ? 'Saves to account settings and loads between turns.'
-                        : 'Saves to account settings for new sessions. This session keeps its current plugins.'}
-                  </p>
-                  <button
-                    type="button"
-                    disabled={busy || !validName || !validSource || !allowed}
-                    onClick={() => void add()}
-                  >
-                    {busy ? 'Saving…' : effectiveScope === 'session' ? 'Add to session' : 'Save always on'}
-                  </button>
-                </>
-              )}
-            </>
-          )}
-          {failure && <p role="alert">{failure}</p>}
-          {applied?.session === sessionId && <p role="status">{applied.text}</p>}
-        </div>
-      )}
+                  )}
+                </label>
+                <label>
+                  Plugin name
+                  <input
+                    value={name}
+                    maxLength={64}
+                    onChange={(e) => setName(e.target.value)}
+                    autoCapitalize="none"
+                    spellCheck={false}
+                  />
+                </label>
+                <label>
+                  Apply plugin
+                  <select value={effectiveScope} onChange={(e) => setScope(e.target.value as PluginScope)}>
+                    <option value="session" disabled={!data.session_apply}>
+                      This session only
+                    </option>
+                    <option value="always">Always on</option>
+                  </select>
+                </label>
+                <p>
+                  {effectiveScope === 'session'
+                    ? 'Loads between turns; your account settings stay unchanged.'
+                    : data.session_apply
+                      ? 'Saves to account settings and loads between turns.'
+                      : 'Saves to account settings for new sessions. This session keeps its current plugins.'}
+                </p>
+                <button
+                  type="button"
+                  disabled={busy || !validName || !validSource || !allowed}
+                  onClick={() => void add()}
+                >
+                  {busy ? 'Saving…' : effectiveScope === 'session' ? 'Add to session' : 'Save always on'}
+                </button>
+              </>
+            )}
+          </>
+        )}
+        {failure && <p role="alert">{failure}</p>}
+        {applied?.session === sessionId && <p role="status">{applied.text}</p>}
+      </div>
     </section>
   )
 }

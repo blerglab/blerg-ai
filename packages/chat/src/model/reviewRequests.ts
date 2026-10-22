@@ -3,7 +3,7 @@
 // functions.
 import type { AgentEvent, ReviewRequestPayload, ReviewRequestState } from '../types'
 
-const STATES: readonly ReviewRequestState[] = ['pending', 'approved', 'changes_requested', 'withdrawn', 'superseded']
+const STATES: readonly ReviewRequestState[] = ['pending', 'approved', 'changes_requested', 'withdrawn', 'superseded', 'dismissed']
 const text = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : '')
 const count = (v: unknown) => (typeof v === 'number' && Number.isSafeInteger(v) && v > 0 ? v : 0)
 
@@ -65,6 +65,7 @@ export function reviewOutcomeLine(r: ReviewRequestPayload): string {
     case 'approved': return 'Approved'
     case 'changes_requested': return 'Changes requested'
     case 'withdrawn': return r.note ? `Withdrawn · ${r.note}` : 'Withdrawn by the session'
+    case 'dismissed': return 'Dismissed (maybe answered in the chat)'
     case 'superseded': return r.superseded_by ? `Superseded by v${r.superseded_by}` : 'Superseded by a newer version'
     default: return ''
   }

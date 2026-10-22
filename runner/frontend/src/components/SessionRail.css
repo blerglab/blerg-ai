@@ -405,7 +405,9 @@
 
 .rail-toggle[aria-expanded="true"] {
   opacity: 1;
-  border-color: var(--accent-border);
+  color: var(--selected-text);
+  border-color: var(--selected-border);
+  background: var(--selected-bg);
 }
 
 .rail-badge {
@@ -469,7 +471,7 @@
 
 .rail-tab.on {
   color: var(--chalk);
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--selected-border);
 }
 
 .rail-tab:focus-visible {
@@ -615,6 +617,330 @@
   color: var(--fog-dim);
 }
 
+/* History's feed: a topic's header line (title, its time or the checklist's progress, its counts as
+   glyphs), and one line per stroke under it: a glyph, the text (cut, whole in the tooltip), chips,
+   and the time, which jumps to the moment in the conversation. */
+.reel-card > .reel-head {
+  flex-wrap: wrap;
+}
+
+/* The title keeps at least ~10em: when the meta does not fit beside it (a phone, another day's span,
+   every count), the meta goes to its own line under the title. */
+.reel-head .rail-item-title {
+  -webkit-line-clamp: 1;
+  flex: 1 1 10em;
+}
+
+.reel-meta {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  margin-left: auto;
+  color: var(--fog-dim);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.reel-span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reel-progress {
+  color: var(--lichen);
+  font-variant-numeric: tabular-nums;
+}
+
+.reel-counts {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.reel-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.reel-card .reel-outcome {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.stroke-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 16px 0;
+}
+
+.stroke-filter {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-height: 28px;
+  padding: 2px 10px;
+  border: 1px solid var(--stone);
+  border-radius: 999px;
+  background: none;
+  color: var(--fog-dim);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.stroke-filter[aria-pressed='true'] {
+  border-color: var(--selected-border);
+  color: var(--selected-text);
+  background: var(--selected-bg);
+}
+
+.stroke-filter-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.stroke-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stroke-run {
+  list-style: none;
+}
+
+.stroke {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--text-xs);
+  line-height: 20px;
+  flex-wrap: wrap;
+}
+
+.stroke-glyph {
+  flex-shrink: 0;
+  width: 1.1em;
+  text-align: center;
+  font-weight: 700;
+  color: var(--fog-dim);
+}
+
+.stroke-decision .stroke-glyph { color: var(--accent); }
+.stroke-decision.by-agent .stroke-glyph { color: var(--fog-dim); }
+.stroke-attention .stroke-glyph { color: var(--amber); }
+.stroke-milestone .stroke-glyph { color: var(--lichen); }
+.stroke-finding .stroke-glyph { color: var(--danger); }
+
+.stroke-text {
+  /* At least ~8em of text: chips and the time that do not fit beside it go to a second line. */
+  flex: 1 1 8em;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--chalk);
+}
+
+.stroke.is-waiting .stroke-text {
+  color: var(--amber);
+}
+
+.stroke-outcome,
+.stroke.is-closed .stroke-text {
+  color: var(--fog-dim);
+}
+
+.stroke .reel-chips {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.stroke-card {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.stroke-time {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--fog-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+button.stroke-jump {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+button.stroke-jump:hover,
+button.stroke-jump:focus-visible {
+  color: var(--accent);
+}
+
+/* A fold of repeated strokes: its text is the button that opens the list; its cards wrap under it;
+   the list is one line per stroke, indented. */
+button.stroke-fold {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.stroke-fold::after {
+  content: ' ▸';
+  color: var(--fog-dim);
+}
+
+button.stroke-fold[aria-expanded='true']::after {
+  content: ' ▾';
+}
+
+.stroke-cards {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-left: calc(1.1em + 6px);
+  min-width: 0;
+}
+
+.stroke-fold-items {
+  flex: 1 1 100%;
+  min-width: 0;
+  margin: 2px 0 4px calc(1.1em + 6px);
+  padding-left: 8px;
+  border-left: 1px solid var(--stone);
+}
+
+/* Where a pinned item sits in the feed: a quiet marker pointing up to it. */
+.stroke.stroke-pinned-marker .stroke-text,
+.stroke.stroke-pinned-marker .stroke-glyph,
+.stroke.stroke-earlier-items {
+  color: var(--fog-dim);
+}
+
+/* In an opened fold, its waiting members come first, as a group of their own. */
+.stroke-fold-items > [data-group='waiting'] {
+  border-left: 2px solid var(--amber);
+  margin-left: -10px;
+  padding-left: 8px;
+}
+
+/* Waiting items, pinned above the feed so they are never out of sight. */
+.stroke-pinned {
+  margin: 8px 16px 0;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--stone));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+}
+
+.stroke-pinned-head {
+  margin: 0 0 2px;
+  color: var(--amber);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.stroke-pinned .stroke-list {
+  margin: 0;
+}
+
+/* A topic opened: one compact line per kind (messages, subagents, files, commits, cards, renames). */
+.reel-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0 0 0 10px;
+  list-style: none;
+  border-left: 1px solid var(--stone);
+}
+
+.reel-sum {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--text-xs);
+  line-height: 20px;
+}
+
+.reel-sum-glyph {
+  flex-shrink: 0;
+  width: 1.1em;
+  text-align: center;
+  color: var(--fog-dim);
+}
+
+.reel-sum-body {
+  display: flex;
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.reel-sum-body .reel-chips {
+  margin: 0;
+}
+
+.reel-sum-label,
+.reel-sum-meta {
+  color: var(--fog-dim);
+  white-space: nowrap;
+}
+
+.reel-chip.reel-jump-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.reel-chip.reel-jump-chip.is-earlier {
+  cursor: default;
+  color: var(--fog-dim);
+}
+
+.reel-sum-name,
+.reel-chip.reel-sum-file {
+  min-width: 0;
+  max-width: 16em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.stroke-earlier {
+  margin: 0 16px 12px;
+}
+
+.stroke .rail-missing {
+  flex-basis: 100%;
+}
+
 /* The work no topic holds: one quiet line after the cards, opening onto its files and one line per
    subagent. */
 .reel-rest {
@@ -682,16 +1008,17 @@
   padding-top: 16px;
 }
 
-/* Capabilities: the Skills & plugins content, its filter and groups in the panel's scroll. */
+/* Capabilities: the header card, the toolbar row and the groups in the panel's scroll, on its
+   16 px gutter like Live and Plan. */
 .rail-capabilities {
   display: flex;
   flex-direction: column;
-  padding-top: 8px;
+  padding-top: 10px;
 }
 
 .rail-capabilities .caps-body {
   overflow: visible;
-  padding: 0 8px 8px;
+  padding: 0 0 8px;
 }
 
 /* Settings for the session and its transcript. */
@@ -714,7 +1041,7 @@
 
 .rail-check input {
   margin: 0;
-  accent-color: var(--accent);
+  accent-color: var(--selected-border);
 }
 
 /* Ticket, Checklist and Plan (the top of Live): words beside the section title, a thin progress bar,
@@ -761,42 +1088,7 @@
   font-weight: 600;
 }
 
-.rail-ticket .rail-item-head {
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.rail-ticket-title {
-  text-align: left;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-/* A ticket title is text, not an action colour: the conversation stays the brightest thing on
-   screen (owner rule). It still opens the ticket; hover underlines it. */
-.rail-ticket-title.rail-link {
-  color: var(--chalk);
-  font-size: var(--text-sm);
-}
-
-.rail-ticket-title.rail-link:hover,
-.rail-ticket-title.rail-link:focus-visible {
-  text-decoration: underline;
-}
-
-.rail-ticket-title.canceled {
-  text-decoration: line-through;
-  color: var(--fog);
-}
-
-.rail-ticket.current .rail-ticket-title {
-  display: block;
-  margin-top: 4px;
-  font-weight: 500;
-}
-
-/* Live's one line about the plan: the ticket chip (opens its modal) and the list button (opens the
-   Plan tab) are separate hit areas. */
+/* Live's one line about the plan: the list button (opens the Plan tab). */
 .rail-plan-summary {
   display: flex;
   align-items: center;
@@ -818,20 +1110,6 @@
 .rail-plan-summary button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
-}
-
-.rail-plan-summary-ticket {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  padding: 2px 8px;
-  background: var(--scree-2);
-  border: 1px solid var(--stone);
-}
-
-.rail-plan-summary-ticket:hover {
-  border-color: var(--fog-dim);
 }
 
 .rail-plan-summary-list {
@@ -862,6 +1140,57 @@
 .rail-plan-summary-head {
   flex: none;
   white-space: nowrap;
+}
+
+/* The line is clickable as a whole (it opens Plan); its head is the keyboard's control, drawn as the
+   plain words it was. */
+.rail-plan-summary-list {
+  cursor: pointer;
+}
+
+.rail-plan-summary button.rail-plan-summary-head {
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  text-align: left;
+}
+
+/* A card a checklist item names (#157): an inline link in the item's text, the same size as the
+   words it replaces; its state glyph beside the item when it differs from the item's own. */
+button.plan-ref {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  line-height: inherit;
+  color: var(--chat-info);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+button.plan-ref:hover,
+button.plan-ref:focus-visible {
+  text-decoration-style: solid;
+}
+
+.rail-plan-card-state {
+  flex: none;
+  margin-inline-start: 4px;
+  color: var(--fog-dim);
+  cursor: default;
+}
+
+.rail-plan-card-state.done {
+  color: var(--lichen);
+}
+
+.rail-plan-card-state.doing {
+  color: var(--amber);
 }
 
 .rail-plan-summary-next {
@@ -972,14 +1301,86 @@
   text-align: left;
   overflow-wrap: anywhere;
 }
-.rail-checklist-assignees {
-  display: block;
-  font-size: .8rem;
-  color: var(--fog-dim);
+/* The Plan tab's checklist: one line per item (box, title, assignee glyphs, one commit chip). The title
+   takes what is left and ends in an ellipsis; a click or the focus shows it whole. */
+.rail-plan-list.checklist-items { gap: 0; }
+.rail-plan-list > li + li { padding-block-start: 0; }
+.rail-plan-list .rail-plan-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 26px;
+  padding-inline: 2px;
+}
+.rail-plan-list .rail-plan-row[hidden] { display: none; }
+.rail-plan-title {
+  /* The containing block of its screen-reader words, so they never stick out past the panel. */
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.rail-plan-title[aria-expanded="true"],
+.rail-plan-title[data-expanded="true"],
+.rail-plan-title:focus-visible {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.rail-plan-title:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; border-radius: 3px; }
+.rail-plan-expand {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fog-dim);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.rail-plan-expand:hover { color: var(--chalk); }
+.rail-plan-expand:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.rail-plan-list .rail-plan-row.done .rail-plan-title { color: var(--fog); text-decoration: none; }
+.rail-plan-row.doing .rail-plan-title { font-weight: 600; }
+.rail-plan-assignees { flex: none; display: inline-flex; gap: 2px; font-size: .8rem; color: var(--fog-dim); }
+.rail-plan-assignee { cursor: default; line-height: 1; }
+.rail-plan-commit.commit-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.rail-plan-commit-glyph { font-family: var(--body, inherit); }
+.rail-plan-commit-more { opacity: .75; }
+.rail-plan-done-toggle button {
+  background: none;
+  border: 0;
+  padding: 4px 2px;
+  font: inherit;
+  font-size: .8rem;
+  color: var(--fog);
+  cursor: pointer;
+}
+.rail-plan-done-toggle button:hover,
+.rail-plan-done-toggle button:focus-visible { color: var(--chalk); text-decoration: underline; }
 
 /* One bounded current-activity line; long commands stay in the full child chat. */
 .rail-child-activity { display:flex; align-items:center; gap:5px; min-width:0; margin-top:6px; color:var(--fog-dim); font-size:0.72rem; }
@@ -1036,3 +1437,176 @@
   margin: 0 0 6px;
   font-size: var(--text-xs);
 }
+
+/* A Running now card (RunCard.tsx): two lines. Line 1: state glyph, title (the card's control), elapsed;
+   line 2: the current step in mono, cut with an ellipsis, and small glyphs with their words in tooltips. */
+.rail-run { cursor: pointer; padding-block: 6px; }
+.rail-run-line { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 20px; line-height: 20px; }
+.rail-run-second { margin-top: 2px; padding-inline-start: calc(12px + 6px); }
+.rail-run-state { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 12px; color: var(--fog-dim); }
+.rail-run-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--chalk);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rail-run .rail-cmd {
+  display: inline;
+  max-height: none;
+  overflow: visible;
+  white-space: nowrap;
+  font-weight: 400;
+  font-size: 11px;
+  line-height: inherit;
+}
+.rail-run .rail-run-doing.rail-cmd { display: block; overflow: hidden; text-overflow: ellipsis; }
+/* The step line is a button: a tap shows it whole in place (a box that scrolls), a second tap folds it. */
+.rail-run-stepbtn { background: none; border: 0; padding: 0; margin: 0; text-align: left; cursor: pointer; display: block; }
+.rail-run-stepbtn:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; border-radius: 3px; }
+.rail-run .rail-run-stepbtn[aria-expanded="true"] { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow: auto; overscroll-behavior: contain; text-overflow: clip; line-height: 1.4; }
+.rail-run-second:has(.rail-run-stepbtn[aria-expanded="true"]) { align-items: flex-start; }
+.rail-run-title:hover { text-decoration: underline; }
+.rail-run-title:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 3px; }
+.rail-run-step { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; }
+.rail-run-step .rail-work-progress { margin-top: 0; flex: 0 1 auto; }
+.rail-run-doing {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fog);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rail-run-doing.bad { color: var(--danger); }
+.rail-run-glyphs { flex: none; display: inline-flex; align-items: center; gap: 4px; line-height: 1; }
+.rail-run-glyphs .bg-icon { font-size: 11px; }
+.rail-run-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border: 1px solid var(--stone);
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--fog);
+  background: none;
+  white-space: nowrap;
+  cursor: default;
+}
+.rail-run-glyph.tokens { font-family: var(--mono); }
+.rail-run-glyph.attention { color: var(--amber); border-color: var(--amber); }
+button.rail-run-glyph { cursor: pointer; font-family: inherit; }
+button.rail-run-glyph:hover, button.rail-run-glyph:focus-visible { color: var(--chalk); border-color: var(--fog); }
+.rail-run-dismiss { flex: none; padding: 0 4px; background: none; border: 0; color: var(--fog); font: inherit; cursor: pointer; }
+.rail-run-dismiss:hover, .rail-run-dismiss:focus-visible { color: var(--chalk); }
+.rail-run .rail-missing { display: block; margin-top: 4px; }
+.rail-child-run.has-discard { padding-right: 42px; }
+
+/* Running now: the Main card (the agent you talk to) is pinned first; what runs inside it (subagents,
+   background commands) is indented under it behind a ↳; started sessions run on their own, at its level. */
+.rail-run.rail-nested { position: relative; margin-inline-start: 16px; }
+.rail-run-nest { position: absolute; inset-inline-start: -14px; top: 6px; line-height: 20px; color: var(--fog-dim); }
+.rail-main .rail-run-idle { font-size: 10px; line-height: 1; letter-spacing: -0.5px; }
+.rail-main .rail-run-idle.attention { color: var(--amber); font-size: 12px; }
+.rail-main-step { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; overflow: hidden; }
+.rail-main-step .rail-clock { flex: none; }
+/* Main with a progress bar and a step: the bar gives way first (its label cuts), so the step and its clock stay. */
+.rail-main .rail-run-step .rail-work-progress { flex: 0 1 auto; min-width: 0; max-width: 45%; }
+.rail-main-step .rail-run-doing { min-width: 3em; }
+
+/* Live's pins (PinLines): one compact line each, the key, the title cut, the status chip; a done
+   card ✓ and muted. The line is the control (opens the ticket); its hovercard previews the card. */
+.rail-pins { gap: 0; }
+.rail-pin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 24px;
+  padding: 1px 0;
+}
+.rail-pin-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: var(--chalk);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.rail-pin-open:hover .rail-pin-title { text-decoration: underline; }
+.rail-pin-open:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; border-radius: 3px; }
+.rail-pin-key { flex: none; font-family: var(--mono); font-size: 12px; color: var(--fog); }
+.rail-pin-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-pin-title.canceled { text-decoration: line-through; color: var(--fog); }
+.rail-pin-worker { flex: none; }
+.rail-pin.done .rail-pin-open { color: var(--fog-dim); }
+.rail-pin-more { padding: 2px 0 0; font-size: var(--text-xs); }
+
+/* A worker's card on its Running now row: "↳ <plan item> · #122", one line, the item cut. */
+.rail-run-work { margin-top: 2px; padding-inline-start: calc(12px + 6px); font-size: 11px; color: var(--fog); }
+.rail-work { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.rail-work-arrow, .rail-work-sep { flex: none; color: var(--fog-dim); }
+.rail-work-item {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+button.rail-work-item { cursor: pointer; }
+button.rail-work-item:hover { color: var(--chalk); text-decoration: underline; }
+.rail-work-key {
+  flex: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--chalk);
+  cursor: pointer;
+}
+.rail-work-key:hover { text-decoration: underline; }
+.rail-work-item:focus-visible, .rail-work-key:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; border-radius: 3px; }
+
+/* A pin's state, one glyph each, all one weight (card #134): ✓ done, ◐ in progress, ○ not started. */
+.rail-pin-state { flex: none; width: 1em; text-align: center; font-weight: 400; font-size: 13px; line-height: 1; }
+.rail-pin-state.done { color: var(--lichen); }
+.rail-pin-state.doing { color: var(--selected-text); }
+.rail-pin-state.todo { color: var(--fog-dim); }
+/* Pinned state shown before the board's read lands: muted until it does. */
+.rail-pin-state.pending { color: var(--fog-dim); opacity: 0.6; }
+
+/* Dismiss in Needs you (card #155): a link-like button with a touch-sized target. */
+.rail-dismiss { min-height: 24px; color: var(--fog); }
+.rail-review-item .rail-actions { margin: 0 8px 6px; }

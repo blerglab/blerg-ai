@@ -277,4 +277,13 @@ it('keeps a reaffirmed snapshot worker assignment and promotes an explicitly lin
  expect(promoted.checklist?.items[0].assignees).toEqual([{kind:'subagent',id:'native'}])
  expect(foldLive(reply(),[...after,ev('subagent_done',{child_id:'native',call_id:'call-only'},14)],T0).subagents).toEqual([])
  expect(foldLive(reply(),[...after,ev('subagent_done',{call_id:'call-only'},14)],T0).subagents).toEqual([])
+
+})
+
+it('carries the names of the checklist\'s workers through a fold', () => {
+  const titles = { 'subagent:native-a': 'Audit the plan tab' }
+  const r = reply({ checklist: { items: [{ text: 'a', done: false, assignees: [{ kind: 'subagent', id: 'native-a' }] }], event_id: 'c1', updated_at: iso(0), worker_titles: titles } })
+  expect(foldLive(r, [], T0).checklist?.workerTitles).toEqual(titles)
+  const next = ev('checklist', { items: [{ text: 'a', done: true }], op: 'tick' }, 11)
+  expect(foldLive(r, [next], T0).checklist?.workerTitles).toEqual(titles)
 })

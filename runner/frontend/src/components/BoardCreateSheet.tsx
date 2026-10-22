@@ -109,8 +109,8 @@ export default function BoardCreateSheet({ open, onClose, onCreated }: BoardCrea
 
   const itemSelected: React.CSSProperties = {
     ...itemBase,
-    border: '1px solid var(--blaze)',
-    background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))',
+    border: '1px solid var(--selected-border)',
+    background: 'var(--selected-bg)',
   }
 
   return (
@@ -217,8 +217,8 @@ export default function BoardCreateSheet({ open, onClose, onCreated }: BoardCrea
                           width: 14,
                           height: 14,
                           borderRadius: 3,
-                          border: `1px solid ${isSelected ? 'var(--blaze)' : 'var(--fog-dim)'}`,
-                          background: isSelected ? 'var(--blaze)' : 'transparent',
+                          border: `1px solid ${isSelected ? 'var(--selected-border)' : 'var(--fog-dim)'}`,
+                          background: isSelected ? 'var(--selected-border)' : 'transparent',
                           display: 'inline-flex',
                           alignItems: 'center',
                           justifyContent: 'center',

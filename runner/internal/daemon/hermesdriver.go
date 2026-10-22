@@ -27,11 +27,13 @@ type hermesDriver struct {
 	restoredFingerprint string
 	permanentFailure    bool
 	cleanupUncertain    bool
-	loaded              chan error
-	loadOnce            sync.Once
-	resumeGate          func(context.Context)
-	retryWake           chan struct{}
-	cancelAsks          func()
+	// runCtx is the session's context (Run's): done only when the session is being stopped.
+	runCtx     context.Context
+	loaded     chan error
+	loadOnce   sync.Once
+	resumeGate func(context.Context)
+	retryWake  chan struct{}
+	cancelAsks func()
 
 	mcpGeneration     uint64
 	mcpInputGate      func(context.Context)
@@ -160,6 +162,9 @@ func (d *hermesDriver) RestoreContext(events []agent.RestoredEvent) {
 
 }
 func (d *hermesDriver) Run(ctx context.Context) {
+	d.mu.Lock()
+	d.runCtx = ctx
+	d.mu.Unlock()
 	defer func() {
 		d.loadOnce.Do(func() { d.loaded <- errors.New("hermes native gateway stopped before loading its conversation") })
 		d.mu.Lock()
@@ -188,6 +193,11 @@ func (d *hermesDriver) Run(ctx context.Context) {
 		unsafe := d.cleanupUncertain || d.permanentFailure
 		d.mu.Unlock()
 		if ctx.Err() != nil || unsafe {
+			return
+		}
+		// A gateway in a sandbox whose container stopped can never start again: say what Docker
+		// recorded and return, so the session ends with it instead of waiting to retry for ever.
+		if sandboxStopped(ctx, d.prefix, d.emit) {
 			return
 		}
 		if time.Since(started) > time.Minute {
@@ -322,7 +332,7 @@ readyLoop:
 			case "gateway.ready":
 				break readyLoop
 			case "blerg.bridge_error":
-				d.emit("error", agent.ErrorPayload{Message: "A compatible Hermes native gateway is required; install a supported Hermes version", Retryable: false})
+				d.emit("error", agent.ErrorPayload{Message: "A compatible Hermes native gateway is required; install a supported Hermes version", Retryable: false, Code: agent.ErrorCodeRuntimeStopped})
 				d.mu.Lock()
 				d.permanentFailure = true
 				d.mu.Unlock()
@@ -363,7 +373,7 @@ readyLoop:
 		return
 	}
 	if native != "" && (savedBinding != "" || strings.HasPrefix(model, "custom:")) && savedBinding != route.fingerprint {
-		d.emit("error", agent.ErrorPayload{Message: "Hermes saved provider binding changed or is missing; start a new session to select this route without replacing saved history", Retryable: false})
+		d.emit("error", agent.ErrorPayload{Message: "Hermes saved provider binding changed or is missing; start a new session to select this route without replacing saved history", Retryable: false, Code: agent.ErrorCodeRuntimeStopped})
 		d.mu.Lock()
 		d.permanentFailure = true
 		d.mu.Unlock()

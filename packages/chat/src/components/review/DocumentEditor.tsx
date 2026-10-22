@@ -108,7 +108,7 @@ export default function DocumentEditor({value, published, showChanges, onChange,
     contentType: 'markdown',
     immediatelyRender: true,
     editorProps: {
-      attributes: {'aria-label': 'Document', role: 'textbox', 'aria-multiline': 'true', class: 'document-editor md md-doc'},
+      attributes: {'aria-label': 'Document', role: 'textbox', 'aria-multiline': 'true', class: 'document-editor md md-doc md-box'},
       handleDOMEvents: {
         drop: (_view, event) => {event.preventDefault(); return true},
         paste: (view, event) => {

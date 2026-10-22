@@ -955,6 +955,20 @@ func UpdateSessionTitle(ctx context.Context, conn *pgxpool.Pool, sessionID, titl
 	return nil
 }
 
+// RenameSessionTx sets the session's title in tx and returns the title it had (nil: none). The row
+// is locked for the rest of tx, so concurrent renames each see the title the one before set.
+func RenameSessionTx(ctx context.Context, tx pgx.Tx, sessionID, title string) (*string, error) {
+	var old *string
+	err := tx.QueryRow(ctx, `SELECT title FROM sessions WHERE id = $1 FOR UPDATE`, sessionID).Scan(&old)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE sessions SET title = $2 WHERE id = $1`, sessionID, title); err != nil {
+		return nil, err
+	}
+	return old, nil
+}
+
 // UpdateSessionMeta updates the model and/or effort fields of a session.
 // Empty strings are ignored (no update for that field).
 func UpdateSessionMeta(ctx context.Context, conn *pgxpool.Pool, sessionID, model, effort string) error {
@@ -1115,6 +1129,13 @@ func UpsertPushSubscription(ctx context.Context, conn *pgxpool.Pool, endpoint, p
 	return err
 }
 
+// DeletePushSubscription removes the subscription for endpoint (the browser turned push off).
+// Removing one that is not there is not an error.
+func DeletePushSubscription(ctx context.Context, conn *pgxpool.Pool, endpoint string) error {
+	_, err := conn.Exec(ctx, `DELETE FROM push_subscriptions WHERE endpoint = $1`, endpoint)
+	return err
+}
+
 // ListPushSubscriptions returns all push subscriptions.
 func ListPushSubscriptions(ctx context.Context, conn *pgxpool.Pool) ([]PushSubscriptionRow, error) {
 	rows, err := conn.Query(ctx, `
@@ -1157,6 +1178,11 @@ type MessageRow struct {
 	// NoWait asks (`blerg-runner ask --no-wait`) are questions the agent does not wait on: their
 	// answer is sent to the session as a message, and only an answer addressed to them closes them.
 	NoWait bool
+	// Dismissed: the person closed the ask without an answer from Needs you (they may have answered
+	// in the chat instead). Status is "answered" with an empty answer, as for any closed ask.
+	Dismissed bool
+	// DismissedBy: the account that dismissed it ("" when not dismissed).
+	DismissedBy string
 }
 
 // MessageBoardID returns the board the message's session is bound to, or ""
@@ -1224,7 +1250,7 @@ func scanMessageRows(rows pgx.Rows) ([]MessageRow, error) {
 	for rows.Next() {
 		var m MessageRow
 		if err := rows.Scan(&m.ID, &m.SessionID, &m.Kind, &m.Body, &m.Status,
-			&m.Answer, &m.CreatedAt, &m.AnsweredAt, &m.OwnerOnly, &m.NoWait); err != nil {
+			&m.Answer, &m.CreatedAt, &m.AnsweredAt, &m.OwnerOnly, &m.NoWait, &m.Dismissed, &m.DismissedBy); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -1232,7 +1258,7 @@ func scanMessageRows(rows pgx.Rows) ([]MessageRow, error) {
 	return out, rows.Err()
 }
 
-const messageCols = `id, session_id, kind, body, status, answer, created_at, answered_at, owner_only, no_wait`
+const messageCols = `id, session_id, kind, body, status, answer, created_at, answered_at, owner_only, no_wait, dismissed, dismissed_by`
 
 // GetMessage returns one message, or (nil, nil) if not found.
 func GetMessage(ctx context.Context, conn *pgxpool.Pool, id string) (*MessageRow, error) {
@@ -1346,6 +1372,19 @@ func AnswerMessage(ctx context.Context, conn *pgxpool.Pool, id, answer string) (
 		UPDATE messages SET answer = $2, status = 'answered', answered_at = now()
 		 WHERE id = $1 AND status = 'open'
 	`, id, answer)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// DismissMessage closes an open ask as dismissed by the person: no answer (”), and marked so the
+// agent and the CLI can tell it from an answer or an expiry. false when it was not open.
+func DismissMessage(ctx context.Context, conn *pgxpool.Pool, id, by string) (bool, error) {
+	tag, err := conn.Exec(ctx, `
+		UPDATE messages SET answer = '', status = 'answered', answered_at = now(), dismissed = true, dismissed_by = $2
+		 WHERE id = $1 AND status = 'open' AND kind = 'ask'
+	`, id, by)
 	if err != nil {
 		return false, err
 	}
@@ -2069,16 +2108,20 @@ func ListAgentEventsTail(ctx context.Context, conn *pgxpool.Pool, sessionID, kin
 }
 
 // UndeliveredQuestionAnswers are a session's questions the agent did not wait on (no_wait) that
-// the person answered within the last day but whose answer never reached the session's input
-// outbox (no session_inputs row 'question-<id>'): the server stopped between the answer and its
-// delivery. They are delivered again (questions.go).
+// the person answered, or dismissed (card #155), within the last day but whose answer or dismissal
+// never reached the session's input outbox (no session_inputs row 'question-<id>', or
+// 'question-dismissed-<id>'): the server stopped, or the delivery failed, between the decision and
+// its delivery. They are delivered again (questions.go).
 func UndeliveredQuestionAnswers(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]MessageRow, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT `+messageCols+` FROM messages m
 		 WHERE m.session_id = $1 AND m.kind = 'ask' AND m.no_wait AND m.status = 'answered'
-		   AND COALESCE(m.answer, '') <> '' AND m.answered_at > now() - interval '1 day'
+		   AND m.answered_at > now() - interval '1 day'
 		   AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id AND s.kind = 'agent')
-		   AND NOT EXISTS (SELECT 1 FROM session_inputs i WHERE i.session_id = m.session_id AND i.client_id = 'question-' || m.id::text)
+		   AND ((COALESCE(m.answer, '') <> '' AND NOT m.dismissed
+		         AND NOT EXISTS (SELECT 1 FROM session_inputs i WHERE i.session_id = m.session_id AND i.client_id = 'question-' || m.id::text))
+		     OR (m.dismissed
+		         AND NOT EXISTS (SELECT 1 FROM session_inputs i WHERE i.session_id = m.session_id AND i.client_id = 'question-dismissed-' || m.id::text)))
 		 ORDER BY m.answered_at`, sessionID)
 	if err != nil {
 		return nil, err

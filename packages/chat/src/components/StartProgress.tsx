@@ -2,6 +2,8 @@
 // whatever stages the server and runner pod reported (model/startStages) — the
 // stage list is data, so a runtime with other steps needs no change here.
 import { useEffect, useRef, useState } from 'react'
+import ConfirmPopover from './ConfirmPopover'
+import { endSessionText } from '../model/endSession'
 import { useTicker } from '../hooks/useTicker'
 import { formatElapsed } from '../model/timeLabel'
 import { STILL_STARTING_MS, type AttemptStage, type StartAttempt } from '../model/startStages'
@@ -28,7 +30,8 @@ const STATE_WORDS: Record<AttemptStage['state'], string> = {
 interface Props {
   attempt: StartAttempt
   /** The session's id and status; absent while there is no session row yet. */
-  session?: { id: string; status: string }
+  /** runtime: where it runs ("daemon", "docker", "cluster"), for what ending it keeps; absent: not known. */
+  session?: { id: string; status: string; runtime?: string }
   /** Ends the session (the transport's stop). Absent: no Stop button. */
   onStop?: () => Promise<void>
   /** client clock − server clock (ms): stage times are server time. */
@@ -42,9 +45,19 @@ const TERMINAL = new Set(['error', 'stopped'])
 
 export default function StartProgress({ attempt, session, onStop, clockOffset = 0, resuming = false }: Props) {
   const [showDetails, setShowDetails] = useState(false)
-  const [stopArmed, setStopArmed] = useState(false)
+  // The stop asks first, in a small confirmation anchored to its button (ConfirmPopover).
+  const [confirmStop, setConfirmStop] = useState(false)
   const [stopError, setStopError] = useState<string | null>(null)
-  const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stopButton = useRef<HTMLButtonElement | null>(null)
+  // A stop on its way: the button waits, so it cannot be sent twice.
+  const [stopping, setStopping] = useState(false)
+  // After a failed stop the focus goes back to the button (enabled again), to try again.
+  const refocusStop = useRef(false)
+  useEffect(() => {
+    if (stopping || !refocusStop.current) return
+    refocusStop.current = false
+    stopButton.current?.focus()
+  }, [stopping])
   // A failed stage is only the end when the session itself has ended: k8s
   // keeps retrying an unschedulable pod or a failing image pull, and either
   // can still come good.
@@ -52,8 +65,6 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
   const retrying = attempt.failed && !gaveUp
   const settled = gaveUp || attempt.ready
   const now = useTicker(!settled) - clockOffset
-
-  useEffect(() => () => { if (armTimer.current) clearTimeout(armTimer.current) }, [])
 
   const endedAt = settled
     ? Math.max(attempt.startedAt, ...attempt.stages.map(s => s.endedAt ?? 0))
@@ -65,19 +76,17 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
   const live = !session || ['starting', 'disconnected'].includes(session.status)
 
   async function stop() {
-    if (!session || !onStop) return
-    if (!stopArmed) {
-      setStopArmed(true)
-      armTimer.current = setTimeout(() => setStopArmed(false), 3000)
-      return
-    }
-    if (armTimer.current) clearTimeout(armTimer.current)
-    setStopArmed(false)
+    if (!session || !onStop || stopping) return
+    setConfirmStop(false)
+    setStopping(true)
     try {
       await onStop()
       setStopError(null)
     } catch (e) {
       setStopError(e instanceof Error && e.message ? e.message : 'Network error')
+      refocusStop.current = true
+    } finally {
+      setStopping(false)
     }
   }
 
@@ -156,12 +165,18 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
           {showDetails ? 'Hide details' : 'View details'}
         </button>
         {onStop && session && (live || failedStage) && (
-          <button type="button" className={`sp-btn sp-stop${stopArmed ? ' armed' : ''}`} onClick={() => void stop()}>
-            {stopArmed ? 'Confirm stop?' : live ? 'Stop session' : 'Delete session'}
+          <button ref={stopButton} type="button" className="sp-btn sp-stop" aria-haspopup="dialog" aria-expanded={confirmStop}
+            disabled={stopping} aria-busy={stopping || undefined} onClick={() => setConfirmStop(true)}>
+            {/* A failed start is ended the same way (its history stays): never "delete". */}
+            {live ? 'Stop session' : 'End session'}
           </button>
         )}
         {stopError && <span className="sp-stop-error">Stop failed: {stopError}</span>}
       </div>
+      {confirmStop && (
+        <ConfirmPopover anchor={stopButton} title="End this session?" description={endSessionText(session?.runtime || attempt.runtime)}
+          confirmLabel="End session" onConfirm={() => void stop()} onCancel={() => setConfirmStop(false)} testId="start-stop-confirm" />
+      )}
       {showDetails && (
         <div className="sp-meta">
           {attempt.runtime && <span>runtime: {attempt.runtime}</span>}

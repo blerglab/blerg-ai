@@ -264,6 +264,50 @@ describe("New board template", () => {
   });
 });
 
+describe("New board repositories", () => {
+  beforeEach(() => {
+    for (const k of Object.keys(responses)) delete responses[k];
+    vi.mocked(api).mockClear();
+    responses["/api/me"] = { kind: "human", is_admin: true, is_human: true };
+  });
+  const postedBody = () => {
+    const call = vi.mocked(api).mock.calls.find((c) => c[0] === "/api/boards" && (c[1] as { json?: unknown })?.json);
+    return (call?.[1] as { json: Record<string, unknown> }).json;
+  };
+
+  it("picks repositories the desktops know, in order, and sets them at creation", async () => {
+    responses["/api/repo-choices"] = { available: true, repos: [
+      { repo: "example-org/app", folder: "app", desktops: ["Laptop"] },
+      { repo: "example-org/web", folder: "web", desktops: ["Laptop", "Desk"] },
+    ] };
+    render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
+    fireEvent.click(await screen.findByText("New board"));
+    fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "launch" } });
+    expect(await screen.findByText(/on Laptop, Desk/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: /example-org\/web/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /example-org\/app/ }));
+    // A repository no desktop has can be typed.
+    fireEvent.change(screen.getByLabelText("Add a repository by name"), { target: { value: "example-org/docs" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(screen.getByLabelText("Chosen repositories").textContent).toMatch(/^example-org\/web primary/);
+    fireEvent.change(screen.getByLabelText("Template"), { target: { value: "focus-board" } });
+    fireEvent.click(screen.getByText("Create board"));
+    await waitFor(() => expect(postedBody()).toBeDefined());
+    expect(postedBody()).toEqual({ name: "launch", require_repo: false, template: "focus-board", repos: ["example-org/web", "example-org/app", "example-org/docs"] });
+  });
+
+  it("refuses a typed repository that is not owner/name or a folder", async () => {
+    responses["/api/repo-choices"] = { available: false, repos: [] };
+    render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
+    fireEvent.click(await screen.findByText("New board"));
+    expect(await screen.findByText(/No desktop is connected/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Add a repository by name"), { target: { value: "../etc" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/owner\/name or a folder name/);
+    expect(screen.queryByLabelText("Chosen repositories")).toBeNull();
+  });
+});
+
 describe("wordmark link", () => {
   it("keeps a port (via coreOrigin(), not the old hostname-only derivation)", async () => {
     responses["/api/me"] = { kind: "service", is_admin: true, is_human: true };

@@ -25,14 +25,16 @@ metadata:
     app: blerg-runner
 spec:
   replicas: 1
-  # Recreate, not RollingUpdate: /data is a ReadWriteOnce claim (runner-data-pvc.yaml), which one
-  # node mounts at a time. A rolling update starts the new pod before it stops the old one; when
-  # the new pod lands on a different node it waits forever for the volume the old pod holds, and
-  # the old pod is only stopped once the new one is ready, so the rollout deadlocks (and where
-  # both land together, two runners would share one data directory). Recreate stops the old pod
-  # first; a deploy costs a few seconds of runner downtime.
+  # Additive migrations allow the old replica to serve until the surge is ready.
+  # The overlap must stay short: the runner keeps routing in memory (daemon, session and browser
+  # sockets, waiters), so two pods split it. The old pod therefore exits at once on SIGTERM: no
+  # preStop hook, no drain, no graceful shutdown (unlike core and the board). Do not add one
+  # without first moving that state out of process.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: blerg-runner
@@ -41,6 +43,15 @@ spec:
       labels:
         app: blerg-runner
     spec:
+      # ReadWriteOnce permits concurrent mounts on one node. Co-locate the surge
+      # with the serving pod so rollout does not wait on a cross-node attachment.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: blerg-runner
+              topologyKey: kubernetes.io/hostname
       serviceAccountName: blerg-runner-agent-launcher
       # fsGroup hands a volume's files to the runner's group (65532, the container's user below), so
       # a freshly provisioned, root-owned volume is writable; only re-chowned when its root differs.
@@ -275,13 +286,13 @@ spec:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_POD_TTL_AFTER_FINISHED_SECONDS, optional: true }
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 2
+            timeoutSeconds: 3
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: 8080
             initialDelaySeconds: 15
             periodSeconds: 20

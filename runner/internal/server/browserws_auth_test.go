@@ -240,6 +240,7 @@ func TestBrowserRESTEndpointsRequireToken(t *testing.T) {
 		{"GET /api/messages", http.MethodGet, "/api/messages", api.HandleGetMessages},
 		{"GET /api/boards", http.MethodGet, "/api/boards", api.HandleGetBoards},
 		{"POST /api/push/subscribe", http.MethodPost, "/api/push/subscribe", api.HandlePostPushSubscribe},
+		{"DELETE /api/push/subscribe", http.MethodDelete, "/api/push/subscribe", api.HandleDeletePushSubscribe},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -40,7 +40,9 @@ export interface ChatContextValue {
   /** The session's configured effort: a subagent that reports none of its own runs at it. */
   sessionEffort?: string
   /** Opens a file the agent's text names, from the session's folder; absent: such text stays text. */
-  openWorkspaceFile?: (path: string, line?: number) => void
+  /** `folder`: the path names the folder's file even when a published file has the same name (a
+   *  relative link inside a file read from the folder). */
+  openWorkspaceFile?: (path: string, line?: number, opts?: { folder?: boolean }) => void
   /** Opens the diff a checklist item names (its artifact id), at a commit's section when one is
    *  given, when the session's file list has it; null when it does not (the item then shows no
    *  "View diff", and its sha chips copy). */

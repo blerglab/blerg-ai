@@ -312,6 +312,12 @@ type DaemonHello struct {
 	PluginEngines []string `json:"plugin_engines,omitempty"`
 	// SessionPluginEngines supports owner-approved live updates on host sessions.
 	SessionPluginEngines []string `json:"session_plugin_engines,omitempty"`
+	// PluginCatalogEngines: the engines whose host sessions this daemon answers ReadPluginCatalog
+	// for (the plugin browser, plugincatalog.go). Absent from older daemons, and an engine not
+	// named here has no catalog: the browser falls back to that engine's add form.
+	PluginCatalogEngines []string `json:"plugin_catalog_engines,omitempty"`
+	// MCPSignInEngines: the engines whose host sessions this daemon answers MCPSignIn for.
+	MCPSignInEngines []string `json:"mcp_sign_in_engines,omitempty"`
 	// AllowHostCredentialClone: this daemon's owner allows a named clone to
 	// use the launching person's own git token on the bare host (a This
 	// machine session). Without it the server sends a token only for a
@@ -448,11 +454,17 @@ type UsageLimits struct {
 	Provider  string        `json:"provider"`       // "codex" | "claude"
 	Windows   []UsageWindow `json:"windows"`
 	FetchedAt time.Time     `json:"fetched_at,omitzero"`
+	// Note says why there are no windows: "no_windows" (the provider answered, and the account it
+	// is signed in to has no limit window to show) or "not_read" (this daemon does not read the
+	// provider's limits: turned off, no sign-in it can read, the engine not installed). Empty
+	// otherwise; an empty Windows with no Note withdraws the provider.
+	Note string `json:"note,omitempty"`
 }
 
 // UsageWindow is one limit window: "5h" (the five-hour window), "7d" (the
 // weekly one), "month" (a work or enterprise account's monthly spend limit),
-// "day" and "spend-week" (its daily and weekly spend limits, when it has them)
+// "day" and "spend-week" (its daily and weekly spend limits, when it has them),
+// "spend" (a Codex usage-based work plan's spend limit, with its reset)
 // or "capped" (the provider refused a call for its limit, until ResetsAt; a
 // reached spend limit has no ResetsAt). UsedPercent is 0–100 and only the
 // share: a spend window never carries the amount, the limit or the currency.
@@ -585,6 +597,9 @@ type SessionEnded struct {
 	SessionID string  `json:"session_id"`
 	ExitCode  int     `json:"exit_code"`
 	Signal    *string `json:"signal,omitempty"`
+	// Message, with a non-zero exit, is why the session failed (its engine runtime stopped):
+	// the server records it as the session's error_reason and relays it to browsers.
+	Message string `json:"message,omitempty"`
 	// Server → browser only (as BrowserSessionEnded), filled from the row:
 	// why the session ended and who ended it. See SessionStateChanged.
 	EndReason string   `json:"end_reason,omitempty"`
@@ -1029,6 +1044,10 @@ type MessageInfo struct {
 	// as themselves, who alone answers it. Only they are notified (bell, toast); everyone else
 	// who can see the session sees it there, read-only.
 	Answerable bool `json:"answerable,omitempty"`
+	// Dismissed: closed by the person from Needs you without an answer.
+	Dismissed bool `json:"dismissed,omitempty"`
+	// DismissedBy: the account that dismissed it, so the chat says "by you" only to that person.
+	DismissedBy string `json:"dismissed_by,omitempty"`
 }
 
 // ─── Agent sessions ──────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
-// A proposal the session made, in the chat: a board card it wants to file, or a call to an MCP tool
-// the person set to approval mode. Pending, its owner approves, edits (board cards: in the host's
+// A proposal the session made, in the chat: a board card it wants to file, a new board it wants
+// created (approved by the owner only, never for the session), or a call to an MCP tool the person
+// set to approval mode. Pending, its owner approves, edits (board cards: in the host's
 // editor), rejects, or allows it for the session (this one and later ones of exactly this scope).
 // Decided, it says how; a created card follows as a compact ticket with Open. The event names the
 // proposal only: what it says is read through the owner-only proposal API, so anyone else sees
@@ -17,7 +18,7 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
   const ctx = useProposals()
   const raw = ev.payload as Partial<ProposalRequestPayload> | null
   const id = typeof raw?.proposal_id === 'string' ? raw.proposal_id : ''
-  const kind = raw?.kind === 'board_file' ? 'board_file' : 'mcp'
+  const kind = raw?.kind === 'board_file' || raw?.kind === 'board_create' ? raw.kind : 'mcp'
   // Why a session permission that covers it did not approve it (its hourly limit).
   const note = typeof raw?.note === 'string' ? raw.note.slice(0, 400) : ''
   const decided = id ? ctx?.states.get(id) : undefined
@@ -59,7 +60,7 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
     setKept(false)
     try {
       setDetail(await decide(id, action, {
-        ...(kind === 'board_file' ? { expected: detail.argumentsRaw } : {}),
+        ...(kind === 'board_file' || kind === 'board_create' ? { expected: detail.argumentsRaw } : {}),
         ...(allowForSession ? { allowForSession: true } : {}),
       }))
     } catch (e) {
@@ -73,10 +74,13 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
     }
   }
 
+  const createdBoard = decided?.board ?? detail?.board ?? null
   const heading = kind === 'board_file'
     ? <>This session wants to file a card{detail?.target ? <> on <b>{detail.target}</b></> : null}</>
-    : <>This session wants to run <b>{tool || 'an MCP tool'}</b>{detail?.target ? <> on {detail.target}</> : null}</>
-  const line = outcomeLine(kind, state, auto)
+    : kind === 'board_create'
+      ? <>This session wants to create a board{detail?.target ? <> named <b>{detail.target}</b></> : null}</>
+      : <>This session wants to run <b>{tool || 'an MCP tool'}</b>{detail?.target ? <> on {detail.target}</> : null}</>
+  const line = outcomeLine(kind, state, auto, createdBoard)
 
   return (
     <div className={`agent-card delegation-card proposal-card status-${state}`} data-testid="proposal-card" data-event-id={ev.client_event_id} data-proposal-id={id}>
@@ -100,7 +104,7 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
           <button type="button" className="delegation-btn primary" disabled={busy} onClick={() => void act('approve')}>Approve</button>
           {kind === 'board_file' && ctx?.onEdit && <button type="button" className="delegation-btn" disabled={busy} onClick={() => ctx.onEdit?.(id)}>Edit</button>}
           <button type="button" className="delegation-btn" disabled={busy} onClick={() => void act('reject')}>Reject</button>
-          <button
+          {kind !== 'board_create' && <button
             type="button"
             className="delegation-btn"
             disabled={busy}
@@ -108,7 +112,7 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
             onClick={() => void act('approve', true)}
           >
             Allow for this session
-          </button>
+          </button>}
         </div>
       )}
       {error && (

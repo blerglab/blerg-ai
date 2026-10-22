@@ -193,8 +193,10 @@ all four before Step 3:
    files published or attached before it are already lost (or go with the old
    pod), stay listed in each session's Files tab marked "no longer available",
    and cannot be opened. Everything published afterwards is kept. The runner
-   Deployment also switches to the `Recreate` strategy, so each deploy stops
-   the runner for a few seconds. If the claim exists, nothing changes for it.
+   Deployment uses rolling updates: the old pod serves until the new pod's
+   database and migrations pass readiness. The surge stays on the old pod's
+   node so both can mount the `ReadWriteOnce` claim. Liveness remains healthy
+   during database startup retries. If the claim exists, it is retained.
 
 4. **Get the human's go-ahead** to upgrade from the old tag to `<TAG>`, with
    or without the backup, before running Step 3.

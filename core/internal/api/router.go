@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/blerglab/blerg-ai/contracts/health"
 	"net"
 	"net/http"
 	"strings"
@@ -299,6 +300,13 @@ func NewRouter(deps Deps) http.Handler {
 		writeJSON(w, site)
 	})
 
+	mux.HandleFunc("GET /readyz", health.Handler(func(ctx context.Context) error {
+		if deps.Store == nil {
+			return errors.New("database unavailable")
+		}
+		return db.Ready(ctx, deps.Store.Pool())
+	}))
+
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
@@ -469,6 +477,11 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("POST /internal/plugins/catalog", deps.handleInternalPluginCatalog)
 	mux.HandleFunc("POST /internal/plugins/policy", deps.handleInternalPluginPolicy)
 	mux.HandleFunc("POST /internal/plugins/add", deps.handleInternalPluginAdd)
+
+	// Board call limits: an administrator's setting (account.manage), and the runner's read.
+	mux.HandleFunc("GET /api/settings/board-limits", requireHumanPrincipal(deps.handleGetBoardLimits, deps, "account.manage"))
+	mux.HandleFunc("PUT /api/settings/board-limits", requireHumanPrincipal(deps.handlePutBoardLimits, deps, "account.manage"))
+	mux.HandleFunc("POST /internal/board-limits", deps.handleInternalBoardLimits)
 
 	deps.registerMCPRoutes(mux)
 	deps.registerInternalTokenRoutes(mux)

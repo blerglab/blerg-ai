@@ -5,7 +5,6 @@
 // that machine's disk — a disposable, dot-prefixed one directly under the repos
 // root, which the daemon never lists as a repository. That name is the one
 // source of truth for "this session has no repository": nothing else records it.
-import { randomSessionName } from '../sessionNames'
 
 export const SCRATCH_PREFIX = '.scratch-'
 export const NO_REPO_LABEL = 'No repository'
@@ -36,14 +35,13 @@ export function validScratchSuffix(s: string): boolean {
   return SUFFIX_RE.test(s)
 }
 
-// A fresh, readable suffix: one of the session-name words plus 64 random bits
-// (16 hex digits) from crypto.getRandomValues. Only a suggestion the person
+// A fresh suffix: "session" plus 64 random bits (16 hex digits) from
+// crypto.getRandomValues (no made-up words; card #143). Only a suggestion the person
 // can keep or rename — the daemon is what guarantees a new folder: it never
 // reuses an existing one, and picks a fresh name if this one is taken.
 export function newScratchSuffix(): string {
   const bytes = new Uint8Array(8)
   crypto.getRandomValues(bytes)
   const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
-  const word = randomSessionName().toLowerCase().replace(/[^a-z0-9]/g, '') || 'scratch'
-  return `${word}-${hex}`
+  return `session-${hex}`
 }

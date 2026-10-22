@@ -210,6 +210,17 @@ func TestMigrationsAndQueries(t *testing.T) {
 	if subs[0].P256dh != "key2" || subs[0].Auth != "auth2" {
 		t.Errorf("ListPushSubscriptions: unexpected values p256dh=%s auth=%s", subs[0].P256dh, subs[0].Auth)
 	}
+
+	// ── DeletePushSubscription ────────────────────────────────────────────────
+	if err := db.DeletePushSubscription(ctx, pool, ep); err != nil {
+		t.Fatalf("DeletePushSubscription: %v", err)
+	}
+	if err := db.DeletePushSubscription(ctx, pool, ep); err != nil {
+		t.Fatalf("DeletePushSubscription (gone already): %v", err)
+	}
+	if subs, err := db.ListPushSubscriptions(ctx, pool); err != nil || len(subs) != 0 {
+		t.Fatalf("after DeletePushSubscription: %d rows, err %v", len(subs), err)
+	}
 }
 
 // TestSetSessionUnread verifies that SetSessionUnread toggles the unread column

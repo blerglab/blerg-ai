@@ -116,6 +116,34 @@ func TestUsageLimitsKeepsSpendWindows(t *testing.T) {
 	}
 }
 
+// A Codex account with no window is kept as such ("no_windows"), not taken for a withdrawal, so the
+// sidebar can say so; Codex's spend limit ("spend") passes; a note beside windows, or an unknown
+// note, is dropped.
+func TestUsageLimitsKeepsTheNoWindowsNoteAndCodexSpend(t *testing.T) {
+	hub, ws, _, bc := sidebarHubFixture(t)
+	handleUsageLimits(hub, ws, protocol.UsageLimits{Provider: "codex", Windows: []protocol.UsageWindow{}, Note: "no_windows"})
+	m := nextLimitsChanged(t, bc)
+	if len(m.UsageLimits) != 1 || m.UsageLimits[0].Provider != "codex" || m.UsageLimits[0].Note != "no_windows" || len(m.UsageLimits[0].Windows) != 0 {
+		t.Fatalf("a no-window report = %+v", m.UsageLimits)
+	}
+	reset := time.Now().Add(20 * 24 * time.Hour).UTC().Truncate(time.Second)
+	handleUsageLimits(hub, ws, protocol.UsageLimits{Provider: "codex", Windows: []protocol.UsageWindow{{ID: "spend", UsedPercent: 30, ResetsAt: reset}}, Note: "no_windows"})
+	m = nextLimitsChanged(t, bc)
+	if u := m.UsageLimits[0]; len(u.Windows) != 1 || u.Windows[0].ID != "spend" || !u.Windows[0].ResetsAt.Equal(reset) || u.Note != "" {
+		t.Fatalf("a spend window = %+v", u)
+	}
+	handleUsageLimits(hub, ws, protocol.UsageLimits{Provider: "claude", Note: "not_read"})
+	if m := nextLimitsChanged(t, bc); len(m.UsageLimits) != 2 || m.UsageLimits[0].Provider != "claude" || m.UsageLimits[0].Note != "not_read" {
+		t.Fatalf("a not_read report = %+v", m.UsageLimits)
+	}
+	handleUsageLimits(hub, ws, protocol.UsageLimits{Provider: "claude"})
+	nextLimitsChanged(t, bc)
+	handleUsageLimits(hub, ws, protocol.UsageLimits{Provider: "codex", Note: "something else"})
+	if m := nextLimitsChanged(t, bc); len(m.UsageLimits) != 0 {
+		t.Fatalf("an unknown note must withdraw like an empty report: %+v", m.UsageLimits)
+	}
+}
+
 // GET /api/daemons says the same limits as initial_state.
 func TestGetDaemonsCarriesUsageLimits(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)

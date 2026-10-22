@@ -100,20 +100,30 @@ func TestSessionOriginRechecksLeaseAfterGitAndDoesNotRunWorkspaceHooks(t *testin
 
 func TestSessionOriginBoundsOutputAndUsesCleanEnvironment(t *testing.T) {
 	dir := t.TempDir()
+	originGit(t, dir, "init", "-q")
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	binding := originBinding(t, dir)
 	bin := t.TempDir()
 	git := filepath.Join(bin, "git")
 	t.Setenv("PATH", bin)
 	t.Setenv("BLERG_RUNNER_SESSION_TOKEN", "fixture-do-not-export")
+	t.Setenv("GIT_DIR", "/elsewhere")
 	good := strings.Repeat("a", 40)
-	script := "#!/bin/sh\nif [ -n \"${BLERG_RUNNER_SESSION_TOKEN:-}\" ] || [ \"$*\" != '-c core.hooksPath=/dev/null -c core.fsmonitor=false -c safe.directory=" + dir + " rev-parse --verify HEAD' ]; then printf bad; else printf " + good + "; fi\n"
+	// The vetting call answers with the workspace; the HEAD read checks the hardened argv and the
+	// clean environment.
+	script := "#!/bin/sh\ncase \"$*\" in\n*--show-toplevel*) printf '%s\\n%s\\n' '" + resolved + "' '" + resolved + "/.git'; exit 0;;\nesac\n" +
+		"if [ -n \"${BLERG_RUNNER_SESSION_TOKEN:-}\" ] || [ -n \"${GIT_DIR:-}\" ] || [ \"${GIT_ALLOW_PROTOCOL:-}\" != none ] || [ \"${GIT_GRAFT_FILE:-}\" != /dev/null ]; then printf bad; exit 0; fi\n" +
+		"case \"$*\" in\n*'-c core.hooksPath=/dev/null'*'-c core.fsmonitor=false'*'-c safe.directory=" + resolved + "'*'rev-parse --verify HEAD') printf " + good + ";;\n*) printf bad;;\nesac\n"
 	if err := os.WriteFile(git, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := readWorkspaceOrigin(t.Context(), binding, nil); !ok || got != good {
-		t.Fatal("fixed arguments or credential-free environment not preserved")
+		t.Fatalf("fixed arguments or credential-free environment not preserved: %q %t", got, ok)
 	}
-	if err := os.WriteFile(git, []byte("#!/bin/sh\nprintf "+strings.Repeat("a", 101)+"\n"), 0700); err != nil {
+	if err := os.WriteFile(git, []byte("#!/bin/sh\ncase \"$*\" in\n*--show-toplevel*) printf '%s\\n%s\\n' '"+resolved+"' '"+resolved+"/.git'; exit 0;;\nesac\nprintf "+strings.Repeat("a", 101)+"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := readWorkspaceOrigin(t.Context(), binding, nil); ok {
@@ -128,6 +138,7 @@ func TestSessionOriginBoundsOutputAndUsesCleanEnvironment(t *testing.T) {
 
 func TestSessionOriginDeadlineTerminatesGit(t *testing.T) {
 	dir := t.TempDir()
+	originGit(t, dir, "init", "-q") // a repository, so git is run (and hangs)
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nexec /bin/sleep 60\n"), 0700); err != nil {
 		t.Fatal(err)

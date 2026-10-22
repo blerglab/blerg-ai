@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
-import { page } from 'vitest/browser'
+import { page, userEvent } from 'vitest/browser'
 import { MemoryRouter } from 'react-router-dom'
 import type { BackgroundTask } from '@blerglab/chat'
 import SessionRail from './SessionRail'
@@ -33,31 +33,47 @@ function show(command: string, long = true, phone = false) {
 beforeEach(() => localStorage.clear())
 describe('bounded Running now shell command cards', () => {
   for (const phone of [false, true]) {
-    it(`keeps a heredoc card compact and its complete text scrollable on ${phone ? 'phone' : 'desktop'}`, async () => {
+    it(`keeps a heredoc card to two lines, the whole text in its tooltip, on ${phone ? 'phone' : 'desktop'}`, async () => {
       await page.viewport(phone ? 390 : 1280, 800)
       const card = show(heredoc, true, phone)
-      expect(card.getBoundingClientRect().height).toBeLessThanOrEqual(340)
-      for (const name of ['Shell command', 'Command description', 'Command result']) {
-        const region = within(card).getByRole('region', { name })
-        expect(region.scrollHeight).toBeGreaterThan(region.clientHeight)
-        expect(region.textContent).toContain('fixture line 80')
-        region.focus()
-        expect(document.activeElement).toBe(region)
-        region.scrollTop = region.scrollHeight
-        expect(region.scrollTop).toBeGreaterThan(0)
-      }
+      // Two lines: the title (what it is for) and the result; the command and the rest in the tooltip,
+      // and in the conversation the card brings into view.
+      expect(card.getBoundingClientRect().height).toBeLessThanOrEqual(60)
+      const lines = [...card.querySelectorAll('.rail-run-line')]
+      expect(lines).toHaveLength(2)
+      for (const line of lines) expect(line.getBoundingClientRect().height).toBeLessThan(24)
+      const title = within(card).getByTestId('rail-show')
+      expect(title.getAttribute('aria-description')).toContain('fixture line 80')
+      expect(within(card).getByTestId('rail-task-summary').getAttribute('title')).toContain('fixture line 80')
       expect(within(card).getByRole('button', { name: 'Dismiss' })).toBeVisible()
-      expect(within(card).getByTestId('rail-shell-status')).toHaveTextContent('failed')
+      expect(within(card).getByRole('img', { name: 'failed' })).toBeVisible()
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(phone ? 390 : 1280)
     })
   }
-  it('keeps an ordinary command on one line without a scroll box', async () => {
+  it('on a phone a tap on the step line shows the whole command in place, scrollable, and a second tap folds it', async () => {
+    await page.viewport(390, 800)
+    const card = show(heredoc, true, true)
+    const step = within(card).getByTestId('rail-task-summary')
+    const folded = card.getBoundingClientRect().height
+    await userEvent.click(step)
+    expect(step).toHaveAttribute('aria-expanded', 'true')
+    expect(step.textContent).toContain('fixture line 80')
+    expect(step.textContent).toContain('Append regression fixture')
+    expect(card.getBoundingClientRect().height).toBeGreaterThan(folded + 60)
+    expect(step.scrollHeight).toBeGreaterThan(step.clientHeight)
+    step.scrollTop = step.scrollHeight
+    expect(step.scrollTop).toBeGreaterThan(0)
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(390)
+    await userEvent.click(step)
+    expect(step).toHaveAttribute('aria-expanded', 'false')
+    expect(card.getBoundingClientRect().height).toBeLessThanOrEqual(60)
+  })
+  it('keeps an ordinary command on one line', async () => {
     await page.viewport(1280, 800)
     const card = show('npm test', false)
     const command = within(card).getByTestId('rail-command')
     expect(command.textContent).toBe('$ npm test')
     expect(command.getBoundingClientRect().height).toBeLessThan(24)
-    expect(command.scrollHeight).toBe(command.clientHeight)
     expect(within(card).getByTestId('rail-task-note')).toHaveTextContent('Run the checks')
   })
 })

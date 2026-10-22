@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/netguard"
@@ -124,8 +125,10 @@ type Gateway struct {
 	lookups   *lookupBudget
 	recent    recentGrants
 	// unrevoked are the session board credentials whose revoke failed, per account, until they
-	// expire (CallBoard stops minting past maxUnrevokedBoardTokens).
-	unrevoked unrevokedBoardTokens
+	// expire (CallBoard stops minting past the unrevoked limit, maxUnrevokedBoardTokens unless
+	// SetUnrevokedBoardTokenLimit set another).
+	unrevoked      unrevokedBoardTokens
+	unrevokedLimit atomic.Int64
 }
 
 // SetTrustedProxies sets the proxies (BLERG_RUNNER_TRUSTED_PROXIES) whose X-Forwarded-For and

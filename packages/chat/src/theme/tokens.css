@@ -18,6 +18,14 @@
   --chat-accent: #ff6a3d;
   --chat-accent-fg: #ffffff;
 
+  /* On / open / pressed / selected (toggles, tabs, segments, the current item): a blue, never the
+     accent, which is for actions and next to the danger red reads as a warning. The border also
+     draws outline icons; the text is AA (4.5:1) on the fill. */
+  --chat-selected-border: #4c9bff;
+  --chat-selected-bg: color-mix(in srgb, var(--chat-selected-border) 16%, transparent);
+  /* derived, so a host that sets a light theme (and only the border) still gets readable text */
+  --chat-selected-text: color-mix(in srgb, var(--chat-selected-border) 65%, var(--chat-fg));
+
   /* Status. */
   --chat-success: #63d68b;
   --chat-warning: #e8b13d;

@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,6 +25,7 @@ import (
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
+	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
 	"github.com/blerglab/blerg-ai/runner/internal/nativehistory"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -328,15 +328,89 @@ func scrubToken(s, token string) string {
 	return s
 }
 
+// podRemote is the session's clone URL, set by PrepareWorkspace: the one transport the pod's own
+// git calls may use is the one it names (gitProtocols).
+var (
+	podRemoteMu sync.Mutex
+	podRemote   string
+)
+
+func setPodRemote(u string) {
+	podRemoteMu.Lock()
+	podRemote = u
+	podRemoteMu.Unlock()
+}
+
+// gitProtocols is the transport the pod's git may use: the clone URL's (https on a cluster).
+// Never one the repository's configuration names: the agent owns .git/config, and a remote it
+// points at ext:: or elsewhere gets no transport.
+func gitProtocols() []string {
+	podRemoteMu.Lock()
+	defer podRemoteMu.Unlock()
+	if podRemote == "" {
+		return []string{"https"}
+	}
+	return hostgit.ProtocolsFor(podRemote)
+}
+
+// gitRun runs the pod's own git (the clone, the wip checkout, the push; never the agent's)
+// through the shared hardened runner (internal/hostgit). The agent owns the working tree and can
+// write .git/config: no hook, fsmonitor command, credential helper, external diff or ssh command
+// it names runs, the serving command on the other end is the pod's own (servingFlag), no file the
+// configuration names for diffs, mailmap or attributes is read, and only the clone URL's transport
+// is allowed. Over https, what the configuration can still steer is the transport itself (a proxy,
+// a URL rewrite, CA or cookie files), which the per-call timeout bounds. The pod's environment (its
+// tokens) is not handed on. Known and kept: the clone URL carries the token (argv during the clone,
+// and remote.origin.url), as before; the agent in the pod holds that token anyway.
+//
+// Differs from the daemon's calls, on purpose: the image's own system git configuration is kept
+// (CA settings), proxy and CA variables pass through, the clone is blobless so a lazy fetch of a
+// missing blob is allowed (over that same transport), and there is no memory limit (the clone).
 func gitRun(dir string, args ...string) (string, error) {
-	// The agent owns the working tree and can write .git/config: keep git from EXECUTING anything the
-	// repository's own settings name (a hook, an fsmonitor command, a credential helper). The command line
-	// beats the repository config for these keys.
-	args = append([]string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "protocol.ext.allow=never"}, args...)
-	cmd := exec.Command("git", args...) //nolint:gosec,noctx // literal git binary; callers pass fixed subcommands, and clone puts the URL after --; noctx: short git steps of pod startup, which has no context to bound them; the pod itself is killed on timeout
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	timeout := gitStepTimeout
+	if len(args) > 0 && args[0] == "clone" {
+		timeout = gitCloneTimeout
+	}
+	return hostgit.OutputBounded(hostgit.Options{
+		Dir: dir, Protocols: gitProtocols(), LazyFetch: true, SystemConfig: true, Timeout: timeout,
+		PassEnv: []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"},
+	}, args...)
+}
+
+// gitCloneTimeout bounds the pod's clone, gitStepTimeout every other git step (a push after each
+// turn included): agent-written configuration could otherwise hang one forever.
+var (
+	gitCloneTimeout = 10 * time.Minute
+	gitStepTimeout  = 2 * time.Minute
+)
+
+// servingFlag names the serving command for service ("upload-pack" or "receive-pack") on the other
+// end of the clone URL's transport, so it is never one the agent's configuration names
+// (remote.origin.uploadpack, receivepack): a local origin gets the hardened local command, an ssh
+// one the plain git-<service>; https has none to name. A local origin whose hardened command
+// cannot be built is refused, never served by the plain command (which would run the origin's
+// configuration unhardened).
+func servingFlag(service string) ([]string, error) {
+	switch p := gitProtocols(); {
+	case len(p) == 1 && p[0] == "file":
+		cmd, err := hostgit.ServeCommand(service)
+		if err != nil {
+			return nil, fmt.Errorf("git %s for the local origin refused: %w", service, err)
+		}
+		return []string{"--" + service + "=" + cmd}, nil
+	case len(p) == 1 && p[0] == "ssh":
+		return []string{"--" + service + "=git-" + service}, nil
+	}
+	return nil, nil
+}
+
+// gitServed is gitRun with the serving flag for service inserted after the subcommand.
+func gitServed(dir, service, sub string, rest ...string) (string, error) {
+	flag, err := servingFlag(service)
+	if err != nil {
+		return "", err
+	}
+	return gitRun(dir, append(append([]string{sub}, flag...), rest...)...)
 }
 
 // ScratchDir is the workspace directory, under Home, of a "No repository"
@@ -381,6 +455,7 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 	if _, err := os.Stat(filepath.Join(workDir, ".git")); err == nil {
 		return workDir, "existing", nil // pre-mounted workspace (tests)
 	}
+	setPodRemote(cfg.GitURL)
 	cloneURL := authURL(cfg.GitURL, cfg.GitToken)
 	// A blobless partial clone: full history and every branch, but file
 	// contents are fetched only for the checkout (and lazily afterwards). Pod
@@ -395,7 +470,7 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 		if i > 0 {
 			time.Sleep(newRepoCloneDelay)
 		}
-		out, err := gitRun(cfg.Home, "clone", "--filter=blob:none", "--", cloneURL, workDir)
+		out, err := gitServed(cfg.Home, "upload-pack", "clone", "--filter=blob:none", "--", cloneURL, workDir)
 		if err == nil {
 			cloneErr = nil
 			break
@@ -425,7 +500,7 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 	}
 	state := "fresh-clone"
 	wip := wipBranch(cfg.SessionID)
-	if out, err := gitRun(workDir, "ls-remote", "--heads", "origin", wip); err == nil && strings.Contains(out, wip) {
+	if out, err := gitServed(workDir, "upload-pack", "ls-remote", "--heads", "origin", wip); err == nil && strings.Contains(out, wip) {
 		if out, err := gitRun(workDir, "checkout", "-b", wip, "origin/"+wip); err != nil {
 			log.Printf("runner: wip checkout failed (%v: %s); staying on default branch", err, out)
 		} else {
@@ -496,7 +571,7 @@ func PushWip(workDir, sessionID string) {
 	if head == remote {
 		return
 	}
-	if out, err := gitRun(workDir, "push", "--force", "origin", "HEAD:"+wipBranch(sessionID)); err != nil {
+	if out, err := gitServed(workDir, "receive-pack", "push", "--force", "origin", "HEAD:"+wipBranch(sessionID)); err != nil {
 		log.Printf("runner: wip push: %v: %s", err, out)
 		if pushProblem != nil {
 			pushProblem(workDir, sessionID, classifyPushFailure(out))
@@ -673,6 +748,12 @@ func Run(ctx context.Context, cfg Config) error {
 		var msg protocol.ResolveProgressOrigin
 		if len(raw) <= 4096 && json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
 			host.ResolveProgressOrigin(msg)
+		}
+	})
+	client.OnMessage("read_commit", func(raw []byte) {
+		var msg protocol.ReadCommit
+		if len(raw) <= 1024 && json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
+			host.ReadCommit(ctx, msg)
 		}
 	})
 	client.OnMessage("read_workspace_file", func(raw []byte) {

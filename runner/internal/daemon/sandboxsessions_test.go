@@ -275,7 +275,7 @@ func TestHungTmuxProbeIsSkipped(t *testing.T) {
 	origOut, origRun, origProbe := dockerOutput, dockerRun, dockerProbe
 	var removed []string
 	dockerOutput = func(args ...string) ([]byte, error) {
-		return []byte(sandboxContainerPrefix + "hung\n"), nil
+		return []byte(sandboxContainerPrefix + "hung\t" + sandboxOwner() + "\n"), nil
 	}
 	dockerRun = func(args ...string) error {
 		if args[0] == "rm" {
@@ -285,10 +285,10 @@ func TestHungTmuxProbeIsSkipped(t *testing.T) {
 	}
 	dockerProbe = func(time.Duration, ...string) (bool, error) { return true, errors.New("timed out") }
 	t.Cleanup(func() { dockerOutput, dockerRun, dockerProbe = origOut, origRun, origProbe })
-	if got := listSandboxedTmuxSessions(); len(got) != 0 {
+	if got := listSandboxedTmuxSessions(nil); len(got) != 0 {
 		t.Fatalf("a container whose probe hung was listed: %v", got)
 	}
-	sweepOrphanSandboxContainers(nil)
+	sweepOrphanSandboxContainers(nil, nil)
 	if len(removed) != 0 {
 		t.Fatalf("a container whose probe hung was swept: %v", removed)
 	}

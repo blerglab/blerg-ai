@@ -2,10 +2,13 @@
 // published text. The root div is where selections are anchored and highlights drawn: every change
 // of the requests, the focus or the text redraws them through applyHighlights.
 import { useEffect, useMemo, type RefObject } from 'react'
-import Markdown from '../Markdown'
+import Markdown, { type MarkdownDocument } from '../Markdown'
 import { applyHighlights } from '../../model/anchor'
 import { wordDiff } from '../../model/diff'
 import type { ReviewRequest } from '../../model/review'
+
+// A reviewed file is a published one: no folder, so relative images stay placeholders.
+const REVIEWED_DOCUMENT: MarkdownDocument = {}
 
 interface Props {
   source: string
@@ -14,9 +17,15 @@ interface Props {
   requests: ReviewRequest[]
   focusedId: string | null
   rootRef: RefObject<HTMLDivElement | null>
+  /** Whether the rendered page hides words the source holds: an HTML comment or anything else the
+   *  sanitizer dropped, a closed <details>, nesting cut short. Review mode then says so. */
+  onHiddenContent?: (hidden: boolean) => void
 }
 
-export default function MarkdownPage({ source, published, showDiff, requests, focusedId, rootRef }: Props) {
+/** What on a rendered document hides words of its source (see onHiddenContent). */
+export const HIDDEN_CONTENT_SELECTOR = '[data-md-hidden], details:not([open]), .md-too-deep'
+
+export default function MarkdownPage({ source, published, showDiff, requests, focusedId, rootRef, onHiddenContent }: Props) {
   const diff = useMemo(() => (showDiff && source !== published ? wordDiff(published, source) : null), [showDiff, published, source])
 
   useEffect(() => {
@@ -24,6 +33,12 @@ export default function MarkdownPage({ source, published, showDiff, requests, fo
     if (!root || showDiff) return
     return applyHighlights(root, requests, focusedId)
   }, [rootRef, requests, focusedId, source, showDiff])
+
+  useEffect(() => {
+    const root = rootRef.current
+    if (!root || diff || !onHiddenContent) return // the word diff is the source itself: nothing hides
+    onHiddenContent(root.querySelector(HIDDEN_CONTENT_SELECTOR) !== null)
+  }, [rootRef, source, diff, onHiddenContent])
 
   return (
     <div className="review-page" data-testid="review-page" ref={rootRef}>
@@ -36,7 +51,7 @@ export default function MarkdownPage({ source, published, showDiff, requests, fo
           )}
         </pre>
       ) : (
-        <Markdown text={source} className="artifact-markdown md-doc" />
+        <Markdown text={source} className="artifact-markdown md-doc md-box" document={REVIEWED_DOCUMENT} html />
       )}
     </div>
   )

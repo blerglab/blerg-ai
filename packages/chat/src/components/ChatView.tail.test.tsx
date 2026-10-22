@@ -38,6 +38,10 @@ async function deliverOlder(t: FakeTransport) {
   })
 }
 
+// A page is in flight: the timeline hides its scrollbar thumb (the loading pill itself shows only
+// near the top and only for a slow page: Transcript.window.test.tsx).
+const inFlight = () => !!document.querySelector('.agent-timeline.backfilling')
+
 function mount(t: FakeTransport = createFakeTransport()) {
   return { t, ...render(<ChatView session={SESSION} transport={t.transport} meta={session} />) }
 }
@@ -62,7 +66,7 @@ describe('ChatView loads a long transcript from its end', () => {
     // No skeleton and a visible timeline, while older events remain to come.
     expect(screen.queryByTestId('history-loading')).toBeNull()
     expect(container.querySelector('.agent-timeline')?.classList.contains('loading')).toBe(false)
-    expect(screen.getByTestId('older-loading')).toBeTruthy()
+    expect(inFlight()).toBe(true)
     // the scrollbar thumb is not drawn while the transcript is still growing
     expect(container.querySelector('.agent-timeline')?.classList.contains('backfilling')).toBe(true)
     // ...and the next page is already being asked for, from just before the oldest one held.
@@ -96,7 +100,7 @@ describe('ChatView loads a long transcript from its end', () => {
     const { t, container } = mount()
     deliverTail(t)
     const timeline = () => container.querySelector('.agent-timeline')
-    expect(screen.getByTestId('older-loading')).toBeTruthy()
+    expect(inFlight()).toBe(true)
     expect(timeline()?.classList.contains('backfilling')).toBe(true)
     await act(async () => {
       t.answerOlder({ events: range(51, 100), hasOlder: true, firstSeq: 51 })
@@ -124,7 +128,7 @@ describe('ChatView loads a long transcript from its end', () => {
     act(() => t.setConnected(true))
     expect(t.older).toHaveLength(2)
     expect(t.older[1]).toEqual({ sessionId: SESSION, beforeSeq: 101, limit: 200 })
-    expect(screen.getByTestId('older-loading')).toBeTruthy()
+    expect(inFlight()).toBe(true)
     await deliverOlder(t)
     expect(screen.queryByTestId('older-loading')).toBeNull()
     expect(useTranscriptStore.getState().sessions.s1.events).toHaveLength(300)
@@ -140,7 +144,7 @@ describe('ChatView loads a long transcript from its end', () => {
     expect(t.subscriptions[1]).toEqual({ sessionId: SESSION, afterSeq: 300, tail: false })
     expect(t.older).toHaveLength(2)
     expect(t.older[1]).toMatchObject({ beforeSeq: 101, limit: 200 })
-    expect(screen.getByTestId('older-loading')).toBeTruthy()
+    expect(inFlight()).toBe(true)
   })
 
   it('a transcript shorter than the tail has no older pages to fetch', () => {
@@ -175,7 +179,7 @@ describe('ChatView loads a long transcript from its end', () => {
       act(() => intersect())
       expect(t.older).toHaveLength(2)
       expect(t.older[1]).toEqual({ sessionId: SESSION, beforeSeq: 51, limit: 200 })
-      expect(screen.getByTestId('older-loading')).toBeTruthy()
+      expect(inFlight()).toBe(true)
       act(() => intersect())
       act(() => intersect())
       expect(t.older).toHaveLength(2)

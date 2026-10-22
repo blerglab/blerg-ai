@@ -17,6 +17,9 @@ export default defineConfig({
       { find: /^@blerglab\/chat\/blerg\.css$/, replacement: chat("theme/blerg.css") },
     ],
   },
+  // Keep license comments (/*! … */, @license) when minifying: Vite drops them by default, and the
+  // bundle carries code adapted under licenses that ask for their notice (THIRD_PARTY_NOTICES.md).
+  build: { rolldownOptions: { output: { comments: { legal: true } } } },
   server: {
     proxy: {
       "/api": "http://localhost:8080",

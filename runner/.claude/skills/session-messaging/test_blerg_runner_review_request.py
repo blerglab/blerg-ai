@@ -121,6 +121,23 @@ class TestReviewRequest(unittest.TestCase):
         result = self.run_cli(["review", "wait", "r1"], server)
         self.assertEqual(result.returncode, 1, result.stderr)
 
+    def test_status_and_wait_exit_4_when_the_person_dismissed_it(self):
+        message = ("Review of plan.md v1 (request r1): DISMISSED. The person dismissed the review request for \"plan.md\"; "
+                   "they may have answered in the chat instead.")
+        for cmd in (["review", "status", "r1"], ["review", "wait", "r1"]):
+            with self.subTest(cmd=cmd[1]):
+                server = make_server(decision={"request_id": "r1", "state": "dismissed", "message": message})
+                result = self.run_cli(cmd, server)
+                self.assertEqual(result.returncode, 4, result.stderr)
+                self.assertIn("DISMISSED. The person dismissed the review request", result.stdout)
+
+    def test_review_help_documents_the_dismissed_exit_code(self):
+        server = make_server()
+        result = self.run_cli(["review", "--help"], server)
+        self.assertIn("4 dismissed", result.stdout)
+        # Withdrawn and superseded keep exit 1 (card #155 review): the help says so.
+        self.assertIn("Withdrawn and superseded keep exit 1", " ".join(result.stdout.split()))
+
     def test_wait_times_out_with_exit_3_and_says_how_to_wait_again(self):
         server = make_server()
         result = self.run_cli(["review", "wait", "r1", "--timeout", "1"], server)

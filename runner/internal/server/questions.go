@@ -21,6 +21,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -136,11 +138,11 @@ func (h *Hub) QuestionSessionEnded(sessionID string) {
 	}
 }
 
-// QuestionAnswered hands a just-answered question to the registered delivery. A no-op for an ask
-// the agent waits on (its CLI reads the answer), an empty answer (closed, not answered) or without
-// a registered delivery.
+// QuestionAnswered hands a just-answered (or dismissed) question to the registered delivery. A no-op
+// for an ask the agent waits on (its CLI reads the answer), an empty answer (closed, not answered,
+// unless the person dismissed it) or without a registered delivery.
 func (h *Hub) QuestionAnswered(row db.MessageRow, answer, answerer string) {
-	if !row.NoWait || row.Kind != "ask" || answer == "" {
+	if !row.NoWait || row.Kind != "ask" || (answer == "" && !row.Dismissed) {
 		return
 	}
 	h.mu.RLock()
@@ -163,8 +165,13 @@ func (a *API) deliverQuestionAnswer(row db.MessageRow, answer, answerer string) 
 	}()
 }
 
+// sendQuestionAnswer delivers row's answer, or, for a question the person dismissed, the dismissal
+// (questionDismissedText under its own client id): the same durable relay, retries and give-up.
 func (a *API) sendQuestionAnswer(ctx context.Context, row db.MessageRow, answer, answerer string) {
 	text := questionAnswerText(row, answer)
+	if row.Dismissed {
+		text = questionDismissedText(row)
+	}
 	sess, err := db.GetSession(ctx, a.dbPool, row.SessionID)
 	if err != nil || sess == nil {
 		log.Printf("question %s: session: %v", row.ID, err)
@@ -178,7 +185,7 @@ func (a *API) sendQuestionAnswer(ctx context.Context, row db.MessageRow, answer,
 		answerer = derefOrEmpty(sess.SpawningAccountID)
 	}
 	principal := runnerPrincipal{Kind: "human", Sub: answerer}
-	clientID := questionAnswerClientID(row.ID)
+	clientID := questionRelayClientID(row)
 	if dc := a.hub.FindDaemonForSession(row.SessionID); dc == nil || dc.CanInputReceipts() {
 		if apiErr := a.sendRelay(ctx, principal, row.SessionID, text, questionAnswerSource, clientID); apiErr != nil {
 			a.questionAnswerFailed(ctx, row, apiErr)
@@ -205,6 +212,26 @@ func (a *API) sendQuestionAnswer(ctx context.Context, row db.MessageRow, answer,
 // questionAnswerClientID is the outbox id of a question's answer: one per question, so a delivery
 // is never queued twice.
 func questionAnswerClientID(messageID string) string { return "question-" + messageID }
+
+// questionDismissedClientID is the outbox id of a question's dismissal (card #155).
+func questionDismissedClientID(messageID string) string { return "question-dismissed-" + messageID }
+
+// questionRelayClientID is the outbox id of what row brings the agent: its dismissal or its answer.
+func questionRelayClientID(row db.MessageRow) string {
+	if row.Dismissed {
+		return questionDismissedClientID(row.ID)
+	}
+	return questionAnswerClientID(row.ID)
+}
+
+// questionRelayWhat names what is being delivered, for the owner: "Your answer to question …" or
+// "Your dismissal of question …".
+func questionRelayWhat(row db.MessageRow) string {
+	if row.Dismissed {
+		return "Your dismissal of question " + row.ID + " (" + questionQuote(row) + ")"
+	}
+	return "Your answer to question " + row.ID + " (" + questionQuote(row) + ")"
+}
 
 // maxQuestionAnswerAttempts is how many permanent delivery failures of one answer (the first
 // delivery, then one per heartbeat of the session's host) are tried before giving up on it.
@@ -340,7 +367,7 @@ func (a *API) questionAnswerFailed(ctx context.Context, row db.MessageRow, apiEr
 	if a.questionDeliveryFailed != nil {
 		defer a.questionDeliveryFailed(row.ID, permanent)
 	}
-	clientID := questionAnswerClientID(row.ID)
+	clientID := questionRelayClientID(row)
 	reason := strings.TrimSuffix(strings.TrimSpace(apiErr.Message), ".")
 	if !permanent {
 		log.Printf("question %s: deliver to %s (will retry): %s", row.ID, row.SessionID, apiErr.Message)
@@ -348,7 +375,7 @@ func (a *API) questionAnswerFailed(ctx context.Context, row db.MessageRow, apiEr
 			// Once, under a fixed id (a restart does not repeat it): the owner knows the answer has
 			// not reached the agent yet, and can send it as a message instead of waiting.
 			recordServerAgentEvent(ctx, a.hub, a.dbPool, row.SessionID, messageEventID(clientID, "input-delayed"), "error", map[string]any{
-				"message": "Your answer to question " + row.ID + " (" + questionQuote(row) + ") is still waiting to be delivered to the agent: " +
+				"message": questionRelayWhat(row) + " is still waiting to be delivered to the agent: " +
 					reason + ". Blerg keeps trying; you can also send it to the agent as a chat message.",
 				"retryable": true,
 			})
@@ -361,8 +388,7 @@ func (a *API) questionAnswerFailed(ctx context.Context, row db.MessageRow, apiEr
 		return
 	}
 	payload, _ := json.Marshal(map[string]any{
-		"message": "Your answer to question " + row.ID + " (" + questionQuote(row) +
-			") could not be delivered to the agent: " + reason + ". Send it to the agent as a chat message.",
+		"message":   questionRelayWhat(row) + " could not be delivered to the agent: " + reason + ". Send it to the agent as a chat message.",
 		"retryable": false,
 	})
 	frame, _ := json.Marshal(map[string]any{"type": "agent_user_message", "session_id": row.SessionID, "source": questionAnswerSource, "client_id": clientID, "undelivered": true})
@@ -377,4 +403,111 @@ func (a *API) questionAnswerFailed(ctx context.Context, row db.MessageRow, apiEr
 		log.Printf("question %s: gave up delivering the answer to %s after %d attempts", row.ID, row.SessionID, n)
 		fanOutServerEvent(a.hub, row.SessionID, eventID, "error", payload, seq, time.Now())
 	}
+}
+
+// ─── dismiss (the person, from Needs you) ─────────────────────────────────────
+
+// questionDismissedText is what the agent reads when the person dismisses a question it did not
+// wait on (a question it waits on gets the dismissal from its CLI: exit code 4).
+func questionDismissedText(row db.MessageRow) string {
+	return "The person dismissed your question " + row.ID + " (" + questionQuote(row) + "); they may have answered in the chat instead. Ask again if you still need an answer."
+}
+
+// HandlePostMessageDismiss is POST /api/messages/{id}/dismiss: the person closes an open question
+// from Needs you without answering it (they may have answered in the chat). Only a person signed in
+// as themselves who may answer it: the session's owner for an owner-only question, anyone who can
+// see the session otherwise. The session's own credential, the daemon, board and agent tokens are
+// refused (the agent closes its own questions with `blerg-runner ask --resolve`). An engine's
+// command approval cannot be dismissed: it is allowed or denied. 409 when it is no longer open.
+func (a *API) HandlePostMessageDismiss(w http.ResponseWriter, r *http.Request) {
+	if a.dbPool == nil {
+		writeError(w, http.StatusServiceUnavailable, "no database")
+		return
+	}
+	id := r.PathValue("id")
+	ctx := r.Context()
+	boardID, err := db.MessageBoardID(ctx, a.dbPool, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "message not found")
+			return
+		}
+		log.Printf("api dismiss resolve board %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+	actor, ok := a.authBrowserOrBoard(w, r, boardID, "session.start")
+	if !ok {
+		return
+	}
+	person := coreAnswerer(actor)
+	if person == "" {
+		writeError(w, http.StatusForbidden, "only the person can dismiss a question (the agent closes its own with blerg-runner ask --resolve)")
+		return
+	}
+	if !a.coreActorCanSeeMessage(ctx, actor.Core, id) {
+		writeError(w, http.StatusNotFound, "message not found")
+		return
+	}
+	row, err := db.GetMessage(ctx, a.dbPool, id)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "message unavailable")
+		return
+	}
+	if row == nil || row.Kind != "ask" {
+		writeError(w, http.StatusNotFound, "message not found")
+		return
+	}
+	if row.OwnerOnly && !row.NoWait {
+		writeError(w, http.StatusConflict, "an approval is allowed or denied, not dismissed")
+		return
+	}
+	if row.OwnerOnly && !a.actorOwnsMessageSession(ctx, actor, row.SessionID) {
+		writeError(w, http.StatusForbidden, "only the session's owner can dismiss this question")
+		return
+	}
+	// Under the same locks as a reply: a discarded child's or an ended parent's question is refused
+	// (409), and a pending limit resume does not race it.
+	err = withCancelledLimitResume(ctx, a.dbPool, row.SessionID, func() error {
+		return withParentInputGuard(ctx, a.dbPool, row.SessionID, func() error {
+			a.dismissMessageUnlocked(w, r, id, person)
+			return nil
+		})
+	})
+	if errors.Is(err, db.ErrDelegationEnded) {
+		writeError(w, http.StatusConflict, "session was discarded or its parent ended")
+	} else if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "dismiss is busy; retry shortly")
+	}
+}
+
+// dismissMessageUnlocked closes the question as dismissed by person and tells whoever waits.
+func (a *API) dismissMessageUnlocked(w http.ResponseWriter, r *http.Request, id, person string) {
+	ctx := r.Context()
+	changed, err := db.DismissMessage(ctx, a.dbPool, id, person)
+	if err != nil {
+		log.Printf("api dismiss %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	if !changed {
+		writeError(w, http.StatusConflict, "message already answered or not open")
+		return
+	}
+	a.waiters.signal(id)
+	log.Printf("question %s dismissed by %s", id, person)
+	row, err := db.GetMessage(ctx, a.dbPool, id)
+	if err != nil || row == nil {
+		// The dismissal stands; the next heartbeat delivers it (db.UndeliveredQuestionAnswers).
+		log.Printf("api dismiss %s: read back: %v", id, err)
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "dismissed": true})
+		return
+	}
+	// A question the agent did not wait on hears of it in a Blerg message, delivered like an answer:
+	// queued in the session's outbox, and redelivered on a heartbeat if it never got there
+	// (db.UndeliveredQuestionAnswers). One it waits on hears from its CLI (exit code 4).
+	a.hub.QuestionAnswered(*row, "", person)
+	a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)})
+	a.hub.ChildActivity(row.SessionID)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "dismissed": true})
 }

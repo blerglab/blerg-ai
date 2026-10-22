@@ -20,6 +20,7 @@ func (a *API) registerDelegationChildRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sessions/{id}/children/{child}", a.handleChildStatus)
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/message", a.handleChildMessage)
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/model", a.handleChildModel)
+	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/title", a.handleChildRename)
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/interrupt", a.handleChildInterrupt)
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/stop", a.handleChildStop)
 	mux.HandleFunc("POST /api/sessions/{id}/children/{child}/discard", a.handleChildDiscard)
@@ -326,6 +327,15 @@ func (a *API) handleChildEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		events, _ := body["events"].([]map[string]any)
 		if len(events) > 0 || wait == 0 {
+			writeJSON(w, http.StatusOK, body)
+			return
+		}
+		// A child that has ended for good will add nothing more: answer now, so a watcher reads
+		// its state at once instead of waiting out the poll for a turn that never comes. An
+		// "error" its daemon can revive is not an end (answering at once would make a watcher
+		// poll in a tight loop).
+		if row, err := db.GetSession(ctx, a.dbPool, child); err == nil && row != nil && terminalSessionStatus(row.Status) &&
+			(row.Status != "error" || db.TerminallyEnded(row)) {
 			writeJSON(w, http.StatusOK, body)
 			return
 		}

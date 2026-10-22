@@ -308,6 +308,10 @@ func TestStalledTransferAborts(t *testing.T) {
 func TestOldHostGitRefusesTokenCloneClearly(t *testing.T) {
 	calls := installFakeGit(t)
 	t.Setenv("FAKE_GIT_VERSION", "2.30.9")
+	// The version check runs in git's own clean environment: the fake reads its version from a file.
+	if err := os.WriteFile(filepath.Join(filepath.Dir(calls), "version"), []byte("2.30.9"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	err := EnsureClonedTarget(context.Background(), t.TempDir(), CloneTarget{Provider: "github", FullName: "acme/app", Folder: "app", Token: "t", HostTokenAllowed: true})
 	if err == nil || !strings.Contains(err.Error(), "git 2.31 or newer") || !strings.Contains(err.Error(), "2.30.9") {
 		t.Fatalf("want a git-version refusal, got %v", err)

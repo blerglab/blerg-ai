@@ -31,6 +31,10 @@ Inside a session you are the agent. The session's own tools are on your path:
   `blerg-runner topic --done "<one-line outcome>"`, and when the work landed commits, pass them:
   `--commit <sha>`. One topic at a time; not for a quick question, and not from a subagent.
   [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md)
+- `blerg-runner mark decision|milestone|finding "<one line>"` puts a major stroke in the History
+  feed: after the person decides something (`--by person`; your own call is `--by agent`), at merges,
+  deploys and releases (`--commit <sha>`, `--card <n>`), and on a finding that changes the plan.
+  Questions, approvals, proposals and reviews appear there by themselves. `blerg-runner mark --help`.
 - When you work on a ticket, read it with the tools you have, then `blerg-runner pin` it
   (`blerg-runner pin --help` shows the shape); keep a checklist with `blerg-runner checklist` and tick
   items as you finish them. Both show at the top of the person's session panel.

@@ -36,6 +36,10 @@ const (
 	childTurnAsked    = "asked"
 	childTurnApproval = "approval"
 	childTurnFailed   = "failed"
+	// childSessionFailed: the session itself failed (its runtime stopped, it exited with an
+	// error) rather than one of its turns. Its note is deduplicated apart from the turn's, so a
+	// child that dies after its last turn was reported is still reported.
+	childSessionFailed = "session_failed"
 )
 
 // childSyncErrorCode is the code of the error a daemon records when it could not bring a sandboxed
@@ -130,7 +134,7 @@ func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) {
 			detail = answer
 		}
 	}
-	if kind == childTurnFailed && detail == "" {
+	if (kind == childTurnFailed || kind == childSessionFailed) && detail == "" {
 		detail = derefOrEmpty(child.ErrorReason)
 	}
 	turn, err := db.LatestUserMessageSeq(ctx, a.dbPool, childID)
@@ -193,6 +197,8 @@ func childTurnNote(title, childID, kind, detail string) string {
 		return with(head+" is waiting on an approval from the person") + fmt.Sprintf(". Only the person can decide it, in the child's chat. blerg-runner session result %s", childID)
 	case childTurnFailed:
 		return with(head+" failed its turn") + fmt.Sprintf(". blerg-runner session result %s", childID)
+	case childSessionFailed:
+		return with(head+" failed") + fmt.Sprintf(" and stopped; it takes no more messages. blerg-runner session result %s", childID)
 	default:
 		return with(head+" finished its turn") + fmt.Sprintf(". blerg-runner session result %s", childID)
 	}

@@ -1,4 +1,6 @@
-import ProposalNotifications from './components/ProposalNotifications'
+import { useProposalExpiryWarnings } from './hooks/useProposalExpiryWarnings'
+import { useProposalInbox } from './hooks/useProposalInbox'
+import { enableNotifications } from './lib/push'
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import SessionList from './components/SessionList'
@@ -95,7 +97,6 @@ export function BrandHeader() {
         Runner
       </span>
     </a>
-      <ProposalNotifications />
       <ThemeToggle />
     </div>
   )
@@ -266,6 +267,10 @@ function Layout() {
   const isMobile = useIsMobile()
   // Keeps the Proposals nav badge fresh wherever the person is.
   useProposalCountPoll()
+  // The app's one Notifications bell (in the sessions header, beside + New) reads this inbox, and
+  // the warning that a proposal expires soon comes from here, on every page.
+  const proposalInbox = useProposalInbox()
+  useProposalExpiryWarnings(proposalInbox)
   // Cluster tab/route only make sense when cluster runtime is actually
   // configured (install/k8s) — on a desktop-only install /api/cluster/status
   // reports configured:false and the tab would just lead to a dead end.
@@ -303,7 +308,7 @@ function Layout() {
       <Route
         path="/sessions"
         element={isMobile
-          ? <SessionList onNewSession={() => setLaunchOpen(true)} />
+          ? <SessionList onNewSession={() => setLaunchOpen(true)} proposalInbox={proposalInbox} />
           : <SessionsHome onNewSession={() => setLaunchOpen(true)} />}
       />
       <Route path="/sessions/:id" element={<SessionDetail />} />
@@ -355,7 +360,7 @@ function Layout() {
       <UpdateBanner />
       <AppHeader />
       <div style={{ display: 'flex', flexDirection: 'row', flex: 1, minHeight: 0 }}>
-        <SessionList variant="sidebar" onNewSession={() => setLaunchOpen(true)} />
+        <SessionList variant="sidebar" onNewSession={() => setLaunchOpen(true)} proposalInbox={proposalInbox} />
         <div style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
           {routes}
         </div>
@@ -364,54 +369,6 @@ function Layout() {
       {settingsDialog}
       <ToastContainer />
     </div>
-  )
-}
-
-function urlBase64ToUint8Array(base64String: string): Uint8Array {
-  const padding = '='.repeat((4 - base64String.length % 4) % 4)
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
-  const rawData = window.atob(base64)
-  return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)))
-}
-
-// enableNotifications is the ONLY place that ever calls
-// Notification.requestPermission() — a user-initiated action from
-// NotificationsButton's click handler, never from a mount effect. Browsers
-// increasingly ignore (or actively penalize) permission prompts fired
-// without a user gesture, and asking on every page load regardless of the
-// visitor's prior answer is exactly that anti-pattern.
-async function enableNotifications() {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return
-  const permission = await Notification.requestPermission()
-  if (permission !== 'granted') return
-  try { localStorage.setItem('blerg_notifications_wanted', '1') } catch { /* storage unavailable: the opt-in just isn't remembered */ }
-  const registration = await navigator.serviceWorker.register('/sw.js')
-  const { publicKey } = await (await apiFetch('/api/push/vapid-public-key')).json()
-  if (!publicKey) return
-  const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey).buffer as ArrayBuffer })
-  await apiFetch('/api/push/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subscription) })
-}
-
-// NotificationsButton reflects the CURRENT Notification.permission on mount
-// (granted/denied/default) rather than assuming "off" — so a visitor who
-// already granted or denied permission in a previous session isn't asked
-// again, and a "denied" visitor sees no button to re-trigger a prompt the
-// browser would silently refuse anyway.
-export function NotificationsButton() {
-  const [state, setState] = useState<'idle' | 'on' | 'off'>(() =>
-    typeof Notification !== 'undefined' && Notification.permission === 'granted' ? 'on' : 'idle')
-  if (state === 'on') return null
-  if (typeof Notification !== 'undefined' && Notification.permission === 'denied') return null
-  // A small bell beside "+ New" in the sessions header; gone once notifications are on.
-  return (
-    <button type="button" aria-label="Enable notifications" title="Enable notifications"
-      onClick={() => enableNotifications().then(() => setState(Notification.permission === 'granted' ? 'on' : 'off')).catch(console.error)}
-      style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, color: 'var(--fog)', background: 'none', border: '1px solid var(--stone)', borderRadius: 6, padding: 0, cursor: 'pointer' }}>
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
-        <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
-      </svg>
-    </button>
   )
 }
 

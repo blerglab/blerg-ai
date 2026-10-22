@@ -11,12 +11,15 @@
   --fog-dim: #8b97a7;    /* muted text */
   --chalk: #f2f6fa;      /* primary text */
 
-  --blaze: #ff6a3d;      /* primary accent — actions, active/attention, focus */
+  --blaze: #ff6a3d;      /* primary accent — brand, primary actions, attention, focus; not "selected" */
   --blaze-soft: #ff6a3d33;
   --lichen: #63d68b;     /* healthy / success / passing */
   --amber: #e8b13d;      /* pending / waiting */
   --danger: #ff6b63;     /* failing / error / down */
   --batch: #4c9bff;      /* GPU batch work */
+  --selected-border: #4c9bff;  /* on / open / pressed / selected: borders, outline icons */
+  --selected-bg: #4c9bff29;  /* its soft fill */
+  --selected-text: #6aadff;  /* its text and glyphs (4.5:1 on its fill) */
 
   --diff-add: #8ed6a6;
   --diff-del: #ff9d94;
@@ -42,6 +45,9 @@
   --accent: var(--blaze);
   --accent-bg: var(--blaze-soft);
   --accent-border: color-mix(in srgb, var(--blaze) 55%, transparent);
+  /* On / open / pressed / selected (toggles, tabs, segments, chips, the current row) is blue, not
+     the accent: the accent is the brand and primary actions, and red-orange next to the danger red
+     read as a warning. The palette blocks set --selected-border, --selected-bg, --selected-text. */
   --social-bg: var(--scree-2);
   --shadow:
     rgba(0, 0, 0, 0.5) 0 10px 15px -3px, rgba(0, 0, 0, 0.3) 0 4px 6px -2px;
@@ -78,6 +84,9 @@
     --amber: #b7791f;
     --danger: #d24747;
     --batch: #2f6fd6;
+    --selected-border: #2f6fd6;
+    --selected-bg: #2f6fd61f;
+    --selected-text: #2559b0;
     --diff-add: #2f8a52;
     --diff-del: #cf4b4b;
   }
@@ -97,6 +106,9 @@
   --amber: #b7791f;
   --danger: #d24747;
   --batch: #2f6fd6;
+  --selected-border: #2f6fd6;
+  --selected-bg: #2f6fd61f;
+  --selected-text: #2559b0;
   --diff-add: #2f8a52;
   --diff-del: #cf4b4b;
 }
@@ -115,6 +127,9 @@
   --amber: #e8b13d;
   --danger: #ff6b63;
   --batch: #4c9bff;
+  --selected-border: #4c9bff;
+  --selected-bg: #4c9bff29;
+  --selected-text: #6aadff;
   --diff-add: #8ed6a6;
   --diff-del: #ff9d94;
 }
@@ -302,7 +317,8 @@ code {
 }
 
 .session-kept-child.active {
-  border-color: var(--blaze);
+  border-color: var(--selected-border);
+  background: var(--selected-bg);
 }
 
 .session-kept-glyph {
@@ -356,4 +372,58 @@ code {
   .session-kept-spin {
     animation: none;
   }
+}
+
+/* The app's button and select. Settings uses them for every button and dropdown (no browser
+   defaults): one height, a 1 px outline, the same hover, focus and disabled states. `.primary` is
+   the accent action, `.danger` a removal. */
+.btn,
+.select {
+  box-sizing: border-box;
+  min-height: 32px;
+  border: 1px solid var(--stone);
+  border-radius: 8px;
+  background-color: var(--scree-2);
+  color: var(--chalk);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.2;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .15s, background-color .15s;
+}
+.btn:hover:not(:disabled) { border-color: var(--fog-dim); background-color: var(--scree); }
+.btn.primary { background-color: var(--accent); border-color: var(--accent); color: var(--accent-fg, #fff); }
+.btn.primary:hover:not(:disabled) { background-color: color-mix(in srgb, var(--accent) 85%, var(--chalk)); border-color: var(--accent); }
+.btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--stone)); }
+.btn.danger:hover:not(:disabled) { border-color: var(--danger); background-color: color-mix(in srgb, var(--danger) 10%, transparent); }
+.btn.small { min-height: 26px; padding: 3px 8px; font-size: var(--text-xs); border-radius: 6px; }
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  max-width: 100%;
+  padding: 6px 30px 6px 10px;
+  cursor: pointer;
+  /* A chevron in the page's colors (a gradient, so it follows the theme). */
+  background-image: linear-gradient(45deg, transparent 50%, var(--fog) 50%), linear-gradient(135deg, var(--fog) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.select:hover:not(:disabled) { border-color: var(--fog-dim); }
+.select option { background: var(--scree-2); color: var(--chalk); }
+.btn:focus-visible,
+.select:focus-visible { outline: 2px solid var(--blaze); outline-offset: 2px; border-color: var(--accent-border); }
+.btn:disabled,
+.select:disabled { opacity: .5; cursor: default; }
+@media (max-width: 640px) {
+  .btn, .select { min-height: 40px; }
+  .btn.small { min-height: 36px; }
 }

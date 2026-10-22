@@ -6,6 +6,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/checklist"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/topics"
 )
 
 var errChecklistWorker = errors.New("the worker is not part of this session")
@@ -131,4 +132,69 @@ func checklistNativeIDs(items []checklist.Item) []string {
 		}
 	}
 	return ids
+}
+
+// checklistWorkerTitles names the checklist's subagents for the panel, keyed "subagent:<id>", by the
+// description each started with (the summary `checklist workers` lists). They come from this
+// session's own events, which every viewer of the session reads in its transcript. Started sessions
+// are named per viewer by checklistChildTitles.
+func checklistWorkerTitles(ctx context.Context, q db.Querier, sid string, items []checklist.Item, through int64) (map[string]string, error) {
+	subagents := []string{}
+	for _, item := range items {
+		for _, a := range item.Assignees {
+			if a.Kind == "subagent" {
+				subagents = append(subagents, a.ID)
+			}
+		}
+	}
+	out := map[string]string{}
+	if len(subagents) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `SELECT DISTINCT ON (w.id) w.id, COALESCE(e.payload->>'summary','')
+ FROM unnest($2::text[]) AS w(id) JOIN agent_events e ON e.session_id=$1 AND e.seq<=$3 AND e.kind='subagent_started'
+ AND (e.payload->>'child_id'=w.id OR e.payload->>'call_id'=w.id) AND COALESCE(e.payload->>'summary','')<>''
+ ORDER BY w.id, e.seq DESC`, sid, subagents, through)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, title string
+		if err := rows.Scan(&id, &title); err != nil {
+			return nil, err
+		}
+		if title = topics.CleanText(title, 200); title != "" {
+			out["subagent:"+id] = title
+		}
+	}
+	return out, rows.Err()
+}
+
+// checklistChildTitles names the checklist's started sessions, keyed "child_session:<id>", from the
+// children this viewer may see (the live reply's own list: a private child only for its owner, never
+// an archived one). A child the viewer may not see stays unnamed; the panel says "a started session".
+func checklistChildTitles(c *liveChecklist, visible []db.ChildLiveRow) {
+	if c == nil {
+		return
+	}
+	titles := map[string]string{}
+	for _, row := range visible {
+		if row.ArchivedAt == nil {
+			titles[row.ID] = row.Title
+		}
+	}
+	for _, item := range c.Items {
+		for _, a := range item.Assignees {
+			if a.Kind != "child_session" {
+				continue
+			}
+			if title := topics.CleanText(titles[a.ID], 200); title != "" {
+				if c.WorkerTitles == nil {
+					c.WorkerTitles = map[string]string{}
+				}
+				c.WorkerTitles["child_session:"+a.ID] = title
+			}
+		}
+	}
 }

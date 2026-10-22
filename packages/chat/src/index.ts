@@ -41,6 +41,7 @@ export type {
   SubscribeAgentEvents,
   ToolCallPayload,
   TopicPayload,
+  MarkPayload,
   ChecklistAssignee,
   ChecklistItem,
   ChecklistPayload,
@@ -58,6 +59,7 @@ export type {
   DelegationChoice,
   DelegationDecidedPayload,
   DelegationRequestPayload,
+  CreatedBoard,
   FiledCard,
   ProposalDecidedPayload,
   ProposalDetail,
@@ -93,12 +95,13 @@ export { DONE_LINGER_MS, backgroundTasks, clockLabel, runningTasks, shownTasks, 
 export { NO_END_RECORDED, STALE_RUNNING_MS } from './model/stale'
 export type { BackgroundTask } from './model/backgroundTasks'
 export { isHarnessText } from './model/harnessText'
-export { topicDividerText } from './model/topicMarker'
+export { markRowText, topicDividerText } from './model/topicMarker'
 export {
   checklistFromEvents, checklistRowText, doneCount, foldTicketEvent, pinnedFromEvents, planLabel, progressText,
   checklistAssignment, safeChecklistAssignments, priorityGlyph, readChecklist, readTicket, readTicketEvent, sourceLabel, statusTone, ticketChanges, ticketHref, ticketMeta,
+  bareStatus, pinStateOfStatus, PIN_STATE_GLYPH,
 } from './model/worklist'
-export type { ChecklistLive, PinnedLive, PlanItemLive, PlanLive, PlanStatus, StatusTone, TicketLive, TicketSummaryLive } from './model/worklist'
+export type { ChecklistLive, PinnedLive, PinState, PlanItemLive, PlanLive, PlanStatus, StatusTone, TicketLive, TicketSummaryLive } from './model/worklist'
 export { McpHoldLine } from './components/McpHoldLine'
 export { holdClock, mcpFromEvents, mcpSummary, readMcp, readMcpHold } from './model/mcp'
 export type { McpHold, McpLive, McpReleased, McpServer, McpServerStatus, McpSummary } from './model/mcp'
@@ -176,7 +179,7 @@ export type { ChatStorage } from './model/storage'
 
 // ─── Components ─────────────────────────────────────────────────────────────────────────────
 export { default as Markdown } from './components/Markdown'
-export type { MarkdownProps } from './components/Markdown'
+export type { MarkdownDocument, MarkdownProps } from './components/Markdown'
 export { default as ChatView, ReadyCard } from './components/ChatView'
 export type { ChatSlots, ChatViewProps } from './components/ChatView'
 export { default as Transcript, HistorySkeleton, pairFooters, turnStartTimes, dayBreaksOf } from './components/Transcript'
@@ -197,12 +200,18 @@ export { default as FilesList } from './components/FilesList'
 export type { FilesListProps } from './components/FilesList'
 export { default as ReviewMode } from './components/review/ReviewMode'
 export type { ReviewModeProps } from './components/review/ReviewMode'
+// A host that shows the viewer outside ChatView provides the review requests it knows (the
+// Conversation's body and timeline, the viewer's review bar).
+export { ReviewRequestContext } from './components/reviewRequestContext'
+export type { ReviewRequestContextValue, ReviewDecision } from './components/reviewRequestContext'
 export { default as PdfPages } from './components/review/PdfPages'
 export type { PdfPagesProps } from './components/review/PdfPages'
 export { default as MarkupMode } from './components/markup/MarkupMode'
 export type { MarkupModeProps } from './components/markup/MarkupMode'
 export { ComposerChips, MessageText } from './components/AttachmentChips'
 export { default as StartProgress } from './components/StartProgress'
+export { default as ConfirmPopover, type ConfirmPopoverProps } from './components/ConfirmPopover'
+export { endSessionText } from './model/endSession'
 export { default as WorkingIndicator } from './components/WorkingIndicator'
 export { KIND_ICON, KIND_NAME, KindIcon, StatusGlyph, commandOf, elapsedOf, isShell, stateClass, titleOf } from './components/BackgroundParts'
 export { default as AskReply } from './components/AskReply'
@@ -227,21 +236,34 @@ export { useSecondClock } from './hooks/useSecondClock'
 export { useBackdropClose } from './hooks/useBackdropClose'
 export { useBackgroundLiveStore, useBackgroundTasks } from './hooks/useBackgroundTasks'
 export type { BackgroundTaskCounts, BackgroundTasksHandle, UseBackgroundTasksOptions } from './hooks/useBackgroundTasks'
+export { mainStep, useMainStep, useWorkingLineStore } from './hooks/useWorkingLine'
+export type { MainStep, WorkingLineInputs } from './hooks/useWorkingLine'
 export { useChatReportStore, useLiveState } from './hooks/useLiveState'
 export type { ChatFiles, ChatReport, LiveState } from './hooks/useLiveState'
 
 // ─── Transport ──────────────────────────────────────────────────────────────────────────────
 export * from './transport'
 
-export { default as VisualBlock } from './components/VisualBlock'
+export { default as VisualBlock, VisualThumb } from './components/VisualBlock'
+export {
+  COMMIT_MISS_MS, HOVERCARD, HOVERCARDS_KEY, Hover, HovercardProvider, clearHovercardCache, hovercardsEnabled, repoName, placeCard, setHovercardsEnabled, useCanHover, useHovercardsEnabled,
+  type HovercardPlace, type HovercardSide, type HovercardBinding, type RunField, type RunTarget, useHovercard, setHovercardClock, getHovercardClock, type HovercardClock,
+  type CardField, type CardPreview, type CardTarget, type CommitField, type CommitTarget, type FileField, type FileTarget, type HoverTarget, type HovercardSources,
+} from './components/Hovercard'
+export { visibleText } from './model/visibleText'
+export { default as CommitViewer, CommitViewerHost, useCommitOpener, type CommitViewerProps, type OpenCommit } from './components/CommitViewer'
 export type { VisualKind } from './model/visualKind'
 
 export { DelegationReview } from './components/DelegationReview'
 export { FiledTicket } from './components/cards/ProposalCard'
-export { outcomeLine, proposalStates, readCard, readProposalView } from './model/proposals'
+export { outcomeLine, proposalStates, readCard, readCreatedBoard, readProposalView } from './model/proposals'
 export { readReviewRequest, reviewForArtifact, reviewOutcomeLine, reviewRequestStates } from './model/reviewRequests'
 
 export { modelDisplayName, modelDisplayNames } from "./model/modelDisplay"
 
 export { reasoningLabel, readReasoning } from './model/reasoning'
 export type { Reasoning } from './model/reasoning'
+
+// ─── References in chat text: card numbers and commit hashes, linked once confirmed (#153) ─────────
+export { createRefStore, refStoreFor, resetRefStoresForTest, splitRefs, isHash, DEBOUNCE_MS as REF_DEBOUNCE_MS } from './model/refs'
+export type { ChatRefs, RefKey, RefState, RefStore } from './model/refs'

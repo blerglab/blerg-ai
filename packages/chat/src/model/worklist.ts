@@ -372,3 +372,60 @@ export function priorityGlyph(priority: string | undefined): string {
 export function ticketMeta(t: Partial<Ticket>): string[] {
   return [t.type, t.priority, t.assignee].filter((x): x is string => !!x)
 }
+
+// ── A pin's state as one glyph (#134): the chat's pin rows and the runner's panel share these ──
+
+export type PinState = 'done' | 'doing' | 'todo'
+
+/** More names for work in flight than the status words above know. */
+const DOING = new Set(['review', 'code review', 'in dev', 'dev', 'implementing', 'wip', 'qa', 'verify', 'staging'])
+
+/** A column name without its decoration: leading numbering ("2.", "2)"), emoji and symbols, and a
+ *  trailing count ("(3)", "[3]", "· 3"). */
+export function bareStatus(status: string | undefined): string {
+  return (status ?? '')
+    .replace(/^[\s\d.)\]:#-]*(?=\p{L})/u, '')
+    .replace(/^[^\p{L}]+/u, '')
+    .replace(/[\s·:-]*[([]?\s*\d+\s*[)\]]?\s*$/u, '')
+    .trim()
+}
+
+/** The state a status word means (a board column's name, or another tracker's status). */
+export function pinStateOfStatus(raw: string | undefined): PinState {
+  const status = bareStatus(raw)
+  if (DOING.has(status.toLowerCase().replace(/[\s_-]+/g, ' '))) return 'doing'
+  const tone = statusTone(status)
+  if (tone === 'done' || tone === 'canceled') return 'done'
+  if (tone === 'active' || tone === 'blocked') return 'doing'
+  return 'todo'
+}
+
+/** The state's glyph and its words. */
+export const PIN_STATE_GLYPH: Record<PinState, { glyph: string; words: string }> = {
+  done: { glyph: '✓', words: 'Done' },
+  doing: { glyph: '◐', words: 'In progress' },
+  todo: { glyph: '○', words: 'Not started' },
+}
+
+/** A run of pins (or of unpins) drawn as one row: the tickets, oldest first. */
+export interface TicketRun { action: 'pin' | 'unpin'; tickets: Ticket[] }
+
+/** The tickets a ticket event's row draws: its own, after any it folded (a run of pins or unpins). */
+export function ticketRunOf(ev: AgentEvent): TicketRun | null {
+  const p = readTicketEvent(ev.payload)
+  if (!p || (p.action !== 'pin' && p.action !== 'unpin')) return null
+  const earlier = Array.isArray((ev.payload as { earlier?: unknown }).earlier) ? (ev.payload as { earlier: unknown[] }).earlier : []
+  const tickets = earlier.map(readTicket).filter((t): t is Ticket => !!t)
+  return { action: p.action, tickets: [...tickets, p.ticket] }
+}
+
+/** foldTicketRun: two ticket events side by side in the transcript, a pin after a pin or an unpin after
+ *  an unpin, as one: the later event, carrying the earlier tickets (`earlier`). Null when they do not
+ *  fold (a refresh, a mixed pair, anything else): a refresh says what changed on a row of its own. */
+export function foldTicketRun(prev: AgentEvent, ev: AgentEvent): AgentEvent | null {
+  if (prev.kind !== 'ticket' || ev.kind !== 'ticket') return null
+  const a = ticketRunOf(prev)
+  const b = readTicketEvent(ev.payload)
+  if (!a || !b || a.action !== b.action) return null
+  return { ...ev, payload: { ...(ev.payload as object), earlier: a.tickets } }
+}

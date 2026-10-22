@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import { apiFetch } from '../apiFetch'
-import { TRIGGER_KINDS, type TopicsReply } from '../lib/topics'
+import { isTrigger, type TopicsReply } from '../lib/topics'
 
 export const MIN_GAP_MS = 5000
 
@@ -25,7 +25,7 @@ const LOADING: TopicsView = { status: 'loading' }
 
 export function countTriggers(events: readonly AgentEvent[]): number {
   let n = 0
-  for (const ev of events) if (TRIGGER_KINDS.has(ev.kind)) n++
+  for (const ev of events) if (isTrigger(ev)) n++
   return n
 }
 

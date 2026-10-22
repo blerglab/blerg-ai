@@ -3,8 +3,14 @@
 // shown itself.
 
 /** The sentence for a read the server refused. */
-export function workspaceErrorText(status: number, serverText = ''): string {
+export function workspaceErrorText(status: number, serverText = '', code?: string): string {
   const t = serverText.toLowerCase()
+  // The server's machine-readable reason first; the sentence only for an older server.
+  if (status === 409 && code) {
+    if (code === 'busy') return 'The file reader is busy. Try again in a moment.'
+    if (code === 'daemon_timeout' || code === 'changed' || code === 'invalid') return 'Couldn’t read the file just now. Try again.'
+    if (code === 'not_running') return 'The session isn’t running, so its files can’t be read.'
+  }
   switch (status) {
     case 401: return 'Sign in again to open files.'
     case 404: return t.startsWith('session not found') ? 'This session can’t be found.' : 'Not found in the session’s folder.'

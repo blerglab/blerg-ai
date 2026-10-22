@@ -224,6 +224,26 @@ type TopicPayload struct {
 	Commits []TopicCommit `json:"commits,omitempty"`
 }
 
+// MarkPayload — kind "mark": a stroke for the History tab the agent marked with `blerg-runner mark`
+// (or the session's owner marked), recorded by the server (POST /api/sessions/{id}/marks). Kind is
+// "decision" | "milestone" | "finding"; By is whose it is ("person": a ruling of the person the agent
+// wrote down, "agent": the agent's own, which the person can overrule). Text is plain text, cleaned
+// like a topic title. Commits, Card (a card number) and BoardID (the board it is on, when the
+// session knows it) are chips. At is set only for a back-dated mark (an import, or --at): the
+// moment it records, RFC 3339 UTC; the chat draws no row for it, History anchors it by time.
+// PostedBy is who posted it: "agent" (the session's own token) or "owner" (the person, signed in).
+type MarkPayload struct {
+	ID       string        `json:"id"`
+	Kind     string        `json:"kind"`
+	By       string        `json:"by"`
+	Text     string        `json:"text"`
+	Commits  []TopicCommit `json:"commits,omitempty"`
+	Card     int           `json:"card,omitempty"`
+	BoardID  string        `json:"board_id,omitempty"`
+	At       string        `json:"at,omitempty"`
+	PostedBy string        `json:"posted_by"`
+}
+
 // TopicCommit is one commit a topic's done names.
 type TopicCommit struct {
 	Sha string `json:"sha"`
@@ -297,6 +317,20 @@ type ErrorPayload struct {
 	Attempt    int `json:"attempt,omitempty"`
 	MaxRetries int `json:"max_retries,omitempty"`
 	RetryInMs  int `json:"retry_in_ms,omitempty"`
+	// SandboxExit, on the runtime_stopped error of a sandboxed session whose container stopped,
+	// is what Docker recorded about that container (docker inspect's State).
+	SandboxExit *SandboxExit `json:"sandbox_exit,omitempty"`
+}
+
+// SandboxExit is a stopped sandbox container's exit, as Docker recorded it. Gone means Docker no
+// longer knows the container (it was removed), so nothing else is known.
+type SandboxExit struct {
+	Gone       bool   `json:"gone,omitempty"`
+	Status     string `json:"status,omitempty"`
+	ExitCode   int    `json:"exit_code"`
+	OOMKilled  bool   `json:"oom_killed"`
+	FinishedAt string `json:"finished_at,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // The ErrorPayload codes.
@@ -311,6 +345,12 @@ const (
 	// wip/<id> branch at the end of a turn. A notice, not the turn's outcome; the parent's
 	// turn-end note says so.
 	ErrorCodeChildSync = "child_sync"
+	// ErrorCodeRuntimeStopped: the engine's runtime has stopped for good (Codex's app-server
+	// failed repeatedly; Hermes found an unsupported gateway, a changed provider binding, or could
+	// not verify its gateway shut down; a sandboxed session's container stopped, with SandboxExit);
+	// the session takes no more turns and ends. `blerg-runner session watch`
+	// returns on it.
+	ErrorCodeRuntimeStopped = "runtime_stopped"
 )
 
 // CompactionPayload — kind "compaction". Summary is the full replacement

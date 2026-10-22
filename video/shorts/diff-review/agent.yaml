@@ -1,0 +1,87 @@
+# The scripted agent for the diff-review short (read by video/demo/fake_claude.py).
+# The person asks for retries, the agent publishes a diff, the person reviews two lines, the agent
+# fixes both, answers both requests and publishes the diff again.
+pace: 1.1
+turns:
+  - id: implement
+    match: "retr(y|ies).*backoff"
+    steps:
+      - think: >-
+          The client gives up on the first 5xx. Retry 5xx answers and dropped connections, back
+          off exponentially, and keep sleep injectable so the tests run instantly.
+      - say: I'll make the upload client retry 5xx answers and dropped connections with exponential backoff.
+      - write: {path: photos/upload.py, from: files/upload_v1.py}
+      - write: {path: tests/test_upload.py, from: files/test_v1.py}
+      - run: python3 -m unittest -q 2>&1 | tail -3
+        description: Run the tests
+      - run: git add -A && git commit -qm "Retry uploads with exponential backoff" && git log --oneline -1
+        description: Commit
+      - run: blerg-runner diff base..HEAD --title "Retry uploads with backoff"
+        description: Show the diff
+      - say: |-
+          Uploads now retry 5xx answers and dropped connections up to 5 times, waiting 0.5 s, 1 s, 2 s, … between tries. Client errors fail at once. Four tests cover it.
+
+          The diff is above: comment on any line and I'll pick it up.
+
+  - id: fix
+    after: implement
+    match: "^Review of"
+    steps:
+      - think: >-
+          Two requests on the backoff: cap the delay, and add jitter. Keep the random source
+          injectable like sleep, so the tests stay deterministic.
+      - run: blerg-runner review list
+        description: List the open review requests
+      - edit:
+          path: photos/upload.py
+          old: |-
+            import time
+          new: |-
+            import random
+            import time
+      - edit:
+          path: photos/upload.py
+          old: "def upload(session, url, data, retries=5, base_delay=0.5, sleep=time.sleep):"
+          new: |-
+            def upload(session, url, data, retries=5, base_delay=0.5, max_delay=8.0,
+                       sleep=time.sleep, rand=random.random):
+      - edit:
+          path: photos/upload.py
+          old: |2-
+                    delay = base_delay * 2 ** attempt
+                    sleep(delay)
+          new: |2-
+                    delay = min(max_delay, base_delay * 2 ** attempt)
+                    sleep(delay * (0.5 + rand() / 2))  # jitter: 50-100% of the delay
+      - edit:
+          path: tests/test_upload.py
+          old: |2-
+                    self.assertEqual(upload(session, URL, b"x", sleep=waits.append), "p2")
+                    self.assertEqual(waits, [0.5, 1.0])
+          new: |2-
+                    self.assertEqual(upload(session, URL, b"x", sleep=waits.append, rand=lambda: 1.0), "p2")
+                    self.assertEqual(waits, [0.5, 1.0])
+
+                def test_delay_is_capped_and_jittered(self):
+                    waits = []
+                    session = FakeSession(*[FakeResponse(503)] * 9)
+                    with self.assertRaises(UploadError):
+                        upload(session, URL, b"x", retries=8, sleep=waits.append, rand=lambda: 0.0)
+                    self.assertEqual(max(waits), 4.0)  # 8 s cap, at the 50% jitter floor
+      - run: python3 -m unittest -q 2>&1 | tail -3
+        description: Run the tests
+      - run: git add -A && git commit -qm "Cap the upload backoff and add jitter" && git log --oneline -1
+        description: Commit
+      - replies:
+          - match: "cap|minutes|long"
+            status: done
+            text: Capped at max_delay (8 s by default); a test checks the cap.
+          - match: "jitter|lockstep|same time"
+            status: done
+            text: Each wait is now 50-100% of the delay, from an injectable random source.
+      - run: blerg-runner diff base..HEAD --title "Retry uploads with backoff"
+        description: Show the updated diff
+      - say: |-
+          Both done. The wait is capped at `max_delay` (8 s by default), and each wait is jittered to 50-100% of it so phones don't retry in lockstep after an outage. Five tests pass.
+
+          The updated diff is above, with your two comments answered beside it.

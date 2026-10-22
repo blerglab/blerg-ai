@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import StartProgress from './StartProgress'
 import { STILL_STARTING_MS, type StartAttempt } from '../model/startStages'
 
@@ -109,31 +109,82 @@ describe('StartProgress', () => {
     expect(screen.getByText(/session: s1/)).toBeInTheDocument()
   })
 
-  it('stops the session after a confirming second click', async () => {
+  // Card #142: a confirmation anchored to the button, never a second press on the same button.
+  it('asks in an alertdialog, focused on Cancel, and ends the session on End session', async () => {
     const onStop = vi.fn(() => Promise.resolve())
     render(<StartProgress attempt={attempt()} session={session} onStop={onStop} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Stop session' }))
+    const stop = screen.getByRole('button', { name: 'Stop session' })
+    fireEvent.click(stop)
     expect(onStop).not.toHaveBeenCalled()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm stop?' })) })
+    // The button itself never arms: same words, no second-press state.
+    expect(stop).toHaveTextContent('Stop session')
+    expect(stop.className).not.toContain('armed')
+    const dialog = screen.getByRole('alertdialog', { name: 'End this session?' })
+    expect(dialog).toHaveAttribute('aria-describedby')
+    expect(document.getElementById(dialog.getAttribute('aria-describedby')!)).toHaveTextContent('its pod is removed')
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: 'End session' })) })
     expect(onStop).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(screen.queryByText(/Stop failed/)).toBeNull()
   })
 
-  it('disarms the stop after three seconds without the second click', () => {
+  it('cancels on Esc, on Cancel and on a press outside, the focus back on the button', () => {
     const onStop = vi.fn(() => Promise.resolve())
     render(<StartProgress attempt={attempt()} session={session} onStop={onStop} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Stop session' }))
-    expect(screen.getByRole('button', { name: 'Confirm stop?' })).toBeInTheDocument()
-    act(() => { vi.advanceTimersByTime(3000) })
-    expect(screen.getByRole('button', { name: 'Stop session' })).toBeInTheDocument()
+    const stop = screen.getByRole('button', { name: 'Stop session' })
+    fireEvent.click(stop)
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(stop).toHaveFocus()
+    fireEvent.click(stop)
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    fireEvent.click(stop)
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(stop).toHaveFocus()
+    // Waiting never ends anything.
+    act(() => { vi.advanceTimersByTime(10_000) })
     expect(onStop).not.toHaveBeenCalled()
+  })
+
+  // Fix round 1 (#142): a failed start ends like any other ("End session"), never "Delete"; the
+  // words come from the session's runtime, and are neutral when it is not known.
+  it('offers End session, not Delete, on a failed start, worded by the session runtime', () => {
+    const failed = attempt({ runtime: undefined, failed: true, stages: [{ id: 'image', label: 'Pulling image', state: 'failed', detail: 'ImagePullBackOff' }] })
+    const { rerender } = render(<StartProgress attempt={failed} session={{ id: 's1', status: 'error', runtime: 'docker' }} onStop={vi.fn(() => Promise.resolve())} />)
+    expect(screen.queryByRole('button', { name: 'Delete session' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'End session' }))
+    expect(screen.getByRole('alertdialog', { name: 'End this session?' })).toHaveAccessibleDescription('The agent stops and its sandbox container is removed. The conversation, files and commits are kept.')
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    rerender(<StartProgress attempt={failed} session={{ id: 's1', status: 'error' }} onStop={vi.fn(() => Promise.resolve())} />)
+    fireEvent.click(screen.getByRole('button', { name: 'End session' }))
+    expect(screen.getByRole('alertdialog')).toHaveAccessibleDescription('The agent stops. Work not yet saved may be lost; the conversation is kept.')
+  })
+
+  it('cannot send a stop twice while one is on its way, and gives the focus back after a failure', async () => {
+    let fail: (e: Error) => void = () => {}
+    const onStop = vi.fn(() => new Promise<void>((_, reject) => { fail = reject }))
+    render(<StartProgress attempt={attempt()} session={session} onStop={onStop} />)
+    const stop = screen.getByRole('button', { name: 'Stop session' })
+    fireEvent.click(stop)
+    await act(async () => { fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' })) })
+    expect(stop).toBeDisabled()
+    expect(stop).toHaveAttribute('aria-busy', 'true')
+    fireEvent.click(stop)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(onStop).toHaveBeenCalledTimes(1)
+    await act(async () => { fail(new Error('HTTP 500')) })
+    expect(stop).toBeEnabled()
+    expect(stop).toHaveFocus()
   })
 
   it('says when the stop failed', async () => {
     const onStop = vi.fn(() => Promise.reject(new Error('HTTP 500')))
     render(<StartProgress attempt={attempt()} session={session} onStop={onStop} />)
     fireEvent.click(screen.getByRole('button', { name: 'Stop session' }))
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm stop?' })) })
+    await act(async () => { fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' })) })
     expect(screen.getByText('Stop failed: HTTP 500')).toBeInTheDocument()
   })
 

@@ -152,6 +152,7 @@ func runNativeCodexPluginSnapshot(t *testing.T, sandbox bool, interactive ...boo
 		if err := exec.Command("docker", "image", "inspect", "busybox:1.37").Run(); err != nil {
 			t.Skip("local busybox fixture image not present")
 		}
+		label := labelTestContainers(t)
 		container := "blerg-plugin-fixture-" + safeFileName(filepath.Base(base)) + "-" + ccUUID()
 		args := sandboxRunArgs(container, catalog, "", nil, sandboxRunExtras{network: "host", codexHome: home, codexSourceHome: source})
 		image := len(args) - 3
@@ -161,7 +162,7 @@ func runNativeCodexPluginSnapshot(t *testing.T, sandbox bool, interactive ...boo
 				t.Fatalf("native Docker fixture failed: %v %s", err, out)
 			}
 		}
-		stopSandbox = func() { _ = exec.Command("docker", "rm", "-f", container).Run() }
+		stopSandbox = func() { removeTestContainers(label) } // by its test label, never by name
 		startSandbox()
 		t.Cleanup(stopSandbox)
 		driver.prefix = sandboxExecPrefix(container)

@@ -1,0 +1,15 @@
+# The scripted agent for the sessions every demo install is seeded with (video/demo/seed.mjs):
+# one finished turn each, so the sidebar and the session list look like a working day. The prompts
+# come from seed.mjs. Read by video/demo/fake_claude.py next to the active short's agent.yaml.
+pace: 1.1
+turns:
+  - id: shop-flake
+    match: "flaky.*cart"
+    steps:
+      - say: The cart total test was flaky because it relied on dict order in an older Python. The total doesn't depend on order, so the test now compares totals only.
+      - run: git log --oneline -1
+      - say: Nothing else depends on the order. Done.
+  - id: albums-cover
+    match: "album cover"
+    steps:
+      - say: "`Album.cover()` returns the first photo, or `None` for an empty album. I'd keep it: the app already shows a placeholder for `None`."

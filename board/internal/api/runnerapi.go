@@ -94,6 +94,8 @@ func (a *API) runnerRoutes(mux *http.ServeMux, authed func(func(http.ResponseWri
 	mux.HandleFunc("POST /api/cards/{id}/spawn", authed(a.handleSpawnFromCard))
 	mux.HandleFunc("GET /api/cards/{id}/run-targets", authed(a.handleCardRunTargets))
 	mux.HandleFunc("GET /api/boards/{id}/run-targets", authed(a.handleBoardRunTargets))
+	mux.HandleFunc("GET /api/boards/{id}/repo-remote", authed(a.handleBoardRepoRemote))
+	mux.HandleFunc("POST /api/boards/{id}/repos/resolve", authed(a.handleResolveBoardRepo))
 	mux.HandleFunc("GET /api/cards/{id}/runner-sessions", authed(a.handleCardRunnerSessions))
 	mux.HandleFunc("GET /api/boards/{id}/active-sessions", authed(a.handleBoardActiveSessions))
 	mux.HandleFunc("GET /api/runner-sessions/{id}/events", authed(a.handleRunnerSessionEvents))

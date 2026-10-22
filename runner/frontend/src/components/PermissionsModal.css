@@ -82,7 +82,7 @@
 .pm-changed { box-shadow: inset 2px 0 0 var(--accent); }
 .pm-check { display: flex; gap: 10px; align-items: flex-start; font-size: var(--text-sm); cursor: pointer; min-width: 0; }
 .pm-check > span { min-width: 0; overflow-wrap: anywhere; }
-.pm-check input { flex: none; margin: 2px 0 0; width: 16px; height: 16px; accent-color: var(--accent); }
+.pm-check input { flex: none; margin: 2px 0 0; width: 16px; height: 16px; accent-color: var(--selected-border); }
 .pm-check input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pm-row-disabled .pm-check { cursor: default; color: var(--fog); }
 .pm-row-note { display: block; margin-top: 2px; font-size: var(--text-xs); color: var(--fog-dim); line-height: 1.4; }

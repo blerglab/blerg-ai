@@ -256,7 +256,7 @@ describe('the session panel\'s History tab', () => {
     await within(rail()!).findByTestId('reel-list')
     const done = within(rail()!).getAllByTestId('reel-card')[1]
     fireEvent.click(within(done).getByTestId('reel-head'))
-    const v2 = () => within(done).getAllByTestId('reel-chip')[1]
+    const v2 = () => within(done).getAllByTestId('reel-sum-file')[0]
     fireEvent.click(v2())
     expect(screen.getByTestId('chat-stub')).toHaveAttribute('data-linked', 'a2')
     fireEvent.click(screen.getByRole('button', { name: 'viewer opened' }))
@@ -283,7 +283,7 @@ describe('the session panel\'s History tab', () => {
     await within(rail()!).findByTestId('reel-list')
     const done = within(rail()!).getAllByTestId('reel-card')[1]
     fireEvent.click(within(done).getByTestId('reel-head'))
-    fireEvent.click(within(done).getAllByTestId('reel-chip')[1])
+    fireEvent.click(within(done).getAllByTestId('reel-sum-file')[0])
     expect(rail()).toBeNull()
     expect(screen.getByTestId('chat-stub')).toHaveAttribute('data-linked', 'a2')
   })

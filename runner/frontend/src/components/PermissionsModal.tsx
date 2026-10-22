@@ -6,6 +6,7 @@
 // From the session panel, Save goes through the grant APIs (owner-only on the server); from the
 // launch sheet, Save hands the draft back and the server grants it as the session starts.
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { GRANT_GLYPH } from '../lib/grantGlyphs'
 import { createPortal } from 'react-dom'
 import { useBackdropClose } from '@blerglab/chat'
 import { ENGINE_LABELS } from '../lib/runtimes'
@@ -58,7 +59,7 @@ export interface PermissionsModalProps {
   onSave: (next: PermissionsDraft, changes: PermissionChanges) => Promise<SaveOutcome>
 }
 
-const KIND_GLYPH = { child: '↳', board: '▦', tool: '⚙' } as const
+const KIND_GLYPH = GRANT_GLYPH
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]):not([tabindex="-1"]), [href], [tabindex]:not([tabindex="-1"])'
 const engineNames = (ids: string[]) => ids.map(id => ENGINE_LABELS[id] ?? id).join(', ')
 

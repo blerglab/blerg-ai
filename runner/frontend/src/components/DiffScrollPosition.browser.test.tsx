@@ -20,7 +20,20 @@ async function mount(text = patch) {
 }
 
 describe('diff file scroll position', () => {
-  it.each([1280, 390])('tracks clicked and manually scrolled files, including both ends at %ipx', async width => {
+  it('on a phone the picker jumps to a file and follows manual scrolling', async () => {
+    await page.viewport(390, 800)
+    const {code, sections} = await mount()
+    const picker = document.querySelector<HTMLSelectElement>('.diff-file-picker')!
+    expect(document.querySelector('.diff-files')).toBeNull()
+    await userEvent.selectOptions(picker, '1')
+    await waitFor(() => expect(Math.abs(sections[1].getBoundingClientRect().top - code.getBoundingClientRect().top)).toBeLessThan(40))
+    code.scrollTop += sections[2].getBoundingClientRect().top - code.getBoundingClientRect().top + 10
+    await waitFor(() => expect(picker.value).toBe('2'))
+    code.scrollTop = code.scrollHeight
+    await waitFor(() => expect(picker.value).toBe('4'))
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(innerWidth)
+  })
+  it.each([1280])('tracks clicked and manually scrolled files, including both ends at %ipx', async width => {
     await page.viewport(width, 800)
     const {code, buttons, sections} = await mount()
     await waitFor(() => expect(buttons[0].getAttribute('aria-current')).toBe('location'))

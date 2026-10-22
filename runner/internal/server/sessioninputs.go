@@ -27,7 +27,13 @@ func acceptSessionInput(ctx context.Context, h *Hub, pool *pgxpool.Pool, msg pro
 	if err != nil {
 		return false, err
 	}
-	payload, err := json.Marshal(map[string]any{"client_id": msg.ClientID, "text": msg.Text})
+	fields := map[string]any{"client_id": msg.ClientID, "text": msg.Text}
+	if msg.Source != "" {
+		// Whose message it is (Blerg's relay of an answer or a decision, a board's, ...): the chat
+		// never draws Blerg's own message to the agent as the person's queued bubble.
+		fields["source"] = msg.Source
+	}
+	payload, err := json.Marshal(fields)
 	if err != nil {
 		return false, err
 	}

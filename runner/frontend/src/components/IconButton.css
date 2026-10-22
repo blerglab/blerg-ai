@@ -1,0 +1,99 @@
+/* The app's icon button: the session header's controls and the sidebar's bell share it. Same size,
+   a 1 px outline, one icon weight, the same hover and focus. */
+.icon-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  box-sizing: border-box;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 7px;
+  flex-shrink: 0;
+  border: 1px solid var(--stone);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fog);
+  font: inherit;
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.icon-btn:hover { color: var(--chalk); border-color: var(--fog-dim); background: var(--scree); }
+.icon-btn:focus-visible { outline: 2px solid var(--blaze); outline-offset: 2px; color: var(--chalk); }
+.icon-btn[aria-pressed="true"], .icon-btn[aria-expanded="true"] { color: var(--selected-text); border-color: var(--selected-border); background: var(--selected-bg); }
+.icon-btn:disabled { opacity: .5; cursor: default; }
+.icon-btn-svg { flex-shrink: 0; }
+/* A starred session's star is the accent. */
+.icon-btn.starred { color: var(--blaze); }
+/* End session: the one control that changes the session, the only red. It asks first (ConfirmPopover). */
+.icon-btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--stone)); }
+.icon-btn.danger:hover { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+/* Open (its confirmation showing): the selected blue, so the confirmation's End session is the only red. */
+.icon-btn.danger[aria-expanded="true"] { color: var(--selected-text); border-color: var(--selected-border); background: var(--selected-bg); }
+/* A count on a button (the bell, the panel toggle). */
+.icon-btn-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--scree-2);
+  color: var(--fog);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.icon-btn-count.attention { background: var(--amber); color: var(--basalt); }
+
+/* A row of them: the session header's controls. */
+.icon-btn-group { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+.icon-menu { position: relative; flex-shrink: 0; }
+.icon-menu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 130;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 220px;
+  max-width: min(360px, calc(100vw - 24px));
+  padding: 6px;
+  border: 1px solid var(--stone);
+  border-radius: 8px;
+  background: var(--scree-2);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35);
+}
+.icon-menu-list[hidden] { display: none; }
+.icon-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--chalk);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.icon-menu-item:hover, .icon-menu-item:focus-visible { background: var(--scree); outline: none; }
+.icon-menu-item:focus-visible { box-shadow: inset 0 0 0 2px var(--blaze); }
+.icon-menu-item:disabled { opacity: .5; cursor: default; }
+.icon-menu-item.danger .icon-menu-label { color: var(--danger); }
+.icon-menu-hint { color: var(--fog-dim); font-size: var(--text-xs); white-space: normal; }
+
+@media (max-width: 768px) {
+  .icon-btn { min-width: 36px; height: 36px; }
+  .icon-btn-group { gap: 4px; }
+  .icon-menu-item { min-height: 44px; }
+}

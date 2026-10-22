@@ -227,7 +227,7 @@ describe('ChatView feedback', () => {
       version: 1,
       file: { name: 'report.md', artifactId: 'r1', artifactVersion: 3 },
       requests: [
-        { id: 'one', anchor: { kind: 'text', quote: 'q' }, text: 'first', status: 'done', reply: 'fixed it', createdAt: '2026-10-06T10:00:00Z' },
+        { id: 'one', anchor: { kind: 'text', quote: 'q' }, text: 'first', status: 'done', settledBy: 'agent', reply: 'fixed it', createdAt: '2026-10-06T10:00:00Z' },
         { id: 'two', anchor: { kind: 'text', quote: 'q' }, text: 'second', status: 'open', createdAt: '2026-10-06T10:00:00Z' },
       ],
     })
@@ -293,7 +293,9 @@ describe('ChatView start and ready', () => {
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'starting' })} />)
     fireEvent.click(screen.getByRole('button', { name: 'Stop session' }))
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm stop?' })) })
+    expect(t.stops).toBe(0)
+    const dialog = screen.getByRole('alertdialog', { name: 'End this session?' })
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: 'End session' })) })
     expect(t.stops).toBe(1)
   })
 
@@ -329,6 +331,9 @@ describe('ChatView start and ready', () => {
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'running' })} />)
     const timeline = screen.getByTestId('agent-chat').querySelector('.agent-timeline')!
     const cards = Array.from(timeline.children)
+    // Nothing older: the line that marks the start of the session, then the ready card.
+    expect(cards[0]).toHaveAttribute('data-testid', 'history-start')
+    cards.shift()
     expect(cards[0]).toHaveAttribute('data-testid', 'ready-card')
     expect(cards[1]).toHaveTextContent('fix the build')
     expect(screen.getByPlaceholderText('Message the agent… (/model, /effort, /<skill>)')).toBeInTheDocument()

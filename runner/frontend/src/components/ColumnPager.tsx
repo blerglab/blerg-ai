@@ -79,7 +79,7 @@ export default function ColumnPager({
                 padding: '10px 14px',
                 background: 'none',
                 border: 'none',
-                borderBottom: isActive ? '2px solid var(--blaze)' : '2px solid transparent',
+                borderBottom: isActive ? '2px solid var(--selected-border)' : '2px solid transparent',
                 color: isActive ? 'var(--chalk)' : 'var(--fog-dim)',
                 fontSize: '0.85rem',
                 fontWeight: isActive ? 700 : 400,
@@ -96,9 +96,9 @@ export default function ColumnPager({
                 <span
                   style={{
                     fontSize: '0.65rem',
-                    background: isActive ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--basalt)',
-                    color: isActive ? 'var(--amber)' : 'var(--fog)',
-                    border: `1px solid ${isActive ? 'var(--blaze)' : 'var(--stone)'}`,
+                    background: isActive ? 'var(--selected-bg)' : 'var(--basalt)',
+                    color: isActive ? 'var(--selected-text)' : 'var(--fog)',
+                    border: `1px solid ${isActive ? 'var(--selected-border)' : 'var(--stone)'}`,
                     borderRadius: 10,
                     padding: '0 5px',
                     lineHeight: '1.4',

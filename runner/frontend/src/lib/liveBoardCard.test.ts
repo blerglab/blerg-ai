@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { readLiveBoardCard, resetLiveBoardCardsForTest, useLiveBoardCard } from './liveBoardCard'
+import { PINS_REFRESH_MS, checkAccount, readLiveBoardCard, resetLiveBoardCardsForTest, useLiveBoardCard, useLiveBoardCards } from './liveBoardCard'
 import { renderHook, waitFor } from '@testing-library/react'
 
 const apiFetch = vi.fn()
@@ -26,5 +26,39 @@ describe('the live card cache is the person\'s', () => {
     await waitFor(() => expect(result.current.state).toBe('failed'))
     expect(result.current.read).toBeNull()
     expect(apiFetch).toHaveBeenCalledTimes(2)
+  })
+})
+
+// Card #127: the Live list reads its pins again while it is on screen, so a card moved to Done shows
+// ✓ before the next pin; and an account switch forgets what hovercards read.
+describe('useLiveBoardCards', () => {
+  it('reads the pins again every PINS_REFRESH_MS while active, and not while inactive', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      token = jwt('ann')
+      apiFetch.mockResolvedValue(card('Live'))
+      const refs = [{ board: 'b', number: 1 }]
+      const { rerender } = renderHook(({ active }) => useLiveBoardCards(refs, 's', active), { initialProps: { active: false } })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiFetch).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(PINS_REFRESH_MS * 2)
+      expect(apiFetch).toHaveBeenCalledTimes(1)
+      rerender({ active: true })
+      await vi.advanceTimersByTimeAsync(PINS_REFRESH_MS)
+      expect(apiFetch).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an account switch clears the hovercards\' and previews\' caches', async () => {
+    const chat = await import('@blerglab/chat')
+    const hc = vi.spyOn(chat, 'clearHovercardCache')
+    token = jwt('ann')
+    checkAccount()
+    expect(hc).not.toHaveBeenCalled()
+    token = jwt('bo')
+    checkAccount()
+    expect(hc).toHaveBeenCalledTimes(1)
   })
 })

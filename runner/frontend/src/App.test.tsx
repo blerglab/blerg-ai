@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom'
-import { TabBar, NotificationsButton, BrandHeader } from './App'
+import App, { TabBar, BrandHeader } from './App'
+import { useSessionStore } from './hooks/useSessionStore'
+import { useToastStore } from './hooks/useToastStore'
+import { resetProposalWarnings } from './lib/proposalAttention'
+import { makeDaemon, makeSession } from './test/fixtures'
+
+vi.mock('./ws', () => import('./test/wsMock'))
+import { PushSetting } from './components/ProposalNotifications'
 import { useMessageStore } from './hooks/useMessageStore'
 import { coreOrigin } from './authClient'
 import { usePendingProposals } from './lib/proposals'
@@ -166,27 +173,85 @@ describe('notifications are opt-in', () => {
       configurable: true,
       value: { register: vi.fn().mockResolvedValue({ pushManager: { subscribe: vi.fn() } }) },
     })
-    render(<MemoryRouter><NotificationsButton /></MemoryRouter>)
+    render(<MemoryRouter><PushSetting /></MemoryRouter>)
     expect(requestPermission).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: 'Enable notifications' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on' }))
     await waitFor(() => expect(requestPermission).toHaveBeenCalledTimes(1))
     vi.unstubAllGlobals()
   })
 
-  it('does not ask for permission at all when the browser has no Service Worker / Push support', async () => {
-    // No stubbing of navigator.serviceWorker / window.PushManager here — this
-    // is the default jsdom environment, i.e. exactly the unsupported case the
-    // capability check exists to guard: never prompt for a permission the
-    // app could not act on anyway (no Service Worker to register, no push
-    // subscription possible).
+  it('says the browser cannot receive push, and offers no button, when it has no Service Worker / Push support', async () => {
+    // The default jsdom environment: no navigator.serviceWorker, no window.PushManager.
     const requestPermission = vi.fn().mockResolvedValue('granted')
     vi.stubGlobal('Notification', { requestPermission, permission: 'default' })
-    render(<MemoryRouter><NotificationsButton /></MemoryRouter>)
-    fireEvent.click(screen.getByRole('button', { name: 'Enable notifications' }))
-    // Give any (incorrect) async call a microtask turn to happen before asserting it didn't.
-    await Promise.resolve()
-    await Promise.resolve()
+    render(<MemoryRouter><PushSetting /></MemoryRouter>)
+    expect(screen.getByTestId('push-state')).toHaveTextContent('This browser cannot receive push notifications')
+    expect(screen.queryByRole('button', { name: 'Turn on' })).toBeNull()
     expect(requestPermission).not.toHaveBeenCalled()
     vi.unstubAllGlobals()
+  })
+
+  it('turns push off: the server forgets the subscription, the browser drops it, and it is not restored', async () => {
+    const unsubscribe = vi.fn().mockResolvedValue(true)
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204, json: () => Promise.resolve({}) })
+    vi.stubGlobal('Notification', { requestPermission: vi.fn(), permission: 'granted' })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('PushManager', function () {})
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { getRegistration: vi.fn().mockResolvedValue({ pushManager: { getSubscription: vi.fn().mockResolvedValue({ endpoint: 'https://push.example.com/sub/1', unsubscribe }) } }) },
+    })
+    localStorage.setItem('blerg_notifications_wanted', '1')
+    render(<MemoryRouter><PushSetting /></MemoryRouter>)
+    expect(screen.getByTestId('push-state')).toHaveTextContent('On for this browser.')
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off' }))
+    await waitFor(() => expect(screen.getByTestId('push-state')).toHaveTextContent('Off for this browser.'))
+    expect(fetchMock).toHaveBeenCalledWith('/api/push/subscribe', expect.objectContaining({ method: 'DELETE', body: JSON.stringify({ endpoint: 'https://push.example.com/sub/1' }) }))
+    expect(unsubscribe).toHaveBeenCalledOnce()
+    expect(localStorage.getItem('blerg_notifications_wanted')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Turn on' })).toBeInTheDocument()
+    vi.unstubAllGlobals()
+  })
+})
+
+describe('the app has one Notifications bell', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    window.history.pushState({}, '', '/')
+  })
+
+  it.each(['/sessions/sess-a', '/sessions'])('shows exactly one bell at %s, in the sessions header beside + New', async path => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}), text: () => Promise.resolve('') })))
+    useSessionStore.setState({ daemons: [makeDaemon()], sessions: [makeSession({ id: 'sess-a', kind: 'agent', status: 'running', title: 'Busy work' })], statusChangedAt: {}, serverVersion: 'test' })
+    window.history.pushState({}, '', path)
+    render(<App />)
+    await act(async () => { for (let i = 0; i < 6; i++) await Promise.resolve() })
+    const bells = screen.getAllByRole('button', { name: /^Notifications/ })
+    expect(bells).toHaveLength(1)
+    expect(bells[0].parentElement!.parentElement).toContainElement(screen.getByText('+ New'))
+    if (path.startsWith('/sessions/')) expect(screen.getByTestId('session-header-controls')).not.toContainElement(bells[0])
+  })
+})
+
+describe('proposal expiry warnings come from the app layout', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    window.history.pushState({}, '', '/')
+  })
+
+  it('warns on a phone page with no bell mounted', async () => {
+    resetProposalWarnings()
+    useToastStore.setState({ toasts: [] })
+    vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
+      matches: true, media: query, onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    })))
+    const expiring = { id: 'p1', state: 'pending', kind: 'board_file', connection_id: '', connection_name: 'Board', tool: 'file_ticket', arguments: { title: 'Card' }, arguments_raw: '{}', agent_summary: '', session_id: 'sess-a', cron_id: null, created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 3600_000).toISOString(), decided_at: null, decided_by: null, result: null }
+    vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(String(url).startsWith('/api/proposals') ? { proposals: [expiring] } : {}), text: () => Promise.resolve('') })))
+    useSessionStore.setState({ daemons: [makeDaemon()], sessions: [], statusChangedAt: {}, serverVersion: 'test' })
+    window.history.pushState({}, '', '/crons')
+    render(<App />)
+    await waitFor(() => expect(useToastStore.getState().toasts.map(t => t.title)).toContain('Proposal expires soon'))
+    expect(screen.queryAllByRole('button', { name: /^Notifications/ })).toHaveLength(0)
   })
 })

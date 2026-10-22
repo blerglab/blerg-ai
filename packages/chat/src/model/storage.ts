@@ -57,3 +57,8 @@ export type ViewerLayoutKind = 'file' | 'review' | 'markup' | 'diff' | 'ticket'
 
 /** Where the viewer keeps a layout's maximize choice ("1" maximized, absent not). */
 export const MAXIMIZED_KEY = (kind: ViewerLayoutKind) => `blerg.chat.viewer.maximized.${kind}`
+
+/** Ctrl+Alt+F, or Cmd+Alt+F on a Mac: by the physical key, since Option changes the character. */
+export function isMaximizeShortcut(e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; code: string; key: string }): boolean {
+  return e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && (e.code === 'KeyF' || e.key.toLowerCase() === 'f')
+}

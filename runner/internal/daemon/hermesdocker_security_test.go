@@ -52,15 +52,12 @@ def main():
 				defer cancel()
 				return exec.CommandContext(ctx, "docker", args...).Output()
 			}
-			_, err := docker("run", "--detach", "--name", name, "--user", strconv.Itoa(os.Getuid())+":"+strconv.Itoa(os.Getgid()), "--network", "none", "--mount", "type=bind,source="+filepath.Join(root, "tui_gateway")+",target=/home/agent/.hermes/hermes-agent/tui_gateway,readonly", "--entrypoint", "sleep", image, "infinity")
+			label := labelTestContainers(t)
+			_, err := docker("run", "--detach", "--name", name, "--label", label, "--label", sandboxTestLabels[0], "--user", strconv.Itoa(os.Getuid())+":"+strconv.Itoa(os.Getgid()), "--network", "none", "--mount", "type=bind,source="+filepath.Join(root, "tui_gateway")+",target=/home/agent/.hermes/hermes-agent/tui_gateway,readonly", "--entrypoint", "sleep", image, "infinity")
 			if err != nil {
 				t.Fatalf("disposable Docker fixture could not start: %v", err)
 			}
-			t.Cleanup(func() {
-				if _, err := docker("rm", "--force", name); err != nil {
-					t.Error("disposable Docker fixture cleanup failed")
-				}
-			})
+			// Removed by its test label (labelTestContainers), never by name.
 			d := newHermesDriver(AgentDriverOpts{Spec: engineRegistry["hermes"], Emitter: &collectEmitter{}, Env: []string{"PATH=/usr/bin:/bin", "HOME=/tmp"}})
 			d.useSandbox(sandboxExec{"docker", "exec", "-i", name})
 			probeCtx, probeCancel := context.WithTimeout(t.Context(), 5*time.Second)

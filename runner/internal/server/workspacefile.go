@@ -34,21 +34,35 @@ type workspaceFileRequests struct {
 	pending        map[string]workspaceFileWaiter
 	active         int
 	activeByDaemon map[string]int
+	activeByUser   map[string]int
 }
 
+// Workspace-file reads at once: for the whole server, per daemon and per person. The per-person
+// limit keeps one person's document (a README full of images) from holding every slot: someone
+// else's viewer still gets one. A refused read is answered 409 busy, and the client retries.
+const (
+	workspaceReadsGlobal    = 4
+	workspaceReadsPerDaemon = 2
+	workspaceReadsPerUser   = 2
+)
+
 // A lease remains held through validation and the bounded HTTP response write, not just RPC.
-func (h *Hub) acquireWorkspaceFileRead(dc *DaemonConn) (func(), bool) {
+func (h *Hub) acquireWorkspaceFileRead(dc *DaemonConn, user string) (func(), bool) {
 	r := &h.workspaceFileReqs
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.active >= 2 || r.activeByDaemon[dc.ID] >= 2 {
+	if r.active >= workspaceReadsGlobal || r.activeByDaemon[dc.ID] >= workspaceReadsPerDaemon || r.activeByUser[user] >= workspaceReadsPerUser {
 		return nil, false
 	}
 	if r.activeByDaemon == nil {
 		r.activeByDaemon = make(map[string]int)
 	}
+	if r.activeByUser == nil {
+		r.activeByUser = make(map[string]int)
+	}
 	r.active++
 	r.activeByDaemon[dc.ID]++
+	r.activeByUser[user]++
 	return func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
@@ -56,6 +70,10 @@ func (h *Hub) acquireWorkspaceFileRead(dc *DaemonConn) (func(), bool) {
 		r.activeByDaemon[dc.ID]--
 		if r.activeByDaemon[dc.ID] == 0 {
 			delete(r.activeByDaemon, dc.ID)
+		}
+		r.activeByUser[user]--
+		if r.activeByUser[user] == 0 {
+			delete(r.activeByUser, user)
 		}
 	}, true
 }
@@ -71,7 +89,7 @@ func (h *Hub) requestWorkspaceFile(ctx context.Context, dc *DaemonConn, sid, nam
 			count++
 		}
 	}
-	if len(r.pending) >= 4 || count >= 2 {
+	if len(r.pending) >= workspaceReadsGlobal || count >= workspaceReadsPerDaemon {
 		r.mu.Unlock()
 		return protocol.WorkspaceFileResult{}, errWorkspaceUnavailable
 	}
@@ -142,12 +160,28 @@ func (a *API) RegisterWorkspaceFileRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sessions/{id}/workspace-file", a.HandleGetWorkspaceFile)
 }
 
-func workspaceFileProblem(w http.ResponseWriter, status int, message string) {
+// Machine-readable reasons for a refused workspace-file read, beside the sentence for people.
+// Clients branch on these, never on the text (packages/chat/src/model/imageQueue.ts retries
+// workspaceCodeBusy without limit while a document is open, and workspaceCodeDaemonTimeout and
+// workspaceCodeChanged a few times; anything else is final).
+const (
+	workspaceCodeBusy          = "busy"           // every read slot is taken; try again shortly
+	workspaceCodeDaemonTimeout = "daemon_timeout" // the daemon's reply did not arrive in time
+	workspaceCodeChanged       = "changed"        // the workspace changed (a reconnect) while opening
+	workspaceCodeNotRunning    = "not_running"    // the session has no live engine or daemon
+	workspaceCodeUnavailable   = "unavailable"
+	workspaceCodeForbidden     = "forbidden"
+	workspaceCodeNotFound      = "not_found"
+	workspaceCodeTooLarge      = "too_large"
+	workspaceCodeInvalid       = "invalid"
+)
+
+func workspaceFileProblem(w http.ResponseWriter, status int, code, message string) {
 	// The daemon wait can exhaust the success deadline. Give this fixed-size refusal a
 	// separate, bounded write window so old peers receive JSON rather than a dropped socket.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
 	w.Header().Set("Cache-Control", "private, no-store")
-	writeJSON(w, status, map[string]string{"error": message, "error_id": newUUID()})
+	writeJSON(w, status, map[string]string{"error": message, "code": code, "error_id": newUUID()})
 }
 
 // HandleGetWorkspaceFile is a human owner/admin capability, stricter than transcript visibility.
@@ -157,16 +191,16 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Kind != "human" {
-		workspaceFileProblem(w, 403, "Workspace files can only be opened by a signed-in person.")
+		workspaceFileProblem(w, 403, workspaceCodeForbidden, "Workspace files can only be opened by a signed-in person.")
 		return
 	}
 	if a.dbPool == nil {
-		workspaceFileProblem(w, 409, "The session workspace is unavailable.")
+		workspaceFileProblem(w, 409, workspaceCodeUnavailable, "The session workspace is unavailable.")
 		return
 	}
 	sid := r.PathValue("id")
 	if !validSessionID(sid) {
-		workspaceFileProblem(w, 404, "Session not found.")
+		workspaceFileProblem(w, 404, workspaceCodeNotFound, "Session not found.")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), workspaceFileTimeout)
@@ -176,102 +210,102 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	}
 	row, err := db.GetSession(ctx, a.dbPool, sid)
 	if err != nil {
-		workspaceFileProblem(w, 409, "The session workspace is unavailable.")
+		workspaceFileProblem(w, 409, workspaceCodeUnavailable, "The session workspace is unavailable.")
 		return
 	}
 	if row == nil {
-		workspaceFileProblem(w, 404, "Session not found.")
+		workspaceFileProblem(w, 404, workspaceCodeNotFound, "Session not found.")
 		return
 	}
 	// A private session is visible to its owner alone (privacy.go): not to an administrator, and to
 	// anyone else it does not exist, so the answer matches an unknown session's.
 	if row.Private && !ownsSession(p.Sub, row) {
-		workspaceFileProblem(w, 404, "Session not found.")
+		workspaceFileProblem(w, 404, workspaceCodeNotFound, "Session not found.")
 		return
 	}
 	if !ownsSession(p.Sub, row) && !p.Has(insightsAdminCap) {
-		workspaceFileProblem(w, 403, "Only the session owner or an administrator can open workspace files.")
+		workspaceFileProblem(w, 403, workspaceCodeForbidden, "Only the session owner or an administrator can open workspace files.")
 		return
 	}
 	name := r.URL.Query().Get("path")
 	if !workspacePathAllowed(name) {
-		workspaceFileProblem(w, 403, "Blerg only opens relative paths inside the session workspace.")
+		workspaceFileProblem(w, 403, workspaceCodeForbidden, "Blerg only opens relative paths inside the session workspace.")
 		return
 	}
 	switch row.Status {
 	case "ended", "stopped", "error", "disconnected":
-		workspaceFileProblem(w, 409, "The session has no live workspace engine.")
+		workspaceFileProblem(w, 409, workspaceCodeNotRunning, "The session has no live workspace engine.")
 		return
 	}
 	dc := a.hub.FindDaemonForSession(sid)
 	if dc == nil || (dc.BoundSessionID != "" && dc.BoundSessionID != sid) {
-		workspaceFileProblem(w, 409, "The session has no live workspace daemon.")
+		workspaceFileProblem(w, 409, workspaceCodeNotRunning, "The session has no live workspace daemon.")
 		return
 	}
-	release, leased := a.hub.acquireWorkspaceFileRead(dc)
+	release, leased := a.hub.acquireWorkspaceFileRead(dc, p.Sub)
 	if !leased {
-		workspaceFileProblem(w, 409, "The workspace file reader is busy.")
+		workspaceFileProblem(w, 409, workspaceCodeBusy, "The workspace file reader is busy.")
 		return
 	}
 	defer release()
 	res, err := a.hub.requestWorkspaceFile(ctx, dc, sid, name)
 	if err != nil {
-		workspaceFileProblem(w, 409, "The session daemon did not provide a workspace file.")
+		workspaceFileProblem(w, 409, workspaceCodeDaemonTimeout, "The session daemon did not provide a workspace file.")
 		return
 	}
 	// Validate authority again after waiting: a reconnect or launch replacement cannot supply data.
 	if a.hub.GetDaemon(dc.ID) != dc || a.hub.FindDaemonForSession(sid) != dc {
-		workspaceFileProblem(w, 409, "The session workspace changed while opening the file.")
+		workspaceFileProblem(w, 409, workspaceCodeChanged, "The session workspace changed while opening the file.")
 		return
 	}
 	if dc.RuntimeTokenID != "" {
 		if err := db.ValidateRuntimeBinding(ctx, a.dbPool, sid, dc.RuntimeTokenID, false); err != nil {
-			workspaceFileProblem(w, 409, "The session workspace changed while opening the file.")
+			workspaceFileProblem(w, 409, workspaceCodeChanged, "The session workspace changed while opening the file.")
 			return
 		}
 	}
 	if !res.OK {
-		status, message := 409, "The session workspace is unavailable."
+		status, code, message := 409, workspaceCodeUnavailable, "The session workspace is unavailable."
 		switch res.ErrorCode {
 		case "forbidden":
-			status = 403
+			status, code = 403, workspaceCodeForbidden
 			message = "Blerg could not safely open that workspace file."
 			if strings.HasPrefix(res.Error, "Blerg doesn't open files that usually hold secrets") {
 				message = "Blerg doesn't open files that usually hold secrets (restricted filename)."
 			}
 		case "not_found":
-			status = 404
+			status, code = 404, workspaceCodeNotFound
 			message = "The workspace file was not found."
 		case "too_large":
-			status = 413
+			status, code = 413, workspaceCodeTooLarge
 			message = "The workspace file is larger than its configured size limit."
 		}
-		workspaceFileProblem(w, status, message)
+		workspaceFileProblem(w, status, code, message)
 		return
 	}
 	if !workspacePathAllowed(res.Path) || res.Path != path.Clean(name) || res.Size < 0 || res.Size > workspaceFileMaxBytes || len(res.ContentB64) > base64.StdEncoding.EncodedLen(workspaceFileMaxBytes) || res.Truncated {
-		workspaceFileProblem(w, 409, "The daemon returned an invalid workspace file.")
+		workspaceFileProblem(w, 409, workspaceCodeInvalid, "The daemon returned an invalid workspace file.")
 		return
 	}
 	// Strict decoding checks padding bits; rejecting CR/LF also enforces the canonical
 	// encoding without allocating another full-size decoded or re-encoded copy.
 	if strings.ContainsAny(res.ContentB64, "\r\n") {
-		workspaceFileProblem(w, 409, "The daemon returned an invalid workspace file.")
+		workspaceFileProblem(w, 409, workspaceCodeInvalid, "The daemon returned an invalid workspace file.")
 		return
 	}
 	decoded := io.LimitReader(base64.NewDecoder(base64.StdEncoding.Strict(), strings.NewReader(res.ContentB64)), res.Size+1)
 	head, err := io.ReadAll(io.LimitReader(decoded, 512))
 	if err != nil {
-		workspaceFileProblem(w, 409, "The daemon returned an invalid workspace file.")
+		workspaceFileProblem(w, 409, workspaceCodeInvalid, "The daemon returned an invalid workspace file.")
 		return
 	}
 	rest, err := io.Copy(io.Discard, decoded)
 	if err != nil || int64(len(head))+rest != res.Size {
-		workspaceFileProblem(w, 409, "The daemon returned an invalid workspace file.")
+		workspaceFileProblem(w, 409, workspaceCodeInvalid, "The daemon returned an invalid workspace file.")
 		return
 	}
 	if _, err := time.Parse(time.RFC3339Nano, res.Mtime); err != nil {
-		workspaceFileProblem(w, 409, "The daemon returned an invalid workspace file.")
+		workspaceFileProblem(w, 409, workspaceCodeInvalid, "The daemon returned an invalid workspace file.")
 		return
 	}
 	ct, view := fileview.Classify(res.Path, head, res.Size)
@@ -308,6 +342,6 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	// A fence commit can fail after the callback already started the HTTP response.
 	// Never append a second JSON document (or retry a possibly partial file response).
 	if err != nil && !responseStarted {
-		workspaceFileProblem(w, 409, "The session workspace changed while opening the file.")
+		workspaceFileProblem(w, 409, workspaceCodeChanged, "The session workspace changed while opening the file.")
 	}
 }

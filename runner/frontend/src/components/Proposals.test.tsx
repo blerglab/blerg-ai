@@ -570,3 +570,46 @@ describe('readable proposal attention and history', () => {
     expect(document.body.textContent).not.toMatch(/account-fixture|permission-fixture/)
   })
 })
+
+describe('a proposed board on the Proposals page', () => {
+  const board = (access?: string) => {
+    const args: Record<string, unknown> = { name: 'Launch', description: 'Ship the launch', repos: ['team/app', 'team/web'], columns: ['Todo', 'Done'], ...(access ? { access } : {}) }
+    return prop({ kind: 'board_create', connection_id: '00000000-0000-4000-8000-00000000b0f3', connection_name: 'board-create', tool: 'create_board', agent_summary: '', arguments: args, arguments_raw: JSON.stringify(args) })
+  }
+
+  it('shows the name, repositories, columns and the access asked for', async () => {
+    items = [board('file')]
+    renderPage()
+    const preview = await screen.findByRole('article', { name: 'Board the agent proposes' })
+    expect(within(preview).getByRole('heading', { name: 'Launch' })).toBeTruthy()
+    expect(preview.textContent).toContain('Ship the launch')
+    expect(preview.textContent).toContain('team/app primary')
+    expect(preview.textContent).toContain('team/web')
+    expect(preview.textContent).toContain('Todo · Done')
+    expect(screen.getByTestId('proposal-board-access-p1').textContent).toBe('File without asking, for this session only')
+  })
+
+  it('approves the exact arguments with the access asked for, or a lower one, never a higher one', async () => {
+    items = [board()]
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+    const select = screen.getByLabelText('Session access to the new board') as HTMLSelectElement
+    expect([...select.options].map(o => o.value)).toEqual(['full', 'file', 'read', 'propose'])
+    expect(select.value).toBe('full')
+    fireEvent.click(screen.getByRole('button', { name: 'Create board' }))
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0]).toEqual({ url: APPROVE, method: 'POST', body: { expected_arguments_raw: items[0].arguments_raw } })
+  })
+
+  it('sends a lowered access', async () => {
+    items = [board('file')]
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+    const select = screen.getByLabelText('Session access to the new board') as HTMLSelectElement
+    expect([...select.options].map(o => o.value)).toEqual(['file', 'read', 'propose'])
+    fireEvent.change(select, { target: { value: 'read' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create board' }))
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0].body).toEqual({ expected_arguments_raw: items[0].arguments_raw, access: 'read' })
+  })
+})

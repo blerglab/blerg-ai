@@ -33,6 +33,7 @@ import (
 func (a *API) RegisterTopicRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sessions/{id}/topics", a.HandlePostTopic)
 	mux.HandleFunc("GET /api/sessions/{id}/topics", a.HandleGetTopics)
+	a.RegisterMarkRoutes(mux)
 }
 
 type topicRequest struct {
@@ -187,6 +188,10 @@ type topicsReply struct {
 	TokensHidden bool             `json:"tokens_hidden"`
 	Unmarked     *topics.Unmarked `json:"unmarked"`
 	Topics       []topics.Topic   `json:"topics"`
+	// Strokes is the History feed (topics/strokes.go), newest first.
+	Strokes []topics.Stroke `json:"strokes"`
+	// StrokesTruncated is how many older strokes the feed left out (every waiting one is kept).
+	StrokesTruncated int `json:"strokes_truncated"`
 }
 
 // topicsBootTag names this process in the reel's ETag (see topicsETag).
@@ -196,7 +201,7 @@ var topicsBootTag = strconv.FormatInt(time.Now().UnixNano(), 36)
 // deletion moves the count), whether the session is live and its end (subagent statuses depend on them),
 // the repository its commit links point at (repo: sessionRepo's key, "" when none) and the
 // viewer class (tokens shown or hidden).
-func topicsETag(through int64, files int, newest time.Time, status string, ended *time.Time, repo string, showTokens bool) string {
+func topicsETag(through int64, files int, newest time.Time, status string, ended *time.Time, repo string, showTokens bool, asks string) string {
 	var end int64
 	if ended != nil {
 		end = ended.UnixNano()
@@ -212,6 +217,9 @@ func topicsETag(through int64, files int, newest time.Time, status string, ended
 	}
 	r := fnv.New32a()
 	_, _ = r.Write([]byte(repo))
+	// The asks' states: closing one without an answer writes no event.
+	_, _ = r.Write([]byte{0})
+	_, _ = r.Write([]byte(asks))
 	// The process's start is in the tag too: a version's missing flag reads the disk, which the
 	// rest of the tag does not see, and the way bytes go missing is a restart onto a data
 	// directory that did not survive it.
@@ -295,7 +303,12 @@ func (a *API) HandleGetTopics(w http.ResponseWriter, r *http.Request) {
 		writeDatabaseFailure(w, "read the session's history", "topics ArtifactStamp "+sid, err)
 		return
 	}
-	etag := topicsETag(through, files, newest, row.Status, row.EndedAt, repoKey, showTokens)
+	askClosed, askDismissed, askOpen, err := db.AskStates(ctx, a.dbPool, sid)
+	if err != nil {
+		writeDatabaseFailure(w, "read the session's history", "topics AskStates "+sid, err)
+		return
+	}
+	etag := topicsETag(through, files, newest, row.Status, row.EndedAt, repoKey, showTokens, fmt.Sprintf("%d.%d", askOpen, len(askClosed)))
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-store")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
@@ -314,6 +327,20 @@ func (a *API) HandleGetTopics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows = append(rows, cards...)
+	// The session's renames: rows in the topic that was open (else unmarked).
+	renames, err := db.ListSessionRenamedEvents(ctx, a.dbPool, sid, through)
+	if err != nil {
+		writeDatabaseFailure(w, "read the session's history", "topics ListSessionRenamedEvents "+sid, err)
+		return
+	}
+	rows = append(rows, renames...)
+	// The History feed's marks, asks, approvals, proposals and reviews.
+	strokeRows, err := db.ListStrokeEvents(ctx, a.dbPool, sid, through)
+	if err != nil {
+		writeDatabaseFailure(w, "read the session's history", "topics ListStrokeEvents "+sid, err)
+		return
+	}
+	rows = append(rows, strokeRows...)
 	arts, err := db.ListArtifacts(ctx, a.dbPool, sid)
 	if err != nil {
 		writeDatabaseFailure(w, "read the session's history", "topics ListArtifacts "+sid, err)
@@ -338,10 +365,10 @@ func (a *API) HandleGetTopics(w http.ResponseWriter, r *http.Request) {
 	}
 	reel := topics.Build(events, published, topics.Options{
 		ThroughSeq: through, Live: !terminalSessionStatus(row.Status), EndedAt: row.EndedAt, ShowTokens: showTokens,
-		CommitURL: commitURL,
+		CommitURL: commitURL, AskClosed: askClosed, AskDismissed: askDismissed,
 	})
 	writeJSON(w, http.StatusOK, topicsReply{
 		SessionID: sid, ThroughSeq: through, GeneratedAt: time.Now().UTC(), TokensHidden: reel.TokensHidden,
-		Unmarked: reel.Unmarked, Topics: reel.Topics,
+		Unmarked: reel.Unmarked, Topics: reel.Topics, Strokes: reel.Strokes, StrokesTruncated: reel.StrokesTruncated,
 	})
 }

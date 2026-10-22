@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import UsageMeters from './UsageMeters'
-import { meterLevel, resetsIn } from '../lib/usageLimits'
+import { clockTime, meterLevel, resetsIn } from '../lib/usageLimits'
 import { makeDaemon } from '../test/fixtures'
 import type { UsageLimits } from '../types'
 
@@ -30,12 +30,12 @@ describe('UsageMeters', () => {
     const five = within(row).getByTestId('usage-window-5h')
     expect(five).toHaveTextContent('5h')
     expect(five).toHaveTextContent('42%')
-    expect(five.title).toBe('5-hour window: 42% used · resets in 2h 10m')
+    expect(five.title).toBe(`5-hour window: 42% used, 58% left · resets ${clockTime(new Date(at(130)))} (in 2h 10m)`)
     expect(five.querySelector('.usage-meter__fill')).toHaveStyle({ width: '42%' })
     const week = within(row).getByTestId('usage-window-7d')
     expect(week).toHaveTextContent('week')
     expect(week).toHaveTextContent('92%')
-    expect(week.title).toBe('Weekly window: 92% used · resets in 3d 4h')
+    expect(week.title).toBe(`Weekly window: 92% used, 8% left · resets ${new Date(at(3 * 1440 + 240)).toLocaleDateString([], { weekday: 'short' })} ${clockTime(new Date(at(3 * 1440 + 240)))} (in 3d 4h)`)
   })
 
   describe('a spend limit (work or enterprise account)', () => {
@@ -46,8 +46,8 @@ describe('UsageMeters', () => {
       const month = screen.getByTestId('usage-window-month')
       expect(month).toHaveTextContent('month')
       expect(month).toHaveTextContent('34%')
-      expect(month.title).toBe('Monthly spend limit: 34% used')
-      expect(month).toHaveAccessibleName('Claude monthly spend limit, 34% used')
+      expect(month.title).toBe('Monthly spend limit: 34% used, 66% left')
+      expect(month).toHaveAccessibleName('Claude monthly spend limit, 34% used, 66% left')
       expect(month.querySelector('.usage-meter__reset')).toBeNull()
       expect(month.querySelector('.usage-meter__fill')).toHaveStyle({ width: '34%' })
     })
@@ -57,8 +57,8 @@ describe('UsageMeters', () => {
       const month = screen.getByTestId('usage-window-month')
       expect(month).toHaveTextContent('<1%')
       expect(month).not.toHaveTextContent('0%')
-      expect(month.title).toBe('Monthly spend limit: <1% used')
-      expect(month).toHaveAccessibleName('Claude monthly spend limit, under 1% used')
+      expect(month.title).toBe('Monthly spend limit: <1% used, 99% left')
+      expect(month).toHaveAccessibleName('Claude monthly spend limit, under 1% used, 99% left')
     })
 
     it('still says 0% for a share of exactly zero', () => {
@@ -90,8 +90,8 @@ describe('UsageMeters', () => {
       expect(within(row).getAllByTestId(/^usage-window-/).map(w => w.dataset.testid)).toEqual([
         'usage-window-month', 'usage-window-day', 'usage-window-spend-week',
       ])
-      expect(screen.getByTestId('usage-window-day').title).toBe('Daily spend limit: 12% used')
-      expect(screen.getByTestId('usage-window-spend-week').title).toBe('Weekly spend limit: 40% used')
+      expect(screen.getByTestId('usage-window-day').title).toBe('Daily spend limit: 12% used, 88% left')
+      expect(screen.getByTestId('usage-window-spend-week').title).toBe('Weekly spend limit: 40% used, 60% left')
     })
   })
 
@@ -134,8 +134,8 @@ describe('UsageMeters', () => {
     expect(bars[0]).toHaveAttribute('aria-valuenow', '42')
     expect(bars[0]).toHaveAttribute('aria-valuemin', '0')
     expect(bars[0]).toHaveAttribute('aria-valuemax', '100')
-    expect(bars[0]).toHaveAccessibleName(`Codex 5-hour window, 42% used, resets in 2h 10m, as of ${clock}`)
-    expect(screen.getByTestId('usage-window-5h').title).toBe(`5-hour window: 42% used · resets in 2h 10m · as of ${clock}`)
+    expect(bars[0]).toHaveAccessibleName(`Codex 5-hour window, 42% used, 58% left, resets in 2h 10m, as of ${clock}`)
+    expect(screen.getByTestId('usage-window-5h').title).toBe(`5-hour window: 42% used, 58% left · resets ${clockTime(new Date(at(130)))} (in 2h 10m) · as of ${clock}`)
   })
 
   it('shows the reset time as text too, for a screen with no hover', () => {
@@ -168,5 +168,77 @@ describe('UsageMeters', () => {
     expect(resetsIn(at(1440 * 2 + 60), NOW)).toBe('in 2d 1h')
     expect(resetsIn(undefined, NOW)).toBe('')
     expect(resetsIn(at(-1), NOW)).toBe('')
+  })
+
+  // Card #85: a machine that runs Codex but has not reported its limits shows a placeholder saying
+  // when they will appear; an account with no window says so; hovering a row gives every window's
+  // used and left shares and its reset; no money is ever shown (the daemon sends none).
+  describe('what each provider row says', () => {
+    const claude: UsageLimits = { provider: 'claude', windows: [{ id: '5h', used_percent: 20, resets_at: at(60) }, { id: '7d', used_percent: 64.4, resets_at: at(2 * 1440) }] }
+
+    it('holds a place for a provider a connected machine runs and has not read yet, saying when it appears', () => {
+      render(<UsageMeters daemons={[makeDaemon({ status: 'connected', available_engines: ['claude', 'codex', 'hermes'], usage_limits: [claude] })]} now={NOW} />)
+      const row = screen.getByTestId('usage-row-codex')
+      expect(row).toHaveTextContent('Codex')
+      expect(within(row).getByTestId('usage-pending')).toHaveAccessibleName('Codex: no usage limits read yet')
+      expect(row.title).toMatch(/^Codex: no usage limits from this machine yet\. A daemon from 0\.4\.5 on reads them when it connects, every 10 minutes/)
+      // It promises nothing an older daemon will not keep.
+      expect(row.title).toMatch(/An older daemon never fills this row/)
+      expect(within(row).queryByRole('progressbar')).toBeNull()
+      // Only the meter providers get one, and Claude, which reported, keeps its bars.
+      expect(screen.queryByTestId('usage-row-hermes')).toBeNull()
+      expect(within(screen.getByTestId('usage-row-claude')).getAllByRole('progressbar')).toHaveLength(2)
+    })
+
+    it('holds no place for a machine that is not connected or does not run the engine', () => {
+      const { container } = render(<UsageMeters daemons={[
+        makeDaemon({ id: 'off', status: 'disconnected', available_engines: ['codex'] }),
+        makeDaemon({ id: 'on', status: 'connected', available_engines: ['hermes'] }),
+      ]} now={NOW} />)
+      expect(container).toBeEmptyDOMElement()
+    })
+
+    it('says a provider is not read on this machine (turned off, an unreadable sign-in), not that it will appear', () => {
+      render(<UsageMeters daemons={[makeDaemon({ status: 'connected', available_engines: ['claude', 'codex'], usage_limits: [{ provider: 'claude', windows: [], note: 'not_read' }, { provider: 'codex', windows: [{ id: '5h', used_percent: 3, resets_at: at(60) }] }] })]} now={NOW} />)
+      const row = screen.getByTestId('usage-row-claude')
+      expect(within(row).getByTestId('usage-not-read')).toHaveAccessibleName('Claude: usage limits not read on this machine')
+      expect(row.title).toMatch(/does not read its usage limits: turned off \(BLERG_RUNNER_CLAUDE_USAGE=0 for Claude\), or the engine's sign-in is not one it can read/)
+      expect(row.title).not.toMatch(/reads them when it connects/)
+      expect(within(row).queryByTestId('usage-pending')).toBeNull()
+    })
+
+    it('draws no not-read row for an engine the machine does not run', () => {
+      const { container } = render(<UsageMeters daemons={[makeDaemon({ status: 'connected', available_engines: ['claude'], usage_limits: [{ provider: 'codex', windows: [], note: 'not_read' }] })]} now={NOW} />)
+      expect(container.querySelector('[data-testid="usage-row-codex"]')).toBeNull()
+    })
+
+    it('explains a placeholder whose last reading\'s windows have all reset', () => {
+      render(<UsageMeters daemons={[makeDaemon({ status: 'connected', available_engines: ['codex'], usage_limits: [{ provider: 'codex', windows: [{ id: '5h', used_percent: 40, resets_at: at(-5) }] }] })]} now={NOW} />)
+      const row = screen.getByTestId('usage-row-codex')
+      expect(within(row).getByTestId('usage-pending')).toBeInTheDocument()
+      expect(row.title).toMatch(/^Codex: the last reading's windows have all reset\./)
+    })
+
+    it('says when the account has no window, instead of drawing nothing', () => {
+      render(<UsageMeters daemons={[makeDaemon({ status: 'connected', available_engines: ['codex'], usage_limits: [{ provider: 'codex', windows: [], note: 'no_windows' }] })]} now={NOW} />)
+      const row = screen.getByTestId('usage-row-codex')
+      expect(within(row).getByTestId('usage-none')).toHaveAccessibleName('Codex: this account has no usage-limit window')
+      expect(row.title).toMatch(/no usage-limit window to show/)
+      expect(screen.queryByTestId('usage-pending')).toBeNull()
+    })
+
+    it('draws a Codex work plan\'s spend limit with its reset', () => {
+      render(<UsageMeters daemons={[makeDaemon({ usage_limits: [{ provider: 'codex', windows: [{ id: 'spend', used_percent: 30, resets_at: at(10 * 1440) }] }] })]} now={NOW} />)
+      const spend = screen.getByTestId('usage-window-spend')
+      expect(spend).toHaveTextContent('spend')
+      expect(spend.title).toMatch(/^Spend limit: 30% used, 70% left · resets .+ \(in 10d 0h\)$/)
+    })
+
+    it('gives the row a tooltip with every window\'s used and left shares and its reset, and no money', () => {
+      render(<UsageMeters daemons={[makeDaemon({ usage_limits: [claude] })]} now={NOW} />)
+      const row = screen.getByTestId('usage-row-claude')
+      expect(row.title).toBe(`Claude · 5-hour window: 20% used, 80% left · resets ${clockTime(new Date(at(60)))} (in 1h 0m) · Weekly window: 64% used, 36% left · resets ${new Date(at(2 * 1440)).toLocaleDateString([], { weekday: 'short' })} ${clockTime(new Date(at(2 * 1440)))} (in 2d 0h)`)
+      expect(row.title).not.toMatch(/[$€£]/)
+    })
   })
 })

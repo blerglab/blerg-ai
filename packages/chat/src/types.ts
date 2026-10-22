@@ -35,6 +35,7 @@ export type AgentEventKind =
   | 'session_upload'
   | 'artifact'
   | 'topic'
+  | 'mark'
   | 'checklist'
   | 'ticket'
   | 'mcp_status'
@@ -111,6 +112,21 @@ export interface SubagentPayload {
 // A piece of work the agent marked (`blerg-runner topic`; the server records it): "start" opens topic
 // id with its title and ends the open one; "done" closes the open one, with an optional outcome.
 export interface TopicPayload { id: string; title: string; action: 'start' | 'done'; outcome?: string }
+// kind "mark" (`blerg-runner mark`; the server records it): a stroke for the session's History — a
+// decision (by "person": the person's ruling the agent wrote down; "agent": its own, which the person
+// can overrule), a milestone or a finding. text is plain text, drawn as text. at: a back-dated mark
+// (an import) records that earlier moment; the transcript draws no row for it.
+export interface MarkPayload {
+  id: string
+  kind: 'decision' | 'milestone' | 'finding'
+  by: 'person' | 'agent'
+  text: string
+  commits?: { sha: string }[]
+  card?: number
+  board_id?: string
+  at?: string
+  posted_by?: 'agent' | 'owner'
+}
 // kind "checklist" (`blerg-runner checklist`; the server records it): the FULL list after the change,
 // the operation, and the item it touched (index 1-based; absent for set and clear).
 /** diff: the id of the session's published diff of the item's commits (`checklist tick --commit`). */
@@ -440,10 +456,10 @@ export interface DelegationDecidedPayload {
 }
 
 // kinds proposal_request | proposal_decided: the session proposed an action that waits for the
-// person (a board card it wants to file, or a call to an MCP tool in approval mode), and how it was
-// decided. The events carry no draft or arguments: the card reads those through
-// Transport.proposal, which only the session's owner can.
-export type ProposalKind = 'board_file' | 'mcp'
+// person (a board card it wants to file, a new board it wants created, or a call to an MCP tool in
+// approval mode), and how it was decided. The events carry no draft or arguments: the card reads
+// those through Transport.proposal, which only the session's owner can.
+export type ProposalKind = 'board_file' | 'board_create' | 'mcp'
 export interface ProposalRequestPayload {
   proposal_id: string
   kind: ProposalKind
@@ -470,6 +486,15 @@ export interface ProposalDecidedPayload {
   auto?: boolean
   grant_id?: string
   card?: FiledCard
+  /** A board a proposed board's approval created, and the session's access to it. */
+  board?: CreatedBoard
+}
+/** A board an approved board proposal created: its id and name, and the access the proposing
+ *  session was given on it (propose: none). */
+export interface CreatedBoard {
+  board_id: string
+  board_name: string
+  access: 'propose' | 'read' | 'file' | 'full'
 }
 /** A proposal as its owner reads it (Transport.proposal). */
 export interface ProposalDetail {
@@ -489,13 +514,16 @@ export interface ProposalDetail {
   approvedByGrant: string | null
   /** A created card (state done, board), from the stored result. */
   card: FiledCard | null
+  /** A created board (state done, board_create), from the stored result. */
+  board?: CreatedBoard | null
   /** The recorded error of a failed or unknown outcome. */
   error: string
 }
 
 // ─── Review requests: the session asks its owner to approve a file or diff at one version ──────
 // (blerg-runner review request). review_requested is the card; review_decided its outcome.
-export type ReviewRequestState = 'pending' | 'approved' | 'changes_requested' | 'withdrawn' | 'superseded'
+/** dismissed: the person closed it from Needs you without deciding (they may have answered in the chat). */
+export type ReviewRequestState = 'pending' | 'approved' | 'changes_requested' | 'withdrawn' | 'superseded' | 'dismissed'
 export interface ReviewRequestPayload {
   request_id: string
   artifact_id: string

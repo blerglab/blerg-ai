@@ -162,3 +162,38 @@ describe('readProposalView', () => {
     expect(v.approvedByGrant).toBe('g1')
   })
 })
+
+describe('a proposed board', () => {
+  beforeEach(() => resetChatState())
+  const NEW_BOARD: ProposalDetail = {
+    id: 'p1', kind: 'board_create', state: 'pending', target: 'Launch', tool: '', title: 'Launch',
+    summary: 'Repositories: team/app · default columns · asks for full access', argumentsRaw: '{"name":"Launch"}', approvedByGrant: null, card: null, error: '',
+  }
+
+  it('is approved by the owner only, with the exact arguments, and says the access the session got', async () => {
+    seedRequest('board_create')
+    const t = createFakeTransport({})
+    const decide = vi.fn(async (): Promise<ProposalDetail> => ({ ...NEW_BOARD, state: 'done', board: { board_id: 'b9', board_name: 'Launch', access: 'file' } }))
+    Object.assign(t.transport, { proposal: vi.fn(async () => NEW_BOARD), decideProposal: decide })
+    render(<ChatView session={SESSION} transport={t.transport} meta={running} onEditProposal={() => {}} />)
+    const card = await screen.findByTestId('proposal-card')
+    await waitFor(() => expect(card.textContent).toContain('This session wants to create a board named Launch'))
+    expect(card.textContent).toContain('Repositories: team/app')
+    // No Edit and no Allow for this session: a board is always the owner's own decision.
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['Approve', 'Reject'])
+    fireEvent.click(within(card).getByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(screen.getByTestId('proposal-outcome').textContent).toContain('Board created · this session has File without asking'))
+    expect(decide).toHaveBeenCalledWith('p1', 'approve', { expected: NEW_BOARD.argumentsRaw })
+  })
+
+  it('reads the proposal view and the decided event', () => {
+    const v = readProposalView({ id: 'p1', kind: 'board_create', state: 'done', arguments_raw: '{}', connection_name: 'board-create', tool: 'create_board',
+      arguments: { name: 'Launch', repos: ['team/app', 7], template: 'focus-board', access: 'read' },
+      result: { board_id: 'b9', board_name: 'Launch', access: 'read', requested_access: 'read' } })
+    expect(v.kind).toBe('board_create')
+    expect(v.target).toBe('Launch')
+    expect(v.summary).toBe('Repositories: team/app · template focus-board · asks for read access')
+    expect(v.board).toEqual({ board_id: 'b9', board_name: 'Launch', access: 'read' })
+    expect(readProposalView({ ...{ id: 'p2', kind: 'board_create', state: 'done', arguments_raw: '{}' }, result: { board_id: 'b', access: 'admin' } }).board).toBeNull()
+  })
+})

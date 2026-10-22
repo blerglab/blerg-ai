@@ -79,12 +79,44 @@
   overflow-wrap: anywhere;
 }
 
-.agent-card.ticket-card {
-  align-self: stretch;
-  background: var(--chat-card-system-bg);
-  border: 1px solid var(--chat-border);
+/* A pin, an unpin or a refresh (WorkCards.tsx TicketCard): one system row like the checklist's, as wide
+   as a bubble at most, on one line; the title gives way first (an ellipsis), the chips and time stay. */
+.agent-card.marker.ticket-row {
+  align-self: flex-start;
+  box-sizing: border-box;
+  max-width: 92%;
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.35em;
+  white-space: nowrap;
+  overflow: hidden;
+  flex-shrink: 0; /* overflow hidden would let the timeline's column squeeze it to nothing */
 }
+.ticket-row > * { flex: none; }
+.ticket-row .ticket-row-chips { flex: none; } /* the title gives way, never the card numbers */
+.ticket-row .ticket-row-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ticket-row .ticket-row-time { color: var(--chat-muted-2); }
+.ticket-row .ticket-row-time::before { content: '· '; }
+.ticket-row button.ticket-chip {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--chat-info);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.ticket-row button.ticket-chip:hover,
+.ticket-row button.ticket-chip:focus-visible { text-decoration-style: solid; }
 
 .ticket-kicker {
   display: flex;
@@ -483,10 +515,10 @@ a.ticket-key:focus-visible {
   margin-top: 16px;
 }
 
-/* The description reads like a document, but its headings stay under the issue's title. */
+/* The description reads like a document (GitHub's rhythm, markdown.css), but its headings stay under
+   the issue's title. */
 .ticket-description.md.md-doc {
   font-size: 15px;
-  line-height: 1.6;
   max-width: 80ch;
 }
 
@@ -498,10 +530,6 @@ a.ticket-key:focus-visible {
 
 .ticket-description.md.md-doc :is(h3, h4, h5, h6) {
   font-size: 1.02em;
-}
-
-.ticket-description.md.md-doc :is(h1, h2, h3, h4, h5, h6) {
-  margin: 1.25em 0 0.5em;
 }
 
 .ticket-description.md.md-doc > :first-child {

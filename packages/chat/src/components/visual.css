@@ -15,3 +15,12 @@
 .visual-dialog { width: min(96vw, 100rem); height: 92vh; background: var(--chat-surface); color: var(--chat-fg); font-family: var(--chat-font); }
 .visual-dialog .visual-surface { min-width: fit-content; }
 .visual-dialog .visual-diagram, .visual-dialog .visual-chart canvas { max-width: none; }
+.visual-failed { margin: .75rem 0; min-width: 0; }
+.visual-failed-reason { margin: 0 0 .35rem; color: var(--chat-muted); font-size: var(--chat-text-sm); overflow-wrap: anywhere; }
+.visual-failed .md-codeblock { margin-top: 0; }
+/* In the file viewer (a published .mmd or chart), the visual takes the dialog's whole body and the
+   diagram is scaled to fit it, so a tall diagram is seen whole; Open still zooms. */
+.artifact-viewer .artifact-body > .visual-block { flex: 1 1 auto; min-height: 12rem; display: flex; flex-direction: column; margin: 0 0 4px; overflow: auto; }
+.artifact-viewer .artifact-body > .visual-block > .visual-surface { flex: 1 1 auto; min-height: 0; max-height: none; display: flex; overflow: hidden; }
+.artifact-viewer .artifact-body > .visual-block > .visual-surface > div { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.artifact-viewer .artifact-body > .visual-block .visual-diagram { width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; margin: auto; }

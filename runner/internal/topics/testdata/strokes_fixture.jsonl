@@ -1,0 +1,11 @@
+{"at":"2026-01-10T09:00Z","kind":"milestone","text":"v1.2.0 cut: release page up, merge-back done","commit":"1a2b3c4d"}
+{"at":"2026-01-10T09:10Z","kind":"decision","by":"owner","text":"Children file board proposals through the parent's sign-in, defaulting to Propose","card":21}
+{"at":"2026-01-10T09:12Z","kind":"decision","by":"owner","text":"Keep the explicit acknowledgement for the \"This machine\" target"}
+{"at":"2026-01-10T09:20Z","kind":"finding","text":"Image mark-up lands pins in the wrong place after sending","card":22}
+{"at":"2026-01-10T09:40Z","kind":"finding","text":"Diagram renderer could fetch outside URLs; fixed with a sandboxed frame","card":23}
+{"at":"2026-01-10T10:00Z","kind":"milestone","text":"Staging deployed: mark-up fix, diagrams, repository resolution","commit":"5e6f7a8b"}
+{"at":"2026-01-10T10:20Z","kind":"decision","by":"agent","text":"No login write-back from sandboxes: access token only","card":24}
+{"at":"2026-01-10T10:50Z","kind":"finding","text":"Deprecating terminal sessions broke Assist; Assist exempted for now","card":25}
+{"at":"2026-01-10T11:05Z","kind":"decision","by":"owner","text":"The header's Stop becomes \"End session\"; the chat keeps Stop"}
+{"at":"2026-01-10T11:30Z","kind":"milestone","text":"Merged the plan tab (one line per item, names not ids)","commit":"9c0d1e2f"}
+{"at":"2026-01-10T11:45Z","kind":"decision","by":"owner","text":"History becomes a compact feed of strokes","card":26}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -80,6 +81,7 @@ func queueWorkspaceFileRead(sender Sender, req protocol.ReadWorkspaceFile, bindi
 	if req.RequestID == "" || len(req.RequestID) > 100 || req.SessionID == "" || len(req.SessionID) > 100 {
 		return
 	}
+	received := time.Now()
 	select {
 	case workspaceFileReads <- struct{}{}:
 	default:
@@ -108,9 +110,9 @@ func queueWorkspaceFileRead(sender Sender, req protocol.ReadWorkspaceFile, bindi
 		}
 		log.Printf("workspace_file session=%q path=%q size=%d outcome=%s", req.SessionID, res.Path, res.Size, outcome)
 		if bounded, ok := sender.(interface {
-			SendWorkspaceFileResult(protocol.WorkspaceFileResult) error
+			SendWorkspaceFileResultBy(protocol.WorkspaceFileResult, time.Time) error
 		}); ok {
-			_ = bounded.SendWorkspaceFileResult(res)
+			_ = bounded.SendWorkspaceFileResultBy(res, received.Add(workspaceReplyTTL))
 		} else {
 			_ = sender.Send(res)
 		}

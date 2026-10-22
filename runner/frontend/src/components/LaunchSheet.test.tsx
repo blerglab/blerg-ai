@@ -1,18 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
+import { makeSession } from '../test/fixtures'
 import LaunchSheet from './LaunchSheet'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { coreOrigin } from '../authClient'
-import { ACK_AGENT, ACK_TERMINAL, AGENT_NO_PROMPTS, NO_DAEMON_REASON, TERMINAL_NEEDS_DAEMON } from '../lib/runtimes'
+import { ACK_AGENT, AGENT_NO_PROMPTS, NO_DAEMON_REASON } from '../lib/runtimes'
 import { clearLaunchCache, fetchRepos, fetchDaemons, fetchCluster, fetchCreds, launchClock } from '../lib/launchCache'
 
-// Pin randomSessionName to a stable value so assertions are deterministic.
-vi.mock('../sessionNames', () => ({
-  randomSessionName: () => 'Granite',
-}))
 
-const AUTO_NAME = 'Granite'
 
 function buildFetchMock(
   captureBody: { value?: Record<string, unknown> },
@@ -195,7 +191,7 @@ describe('LaunchSheet', () => {
   async function selectRepoAndSubmit(typedName?: string) {
     fireEvent.click(screen.getByText('myrepo'))
     if (typedName !== undefined) {
-      const nameInput = screen.getByPlaceholderText(AUTO_NAME)
+      const nameInput = screen.getByTestId('launch-session-name')
       fireEvent.change(nameInput, { target: { value: typedName } })
     }
     await waitFor(() => expect(screen.getByText('Launch Session')).not.toBeDisabled())
@@ -231,16 +227,46 @@ describe('LaunchSheet', () => {
     expect(screen.getByRole('button', { name: /Launch/ })).toBeDisabled()
   })
 
-  it('renders a session name input with autoName as placeholder', async () => {
+  // Card #143: the default name is the repository's (no made-up names), "Session" without one.
+  it('without a repository the name is "Session"; picking a repo fills it with the repository\'s name', async () => {
     await renderAndWaitForLoad()
-    expect(screen.getByPlaceholderText(AUTO_NAME)).toBeInTheDocument()
+    expect(screen.getByTestId('launch-session-name')).toHaveValue('Session')
+    fireEvent.click(screen.getByText('myrepo'))
+    expect(screen.getByTestId('launch-session-name')).toHaveValue('myrepo')
   })
 
-  it('uses autoName as title when name input is left blank', async () => {
+  it('uses the repository\'s name as title when the name is left as it was', async () => {
     await renderAndWaitForLoad()
     await selectRepoAndSubmit()
     await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.title).toBe(AUTO_NAME)
+    expect(captureBody.value!.title).toBe('myrepo')
+  })
+
+  it('the name follows a change of repository until the person types their own; then theirs sticks', async () => {
+    vi.stubGlobal('fetch', buildFetchMock(captureBody, { extraRepos: [{ name: 'other', full_name: 'org/other', checked_out: ['workstation'] }] }))
+    await renderAndWaitForLoad()
+    const input = screen.getByTestId('launch-session-name')
+    fireEvent.click(screen.getByText('myrepo'))
+    expect(input).toHaveValue('myrepo')
+    fireEvent.click(screen.getByText('other'))
+    expect(input).toHaveValue('other')
+    fireEvent.change(input, { target: { value: 'My own name' } })
+    fireEvent.click(screen.getByText('myrepo'))
+    expect(input).toHaveValue('My own name')
+    await waitFor(() => expect(screen.getByText('Launch Session')).not.toBeDisabled())
+    fireEvent.click(screen.getByText('Launch Session'))
+    await waitFor(() => expect(captureBody.value?.title).toBe('My own name'))
+  })
+
+  it('numbers the name past running sessions that already have it', async () => {
+    useSessionStore.setState({ sessions: [
+      makeSession({ id: 'a', title: 'myrepo', status: 'running' }),
+      makeSession({ id: 'b', title: 'myrepo 2', status: 'idle' }),
+      makeSession({ id: 'c', title: 'myrepo 3', status: 'ended', ended_at: new Date().toISOString() }),
+    ] })
+    await renderAndWaitForLoad()
+    fireEvent.click(screen.getByText('myrepo'))
+    expect(screen.getByTestId('launch-session-name')).toHaveValue('myrepo 3')
   })
 
   it('uses the typed name as title when the user provides one', async () => {
@@ -422,7 +448,6 @@ describe('LaunchSheet — Run column defaults', () => {
   it('keeps a runtime the user picked when kind and engine change around it', async () => {
     await renderSheet({ clusterStatus: CLUSTER_ON })
     fireEvent.click(screen.getByTestId('runtime-daemon'))
-    fireEvent.click(screen.getByTestId('kind-tmux'))
     fireEvent.click(screen.getByTestId('kind-agent'))
     fireEvent.click(await screen.findByTestId('engine-codex'))
     expect(screen.getByTestId('runtime-daemon')).toHaveAttribute('aria-checked', 'true')
@@ -596,16 +621,7 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     expect(captureBody.value!.permissions).toBeUndefined()
   })
 
-  it('sends docker + tmux', async () => {
-    await renderSheet()
-    fireEvent.click(screen.getByTestId('kind-tmux'))
-    fireEvent.click(screen.getByText('myrepo'))
-    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
-    fireEvent.click(screen.getByText(/Launch/))
-    await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.runtime).toBe('docker')
-    expect(captureBody.value!.kind).toBe('tmux')
-  })
+
 
   it('refuses This machine + Agent + Claude when the daemon has neither the claude CLI nor an API key', async () => {
     await renderSheet({ daemon: { claude_cli_available: false, anthropic_key_set: false } })
@@ -707,18 +723,7 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     expect(captureBody.value!.kind).toBe('agent')
   })
 
-  it('sends daemon + tmux once acknowledged', async () => {
-    await renderSheet()
-    fireEvent.click(screen.getByTestId('runtime-daemon'))
-    fireEvent.click(screen.getByTestId('kind-tmux'))
-    fireEvent.click(screen.getByText('myrepo'))
-    fireEvent.click(screen.getByLabelText(ACK_TERMINAL))
-    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
-    fireEvent.click(screen.getByText(/Launch/))
-    await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.runtime).toBe('daemon')
-    expect(captureBody.value!.kind).toBe('tmux')
-  })
+
 })
 
 // ─── the Run column: rules between the options ───────────────────────────────
@@ -747,13 +752,13 @@ describe('LaunchSheet — Run column rules', () => {
     await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
   }
 
-  it('disables Terminal on the cluster pod, with the reason', async () => {
+  it('hides Terminal on every runtime', async () => {
     await renderSheet({ clusterStatus: CLUSTER_ON })
-    expect(screen.getByTestId('kind-tmux')).toBeDisabled()
-    expect(screen.getByTestId('terminal-disabled-reason')).toHaveTextContent(TERMINAL_NEEDS_DAEMON)
-    // ...and it comes back on a runtime that can host a terminal.
+    expect(screen.queryByTestId('kind-tmux')).not.toBeInTheDocument()
     fireEvent.click(screen.getByTestId('runtime-docker'))
-    expect(screen.getByTestId('kind-tmux')).not.toBeDisabled()
+    expect(screen.queryByTestId('kind-tmux')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('runtime-daemon'))
+    expect(screen.queryByTestId('kind-tmux')).not.toBeInTheDocument()
   })
 
   it('disables the cluster card with a reason when no cluster is configured', async () => {
@@ -806,40 +811,24 @@ describe('LaunchSheet — Run column rules', () => {
     expect(captureBody.value!.interaction).toBe('unattended')
   })
 
-  it('offers Unattended for an agent session only, and a terminal launch sends none', async () => {
+  it('launches an agent with the selected interaction mode', async () => {
     await renderSheet()
     fireEvent.click(screen.getByTestId('unattended-toggle'))
-    fireEvent.click(screen.getByTestId('kind-tmux'))
-    expect(screen.queryByTestId('unattended-toggle')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('kind-tmux')).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.kind).toBe('tmux')
-    expect('interaction' in captureBody.value!).toBe(false)
+    expect(captureBody.value!.kind).toBe('agent')
+    expect(captureBody.value!.interaction).toBe('unattended')
   })
 
-  it('shows the permissions toggle only for a terminal session in the sandbox', async () => {
+  it('keeps the agent permissions note on both desktop runtimes', async () => {
     await renderSheet()
-    // Agent kind: a note, no toggle.
     expect(screen.getByTestId('agent-permissions-note')).toHaveTextContent(AGENT_NO_PROMPTS)
     expect(screen.queryByTestId('skip-permissions-toggle')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByTestId('kind-tmux'))
-    const toggle = screen.getByTestId('skip-permissions-toggle')
-    expect(toggle).toHaveAttribute('aria-checked', 'false')
-    fireEvent.click(toggle)
-    expect(toggle).toHaveAttribute('aria-checked', 'true')
-
-    // Off the sandbox it disappears — and the flag it set goes with it.
     fireEvent.click(screen.getByTestId('runtime-daemon'))
+    expect(screen.getByTestId('agent-permissions-note')).toHaveTextContent(AGENT_NO_PROMPTS)
     expect(screen.queryByTestId('skip-permissions-toggle')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByText('myrepo'))
-    fireEvent.click(screen.getByLabelText(ACK_TERMINAL))
-    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
-    fireEvent.click(screen.getByText(/Launch/))
-    await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.dangerously_skip_permissions).toBe(false)
   })
 
   // A remembered OpenClaw is picked before any daemon or cluster data has
@@ -888,14 +877,15 @@ describe('LaunchSheet — Run column rules', () => {
     expect(captureBody.value!.runtime).toBe('daemon')
   })
 
-  it('re-asks for the acknowledgement when the runtime or kind changes under it', async () => {
+  it('re-asks for the acknowledgement when the runtime changes', async () => {
     await renderSheet()
     fireEvent.click(screen.getByTestId('runtime-daemon'))
     fireEvent.click(screen.getByTestId('agent-ack'))
     expect(screen.getByTestId('agent-ack')).toBeChecked()
-    fireEvent.click(screen.getByTestId('kind-tmux'))
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    fireEvent.click(screen.getByTestId('runtime-daemon'))
     expect(screen.getByTestId('agent-ack')).not.toBeChecked()
-    expect(screen.getByLabelText(ACK_TERMINAL)).toBeInTheDocument()
+    expect(screen.getByLabelText(ACK_AGENT)).toBeInTheDocument()
   })
 
   it('hides engines unavailable on the cluster', async () => {
@@ -1262,6 +1252,74 @@ describe('LaunchSheet — Claude model and effort', () => {
     return captureBody.value!
   }
 
+  // Card #151: a change of where it runs keeps the person's model and effort.
+  const M = (id: string, name: string, efforts = ['low', 'medium', 'high', 'xhigh'], default_effort = 'medium') =>
+    ({ id, name, description: '', section: 'main', efforts, default_effort })
+  const BOTH = { source: 'live', models: [M('claude-opus-5-5', 'Opus 5.5'), M('claude-sonnet-5-5', 'Sonnet 5.5')] }
+  const pressed = () => screen.getAllByRole('button').filter(b => b.dataset.testid?.startsWith('model-claude') && b.getAttribute('aria-pressed') === 'true').map(b => b.dataset.testid)
+
+  it('keeps the model and effort from docker to the cluster to this machine', async () => {
+    await renderSheet({ clusterStatus: CLUSTER_ON, modelsByEngine: { 'claude?runtime=cluster': BOTH, 'claude?daemon_id=d1': BOTH } })
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    fireEvent.click(await screen.findByTestId('model-claude-opus-5-5'))
+    fireEvent.click(screen.getByTestId('effort-xhigh'))
+    for (const place of ['runtime-cluster', 'runtime-daemon', 'runtime-docker']) {
+      fireEvent.click(screen.getByTestId(place))
+      await waitFor(() => expect(pressed()).toEqual(['model-claude-opus-5-5']))
+      expect(screen.getByTestId('effort-xhigh')).toHaveAttribute('aria-checked', 'true')
+      expect(screen.queryByTestId('model-keep-notice')).not.toBeInTheDocument()
+    }
+  })
+
+  it('a model the new place does not offer: switched, and said beside the highlighted field', async () => {
+    const clusterOnly = { source: 'live', models: [M('claude-sonnet-5-5', 'Sonnet 5.5')] }
+    await renderSheet({ clusterStatus: CLUSTER_ON, modelsByEngine: { 'claude?runtime=cluster': clusterOnly, 'claude?daemon_id=d1': BOTH } })
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    fireEvent.click(await screen.findByTestId('model-claude-opus-5-5'))
+    fireEvent.click(screen.getByTestId('runtime-cluster'))
+    const notice = await screen.findByTestId('model-keep-notice')
+    expect(notice).toHaveTextContent("Opus 5.5 isn't available in the cluster: switched to Sonnet 5.5")
+    expect(screen.getByTestId('model-field')).toHaveAttribute('data-notice', 'true')
+    expect(pressed()).toEqual(['model-claude-sonnet-5-5'])
+    // Back where it is offered: the person's choice is there again, and nothing is said.
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    await waitFor(() => expect(pressed()).toEqual(['model-claude-opus-5-5']))
+    expect(screen.queryByTestId('model-keep-notice')).not.toBeInTheDocument()
+  })
+
+  it('the same model under another id in the new place is kept, silently', async () => {
+    const renamed = { source: 'live', models: [M('claude-opus-5-5-20261001', 'Opus 5.5'), M('claude-sonnet-5-5', 'Sonnet 5.5')] }
+    await renderSheet({ clusterStatus: CLUSTER_ON, modelsByEngine: { 'claude?runtime=cluster': renamed, 'claude?daemon_id=d1': BOTH } })
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    fireEvent.click(await screen.findByTestId('model-claude-opus-5-5'))
+    fireEvent.click(screen.getByTestId('runtime-cluster'))
+    await waitFor(() => expect(screen.getByTestId('model-claude-opus-5-5-20261001')).toHaveAttribute('aria-pressed', 'true'))
+    expect(screen.queryByTestId('model-keep-notice')).not.toBeInTheDocument()
+  })
+
+  it('a model list that arrives late does not reset a choice already made', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>(r => { release = r })
+    const inner = buildFetchMock(captureBody, { clusterStatus: CLUSTER_ON, modelsByEngine: { 'claude?runtime=cluster': BOTH, 'claude?daemon_id=d1': BOTH } })
+    let holdCluster = false
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (holdCluster && url.startsWith('/api/models/claude?runtime=cluster')) await held
+      return inner(url, init)
+    }))
+    render(<MemoryRouter><LaunchSheet open={true} onClose={vi.fn()} /></MemoryRouter>)
+    await screen.findByText('Repository')
+    fireEvent.click(screen.getByTestId('runtime-docker'))
+    fireEvent.click(await screen.findByTestId('model-claude-opus-5-5'))
+    holdCluster = true
+    clearLaunchCache()
+    fireEvent.click(screen.getByTestId('runtime-cluster'))
+    // While the cluster's list is on its way, nothing is said to have switched.
+    expect(screen.queryByTestId('model-keep-notice')).not.toBeInTheDocument()
+    release()
+    await waitFor(() => expect(pressed()).toEqual(['model-claude-opus-5-5']))
+    expect(screen.queryByTestId('model-keep-notice')).not.toBeInTheDocument()
+  })
+
   it('shows the fetched list, preselects Sonnet with its default effort, and sends the full id', async () => {
     await renderSheet({ models: LIVE })
     await screen.findByTestId('model-claude-opus-9')
@@ -1319,13 +1377,12 @@ describe('LaunchSheet — Claude model and effort', () => {
     expect(body).not.toHaveProperty('effort')
   })
 
-  it('sends the full id and effort for a terminal session too', async () => {
+  it('keeps the full id and effort on the available Agent session', async () => {
     await renderSheet({ models: LIVE })
-    fireEvent.click(screen.getByTestId('kind-tmux'))
     fireEvent.click(await screen.findByTestId('model-claude-opus-9'))
     fireEvent.click(screen.getByTestId('effort-xhigh'))
     const body = await launch()
-    expect(body.kind).toBe('tmux')
+    expect(body.kind).toBe('agent')
     expect(body.model).toBe('claude-opus-9')
     expect(body.effort).toBe('xhigh')
   })
@@ -1815,7 +1872,7 @@ describe('LaunchSheet — No repository', () => {
     vi.restoreAllMocks()
   })
 
-  const SCRATCH = '.scratch-granite-8080808080808080'
+  const SCRATCH = '.scratch-session-8080808080808080'
 
   async function renderSheet(opts?: Parameters<typeof buildFetchMock>[1]) {
     vi.stubGlobal('fetch', buildFetchMock(captureBody, opts))
@@ -1921,7 +1978,7 @@ describe('LaunchSheet — No repository', () => {
     await renderSheet()
     fireEvent.click(screen.getByTestId('scratch-rename'))
     const input = screen.getByTestId('scratch-name-input')
-    expect(input).toHaveValue('granite-8080808080808080')
+    expect(input).toHaveValue('session-8080808080808080')
     fireEvent.change(input, { target: { value: 'my-notes' } })
     expect(screen.getByTestId('no-repo-plan')).toHaveTextContent('+ Will create a scratch folder named .scratch-my-notes in /repos')
     fireEvent.change(input, { target: { value: '../escape' } })
@@ -2316,7 +2373,7 @@ describe('LaunchSheet board access', () => {
     expect(body.engine).toBe('codex')
     expect(body.board_id).toBe('board-1')
   })
-  it.each(['kind-tmux', 'engine-codex'])('blocks a preserved board for an unsupported choice: %s', async choice => {
+  it.each(['engine-codex'])('blocks a preserved board for an unsupported choice: %s', async choice => {
     await open()
     fireEvent.change(await screen.findByLabelText('Board'), { target: { value: 'board-1' } })
     fireEvent.click(await screen.findByTestId(choice))

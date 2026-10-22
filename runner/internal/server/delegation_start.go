@@ -132,7 +132,7 @@ func parseChildStart(raw []byte, host childHost) (childStart, childHost, *APIErr
 	if len(cs.Prompt) > maxDelegationPromptBytes {
 		return fail(apiErrorf(http.StatusRequestEntityTooLarge, "%s", childPromptTooLarge))
 	}
-	cs.Title = strings.TrimSpace(cs.Title)
+	cs.Title = cleanSessionTitle(cs.Title)
 	if utf8.RuneCountInString(cs.Title) > maxDelegationTitleRunes {
 		return fail(apiErrorf(http.StatusUnprocessableEntity, "title is longer than %d characters", maxDelegationTitleRunes))
 	}
@@ -255,7 +255,7 @@ func defaultChildTitle(prompt string) string {
 			break
 		}
 	}
-	return cutRunes(line, delegationTitleDefaultRunes)
+	return cutRunes(cleanSessionTitle(line), delegationTitleDefaultRunes)
 }
 
 func cutRunes(s string, n int) string {

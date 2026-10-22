@@ -1,0 +1,364 @@
+/* The plugin browser (card #144): a large panel that uses the space on a desktop and grows with
+   a 4K screen, a full-screen sheet on a phone. Rows follow the Capabilities list: compact, one
+   line of name and facts, one line of description. */
+.pb-dialog {
+  width: min(96vw, max(960px, 62vw));
+  height: min(92vh, max(640px, 80vh));
+  display: flex;
+  flex-direction: column;
+  background: var(--scree);
+  color: var(--chalk);
+  border: 1px solid var(--stone);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+@media (max-width: 899px) {
+  .pb-overlay {
+    padding: 0;
+    align-items: stretch;
+  }
+  .pb-dialog {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+    border: none;
+  }
+}
+
+.pb-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px 10px;
+}
+
+.pb-search {
+  flex: 1 1 16em;
+  min-width: 0;
+}
+
+.pb-select,
+.pb-add-market input,
+.pb-add-market button,
+.pb-install {
+  color: var(--chalk);
+  background: var(--scree);
+  border: 1px solid var(--stone);
+  border-radius: 8px;
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 5px 8px;
+  min-height: 30px;
+}
+
+.pb-select:focus-visible,
+.pb-add-market input:focus-visible,
+.pb-add-market button:focus-visible,
+.pb-install:focus-visible,
+.pb-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.pb-count {
+  font-size: 11px;
+  color: var(--fog-dim);
+  white-space: nowrap;
+}
+
+.pb-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 16px 8px;
+}
+
+.pb-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr));
+  column-gap: 16px;
+}
+
+.pb-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--stone);
+  min-width: 0;
+}
+
+.pb-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.pb-row-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pb-state {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--fog);
+}
+
+.pb-state.on {
+  color: var(--selected-text);
+}
+
+.pb-name {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.pb-market {
+  flex: none;
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pb-meta {
+  font-size: 11px;
+  color: var(--fog-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.pb-desc {
+  margin: 2px 0 0;
+  font-size: var(--text-xs);
+  color: var(--fog);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.pb-install {
+  flex: none;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pb-install:hover:not(:disabled) {
+  border-color: var(--fog);
+}
+
+.pb-install:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.pb-note {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--fog);
+  overflow-wrap: anywhere;
+}
+
+.pb-note.failed {
+  color: var(--amber);
+}
+
+.pb-pad {
+  padding: 0 16px 6px;
+  margin: 0;
+}
+
+.pb-empty {
+  margin: 16px 0;
+  font-size: var(--text-sm);
+  color: var(--fog);
+}
+
+.pb-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--fog);
+  font: inherit;
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  cursor: pointer;
+  justify-self: start;
+}
+
+.pb-link[aria-expanded='true'] {
+  color: var(--selected-text);
+}
+
+.pb-footer {
+  display: grid;
+  gap: 8px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--stone);
+  max-height: 45%;
+  overflow: auto;
+}
+
+.pb-footer .session-plugins {
+  margin: 0;
+}
+
+.pb-add-market {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+}
+
+.pb-add-market label {
+  color: var(--fog);
+  font-weight: 600;
+}
+
+.pb-add-market input {
+  flex: 1 1 18em;
+  min-width: 0;
+}
+
+.pb-add-market button {
+  cursor: pointer;
+}
+
+.pb-add-market button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.pb-add-market .pb-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.pb-truncated {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--stone));
+  border-radius: 8px;
+  font-size: var(--text-xs);
+  color: var(--chalk);
+}
+
+.pb-fallback .session-plugin-form {
+  margin-top: 4px;
+}
+
+/* MCP rows that need a sign-in (CapabilitiesPanel's MCP group). */
+.caps-auth {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fog);
+}
+
+.caps-auth-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  min-height: 24px;
+  border: 1px solid var(--stone);
+  border-radius: 6px;
+  background: none;
+  color: var(--chalk);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.caps-auth-btn:hover,
+.caps-auth-btn:focus-visible {
+  border-color: var(--fog);
+}
+
+.caps-auth-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.caps-auth-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.caps-auth-note {
+  flex-basis: 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.caps-auth-note.failed {
+  color: var(--amber);
+}
+
+/* Where a sign-in link goes, before the person leaves Blerg: the host, prominent. */
+.caps-auth-host {
+  font-size: var(--text-xs);
+  color: var(--fog);
+  overflow-wrap: anywhere;
+}
+
+.caps-auth-host strong,
+.caps-auth-confirm strong {
+  color: var(--chalk);
+  font-family: var(--mono);
+}
+
+.caps-auth-warn {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--stone));
+  border-radius: 6px;
+  color: var(--chalk);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.caps-auth-warn small {
+  color: var(--fog);
+  font-size: 10px;
+}
+
+.caps-auth-confirm:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.caps-auth-confirm {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--stone);
+  border-radius: 8px;
+}

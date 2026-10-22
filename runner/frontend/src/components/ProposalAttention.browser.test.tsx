@@ -68,3 +68,31 @@ describe('readable proposal requests in Chromium', () => {
     }
   })
 })
+
+describe('a proposed board in Needs you, in Chromium', () => {
+  const args = { name: 'Launch planning board for the next release', description: 'Everything the launch needs.\nOne line more.', repos: ['example-org/example-app', 'example-org/example-web', 'docs'], template: 'focus-board', access: 'full' }
+  const board: ProposalInfo = { ...draft, kind: 'board_create', connection_name: 'board-create', tool: 'create_board', arguments: args, arguments_raw: JSON.stringify(args) }
+  it.each([390, 3840])('shows the board and approves with a lowered access at %i px', async width => {
+    await page.viewport(width, width === 3840 ? 2160 : 844)
+    const refresh = vi.fn()
+    apiFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    const { container } = render(<MemoryRouter><div style={{ width: width === 390 ? 'min(100%, 360px)' : '100%', boxSizing: 'border-box', padding: 8 }}><PendingProposal proposal={board} refresh={refresh} /></div></MemoryRouter>)
+    const preview = screen.getByRole('article', { name: 'Board the agent proposes' })
+    expect(within(preview).getByRole('heading', { name: args.name })).toBeTruthy()
+    expect(preview.textContent).toContain('example-org/example-app primary')
+    expect(preview.textContent).toContain('focus-board')
+    expect(preview.textContent).toContain('Full, for this session only')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    const select = screen.getByLabelText('Session access to the new board')
+    await userEvent.selectOptions(select, 'file')
+    expect(container.scrollWidth).toBeLessThanOrEqual(width)
+    for (const el of container.querySelectorAll<HTMLElement>('button, select')) {
+      const box = el.getBoundingClientRect()
+      expect(box.right).toBeLessThanOrEqual(width)
+      if (width === 390) expect(box.height).toBeGreaterThanOrEqual(44)
+    }
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm approve' }))
+    expect(apiFetch).toHaveBeenCalledWith('/api/proposals/p1/approve', expect.objectContaining({ method: 'POST', body: JSON.stringify({ expected_arguments_raw: board.arguments_raw, access: 'file' }) }))
+    expect(refresh).toHaveBeenCalledOnce()
+  })
+})

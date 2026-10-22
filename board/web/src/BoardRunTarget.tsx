@@ -1,8 +1,18 @@
 import { useEffect, useState } from "react";
 import { api, Board } from "./api";
+import RepoResolve, { Desktop } from "./RepoResolve";
 
 interface Target { runtime: string; daemon_id?: string; label: string; desktop_name?: string; unavailable?: string }
-interface Targets { can_choose: boolean; targets: Target[]; default_runtime: string; default_daemon_id?: string; reason?: string }
+interface Targets { can_choose: boolean; targets: Target[]; default_runtime: string; default_daemon_id?: string; reason?: string; unresolved_repos?: string[] }
+
+// The connected desktops, once each, for picking the person's own.
+function desktopsOf(targets: Target[]): Desktop[] {
+  const out: Desktop[] = [];
+  for (const t of targets) {
+    if (t.daemon_id && !t.unavailable && !out.some(d => d.daemon_id === t.daemon_id)) out.push({ daemon_id: t.daemon_id, name: t.desktop_name || t.daemon_id });
+  }
+  return out;
+}
 export default function BoardRunTarget({ board, editable, onChanged }: { board: Board; editable: boolean; onChanged?: () => void }) {
   const stored = `${board.run_runtime || ""}|${board.run_daemon_id || ""}`;
   const [choice, setChoice] = useState(stored);
@@ -53,6 +63,7 @@ export default function BoardRunTarget({ board, editable, onChanged }: { board: 
         </label>}
         {isHost && board.run_runtime === "daemon" && `daemon|${board.run_daemon_id || ""}` === choice && board.run_host_acknowledged_at && <p className="pop-foot">Acknowledged {new Date(board.run_host_acknowledged_at).toLocaleString()}.</p>}
         <p className="pop-foot">Applies to board sessions, card runs, and automation. A single run can override it. On a desktop-only install, Automatic uses that desktop.</p>
+        <RepoResolve board={board} repos={targets.unresolved_repos ?? []} desktops={desktopsOf(targets.targets)} onChanged={() => { setAttempt(x => x + 1); onChanged?.(); }} />
       </> : <span>{board.run_runtime ? `${board.run_daemon_id ? `${board.run_daemon_id} · ` : ""}${board.run_runtime}` : "Automatic"}{targets?.reason ? ` — ${targets.reason}` : ""}</span>}
       {error && <p role="alert">{error} <button type="button" onClick={() => setAttempt(x => x + 1)}>Retry run targets</button></p>}
     </dd>

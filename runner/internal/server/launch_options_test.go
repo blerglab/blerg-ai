@@ -363,3 +363,61 @@ func TestLaunchOptionsTargetsReportRepoPresence(t *testing.T) {
 		t.Fatalf("no repo asked: %v", got)
 	}
 }
+
+// A bare folder's remote is reported only for the desktop the request names, never another
+// desktop's: desktops have no owner, so the Board resolves a board repo to owner/name against the
+// one desktop the person chose. A folder with no remote reports none.
+func TestLaunchOptionsReportOnlyTheNamedDesktopsRemote(t *testing.T) {
+	hub := NewHub()
+	mine := &DaemonConn{ID: "desktop-a", Name: "A", send: make(chan []byte, 8)}
+	mine.SetSandboxClones(true)
+	mine.SetCheckedOutRepos([]string{"app", "scratch"})
+	mine.SetRepoRemotes(map[string]string{"app": "example-org/app"})
+	hub.Register(mine)
+	other := &DaemonConn{ID: "desktop-b", Name: "B", send: make(chan []byte, 8)}
+	other.SetSandboxClones(true)
+	other.SetCheckedOutRepos([]string{"app", "scratch"})
+	other.SetRepoRemotes(map[string]string{"app": "someone/app", "scratch": "someone/scratch"})
+	hub.Register(other)
+	jm := newTestJobManager(t, &fakeK8s{})
+	jm.GitHubOrg, jm.ExplicitGitURLBase = "", ""
+	hub.SetJobManager(jm)
+	a := NewAPI(hub, nil, "fixture-daemon", nil, "")
+	origins := func(repo, daemon string) (map[string]string, LaunchTarget) {
+		options, err := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Repo: repo, DaemonID: daemon, Runtime: "daemon", Kind: "agent"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		var cluster LaunchTarget
+		for _, target := range options.Targets {
+			if target.DaemonID == "" {
+				cluster = target
+			}
+			if target.RepoOrigin != nil {
+				out[target.DaemonID] = target.RepoOrigin.Provider + ":" + target.RepoOrigin.FullName
+			}
+		}
+		return out, cluster
+	}
+	got, cluster := origins("app", "desktop-a")
+	if len(got) != 1 || got["desktop-a"] != "github:example-org/app" {
+		t.Fatalf("named desktop: %v", got)
+	}
+	if cluster.ResolvesBareRepos {
+		t.Fatal("no default org or git base, yet the cluster says it resolves bare names")
+	}
+	if got, _ := origins("scratch", "desktop-a"); len(got) != 0 {
+		t.Fatalf("a folder with no remote on the named desktop borrowed another desktop's: %v", got)
+	}
+	if got, _ := origins("app", ""); len(got) != 0 {
+		t.Fatalf("no desktop named, yet a remote was reported: %v", got)
+	}
+	if got, _ := origins("example-org/app", "desktop-a"); len(got) != 0 {
+		t.Fatalf("owner/name needs no resolving: %v", got)
+	}
+	jm.GitHubOrg = "example-org"
+	if _, cluster := origins("app", "desktop-a"); !cluster.ResolvesBareRepos {
+		t.Fatal("a default org resolves bare names on the cluster")
+	}
+}

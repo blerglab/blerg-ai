@@ -68,7 +68,7 @@ func TestHostTargetsExplicitPinsCannotLaunchIntoPods(t *testing.T) {
 			if rec.Code != http.StatusNotFound {
 				t.Fatalf("explicit REST pin status=%d", rec.Code)
 			}
-			if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "fixture-browser"}, protocol.BrowserSpawnSession{Type: "spawn_session", DaemonID: podID, Repo: "victim-repository", InitialPrompt: "fixture-private-start"}, pool); err == nil {
+			if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "fixture-browser"}, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: podID, Repo: "victim-repository", InitialPrompt: "fixture-private-start"}, pool); err == nil {
 				t.Error("browser websocket pin accepted a pod")
 			}
 			for _, noRepo := range []bool{false, true} {

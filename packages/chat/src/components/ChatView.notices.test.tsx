@@ -115,10 +115,12 @@ describe('text nobody typed', () => {
     expect(screen.queryByText(/system reminder/)).toBeNull()
   })
 
-  it('an answer to an ask is the person, marked as an answer', () => {
+  it("the person's answer to an ask is one short row, never a bubble (#156)", () => {
     seed(ev(1, 'user_message', { text: 'yes, ship it', source: 'ask_answer', message_id: 'm1' }))
     mount()
-    expect(screen.getByText('yes, ship it').closest('.agent-card')!.textContent).toMatch(/You · Answer/)
+    const row = screen.getByTestId('system-note')
+    expect(row.textContent).toMatch(/^You\s*answered: yes, ship it/)
+    expect(document.querySelector('.agent-card.user')).toBeNull()
   })
 
   it("the parent's answer to the child's question is the parent's, never \"You\"", () => {
@@ -130,7 +132,7 @@ describe('text nobody typed', () => {
     const parent = screen.getByText('use main').closest('.agent-card')!
     expect(parent.className).toContain('other-author')
     expect(parent.textContent).toMatch(/↑ Parent · Answer/)
-    expect(screen.getByText('my own answer').closest('.agent-card')!.textContent).toMatch(/You · Answer/)
+    expect(screen.getByText('answered: my own answer').closest('[data-testid="system-note"]')!.textContent).toMatch(/You\s*answered: my own answer/)
     expect(screen.getAllByText('You')).toHaveLength(1)
   })
 

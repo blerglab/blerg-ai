@@ -318,3 +318,76 @@ func TestChecklistWorkersUsesActualSessionStatusAndSafeTitles(t *testing.T) {
 		t.Fatal("unsafe or unbounded title")
 	}
 }
+
+// The live checklist names its assignees (a subagent by its description, a started session by its
+// title) so the panel never has to show an id.
+func TestChecklistLiveNamesAssignees(t *testing.T) {
+	fx := checklistMapFixture(t)
+	child, _ := fx.session(sessOpts{owner: "owner-1", parent: fx.parent})
+	if _, err := fx.pool.Exec(t.Context(), `UPDATE sessions SET title='Port the parser' WHERE id=$1`, child); err != nil {
+		t.Fatal(err)
+	}
+	checklistMapPost(fx, fx.parent, fx.parentTok, map[string]any{"op": "set", "items": []string{"One", "Two"}})
+	checklistMapEvent(t, fx, fx.parent, "subagent_started", map[string]string{"child_id": "toolu_01TJqzn5hgEU53pBc", "summary": "Audit the\x1b plan tab"})
+	checklistMapEvent(t, fx, fx.parent, "subagent_done", map[string]string{"child_id": "toolu_01TJqzn5hgEU53pBc"})
+	for _, a := range []map[string]any{
+		{"op": "assign", "index": 1, "assignee": map[string]string{"kind": "subagent", "id": "toolu_01TJqzn5hgEU53pBc"}},
+		{"op": "assign", "index": 2, "assignee": map[string]string{"kind": "child_session", "id": child}},
+	} {
+		if code, out := checklistMapPost(fx, fx.parent, fx.parentTok, a); code != http.StatusCreated {
+			t.Fatal(code, out)
+		}
+	}
+	code, out, _ := fx.do(http.MethodGet, "/api/sessions/"+fx.parent+"/live", fx.human("owner-1"), nil, nil)
+	if code != http.StatusOK {
+		t.Fatal(code, out)
+	}
+	current, _ := out["checklist"].(map[string]any)
+	titles, _ := current["worker_titles"].(map[string]any)
+	if titles["subagent:toolu_01TJqzn5hgEU53pBc"] != "Audit the plan tab" || titles["child_session:"+child] != "Port the parser" {
+		t.Fatal("assignees not named", titles)
+	}
+}
+
+// A started session is named only to a viewer who may see it: a private child's title reaches its
+// owner, never another viewer of the shared parent; an archived child is named to no one.
+func TestChecklistLiveNamesChildrenPerViewer(t *testing.T) {
+	fx := checklistMapFixture(t)
+	private, _ := fx.session(sessOpts{owner: "owner-1", parent: fx.parent, private: true, title: "Investigate the customer incident"})
+	archived, _ := fx.session(sessOpts{owner: "owner-1", parent: fx.parent, title: "Archived worker"})
+	shared, _ := fx.session(sessOpts{owner: "owner-1", parent: fx.parent, title: "Shared worker"})
+	if _, err := fx.pool.Exec(t.Context(), `UPDATE sessions SET archived_at=now() WHERE id=$1`, archived); err != nil {
+		t.Fatal(err)
+	}
+	checklistMapPost(fx, fx.parent, fx.parentTok, map[string]any{"op": "set", "items": []string{"One", "Two", "Three"}})
+	for i, child := range []string{private, archived, shared} {
+		if code, out := checklistMapPost(fx, fx.parent, fx.parentTok, map[string]any{"op": "assign", "index": i + 1, "assignee": map[string]string{"kind": "child_session", "id": child}}); code != http.StatusCreated {
+			t.Fatal(code, out)
+		}
+	}
+	titles := func(viewer string) map[string]any {
+		code, out, _ := fx.do(http.MethodGet, "/api/sessions/"+fx.parent+"/live", fx.human(viewer), nil, nil)
+		if code != http.StatusOK {
+			t.Fatal(viewer, code, out)
+		}
+		current, _ := out["checklist"].(map[string]any)
+		got, _ := current["worker_titles"].(map[string]any)
+		return got
+	}
+	owner := titles("owner-1")
+	if owner["child_session:"+private] != "Investigate the customer incident" || owner["child_session:"+shared] != "Shared worker" {
+		t.Fatal("owner does not see the names of its children", owner)
+	}
+	other := titles("owner-2")
+	if other["child_session:"+shared] != "Shared worker" {
+		t.Fatal("another viewer lost the shared child's name", other)
+	}
+	if _, ok := other["child_session:"+private]; ok {
+		t.Fatal("a private child's title leaked to another viewer", other)
+	}
+	for _, got := range []map[string]any{owner, other} {
+		if _, ok := got["child_session:"+archived]; ok {
+			t.Fatal("an archived child is named", got)
+		}
+	}
+}

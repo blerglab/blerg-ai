@@ -396,6 +396,8 @@ export default function BoardView() {
 
   const [error, setError] = useState<string | null>(null)
   const [assisting, setAssisting] = useState(false)
+  // Why the last Assist start failed (the server's message), shown beside the button.
+  const [assistError, setAssistError] = useState<string | null>(null)
   const [addColumnOpen, setAddColumnOpen] = useState(false)
 
   // Per-column add-ticket form state: { [columnId]: { open, title } }
@@ -437,11 +439,12 @@ export default function BoardView() {
   async function handleAssist() {
     if (assisting) return
     setAssisting(true)
+    setAssistError(null)
     try {
       const { session_id } = await boardApi.spawnAssist(boardId, {})
       navigate(`/sessions/${session_id}`)
     } catch (err) {
-      console.error('Assist failed:', err)
+      setAssistError(err instanceof Error && err.message ? err.message : 'Assist could not start')
     } finally {
       setAssisting(false)
     }
@@ -666,6 +669,21 @@ export default function BoardView() {
         >
           {assisting ? 'Starting…' : 'Assist'}
         </button>
+        {assistError && (
+          <span
+            role="alert"
+            data-testid="assist-error"
+            title={assistError}
+            style={{
+              color: 'var(--blaze)',
+              fontSize: '0.8rem',
+              maxWidth: 'min(100%, 640px)',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            Assist failed: {assistError}
+          </span>
+        )}
       </div>
 
       {/* ── Filter bar ─────────────────────────────────────────────────────── */}

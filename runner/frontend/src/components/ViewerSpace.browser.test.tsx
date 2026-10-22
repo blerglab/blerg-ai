@@ -1,8 +1,8 @@
 // The artifact viewer uses the screen it is given (0.4.4): review and diff take about 96% × 92% of
 // the viewport with no pixel cap, the review's panes split the width (the source with room for its
-// lines, the page at a readable measure, the comments at a fixed width), maximize goes edge to
-// edge, and the plain viewer is wider while prose keeps its measure. Measured in real Chromium on a
-// 4K display, a 1080p one and a phone.
+// lines, the page at GitHub's article width, the comments at a fixed width), maximize goes edge to
+// edge, and a markdown document reads in GitHub's box (1012px of text, a 1px border, 32px of padding;
+// 0.4.5) centered in the wider viewer. Measured in real Chromium on a 4K display, a 1080p one and a phone.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -80,8 +80,8 @@ describe('the viewer uses the screen', () => {
     const pageRect = rect('.review-page')
     expect(margin.left - pageRect.right).toBeGreaterThanOrEqual(0)
     expect(margin.left - pageRect.right).toBeLessThan(48)
-    // The page reads at a measure.
-    expect(pageRect.width).toBeLessThanOrEqual(820)
+    // The page reads at GitHub's article width.
+    expect(pageRect.width).toBeLessThanOrEqual(1078 + 1) // GitHub's box
     expect(pageRect.width).toBeGreaterThan(600)
     // The source takes the left, about half; the page and its comments are centered as one group in
     // the rest.
@@ -101,7 +101,7 @@ describe('the viewer uses the screen', () => {
   it.each(SIZES)('a diff takes about 96 percent of a %i × %i viewport', async (width, height) => {
     await page.viewport(width, height)
     open(diff, PATCH)
-    await waitFor(() => expect(document.querySelector('.diff-files')).not.toBeNull())
+    await waitFor(() => expect(document.querySelector('.diff-main')).not.toBeNull())
     await frame()
     const dialog = rect('.artifact-viewer')
     if (width < 900) {
@@ -135,7 +135,7 @@ describe('the viewer uses the screen', () => {
     expect(back.height).toBeCloseTo(before.height, 0)
   })
 
-  it.each(SIZES)('the plain viewer is wider on a %i × %i viewport while prose keeps its measure', async (width, height) => {
+  it.each(SIZES)('the plain viewer keeps its size and a markdown file reads in GitHub’s box on a %i × %i viewport', async (width, height) => {
     await page.viewport(width, height)
     open(md, MARKDOWN)
     await waitFor(() => expect(document.querySelector('.artifact-markdown')).not.toBeNull())
@@ -144,10 +144,11 @@ describe('the viewer uses the screen', () => {
     if (width < 900) {
       expect(dialog.width).toBeCloseTo(width, 0)
     } else {
+      // The viewer keeps its usual size; the document is GitHub's box, centered in it.
       expect(dialog.width).toBeCloseTo(Math.min(1400, width * 0.94), 0)
       const body = rect('.artifact-body')
       const prose = rect('.artifact-markdown')
-      expect(prose.width).toBeLessThanOrEqual(900)
+      expect(prose.width).toBeCloseTo(1078, 0) // GitHub's box, however wide the dialog
       expect(Math.abs((prose.left - body.left) - (body.right - prose.right))).toBeLessThan(2)
     }
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(innerWidth)
@@ -193,7 +194,7 @@ describe('the viewer uses the screen', () => {
     expect(margin.width).toBeCloseTo(300, 0)
     expect(margin.left - pageRect.right).toBeGreaterThanOrEqual(0)
     expect(margin.left - pageRect.right).toBeLessThan(48)
-    expect(pageRect.width).toBeLessThanOrEqual(820)
+    expect(pageRect.width).toBeLessThanOrEqual(1078 + 1) // GitHub's box
     expect(Math.abs((pageRect.left - panes.left) - (panes.right - margin.right))).toBeLessThan(4)
   })
 })

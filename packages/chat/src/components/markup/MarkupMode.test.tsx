@@ -59,6 +59,8 @@ beforeEach(() => {
   vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(function (cb) {
     cb(new Blob(['png-bytes'], { type: 'image/png' }))
   })
+  // The image's box is what maps the pointer; the canvas is laid over it.
+  vi.spyOn(HTMLImageElement.prototype, 'getBoundingClientRect').mockReturnValue(STAGE as DOMRect)
   vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue(STAGE as DOMRect)
 })
 
@@ -261,5 +263,50 @@ describe('MarkupMode', () => {
     expect(screen.queryByTestId('markup-pin-1')).toBeNull()
     fireEvent.keyDown(root, { key: 'p' })
     expect(screen.getByRole('button', { name: 'Pen' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  // Card #94: the stage is a grid item that stretches to its column, while the image is capped by
+  // height and sits at its left. A canvas the size of the stage mapped the pointer against the
+  // wrong box, so the marks landed left of where they were drawn and squashed sideways.
+  describe('a stage wider than a height-capped image', () => {
+    // The image shows at 400×300 at (100, 50); the stage (and the canvas, before the fix) is 900 wide.
+    const IMAGE = { left: 100, top: 50, width: 400, height: 300, right: 500, bottom: 350, x: 100, y: 50, toJSON: () => ({}) }
+    const WIDE = { left: 100, top: 50, width: 900, height: 300, right: 1000, bottom: 350, x: 100, y: 50, toJSON: () => ({}) }
+    beforeEach(() => {
+      vi.spyOn(HTMLImageElement.prototype, 'getBoundingClientRect').mockReturnValue(IMAGE as DOMRect)
+      vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue(WIDE as DOMRect)
+      vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockReturnValue(WIDE as DOMRect)
+    })
+
+    it('maps a pin at the image center to the center, and places the canvas over the image only', () => {
+      const { canvas } = setup()
+      fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+      press(canvas, 300, 200)
+      const row = screen.getByTestId('markup-pin-1')
+      expect(row).toHaveAttribute('data-x', '0.5')
+      expect(row).toHaveAttribute('data-y', '0.5')
+      expect(canvas.style.width).toBe('400px')
+      expect(canvas.style.height).toBe('300px')
+      expect(canvas.style.left).toBe('0px')
+    })
+
+    it('draws the overlay at one uniform scale and flattens the same natural pixels', async () => {
+      const { canvas, onSend } = setup()
+      fireEvent.click(screen.getByRole('button', { name: 'Box' }))
+      calls = []
+      drag(canvas, [200, 100], [400, 300]) // image pixels (200,100) to (600,500)
+      const scales = calls.filter(c => c.name === 'scale').map(c => c.args)
+      expect(scales.length).toBeGreaterThan(0)
+      for (const [sx, sy] of scales) expect(sx).toBe(sy)
+      expect(calls.filter(c => c.name === 'strokeRect').map(c => c.args)).toContainEqual([200, 100, 400, 400])
+      fireEvent.change(screen.getByRole('textbox', { name: 'Comment for annotation 1' }), { target: { value: 'here' } })
+      calls = []
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+      await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1))
+      // The flattened copy strokes the very same rectangle, in natural pixels, with no scale.
+      expect(calls.filter(c => c.name === 'scale')).toHaveLength(0)
+      expect(calls.filter(c => c.name === 'strokeRect').map(c => c.args)).toContainEqual([200, 100, 400, 400])
+      expect(onSend.mock.calls[0][1]).toEqual([{ n: 1, note: 'here', x: 0.5, y: 0.5 }])
+    })
   })
 })

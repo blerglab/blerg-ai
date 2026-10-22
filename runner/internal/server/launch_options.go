@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/blerglab/blerg-ai/contracts/engines"
+	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 type LaunchOptionsRequest struct {
@@ -45,6 +48,14 @@ type LaunchTarget struct {
 	// HasRepo (a desktop, when the request names a repo): whether that desktop has a folder for
 	// it, matched the way a start pinned to it finds one (repoFolderOn). Absent otherwise.
 	HasRepo *bool `json:"has_repo,omitempty"`
+	// RepoOrigin (only the desktop the request names, for a bare folder name it has): the hosted
+	// repository that folder's origin remote points at, or absent when it has none the desktop
+	// recognised. No other desktop's remote is reported: desktops have no owner in the runner,
+	// so a caller resolving a folder name to owner/name consults only the desktop it chose.
+	RepoOrigin *protocol.RepoOrigin `json:"repo_origin,omitempty"`
+	// ResolvesBareRepos (the cluster): the install has a default organization or git base, so a
+	// cluster start may name a bare folder and the cluster resolves it itself.
+	ResolvesBareRepos bool `json:"resolves_bare_repos,omitempty"`
 }
 
 func (a *API) authorizeLaunchOptions(w http.ResponseWriter, r *http.Request) (runnerPrincipal, bool) {
@@ -69,6 +80,20 @@ func (a *API) HandleLaunchOptions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, options)
 }
 
+// folderOrigin is the hosted repository dc reports for its folder, normalized the way a cluster
+// start resolves a bare name (resolveClusterRepoName), or nil when it reports none.
+func folderOrigin(dc *DaemonConn, folder string) *protocol.RepoOrigin {
+	origin, ok := dc.RepoOrigin(folder)
+	if !ok {
+		return nil
+	}
+	ref, ok := gitprovider.Default.ParseFullName(origin.Provider, origin.FullName)
+	if !ok {
+		return nil
+	}
+	return &protocol.RepoOrigin{Provider: origin.Provider, FullName: ref.FullName()}
+}
+
 // DiscoverLaunchOptions resolves readiness using the same principal and target
 // as launch. It never substitutes another account's catalog or a host union for
 // a Cluster catalog. Catalog acquisition itself remains asynchronous.
@@ -78,8 +103,9 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 	}
 	out := LaunchOptions{Runtime: req.Runtime, State: "known", Engines: []LaunchEngine{}}
 	out.Targets = []LaunchTarget{}
-	if a.hub.JobManager() != nil {
-		out.Targets = append(out.Targets, LaunchTarget{Name: "Cluster", Runtimes: []string{runnerRuntimeCluster}})
+	if jm := a.hub.JobManager(); jm != nil {
+		out.Targets = append(out.Targets, LaunchTarget{Name: "Cluster", Runtimes: []string{runnerRuntimeCluster},
+			ResolvesBareRepos: jm.GitHubOrg != "" || jm.ExplicitGitURLBase != ""})
 	}
 	hosts := a.hub.GetHostDaemons()
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].ID < hosts[j].ID })
@@ -90,8 +116,12 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 		}
 		target := LaunchTarget{DaemonID: host.ID, Name: host.Name, Runtimes: runtimes}
 		if req.Repo != "" && validateRepoName(req.Repo) == nil {
-			has := slices.Contains(host.CheckedOutRepos(), repoFolderOn(host, req.Repo, ""))
+			folder := repoFolderOn(host, req.Repo, "")
+			has := slices.Contains(host.CheckedOutRepos(), folder)
 			target.HasRepo = &has
+			if has && req.DaemonID != "" && host.ID == req.DaemonID && !strings.Contains(req.Repo, "/") {
+				target.RepoOrigin = folderOrigin(host, folder)
+			}
 		}
 		out.Targets = append(out.Targets, target)
 	}

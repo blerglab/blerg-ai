@@ -376,27 +376,34 @@ func ReplaceBoardAutomationToken(ctx context.Context, pool *pgxpool.Pool, boardI
 
 // CreateBoard creates a board with its repos and initial columns.
 func CreateBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams) (Board, error) {
+	b, _, err := createBoard(ctx, pool, p, nil, nil)
+	return b, err
+}
+
+// createBoard is CreateBoard with two hooks in its transaction: before runs first and may answer
+// an existing board instead (replayed), after runs once the board is written.
+func createBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams, before func(pgx.Tx) (*Board, error), after func(pgx.Tx, Board) error) (Board, bool, error) {
 	if p.Name == "" {
-		return Board{}, fmt.Errorf("board name required")
+		return Board{}, false, fmt.Errorf("board name required")
 	}
 	schema := p.FieldSchema
 	if len(schema) == 0 {
 		schema = json.RawMessage(`[]`)
 	}
 	if _, err := ParseFieldSchema(schema); err != nil {
-		return Board{}, err
+		return Board{}, false, err
 	}
 	if err := checkBoardEfforts(&p); err != nil {
-		return Board{}, err
+		return Board{}, false, err
 	}
 	if err := checkConcurrency(p.Concurrency); err != nil {
-		return Board{}, err
+		return Board{}, false, err
 	}
 	if err := checkCIPolicy(p.CIPolicy); err != nil {
-		return Board{}, err
+		return Board{}, false, err
 	}
 	if err := checkAutomationEngine(p.AutomationEngine); err != nil {
-		return Board{}, err
+		return Board{}, false, err
 	}
 	engine := EngineClaude
 	if p.AutomationEngine != nil {
@@ -435,10 +442,33 @@ func CreateBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams) (Board,
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return Board{}, err
+		return Board{}, false, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
+	if before != nil {
+		existing, err := before(tx)
+		if err != nil {
+			return Board{}, false, err
+		}
+		if existing != nil {
+			return *existing, true, tx.Commit(ctx)
+		}
+	}
+	b, err := insertBoardTx(ctx, tx, p, schema, requireRepo, gateEnabled, onUnavail, onDispute, engine, ciPolicy, concurrency)
+	if err != nil {
+		return Board{}, false, err
+	}
+	if after != nil {
+		if err := after(tx, b); err != nil {
+			return Board{}, false, err
+		}
+	}
+	return b, false, tx.Commit(ctx)
+}
 
+// insertBoardTx writes the board row, its repos and its columns in tx (CreateBoard's checked
+// parameters).
+func insertBoardTx(ctx context.Context, tx pgx.Tx, p BoardParams, schema json.RawMessage, requireRepo, gateEnabled bool, onUnavail, onDispute, engine, ciPolicy string, concurrency int) (Board, error) {
 	gitBase := ""
 	if p.GitBase != nil {
 		gitBase = *p.GitBase
@@ -457,10 +487,10 @@ func CreateBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams) (Board,
 		return Board{}, fmt.Errorf("insert board: %w", err)
 	}
 
-	for _, repo := range p.Repos {
+	for i, repo := range p.Repos {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO board_repos (board_id, repo) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-			b.ID, repo); err != nil {
+			`INSERT INTO board_repos (board_id, repo, position) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+			b.ID, repo, i); err != nil {
 			return Board{}, fmt.Errorf("insert board repo: %w", err)
 		}
 	}
@@ -483,8 +513,7 @@ func CreateBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams) (Board,
 			return Board{}, fmt.Errorf("insert column: %w", err)
 		}
 	}
-
-	return b, tx.Commit(ctx)
+	return b, nil
 }
 
 func GetBoard(ctx context.Context, pool *pgxpool.Pool, id string) (Board, error) {
@@ -492,7 +521,7 @@ func GetBoard(ctx context.Context, pool *pgxpool.Pool, id string) (Board, error)
 	if err != nil {
 		return b, err
 	}
-	rows, err := pool.Query(ctx, `SELECT repo FROM board_repos WHERE board_id = $1 ORDER BY repo`, id)
+	rows, err := pool.Query(ctx, `SELECT repo FROM board_repos WHERE board_id = $1 ORDER BY position, repo`, id)
 	if err != nil {
 		return b, err
 	}
@@ -730,9 +759,9 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 		if _, err := tx.Exec(ctx, `DELETE FROM board_repos WHERE board_id = $1`, id); err != nil {
 			return Board{}, nil, err
 		}
-		for _, repo := range p.Repos {
+		for i, repo := range p.Repos {
 			if _, err := tx.Exec(ctx,
-				`INSERT INTO board_repos (board_id, repo) VALUES ($1,$2)`, id, repo); err != nil {
+				`INSERT INTO board_repos (board_id, repo, position) VALUES ($1,$2,$3)`, id, repo, i); err != nil {
 				return Board{}, nil, err
 			}
 		}

@@ -5,6 +5,7 @@
 // card is just one more chip. Every state shown is the server's: nothing is optimistic, and a failed
 // change says so. The modal holds its changes until Save, which goes through the same grant APIs.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { GRANT_GLYPH } from '../lib/grantGlyphs'
 import { apiFetch } from '../apiFetch'
 import { ENGINE_LABELS, RUNTIME_LABELS } from '../lib/runtimes'
 import { useSessionBoards } from '../lib/sessionBoards'
@@ -153,16 +154,16 @@ function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest,
         {view && !view.can_grant && view.reason && <p className="child-approval-note" data-testid="perm-reason">{view.reason}</p>}
         {state === 'ready' && count === 0 && dormant.length + dormantBoards.length === 0 && <p className="child-approval-note">None yet: this session asks you each time.</p>}
         {count > 0 && <ul className="perm-chips" data-testid="perm-active" aria-label="Active permissions">
-          {groups.map(c => <Chip key={c.key} glyph="↳" text={c.chip} scope={c.label} title={`${c.label} without asking`} disabled={busy !== null} onRevoke={() => { void revokeChildren(c.ids) }} />)}
-          {boards.map(b => <Chip key={`b:${b.board_id}`} testId="perm-board" glyph="▦" text={boardChip(b)} scope={boardScope(b)} title={`${boardScope(b)} · ${boardDetail(b)}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
-          {grants.map(g => <Chip key={g.id} testId="perm-grant" glyph="⚙" text={grantTarget(g)} scope={grantScope(g)} title={`${grantScope(g)} · ${grantDetail(g)}`} disabled={busy !== null} onRevoke={() => { void revoke(g.id) }} />)}
+          {groups.map(c => <Chip key={c.key} glyph={GRANT_GLYPH.child} text={c.chip} scope={c.label} title={`${c.label} without asking`} disabled={busy !== null} onRevoke={() => { void revokeChildren(c.ids) }} />)}
+          {boards.map(b => <Chip key={`b:${b.board_id}`} testId="perm-board" glyph={GRANT_GLYPH.board} text={boardChip(b)} scope={boardScope(b)} title={`${boardScope(b)} · ${boardDetail(b)}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
+          {grants.map(g => <Chip key={g.id} testId="perm-grant" glyph={GRANT_GLYPH.tool} text={grantTarget(g)} scope={grantScope(g)} title={`${grantScope(g)} · ${grantDetail(g)}`} disabled={busy !== null} onRevoke={() => { void revoke(g.id) }} />)}
         </ul>}
         {dormant.length + dormantBoards.length > 0 && <div className="perm-dormant-list" data-testid="perm-inactive">
           <p className="perm-dormant-head">Not approving now</p>
           <ul className="perm-chips">
-            {dormantBoards.map(b => <Chip key={`b:${b.board_id}`} dormant glyph="▦" text={boardChip(b)} scope={boardScope(b)} why="Needs you signed in"
+            {dormantBoards.map(b => <Chip key={`b:${b.board_id}`} dormant glyph={GRANT_GLYPH.board} text={boardChip(b)} scope={boardScope(b)} why="Needs you signed in"
               title={`${boardScope(b)}. ${SIGNED_OUT}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
-            {dormant.map(g => <Chip key={g.id} dormant glyph="⚙" text={grantTarget(g)} scope={grantScope(g)}
+            {dormant.map(g => <Chip key={g.id} dormant glyph={GRANT_GLYPH.tool} text={grantTarget(g)} scope={grantScope(g)}
               why={g.inactive === 'tool_changed' ? 'tool changed' : 'Needs you signed in'} title={`${grantScope(g)}. ${inactiveLabel(g)}`} disabled={busy !== null} onRevoke={() => { void revoke(g.id) }} />)}
           </ul>
         </div>}

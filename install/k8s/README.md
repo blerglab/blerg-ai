@@ -359,11 +359,23 @@ so those files survive restarts and deploys.
   (`BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB`, `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`,
   `BLERG_RUNNER_MAX_FILE_MB` in `configmap.yaml`). Size the claim for the
   sessions you keep, or lower the limits.
-- **Recreate, not rolling.** A `ReadWriteOnce` volume is mounted by one node at
-  a time, so the runner Deployment uses the `Recreate` strategy: a rolling
-  update would start the new pod before stopping the old one, and on another
-  node it would wait forever for the volume. A deploy therefore stops the
-  runner for a few seconds; browsers and daemons reconnect by themselves.
+- **Rolling updates.** Core, board, and runner retain the serving replica until
+  the new replica passes `/readyz` (database access and required migrations).
+  `/livez` remains healthy during database startup retries; `/readyz` and API
+  traffic return 503 until initialization finishes. Each failed attempt is logged
+  with its reason (for example `SQLSTATE 28P01: ... password authentication
+  failed`; passwords and connection strings are removed), with backoff from one
+  second up to 30 seconds; after five failures in a row `/readyz` names only the kind of
+  failure (`database: SQLSTATE 28P01 (authentication failed)`, `database:
+  connection refused`), so a probe shows what kind of fix a hung rollout needs and
+  `kubectl -n blerg logs` has the details.
+  Migrations are additive and safe alongside the old version. On SIGTERM core and
+  the board keep serving for 5 seconds with `/readyz` at 503, then finish their
+  in-flight requests and exit; the runner exits at once on purpose (it keeps its
+  connections in memory, so two runner pods must overlap as briefly as possible). Runner surge pods
+  must share the current pod's node so the `ReadWriteOnce` data volume can be
+  mounted by both. Reserve capacity for the surge on that node; a drained or
+  unavailable node still requires volume reattachment and can cause downtime.
 - **Ownership.** The pod sets `fsGroup: 65532` (the runner's user), so a
   freshly provisioned, root-owned volume is writable — on volume types with
   ownership management (most CSI and block volumes). In-tree hostPath volumes,
@@ -870,7 +882,7 @@ Secret and restart the three Deployments after each `deploy.sh` run.
 | `postgres-statefulset.yaml` | Postgres 16 StatefulSet + headless Service + PVC |
 | `core-deployment.yaml` | `blerg-core` Deployment + Service (`:8080`) |
 | `board-deployment.yaml` | `blerg-board` Deployment + Service (`:8080`) |
-| `runner-deployment.yaml` | `blerg-runner` Deployment (strategy `Recreate`) + Service (`:8080`) — server only, see "Connecting the workstation daemon" |
+| `runner-deployment.yaml` | `blerg-runner` Deployment (strategy `RollingUpdate`) + Service (`:8080`) — server only, see "Connecting the workstation daemon" |
 | `runner-data-pvc.yaml` | the runner's data claim `blerg-runner-data`, mounted at `/data`; created once by `deploy.sh`, not in the kustomization ([Runner data volume](#runner-data-volume)) |
 | `ingress.yaml` | host-based routing under `${DOMAIN}` |
 | `kustomization.yaml` | ties the above together (everything except the Secret, the runner data claim and `cluster-runtime.yaml`) |

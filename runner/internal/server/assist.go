@@ -34,6 +34,9 @@ type assistRequest struct {
 // a ticket. Normal sessions are created async by session_started from the daemon,
 // but we need the row now. Solution: CreateAssistSession pre-creates it with
 // assist=true; the later session_started is a no-op (ON CONFLICT DO NOTHING).
+//
+// Assist still starts a tmux (Terminal) session: it is exempt from the Terminal deprecation
+// (terminal_deprecation.go) until card #103 moves it to an agent session in 0.5.0.
 func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 	boardID := r.PathValue("id")
 	if boardID == "" {

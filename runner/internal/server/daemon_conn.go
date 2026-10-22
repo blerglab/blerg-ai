@@ -246,6 +246,7 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			dc.SetPlugins(hello.Plugins)
 			dc.SetPluginEngines(hello.PluginEngines)
 			dc.SetSessionPluginEngines(hello.SessionPluginEngines)
+			dc.SetExtensionEngines(hello.PluginCatalogEngines, hello.MCPSignInEngines)
 			dc.SetAllowHostCredentialClone(hello.AllowHostCredentialClone)
 			dc.SetSandboxAvailable(hello.SandboxAvailable)
 			dc.SetHostClaude(hello.ClaudeCLIAvailable, hello.AnthropicKeySet, hello.SandboxClaudeCredential)
@@ -433,7 +434,7 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 		}
 		// Global daemon control responses are never a pod capability.
 		switch env.Type {
-		case "daemon_heartbeat", "session_started", "session_state_changed", "session_ended", "session_paused", "session_meta_changed", "session_output", "agent_event", "session_scrollback", "workspace_file_result", "session_origin_result", "progress_origin_result":
+		case "daemon_heartbeat", "session_started", "session_state_changed", "session_ended", "session_paused", "session_meta_changed", "session_output", "agent_event", "session_scrollback", "workspace_file_result", "session_origin_result", "progress_origin_result", "commit_result":
 		default:
 			return true
 		}
@@ -519,6 +520,24 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 		if json.Unmarshal(raw, &msg) == nil {
 			h.deliverProgressOriginResult(dc, msg)
 		}
+	case "plugin_catalog_result":
+		if len(raw) > protocol.CatalogResultMaxFrame {
+			return true
+		}
+		h.deliverExtResult(dc, env.Type, raw)
+	case "mcp_sign_in_result":
+		if len(raw) > 16<<10 {
+			return true
+		}
+		h.deliverExtResult(dc, env.Type, raw)
+	case "commit_result":
+		if len(raw) > commitResultMaxFrame {
+			return true
+		}
+		var msg protocol.CommitResult
+		if json.Unmarshal(raw, &msg) == nil {
+			h.deliverCommitResult(dc, msg)
+		}
 	case "workspace_file_result":
 		if len(raw) > workspaceFileMaxFrame {
 			return true
@@ -573,6 +592,10 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 		var msg protocol.SessionEnded
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			log.Printf("daemon %s malformed session_ended: %v", dc.ID, err)
+			return true
+		}
+		if !daemonHostsSession(ctx, dbPool, dc, msg.SessionID) {
+			log.Printf("daemon %s: session_ended for a session it does not host (%s) — ignored", dc.ID, msg.SessionID)
 			return true
 		}
 		HandleSessionEnded(ctx, h, dbPool, msg)
@@ -922,6 +945,21 @@ func reconcileSessionsQueuedChecked(ctx context.Context, h *Hub, dbPool *pgxpool
 	return stopped, nil
 }
 
+// daemonHostsSession reports whether dc may end sessionID: the session's row names dc as its
+// daemon. A runner pod is already held to its one session (runnerBoundSession) and a runtime-token
+// connection to its binding, so either passes; so does an id with no row, which has nothing to end.
+func daemonHostsSession(ctx context.Context, dbPool *pgxpool.Pool, dc *DaemonConn, sessionID string) bool {
+	if dbPool == nil || dc.BoundSessionID != "" || runnerBoundSession(dc.Mode, dc.Name) != "" {
+		return true
+	}
+	row, err := db.GetSession(ctx, dbPool, sessionID)
+	if err != nil {
+		log.Printf("daemon %s: session_ended %s: %v", dc.ID, sessionID, err)
+		return false
+	}
+	return row == nil || row.DaemonID == dc.ID
+}
+
 // unreportedGrace is how long after a session's row was made reconcile waits
 // before treating a daemon that does not list it as having lost it. A current
 // daemon lists its queued spawns (QueuedSessions), so this is the backstop for
@@ -947,6 +985,10 @@ func stoppedForGood(status string, endReason *string) bool {
 		return true
 	case db.EndReasonDaemonLost:
 		return status == "stopped"
+	case db.EndReasonProcessFailed:
+		// It failed by itself (its engine runtime stopped): the daemon that ended it no longer
+		// hosts it, so a report of it alive is a heartbeat built before the end.
+		return status == "error"
 	}
 	return false
 }
@@ -982,6 +1024,8 @@ func handleDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 	h.abandonReposRootRequests(dc)
 	h.abandonWorkspaceFileRequests(dc)
 	h.abandonSessionOriginRequests(dc)
+	h.abandonCommitRequests(dc)
+	h.abandonExtRequests(dc)
 	h.abandonProgressOriginRequests(dc)
 	if !h.UnregisterIfCurrent(dc) {
 		return

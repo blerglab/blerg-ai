@@ -257,7 +257,11 @@ and decides the proposal through the transport's optional `proposal` and `decide
 them the card says it waits for the owner); `onEditProposal(id)` opens the host's draft editor for a
 board card, `onOpenBoardCard(card)` opens a created card in the host's board, `onManagePermissions`
 opens the host's session permissions, and bumping `proposalRevision` has the cards read their
-proposal again (after the host's editor approved one). `describeUserMessage` says how a user
+proposal again (after the host's editor approved one). A proposal of kind `board_create` (0.74.0: a
+new board the session asks for) is approved by its owner only: its card has no Edit or Allow for this
+session, sends the reviewed arguments with the approval, and once decided says the board was
+created and the access the session got (`ProposalDecidedPayload.board`, `ProposalDetail.board`,
+`CreatedBoard`, `readCreatedBoard`). `describeUserMessage` says how a user
 message is drawn: return `{ author: 'the board' }` for one the app's automation sent rather than
 the person, `{ brief: true }` to fold the long prompt a session was started with into one line
 that opens, or nothing to leave it as the person's. Its third argument says whether the message is the
@@ -481,7 +485,8 @@ Added in 0.13.0; no new props, nothing removed.
   Older chat builds draw nothing for either.
 - **Tracker data is untrusted.** Every field renders as text; the description and the comments go
   through the package's Markdown without the app's cards (a `card:` fence stays a code block), and,
-  as everywhere, without raw HTML or images; the key links only to an `http:`/`https:` url. Any
+  as everywhere outside a document, raw HTML as literal text and no image loaded; the key links only
+  to an `http:`/`https:` url. Any
   session token can claim any source, so the badge's tooltip says the agent pinned it.
 - **`LiveState` gains `checklist`, `plan`, `tickets` and `ticket`** (all optional). `useLiveState`
   derives the checklist and the pins from the events it holds; the engine's plan comes only from
@@ -503,9 +508,15 @@ accepted: ChatView's `commitUrl`, `ChecklistItems`'s `commitUrls`, `CommitRef.ur
   (won't do, won't fix, canceled, duplicate, invalid, rejected). `StatusChip` draws it as a muted tint
   of `--chat-info`, `--chat-warning` or `--chat-success` with a dot; a canceled ticket's title is
   struck through. The chat's card, the modal and the runner's panel all use it.
-- **The ticket card is a summary.** Badge, key and status; the title one size up; one meta line
-  (type · priority · assignee, the priority with a muted ↑ → ↓); the first lines of the description,
-  faded; **Open ticket** opens `TicketModal`. Fields, criteria and comments are in the modal only.
+- **A pin is one row (0.81.0).** "📌 Pinned #157 ◐ <title, cut to one line> · <time>", a system row
+  as wide as a bubble at most: the key is the card chip with its hovercard, then the state glyph
+  (`PIN_STATE_GLYPH` by `pinStateOfStatus`: ✓ done, ◐ in progress, ○ not started, shared with the
+  runner's panel), the title, another tracker's source ("· JIRA"). Consecutive pins fold into one row
+  ("📌 Pinned #157, #158"), as do consecutive unpins ("📌 Unpinned #127 (done)"); a refresh says what
+  changed ("📌 Updated #157 ✓ … · status In progress → Done"). A click on the chip opens the host's
+  ticket dialog (`ChatRefs.openTicket`: the runner's live Board card in its two-column layout); a host
+  without one gets `TicketModal` on the pinned copy. Fields, criteria and comments are in the dialog
+  only.
 - **The modal is an issue view.** Header: badge, key, status, a large title and "Open in <Source>".
   Body: Description (the `md-doc` look), Acceptance criteria (a plain ☐ list) and Comments (an
   initials avatar, the name, a relative time), with **Details** (Type, Priority, Assignee, Reporter,
@@ -515,6 +526,87 @@ accepted: ChatView's `commitUrl`, `ChecklistItems`'s `commitUrls`, `CommitRef.ur
   published diff a sha opens it in the viewer at that commit's section (`DiffView`'s and
   `ArtifactViewer`'s `commit`); without one it copies the sha ("Copied"). Nothing links to a forge.
   **± View diff** is a small button with the diff's +/− counts, read once (`loadDiffSummary`).
+
+## Hovercards
+
+New in 0.54.0: `Hover`, `HovercardProvider`, `HOVERCARD`, `hovercardsEnabled`,
+`setHovercardsEnabled`, `useHovercardsEnabled`, `useCanHover`, `clearHovercardCache`, `VisualThumb`,
+`CommitChips`'s `hover`.
+
+- **One preview for every chip.** `<Hover target={…}>{chip}</Hover>` gives a chip a hovercard, as
+  GitHub previews an issue or a commit: a card (`{kind: 'card', source, key, boardId?, title?,
+  status?, ticket?, worker?}`: key, title, status, priority, type, tags, the assignee or the worker
+  on it, the first lines of the description), a file (`{kind: 'file', sessionId, id, artifact?,
+  reviewOpen?}`: an image as a thumbnail, markdown, text and code as the first lines, Mermaid and
+  Vega-Lite drawn small by the viewer's own renderer and sandbox (`VisualThumb`), a diff as its
+  files with +/− counts; then name, version, size, who published it and when, and an open review)
+  or a commit (`{kind: 'commit', sessionId, sha, diff?}`: message, author and files, read from the
+  published diff that holds it). The chat's checklist commit chips, its pinned ticket rows and the
+  Files list use it.
+- **Behavior.** It opens after `HOVERCARD.openDelayMs` (400 ms) of hover or keyboard focus, stays
+  while the pointer moves into it, and closes on leave, Esc or a press of the chip.
+- **Lists (0.64.0).** A card opens beside what its chip sits in, never over the rows that follow:
+  beside an ancestor marked `data-hc-boundary` (the runner's side panel: the card opens to its
+  left), else beside the chip's row (its `li` or `[data-hc-row]`), else beside the chip, on the
+  side with room (`placeCard`); below or above only when neither side has room. While a card is
+  open, and `HOVERCARD.warmMs` (300 ms) after one closed, another chip's card opens after only
+  `warmDwellMs` (70 ms, so a fast sweep does not read every card). Out of the chip, the card stays
+  only while the pointer heads for it: inside the safe triangle (its apex `apexBehindPx` behind
+  where the pointer left) and, judged over a window (`windowMoves` moves or `windowMs`), pointing
+  between the card's near corners (± `angleDeg`) and no steeper than `steepDeg`; moves under
+  `jitterPx` are not judged. Each move toward it restarts `graceMs`, `headingMaxMs` caps the trip;
+  any other move closes it at once, and reaching another chip switches to that chip's card at once,
+  whatever the triangle says. A
+  chip nested in a row (`data-hc-anchor`) keeps its own focus and hover.
+- **Live from the board (0.67.0).** A card read whose `CardPreview` has `live: true` says "Live from the
+  board" in its hovercard (the rows carry no mark for it).
+- **Rows (0.64.0).** `useHovercard(target)` gives a whole element (a list row) the same card:
+  spread its `props` on the row and render its `card`. A `{kind: 'run', title, facts}` target is a
+  card of facts (`HOVERCARD.fields.run`: kind, engine, model, state, the whole step, elapsed,
+  tokens, card, started by), each `{value, raw?}`, the raw value in the fact's tooltip. Only a device that
+  can hover (`(hover: hover)`) gets one; a tap on a touch screen opens the thing as before. It is
+  drawn in a portal on the page's body, under or over its chip and kept on screen, so a narrow side
+  panel never clips it. It holds no links or controls.
+- **Data.** Nothing is read until a card opens. `HovercardProvider` says where to read
+  (`files`, `artifact(sessionId, id)`, `card(target)`, `reviewOpen(sessionId, id)`,
+  `worker(target)`, `diffFor(sessionId, sha)`); a nested provider adds to the one above it, and inside
+  a chat the chat's files are used. File and commit reads are cached (bounded): a diff is read
+  and parsed once for all its commits, and only its commits are kept.
+- **Never more than 256 KB.** A commit's diff is read with `TransportFiles.rawCapped(sessionId, id,
+  max)` (new, optional; `createFiles` has it): null when Content-Length is over `max`, or when the
+  stream passes it, which stops the download; null too when neither tells the size. A transport
+  without it previews a diff only when the list gives a size within the cap.
+- **Tuning and turning off.** `HOVERCARD` holds the delays, the width, the line counts and which
+  fields each kind draws (`fields.card`, `fields.file`, `fields.commit`, in order).
+  `setHovercardsEnabled(false)` turns every hovercard off (kept per browser under
+  `blerg.chat.hovercards`).
+
+## Commits read from the session's workspace
+
+New in 0.69.0: `TransportFiles.commit` and `commitDiff` (`createFiles({ commits: true })`; the Blerg
+transport has them), `CommitDetails`, `CommitDiff`, `COMMIT_DIFF_MAX`, `CommitViewer`,
+`CommitViewerHost`, `useCommitOpener`, `repoName`, `visibleText`, `COMMIT_MISS_MS`, `HovercardSources.repo` and `account`.
+
+- **A commit no published diff holds is read from the session.** `commit(sessionId, sha)` reads
+  `GET <base>/commits/<sha>` (7 to 64 hex digits; anything else is not asked): the full and short
+  sha, subject, body, author, author date, parents and the files changed with +/− counts, each
+  bounded by the server. It resolves null for every refusal (no access, the session ended, its
+  daemon offline, an unknown sha): there is nothing for the person to fix.
+- **The hovercard.** A commit's card reads the published diff that holds it first, then the
+  session's workspace. Neither: the card shows the short sha and the repository's name
+  (`HovercardSources.repo(sessionId)`), with no error text. Reads are cached per session and sha
+  (64, newest kept); a read that found nothing is asked again after `COMMIT_MISS_MS` (a minute).
+  `HovercardSources.account()` names who is signed in: when it changes, every hovercard read is
+  forgotten. Subjects, messages, authors and file names show control and bidirectional characters
+  as visible escapes (`visibleText`: controls, bidirectional and invisible formatting, the line and
+  paragraph separators, the soft hyphen and the tag characters), and file names are isolated
+  (`<bdi>`). `CommitViewer` does the same for the commit's header and message.
+- **The click.** Under a `CommitViewerHost` whose `files` can read commits, a commit chip with no
+  published diff opens `CommitViewer`: the commit's diff generated on demand
+  (`commitDiff(sessionId, sha)`, `GET <base>/commits/<sha>/diff`, read no further than 2 MB) in the
+  viewer every published diff uses. Over the cap it says the diff is too large; unreadable, one
+  neutral line. The host's `opened(sessionId, sha)` can open a published diff instead (return
+  true). Without a host, a chip copies its sha as before.
 
 ## MCP servers and checklist commits
 
@@ -553,10 +645,50 @@ Changed in 0.18.0; nothing removed, no new props.
   file of no known language stays plain wrapped text.
 - **One table for CSV and TSV.** The viewer and the inline preview draw the same bordered table with a
   header row and zebra rows; the preview is its first rows and columns.
-- **Markdown files read like a README.** A markdown file (inline preview, viewer, the review page)
-  takes the `md-doc` class: a system UI font at 16 px, ruled h1 and h2, chips for inline code, padded
-  code blocks, bordered zebra tables, a bar on a quote. Chat messages keep their compact scale, with
-  only the code chip, table, and quote refined to match. Colors are the usual `--chat-*` tokens.
+- **Markdown reads like GitHub.** Since 0.61.0 every rendered Markdown block follows GitHub's README
+  styling (adapted from github-markdown-css, MIT): headings 2em/1.5em/1.25em/1em at weight 600 with
+  24 px above and 16 px below, ruled h1 and h2, 16 px between blocks, .25em between list items, inline
+  code at 85% in a 6 px chip, code blocks at 85% / 1.45 with a 16 px pad, collapsed tables with
+  6 px 13 px cells and zebra rows, a quote with a .25em bar. GitHub's px are written in units of the
+  block's own text size (`--chat-md-unit`), so a document (`md-doc`: GitHub's font stack at 16 px;
+  the inline preview, the viewer, the review page, a ticket's description) matches GitHub exactly. A
+  chat message (`.md` without `md-doc`) is compact: the same rhythm at a .75em gap (`--chat-md-gap`)
+  and tamer headings (h1 1.3em, h2 1.15em, h3 1.05em, no rules). An app's own bare `h1`, `h2` and `code`
+  styles no longer leak in. Since 0.73.0 a document in a viewer (the file viewer, the folder viewer,
+  review mode: class `md-box`) reads in GitHub's box: centered, a 1 px border and 6 px radius, 32 px
+  of padding around a 1012 px text column, however large or maximized the dialog; in a column 700 px
+  or narrower (a phone, review's page beside its source: a container query on the viewer's body and
+  review's page column) it is the page itself, with no border. Colors are the usual `--chat-*` tokens.
+- **Raw HTML as GitHub allows it, in documents.** New in 0.70.0: `Markdown`'s `html` prop (off by
+  default) renders HTML in Markdown (a README's centered banner, badges, a table of screenshots)
+  through an allowlist: `p div span img a table thead tbody tr td th b i em strong br hr sub sup
+  details summary picture source kbd code pre ul ol li h1–h6 blockquote`, with `align width height
+  alt title href src srcset colspan rowspan open`. Only document surfaces opt in: the file viewer,
+  the folder-file viewer and review mode. Chat messages, approvals (proposal previews), tickets,
+  board cards and threads keep HTML as literal text, so a comment or a closed `<details>` cannot
+  hide words from the person reading. DOMPurify (now a direct dependency; mermaid already brought
+  it) drops everything else, and the result is rebuilt as React elements, checked against the
+  allowlist again: nothing is serialized and parsed a second time. Each HTML block is sanitized once
+  and cached. Links keep http(s), relative and `#fragment` URLs; images http(s), relative and base64
+  raster data; width and height are clamped (4096 px, 100%) and images keep their aspect ratio.
+  `srcset` and `<source>` never load. Past 200 levels of nesting a note says the rest was cut, and
+  Markdown that an unclosed element (`<math>`, `<svg>`, `<title>`, `<xmp>`, `<iframe>`, …) would
+  swallow follows behind a note. Review mode says "This document has hidden content" (with **Show
+  source**) when the page does not show every word: an HTML comment, a closed `<details>`, text the
+  sanitizer dropped.
+  Headings get GitHub's ids (`user-content-<slug>`), and a `#fragment` link scrolls to its heading.
+  `Markdown`'s `document` prop (`MarkdownDocument`: `path`, `readWorkspace`) marks a document rather
+  than chat text: a relative image loads from the session's folder through `readWorkspace`, resolved
+  beside `path` and never outside the folder, through one queue per page (two reads at a time,
+  retried by the server's machine-readable `code`: `busy` for as long as the document is open, `daemon_timeout` and `changed` three times, anything else not at all; one backoff for the whole page, paused while the tab is hidden; a read that failed for a reason reading again could fix offers **Retry**, drawn after the link an image sits in), at most 50 per document before **Load
+  images**; a folder SVG draws through `<img>` from a `data:` URL.
+  Every viewer makes its media URLs with `mediaUrl` (`releaseMediaUrl` frees them): an SVG is never
+  a same-origin `blob:` URL, which opened in a tab would run its script as the app; `blobTypeFor`
+  never returns `image/svg+xml`. The folder-file viewer's own read goes through the same queue. A relative link opens the
+  folder's file inside Blerg (`openWorkspaceFile(path, line, { folder: true })`). A published or
+  uploaded document has no folder: its relative images show their alt text and its relative links
+  stay text. A remote image shows its alt text, the host and **Load image**, and loads (lazily,
+  without a referrer) only on that click. Chat text loads no image at all, as before.
 
 ## Copying and pasting
 
@@ -684,3 +816,22 @@ origin; the app is a Go backend with a React frontend. Stop at any failing check
 9. **Report.** The package version and sha512 installed, where `chatproxy.go` landed, the prefix, what `Authorize` keys on, and the output of each check.
 
 Model labels are presentation only: `modelDisplayName(id, suppliedName?)` shortens recognized families, while `modelDisplayNames(catalog)` disambiguates collisions using model details and routes. Keep the original ID as the option value and full-ID tooltip; never send a display name to an engine.
+
+## Confirming an action that cannot be undone
+
+New in 0.71.0: `ConfirmPopover` and `endSessionText`.
+
+- **`ConfirmPopover`** asks before an action that cannot be undone (End session), anchored to the
+  control that opened it: `anchor` (a ref to that control), `title`, `description`,
+  `confirmLabel` (its red button, the only red), `cancelLabel` (default "Cancel"), `onConfirm`,
+  `onCancel`, `testId`. It is an `alertdialog` named by its title and described by its text; the
+  focus starts on Cancel and stays between the two buttons; Esc or a press outside cancels and the
+  focus goes back to the anchor; the rest of the page is inert while it shows. Under the anchor on a wide screen, kept inside the window; at
+  640 px and less a bottom sheet. It replaces the "press again to confirm" arming:
+  `StartProgress`'s Stop now asks with it.
+- **`endSessionText(runtime, terminal?)`** says what ending a session keeps, by where it runs:
+  this machine (`daemon`) "The agent stops. The conversation and files are kept."; a local
+  sandbox, that its container is removed and its files and commits are kept; a cluster pod, that
+  the pod is removed and work in it that was not pushed is lost; unknown, "The agent stops. Work
+  not yet saved may be lost; the conversation is kept." With `terminal` it speaks of a terminal
+  session, which has no conversation. `StartProgress`'s `session` takes an optional `runtime` for it.

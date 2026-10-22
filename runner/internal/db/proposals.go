@@ -144,7 +144,7 @@ func InsertProposalLimited(ctx context.Context, pool *pgxpool.Pool, p Proposal, 
 		return nil, fmt.Errorf("InsertProposal lock: %w", err)
 	}
 	// Built-in session requests recheck owner and lifecycle after remote policy checks.
-	if IsBoardFilingProposal(&p) || IsSessionPluginProposal(&p) {
+	if IsBoardFilingProposal(&p) || IsSessionPluginProposal(&p) || IsBoardCreateProposal(&p) {
 		var account, status string
 		if err := tx.QueryRow(ctx, `SELECT COALESCE(spawning_account_id,''),status FROM sessions WHERE id=$1::uuid FOR UPDATE`, p.SessionID).Scan(&account, &status); err != nil {
 			return nil, ErrProposalState
@@ -168,6 +168,16 @@ func InsertProposalLimited(ctx context.Context, pool *pgxpool.Pool, p Proposal, 
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, err
+		}
+	}
+	if IsBoardCreateProposal(&p) {
+		twin, err := boardCreateTwin(ctx, tx, p)
+		if err != nil {
+			return nil, err
+		}
+		if twin != nil {
+			twin.Repeated = true
+			return twin, tx.Commit(ctx)
 		}
 	}
 	var pending int

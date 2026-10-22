@@ -6,18 +6,21 @@
 // puts it in a dialog (a terminal session's, which says why it has none): a
 // modal on desktop, a full-screen sheet on narrow screens (CSS). All text
 // renders as plain text.
-import { useEffect, useId, useMemo, useRef, useState, type RefObject } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { CapabilityGroup, CapabilityItem } from '../types'
-import { CAPABILITY_GROUPS, capabilityCount, matchesQuery, statusWord, withLiveMcp, type CapabilitiesReport } from '../lib/capabilities'
+import { CAPABILITY_GROUPS, asOfLabel, capabilityCount, humanModelName, matchesQuery, middleTruncate, permissionLabel, statusGlyph, statusWord, withLiveMcp, type CapabilitiesReport } from '../lib/capabilities'
+import { builtinModels } from '../lib/engineModels'
+import { ENGINE_LABELS, ENGINE_SHORT } from '../lib/runtimes'
+import { RunGlyph } from './RunCard'
+import type { CapabilitiesPayload } from '../types'
 import { useBackdropClose, type McpLive } from '@blerglab/chat'
 import './CapabilitiesPanel.css'
 import ToolSchemaGuidance from './ToolSchemaGuidance'
+import { toolSchemaGuidanceText } from '../lib/toolSchemaGuidance'
 
 // Groups longer than this start collapsed.
 const COLLAPSE_OVER = 15
-// Descriptions longer than this are cut, with a toggle to read the rest.
-const DESC_PREVIEW = 160
 
 interface ViewProps {
   report: CapabilitiesReport | null
@@ -31,6 +34,12 @@ interface ViewProps {
   liveMcp?: McpLive | null
   // The filter box, for a dialog that focuses it when it opens.
   searchRef?: RefObject<HTMLInputElement | null>
+  // A control beside the filter on the toolbar row (the panel's "+ Add"), and what shows under the
+  // row (the add form it opens, plugin requests).
+  toolbarAction?: ReactNode
+  belowToolbar?: ReactNode
+  // An action under one item (an MCP server's sign-in), by group; null for none.
+  itemAction?: (groupId: string, item: CapabilityItem) => ReactNode
 }
 
 interface Props extends Omit<ViewProps, 'searchRef'> {
@@ -99,7 +108,7 @@ export default function CapabilitiesPanel({ onClose, ...view }: Props) {
 }
 
 /** What the session loaded, with the report's facts, a filter and a section per group. */
-export function CapabilitiesView({ report, unavailable, pendingToolChanges, liveMcp, searchRef }: ViewProps) {
+export function CapabilitiesView({ report, unavailable, pendingToolChanges, liveMcp, searchRef, toolbarAction, belowToolbar, itemAction }: ViewProps) {
   const listBase = useId()
   const [query, setQuery] = useState('')
   const snapshot = report?.payload ?? null
@@ -182,7 +191,7 @@ export function CapabilitiesView({ report, unavailable, pendingToolChanges, live
                 <p className="caps-group-empty">None loaded.</p>
               ) : (
                 <ul className="caps-items">
-                  {items.map(it => <Item key={it.name} item={it} />)}
+                  {items.map(it => <Item key={it.name} item={it} action={itemAction?.(id, it)} />)}
                 </ul>
               )}
               {group.total !== undefined && group.total > group.items.length && (
@@ -201,70 +210,162 @@ export function CapabilitiesView({ report, unavailable, pendingToolChanges, live
     )
   }
 
-  const meta: string[] = []
-  if (report && payload) {
-    const t = Date.parse(report.ts)
-    if (Number.isFinite(t)) meta.push(`reported ${new Date(t).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`)
-    if (payload.model) meta.push(payload.model)
-    const engine = [payload.engine_name ?? payload.engine, payload.version].filter(Boolean).join(' ')
-    if (engine) meta.push(engine)
-  }
-
+  const showSearch = !!payload && !unavailable && capabilityCount(payload) > 0
   return (
     <>
-    {payload && !unavailable && (
-      <div className="caps-meta">
-        {meta.length > 0 && <p data-testid="caps-meta">{meta.join(' · ')}</p>}
-        {(payload.cwd || payload.permission_mode) && (
-          <p className="caps-meta-dim">
-            {[payload.cwd, payload.permission_mode && `permissions: ${payload.permission_mode}`].filter(Boolean).join(' · ')}
-          </p>
+    {payload && !unavailable && <HeaderCard payload={payload} ts={report?.ts ?? ''} />}
+    {(showSearch || toolbarAction) && (
+      <div className="caps-toolbar" data-testid="caps-toolbar">
+        {showSearch && (
+          <input
+            ref={searchRef}
+            className="caps-search"
+            type="search"
+            placeholder="Filter by name, description, source…"
+            aria-label="Filter skills, plugins and tools"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+          />
         )}
-        <ToolSchemaGuidance policy={payload.tool_schema_refresh} />
-        <p className="caps-meta-dim">
-          {payload.note ?? 'What the session reported it loaded.'} It reflects what was loaded at start;
-          changes on disk since then aren’t shown until the engine reports again.
-        </p>
+        {toolbarAction}
       </div>
     )}
-    {payload && !unavailable && capabilityCount(payload) > 0 && (
-      <input
-        ref={searchRef}
-        className="caps-search"
-        type="search"
-        placeholder="Filter by name, description, source…"
-        aria-label="Filter skills, plugins and tools"
-        value={query}
-        onChange={e => setQuery(e.target.value)}
-      />
-    )}
+    {belowToolbar}
     <div className="caps-body">{body}</div>
     </>
   )
 }
 
-function Item({ item }: { item: CapabilityItem }) {
+/** The facts of the report in one compact card: engine and version with the model's name, then the
+ *  workspace, the permission mode as a chip, and when it was reported, with an ⓘ that explains what
+ *  the list is and when it changes. */
+function HeaderCard({ payload, ts }: { payload: CapabilitiesPayload; ts: string }) {
+  const infoId = useId()
+  const [info, setInfo] = useState(false)
+  const infoButton = useRef<HTMLButtonElement | null>(null)
+  const card = useRef<HTMLElement | null>(null)
+  // Closes on a press anywhere outside the card, as a popover does.
+  useEffect(() => {
+    if (!info) return
+    const away = (e: PointerEvent) => { if (!card.current?.contains(e.target as Node)) setInfo(false) }
+    document.addEventListener('pointerdown', away)
+    return () => document.removeEventListener('pointerdown', away)
+  }, [info])
+  // Esc closes the open popover first, wherever the focus is (the filter, the page after a tap that
+  // did not focus the button): caught on the way down, before the drawer or dialog closes on it.
+  useEffect(() => {
+    if (!info) return
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const el = card.current
+      setInfo(false)
+      // A card on a tab that is not on screen just closes; the Esc goes on to whatever wants it.
+      if (!el || el.closest('[hidden]')) return
+      e.stopPropagation()
+      e.preventDefault()
+      const at = document.activeElement
+      if (!at || at === document.body || el.contains(at)) infoButton.current?.focus()
+    }
+    document.addEventListener('keydown', esc, true)
+    return () => document.removeEventListener('keydown', esc, true)
+  }, [info])
+
+  const engineKey = payload.engine || 'claude'
+  const engineName = payload.engine_name ?? ENGINE_LABELS[engineKey] ?? payload.engine
+  const engineLine = [engineName, payload.version].filter(Boolean).join(' ')
+  const model = payload.model ? humanModelName(payload.model, builtinModels(engineKey)) : ''
+  const perm = payload.permission_mode ? permissionLabel(payload.permission_mode) : null
+  const asOf = asOfLabel(ts)
+  const t = Date.parse(ts)
+  const full = Number.isFinite(t) ? new Date(t).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : ''
+
+  const about = `${payload.note ?? 'What the session reported it loaded.'} It reflects what was loaded at start; changes on disk since then aren’t shown until the engine reports again.`
+
+  return (
+    <section ref={card} className="rail-item caps-card" data-testid="caps-header" aria-label="What the session reported">
+      <div className="caps-card-line">
+        {engineKey && <RunGlyph label={`Engine: ${engineName || engineKey}`}>{ENGINE_SHORT[engineKey] ?? engineKey.charAt(0).toUpperCase()}</RunGlyph>}
+        <span className="caps-card-title" data-testid="caps-meta">
+          {engineLine}
+          {engineLine && model && ' · '}
+          {model && <span title={`Model: ${payload.model}`}>{model}</span>}
+        </span>
+      </div>
+      <div className="caps-card-line caps-card-facts">
+        {payload.cwd && <span className="caps-cwd" data-testid="caps-cwd" title={payload.cwd}>{middleTruncate(payload.cwd)}</span>}
+        {perm && (
+          <span className={`rail-chip caps-perm${perm.risky ? ' risky' : ''}`} data-testid="caps-permission"
+            title={`Permission mode: ${payload.permission_mode}${perm.risky ? ' (acts without asking)' : ''}`}>{perm.label}</span>
+        )}
+        <span className="caps-asof">
+          {asOf && <time dateTime={ts} title={full} data-testid="caps-asof">{asOf}</time>}
+          <button ref={infoButton} type="button" className="caps-info-btn" aria-label="About this list" aria-expanded={info}
+            aria-controls={info ? infoId : undefined} onClick={() => setInfo(v => !v)}>
+            {/* ⓘ drawn in CSS: the character is missing from some system fonts. */}
+            <span className="caps-info-i" aria-hidden="true">i</span>
+          </button>
+        </span>
+      </div>
+      {info && (
+        <div id={infoId} className="caps-info" role="note" data-testid="caps-info">
+          <p>{about}</p>
+          <ToolSchemaGuidance policy={payload.tool_schema_refresh} className="caps-info-guidance" />
+        </div>
+      )}
+      {/* Read out when the popover opens: a polite region that is always there, filled on open. */}
+      <span className="rail-sr" role="status" aria-live="polite" data-testid="caps-info-announce">
+        {info ? `${about} ${toolSchemaGuidanceText(payload.tool_schema_refresh)}` : ''}
+      </span>
+    </section>
+  )
+}
+
+function Item({ item, action }: { item: CapabilityItem; action?: ReactNode }) {
   const [expanded, setExpanded] = useState(false)
+  // A description is a button only when its one line is cut: measured, and again when the width changes.
+  const [cut, setCut] = useState(false)
+  const wrap = useRef<HTMLDivElement | null>(null)
   const desc = item.description ?? ''
-  const long = desc.length > DESC_PREVIEW
+  useLayoutEffect(() => {
+    const el = wrap.current
+    if (!el || expanded) return
+    const measure = () => {
+      const line = el.firstElementChild as HTMLElement | null
+      if (line) setCut(line.scrollWidth > line.clientWidth + 1)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [desc, expanded])
+  const status = item.status ? statusGlyph(item.status) : null
+  const word = item.status ? statusWord(item.status) : ''
   return (
     <li className="caps-item" data-testid="caps-item">
       <div className="caps-item-line">
-        <span className="caps-item-name">{item.name}</span>
-        {item.status && <span className={`caps-chip status-${item.status}`}>{statusWord(item.status)}</span>}
-        {item.source && <span className="caps-chip source">{item.source}</span>}
+        {status && (
+          <span className={`caps-status status-${item.status} tone-${status.tone}`} title={word}>
+            <span aria-hidden="true">{status.glyph}</span><span className="rail-sr">{word}</span>
+          </span>
+        )}
+        <span className="caps-item-name" title={item.name}>{item.name}</span>
         {item.detail && <span className="caps-item-detail">{item.detail}</span>}
+        {item.source && <span className="rail-chip caps-source" title={`Source: ${item.source}`}>{item.source}</span>}
       </div>
       {desc && (
-        <p className="caps-item-desc">
-          {long && !expanded ? `${desc.slice(0, DESC_PREVIEW).trimEnd()}…` : desc}
-          {long && (
-            <button type="button" className="caps-more" aria-expanded={expanded} onClick={() => setExpanded(x => !x)}>
-              {expanded ? 'less' : 'more'}
+        <div ref={wrap} className="caps-item-desc-wrap">
+          {cut || expanded ? (
+            <button type="button" className={`caps-item-desc${expanded ? ' open' : ''}`} aria-expanded={expanded} title={expanded ? undefined : desc}
+              onClick={() => setExpanded(x => !x)}>
+              {desc}
             </button>
+          ) : (
+            <span className="caps-item-desc">{desc}</span>
           )}
-        </p>
+        </div>
       )}
+      {action}
     </li>
   )
 }

@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { formatDuration, useTranscriptStore, type AgentEvent, type SessionTranscript } from '@blerglab/chat'
 import HistoryTab, { TopicList } from './HistoryTab'
 import { reelReply } from '../test/reelFixture'
-import { EMPTY_HISTORY, spanLabel, type TopicsReply } from '../lib/topics'
+import { EMPTY_HISTORY, hm, spanLabel, type TopicsReply } from '../lib/topics'
 import type { TopicsView } from '../hooks/useTopics'
 
 // HistoryTab's own reads are useTopics' (tested there): here it answers the fixture.
@@ -42,13 +42,15 @@ describe('History tab', () => {
     const reply = reelReply(NOW)
     show(ready(reply))
     const all = cards()
-    expect(all.map(c => within(c).getByTestId('reel-head').textContent)).toEqual(['Fix the drawer on phones', 'Build the History tab'])
+    expect(all.map(c => within(c).getByTestId('reel-head').querySelector('.rail-item-title')!.textContent)).toEqual(['Fix the drawer on phones', 'Build the History tab'])
     expect(within(all[0]).getByTestId('reel-now')).toBeInTheDocument()
     expect(within(all[1]).queryByTestId('reel-now')).toBeNull()
     expect(within(all[1]).getByTestId('reel-outcome')).toHaveTextContent('Shipped on main')
     expect(within(all[1]).getByTestId('reel-span')).toHaveTextContent(spanLabel(reply.topics[1], NOW))
-    expect(within(all[1]).getByTestId('reel-counts')).toHaveTextContent('2 docs · 3 agents · 3 commits')
-    expect(within(all[0]).getByTestId('reel-counts')).toHaveTextContent('1 agent')
+    // The counts are glyphs, their words in the name and the tooltips.
+    expect(within(all[1]).getByTestId('reel-counts')).toHaveTextContent('📄2↳3⎇3')
+    expect(within(all[1]).getByTestId('reel-counts')).toHaveAttribute('aria-label', '2 files, 3 subagents, 3 commits')
+    expect(within(all[0]).getByTestId('reel-counts')).toHaveAttribute('aria-label', '1 subagent')
     expect(screen.queryByTestId('reel-auto')).toBeNull()
     expect(screen.queryByText('auto')).toBeNull()
   })
@@ -119,84 +121,105 @@ describe('History tab', () => {
     expect(screen.getByTestId('reel-no-route')).toHaveTextContent('History needs a newer runner server')
   })
 
-  it('opens a card onto its timeline, in seq order', () => {
+  it('opens a card onto one compact line per kind, never the chat replayed', () => {
     show(ready())
-    // A closed card controls nothing; an open one names its timeline.
+    // A closed card controls nothing; an open one names its summary.
     expect(within(cards()[1]).getByTestId('reel-head')).not.toHaveAttribute('aria-controls')
     expand(1)
     const head = within(cards()[1]).getByTestId('reel-head')
-    expect(document.getElementById(head.getAttribute('aria-controls')!)).toBe(within(cards()[1]).getByRole('list'))
-    const rows = within(cards()[1]).getAllByRole('listitem')
-    expect(rows.map(r => r.getAttribute('data-testid'))).toEqual([
-      'reel-request', 'reel-document', 'reel-document', 'reel-agent', 'reel-agent', 'reel-agent', 'reel-done',
+    const summary = within(cards()[1]).getByTestId('reel-summary')
+    expect(document.getElementById(head.getAttribute('aria-controls')!)).toBe(summary)
+    expect(Array.from(summary.children).map(r => r.getAttribute('data-testid'))).toEqual([
+      'reel-sum-messages', 'reel-sum-agents', 'reel-sum-files', 'reel-sum-commits',
     ])
-    expect(rows[0]).toHaveTextContent('You: Build the History tab per the spec')
-    expect(rows[6]).toHaveTextContent('Done: Shipped on main')
+    for (const raw of ['reel-request', 'reel-document', 'reel-agent', 'reel-done', 'reel-filed-card']) {
+      expect(within(cards()[1]).queryAllByTestId(raw)).toHaveLength(0)
+    }
+    // The open topic began at the marker: no message of yours, so no messages line.
     expand(0)
-    expect(within(cards()[0]).getByTestId('reel-request')).toHaveTextContent('Started: Fix the drawer on phones')
+    expect(within(cards()[0]).queryByTestId('reel-sum-messages')).toBeNull()
+    expect(within(cards()[0]).getByTestId('reel-sum-agents')).toHaveTextContent('1 subagent')
   })
 
-  it('draws every version as a chip: filled in the topic, outlined outside it, struck when deleted', () => {
-    const { onOpenArtifact } = show(ready())
-    expand(1)
-    const plan = within(cards()[1]).getAllByTestId('reel-document')[0]
-    const [v1, v2, v3] = within(plan).getAllByTestId('reel-chip')
-    expect(v1.tagName).toBe('SPAN')
-    expect(v1).toHaveAttribute('aria-disabled', 'true')
-    expect(v1.querySelector('s')).toHaveTextContent('v1')
-    expect(v2).toHaveAttribute('href', '?artifact=a2')
-    expect(v2).toHaveClass('in-topic')
-    expect(v3).toHaveAttribute('href', '?artifact=a3')
-    expect(v3).not.toHaveClass('in-topic')
-    // Named for a screen reader by file and version; a deleted one says so.
-    expect(within(plan).getByRole('link', { name: 'plan.md v2' })).toBe(v2)
-    expect(within(plan).getByRole('link', { name: 'plan.md v3' })).toBe(v3)
-    expect(v1).toHaveTextContent('plan.md v1 (deleted)')
-    fireEvent.click(v2)
-    expect(onOpenArtifact).toHaveBeenCalledWith('a2')
-    fireEvent.click(v1)
-    expect(onOpenArtifact).toHaveBeenCalledTimes(1)
-  })
-
-  it('draws a version whose bytes are gone as a disabled chip that says no longer available', () => {
+  it('counts your messages, each a time that jumps to it, its text in the tooltip', () => {
     const reply = reelReply(NOW)
-    const doc = reply.topics.flatMap(t => t.items).find(i => i.type === 'document' && i.versions.some(v => v.artifact_id === 'a2'))
-    if (!doc || doc.type !== 'document') throw new Error('fixture has no a2 document')
-    doc.versions = doc.versions.map(v => (v.artifact_id === 'a2' ? { ...v, missing: true } : v))
+    reply.topics[1].messages = [
+      { seq: 100, event_id: 'ev-100', ts: reply.topics[1].started_at, text: 'Build the History tab per the spec' },
+      { seq: 200, event_id: 'ev-200', ts: new Date(NOW.getTime() - 100 * 60_000).toISOString(), text: 'Also the phone layout' },
+    ]
+    hold(1)
+    const onJump = vi.fn((_: string, go: () => boolean) => go())
+    show(ready(reply), { onJump })
+    expand(1)
+    const line = within(cards()[1]).getByTestId('reel-sum-messages')
+    expect(line).toHaveTextContent('2 messages')
+    const chips = within(line).getAllByTestId('reel-sum-message')
+    expect(chips.map(c => c.textContent)).toEqual([hm(reply.topics[1].started_at), hm(reply.topics[1].messages[1].ts)])
+    expect(chips[1]).toHaveAttribute('title', 'Also the phone layout')
+    const target = document.createElement('div')
+    target.dataset.eventId = 'ev-200'
+    target.scrollIntoView = vi.fn()
+    document.body.appendChild(target)
+    try {
+      fireEvent.click(chips[1])
+      expect(onJump).toHaveBeenCalledWith('msg:ev-200', expect.any(Function))
+      expect(target.scrollIntoView).toHaveBeenCalled()
+    } finally {
+      target.remove()
+    }
+  })
+
+  it('draws the subagents as one line: their count, a chip each with its status, and their tokens and time', () => {
+    hold(1)
+    show(ready())
+    expand(1)
+    const line = within(cards()[1]).getByTestId('reel-sum-agents')
+    expect(line).toHaveTextContent('3 subagents')
+    const chips = within(line).getAllByTestId('reel-sum-agent')
+    expect(chips.map(c => c.textContent)).toEqual(['✓ Implement task 3', '✗ Review the branch', '■ Watch CI'])
+    expect(chips[0]).toHaveAttribute('title', `Implement task 3 · done · sonnet-5 · 1.5k tokens · ${formatDuration(412000)}`)
+    // Time on the clock: the second subagent ran within the first's span, so it adds nothing.
+    expect(within(line).getByTestId('reel-sum-agent-meta')).toHaveTextContent(`1.5k tokens · ${formatDuration(412000)}`)
+    expect(cards()[1].querySelector('[data-event-id], [data-call-id], [data-call-ids]')).toBeNull()
+  })
+
+  it('draws the files as chips that open the version the topic published; a gone one is struck', () => {
+    const reply = reelReply(NOW)
     const { onOpenArtifact } = show(ready(reply))
     expand(1)
-    const plan = within(cards()[1]).getAllByTestId('reel-document')[0]
-    const v2 = within(plan).getAllByTestId('reel-chip')[1]
-    expect(v2.tagName).toBe('SPAN')
-    expect(v2).toHaveClass('missing')
-    expect(v2).toHaveAttribute('aria-disabled', 'true')
-    expect(v2).toHaveAttribute('title', 'v2 is no longer available')
-    expect(v2).toHaveTextContent('plan.md v2 (no longer available)')
-    expect(within(plan).queryByRole('link', { name: 'plan.md v2' })).toBeNull()
-    fireEvent.click(v2)
-    expect(onOpenArtifact).not.toHaveBeenCalled()
+    const files = within(cards()[1]).getAllByTestId('reel-sum-file')
+    expect(files.map(f => f.textContent)).toEqual(['plan.md v2', 'mock.html v1'])
+    expect(files[0]).toHaveAttribute('href', '?artifact=a2')
+    fireEvent.click(files[0])
+    expect(onOpenArtifact).toHaveBeenCalledWith('a2')
+    cleanup()
+    const doc = reply.topics[1].items[1]
+    if (doc.type !== 'document') throw new Error('fixture')
+    doc.versions = doc.versions.map(v => (v.artifact_id === 'a2' ? { ...v, missing: true } : v))
+    const again = show(ready(reply))
+    expand(1)
+    const gone = within(cards()[1]).getAllByTestId('reel-sum-file')[0]
+    expect(gone.tagName).toBe('SPAN')
+    expect(gone).toHaveAttribute('aria-disabled', 'true')
+    expect(gone).toHaveAttribute('title', 'plan.md v2 is no longer available')
+    fireEvent.click(gone)
+    expect(again.onOpenArtifact).not.toHaveBeenCalled()
   })
 
-  it('draws the commits on the Done row as short chips that copy the sha, never a link out of Blerg', async () => {
+  it('draws the commits as short chips that copy the sha, never a link out of Blerg', async () => {
     const writeText = vi.fn(() => Promise.resolve())
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     show(ready())
     expand(1)
-    const done = within(cards()[1]).getByTestId('reel-done')
-    const chips = within(done).getAllByTestId('reel-commit')
+    const line = within(cards()[1]).getByTestId('reel-sum-commits')
+    const chips = within(line).getAllByTestId('reel-commit')
     expect(chips.map(c => c.textContent)).toEqual(['1a2b3c4', '9f8e7d6', '0badc0f'])
-    expect(done.querySelector('a')).toBeNull()
-    for (const c of chips) expect(c.tagName).toBe('BUTTON')
-    const [long, , bare] = chips
-    expect(long).toHaveAttribute('title', '1a2b3c4d5e6f708192a3b4c5d6e7f80912a3b4c5 (click to copy)')
-    expect(within(done).getByRole('button', { name: 'Copy commit 0badc0ffee0ddf00d' })).toBe(bare)
-    await act(async () => { fireEvent.click(bare) })
+    expect(line.querySelector('a')).toBeNull()
+    await act(async () => { fireEvent.click(chips[2]) })
     expect(writeText).toHaveBeenCalledWith('0badc0ffee0ddf00d')
-    expect(within(done).getByRole('status')).toHaveTextContent('Copied')
-    expect(done).toHaveTextContent('Done: Shipped on main')
   })
 
-  it('draws no commit chips on a Done row without commits', () => {
+  it('draws no commits line when the topic named none', () => {
     const reply = reelReply(NOW)
     const done = reply.topics[1].items[6]
     if (done.type !== 'done') throw new Error('fixture')
@@ -204,43 +227,31 @@ describe('History tab', () => {
     reply.topics[1].counts = { documents: 2, agents: 3 }
     show(ready(reply))
     expand(1)
-    expect(within(cards()[1]).queryAllByTestId('reel-commit')).toHaveLength(0)
-    expect(within(cards()[1]).getByTestId('reel-counts')).toHaveTextContent('2 docs · 3 agents')
+    expect(within(cards()[1]).queryByTestId('reel-sum-commits')).toBeNull()
+    expect(within(cards()[1]).getByTestId('reel-counts')).toHaveAttribute('aria-label', '2 files, 3 subagents')
   })
 
-  it('says how many older versions a capped document leaves out', () => {
-    const reply = reelReply(NOW)
-    const plan = reply.topics[1].items[1]
-    if (plan.type !== 'document') throw new Error('fixture')
-    plan.versions_total = 25
-    show(ready(reply))
-    expand(1)
-    const [planRow, mockRow] = within(cards()[1]).getAllByTestId('reel-document')
-    expect(within(planRow).getByTestId('reel-older')).toHaveTextContent('+22 older')
-    // Before the oldest listed version, where the older ones would be.
-    expect(planRow.querySelector('.reel-chips')!.firstElementChild).toBe(within(planRow).getByTestId('reel-older'))
-    expect(within(mockRow).queryByTestId('reel-older')).toBeNull()
-  })
-
-  it('offers "Show in conversation" only for a row the chat holds, and follows the store when it resets', () => {
+  it('jumps from a line\'s time to its first item only when the chat holds it, and follows the store when it resets', () => {
     hold(150)
     const onJump = vi.fn((_: string, go: () => boolean) => go())
     show(ready(), { onJump })
     expand(1)
     const card = cards()[1]
-    const request = within(card).getByTestId('reel-request')
-    expect(within(request).queryByTestId('rail-show')).toBeNull()
-    expect(within(request).getByTestId('reel-earlier')).toHaveAttribute('title', 'Earlier than what is loaded')
-    const agent = within(card).getAllByTestId('reel-agent')[0]
+    // Your message (seq 100) is older than what the chat holds: a time, not a jump.
+    expect(within(within(card).getByTestId('reel-sum-messages')).queryByTestId('reel-sum-jump')).toBeNull()
     const target = document.createElement('div')
     target.setAttribute('data-call-id', 'toolu_1')
     target.scrollIntoView = vi.fn()
     document.body.appendChild(target)
-    fireEvent.click(within(agent).getByTestId('rail-show'))
-    expect(onJump).toHaveBeenCalledWith('reel:ev-160', expect.any(Function))
-    expect(target.scrollIntoView).toHaveBeenCalled()
+    try {
+      fireEvent.click(within(within(card).getByTestId('reel-sum-agents')).getByTestId('reel-sum-jump'))
+      expect(onJump).toHaveBeenCalledWith('sum:tp_done:agents', expect.any(Function))
+      expect(target.scrollIntoView).toHaveBeenCalled()
+    } finally {
+      target.remove()
+    }
     act(() => useTranscriptStore.getState().resetEvents('sess-a'))
-    expect(within(card).queryAllByTestId('rail-show')).toHaveLength(0)
+    expect(within(card).queryAllByTestId('reel-sum-jump')).toHaveLength(0)
   })
 
   it('does not draw again while the conversation streams in below what it holds', () => {
@@ -261,36 +272,12 @@ describe('History tab', () => {
     expect(onRender.mock.calls.length).toBe(drawn)
   })
 
-  it('names a row that was not found, as the Live rows do', () => {
+  it('names a line whose item was not found, as the Live rows do', () => {
     hold(1)
-    show(ready(), { missing: 'reel:ev-160' })
+    show(ready(), { missing: 'sum:tp_done:agents' })
     expand(1)
-    const agent = within(cards()[1]).getAllByTestId('reel-agent')[0]
-    expect(within(agent).getByRole('status')).toHaveTextContent('Not in the part of the conversation the chat has drawn. Scroll up in the chat to reach it.')
-  })
-
-  it('gives each subagent its status, type, model, tokens and duration; no row carries the chat\'s anchors', () => {
-    show(ready())
-    expand(1)
-    const [done, failed, stopped] = within(cards()[1]).getAllByTestId('reel-agent')
-    expect(done).toHaveTextContent('done')
-    expect(done).toHaveTextContent('general-purpose')
-    expect(done).toHaveTextContent('sonnet-5')
-    expect(within(done).getByTestId('reel-agent-tokens')).toHaveTextContent('1.5k tokens')
-    expect(done).toHaveTextContent(formatDuration(412000))
-    expect(within(failed).getByTestId('reel-agent-status')).toHaveTextContent('error')
-    expect(within(stopped).getByTestId('reel-agent-status')).toHaveTextContent('stopped')
-    expect(cards()[1].querySelector('[data-event-id], [data-call-id], [data-call-ids]')).toBeNull()
-  })
-
-  it('a mock image gets a thumbnail, a mock page an icon', async () => {
-    const reply = reelReply(NOW)
-    const doc = reply.topics[1].items[2]
-    if (doc.type !== 'document') throw new Error('fixture')
-    Object.assign(doc, { name: 'shot.png', view: 'image', content_type: 'image/png' })
-    show(ready(reply))
-    expand(1)
-    expect(await screen.findByTestId('reel-thumb')).toHaveAttribute('src', 'blob:x')
+    const line = within(cards()[1]).getByTestId('reel-sum-agents')
+    expect(within(line).getByRole('status')).toHaveTextContent('Not in the part of the conversation the chat has drawn. Scroll up in the chat to reach it.')
   })
 
   it('reads the spans against the time the tab came on screen', () => {
@@ -318,7 +305,7 @@ describe('History tab: cards an approved proposal created', () => {
     reply.topics[0].items.push({ type: 'card', seq: 399, event_id: 'ev-card', ts: NOW.toISOString(), card })
     reply.topics[0].counts.cards = 1
     show(ready(reply))
-    expect(within(cards()[0]).getByTestId('reel-counts')).toHaveTextContent('1 card')
+    expect(within(cards()[0]).getByTestId('reel-counts')).toHaveAttribute('aria-label', '1 subagent, 1 card')
     expand(0)
     const chip = within(cards()[0]).getByTestId('reel-card-chip')
     expect(chip).toHaveTextContent('Product #42 Export button is stale')
@@ -334,5 +321,25 @@ describe('History tab: cards an approved proposal created', () => {
     expect(within(line).getByTestId('reel-unmarked-head')).toHaveTextContent('1 card')
     fireEvent.click(within(line).getByTestId('reel-unmarked-head'))
     expect(within(line).getByTestId('reel-filed-card')).toHaveTextContent('#42')
+  })
+})
+
+describe('History tab: renames', () => {
+  it('shows who renamed the session, from what to what, in its topic', () => {
+    const reply = reelReply(NOW)
+    reply.topics[0].items.push({ type: 'rename', seq: 399, event_id: 'ev-rn', ts: NOW.toISOString(), rename: { from: 'Worker', to: 'Fix the login flow', by: 'parent' } })
+    show(ready(reply))
+    expand(0)
+    const row = within(cards()[0]).getByTestId('reel-sum-renames')
+    expect(row).toHaveTextContent('Renamed by the parent: Worker → Fix the login flow')
+  })
+  it('lists a rename outside every topic under Unmarked work', () => {
+    const reply = reelReply(NOW)
+    reply.unmarked = { ...reply.unmarked!, renames: [{ type: 'rename', seq: 5, event_id: 'ev-r', ts: NOW.toISOString(), rename: { from: '', to: 'Review the billing PR', by: 'agent' } }] }
+    show(ready(reply))
+    const line = screen.getByTestId('reel-unmarked')
+    expect(within(line).getByTestId('reel-unmarked-head')).toHaveTextContent('1 rename')
+    fireEvent.click(within(line).getByTestId('reel-unmarked-head'))
+    expect(within(line).getByTestId('reel-rename')).toHaveTextContent('Renamed by the agent: Untitled → Review the billing PR')
   })
 })

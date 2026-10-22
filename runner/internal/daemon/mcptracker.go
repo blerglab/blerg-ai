@@ -38,7 +38,10 @@ type mcpTracker struct {
 	gateMu   sync.Mutex
 	gates    chan mcpGateRequest
 	releases chan struct{}
-	done     chan struct{}
+	// watches asks for status reads to continue for a while even though the inventory settled:
+	// after a sign-in was started, so the row changes when the engine connects the server.
+	watches chan time.Duration
+	done    chan struct{}
 }
 
 func parseMCPPromptWait(raw string) time.Duration {
@@ -58,7 +61,7 @@ func newMCPTracker(ctx context.Context, engine string, source mcpStatusSource, e
 	if opts.Track <= 0 {
 		opts.Track = 120 * time.Second
 	}
-	t := &mcpTracker{gates: make(chan mcpGateRequest), releases: make(chan struct{}, 1), done: make(chan struct{})}
+	t := &mcpTracker{gates: make(chan mcpGateRequest), releases: make(chan struct{}, 1), watches: make(chan time.Duration, 1), done: make(chan struct{})}
 	go t.run(ctx, engine, source, emitter, opts)
 	return t
 }
@@ -82,6 +85,26 @@ func (t *mcpTracker) beforeFirstPrompt(ctx context.Context) {
 	case <-t.done:
 	}
 }
+
+// watch keeps reading the engine's MCP status every poll for d, settled or not (at most
+// mcpWatchMax). A later call replaces the window.
+func (t *mcpTracker) watch(d time.Duration) {
+	if t == nil {
+		return
+	}
+	select {
+	case <-t.watches:
+	default:
+	}
+	select {
+	case t.watches <- min(d, mcpWatchMax):
+	default:
+	}
+}
+
+// mcpWatchMax bounds a watch window: a sign-in the person never finishes stops costing reads.
+const mcpWatchMax = 10 * time.Minute
+
 func (t *mcpTracker) release() {
 	select {
 	case t.releases <- struct{}{}:
@@ -98,7 +121,7 @@ func (t *mcpTracker) run(ctx context.Context, engine string, source mcpStatusSou
 	defer ticker.Stop()
 	results := make(chan mcpProbeResult, 1)
 	var inflight, ready bool
-	var lastRead time.Time
+	var lastRead, watchUntil time.Time
 	generation := source.MCPGeneration()
 	since := time.Now()
 	state := protocol.MCPStatusPayload{Engine: engine, Since: since.UTC().Format(time.RFC3339Nano), Servers: []protocol.MCPServerStatus{}}
@@ -176,7 +199,7 @@ func (t *mcpTracker) run(ctx context.Context, engine string, source mcpStatusSou
 		return true
 	}
 	startRead := func() {
-		if inflight || state.Settled || time.Since(lastRead) < opts.Poll {
+		if inflight || (state.Settled && !time.Now().Before(watchUntil)) || time.Since(lastRead) < opts.Poll {
 			return
 		}
 		inflight = true
@@ -284,6 +307,10 @@ func (t *mcpTracker) run(ctx context.Context, engine string, source mcpStatusSou
 				emit()
 			}
 			resetWake()
+		case d := <-t.watches:
+			watchUntil = time.Now().Add(d)
+			lastRead = time.Time{}
+			startRead()
 		case <-t.releases:
 			if gate != nil && state.Hold != nil {
 				finishGate("person")

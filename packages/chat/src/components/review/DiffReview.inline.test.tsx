@@ -1,4 +1,4 @@
-import {act, fireEvent, render, screen, waitFor} from '@testing-library/react'
+import {act, fireEvent, render, screen, waitFor, within} from '@testing-library/react'
 import {describe, expect, it, vi} from 'vitest'
 import ReviewMode from './ReviewMode'
 import ArtifactViewer from '../ArtifactViewer'
@@ -39,6 +39,10 @@ function fileText(file: File): Promise<string> {
 function beginInline(side: 'old' | 'new' = 'new') {
   fireEvent.click(screen.getByRole('button', {name: `Comment on ${side} line 1 in src/example.ts`}))
 }
+/** Opens a settled thread's collapsed bar. */
+async function showThread(text = 'Please improve this name') {
+  fireEvent.click(await screen.findByRole('button', {name: `Show thread: ${text}`}))
+}
 function writeAndSave(text: string) {
   fireEvent.change(screen.getByRole('textbox', {name: 'Request'}), {target: {value: text}})
   fireEvent.click(screen.getByRole('button', {name: 'Save'}))
@@ -51,9 +55,15 @@ describe('independent inline diff review', () => {
       <ArtifactViewer sessionId="inline-review-test" files={files} artifact={artifact} onClose={() => {}}/>
     </ChatContext.Provider>)
     expect(await screen.findByRole('button', {name: 'Add general comment'})).toBeInTheDocument()
-    expect(await screen.findByText('Please improve this name')).toBeInTheDocument()
     expect(screen.queryByRole('button', {name: 'Review'})).toBeNull()
-    expect(screen.getByText('Renamed it.')).toBeInTheDocument()
+    // The viewer opens on the Conversation (GitHub's default); the thread is there and in Files.
+    expect(screen.getByRole('tab', {name: 'Conversation'})).toHaveAttribute('aria-selected', 'true')
+    const card = (await screen.findByRole('button', {name: 'Show thread: Please improve this name'})).closest('[data-testid="conversation-thread"]')
+    expect(card).not.toBeNull()
+    fireEvent.click(screen.getByRole('tab', {name: 'Files'}))
+    const row = document.querySelector<HTMLElement>('.diff-comment-row')!
+    fireEvent.click(within(row).getByRole('button', {name: 'Show thread: Please improve this name'}))
+    expect(within(row).getByText('Renamed it.')).toBeInTheDocument()
   })
   it('sends general and inline structured suggestions as one review with no automatic application', async () => {
     const submit = vi.fn(async () => true)
@@ -91,6 +101,7 @@ describe('independent inline diff review', () => {
   it('reopens a resolved inline thread with the same id and preserved agent history', async () => {
     const submit = vi.fn(async () => true)
     show(context(async () => existing(), submit))
+    await showThread()
     expect(await screen.findByText('Renamed it.')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', {name: 'Reopen'}))
     fireEvent.change(screen.getByRole('textbox', {name: 'Reason for reopening'}), {target: {value: 'The change still misses the requested behavior.'}})
@@ -107,9 +118,16 @@ describe('independent inline diff review', () => {
   it('marks changed or ambiguous old-revision code as outdated while preserving its original anchor', async () => {
     const review = existing({anchor: {kind: 'text', quote: 'missing previous code', diff: {artifactId: 'patch-old', file: 'src/example.ts', side: 'new', start: 1, end: 1, fileIndex: 1, hunk: 1, commit: 'b'.repeat(40)}}})
     const {container} = show(context(async () => review))
-    expect(await screen.findByText(/Outdated · original code changed or is ambiguous/)).toBeInTheDocument()
-    expect(screen.getByText('missing previous code')).toBeInTheDocument()
+    // As on GitHub, an Outdated thread is not drawn in this version's Files: the Conversation has it,
+    // with its original code.
+    expect(await screen.findByTestId('review-unplaced-notice')).toHaveTextContent('1 outdated conversation · view')
     expect(container.querySelector('.diff-comment-row')).toBeNull()
+    expect(container.querySelector('.diff-requested')).toBeNull()
+    fireEvent.click(screen.getByRole('tab', {name: 'Conversation'}))
+    const card = (await screen.findByText('Please improve this name')).closest('[data-testid="conversation-thread"]')!
+    expect(card).toHaveTextContent('Outdated')
+    expect(card).toHaveTextContent('missing previous code')
+    expect(review.requests[0].anchor.quote).toBe('missing previous code')
   })
   it('keeps an unsaved draft when another line or the general-comment action is pressed', () => {
     show(context())
@@ -128,6 +146,7 @@ describe('independent inline diff review', () => {
     const initial = existing()
     const value = context(async () => initial)
     const {rerender} = show(value)
+    await showThread()
     fireEvent.click(await screen.findByRole('button', {name: 'Reopen'}))
     fireEvent.change(screen.getByRole('textbox', {name: 'Reason for reopening'}), {target: {value: 'The change still misses the requested behavior.'}})
     fireEvent.click(screen.getByRole('button', {name: 'Reopen with comment'}))
@@ -163,6 +182,7 @@ describe('independent inline diff review', () => {
   it('does not close a successfully reopened thread when a later load contains an older reply', async () => {
     const value = context(async () => existing())
     const {rerender} = show(value)
+    await showThread()
     fireEvent.click(await screen.findByRole('button', {name: 'Reopen'}))
     fireEvent.change(screen.getByRole('textbox', {name: 'Reason for reopening'}), {target: {value: 'The change still misses the requested behavior.'}})
     fireEvent.click(screen.getByRole('button', {name: 'Reopen with comment'}))
@@ -176,6 +196,9 @@ describe('independent inline diff review', () => {
   })
   it('keeps legacy text comments without diff metadata visible', async () => {
     show(context(async () => existing({anchor: {kind: 'text', quote: 'previous passage'}})))
+    // A passage with no code cannot be called outdated: it is just not in this version.
+    expect(await screen.findByTestId('review-unplaced-notice')).toHaveTextContent('1 conversation not in this version · view')
+    fireEvent.click(screen.getByRole('button', {name: 'View 1 conversation in the Conversation'}))
     expect(await screen.findByText('Please improve this name')).toBeInTheDocument()
     expect(screen.getByText('previous passage')).toBeInTheDocument()
   })
@@ -183,6 +206,7 @@ describe('independent inline diff review', () => {
     const files = createFakeFiles(); files.serve(PATCH)
     const close = vi.fn()
     render(<ChatContext.Provider value={{...context(), files}}><ArtifactViewer sessionId="inline-review-test" files={files} artifact={artifact} onClose={close}/></ChatContext.Provider>)
+    fireEvent.click(await screen.findByRole('tab', {name: 'Files'}))
     const line = await screen.findByRole('button', {name: 'Select new line 1 in src/example.ts'})
     fireEvent.keyDown(line, {key: 'Escape'})
     expect(close).toHaveBeenCalledOnce()
@@ -191,6 +215,8 @@ describe('independent inline diff review', () => {
     const old = existing({anchor: {kind: 'text', quote: 'newLine', diff: {artifactId: 'patch-old', file: 'src/example.ts', side: 'new', start: 1, end: 1, fileIndex: 1, hunk: 1, commit: 'b'.repeat(40)}}})
     const submit = vi.fn(async () => true)
     const {container} = render(<ChatContext.Provider value={context(async () => old, submit)}><ReviewMode artifact={artifact} text={PATCH.replace('@@ -1,2 +1,2 @@', '@@ -10,2 +10,2 @@')} onClose={() => {}}/></ChatContext.Provider>)
+    expect(container.querySelector('.diff-comment-row')).toBeNull()
+    await showThread()
     expect(await screen.findByText('Earlier revision')).toBeInTheDocument()
     expect(container.querySelector('.diff-comment-row')).toHaveTextContent('Please improve this name')
     fireEvent.click(screen.getByRole('button', {name: 'Reopen'}))
@@ -207,28 +233,78 @@ describe('independent inline diff review', () => {
     const old = existing({anchor: {kind: 'text', quote: 'newLine', diff: {artifactId: 'patch-old', file: 'src/example.ts', side: 'new', start: 1, end: 1, fileIndex: 1, hunk: 1, commit: 'b'.repeat(40)}}})
     const repeated = PATCH.replace('@@ -1,2 +1,2 @@', '@@ -1,3 +1,3 @@').replace(' tail\n', ' tail\n newLine\n')
     const {container} = render(<ChatContext.Provider value={context(async () => old)}><ReviewMode artifact={artifact} text={repeated} onClose={() => {}}/></ChatContext.Provider>)
-    expect(await screen.findByText(/Outdated · original code changed or is ambiguous/)).toBeInTheDocument()
-    expect(screen.getByText('Please improve this name')).toBeInTheDocument()
+    // Never placed on either copy of the repeated code: it is an outdated conversation.
+    expect(await screen.findByTestId('review-unplaced-notice')).toHaveTextContent('1 outdated conversation')
     expect(container.querySelector('.diff-comment-row')).toBeNull()
+    expect(container.querySelector('.diff-requested')).toBeNull()
   })
 
 })
 
 
 describe('resolved thread visibility', () => {
-  it('collapses and expands a resolved thread without changing its review state', async () => {
-    show(context(async () => existing()))
-    const collapse = await screen.findByRole('button', {name: 'Collapse thread: Please improve this name'})
-    expect(collapse).toHaveAttribute('aria-expanded', 'true')
-    fireEvent.click(collapse)
-    expect(screen.getByText('Please improve this name')).toBeInTheDocument()
+  it('keeps a resolved thread on its line, collapsed to one bar, and opens it in place', async () => {
+    const {container} = show(context(async () => existing()))
+    const show_ = await screen.findByRole('button', {name: 'Show thread: Please improve this name'})
+    expect(show_).toHaveAttribute('aria-expanded', 'false')
+    const row = show_.closest('tr')!
+    expect(row).not.toBeNull()
+    expect(row.previousElementSibling).toHaveTextContent('newLine')
+    expect(row).toHaveTextContent('✓ Resolved · conversation by the agent')
+    expect(container.querySelector('.diff-requested')).not.toBeNull()
     expect(screen.queryByText('Renamed it.')).toBeNull()
     expect(screen.queryByRole('button', {name: 'Reopen'})).toBeNull()
-    const expand = screen.getByRole('button', {name: 'Expand thread: Please improve this name'})
-    expect(expand).toHaveAttribute('aria-expanded', 'false')
-    fireEvent.click(expand)
+    expect(screen.queryByText('Outdated · not in this diff')).toBeNull()
+    fireEvent.click(show_)
     expect(screen.getByText('Renamed it.')).toBeInTheDocument()
-    expect(screen.getByRole('button', {name: 'Reopen'})).toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Reopen'}).closest('tr')).toBe(container.querySelector('.diff-comment-row'))
+    const hide = screen.getByRole('button', {name: 'Hide thread: Please improve this name'})
+    expect(hide).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(hide)
+    expect(screen.queryByText('Renamed it.')).toBeNull()
+    expect(screen.getByText('Please improve this name').closest('tr')).toBe(row)
+  })
+  it('collapses and labels a rejected thread like a resolved one', async () => {
+    show(context(async () => existing({status: 'declined', reply: 'Not needed.'})))
+    const bar = (await screen.findByRole('button', {name: 'Show thread: Please improve this name'})).closest('tr')!
+    expect(bar).toHaveTextContent('✕ Rejected · conversation by the agent')
+    expect(screen.queryByText('Not needed.')).toBeNull()
+  })
+  it('keeps a thread inline in a later revision that keeps its line', async () => {
+    const old = existing({anchor: {kind: 'text', quote: 'newLine', diff: {artifactId: 'patch-old', file: 'src/example.ts', side: 'new', start: 1, end: 1, fileIndex: 1, hunk: 1, commit: 'b'.repeat(40)}}})
+    const later = PATCH.replace('@@ -1,2 +1,2 @@', '@@ -1,3 +1,3 @@').replace('-oldLine\n', '-oldLine\n-more\n+added\n').replace(' tail\n', ' tail\n')
+    const {container} = render(<ChatContext.Provider value={context(async () => old)}><ReviewMode artifact={artifact} text={later} onClose={() => {}}/></ChatContext.Provider>)
+    const row = (await screen.findByRole('button', {name: 'Show thread: Please improve this name'})).closest('tr')!
+    expect(row.previousElementSibling).toHaveTextContent('newLine')
+    expect(row).not.toHaveTextContent('Outdated')
+    expect(container.querySelector('.diff-requested')).not.toBeNull()
+  })
+  it('moves a thread whose line changed in a later revision out of Files, as Outdated', async () => {
+    const old = existing({anchor: {kind: 'text', quote: 'newLine', diff: {artifactId: 'patch-old', file: 'src/example.ts', side: 'new', start: 1, end: 1, fileIndex: 1, hunk: 1, commit: 'b'.repeat(40)}}})
+    const changed = PATCH.replace('+newLine', '+renamedLine')
+    const {container} = render(<ChatContext.Provider value={context(async () => old)}><ReviewMode artifact={artifact} text={changed} onClose={() => {}}/></ChatContext.Provider>)
+    expect(await screen.findByTestId('review-unplaced-notice')).toHaveTextContent('1 outdated conversation · view')
+    expect(container.querySelector('.diff-comment-row')).toBeNull()
+    expect(container.querySelector('.diff-requested')).toBeNull()
+    fireEvent.click(screen.getByRole('tab', {name: 'Conversation'}))
+    const card = (await screen.findByRole('button', {name: 'Show thread: Please improve this name'})).closest('[data-testid="conversation-thread"]')!
+    expect(card).toHaveTextContent('Outdated')
+    expect(card).toHaveTextContent('✓ Resolved · conversation by the agent')
+  })
+  it('lists a thread whose file left the patch apart, still collapsed and labeled', async () => {
+    const old = existing({anchor: {kind: 'text', quote: 'newLine', diff: {artifactId: 'patch-old', file: 'src/gone.ts', side: 'new', start: 1, end: 1, fileIndex: 1, hunk: 1}}})
+    const {container} = show(context(async () => old))
+    // Not in Files (no "Earlier revision comments" section): the Conversation has it, collapsed.
+    await screen.findByTestId('review-unplaced-notice')
+    expect(container.querySelector('.diff-comment-row')).toBeNull()
+    expect(screen.queryByText('Please improve this name')).toBeNull()
+    fireEvent.click(screen.getByRole('tab', {name: 'Conversation'}))
+    const card = (await screen.findByRole('button', {name: 'Show thread: Please improve this name'})).closest('[data-testid="conversation-thread"]')!
+    expect(card).toHaveTextContent('src/gone.ts:1')
+    // Its file is not in the open (newest) version: not claimed to have changed.
+    expect(card).toHaveTextContent('Not in v2')
+    expect(card).not.toHaveTextContent('Outdated')
+    expect(card).toHaveTextContent('✓ Resolved · conversation by the agent')
   })
   it('hides settled inline, general and outdated threads, retains open threads and restores hidden threads', async () => {
     const review = existing()
@@ -248,10 +324,12 @@ describe('resolved thread visibility', () => {
     fireEvent.click(screen.getByRole('checkbox', {name: 'Hide resolved'}))
     expect(screen.getByText('Please improve this name')).toBeInTheDocument()
     expect(screen.getByText('General rejected')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', {name: 'Conversation'}))
     expect(screen.getByText('Old resolved')).toBeInTheDocument()
   })
   it('keeps a reopened thread visible when resolved threads are hidden', async () => {
     show(context(async () => existing()))
+    await showThread()
     fireEvent.click(await screen.findByRole('button', {name: 'Reopen'}))
     fireEvent.change(screen.getByRole('textbox', {name: 'Reason for reopening'}), {target: {value: 'The change still misses the requested behavior.'}})
     fireEvent.click(screen.getByRole('button', {name: 'Reopen with comment'}))

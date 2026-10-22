@@ -792,6 +792,21 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
 
+	// A change of repos takes the board lock first (before the card's row, the order
+	// ResolveBoardRepo locks in), so the repos it validates cannot be renamed under it.
+	if p.Repos != nil {
+		var boardID string
+		if err := tx.QueryRow(ctx, `SELECT board_id FROM cards WHERE id = $1`, cardID).Scan(&boardID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return Card{}, ErrNotFound
+			}
+			return Card{}, err
+		}
+		if err := lockBoard(ctx, tx, boardID); err != nil {
+			return Card{}, err
+		}
+	}
+
 	card, err := scanCard(tx.QueryRow(ctx,
 		`SELECT `+cardCols+` FROM cards WHERE id = $1 FOR UPDATE`, cardID))
 	if err != nil {

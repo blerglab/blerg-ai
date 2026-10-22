@@ -2,7 +2,9 @@
 // published artifact) and shown in the artifact viewer's frame. The bytes come through the
 // transport's workspace-file read; they are drawn exactly as an artifact's are (the same
 // renderers): text as escaped text, html in a sandboxed frame with no network, svg only through
-// <img> on a blob URL. Nothing the file holds is ever put into this page's DOM as markup.
+// <img> on a blob URL. Markdown's raw HTML is the one exception, as on GitHub: an allowlist of
+// elements and attributes rebuilt by React after DOMPurify (model/markdownHtml.ts). A markdown file's
+// relative images are read through the same workspace-file route, resolved beside the file.
 //
 // A code file opens as numbered, highlighted lines; a line the text named is scrolled to and
 // marked. "Save a copy to Files" uploads the bytes as the person's own file, so it is kept after
@@ -12,7 +14,8 @@ import { createPortal } from 'react-dom'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { formatSize } from '../model/artifacts'
-import { ARTIFACT_VIEWS, blobTypeFor, isViewable, tooBigToPreview } from '../model/artifactViews'
+import { ARTIFACT_VIEWS, blobTypeFor, isViewable, mediaUrl, releaseMediaUrl, tooBigToPreview } from '../model/artifactViews'
+import { queuedRead } from '../model/imageQueue'
 import { langFromName, langLabel } from '../model/codeLang'
 import { useHighlightHead } from '../model/highlight'
 import { countLines } from '../model/lineCap'
@@ -22,6 +25,7 @@ import type { ArtifactInfo, TransportFiles, WorkspaceFile } from '../transport/t
 import CodeText from './CodeText'
 import ErrorId from './ErrorId'
 import { BlobView, NoPreview, TextView } from './ArtifactViewer'
+import type { MarkdownDocument } from './Markdown'
 
 /** The longest the spinner runs before the viewer gives up (the server answers within ~11 s). */
 const GIVE_UP_MS = 20_000
@@ -62,10 +66,13 @@ export default function WorkspaceFileViewer({ sessionId, files, path, line, onCl
     const ac = new AbortController()
     let url: string | null = null
     let timedOut = false
+    // The last refusal the queue tried again: on a timeout the person still sees the server's reason.
+    let lastRefusal: unknown = null
     const timer = setTimeout(() => { timedOut = true; ac.abort() }, GIVE_UP_MS)
     void (async () => {
       try {
-        const file = await read.call(files, sessionId, path, ac.signal)
+        // Through the page's workspace-read queue: two at a time, retried while the server is busy.
+        const file = await queuedRead(signal => read.call(files, sessionId, path, signal), ac.signal, { onRefused: e => { lastRefusal = e } })
         clearTimeout(timer)
         if (ac.signal.aborted) return
         const spec = isViewable(file.view) ? ARTIFACT_VIEWS[file.view] : null
@@ -76,7 +83,10 @@ export default function WorkspaceFileViewer({ sessionId, files, path, line, onCl
           const buf = await file.blob.arrayBuffer()
           if (ac.signal.aborted) return
           const typed = new Blob([buf], { type: blobTypeFor(file.view, file.content_type) })
-          url = URL.createObjectURL(typed)
+          // An SVG draws from a data: URL, never a same-origin blob: one (mediaUrl).
+          const made = await mediaUrl(buf, file.view, file.content_type)
+          if (ac.signal.aborted) { releaseMediaUrl(made); return }
+          url = made
           setState({ kind: 'ready', file: { ...file, blob: typed }, url })
         } else {
           setState({ kind: 'ready', file })
@@ -84,19 +94,29 @@ export default function WorkspaceFileViewer({ sessionId, files, path, line, onCl
       } catch (e) {
         clearTimeout(timer)
         if (ac.signal.aborted && !timedOut) return // cancelled by the person
-        if (timedOut) setState({ kind: 'error', message: 'Opening the file took too long. Try again.' })
-        else if (e instanceof WorkspaceFileError) setState({ kind: 'error', message: workspaceErrorText(e.status, e.serverText), errorId: e.errorId })
+        if (timedOut) {
+          const why = lastRefusal instanceof WorkspaceFileError ? lastRefusal : null
+          setState(why
+            ? { kind: 'error', message: workspaceErrorText(why.status, why.serverText, why.code), errorId: why.errorId }
+            : { kind: 'error', message: 'Opening the file took too long. Try again.' })
+        }
+        else if (e instanceof WorkspaceFileError) setState({ kind: 'error', message: workspaceErrorText(e.status, e.serverText, e.code), errorId: e.errorId })
         else setState({ kind: 'error', message: 'Couldn’t reach the server to open that file.' })
       }
     })()
     return () => {
       clearTimeout(timer)
       ac.abort()
-      if (url) URL.revokeObjectURL(url)
+      releaseMediaUrl(url)
     }
   }, [sessionId, files, path, attempt])
 
   const ready = state.kind === 'ready' ? state : null
+  // A markdown file's relative images and links resolve beside it, in the same folder.
+  const mdDocument = useMemo<MarkdownDocument>(() => ({
+    path,
+    readWorkspace: files.workspaceFile ? (p: string, signal?: AbortSignal) => files.workspaceFile!.call(files, sessionId, p, signal) : undefined,
+  }), [files, sessionId, path])
 
   async function saveCopy() {
     if (!ready) return
@@ -165,7 +185,7 @@ export default function WorkspaceFileViewer({ sessionId, files, path, line, onCl
               {' '}<button type="button" className="artifact-link" onClick={() => { setState({ kind: 'loading' }); setAttempt(n => n + 1) }}>Try again</button>
             </div>
           ) : (
-            <Body state={state} name={name} line={line} />
+            <Body state={state} name={name} line={line} document={mdDocument} />
           )}
         </div>
       </div>
@@ -174,7 +194,7 @@ export default function WorkspaceFileViewer({ sessionId, files, path, line, onCl
   )
 }
 
-function Body({ state, name, line }: { state: Extract<State, { kind: 'ready' }>; name: string; line?: number }) {
+function Body({ state, name, line, document: doc }: { state: Extract<State, { kind: 'ready' }>; name: string; line?: number; document: MarkdownDocument }) {
   const { file } = state
   const info: ArtifactInfo = useMemo(
     () => ({ id: file.path, name, size: file.size, content_type: file.content_type, view: file.view }),
@@ -182,7 +202,7 @@ function Body({ state, name, line }: { state: Extract<State, { kind: 'ready' }>;
   )
   const [showAll, setShowAll] = useState(false)
   if (state.text !== undefined && file.view === 'text') return <CodeFile text={state.text} name={name} line={line} />
-  if (state.text !== undefined) return <TextView artifact={info} text={state.text} showAll={showAll} onShowAll={() => setShowAll(true)} />
+  if (state.text !== undefined) return <TextView artifact={info} text={state.text} showAll={showAll} onShowAll={() => setShowAll(true)} document={doc} />
   if (state.url) return <BlobView artifact={info} url={state.url} autoplay={false} />
   return <NoPreview artifact={info} tooBig={tooBigToPreview(file.view, file.size)} />
 }

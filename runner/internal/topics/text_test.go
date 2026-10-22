@@ -167,3 +167,11 @@ func TestCleanCommits(t *testing.T) {
 		t.Errorf("50 after the duplicate goes: %d %v", len(got), err)
 	}
 }
+
+// Every Unicode format character (Cf) goes, not only the bidi and zero-width ones.
+func TestCleanTextDropsEveryFormatCharacter(t *testing.T) {
+	in := "a\u061cb\u00adc\u180ed\u2060\u2061\u2064e\ufff9\ufffbf\U000E0001\U000E0041\U000E007Fg\u200dh"
+	if got := CleanText(in, 100); got != "abcdefgh" {
+		t.Fatalf("CleanText = %q", got)
+	}
+}

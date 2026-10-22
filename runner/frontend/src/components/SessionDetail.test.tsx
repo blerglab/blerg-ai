@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useNavigate } from 'react-router-dom'
 import SessionDetail from './SessionDetail'
 import SettingsDialog from './SettingsDialog'
@@ -110,20 +110,27 @@ describe('SessionDetail', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('on a phone the header\'s Insights button is an icon with a name, so it never squeezes the title out', () => {
+  it('on a phone the header holds the app\'s one Notifications bell, and Insights moves into ⋯ to leave the title room', () => {
     const desktop = window.matchMedia
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({
       matches: true, media: query, onchange: null,
       addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
     }))
     try {
-      seedSession({ title: 'Fix the bug', status: 'running' })
+      seedSession({ title: 'Fix the bug', status: 'running', kind: 'agent' })
       renderDetail()
-      const toggle = screen.getByTestId('session-insights-toggle')
-      expect(toggle).toHaveAccessibleName('Insights')
-      expect(toggle.textContent).toBe('')
-      expect(toggle.querySelector('svg')).not.toBeNull()
-      expect(toggle).toHaveAttribute('title', "This session's time, work, tokens and cost")
+      const group = screen.getByTestId('session-header-controls')
+      const bells = screen.getAllByRole('button', { name: /^Notifications/ })
+      expect(bells).toHaveLength(1)
+      expect(group).toContainElement(bells[0])
+      expect(bells[0]).toHaveClass('icon-btn')
+      const controls = [...group.querySelectorAll<HTMLButtonElement>('button:not([role="menuitem"])')]
+      expect(controls.map(b => b.getAttribute('aria-label')?.replace(/ \(.*$/, ''))).toEqual(['Star', expect.any(String), 'Notifications', 'End session', 'More actions'])
+      const insights = screen.getByTestId('session-insights-toggle')
+      expect(insights).toHaveAttribute('role', 'menuitem')
+      fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
+      fireEvent.click(insights)
+      expect(screen.getByRole('dialog', { name: 'Fix the bug · Insights' })).toBeInTheDocument()
     } finally {
       window.matchMedia = desktop
     }
@@ -221,15 +228,23 @@ describe('SessionDetail', () => {
     })
   })
 
-  it('requires a second click to confirm a kill, then issues a DELETE', () => {
-    seedSession({ status: 'running' })
+  // Card #142: End session asks in a confirmation anchored to the ✕, never by arming the ✕ itself.
+  it('asks in an alertdialog focused on Cancel, and End session issues the DELETE', () => {
+    seedSession({ status: 'running', kind: 'agent', runtime: 'daemon' })
     renderDetail()
 
-    fireEvent.click(screen.getByText('✕ Kill'))
-    expect(screen.getByText('✕ Confirm kill?')).toBeInTheDocument()
+    const end = screen.getByTestId('stop-session')
+    fireEvent.click(end)
+    // The ✕ never arms: same name, and a second press closes the question instead of ending.
+    expect(end).toHaveAccessibleName('End session')
+    expect(end.className).not.toContain('armed')
+    expect(end).toHaveAttribute('aria-expanded', 'true')
+    const dialog = screen.getByRole('alertdialog', { name: 'End this session?' })
+    expect(dialog).toHaveAccessibleDescription('The agent stops. The conversation and files are kept.')
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus()
     expect(fetch).not.toHaveBeenCalledWith('/api/sessions/sess-a', expect.objectContaining({ method: 'DELETE' }))
 
-    fireEvent.click(screen.getByText('✕ Confirm kill?'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'End session' }))
     // apiFetch (Task 18) adds an Authorization header on top of the call site's own init —
     // but only when an access token actually exists. There is none in this test, and
     // apiFetch no longer sends the literal string "Bearer null" in that case.
@@ -237,6 +252,71 @@ describe('SessionDetail', () => {
       method: 'DELETE',
       headers: {},
     })
+  })
+
+  it('cancels End session on Esc, on Cancel and on a press outside, the focus back on the ✕', () => {
+    seedSession({ status: 'running' })
+    renderDetail()
+    const end = screen.getByTestId('stop-session')
+    fireEvent.click(end)
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(end).toHaveFocus()
+    fireEvent.click(end)
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    fireEvent.click(end)
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(end).toHaveFocus()
+    expect(fetch).not.toHaveBeenCalledWith('/api/sessions/sess-a', expect.objectContaining({ method: 'DELETE' }))
+  })
+
+  it('says what ending keeps for where the session runs', () => {
+    seedSession({ status: 'running', kind: 'agent', runtime: 'cluster' })
+    renderDetail()
+    fireEvent.click(screen.getByTestId('stop-session'))
+    expect(screen.getByRole('alertdialog')).toHaveAccessibleDescription(/pod is removed.*not pushed is lost/)
+  })
+
+  it('words a terminal session as a terminal, with no conversation', () => {
+    seedSession({ status: 'running', runtime: 'daemon' })
+    renderDetail()
+    fireEvent.click(screen.getByTestId('stop-session'))
+    expect(screen.getByRole('alertdialog')).toHaveAccessibleDescription('The terminal session stops. Files are kept.')
+  })
+
+  it('cannot send End twice while one is on its way, and gives the ✕ back after a failure', async () => {
+    let answer: (r: { ok: boolean; status: number }) => void = () => {}
+    vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => init?.method === 'DELETE'
+      ? new Promise(r => { answer = r })
+      : Promise.resolve({ ok: true, status: 200, json: async () => ({}) })))
+    seedSession({ status: 'running', kind: 'agent', runtime: 'daemon' })
+    renderDetail()
+    const end = screen.getByTestId('stop-session')
+    fireEvent.click(end)
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' }))
+    await waitFor(() => expect(end).toBeDisabled())
+    expect(end).toHaveAttribute('aria-busy', 'true')
+    fireEvent.click(end)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(vi.mocked(fetch).mock.calls.filter(c => (c[1] as RequestInit | undefined)?.method === 'DELETE')).toHaveLength(1)
+    await act(async () => { answer({ ok: false, status: 503 }) })
+    await waitFor(() => expect(end).toBeEnabled())
+    expect(end).toHaveFocus()
+    expect(useToastStore.getState().toasts).toHaveLength(1)
+  })
+
+  it('makes the rest of the page inert while it asks, and gives it back after', () => {
+    seedSession({ status: 'running', kind: 'agent', runtime: 'daemon' })
+    const { container } = renderDetail()
+    const root = container as HTMLElement
+    fireEvent.click(screen.getByTestId('stop-session'))
+    expect(root.inert).toBe(true)
+    expect(screen.getByRole('alertdialog').closest('[inert]')).toBeNull()
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(root.inert).toBe(false)
+    expect(screen.getByTestId('stop-session')).toHaveFocus()
   })
 
   // ── error_reason banner: gated on status === 'error', not just presence ────
@@ -344,15 +424,15 @@ describe('SessionDetail', () => {
     expect(screen.getByText('New session')).toBeInTheDocument()
   })
 
-  // ── Kill: navigate on success, stay + toast on failure ────────────────────
+  // ── End session: navigate on success, stay + toast on failure ────────────────────
 
   it('navigates home after a successful DELETE (ok:true)', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true })))
     seedSession({ status: 'running' })
     renderDetail()
 
-    fireEvent.click(screen.getByText('✕ Kill'))
-    fireEvent.click(screen.getByText('✕ Confirm kill?'))
+    fireEvent.click(screen.getByTestId('stop-session'))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' }))
 
     await waitFor(() => expect(screen.getByText('HOME')).toBeInTheDocument())
     expect(useToastStore.getState().toasts).toHaveLength(0)
@@ -363,8 +443,8 @@ describe('SessionDetail', () => {
     const session = seedSession({ status: 'running' })
     renderDetail()
 
-    fireEvent.click(screen.getByText('✕ Kill'))
-    fireEvent.click(screen.getByText('✕ Confirm kill?'))
+    fireEvent.click(screen.getByTestId('stop-session'))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' }))
 
     await waitFor(() => expect(useToastStore.getState().toasts).toHaveLength(1))
     expect(screen.queryByText('HOME')).not.toBeInTheDocument()
@@ -379,7 +459,8 @@ describe('SessionDetail', () => {
     seedSession({ id: 'sess-a', status: 'idle', runtime: 'cluster' })
     renderDetail()
 
-    fireEvent.click(screen.getByText('⏸ Pause'))
+    fireEvent.click(screen.getByTestId('session-more'))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Pause/ }))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
     expect(fetchMock).toHaveBeenCalledWith('/api/sessions/sess-a/pause', expect.objectContaining({ method: 'POST' }))
@@ -392,22 +473,23 @@ describe('SessionDetail', () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 502 })))
     seedSession({ status: 'running', runtime: 'cluster' })
     renderDetail()
-    fireEvent.click(screen.getByText('⏸ Pause'))
+    fireEvent.click(screen.getByTestId('session-more'))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Pause/ }))
     await waitFor(() => expect(useToastStore.getState().toasts).toHaveLength(1))
   })
 
   it('does not offer Pause on a desktop session, a starting one, or one already paused', () => {
     seedSession({ status: 'idle', runtime: 'daemon' })
     const { unmount } = renderDetail()
-    expect(screen.queryByText('⏸ Pause')).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /Pause/, hidden: true })).not.toBeInTheDocument()
     unmount()
     seedSession({ status: 'starting', runtime: 'cluster' })
     const second = renderDetail()
-    expect(screen.queryByText('⏸ Pause')).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /Pause/, hidden: true })).not.toBeInTheDocument()
     second.unmount()
     seedSession({ status: 'disconnected', runtime: 'cluster' })
     renderDetail()
-    expect(screen.queryByText('⏸ Pause')).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /Pause/, hidden: true })).not.toBeInTheDocument()
   })
 
   it('sends mark_session_read on mount when a sessionId is present', () => {
@@ -420,6 +502,55 @@ describe('SessionDetail', () => {
     })
   })
 
+  // ── The header's controls: one style, grouped by intent, no bell (card #87) ──
+
+  it('draws the header controls in one icon-button style, in order: star, insights, panel, end session, more', () => {
+    seedSession({ status: 'running', kind: 'agent' })
+    renderDetail()
+    const group = screen.getByTestId('session-header-controls')
+    const controls = [...group.querySelectorAll<HTMLButtonElement>('button:not([role="menuitem"])')]
+    expect(controls.map(b => b.getAttribute('aria-label'))).toEqual(['Star', 'Insights', expect.stringMatching(/panel|need|running|Session/i), 'End session', 'More actions'])
+    for (const b of controls) {
+      expect(b).toHaveClass('icon-btn')
+      // Icons only: the word is in the tooltip and the label, no text or emoji drawn.
+      expect(b.title).not.toBe('')
+      expect(b.querySelector('svg')).not.toBeNull()
+      expect(b.textContent?.replace(/\d/g, '')).toBe('')
+    }
+    // End session is the only red one.
+    expect(controls.filter(b => b.classList.contains('danger'))).toEqual([screen.getByRole('button', { name: 'End session' })])
+  })
+
+  it('has no Notifications bell in the session header', () => {
+    seedSession({ status: 'running', kind: 'agent' })
+    renderDetail()
+    expect(screen.queryAllByRole('button', { name: /Notifications/ })).toHaveLength(0)
+    expect(screen.queryByText('🔔')).toBeNull()
+  })
+
+  it('reaches Discard from ⋯, with its one-line explanation, and confirms it while the session runs', () => {
+    seedSession({ status: 'running', kind: 'agent', title: 'Busy work' })
+    renderDetail()
+    // Not a header button of its own any more.
+    expect(screen.queryByRole('button', { name: 'Discard Busy work' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
+    const item = screen.getByRole('menuitem', { name: 'Discard session and children' })
+    expect(item).toHaveTextContent('End the session and archive it; history and URL kept')
+    fireEvent.click(item)
+    expect(screen.getByRole('dialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
+    expect(screen.getByTestId('discard-running')).toHaveTextContent('It is running now.')
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/discard'), expect.anything())
+  })
+
+  it('keeps an idle session\'s Discard confirmation free of the running warning', () => {
+    seedSession({ status: 'idle', kind: 'agent', title: 'Quiet work' })
+    renderDetail()
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Discard session and children' }))
+    expect(screen.getByRole('dialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
+    expect(screen.queryByTestId('discard-running')).toBeNull()
+  })
+
   // ── Star toggle in header ──────────────────────────────────────────────────
 
   it('renders a filled star when session.starred is true', () => {
@@ -427,7 +558,8 @@ describe('SessionDetail', () => {
     renderDetail()
     const btn = screen.getByTestId('star-toggle')
     expect(btn).toHaveAttribute('data-starred', 'true')
-    expect(btn).toHaveTextContent('★')
+    expect(btn).toHaveAttribute('aria-pressed', 'true')
+    expect(btn).toHaveAccessibleName('Unstar')
   })
 
   it('renders an outline star when session.starred is false', () => {
@@ -435,7 +567,8 @@ describe('SessionDetail', () => {
     renderDetail()
     const btn = screen.getByTestId('star-toggle')
     expect(btn).toHaveAttribute('data-starred', 'false')
-    expect(btn).toHaveTextContent('☆')
+    expect(btn).toHaveAttribute('aria-pressed', 'false')
+    expect(btn).toHaveAccessibleName('Star')
   })
 
   it('sends set_session_star with starred:true when clicking an unstarred session star', () => {

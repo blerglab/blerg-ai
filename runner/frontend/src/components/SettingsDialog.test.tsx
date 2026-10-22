@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { CODE_TOKEN_NAMES, DEFAULT_CODE_COLOURS, codeThemes } from '@blerglab/chat'
+import { CODE_TOKEN_NAMES, DEFAULT_CODE_COLOURS, HOVERCARDS_KEY, codeThemes, hovercardsEnabled } from '@blerglab/chat'
 import SettingsDialog from './SettingsDialog'
 import { CODE_COLOURS_KEY, fetchCodeColours, getCodeColours, saveCodeColours, setCodeColours } from '../lib/codeColours'
 
@@ -21,6 +21,19 @@ beforeEach(() => {
 afterEach(() => document.documentElement.removeAttribute('data-theme'))
 
 describe('SettingsDialog', () => {
+  it('Hover previews: on by default, one checkbox turns every hovercard off and on (kept per browser)', () => {
+    render(<SettingsDialog onClose={() => {}} />)
+    const box = screen.getByRole('checkbox', { name: 'Hover previews' })
+    expect(box).toBeChecked()
+    fireEvent.click(box)
+    expect(box).not.toBeChecked()
+    expect(hovercardsEnabled()).toBe(false)
+    expect(localStorage.getItem(HOVERCARDS_KEY)).toBe('0')
+    fireEvent.click(box)
+    expect(hovercardsEnabled()).toBe(true)
+    expect(localStorage.getItem(HOVERCARDS_KEY)).toBeNull()
+  })
+
   it('shows real highlighted blocks in five languages, in the chosen theme, and switches live', async () => {
     render(<SettingsDialog onClose={() => {}} />)
     await waitFor(() => expect(preview().querySelectorAll('.hljs-keyword').length).toBeGreaterThan(2))
@@ -110,7 +123,7 @@ describe('SettingsDialog on a phone', () => {
     const cc = fs.readFileSync(`${dir}SettingsDialog.css`, 'utf8')
     expect(caps).toMatch(/@media \(max-width: 899px\)[\s\S]*\.caps-dialog \{[^}]*height: 100%;[^}]*border-radius: 0;/)
     expect(cc).toMatch(/@media \(max-width: 640px\)[\s\S]*\.cc-pickers,\s*\.cc-tokens \{ grid-template-columns: 1fr; \}/)
-    expect(cc).toMatch(/\.cc-footer \.cc-btn \{ flex: 1; min-height: 40px; \}/)
+    expect(cc).toMatch(/\.cc-footer \.btn \{ flex: 1; min-height: 40px; \}/)
   })
 })
 

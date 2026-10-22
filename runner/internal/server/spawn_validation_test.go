@@ -38,7 +38,7 @@ func TestPostSessionsRejectsTraversalRepo(t *testing.T) {
 	tok := mint("session.start")
 
 	for _, repo := range []string{"../..", "../../..", "a/b/c", "org/../x", "a\\b", ".hidden", ".hidden/x", "org/.hidden", "..", "/etc", "/abs", "app/", "/org/name"} {
-		body, _ := json.Marshal(map[string]any{"daemon_id": "d1", "repo": repo, "runtime": "docker"})
+		body, _ := json.Marshal(map[string]any{"daemon_id": "d1", "repo": repo, "runtime": "docker", "kind": "agent"})
 		req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(body)))
 		req.Header.Set("Authorization", "Bearer "+tok)
 		rec := httptest.NewRecorder()
@@ -61,7 +61,7 @@ func TestPostSessionsAcceptsPlainRepoName(t *testing.T) {
 	hub.Register(dc)
 	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
-	body, _ := json.Marshal(map[string]any{"daemon_id": "d1", "repo": "my-app", "runtime": "docker"})
+	body, _ := json.Marshal(map[string]any{"daemon_id": "d1", "repo": "my-app", "runtime": "docker", "kind": "agent"})
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
@@ -89,7 +89,7 @@ func TestForwardBrowserSpawnRejectsTraversalRepo(t *testing.T) {
 	bc := &BrowserConn{ID: "b1"}
 
 	for _, repo := range []string{"../..", "../../..", "a/b/c", "org/../x", "a\\b", ".hidden", ".hidden/x", "org/.hidden", "..", "/etc", "/abs", "app/", "/org/name"} {
-		msg := protocol.BrowserSpawnSession{Type: "spawn_session", DaemonID: "d1", Repo: repo}
+		msg := protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "d1", Repo: repo}
 		_, err := hub.forwardBrowserSpawn(bc, msg, nil)
 		if err == nil {
 			t.Errorf("repo %q: expected error, got nil", repo)
@@ -109,7 +109,7 @@ func TestForwardBrowserSpawnAcceptsPlainRepoName(t *testing.T) {
 	hub.Register(dc)
 	bc := &BrowserConn{ID: "b1"}
 
-	sessionID, err := hub.forwardBrowserSpawn(bc, protocol.BrowserSpawnSession{Type: "spawn_session", DaemonID: "d1", Repo: "my-app"}, nil)
+	sessionID, err := hub.forwardBrowserSpawn(bc, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "d1", Repo: "my-app"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestPostSessionsAcceptsOrgQualifiedRepo(t *testing.T) {
 	hub.Register(dc)
 	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
-	body, _ := json.Marshal(map[string]any{"daemon_id": "d1", "repo": "blerglab/blerg", "runtime": "docker"})
+	body, _ := json.Marshal(map[string]any{"daemon_id": "d1", "repo": "blerglab/blerg", "runtime": "docker", "kind": "agent"})
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
@@ -275,6 +275,9 @@ func TestPostSessionsClusterAcceptsOrgQualifiedRepoWithoutOrg(t *testing.T) {
 // recorder, so the runtime rules can be asserted on status and body.
 func postSpawn(t *testing.T, api *API, body map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
+	if _, ok := body["kind"]; !ok {
+		body["kind"] = "agent"
+	}
 	tok := enableBrowserAuth(t, api)("session.start")
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(raw)))
@@ -332,8 +335,8 @@ func TestPostSessionsRejectsTerminalOnCluster(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
-		if body["error"] != "terminal sessions run on a daemon" {
-			t.Errorf("kind %q: error = %q, want %q", kind, body["error"], "terminal sessions run on a daemon")
+		if want := newSessionKindProblem(kind); body["error"] != want {
+			t.Errorf("kind %q: error = %q, want %q", kind, body["error"], want)
 		}
 		if len(f.created) != 0 {
 			t.Errorf("kind %q: no Job should have been created", kind)
@@ -369,22 +372,6 @@ func TestPostSessionsAgentOnDaemonIsUnsandboxed(t *testing.T) {
 		if msg := recvSpawn(t, dc); msg.Sandbox {
 			t.Errorf("runtime %q: Sandbox = true, want false", rt)
 		}
-	}
-}
-
-// tmux + docker is unchanged: the sandbox terminal, permission bypass allowed.
-func TestPostSessionsTerminalOnDockerUnchanged(t *testing.T) {
-	api, dc := runtimeTestAPI(t)
-	rec := postSpawn(t, api, map[string]any{
-		"daemon_id": "d1", "repo": "my-app", "runtime": "docker",
-		"dangerously_skip_permissions": true,
-	})
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status %d, want 202: %s", rec.Code, rec.Body.String())
-	}
-	msg := recvSpawn(t, dc)
-	if !msg.Sandbox || !msg.DangerouslySkipPermissions || msg.Kind != "" {
-		t.Errorf("spawn = %+v, want sandboxed tmux with skip permissions", msg)
 	}
 }
 

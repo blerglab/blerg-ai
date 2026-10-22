@@ -187,6 +187,7 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 	}
 	applyReasoning(&st, children, sid, reasoning)
 	a.addChecklistCommitURLs(row, &ws)
+	checklistChildTitles(ws.Checklist, snapshot.Rows)
 	writeJSON(w, http.StatusOK, liveReply{
 		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, workState: ws, ToolChanges: toolChanges, Proposals: proposals, liveDelegation: liveDelegation{Children: children, DelegationRequests: snapshot.Requests, DelegationGrants: snapshot.Grants},
 		ReviewRequests:   reviews,

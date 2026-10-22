@@ -41,7 +41,7 @@ describe('the agent asks a question', () => {
     const clientId = t.sentWith[0].opts!.clientId!
     act(() => t.emit(ev(3, 'user_message', { text: 'yes, staging', source: 'ask_answer', message_id: 'm1', client_id: clientId })))
     expect(screen.queryByTestId('queued-message')).toBeNull()
-    expect(screen.getByTestId('ask-closed').textContent).toBe('answered')
+    expect(screen.getByTestId('ask-closed').textContent).toMatch(/^Answered: yes, staging · by you · /)
     expect(within(screen.getByTestId('ask-card')).queryByLabelText('Your answer')).toBeNull()
   })
 
@@ -89,7 +89,7 @@ describe('the agent asks a question', () => {
     act(() => t.emit(ev(3, 'user_message', { text: 'yes', source: 'ask_answer', message_id: 'q1' })))
     act(() => t.emit(ev(4, 'user_message', { text: 'Answer to your question q1 ("Ship the blue one?"): yes', source: 'question_answer' })))
     expect(screen.queryByText(/Answer to your question q1/)).toBeNull()
-    expect(screen.getByTestId('ask-closed').textContent).toBe('answered')
+    expect(screen.getByTestId('ask-closed').textContent).toMatch(/^Answered: yes · by you · /)
   })
 
   it('points a host that never answers approvals to Runner', () => {

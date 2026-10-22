@@ -431,8 +431,8 @@ func engineHome(home, envVar, dotDir string) string {
 }
 
 // codexCapabilities lists Codex's skills directory ($CODEX_HOME/skills;
-// ".system" holds the ones Codex ships). The sandbox mounts ~/.codex, so a
-// sandboxed session sees the same directory.
+// ".system" holds the ones Codex ships). The sandbox mounts ~/.codex/skills
+// read-only, so a sandboxed session sees the same directory.
 func codexCapabilities(c CapabilityContext) []protocol.CapabilityGroup {
 	dir := engineHome(c.HomeDir, "CODEX_HOME", ".codex")
 	if dir == "" {

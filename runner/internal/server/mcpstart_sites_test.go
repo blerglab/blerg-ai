@@ -236,8 +236,8 @@ func TestPostSessionsMCPRuntimeRefusals(t *testing.T) {
 		want string
 	}{
 		{map[string]any{"repo": "acme/widget", "runtime": "cluster", "kind": "agent", "engine": "hermes"}, msgMCPEngine},
-		{map[string]any{"daemon_id": fx.dc.ID, "repo": "app", "runtime": "docker", "kind": ""}, msgMCPKind},
-		{map[string]any{"daemon_id": fx.dc.ID, "repo": "app", "runtime": "docker", "kind": "tmux"}, msgMCPKind},
+		{map[string]any{"daemon_id": fx.dc.ID, "repo": "app", "runtime": "docker", "kind": ""}, kindRequiredMessage},
+		{map[string]any{"daemon_id": fx.dc.ID, "repo": "app", "runtime": "docker", "kind": "tmux"}, terminalDeprecationMessage},
 	} {
 		tc.body["mcp"] = fx.selection()
 		rec := fx.do(fx.api.HandlePostSessions, fx.human(), tc.body)

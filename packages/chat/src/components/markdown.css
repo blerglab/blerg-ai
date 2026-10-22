@@ -1,6 +1,40 @@
-/* Rendered chat Markdown. Compact: this lives inside chat cards, so block
-   margins are tight and the first/last child sit flush with the card edge. */
+/*! Rendered Markdown, styled after GitHub's README rendering.
+
+   Adapted from github-markdown-css by Sindre Sorhus (https://github.com/sindresorhus/github-markdown-css),
+   MIT License, Copyright (c) Sindre Sorhus <sindresorhus@gmail.com> (https://sindresorhus.com).
+   The full notice is in THIRD_PARTY_NOTICES.md (the repository's root and this package's). CSS
+   minifiers keep a /*! comment only at the very top of a file, so the bundles carry the credit as a
+   legal comment in Markdown.tsx (the app and package builds keep legal comments).
+
+   What is GitHub's: the type scale (h1 2em … h6 .85em, weight 600, line height 1.25), the rhythm
+   (one text size between blocks, 1.5 text sizes above a heading), ruled h1 and h2, .25em between list
+   items, inline code at 85% in a 6px chip, code blocks at 85% / 1.45 with a 16px pad, collapsed tables
+   with 6px 13px cells and zebra rows, a quote with a .25em bar in the muted color, a .25em rule.
+   What is Blerg's: the colors, which are the theme's --chat-* tokens (dark and light follow the app),
+   and the scale. GitHub writes its spacing in px at a 16px body; here it is in units of the block's
+   own text size (--chat-md-unit), so a markdown DOCUMENT (.md-doc: the viewer, its preview, the review
+   page, a ticket's description; GitHub's 16px and font stack) reads exactly like GitHub.
+   A chat MESSAGE (.md without .md-doc) is compact: the same rhythm at three quarters of the gap
+   (--chat-md-gap .75em, so 1.125em above a heading) and tamer headings (h1 1.3em, h2 1.15em, h3
+   1.05em, no rules); a reply is conversation, not a README. */
+
+/* The block's text size as an absolute length: set once on .md (1em there), inherited as px, so a
+   heading's margin is measured in body text, not in the heading's own larger em. */
+@property --chat-md-unit {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 16px;
+}
+/* The gap between blocks: GitHub's (one unit) in a document, three quarters of it in a message. */
+@property --chat-md-gap {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 16px;
+}
+
 .md {
+  --chat-md-unit: 1em;
+  --chat-md-gap: 0.75em;
   line-height: 1.5;
   overflow-wrap: anywhere;
   min-width: 0;
@@ -12,71 +46,110 @@
 .md p,
 .md ul,
 .md ol,
+.md dl,
 .md blockquote,
+.md details,
 .md .md-codeblock,
 .md .md-card,
 .md .md-table-wrap {
-  margin: 0 0 0.6em;
+  margin: 0 0 var(--chat-md-gap);
 }
 
+/* Headings. font-family, letter-spacing and color are reset because apps style a bare h1/h2 their
+   own way (the runner: a display face, tight tracking); a document's headings are the document's. */
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
-  margin: 0.8em 0 0.4em;
+  margin: calc(var(--chat-md-gap) * 1.5) 0 var(--chat-md-gap);
+  font-family: inherit;
+  font-weight: 600;
   line-height: 1.25;
-  font-weight: 650;
+  letter-spacing: normal;
+  color: inherit;
 }
 .md h1 { font-size: 1.3em; }
-.md h2 { font-size: 1.18em; }
-.md h3 { font-size: 1.06em; }
-.md h4, .md h5, .md h6 { font-size: 1em; }
+.md h2 { font-size: 1.15em; }
+.md h3 { font-size: 1.05em; }
+.md h4, .md h5 { font-size: 1em; }
+.md h6 { font-size: 1em; color: var(--chat-muted); }
+/* A document's headings: GitHub's scale, h1 and h2 ruled. */
+.md.md-doc h1 { font-size: 2em; padding-bottom: 0.3em; border-bottom: 1px solid color-mix(in srgb, var(--chat-border) 70%, transparent); }
+.md.md-doc h2 { font-size: 1.5em; padding-bottom: 0.3em; border-bottom: 1px solid color-mix(in srgb, var(--chat-border) 70%, transparent); }
+.md.md-doc h3 { font-size: 1.25em; }
+.md.md-doc h4 { font-size: 1em; }
+.md.md-doc h5 { font-size: 0.875em; }
+.md.md-doc h6 { font-size: 0.85em; }
+.md :is(h1, h2, h3, h4, h5, h6) code { padding: 0 0.2em; font-size: inherit; }
 
-.md ul, .md ol { padding-left: 1.4em; }
-.md li + li { margin-top: 0.15em; }
-.md li > p { margin: 0; }
-.md li input[type='checkbox'] { margin: 0 0.35em 0 0; vertical-align: middle; }
+.md b, .md strong { font-weight: 600; }
+
+/* Lists. */
+.md ul, .md ol { padding-left: 2em; }
+.md ol ol, .md ul ol { list-style-type: lower-roman; }
+.md ul ul ol, .md ul ol ol, .md ol ul ol, .md ol ol ol { list-style-type: lower-alpha; }
+.md li > ul, .md li > ol { margin: 0; }
+.md li + li { margin-top: 0.25em; }
+.md li > p { margin-top: var(--chat-md-gap); }
+.md li.task-list-item { list-style-type: none; }
+.md li.task-list-item input[type='checkbox'] { margin: 0 0.2em 0.25em -1.4em; vertical-align: middle; }
 
 .md a {
   color: var(--chat-info);
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-underline-offset: 0.2rem;
 }
 
 .md blockquote {
-  padding: 0 0.9em;
-  border-left: 0.25em solid var(--chat-border);
+  padding: 0 1em;
   color: var(--chat-muted);
+  border-left: 0.25em solid var(--chat-border);
 }
+.md blockquote > :first-child { margin-top: 0; }
+.md blockquote > :last-child { margin-bottom: 0; }
 
 .md hr {
-  border: none;
-  border-top: 1px solid var(--chat-border);
-  margin: 0.8em 0;
+  box-sizing: content-box;
+  height: 0.25em;
+  padding: 0;
+  margin: calc(var(--chat-md-gap) * 1.5) 0;
+  overflow: hidden;
+  background-color: var(--chat-border);
+  border: 0;
 }
 
+/* Inline code. display and line-height are reset because apps style a bare `code` as a box (the
+   runner: inline-flex, 135%), which loosens every line it sits on. */
 .md code {
+  display: inline;
+  margin: 0;
+  padding: 0.2em 0.4em;
   font-family: var(--chat-font-mono);
-  font-size: 0.88em;
-  background: color-mix(in srgb, var(--chat-muted-2) 22%, transparent);
+  font-size: 85%;
+  line-height: inherit;
+  white-space: break-spaces;
+  color: inherit;
+  background: color-mix(in srgb, var(--chat-muted-2) 20%, transparent);
+  border: 0;
   border-radius: 6px;
-  padding: 0.15em 0.4em;
 }
 
 .md-codeblock {
   position: relative;
 }
 
+/* Code blocks: GitHub's, on the theme's code background. The faint border is Blerg's: a tool card's
+   background is the code background, where a borderless block would vanish. */
 .md-codeblock pre {
   margin: 0;
-  padding: 8px 10px;
+  padding: var(--chat-md-unit);
   background: var(--chat-code-bg);
   color: var(--chat-code-fg);
-  border: 1px solid var(--chat-border);
-  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--chat-border) 60%, transparent);
+  border-radius: 6px;
   overflow-x: auto;
   white-space: pre;
   word-break: normal;
   overflow-wrap: normal;
   font-family: var(--chat-font-mono);
-  font-size: var(--chat-text-xs);
+  font-size: 85%;
   line-height: 1.45;
 }
 
@@ -84,7 +157,10 @@
   color: inherit; /* the app's own `code` colour must not override the theme's text colour */
   background: none;
   padding: 0;
+  border-radius: 0;
   font-size: inherit;
+  line-height: inherit;
+  white-space: inherit;
 }
 
 .md-copy {
@@ -117,30 +193,109 @@
   color: var(--chat-muted-2);
 }
 
+/* Tables: collapsed, 6px 13px cells, every other row tinted. The wrapper scrolls a wide table. */
 .md-table-wrap {
   overflow-x: auto;
   max-width: 100%;
 }
+.md-table-wrap.is-centered > table { margin-inline: auto; }
 .md table {
+  border-spacing: 0;
   border-collapse: collapse;
-  font-size: 0.95em;
+  font-variant: tabular-nums;
 }
 .md th, .md td {
+  padding: calc(var(--chat-md-unit) * 0.375) calc(var(--chat-md-unit) * 0.8125);
   border: 1px solid var(--chat-border);
-  padding: 4px 10px;
-  text-align: left;
-  vertical-align: top;
 }
-.md th {
-  background: var(--chat-surface-2);
-  font-weight: 600;
+.md th { font-weight: 600; }
+.md tr { border-top: 1px solid color-mix(in srgb, var(--chat-border) 70%, transparent); }
+.md tr:nth-child(2n) { background-color: color-mix(in srgb, var(--chat-fg) 5%, transparent); }
+.md td > :last-child, .md th > :last-child { margin-bottom: 0; }
+
+/* Footnotes (remark-gfm): small and muted under a rule, as on GitHub. */
+.md .footnotes {
+  font-size: 0.75em;
+  color: var(--chat-muted);
+  border-top: 1px solid var(--chat-border);
 }
-.md tbody tr:nth-child(2n) td {
-  background: color-mix(in srgb, var(--chat-surface-2) 55%, transparent);
-}
+.md .footnotes ol { padding-left: var(--chat-md-unit); }
+.md sup > a::before { content: '['; }
+.md sup > a::after { content: ']'; }
 
 .md-link-inert {
   text-decoration: underline dotted;
+}
+
+/* Raw HTML (GitHub's allowlist, model/markdownHtml.ts): images, keys, disclosure. */
+.md img {
+  max-width: 100%;
+  height: auto; /* a clamped width keeps the aspect ratio; a huge height cannot bury the page */
+  box-sizing: content-box;
+}
+.md kbd {
+  display: inline-block;
+  padding: 0.2em 0.35em;
+  font-family: var(--chat-font-mono);
+  font-size: 0.7em;
+  line-height: 1;
+  color: var(--chat-fg);
+  vertical-align: middle;
+  background: var(--chat-surface-2);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  box-shadow: inset 0 -1px 0 var(--chat-border);
+}
+.md details summary { cursor: pointer; }
+
+/* An image that is not loaded: a remote one until "Load image", a relative one in a published file
+   (no folder to read it from), one that failed. Its alt text in a quiet dashed frame. */
+.md-img-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0.15em 0.6em;
+  border: 1px dashed var(--chat-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--chat-fg) 4%, transparent);
+  color: var(--chat-muted);
+  font-size: 0.85em;
+  line-height: 1.5;
+  vertical-align: middle;
+  text-align: left;
+}
+.md-img-alt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.md-img-host {
+  flex: none;
+  color: var(--chat-muted-2);
+}
+.md-img-host::before { content: '· '; }
+.md-too-deep,
+.md-unclosed {
+  display: block;
+  color: var(--chat-muted);
+  font-style: italic;
+}
+.md-img-load {
+  flex: none;
+  font: inherit;
+  color: var(--chat-fg);
+  background: var(--chat-surface-2);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  padding: 0 0.5em;
+  cursor: pointer;
+}
+.md-img-load:hover,
+.md-img-load:focus-visible {
+  border-color: color-mix(in srgb, var(--chat-info) 60%, var(--chat-border));
 }
 
 /* Code blocks: syntax colours (model/highlighter.ts classes), diff lines, and the line cap. */
@@ -236,12 +391,11 @@
   line-height: inherit;
 }
 
-/* A markdown FILE (the viewer, the review page, the inline preview): the look of a README, which is
-   what developers read documents in. A system UI font at 16px, a ruled h1 and h2, 1em between
-   blocks, chips for inline code, padded code blocks, bordered zebra tables, a bar on a quote.
-   Sizes and spacing are in em, so the preview, which sets a smaller font-size, scales as a whole.
-   Chat MESSAGES do not take this class: they keep the compact scale above. */
+/* A markdown FILE (the viewer, the review page, the inline preview, a ticket's description): GitHub's
+   font stack, 16px body and full gap. Everything above is in these units, so it follows; the preview,
+   which sets a smaller size, scales as a whole. */
 .md.md-doc {
+  --chat-md-gap: 1em;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 1.5;
@@ -250,54 +404,50 @@
 }
 .md.md-doc.artifact-preview-md { font-size: var(--chat-text-sm); }
 
-.md.md-doc > :first-child { margin-top: 0; }
-.md.md-doc > :last-child { margin-bottom: 0; }
-
-.md.md-doc p,
-.md.md-doc ul,
-.md.md-doc ol,
-.md.md-doc blockquote,
-.md.md-doc .md-codeblock,
-.md.md-doc .md-card,
-.md.md-doc .md-table-wrap {
-  margin: 0 0 1em;
-}
-
-.md.md-doc h1, .md.md-doc h2, .md.md-doc h3,
-.md.md-doc h4, .md.md-doc h5, .md.md-doc h6 {
-  margin: 1.5em 0 1em;
-  font-weight: 600;
-  line-height: 1.25;
-}
-.md.md-doc h1 { font-size: 2em; padding-bottom: 0.3em; border-bottom: 1px solid var(--chat-border); }
-.md.md-doc h2 { font-size: 1.5em; padding-bottom: 0.3em; border-bottom: 1px solid var(--chat-border); }
-.md.md-doc h3 { font-size: 1.25em; }
-.md.md-doc h4 { font-size: 1em; }
-.md.md-doc h5 { font-size: 0.875em; }
-.md.md-doc h6 { font-size: 0.85em; color: var(--chat-muted); }
-
-.md.md-doc ul, .md.md-doc ol { padding-left: 2em; }
-.md.md-doc li + li { margin-top: 0.25em; }
-.md.md-doc li > p { margin: 1em 0 0; }
-.md.md-doc li > ul, .md.md-doc li > ol { margin: 0.25em 0 0; }
-.md.md-doc li.task-list-item { list-style: none; }
-.md.md-doc li input[type='checkbox'] { margin: 0 0.4em 0.2em -1.4em; vertical-align: middle; }
-
-.md.md-doc a { text-decoration: none; }
-.md.md-doc a:hover { text-decoration: underline; }
-
-.md.md-doc blockquote { padding: 0 1em; }
-.md.md-doc blockquote > :last-child { margin-bottom: 0; }
-
-.md.md-doc hr { margin: 1.5em 0; }
-
-.md.md-doc code { font-size: 85%; padding: 0.2em 0.4em; }
-.md.md-doc .md-codeblock pre {
-  padding: 16px;
+/* A document in a viewer (the file viewer, the folder viewer, review mode): GitHub's box. A centered
+   column with a 1px border, a 6px radius and 32px of padding around GitHub's 1012px text column, so
+   the text stays anchored at a readable width on a wide or maximized dialog. In a narrow column (a
+   phone, or review mode's page beside its source) it is the page itself: no border, the full width,
+   the viewer's own padding. The width that decides is the column's, not the screen's: the viewer's
+   body and review's page column are size containers (chat.css, review.css), and 700px matches the
+   viewer's other narrow rules. */
+.md.md-doc.md-box {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(1012px + 2 * 32px + 2px);
+  margin-inline: auto;
+  padding: 32px;
+  border: 1px solid var(--chat-border);
   border-radius: 6px;
-  font-size: 85%;
-  line-height: 1.45;
+}
+@container (max-width: 700px) {
+  .md.md-doc.md-box {
+    max-width: none;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+  }
 }
 
-.md.md-doc table { font-size: 1em; }
-.md.md-doc th, .md.md-doc td { padding: 6px 13px; }
+/* A card number or a commit hash in chat text, once confirmed (RefLinks.tsx): a link in place, the
+   same size as the text it was (no box, no padding), so nothing moves when it turns into one. */
+.md button.md-ref {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  color: var(--chat-info);
+  text-align: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.md button.md-ref:hover,
+.md button.md-ref:focus-visible {
+  text-decoration-style: solid;
+}

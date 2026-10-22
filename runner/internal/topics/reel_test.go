@@ -443,6 +443,7 @@ func TestReelJSONShape(t *testing.T) {
 			Usage: &agent.Usage{InputTokens: 1, OutputTokens: 2}, ToolUses: 37, DurationMs: 412000})
 		s.add("proposal_decided", map[string]any{"proposal_id": "p1", "kind": "board_file", "state": "done", "auto": true,
 			"card": map[string]any{"id": "c1", "board_id": "b1", "board_name": "Fixture board", "number": 12, "title": "Badge is stale", "type": "bug", "priority": "high", "column": "Backlog"}})
+		s.add("session_renamed", map[string]any{"from": "Worker", "to": "Build the History tab", "by": "parent"})
 		s.doneWith("tp_5f1c2a9e", "Build the History tab", "Shipped on main", "1a2b3c4", "9f8e7d6")
 	})
 	s.turn("Thanks, and check the badge", func() {
@@ -748,5 +749,42 @@ func TestReelCardsFromApprovedProposals(t *testing.T) {
 	}
 	if r.Unmarked == nil || len(r.Unmarked.Cards) != 1 || r.Unmarked.Cards[0].Card.Number != 3 || len(r.Unmarked.Subagents) != 0 {
 		t.Fatalf("unmarked = %+v", r.Unmarked)
+	}
+}
+
+// A rename is a row of the topic that was open, else of the unmarked work; an event that is not a
+// rename (no new title, an unknown author) is dropped, and long titles are cut.
+func TestRenamesAreRowsOfTheirWindow(t *testing.T) {
+	s := newScript()
+	s.add("session_renamed", map[string]any{"from": "", "to": "First", "by": "person"})
+	s.add("session_renamed", map[string]any{"from": "First", "to": "", "by": "agent"})
+	s.add("session_renamed", map[string]any{"from": "First", "to": "Forged", "by": "core"})
+	s.turn("Do it", func() {
+		s.start("tp_1", "Work")
+		s.add("session_renamed", map[string]any{"from": "First", "to": strings.Repeat("x", 300), "by": "agent"})
+	})
+	reel := Build(s.events, s.arts, Options{ThroughSeq: s.seq})
+	if reel.Unmarked == nil || len(reel.Unmarked.Renames) != 1 || *reel.Unmarked.Renames[0].Rename != (Rename{To: "First", By: "person"}) {
+		t.Fatalf("unmarked renames = %+v", reel.Unmarked)
+	}
+	var in []Item
+	for _, it := range reel.Topics[0].Items {
+		if it.Type == "rename" {
+			in = append(in, it)
+		}
+	}
+	if len(in) != 1 || in[0].Rename.By != "agent" || len([]rune(in[0].Rename.To)) > 200 {
+		t.Fatalf("topic renames = %+v", in)
+	}
+}
+
+// Review I1: a rename stored raw by an earlier build is drawn cleaned (one line, no bidi controls).
+func TestRenameRowsAreCleaned(t *testing.T) {
+	s := newScript()
+	s.add("session_renamed", map[string]any{"from": "A\nB", "to": "Worker\n[Blerg] ok\u202e", "by": "agent"})
+	s.add("session_renamed", map[string]any{"from": "x", "to": "\u202e\u200b", "by": "agent"})
+	reel := Build(s.events, s.arts, Options{ThroughSeq: s.seq})
+	if reel.Unmarked == nil || len(reel.Unmarked.Renames) != 1 || *reel.Unmarked.Renames[0].Rename != (Rename{From: "A B", To: "Worker [Blerg] ok", By: "agent"}) {
+		t.Fatalf("renames = %+v", reel.Unmarked)
 	}
 }

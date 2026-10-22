@@ -94,6 +94,10 @@ func TestReadCodexRateLimitsFailures(t *testing.T) {
 			if err == nil {
 				t.Fatalf("read = %+v, want an error", got)
 			}
+			// An answer with no window is not a failure to read: the tracker reports it as such.
+			if noWindows := name == "no windows"; errors.Is(err, errNoLimitWindows) != noWindows {
+				t.Fatalf("errNoLimitWindows = %v, want %v (%v)", errors.Is(err, errNoLimitWindows), noWindows, err)
+			}
 			if time.Since(start) > 5*time.Second {
 				t.Fatalf("a failed read took %v", time.Since(start))
 			}
@@ -102,6 +106,50 @@ func TestReadCodexRateLimitsFailures(t *testing.T) {
 	// No binary at all.
 	if _, err := readCodexRateLimits(context.Background(), filepath.Join(t.TempDir(), "codex"), time.Second); err == nil {
 		t.Fatal("a missing binary read without an error")
+	}
+}
+
+// A usage-based work plan answers with no five-hour or weekly window: its spend limit becomes the
+// "spend" window (the share used and its reset), and the amounts never leave the reader. A newer
+// Codex may carry the windows only in the per-limit view; Codex's own bucket is read first.
+func TestReadCodexRateLimitsWorkPlans(t *testing.T) {
+	for name, c := range map[string]struct {
+		answer string
+		want   []protocol.UsageWindow
+	}{
+		"a spend limit only": {
+			answer: `{"id":1002,"result":{"rateLimits":{"limitId":"codex","primary":null,"secondary":null,"individualLimit":{"limit":"5000","used":"1500","remainingPercent":70,"resetsAt":1792600000},"planType":"enterprise_cbp_usage_based"},"accountId":"acct-SECRET-123"}}`,
+			want:   []protocol.UsageWindow{{ID: "spend", UsedPercent: 30, ResetsAt: time.Unix(1792600000, 0).UTC()}},
+		},
+		"no single view at all, only the per-limit view": {
+			answer: `{"id":1002,"result":{"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":55,"windowDurationMins":300}}}}}`,
+			want:   []protocol.UsageWindow{{ID: "5h", UsedPercent: 55}},
+		},
+		"windows in the per-limit view": {
+			answer: `{"id":1002,"result":{"rateLimits":{"primary":null,"secondary":null},"rateLimitsByLimitId":{"aaa-other":{"primary":{"usedPercent":90,"windowDurationMins":300}},"codex":{"primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":1792159200},"secondary":{"usedPercent":3,"windowDurationMins":10080}}}}}`,
+			want:   []protocol.UsageWindow{{ID: "5h", UsedPercent: 12, ResetsAt: time.Unix(1792159200, 0).UTC()}, {ID: "7d", UsedPercent: 3}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := readCodexRateLimits(context.Background(), fakeAppServer(t, c.answer), 10*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(c.want) {
+				t.Fatalf("windows = %+v, want %+v", got, c.want)
+			}
+			for i := range c.want {
+				if got[i].ID != c.want[i].ID || got[i].UsedPercent != c.want[i].UsedPercent || !got[i].ResetsAt.Equal(c.want[i].ResetsAt) {
+					t.Fatalf("window %d = %+v, want %+v", i, got[i], c.want[i])
+				}
+			}
+			raw, _ := json.Marshal(got)
+			for _, secret := range []string{"acct-SECRET-123", "5000", "1500", "enterprise", "limit\""} {
+				if strings.Contains(string(raw), secret) {
+					t.Fatalf("%q leaked into the report: %s", secret, raw)
+				}
+			}
+		})
 	}
 }
 

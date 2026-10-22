@@ -1,22 +1,20 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { useTicker } from '@blerglab/chat'
 import { useMessageStore } from '../hooks/useMessageStore'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { sessionLabel } from '../notify'
 import { useProposalInbox, type ProposalInbox } from '../hooks/useProposalInbox'
-import { useToastStore } from '../hooks/useToastStore'
+import { useProposalExpiryWarnings } from '../hooks/useProposalExpiryWarnings'
 import { PendingProposal } from './ProposalAttention'
-import { proposalExpiring, proposalsWaiting, warnedProposalDeadlines as warned } from '../lib/proposalAttention'
-import type { MessageInfo, ProposalInfo } from '../types'
+import { proposalExpiring, proposalsWaiting } from '../lib/proposalAttention'
+import type { MessageInfo } from '../types'
+import { BellIcon } from './IconButton'
+import { dismissWithUndo, useDismissed } from '../lib/needsYouDismiss'
+import { useMyReviewRequests, type MyReviewRequest } from '../hooks/useMyReviewRequests'
+import { disableNotifications, enableNotifications, pushState, type PushState } from '../lib/push'
 
-
-// notifyExpiring tells the person that proposals enter their last 24 hours. It is in-app only, by
-// the owner's ruling (0.4.4): no push notification, with or without contents. Sessions are
-// semi-ephemeral, and a proposal open long enough to need one means something is wrong.
-function notifyExpiring(due: ProposalInfo[]) {
-  useToastStore.getState().addToast({ title: due.length === 1 ? 'Proposal expires soon' : 'Proposals expire soon', body: `${due.length} pending ${due.length === 1 ? 'request expires' : 'requests expire'} within 24 hours. Review or extend before the deadline.`, url: `/proposals?id=${encodeURIComponent(due[0].id)}` })
-}
 
 // The questions agents asked without waiting (`blerg-runner ask --no-wait`) that are still open and
 // this person answers (the server marks them answerable for the session's owner only): the bell
@@ -31,27 +29,94 @@ function QuestionRow({ question }: { question: MessageInfo }) {
   return <article className="proposal-question" data-testid="bell-question">
     <div className="proposal-question-kicker">Question · {session ? sessionLabel(session) : 'a session'}</div>
     <p className="proposal-question-text">{question.body}</p>
-    <Link to={`/sessions/${encodeURIComponent(question.session_id)}`}>Answer in the session</Link>
+    <div className="proposal-question-actions">
+      <Link to={`/sessions/${encodeURIComponent(question.session_id)}`}>Answer in the session</Link>
+      <button type="button" data-testid="bell-dismiss" aria-label={`Dismiss question: ${question.body.slice(0, 80)}`}
+        title="Dismiss: you answered elsewhere, or it no longer needs you. The agent is told."
+        onClick={() => dismissWithUndo(`ask:${question.id}`, `Question: ${question.body.slice(0, 80)}`)}>Dismiss</button>
+    </div>
   </article>
 }
 
-// In-app notifications are owner scoped.
+// A review a session asked of this person: open the file in its session (Approve or Request changes
+// there), or dismiss it.
+function ReviewRow({ review }: { review: MyReviewRequest }) {
+  const session = useSessionStore(s => s.sessions.find(x => x.id === review.session_id))
+  return <article className="proposal-question" data-testid="bell-review">
+    <div className="proposal-question-kicker">Review · {session ? sessionLabel(session) : 'a session'}</div>
+    <p className="proposal-question-text"><strong>{review.artifact_name}</strong>{review.artifact_version > 1 ? ` v${review.artifact_version}` : ''}{review.ask ? `: ${review.ask}` : ''}</p>
+    <div className="proposal-question-actions">
+      <Link to={review.url}>Review in the session</Link>
+      <button type="button" data-testid="bell-dismiss" aria-label={`Dismiss review request: ${review.artifact_name}`}
+        title="Dismiss: you answered elsewhere, or it no longer needs you. The agent is told."
+        onClick={() => dismissWithUndo(`review:${review.request_id}`, `Review: ${review.artifact_name}`)}>Dismiss</button>
+    </div>
+  </article>
+}
+
+const PUSH_WORDS: Record<PushState, string> = {
+  unsupported: 'This browser cannot receive push notifications (it has no service worker or Push API support). Toasts in an open page still come.',
+  blocked: 'Blocked in this browser\'s site settings. Allow notifications there to turn them on.',
+  on: 'On for this browser.',
+  off: 'Off for this browser.',
+}
+
+// Push to this browser (phone or desktop), folded into the bell: the one place to turn it on or off.
+export function PushSetting() {
+  const [state, setState] = useState<PushState>(pushState)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const change = (action: () => Promise<void>, failed: string) => {
+    setBusy(true); setError('')
+    action().catch(err => { console.error(err); setError(failed) }).finally(() => { setState(pushState()); setBusy(false) })
+  }
+  return <div className="proposal-push" data-testid="push-setting">
+    <div className="proposal-push-text">
+      <strong>Push notifications</strong>
+      <span data-testid="push-state">{PUSH_WORDS[state]}</span>
+      {error && <span role="alert">{error}</span>}
+    </div>
+    {state === 'off' && <button type="button" disabled={busy} onClick={() => change(enableNotifications, 'Could not turn push on. Try again.')}>Turn on</button>}
+    {state === 'on' && <button type="button" disabled={busy} onClick={() => change(disableNotifications, 'Could not turn push off. Try again.')}>Turn off</button>}
+  </div>
+}
+
+// The panel sits under the bell, inside the screen: the bell is at the sidebar's right edge (the
+// panel opens rightward over the page) or at a phone's (it spans the screen).
+function panelPlace(button: HTMLElement | null) {
+  const vw = window.innerWidth
+  const width = Math.min(vw - 24, Math.max(640, vw * 0.4))
+  const rect = button?.getBoundingClientRect()
+  const top = (rect?.bottom ?? 48) + 6
+  const left = Math.max(12, Math.min(rect?.left ?? 12, vw - 12 - width))
+  return { top, left, width, maxHeight: `calc(100dvh - ${Math.round(top) + 12}px)` }
+}
+
+// In-app notifications are owner scoped. The app has one bell, in the sessions header beside + New.
 export function ProposalBell({ inbox }: { inbox: ProposalInbox }) {
   const [open, setOpen] = useState(false)
   const now = useTicker(true)
   const messages = useMessageStore(s => s.messages)
-  const questions = useMemo(() => openQuestions(messages), [messages])
+  const dismissed = useDismissed()
+  const questions = useMemo(() => openQuestions(messages), [messages]).filter(q => !dismissed(`ask:${q.id}`))
+  const reviews = useMyReviewRequests(open).filter(r => !dismissed(`review:${r.request_id}`))
   // A proposal past its deadline is listed (as expired) but not counted: it no longer needs you.
   const serverNow = now - (inbox.clockOffset ?? 0)
   const waiting = proposalsWaiting(inbox.pending, serverNow).length
-  const total = waiting + questions.length
-  const questionWords = questions.length ? `, ${questions.length} ${questions.length === 1 ? 'question' : 'questions'}` : ''
+  const total = waiting + questions.length + reviews.length
+  const questionWords = (questions.length ? `, ${questions.length} ${questions.length === 1 ? 'question' : 'questions'}` : '') +
+    (reviews.length ? `, ${reviews.length} ${reviews.length === 1 ? 'review' : 'reviews'}` : '')
   const due = inbox.pending.filter(p => proposalExpiring(p, serverNow))
-  useEffect(() => {
-    const newlyDue = inbox.pending.filter(p => proposalExpiring(p, serverNow) && !warned.has(`${p.id}:${p.expires_at}`))
-    for (const p of newlyDue) warned.add(`${p.id}:${p.expires_at}`)
-    if (newlyDue.length) notifyExpiring(newlyDue)
-  }, [inbox.pending, serverNow])
+  useProposalExpiryWarnings(inbox)
+  const button = useRef<HTMLButtonElement>(null)
+  const [place, setPlace] = useState<ReturnType<typeof panelPlace> | null>(null)
+  useLayoutEffect(() => {
+    if (!open) return
+    const update = () => setPlace(panelPlace(button.current))
+    update()
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [open])
   useEffect(() => {
     if (!open) return
     const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
@@ -59,16 +124,18 @@ export function ProposalBell({ inbox }: { inbox: ProposalInbox }) {
     return () => window.removeEventListener('keydown', escape)
   }, [open])
   return <div className="proposal-notifications">
-    <button type="button" className={due.length ? 'proposal-bell urgent' : 'proposal-bell'} aria-label={`Notifications (${waiting} pending${due.length ? `, ${due.length} expiring soon` : ''}${questionWords})`} title={`${waiting} proposals${questionWords} need you${due.length ? `; ${due.length} expire soon` : ''}`} aria-expanded={open} onClick={() => setOpen(v => !v)}>
-      <span aria-hidden="true">🔔</span>{total > 0 && <span aria-hidden="true">{total}</span>}
+    <button ref={button} type="button" className={due.length ? 'icon-btn proposal-bell urgent' : 'icon-btn proposal-bell'} data-testid="notifications-bell" aria-label={`Notifications (${waiting} pending${due.length ? `, ${due.length} expiring soon` : ''}${questionWords})`} title={`Notifications: ${waiting} proposals${questionWords} need you${due.length ? `; ${due.length} expire soon` : ''}`} aria-expanded={open} onClick={() => setOpen(v => !v)}>
+      <BellIcon />{total > 0 && <span className={due.length ? 'icon-btn-count attention' : 'icon-btn-count'} aria-hidden="true">{total}</span>}
     </button>
-    {open && <section className="proposal-notification-list" aria-label="Notifications">
+    {open && createPortal(<section className="proposal-notification-list" aria-label="Notifications" style={place ?? undefined}>
       <div className="proposal-attention-actions"><h2>Needs you</h2><button type="button" onClick={() => setOpen(false)}>Close notifications</button></div>
       {inbox.error && <p role="alert">{inbox.error} <button type="button" onClick={() => void inbox.refresh()}>Retry</button></p>}
       {questions.map(q => <QuestionRow key={q.id} question={q} />)}
+      {reviews.map(r => <ReviewRow key={r.request_id} review={r} />)}
       {!inbox.error && inbox.pending.length === 0 && <p>No proposals waiting.</p>}
       {inbox.pending.map(p => <PendingProposal key={p.id} proposal={p} refresh={() => void inbox.refresh()} />)}
-    </section>}
+      <PushSetting />
+    </section>, document.body)}
   </div>
 }
 export default function ProposalNotifications() { return <ProposalBell inbox={useProposalInbox()} /> }

@@ -1,0 +1,125 @@
+/* Hovercards (Hovercard.tsx): drawn on the page's body, above the panel and drawers. */
+.hc-anchor { display: contents; }
+
+.hc {
+  z-index: 2147483000;
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--chat-border);
+  border-radius: var(--chat-radius, 10px);
+  background: var(--chat-surface);
+  color: var(--chat-fg);
+  font-family: var(--chat-font);
+  font-size: var(--chat-text-sm, 13px);
+  line-height: 1.4;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  white-space: normal;
+  pointer-events: auto;
+}
+
+.hc-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hc-source {
+  font-size: var(--chat-text-xs, 12px);
+  color: var(--chat-muted-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.hc-key { font-family: var(--chat-font-mono); color: var(--chat-muted); }
+.hc-name { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.hc-title { font-weight: 600; overflow-wrap: anywhere; }
+.hc-title.canceled { text-decoration: line-through; color: var(--chat-muted); }
+.hc-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--chat-muted); font-size: var(--chat-text-xs, 12px); }
+.hc-dots > * + *::before { content: '·'; margin-right: 8px; color: var(--chat-muted-2); }
+.hc-chip, .hc-tag {
+  padding: 0 6px;
+  border: 1px solid var(--chat-border);
+  border-radius: 999px;
+  color: var(--chat-muted);
+}
+.hc-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.hc-who { color: var(--chat-fg); }
+.hc-review { color: var(--chat-warning); }
+.hc-desc {
+  margin: 0;
+  color: var(--chat-muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.hc-note { color: var(--chat-muted); white-space: pre-line; overflow-wrap: anywhere; }
+
+.hc-preview {
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  background: var(--chat-bg);
+  overflow: hidden;
+  min-height: 24px;
+  max-height: 240px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+.hc-preview[data-preview='none'], .hc-preview[data-preview='failed'] { display: none; }
+.hc-image { display: block; max-width: 100%; max-height: 200px; object-fit: contain; margin: auto; }
+.hc-lines {
+  margin: 0;
+  padding: 6px 8px;
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs, 12px);
+  line-height: 1.35;
+  white-space: pre;
+  overflow: hidden;
+}
+.hc-lines.has-more { -webkit-mask-image: linear-gradient(to bottom, #000 75%, transparent); mask-image: linear-gradient(to bottom, #000 75%, transparent); }
+.hc-preview .visual-thumb { width: 100%; max-height: 236px; overflow: hidden; zoom: 0.6; }
+
+.hc-diff { width: 100%; padding: 6px 8px; box-sizing: border-box; }
+.hc .hc-diff { border: 0; }
+.hc-diff-total { color: var(--chat-muted); font-size: var(--chat-text-xs, 12px); margin-bottom: 2px; }
+.hc-files { list-style: none; margin: 0; padding: 0; font-family: var(--chat-font-mono); font-size: var(--chat-text-xs, 12px); }
+.hc-files li { display: flex; gap: 8px; justify-content: space-between; min-width: 0; }
+.hc-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.hc-counts { flex-shrink: 0; }
+.hc-more { color: var(--chat-muted-2); }
+.hc .diff-plus { color: var(--chat-success); }
+.hc .diff-minus { color: var(--chat-danger); }
+
+.hc-loading {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--chat-border);
+  border-top-color: var(--chat-muted);
+  animation: hc-spin 0.9s linear infinite;
+  margin: 6px;
+}
+@keyframes hc-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .hc-loading { animation: none; } }
+
+/* A Running now row's card: the step whole, then its facts. */
+.hc-step {
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  background: var(--chat-bg);
+  font-family: var(--chat-font-mono);
+  font-size: var(--chat-text-xs, 12px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 12em;
+  overflow: auto;
+}
+.hc-facts { margin: 0; display: grid; gap: 2px; font-size: var(--chat-text-xs, 12px); }
+.hc-facts > div { display: grid; grid-template-columns: 6.5em 1fr; gap: 8px; }
+.hc-facts dt { color: var(--chat-muted-2); }
+.hc-facts dd { margin: 0; color: var(--chat-fg); overflow-wrap: anywhere; }

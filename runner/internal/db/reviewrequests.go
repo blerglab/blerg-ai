@@ -25,6 +25,9 @@ const (
 	ReviewChangesRequested = "changes_requested"
 	ReviewWithdrawn        = "withdrawn"
 	ReviewSuperseded       = "superseded"
+	// ReviewDismissed: the person closed the request from Needs you without deciding it (they may
+	// have answered in the chat instead). Not an approval and not a request for changes.
+	ReviewDismissed = "dismissed"
 )
 
 // ReviewRequest is one review_requests row.
@@ -42,6 +45,13 @@ type ReviewRequest struct {
 
 const reviewRequestCols = `id::text, session_id::text, artifact_id, artifact_name, artifact_origin, artifact_version,
 	artifact_view, ask, state, note, COALESCE(superseded_by, 0), COALESCE(decided_by, ''), decided_at, created_at`
+
+// reviewRequestColsQualified is reviewRequestCols for the review_requests table under alias t.
+func reviewRequestColsQualified(t string) string {
+	return t + ".id::text, " + t + ".session_id::text, " + t + ".artifact_id, " + t + ".artifact_name, " + t + ".artifact_origin, " +
+		t + ".artifact_version, " + t + ".artifact_view, " + t + ".ask, " + t + ".state, " + t + ".note, COALESCE(" + t + ".superseded_by, 0), " +
+		"COALESCE(" + t + ".decided_by, ''), " + t + ".decided_at, " + t + ".created_at"
+}
 
 func scanReviewRequest(row pgx.Row) (ReviewRequest, error) {
 	var r ReviewRequest
@@ -126,6 +136,19 @@ func ListPendingReviewRequests(ctx context.Context, pool *pgxpool.Pool, sessionI
 	return scanReviewRequests(rows)
 }
 
+// ListPendingReviewRequestsOwnedBy is the pending requests of the sessions this account started, newest
+// first (at most 100): what the person's bell lists.
+func ListPendingReviewRequestsOwnedBy(ctx context.Context, pool *pgxpool.Pool, account string) ([]ReviewRequest, error) {
+	rows, err := pool.Query(ctx, `SELECT `+reviewRequestColsQualified("r")+` FROM review_requests r
+		JOIN sessions s ON s.id = r.session_id
+		WHERE r.state = 'pending' AND s.spawning_account_id = $1 AND s.ended_at IS NULL
+		ORDER BY r.created_at DESC, r.id DESC LIMIT 100`, account)
+	if err != nil {
+		return nil, err
+	}
+	return scanReviewRequests(rows)
+}
+
 // settleReviewRequest moves a pending request of the session to state (compare-and-set). It
 // returns ErrReviewRequestNotFound for no such request of the session, and ErrReviewRequestState
 // with the row as it is for one no longer pending.
@@ -157,6 +180,11 @@ func DecideReviewRequest(ctx context.Context, pool *pgxpool.Pool, id, sessionID,
 		return ReviewRequest{}, errors.New("not a decision")
 	}
 	return settleReviewRequest(ctx, pool, id, sessionID, state, note, account)
+}
+
+// DismissReviewRequest is the person closing a pending request without deciding it.
+func DismissReviewRequest(ctx context.Context, pool *pgxpool.Pool, id, sessionID, account string) (ReviewRequest, error) {
+	return settleReviewRequest(ctx, pool, id, sessionID, ReviewDismissed, "", account)
 }
 
 // WithdrawReviewRequest is the session taking its own pending request back.

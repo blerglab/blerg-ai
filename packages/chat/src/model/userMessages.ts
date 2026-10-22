@@ -52,6 +52,24 @@ export function isFromParentSession(payload: unknown): boolean {
   return p.source === 'session' || (p.source === 'ask_answer' && p.answered_by === 'session')
 }
 
+/** Sources of the messages Blerg sends the agent on the person's behalf, that the chat never draws
+ *  as the person's bubble: decisions relayed (review, proposal), a child's turn, a question's answer. */
+export function isRelayInputSource(source: unknown): boolean {
+  return isBlergRelaySource(source) || source === 'question_answer'
+}
+
+const UUID = /\s*\(request [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\)|\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
+
+function oneLine(text: string): string {
+  return text.split(/\s+/u).filter(Boolean).join(' ')
+}
+
+/** A relayed decision as one short line: its first line, without request ids. */
+export function compactRelay(text: string): string {
+  const first = text.split('\n').find(line => line.trim() !== '') ?? ''
+  return oneLine(first.replace(UUID, ''))
+}
+
 export function userMessageShape(payload: unknown): UserMessageShape {
   if (!payload || typeof payload !== 'object') return { as: 'person' }
   const p = payload as Partial<UserMessagePayload>
@@ -61,9 +79,16 @@ export function userMessageShape(payload: unknown): UserMessageShape {
   // question's card already shows the person's answer.
   if (p.source === 'question_answer') return { as: 'hidden' }
   const trimmed = text.trim()
+  // The person's answer to one of the agent's asks: the ask's card shows it in full, with who and
+  // when; the chat keeps one short row ("You answered: orange"), never a bubble. (A parent
+  // session's answer to its child stays the parent's message, with its author.)
+  if (p.source === 'ask_answer' && p.answered_by !== 'session') {
+    return { as: 'notice', text: `answered: ${oneLine(trimmed)}`, label: 'You' }
+  }
   // Blerg itself telling the agent how something it asked for was decided (a review request, a
-  // proposal): never the person's words, so never drawn as theirs.
-  if (isBlergRelaySource(p.source)) return { as: 'notice', text: trimmed, label: 'Blerg' }
+  // proposal): never the person's words, so never drawn as theirs; one short line (the agent has
+  // the whole message), without the request ids.
+  if (isBlergRelaySource(p.source)) return { as: 'notice', text: compactRelay(trimmed), label: 'Blerg' }
   if (p.source !== 'system') {
     return trimmed.startsWith(RESTART_NOTE) ? { as: 'notice', text: trimmed.slice(NOTE_PREFIX.length) } : { as: 'person' }
   }

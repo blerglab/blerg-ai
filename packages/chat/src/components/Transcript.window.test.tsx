@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import Transcript, { WINDOW, type TranscriptProps } from './Transcript'
 import { installIntersectionObserver, intersect } from '../test/intersection'
+import { inputClock } from '../model/clock'
 import { SESSION } from '../test/chat'
 import type { AgentEvent } from '../types'
 
@@ -123,18 +124,16 @@ describe('Transcript draws a window of the newest rows', () => {
     // ...and not again while it is on its way, however often the sentinel is seen.
     act(() => intersect())
     rerender(<Transcript {...p} loadingOlder />)
-    expect(screen.getByTestId('older-loading')).toBeInTheDocument()
+    expect(container.querySelector('.agent-timeline')).toHaveClass('backfilling')
     act(() => intersect())
     act(() => intersect())
     expect(onLoadOlder).toHaveBeenCalledTimes(1)
 
-    // The page lands in front: it is not drawn until the reader reaches the top again.
+    // The page lands in front of the top of what was drawn: it is drawn in the same render that
+    // takes the loading line away (the content above the reader grows, never shrinks first).
     const more = range(1, 600)
     rerender(<Transcript {...p} events={more} />)
     expect(screen.queryByTestId('older-loading')).toBeNull()
-    expect(drawn(container)).toBe(400)
-    expect(screen.queryByText('message 200')).toBeNull()
-    act(() => intersect())
     expect(drawn(container)).toBe(600)
     expect(screen.getByText('message 1')).toBeInTheDocument()
     // Still more on the server: the next page, once.
@@ -297,6 +296,21 @@ describe('Transcript draws a window of the newest rows', () => {
     expect(screen.getByTestId('subagent-row')).toHaveAttribute('aria-expanded', 'false')
   })
 
+  it('says where the session begins once nothing older is left, above everything else', () => {
+    const p = props({ events: range(1, 400), hasOlder: false })
+    const { container, rerender } = render(<Transcript {...p} hasOlder />)
+    expect(screen.queryByTestId('history-start')).toBeNull()
+    rerender(<Transcript {...p} />)
+    // Rows held above the window are not drawn yet: not the beginning.
+    expect(screen.queryByTestId('history-start')).toBeNull()
+    act(() => intersect())
+    const start = screen.getByTestId('history-start')
+    expect(start).toHaveTextContent('Beginning of the session')
+    expect(container.querySelector('.agent-timeline')!.firstElementChild).toBe(start)
+    rerender(<Transcript {...p} loadingOlder />)
+    expect(screen.queryByTestId('history-start')).toBeNull()
+  })
+
   it('windows the full-card (not compact) view too', () => {
     const { container } = render(<Transcript {...props({ events: range(1, 1000), compact: false })} />)
     expect(drawn(container)).toBe(300)
@@ -346,24 +360,281 @@ describe('Transcript keeps the reader in place as rows are revealed above', () =
     expect(viewTop(first)).toBe(before)
   })
 
-  it('does not move the view again where the browser already kept the row in place', () => {
-    const { container } = render(<Transcript {...props({ events: range(1, 1000) })} />)
+  it('draws a landed page at once only when the top was drawn', () => {
+    const { container, rerender } = render(<Transcript {...props({ events: range(301, 1000), hasOlder: true })} />)
     layout(container)
     scrollUpTo(timeline, 20)
-    // A browser with scroll anchoring moves the scroll position by what went in above the row it
-    // anchors to, as it lays the page out (here: on the first measurement after the reveal).
-    const measure = Element.prototype.getBoundingClientRect
-    let anchored = false
-    Element.prototype.getBoundingClientRect = function (this: Element) {
-      if (!anchored && this.parentElement === timeline && drawn(container) === 600) {
-        anchored = true
-        timeline.scrollTop += 3000
-      }
-      return measure.call(this)
-    }
+    // The newest WINDOW rows are drawn, not the top: a page landing in front draws nothing new.
+    rerender(<Transcript {...props({ events: range(1, 1000), hasOlder: true })} />)
+    expect(drawn(container)).toBe(WINDOW)
+  })
+
+  it('a page landing at the very top keeps the row in view where it was', () => {
+    const onLoadOlder = vi.fn()
+    const p = props({ events: range(901, 1000), hasOlder: true, onLoadOlder })
+    const { container, rerender } = render(<Transcript {...p} />)
+    layout(container)
+    scrollUpTo(timeline, 0)
     act(() => intersect())
-    expect(drawn(container)).toBe(600)
-    expect(timeline.scrollTop).toBe(3020)
+    expect(onLoadOlder).toHaveBeenCalledTimes(1)
+    rerender(<Transcript {...p} loadingOlder />)
+    const first = screen.getByText('message 901').closest('.agent-card') as Element
+    const before = viewTop(first)
+    // 100 rows of 10px go in above the row.
+    rerender(<Transcript {...p} events={range(801, 1000)} />)
+    expect(viewTop(first)).toBe(before)
+    expect(timeline.scrollTop).toBe(1000)
+  })
+
+  it('after a page that moved the top out of reach, sitting still asks for nothing more; scrolling up again does', async () => {
+    const onLoadOlder = vi.fn()
+    const p = props({ events: range(981, 1000), hasOlder: true, onLoadOlder })
+    const { container, rerender } = render(<Transcript {...p} />)
+    layout(container)
+    scrollUpTo(timeline, 0)
+    act(() => intersect())
+    expect(onLoadOlder).toHaveBeenCalledTimes(1)
+    rerender(<Transcript {...p} loadingOlder />)
+    // A long page lands (200 rows of 10px in a 100px view): the top is far above the view now.
+    rerender(<Transcript {...p} events={range(781, 1000)} />)
+    expect(timeline.scrollTop).toBe(2000)
+    act(() => intersect())
+    await act(() => new Promise(r => setTimeout(r, 500)))
+    act(() => intersect())
+    expect(onLoadOlder).toHaveBeenCalledTimes(1)
+    // The reader scrolls up again: the next page.
+    timeline.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))
+    await act(() => new Promise(r => setTimeout(r, 0)))
+    expect(onLoadOlder).toHaveBeenCalledTimes(2)
+  })
+
+  it('after a page that left the reader at the top, asks for the next by itself (after the gap)', async () => {
+    const onLoadOlder = vi.fn()
+    const p = props({ events: range(981, 1000), hasOlder: true, onLoadOlder })
+    const { container, rerender } = render(<Transcript {...p} />)
+    layout(container)
+    scrollUpTo(timeline, 0)
+    act(() => intersect())
+    expect(onLoadOlder).toHaveBeenCalledTimes(1)
+    rerender(<Transcript {...p} loadingOlder />)
+    // A short page: the top of what is drawn is still within reach.
+    rerender(<Transcript {...p} events={range(976, 1000)} />)
+    act(() => intersect())
+    await act(() => new Promise(r => setTimeout(r, 500)))
+    expect(onLoadOlder).toHaveBeenCalledTimes(2)
+  })
+
+  // A long page lands with the reader at the top: it moves the top out of reach (gated). The mock
+  // IntersectionObserver then says the top is near again without any scroll, so only the input under
+  // test can open the gate. Input timing runs on a hand-driven clock.
+  async function gatedLanding() {
+    const onLoadOlder = vi.fn()
+    const p = props({ events: range(981, 1000), hasOlder: true, onLoadOlder })
+    const { container, rerender } = render(<Transcript {...p} />)
+    layout(container)
+    scrollUpTo(timeline, 0)
+    act(() => intersect())
+    rerender(<Transcript {...p} loadingOlder />)
+    const clock = { t: realNow() + 1000 }
+    inputClock.now = () => clock.t
+    rerender(<Transcript {...p} events={range(781, 1000)} />)
+    act(() => intersect())
+    await act(() => new Promise(r => setTimeout(r, 450)))
+    expect(onLoadOlder).toHaveBeenCalledTimes(1)
+    return { onLoadOlder, clock }
+  }
+  const realNow = inputClock.now
+  const wheel = (deltaY = -120) => timeline.dispatchEvent(new WheelEvent('wheel', { deltaY, bubbles: true, cancelable: true }))
+  const settle = (ms = 0) => act(() => new Promise(r => setTimeout(r, ms)))
+
+  it('a wheel counts only when its gesture began after the page landed', async () => {
+    try {
+      const { onLoadOlder, clock } = await gatedLanding()
+      // A gesture that began before the landing (a momentum tail, events 16 ms apart): nothing.
+      clock.t -= 48
+      for (let i = 0; i < 6; i++) {
+        wheel()
+        clock.t += 16
+        await settle()
+      }
+      expect(onLoadOlder).toHaveBeenCalledTimes(1)
+      // A pause, then a new gesture: the next page.
+      clock.t += 200
+      wheel()
+      await settle()
+      expect(onLoadOlder).toHaveBeenCalledTimes(2)
+    } finally {
+      inputClock.now = realNow
+    }
+  })
+
+  it('a scroll a momentum wheel made is left to the wheel rule', async () => {
+    try {
+      const { onLoadOlder, clock } = await gatedLanding()
+      // A momentum tail still coming (its gesture began before the landing), and the scroll it makes,
+      // past the window: neither counts.
+      clock.t -= 32
+      for (let i = 0; i < 16; i++) {
+        clock.t += 16
+        wheel()
+        timeline.scrollTop -= 10
+        act(() => { timeline.dispatchEvent(new Event('scroll', { bubbles: true })) })
+        await settle()
+      }
+      await settle(200)
+      expect(onLoadOlder).toHaveBeenCalledTimes(1)
+    } finally {
+      inputClock.now = realNow
+    }
+  })
+
+  it('a wheel just after a page went in is not a new gesture, however long since the last', async () => {
+    try {
+      const { onLoadOlder, clock } = await gatedLanding()
+      // The first wheel event after drawing the page (held up behind it): 50 ms after it went in.
+      clock.t += 50
+      wheel()
+      await settle()
+      expect(onLoadOlder).toHaveBeenCalledTimes(1)
+      // A pause, then a wheel: a new gesture.
+      clock.t += 200
+      wheel()
+      await settle()
+      expect(onLoadOlder).toHaveBeenCalledTimes(2)
+    } finally {
+      inputClock.now = realNow
+    }
+  })
+
+  it('a scroll just after a landing counts once its window has passed', async () => {
+    try {
+      const { onLoadOlder, clock } = await gatedLanding()
+      // A scroll the input listeners did not see (the scrollbar), 50 ms after the landing.
+      clock.t += 50
+      timeline.scrollTop -= 100
+      act(() => { timeline.dispatchEvent(new Event('scroll', { bubbles: true })) })
+      expect(onLoadOlder).toHaveBeenCalledTimes(1)
+      await settle(150)
+      expect(onLoadOlder).toHaveBeenCalledTimes(2)
+    } finally {
+      inputClock.now = realNow
+    }
+  })
+
+  it('a key pressed within the window after a landing is not lost', async () => {
+    try {
+      const { onLoadOlder, clock } = await gatedLanding()
+      clock.t += 20
+      timeline.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }))
+      await settle()
+      expect(onLoadOlder).toHaveBeenCalledTimes(2)
+    } finally {
+      inputClock.now = realNow
+    }
+  })
+
+  it('tells a screen reader, politely, when an earlier page lands near the top', async () => {
+    const wait = (ms: number) => act(() => new Promise(r => setTimeout(r, ms)))
+    const p = props({ events: range(901, 1000), hasOlder: true })
+    const { rerender } = render(<Transcript {...p} />)
+    const status = screen.getByTestId('older-status')
+    // A live region that is always there (not a second role=status beside the host's own).
+    expect(status).toHaveAttribute('aria-live', 'polite')
+    expect(status).toHaveTextContent('')
+    act(() => intersect())
+    rerender(<Transcript {...p} loadingOlder />)
+    rerender(<Transcript {...p} events={range(801, 1000)} />)
+    await wait(1100)
+    expect(screen.getByTestId('older-status')).toHaveTextContent('Loaded earlier messages')
+  })
+
+  it('says one "Loading" and one "Loaded" for a run of slow pages, not both in turn for each', async () => {
+    const wait = (ms: number) => act(() => new Promise(r => setTimeout(r, ms)))
+    const p = props({ events: range(951, 1000), hasOlder: true })
+    const { rerender } = render(<Transcript {...p} />)
+    act(() => intersect())
+    const heard: string[] = []
+    const status = screen.getByTestId('older-status')
+    const mo = new MutationObserver(() => {
+      const t = status.textContent ?? ''
+      if (heard[heard.length - 1] !== t) heard.push(t)
+    })
+    mo.observe(status, { childList: true, characterData: true, subtree: true })
+    // Three slow pages, 400 ms apart, each drawing a few rows.
+    for (let i = 0; i < 3; i++) {
+      rerender(<Transcript {...p} events={range(951 - 10 * i, 1000)} loadingOlder />)
+      await wait(350)
+      await wait(100)
+      rerender(<Transcript {...p} events={range(941 - 10 * i, 1000)} />)
+      await wait(400)
+    }
+    await wait(1200)
+    mo.disconnect()
+    expect(heard).toEqual(['Loading earlier messages…', 'Loaded earlier messages'])
+  })
+
+  it('says nothing about loading when another session opens', async () => {
+    const wait = (ms: number) => act(() => new Promise(r => setTimeout(r, ms)))
+    const p = props({ events: range(901, 1000), hasOlder: true })
+    const { rerender } = render(<Transcript {...p} />)
+    act(() => intersect())
+    // Session B arrives in one step (a cached switch).
+    rerender(<Transcript {...p} sessionId="B" events={Array.from({ length: 30 }, (_, i) => ev(i + 1, 'B'))} />)
+    await wait(1200)
+    expect(screen.getByTestId('older-status')).toHaveTextContent('')
+  })
+
+  it('another session starts its timing afresh', async () => {
+    const onLoadOlder = vi.fn()
+    const p = props({ events: range(981, 1000), hasOlder: true, onLoadOlder })
+    const { container, rerender } = render(<Transcript {...p} />)
+    layout(container)
+    scrollUpTo(timeline, 0)
+    act(() => intersect())
+    rerender(<Transcript {...p} loadingOlder />)
+    rerender(<Transcript {...p} events={range(781, 1000)} />)
+    expect(onLoadOlder).toHaveBeenCalledTimes(1)
+    // Session B opens with its top already in reach: asked for at once, no scroll needed.
+    const other = Array.from({ length: 30 }, (_, i) => ev(i + 1, 'B'))
+    rerender(<Transcript {...p} sessionId="B" events={other} />)
+    act(() => intersect())
+    expect(onLoadOlder).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows the loading pill only near the top, and only for a page slower than 300 ms', async () => {
+    const wait = (ms: number) => act(() => new Promise(r => setTimeout(r, ms)))
+    const p = props({ events: range(901, 1000), hasOlder: true })
+    const { rerender } = render(<Transcript {...p} loadingOlder />)
+    // Not near the top (the reader is at the end): no pill however long it takes.
+    await wait(350)
+    expect(screen.queryByTestId('older-loading')).toBeNull()
+    rerender(<Transcript {...p} />)
+    act(() => intersect())
+    // Near the top, a fast page: none.
+    rerender(<Transcript {...p} loadingOlder />)
+    await wait(150)
+    expect(screen.queryByTestId('older-loading')).toBeNull()
+    rerender(<Transcript {...p} />)
+    await wait(300)
+    expect(screen.queryByTestId('older-loading')).toBeNull()
+    // A slow page: after 300 ms.
+    rerender(<Transcript {...p} loadingOlder />)
+    await wait(200)
+    expect(screen.queryByTestId('older-loading')).toBeNull()
+    await wait(150)
+    expect(screen.getByTestId('older-loading')).toHaveTextContent('Loading earlier messages')
+    rerender(<Transcript {...p} />)
+    expect(screen.queryByTestId('older-loading')).toBeNull()
+  })
+
+  it('a page landing while the reader follows the end is not drawn until they reach it', () => {
+    const p = props({ events: range(901, 1000), hasOlder: true })
+    const { container, rerender } = render(<Transcript {...p} loadingOlder />)
+    expect(drawn(container)).toBe(100)
+    rerender(<Transcript {...p} events={range(801, 1000)} />)
+    expect(drawn(container)).toBe(100)
+    act(() => intersect())
+    expect(drawn(container)).toBe(200)
   })
 
   it('a reader at the bottom stays at the bottom', () => {

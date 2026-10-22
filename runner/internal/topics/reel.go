@@ -41,6 +41,10 @@ type Options struct {
 	EndedAt    *time.Time
 	ShowTokens bool
 	CommitURL  func(sha string) string
+	// AskClosed names the asks (by message id) closed without an answer (the messages rows).
+	AskClosed map[string]bool
+	// AskDismissed names the asks the person dismissed from Needs you (also in AskClosed).
+	AskDismissed map[string]bool
 }
 
 // Reel is GET /api/sessions/{id}/topics' body, less the session fields the handler adds.
@@ -48,6 +52,10 @@ type Reel struct {
 	Topics       []Topic   `json:"topics"`
 	Unmarked     *Unmarked `json:"unmarked"`
 	TokensHidden bool      `json:"tokens_hidden"`
+	// Strokes is the History feed, newest first (strokes.go).
+	Strokes []Stroke `json:"strokes"`
+	// StrokesTruncated is how many older strokes the feed left out (MaxStrokes).
+	StrokesTruncated int `json:"strokes_truncated"`
 }
 
 // Unmarked is the work no marker window holds, as one summary: how many subagents ran (Subagents
@@ -59,7 +67,9 @@ type Unmarked struct {
 	Documents []Item `json:"documents"`
 	Subagents []Item `json:"subagents"`
 	// Cards are the board cards the session's approved proposals created outside every window.
-	Cards     []Item    `json:"cards"`
+	Cards []Item `json:"cards"`
+	// Renames are the session's renames outside every window.
+	Renames   []Item    `json:"renames"`
 	FirstSeq  int64     `json:"first_seq"`
 	LastSeq   int64     `json:"last_seq"`
 	StartedAt time.Time `json:"started_at"`
@@ -79,7 +89,26 @@ type Topic struct {
 	EndedAt   *time.Time `json:"ended_at"`
 	Counts    Counts     `json:"counts"`
 	Items     []Item     `json:"items"`
+	// Messages are the person's messages within the topic, oldest first: History's "You" line, each
+	// jumping to its moment.
+	Messages []Message `json:"messages"`
+	// MessagesTruncated counts the older messages left out (the newest MaxTopicMessages are listed).
+	MessagesTruncated int `json:"messages_truncated,omitempty"`
 }
+
+// MaxTopicMessages is how many of the person's messages a topic lists, the newest.
+const MaxTopicMessages = 50
+
+// Message is one of the person's messages in a topic: where it is, and its start for a tooltip.
+type Message struct {
+	Seq     int64     `json:"seq"`
+	EventID string    `json:"event_id"`
+	Ts      time.Time `json:"ts"`
+	Text    string    `json:"text"`
+}
+
+// maxMessageText is how much of a message the "You" line's tooltip carries.
+const maxMessageText = 120
 
 // Counts omits zeros, so a count a daemon cannot report (F2), or commits nobody named, never reads 0.
 type Counts struct {
@@ -90,8 +119,8 @@ type Counts struct {
 }
 
 // Item is one timeline row; exactly one of the parts is set, by Type (request | document | agent |
-// done | card). The embedded parts' fields sit beside type/seq/event_id/ts; a card is under "card"
-// (its title would collide with an agent's).
+// done | card | rename). The embedded parts' fields sit beside type/seq/event_id/ts; a card is under
+// "card" (its title would collide with an agent's), a rename under "rename".
 type Item struct {
 	Type    string    `json:"type"`
 	Seq     int64     `json:"seq"`
@@ -101,7 +130,31 @@ type Item struct {
 	*Document
 	*Agent
 	*Done
-	Card *Card `json:"card,omitempty"`
+	Card   *Card   `json:"card,omitempty"`
+	Rename *Rename `json:"rename,omitempty"`
+}
+
+// Rename is one change of the session's title (a session_renamed event): from what, to what, and by
+// whom: "person" (its owner or an administrator), "parent" (the session that started it) or "agent"
+// (the session's own agent).
+type Rename struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	By   string `json:"by"`
+}
+
+// renameOf reads a session_renamed event, or nil when it is not one.
+func renameOf(ev Event) *Rename {
+	var p Rename
+	if json.Unmarshal(ev.Payload, &p) != nil || CleanText(p.To, 200) == "" {
+		return nil
+	}
+	switch p.By {
+	case "person", "parent", "agent":
+	default:
+		return nil
+	}
+	return &Rename{From: CleanText(p.From, 200), To: CleanText(p.To, 200), By: p.By}
 }
 
 // Card is a board card an approved proposal of the session created (a proposal_decided event):
@@ -231,13 +284,28 @@ func Build(events []Event, arts []Artifact, opt Options) Reel {
 	closeWindows(wins, events, opt)
 	rest := &Topic{}
 	collect(wins, rest, events, arts, opt)
+	for _, p := range persons {
+		if w := windowAt(wins, p.ev.Seq); w != nil {
+			w.Messages = append(w.Messages, Message{Seq: p.ev.Seq, EventID: p.ev.ID, Ts: p.ev.Ts, Text: Cut(RequestText(p.text), maxMessageText)})
+		}
+	}
 	reel := Reel{Topics: make([]Topic, 0, len(wins)), TokensHidden: !opt.ShowTokens}
 	for i := len(wins) - 1; i >= 0; i-- {
 		finish(wins[i])
 		reel.Topics = append(reel.Topics, *wins[i])
 	}
 	reel.Unmarked = unmarked(rest)
+	reel.Strokes, reel.StrokesTruncated = CapStrokes(strokes(events, wins, opt), MaxStrokes)
 	return reel
+}
+
+// windowAt is the window that holds seq, nil when none does.
+func windowAt(wins []*Topic, seq int64) *Topic {
+	i := sort.Search(len(wins), func(i int) bool { return wins[i].StartSeq > seq }) - 1
+	if i >= 0 && seq <= wins[i].EndSeq {
+		return wins[i]
+	}
+	return nil
 }
 
 // unmarked folds the rows no window holds into the summary, nil when there are none.
@@ -247,7 +315,7 @@ func unmarked(rest *Topic) *Unmarked {
 	}
 	finish(rest)
 	first, last := rest.Items[0], rest.Items[len(rest.Items)-1]
-	u := &Unmarked{Agents: rest.Counts.Agents, Documents: []Item{}, Subagents: []Item{}, Cards: []Item{},
+	u := &Unmarked{Agents: rest.Counts.Agents, Documents: []Item{}, Subagents: []Item{}, Cards: []Item{}, Renames: []Item{},
 		FirstSeq: first.Seq, LastSeq: last.Seq, StartedAt: first.Ts, EndedAt: last.Ts}
 	if rest.EndSeq > u.LastSeq { // a file republished after the last row
 		u.LastSeq, u.EndedAt = rest.EndSeq, *rest.EndedAt
@@ -258,6 +326,8 @@ func unmarked(rest *Topic) *Unmarked {
 			u.Documents = append(u.Documents, it)
 		case "card":
 			u.Cards = append(u.Cards, it)
+		case "rename":
+			u.Renames = append(u.Renames, it)
 		default:
 			u.Subagents = append(u.Subagents, it)
 		}
@@ -533,6 +603,11 @@ func collect(wins []*Topic, rest *Topic, events []Event, arts []Artifact, opt Op
 				t := at(ev.Seq)
 				t.Items = append(t.Items, Item{Type: "card", Seq: ev.Seq, EventID: ev.ID, Ts: ev.Ts, Card: c})
 			}
+		case "session_renamed":
+			if rn := renameOf(ev); rn != nil {
+				t := at(ev.Seq)
+				t.Items = append(t.Items, Item{Type: "rename", Seq: ev.Seq, EventID: ev.ID, Ts: ev.Ts, Rename: rn})
+			}
 		case "subagent_started":
 			var p agent.SubagentPayload
 			if json.Unmarshal(ev.Payload, &p) != nil || p.ChildID == "" {
@@ -653,5 +728,11 @@ func finish(t *Topic) {
 	}
 	if t.Items == nil {
 		t.Items = []Item{}
+	}
+	if t.Messages == nil {
+		t.Messages = []Message{}
+	}
+	if n := len(t.Messages); n > MaxTopicMessages {
+		t.Messages, t.MessagesTruncated = t.Messages[n-MaxTopicMessages:], n-MaxTopicMessages
 	}
 }

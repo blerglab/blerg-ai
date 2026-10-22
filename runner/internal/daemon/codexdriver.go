@@ -62,8 +62,12 @@ type codexDriver struct {
 	cmd                   *exec.Cmd // persistent app-server, for process ownership.
 	mcpGeneration         uint64
 	mcpInputGate          func(context.Context)
-	recoveryInputGate     func(context.Context)
-	recoveryInputReady    func() bool
+	// projectMCPNames / projectMCPAll: the MCP server names project .codex/config.toml files
+	// defined each time the app-server started (recordProjectMCP); sign-in refuses those.
+	projectMCPNames    map[string]bool
+	projectMCPAll      bool
+	recoveryInputGate  func(context.Context)
+	recoveryInputReady func() bool
 
 	settingsMu         sync.Mutex // serialize settings mutation and publication; acquire before mu
 	settingsGeneration uint64     // successful manual settings controls, including same-value selections
@@ -109,7 +113,7 @@ func (d *codexDriver) EnqueueInput(in agent.Input) {
 	d.mu.Lock()
 	if d.stopped {
 		d.mu.Unlock()
-		d.emit("error", agent.ErrorPayload{Message: "Codex runtime has stopped; start a new session to resume work", Retryable: true, ClientID: in.ClientID})
+		d.emit("error", agent.ErrorPayload{Message: "Codex runtime has stopped; start a new session to resume work", Retryable: true, ClientID: in.ClientID, Code: agent.ErrorCodeRuntimeStopped})
 		return
 	}
 	if in.ExpectedTurnID != "" && (in.ExpectedTurnID != d.usageTurnID || d.activeTurn || len(d.queue) > 0 || d.retryInput != nil) {
@@ -186,6 +190,12 @@ func (d *codexDriver) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// An app-server in a sandbox whose container stopped can never start again: say what Docker
+		// recorded and stop, instead of retrying in it and then blaming the Codex version.
+		if sandboxStopped(ctx, d.prefix, d.emit) {
+			d.stopRuntime("")
+			return
+		}
 		if time.Since(start) > time.Minute {
 			failures = 0
 		}
@@ -202,6 +212,13 @@ func (d *codexDriver) Run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	d.stopRuntime("Codex app-server repeatedly failed; update Codex and start a new session")
+}
+
+// stopRuntime marks the runtime stopped for good, refuses the messages still waiting for it, and
+// (when final is set) says why with the runtime_stopped code. Run returns right after, and the
+// session ends with that reason.
+func (d *codexDriver) stopRuntime(final string) {
 	d.mu.Lock()
 	d.stopped = true
 	retry := d.retryInput
@@ -215,7 +232,9 @@ func (d *codexDriver) Run(ctx context.Context) {
 		case msg := <-d.queue:
 			d.emit("error", agent.ErrorPayload{Message: "Codex runtime could not restart; message was not delivered", Retryable: true, ClientID: msg.ClientID})
 		default:
-			d.emit("error", agent.ErrorPayload{Message: "Codex app-server repeatedly failed; update Codex and start a new session"})
+			if final != "" {
+				d.emit("error", agent.ErrorPayload{Message: final, Code: agent.ErrorCodeRuntimeStopped})
+			}
 			return
 		}
 	}

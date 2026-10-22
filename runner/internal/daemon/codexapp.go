@@ -289,6 +289,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	// stderr can contain credentials from third-party MCP processes. Only fixed
 	// diagnostics for recognized native login failures may reach the session.
 	cmd.Stderr = &codexAuthDiagnostic{emit: d.emit}
+	d.recordProjectMCP()
 	if err = cmd.Start(); err != nil {
 		d.emit("error", agent.ErrorPayload{Message: "Codex app-server could not start: " + err.Error(), Retryable: true})
 		return

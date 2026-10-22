@@ -273,3 +273,32 @@ func TestCallBoardStopsMintingWhileRevokesFail(t *testing.T) {
 		t.Fatalf("after expiry: %v", err)
 	}
 }
+
+// The unrevoked allowance follows SetUnrevokedBoardTokenLimit at the next call (core's setting),
+// and a limit below 1 restores the default.
+func TestCallBoardUnrevokedLimitIsSettable(t *testing.T) {
+	b := newBoardHarness(t, nil)
+	b.ex.revokeErr = errors.New("core unavailable")
+	b.gw.SetUnrevokedBoardTokenLimit(3)
+	call := func() error {
+		_, err := b.gw.CallBoard(context.Background(), BoardCall{Proof: Proof{AccountID: "acct-1", SessionID: "login-1"}, BoardID: boardTestID,
+			SessionRef: "s-1", Tool: "blerg_card_get", Arguments: []byte(`{"card_id":"c1"}`), ReadOnly: true})
+		return err
+	}
+	for i := 0; i < 3; i++ {
+		if err := call(); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if err := call(); !errors.Is(err, ErrBoardRevokesFailing) {
+		t.Fatalf("past the set allowance of 3: %v", err)
+	}
+	b.gw.SetUnrevokedBoardTokenLimit(4)
+	if err := call(); err != nil {
+		t.Fatalf("after raising it to 4: %v", err)
+	}
+	b.gw.SetUnrevokedBoardTokenLimit(0)
+	if got := b.gw.unrevokedBoardTokenLimit(); got != maxUnrevokedBoardTokens {
+		t.Fatalf("reset limit %d", got)
+	}
+}

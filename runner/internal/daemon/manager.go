@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -301,6 +302,9 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	client.OnMessage("request_scrollback", m.handleRequestScrollback)
 	client.OnMessage("read_workspace_file", m.handleReadWorkspaceFile)
 	client.OnMessage("read_session_origin", m.handleReadSessionOrigin)
+	client.OnMessage("read_commit", m.handleReadCommit)
+	client.OnMessage("read_plugin_catalog", m.handleReadPluginCatalog)
+	client.OnMessage("mcp_sign_in", m.handleMCPSignIn)
 	client.OnMessage("apply_session_plugins", func(raw []byte) {
 		var msg protocol.ApplySessionPlugins
 		if json.Unmarshal(raw, &msg) == nil {
@@ -635,7 +639,8 @@ func validExtraEnvKey(k string) bool {
 	if strings.HasPrefix(k, "BLERG_RUNNER_") {
 		return false
 	}
-	return !reservedExtraEnvKeys[k] && !sessionOriginEnvKeys[k]
+	// Where an engine keeps its own configuration is the daemon's to say (card #144).
+	return !reservedExtraEnvKeys[k] && !sessionOriginEnvKeys[k] && !protocol.IsReservedEngineHomeEnv(k)
 }
 
 // extraEnvPairs renders the per-session messaging token and caller-supplied
@@ -1321,6 +1326,10 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 		} else {
 			inner = claudeCommand(msg.SessionID, msg.Model, msg.Effort, msg.DangerouslySkipPermissions, false, msg.Sandbox)
 		}
+		if _, registered := engineRegistry[msg.Engine]; !registered {
+			home, _ := os.UserHomeDir()
+			inner = append(inner, claudeTerminalSandboxArgs(msg.SessionID, env, home, projectPath, msg.Sandbox)...)
+		}
 		if codexHome != "" {
 			inner = append(inner, "--no-daemon")
 			inner = append([]string{"env", "CODEX_HOME=" + codexHome}, inner...)
@@ -1343,6 +1352,7 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 			}
 			projectPath = clone
 			opts := m.config.sandboxOptions()
+			opts.Engine = msg.Engine
 			opts.CodexHome, opts.CodexSourceHome = codexHome, codexSource
 			if createErr = startTerminalSandbox(msg.SessionID, projectPath, inner, env, opts); createErr != nil {
 				removeSandboxContainer(msg.SessionID)
@@ -1604,8 +1614,34 @@ func (m *Manager) ReattachSessions() {
 	m.reattachMu.Lock()
 	defer m.reattachMu.Unlock()
 
-	sandboxed := m.stopLegacySandboxes(listSandboxedTmuxSessions())
-	liveIDs := mergeSessionIDs(listBlergRunnerTmuxSessions(), sandboxed)
+	// The records first: a sandbox container from before the owner label is this daemon's only when
+	// it has a record of the session (listOwnSandboxContainers).
+	var recs []SessionRecord
+	m.config.ReposRootSetting.WithRoot(func(root string) { recs = listSessionRecords(root) })
+	m.reattachPass(recs, listBlergRunnerTmuxSessions())
+}
+
+// reattachPass is ReattachSessions once the records and the host's tmux sessions are listed:
+// reattach what still runs, recover what a hard restart left behind, then sweep the sandbox
+// containers and homes nobody uses.
+func (m *Manager) reattachPass(recs []SessionRecord, hostTmux []string) {
+	recorded := map[string]bool{}
+	for _, rec := range recs {
+		recorded[rec.SessionID] = true
+	}
+	listed := listSandboxedTmuxSessions(func(id string) bool { return recorded[id] })
+	sandboxed := m.stopLegacySandboxes(listed)
+	// A sandboxed terminal stopped just now has had its record deleted and been told why: it is not
+	// recovered (nor told again, less accurately) below.
+	stopped := map[string]bool{}
+	for _, id := range listed {
+		if !slices.Contains(sandboxed, id) {
+			stopped[id] = true
+			delete(recorded, id)
+		}
+	}
+	recs = slices.DeleteFunc(slices.Clone(recs), func(rec SessionRecord) bool { return stopped[rec.SessionID] })
+	liveIDs := mergeSessionIDs(hostTmux, sandboxed)
 	for _, id := range liveIDs {
 		m.mu.Lock()
 		_, exists := m.sessions[id]
@@ -1624,8 +1660,6 @@ func (m *Manager) ReattachSessions() {
 	}
 	m.mu.Unlock()
 
-	var recs []SessionRecord
-	m.config.ReposRootSetting.WithRoot(func(root string) { recs = listSessionRecords(root) })
 	for _, rec := range recoverableRecords(recs, liveIDs, managedIDs) {
 		m.recoverSession(rec)
 	}
@@ -1636,7 +1670,11 @@ func (m *Manager) ReattachSessions() {
 	// tmux, and the engine subprocess inside it died with the old daemon). Left
 	// alone it keeps its memory ceiling, its mounts and its name forever, so
 	// the next session with that id cannot even start without a collision.
-	sweepOrphanSandboxContainers(m.ownsSession)
+	// A container from before the owner label counts with a session record too.
+	sweepOrphanSandboxContainers(m.ownsSession, func(id string) bool { return recorded[id] })
+	// Then the sandbox homes nobody uses any more (a crash's leftovers): never kept fresh, removed.
+	// A sandboxed terminal whose record is still here keeps its home (its transcript is in it).
+	sweepOrphanSandboxHomes(func(id string) bool { return recorded[id] || m.ownsSession(id) })
 }
 
 // startTerminalSandbox starts a sandboxed terminal's container and tmux (a seam for tests).
@@ -1838,7 +1876,12 @@ func (m *Manager) recoverSession(rec SessionRecord) {
 			resume = true
 		}
 	} else {
-		resume = transcriptExists(rec.SessionID)
+		if rec.Sandbox {
+			// A sandboxed terminal's transcript is in its own sandbox home, never the person's ~/.claude.
+			resume = sandboxTranscriptExists(rec.SessionID)
+		} else {
+			resume = transcriptExists(rec.SessionID)
+		}
 		inner = claudeCommand(rec.SessionID, rec.Model, rec.Effort, rec.DangerouslySkipPermissions, resume, rec.Sandbox)
 	}
 
@@ -1846,10 +1889,15 @@ func (m *Manager) recoverSession(rec SessionRecord) {
 	// session runs but cannot message (it never could without the master
 	// token, which is gone for good).
 	env := m.sessionEnv(rec.SessionID, rec.Assist, rec.BoardID, rec.BoardToken, rec.SessionToken, rec.ExtraEnv)
+	if _, registered := engineRegistry[rec.Engine]; !registered {
+		home, _ := os.UserHomeDir()
+		inner = append(inner, claudeTerminalSandboxArgs(rec.SessionID, env, home, rec.ProjectPath, rec.Sandbox)...)
+	}
 
 	var createErr error
 	if rec.Sandbox {
 		opts := m.config.sandboxOptions()
+		opts.Engine = rec.Engine
 		opts.CodexHome, opts.CodexSourceHome = rec.CodexHome, rec.CodexSourceHome
 		// The record names the session's clone (checked above, and again by the mount check).
 		createErr = startTerminalSandbox(rec.SessionID, rec.ProjectPath, inner, env, opts)

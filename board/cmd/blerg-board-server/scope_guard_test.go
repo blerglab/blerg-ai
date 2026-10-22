@@ -29,6 +29,7 @@ var mainRouteScopes = map[string]string{
 	"GET /api/version": "public static version string; no principal",
 	"/mcp":             "one route for every tool; scoped per tool by internal/mcp toolScopes (TestEveryToolHasAScopeDecision), argument decode shared with the check",
 	"/":                "static SPA assets and index.html; no principal, no data",
+	"GET /readyz":      "public database and migration readiness probe; no principal",
 	"GET /healthz":     "public liveness probe; no principal",
 }
 

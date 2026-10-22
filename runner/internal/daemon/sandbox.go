@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log"
 	"net"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +45,32 @@ const sandboxWorkdir = "/workspace"
 
 func dockerContainerName(sessionID string) string {
 	return sandboxContainerPrefix + sessionID
+}
+
+// sandboxOwnerLabel is the label every sandbox container carries with the identity of the daemon
+// that started it (sandboxOwner). The name prefix says only "a Blerg sandbox": another daemon on the
+// same Docker, or a test, makes containers with the same prefix, and a cleanup pass must never
+// remove those.
+const sandboxOwnerLabel = "blerg.runner.owner"
+
+const sandboxContextLabel = "blerg.runner.docker-context"
+
+// sandboxOwner is this daemon's owner label value: derived from its state directory, which holds
+// the records of its sessions (two daemons never share one). "" when there is no state directory.
+func sandboxOwner() string {
+	state := DaemonStateDir()
+	if state == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(state); err == nil {
+		state = abs
+	}
+	// The same directory reached through a symlink is the same daemon.
+	if resolved, err := filepath.EvalSymlinks(state); err == nil {
+		state = resolved
+	}
+	sum := sha256.Sum256([]byte(state))
+	return hex.EncodeToString(sum[:8])
 }
 
 // dockerRun runs `docker <args>` and reports only whether it succeeded — the
@@ -177,10 +206,10 @@ type SandboxOptions struct {
 	// RepoRoot is the checkout the daemon runs from (RepoRootFromExecutable);
 	// the messaging CLI is mounted from it. "" = no mount.
 	RepoRoot string
-	// ClaudeOnly is set per session (never from configuration) for a restricted session: only the
-	// claude login is mounted, not codex's or hermes's.
-	ClaudeOnly bool
-	// RestrictedEngine selects only that registered engine's login mounts.
+	// Engine is the session's engine ("" = Claude), set per session: only its login and
+	// configuration go into the sandbox (sandboxhome.go).
+	Engine string
+	// RestrictedEngine, for a restricted session, overrides Engine.
 	RestrictedEngine string
 	// PluginCache is set per session when it loads always-on plugins: the
 	// session's plugin snapshot (pluginworkshop.go), bind-mounted read-only at
@@ -188,7 +217,8 @@ type SandboxOptions struct {
 	PluginCache string
 	// CodexHome is a private per-session CODEX_HOME; exact-path mounts preserve native paths.
 	CodexHome string
-	// CodexSourceHome supplies fixed user login/config links for unrestricted sessions only.
+	// CodexSourceHome is the host path a private CODEX_HOME's links point to (unrestricted sessions
+	// only): the session's own Codex copy is mounted there, never the person's directory.
 	CodexSourceHome string
 }
 
@@ -254,7 +284,7 @@ func sandboxNetworkState(name string) (bool, error) {
 // the process ran and wrote any (exec's Output captures it). Otherwise — a
 // silent non-zero exit, no binary — the error prefixed with the command that
 // failed, so "exit status 1" never arrives on its own as a reason.
-func dockerErrorText(err error, command string) string { //nolint:unparam // the command names the failing call in the message; one caller today, the helper is not specific to it
+func dockerErrorText(err error, command string) string {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && len(bytes.TrimSpace(exitErr.Stderr)) > 0 {
 		return strings.TrimSpace(string(exitErr.Stderr))
@@ -386,6 +416,14 @@ func codexHomeMountArg(path string) string {
 	return "type=bind," + field("src") + "," + field("dst")
 }
 
+// sandboxTestLabels are `--label` values a test puts on every container it starts, so it removes
+// only its own containers (by label, never by name prefix). Always empty in the daemon.
+var sandboxTestLabels []string
+
+// sandboxTestMounts are extra `--mount` values a test gives every container it starts (a fake engine
+// over the image's own). Always empty in the daemon.
+var sandboxTestMounts []string
+
 // sandboxRunExtras are the per-start additions to `docker run` that depend on
 // the host's state at spawn time rather than on the session.
 type sandboxRunExtras struct {
@@ -393,21 +431,28 @@ type sandboxRunExtras struct {
 	cloneObjects string
 	network      string // --network <name>; "" = default bridge
 	cliPath      string // host path of the messaging CLI to mount; "" = none
-	// claudeOnly mounts only the claude login (a restricted session runs no other engine).
-	claudeOnly       bool
+	// engine is the session's engine: only its login and configuration are mounted.
+	engine           string
 	restrictedEngine string
 	// pluginCache is the daemon's plugin cache to mount read-only; "" = none.
-	pluginCache     string
-	codexHome       string
+	pluginCache string
+	codexHome   string
+	// codexSourceHome is the person's Codex directory a private CODEX_HOME links into: the session's
+	// own Codex copy is mounted at that path too, never the person's directory.
 	codexSourceHome string
+	// sandboxHome is the session's home (prepareSandboxHome); "" = no engine login at all.
+	sandboxHome string
 	// noProxy is the NO_PROXY / no_proxy value of a container on the sandbox network; "" =
 	// leave both to Docker. See sandboxNoProxy.
 	noProxy string
+	// owner is this daemon's sandboxOwner, set as the sandboxOwnerLabel; "" = no label.
+	owner string
 }
 
 // sandboxRunArgs is the `docker run` argument list for a session sandbox:
 // pure, so the flags are testable without Docker. home is the host home dir
-// whose engine config dirs are mounted (only the ones that exist); env is
+// whose engine configuration is mounted read-only over the session's own
+// sandbox home (extras.sandboxHome, see sandboxhome.go); env is
 // the session env, of which only BLERG_RUNNER_* entries are forwarded
 // (sandboxEnvArgs — never the master token, which Task 3 already strips;
 // asserted again here as defence in depth).
@@ -417,7 +462,7 @@ type sandboxRunExtras struct {
 // session's Claude credential (see sandboxClaudeCredentialEnv): the engine
 // runs *inside* the container, so a credential the host-side driver would
 // have read from its own environment has to travel with it. That is the same
-// exposure as the ~/.claude mount right beside it, and it is never the daemon
+// exposure as the login copy in the session's sandbox home, and it is never the daemon
 // master token — no caller may pass one (assertSandboxRun pins that).
 //
 // extras adds the sandbox network (--network) and the read-only messaging CLI
@@ -436,6 +481,9 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 		// bring back, not Docker's.
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
+		// Reap orphaned tool/test descendants: sleep as PID 1 never waits for
+		// them, so zombies otherwise consume the process ceiling permanently.
+		"--init",
 		"--pids-limit", "512",
 		"--memory", "4g",
 		"--mount", sandboxBindMount(hostProjectPath, sandboxWorkdir),
@@ -467,39 +515,32 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 	if extras.codexHome != "" && filepath.IsAbs(extras.codexHome) {
 		args = append(args, "--mount", codexHomeMountArg(extras.codexHome))
 	}
-	if extras.codexSourceHome != "" && filepath.IsAbs(extras.codexSourceHome) && extras.restrictedEngine == "" {
-		args = append(args, "--mount", codexHomeMountArg(extras.codexSourceHome))
-	}
 
 	if home != "" {
-		// /home/agent matches the sandbox image's ENV HOME (see
-		// runner/sandbox/Dockerfile) — not the host's own $HOME. These are
-		// read-write on purpose (the engine needs its login) — which is why the
-		// launch sheet and DAEMON.md say the sandbox does NOT protect them.
-		logins := append([]string(nil), claudeEngineSpec.SandboxLoginPaths...)
-		for _, id := range engineOrder {
-			logins = append(logins, engineRegistry[id].SandboxLoginPaths...)
+		// The engines' logins and configuration: a home of the session's own (sandboxhome.go),
+		// never the person's ~/.claude, ~/.claude.json, ~/.codex or ~/.hermes. Their configuration
+		// is mounted read-only; only the session's own copies are writable.
+		codexAt := ""
+		if extras.restrictedEngine == "" {
+			codexAt = extras.codexSourceHome
 		}
-		if extras.claudeOnly {
-			// A restricted session runs claude only: no other engine's login goes in.
-			logins = append([]string(nil), claudeEngineSpec.SandboxLoginPaths...)
-		}
-		if extras.restrictedEngine != "" {
-			logins = engineRegistry[extras.restrictedEngine].SandboxLoginPaths
-			if extras.restrictedEngine == "claude" {
-				logins = claudeEngineSpec.SandboxLoginPaths
-			}
-		}
-		for _, p := range logins {
-			if _, err := os.Stat(filepath.Join(home, p)); err == nil {
-				args = append(args, "-v", filepath.Join(home, p)+":/home/agent/"+p)
-			}
-		}
+		codexSource := engineHome(home, "CODEX_HOME", ".codex")
+		args = append(args, sandboxHomeMountArgs(extras.sandboxHome, home, codexSource, codexAt,
+			sandboxEnginesFor(extras.engine, extras.restrictedEngine))...)
 	}
 	// Only BLERG_RUNNER_* and BLERG_BOARD_* are forwarded (see sandboxEnvArgs):
 	// the host's HOME/PATH would override the image's own, and the master token
 	// must never enter a session (Task 3 strips it from env already; this is the
 	// second lock on that door).
+	if extras.owner != "" {
+		args = append(args, "--label", sandboxOwnerLabel+"="+extras.owner)
+	}
+	for _, l := range sandboxTestLabels {
+		args = append(args, "--label", l)
+	}
+	for _, m := range sandboxTestMounts {
+		args = append(args, "--mount", m)
+	}
 	args = append(args, sandboxEnvArgs(env)...)
 	args = append(args, extraEnvArgs...)
 	return append(args, sandboxImage(), "sleep", "infinity")
@@ -512,30 +553,12 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 // setup, just routed through `docker exec` instead of running directly on
 // the host.
 //
-// Both ~/.claude AND ~/.claude.json (a separate top-level dotfile) are
-// mounted, read-write. This was empirically found, not assumed: mounting only
-// ~/.claude/.credentials.json (even read-only) does NOT satisfy claude's own
-// login check — it still runs the full first-run OAuth wizard, which can't
-// complete headlessly in a container (it tries to open a browser). Account
-// state (which ~/.claude.json holds) turned out to be what actually gates
-// that, alongside the credentials file. Read-write because claude writes into
-// ~/.claude (session transcripts, settings) as it runs; this is the same
-// directory the bare-host daemon already trusts fully, just now also reachable
-// from inside a container — no new exposure of anything not already true for
-// desktop-daemon sessions. ~/.codex gets the identical treatment for the same
-// reason (untested against codex's actual login check specifically, but
-// there is no reason to expect the credentials-file-alone shortcut to work
-// there either, given the mix of config + operational state under the same
-// directory).
-//
-// ~/.hermes is different: alongside config/credentials it also holds the
-// actual hermes-agent code checkout the installer manages ("Code:
-// ~/.hermes/hermes-agent" per its own install output), which the sandbox
-// image installs its own copy of at build time. Mounting the whole directory
-// would silently replace that with whatever's on the host, version mismatch
-// and all — so only the two files that actually hold config/credentials
-// (config.yaml, .env) are mounted, individually, leaving the image's own
-// install untouched.
+// The engines' logins come from the session's own sandbox home (sandboxhome.go), never from the
+// person's engine directories: Claude Code's login check needs both its credentials file and the
+// account state in ~/.claude.json (a credentials file alone runs the first-run OAuth wizard, which
+// cannot complete in a container), so the home holds a copy of each; the person's configuration is
+// mounted read-only over it. ~/.hermes keeps the image's own hermes-agent install: only its
+// config.yaml and .env are mounted, read-only.
 func createDockerSandbox(sessionID, hostProjectPath string, inner, env []string, opts SandboxOptions) error {
 	// No engine credential to pass: a terminal sandbox runs the engine's CLI
 	// interactively against the mounted login directories.
@@ -593,7 +616,18 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	// to a session that is being recreated right now either way.
 	forceRemoveContainer(container)
 	home, _ := os.UserHomeDir()
-	extras := sandboxRunExtras{cloneObjects: cloneObjects, cliPath: messagingCLIPath(opts.RepoRoot), claudeOnly: opts.ClaudeOnly, restrictedEngine: opts.RestrictedEngine, pluginCache: opts.PluginCache, codexHome: opts.CodexHome, codexSourceHome: opts.CodexSourceHome}
+	engines := sandboxEnginesFor(opts.Engine, opts.RestrictedEngine)
+	sbHome := ""
+	if home != "" {
+		markSandboxHomeStarting(sessionID)
+		defer clearSandboxHomeStarting(sessionID) // registered below, or failed
+		var err error
+		if sbHome, err = prepareSandboxHome(sessionID, home, engineHome(home, "CODEX_HOME", ".codex"), engines); err != nil {
+			return "", err
+		}
+		ensureSandboxLoginRefresh()
+	}
+	extras := sandboxRunExtras{owner: sandboxOwner(), sandboxHome: sbHome, cloneObjects: cloneObjects, cliPath: messagingCLIPath(opts.RepoRoot), engine: opts.Engine, restrictedEngine: opts.RestrictedEngine, pluginCache: opts.PluginCache, codexHome: opts.CodexHome, codexSourceHome: opts.CodexSourceHome}
 	if opts.Network != "" {
 		exists, err := sandboxNetworkState(opts.Network)
 		if err != nil {
@@ -613,13 +647,22 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	// reconnect could `docker rm -f` the container this spawn just created.
 	// Claiming the name first closes it; the failure path below gives it back.
 	registerSandbox(sessionID, container)
-	if err := dockerRunEnv(cred.clientEnv, sandboxRunArgs(container, hostProjectPath, home, env, extras, cred.args...)...); err != nil {
+	forgetSandboxDeath(container) // a new container under the name: its stop is not reported yet
+	dockerContext := currentDockerContext()
+	args := sandboxRunArgs(container, hostProjectPath, home, env, extras, cred.args...)
+	// Put the label before the image, and run on exactly the context recorded in it.
+	args = slices.Insert(args, 4, "--label", sandboxContextLabel+"="+dockerContext)
+	pinSandboxContext(container, dockerContext)
+	if err := dockerRunEnv(cred.clientEnv, pinnedDockerArgs(container, args...)...); err != nil {
 		// A half-created container (run failed after the name was taken) would
 		// otherwise linger and block the next attempt.
 		forceRemoveContainer(container)
 		unregisterSandbox(sessionID)
+		forgetSandboxDeath(container)
 		return "", err
 	}
+	// Every later look at it goes to the Docker it was started on.
+	pinSandboxContext(container, dockerContext)
 	// Before anything runs in it: a session given a fresh token earlier keeps it.
 	copyTokenIntoSandbox(container, sessionID)
 	return container, nil
@@ -647,13 +690,19 @@ func forceRemoveContainer(container string) {
 // spends one `docker rm -f` on a name that does not exist. That is a fork and
 // an ignored "No such container", against the alternative of leaking a whole
 // container — and only for sessions that outlived a daemon restart.
+//
+// The session's sandbox home goes with it, after a last sync of a login it refreshed.
 func removeSandboxContainer(sessionID string) {
+	defer releaseSandboxHome(sessionID)
 	container, ok := sandboxContainer(sessionID)
 	if !ok {
-		forceRemoveContainer(dockerContainerName(sessionID))
+		container = dockerContainerName(sessionID)
+		forceRemoveContainer(container)
+		forgetSandboxDeath(container)
 		return
 	}
 	forceRemoveContainer(container)
+	forgetSandboxDeath(container)
 	unregisterSandbox(sessionID)
 }
 
@@ -669,8 +718,13 @@ func removeSandboxContainer(sessionID string) {
 // safety catch: a container that could still be reattached is never swept.
 //
 // isLive reports whether the daemon is managing a session id (nil = none are).
-func sweepOrphanSandboxContainers(isLive func(sessionID string) bool) {
-	for _, name := range listSandboxContainers() {
+//
+// Only a container this daemon can tie to itself is a candidate (listOwnSandboxContainers): never
+// one that merely has the name prefix.
+//
+// tied adds the sessions the daemon has another record of (nil = none).
+func sweepOrphanSandboxContainers(isLive, tied func(sessionID string) bool) {
+	for _, name := range listOwnSandboxContainers(tied) {
 		id := strings.TrimPrefix(name, sandboxContainerPrefix)
 		if _, registered := sandboxContainer(id); registered {
 			continue
@@ -717,6 +771,67 @@ func listSandboxContainers() []string {
 		}
 	}
 	return names
+}
+
+// listOwnSandboxContainers returns the running sandbox containers this daemon can tie to itself:
+// those carrying its owner label, and, for a container from before the label (no owner label at
+// all), those of a session it has a record of: registered, a sandbox clone record or a sandbox home
+// in its state directory, or tied (nil = no other records). A container another daemon labeled, or
+// an unlabeled one this daemon knows nothing of, is left alone, whatever its name: it is someone
+// else's session (or a test's) that happens to share the prefix. An error is an empty list.
+func listOwnSandboxContainers(tied func(sessionID string) bool) []string {
+	out, err := dockerOutput("ps", "--filter", "name=^/"+sandboxContainerPrefix,
+		"--format", "{{.Names}}\t{{.Label \""+sandboxOwnerLabel+"\"}}\t{{.Label \""+sandboxContextLabel+"\"}}")
+	if err != nil {
+		return nil
+	}
+	own := sandboxOwner()
+	names := []string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		name, labels, _ := strings.Cut(strings.TrimSpace(line), "\t")
+		owner, dockerContext, _ := strings.Cut(labels, "\t")
+		name, owner = strings.TrimSpace(name), strings.TrimSpace(owner)
+		if !strings.HasPrefix(name, sandboxContainerPrefix) {
+			continue
+		}
+		if sandboxContainerIsOurs(strings.TrimPrefix(name, sandboxContainerPrefix), owner, own, tied) {
+			restoreSandboxContext(name, strings.TrimSpace(dockerContext))
+			names = append(names, name)
+			continue
+		}
+		if _, seen := sandboxForeignLogged.LoadOrStore(name, struct{}{}); !seen {
+			log.Printf("sandbox: container %s is not this daemon's (owner %q); left alone", name, owner)
+		}
+	}
+	return names
+}
+
+// sandboxForeignLogged holds the containers already logged as not this daemon's: each is said once
+// per daemon run, not at every reconnect.
+var sandboxForeignLogged sync.Map
+
+// sandboxContainerIsOurs is listOwnSandboxContainers' test for one container.
+func sandboxContainerIsOurs(sessionID, owner, own string, tied func(string) bool) bool {
+	if owner != "" {
+		return own != "" && owner == own
+	}
+	if _, registered := sandboxContainer(sessionID); registered {
+		return true
+	}
+	if !sandboxCloneIDPattern.MatchString(sessionID) {
+		return false
+	}
+	if _, record, ok := sandboxClonePaths(sessionID); ok {
+		if _, err := os.Lstat(record); err == nil {
+			return true
+		}
+	}
+	if dir, ok := sandboxHomePath(sessionID); ok {
+		if _, err := os.Lstat(dir); err == nil {
+			return true
+		}
+	}
+	return tied != nil && tied(sessionID)
 }
 
 // sandboxExec is the argv prefix that runs a command inside a session's
@@ -840,7 +955,11 @@ func interruptTurnPID(p sandboxExec, cmd *exec.Cmd, pidFile string) {
 // sandbox image — what preflight checks for a sandboxed agent-kind spawn,
 // since the host PATH says nothing about what the container can run.
 func engineInSandboxImage(bin string) error {
-	return dockerRun("run", "--rm", "--pull=never", sandboxImage(), "which", bin)
+	args := []string{"run", "--rm", "--pull=never"}
+	for _, l := range sandboxTestLabels {
+		args = append(args, "--label", l)
+	}
+	return dockerRun(append(args, sandboxImage(), "which", bin)...)
 }
 
 // sandboxImageAvailable reports whether the sandbox image is present on this host,
@@ -864,9 +983,12 @@ func sandboxImageAvailable() bool {
 // reattach a PTY to a tmux session that does not exist — the session would be
 // "recovered" into something unusable instead of being respawned by the
 // server.
-func listSandboxedTmuxSessions() []string {
+//
+// Only this daemon's own containers are listed (listOwnSandboxContainers; tied adds the sessions
+// it has a record of): the reattach pass registers, reattaches or stops what it lists.
+func listSandboxedTmuxSessions(tied func(sessionID string) bool) []string {
 	ids := []string{}
-	for _, name := range listSandboxContainers() {
+	for _, name := range listOwnSandboxContainers(tied) {
 		if has, known := tmuxProbe(name); !has || !known {
 			continue
 		}

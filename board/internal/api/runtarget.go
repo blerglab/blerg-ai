@@ -161,6 +161,18 @@ func (a *API) writeBoardRunTargets(w http.ResponseWriter, r *http.Request, p aut
 			out["default_runtime"], out["default_daemon_id"] = target.Runtime, target.DaemonID
 		}
 	}
+	// Bare repos the cluster would refuse: board settings asks the person to resolve them, and the
+	// cluster is not offered for them until then (a single run: its card's repo; the board: any).
+	blocked := a.unresolvedRepos(board, options)
+	out["unresolved_repos"] = blocked
+	clusterBlocked := ""
+	if forCard {
+		if bareRepo(repo) && a.bareReposBlockCluster(board, options) {
+			clusterBlocked = msgBareRepoCluster(repo)
+		}
+	} else if len(blocked) > 0 {
+		clusterBlocked = msgBareRepoCluster(blocked...)
+	}
 	targets := []runTargetOption{}
 	for _, t := range options.Targets {
 		if len(targets) >= 64 || len(t.Name) > 128 {
@@ -169,7 +181,7 @@ func (a *API) writeBoardRunTargets(w http.ResponseWriter, r *http.Request, p aut
 		for _, rt := range t.Runtimes {
 			switch {
 			case rt == "cluster" && t.DaemonID == "":
-				targets = append(targets, runTargetOption{Runtime: rt, Label: runtimeLabel(rt)})
+				targets = append(targets, runTargetOption{Runtime: rt, Label: runtimeLabel(rt), Unavailable: clusterBlocked})
 			case rt == "daemon" && forCard && !hostAcknowledged(board, t.DaemonID):
 				continue
 			case (rt == "docker" || rt == "daemon") && validDaemonID.MatchString(t.DaemonID):

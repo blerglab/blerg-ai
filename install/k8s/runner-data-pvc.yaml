@@ -20,8 +20,8 @@ metadata:
   labels:
     app: blerg-runner
 spec:
-  # One node mounts it at a time: the runner is a single replica, and its Deployment uses the
-  # Recreate strategy so the old pod lets go before the new one mounts it.
+  # One node mounts it at a time. Surge pod affinity keeps both rolling-update
+  # replicas on the node that holds the volume.
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:

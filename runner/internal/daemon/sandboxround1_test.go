@@ -387,7 +387,7 @@ func TestRestartSweepBringsAnOrphansWorkBack(t *testing.T) {
 	}
 	dockerProbe = func(time.Duration, ...string) (bool, error) { return false, errNotInImage } // no tmux: an agent sandbox
 	t.Cleanup(func() { dockerOutput, dockerRun, dockerProbe = origOut, origRun, origProbe })
-	sweepOrphanSandboxContainers(nil)
+	sweepOrphanSandboxContainers(nil, nil)
 	if len(removed) != 1 || removed[0] != dockerContainerName("orphan-1") {
 		t.Fatalf("removed %v", removed)
 	}
@@ -417,13 +417,14 @@ func TestHungTmuxProbeInDocker(t *testing.T) {
 	if os.Getenv("BLERG_SANDBOX_CHILD_TEST") != "1" {
 		t.Skip("set BLERG_SANDBOX_CHILD_TEST=1 with a built sandbox image")
 	}
+	labelTestContainers(t)
 	t.Setenv("HOME", t.TempDir())
 	id := "hung-probe-" + ccUUID()
 	name, err := startSandboxContainer(id, sandboxTestClone(t, id), nil, sandboxCredential{}, SandboxOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { removeSandboxContainer(id) })
+	t.Cleanup(func() { releaseTestSandbox(id) })
 	plant := `d=/tmp/tmux-$(id -u); mkdir -p $d && chmod 700 $d && nohup python3 -c 'import socket,time,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(600)' $d/default >/dev/null 2>&1 &
 sleep 1; test -S $d/default`
 	if out, err := exec.Command("docker", "exec", name, "sh", "-c", plant).CombinedOutput(); err != nil {

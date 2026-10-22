@@ -25,4 +25,7 @@ func (a *API) registerArtifactRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sessions/{id}/files", h.files)
 	mux.HandleFunc("DELETE /api/sessions/{id}/files/{aid}", h.unpublish)
 	a.registerReviewRequestRoutes(mux)
+	// A commit chip's hovercard and its diff, read from the session's workspace (commitlookup.go).
+	a.RegisterCommitRoutes(mux)
+	a.RegisterPluginBrowseRoutes(mux)
 }

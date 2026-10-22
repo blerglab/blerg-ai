@@ -156,6 +156,9 @@ func (k *BlergRunner) SetRuntime(runtime string) { k.runtime = runtime }
 // ("" = the runner decides).
 func (k *BlergRunner) DefaultRuntime() string { return k.runtime }
 
+// GitBase is the clone base a start without its own git_url is sent with ("" for none).
+func (k *BlergRunner) GitBase() string { return k.gitBase }
+
 // ParseRuntime validates BLERG_BOARD_RUNNER_RUNTIME: empty (the runner
 // decides) or one of the runner contract's runtimes. Anything else is refused
 // here, at boot, rather than turned into a 422 on every start.

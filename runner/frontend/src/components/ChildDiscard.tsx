@@ -13,6 +13,8 @@ interface Props {
   onOpen?(): void
   /** The session is at work now: the confirmation says discarding stops it. */
   running?: boolean
+  /** In a ⋯ menu (IconMenu): the item's one-line explanation under its name. */
+  hint?: string
 }
 interface SessionProps extends Omit<Props, 'parentId' | 'childId'> {
   sessionId: string
@@ -28,7 +30,7 @@ export function ParentDiscardAction(props: SessionProps) {
 }
 
 /** A human-only action: never changes local session records ahead of the server's update. */
-function DiscardAction({parentId, sessionId, title, menu = false, focusTarget, onOpen, onDiscarded, running = false}: SessionProps & {parentId?: string}) {
+function DiscardAction({parentId, sessionId, title, menu = false, focusTarget, onOpen, onDiscarded, running = false, hint}: SessionProps & {parentId?: string}) {
   const child = !!parentId
   const actionName = child ? 'Discard child session' : 'Discard session and children'
   const [open, setOpen] = useState(false)
@@ -73,7 +75,7 @@ function DiscardAction({parentId, sessionId, title, menu = false, focusTarget, o
     finally {if (mounted.current) setBusy(false)}
   }
   return <>
-    <button ref={trigger} type="button" role={menu ? 'menuitem' : undefined} className="rail-link child-discard-trigger" aria-label={menu ? actionName : `Discard ${title}`} title={menu ? actionName : `Discard ${title}`} disabled={busy || requested} onClick={() => {setError(''); setOpen(true); onOpen?.()}}>{menu ? 'Discard' : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>}</button>
+    <button ref={trigger} type="button" role={menu ? 'menuitem' : undefined} className={hint ? 'icon-menu-item danger child-discard-trigger' : 'rail-link child-discard-trigger'} data-testid={hint ? 'discard-menuitem' : undefined} aria-label={menu ? actionName : `Discard ${title}`} title={menu ? actionName : `Discard ${title}`} disabled={busy || requested} onClick={() => {setError(''); setOpen(true); onOpen?.()}}>{menu ? (hint ? <><span className="icon-menu-label">Discard</span><span className="icon-menu-hint">{hint}</span></> : 'Discard') : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>}</button>
     {requested && !menu && <span className="child-discard-status" role="status">Discard requested. Updating session list…</span>}
     {open && createPortal(<div className="child-discard-backdrop" onClick={event => {event.stopPropagation(); if (event.target === event.currentTarget && !busy) setOpen(false)}}>
       <div ref={dialog} className="child-discard-dialog" role="dialog" tabIndex={-1} aria-modal="true" aria-labelledby={heading} aria-describedby={description} onKeyDown={event => {

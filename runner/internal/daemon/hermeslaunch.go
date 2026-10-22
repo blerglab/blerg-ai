@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,10 +127,12 @@ func (d *hermesDriver) configureGatewayCancellation(parent context.Context, cmd 
 			cleanup.Stdout = nil
 			cleanup.Stderr = nil
 			if err := cleanup.Run(); err != nil {
-				d.mu.Lock()
-				d.cleanupUncertain = true
-				d.mu.Unlock()
-				d.emit("error", agent.ErrorPayload{Message: "Hermes sandbox shutdown could not be verified; automatic restart is disabled", Retryable: false})
+				// A container that stopped took the gateway with it: nothing is left running, and
+				// the reason is the container's (reported once), not an unverified shutdown.
+				if sandboxStopped(ctx, d.prefix, d.emit) {
+					return cmd.Process.Kill()
+				}
+				d.shutdownUnverified("Hermes sandbox shutdown could not be verified; automatic restart is disabled")
 			}
 			return cmd.Process.Kill()
 		}
@@ -151,10 +154,24 @@ func (d *hermesDriver) configureGatewayCancellation(parent context.Context, cmd 
 			}
 			time.Sleep(25 * time.Millisecond)
 		}
-		d.mu.Lock()
-		d.cleanupUncertain = true
-		d.mu.Unlock()
-		d.emit("error", agent.ErrorPayload{Message: "Hermes shutdown did not finish gracefully; automatic restart is disabled", Retryable: false})
+		d.shutdownUnverified("Hermes shutdown did not finish gracefully; automatic restart is disabled")
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+}
+
+// shutdownUnverified records a gateway whose end could not be confirmed: no gateway is started
+// again (a second one could share the native conversation). While the session is meant to run,
+// that stops its runtime for good, said with the runtime_stopped code so the session ends with
+// why. A stop the person or a parent asked for (the session's context is done) is not a failure:
+// it is logged, and no runtime_stopped is said, so a watcher sees the child ended, not failed.
+func (d *hermesDriver) shutdownUnverified(message string) {
+	d.mu.Lock()
+	d.cleanupUncertain = true
+	runCtx := d.runCtx
+	d.mu.Unlock()
+	if runCtx != nil && runCtx.Err() != nil {
+		log.Printf("hermes: %s (the session was being stopped)", message)
+		return
+	}
+	d.emit("error", agent.ErrorPayload{Message: message, Retryable: false, Code: agent.ErrorCodeRuntimeStopped})
 }

@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { isNoRepo, repoLabel, repoDetail, validScratchSuffix, newScratchSuffix, SCRATCH_PREFIX } from './noRepo'
 
-vi.mock('../sessionNames', () => ({ randomSessionName: () => 'Granite' }))
 
 describe('noRepo', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -30,11 +29,11 @@ describe('noRepo', () => {
     }
   })
 
-  it('generates a valid, readable suffix with 64 bits from crypto.getRandomValues, never Math.random', () => {
+  it('generates a valid suffix, "session" and 64 bits from crypto.getRandomValues (no made-up words), never Math.random', () => {
     const mathRandom = vi.spyOn(Math, 'random')
     const getRandom = vi.spyOn(crypto, 'getRandomValues')
     const s = newScratchSuffix()
-    expect(s).toMatch(/^granite-[0-9a-f]{16}$/)
+    expect(s).toMatch(/^session-[0-9a-f]{16}$/)
     expect(validScratchSuffix(s)).toBe(true)
     expect(isNoRepo(SCRATCH_PREFIX + s)).toBe(true)
     expect(getRandom).toHaveBeenCalledTimes(1)

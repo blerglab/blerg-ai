@@ -3,6 +3,7 @@ package pluginsinstall
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 
@@ -108,4 +109,54 @@ func codexGitHubSource(raw string) string {
 		return ""
 	}
 	return source
+}
+
+// CodexMarketplace is one marketplace `codex plugin marketplace list --json` reports: its name,
+// its local root (where .agents/plugins/marketplace.json lives) and, for a Git marketplace on
+// GitHub, its owner/repo source ("" otherwise).
+type CodexMarketplace struct {
+	Name   string
+	Root   string
+	Source string
+}
+
+// ListCodexMarketplaces runs `codex plugin marketplace list --json` (fixed argv, the options'
+// environment and per-command timeout) and returns the well-formed entries, at most limit.
+func ListCodexMarketplaces(ctx context.Context, o Options, limit int) ([]CodexMarketplace, error) {
+	if o.Bin == "" {
+		o.Bin = "codex"
+	}
+	p := newInstaller(o)
+	out, err := p.step(ctx, "marketplace list", "plugin", "marketplace", "list", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var list struct {
+		Marketplaces []struct {
+			Name   string `json:"name"`
+			Root   string `json:"root"`
+			Source struct {
+				Type   string `json:"sourceType"`
+				Source string `json:"source"`
+			} `json:"marketplaceSource"`
+		} `json:"marketplaces"`
+	}
+	if decodeCodexJSON(out, &list) != nil {
+		return nil, errors.New("codex marketplace list output was not JSON")
+	}
+	var res []CodexMarketplace
+	for _, m := range list.Marketplaces {
+		if len(res) >= limit {
+			break
+		}
+		if !ValidMarketplaceName(m.Name) {
+			continue
+		}
+		source := ""
+		if m.Source.Type == "git" {
+			source = codexGitHubSource(m.Source.Source)
+		}
+		res = append(res, CodexMarketplace{Name: m.Name, Root: m.Root, Source: source})
+	}
+	return res, nil
 }

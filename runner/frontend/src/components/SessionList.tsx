@@ -8,7 +8,8 @@ import SessionCard, { type SessionCardProps } from './SessionCard'
 import { nestChildren, searchTree, type SessionTree } from '../lib/sessionTree'
 import { childrenExpanded, setChildrenExpanded } from '../lib/sidebarPrefs'
 import { getFocus, setFocus } from '../lib/sidebarPrefs'
-import { NotificationsButton } from '../App'
+import ProposalNotifications, { ProposalBell } from './ProposalNotifications'
+import type { ProposalInbox } from '../hooks/useProposalInbox'
 import { ProposalsBadge } from './Proposals'
 import { OpenSessionContext } from '../lib/openSession'
 import { prefetchLaunchData } from '../lib/launchCache'
@@ -21,6 +22,8 @@ import { repoLabel } from '../lib/noRepo'
 interface Props {
   onNewSession?: () => void
   variant?: 'page' | 'sidebar'
+  /** The app's proposal inbox (App's Layout reads it once); without one the bell reads its own. */
+  proposalInbox?: ProposalInbox
 }
 
 const Nesting = createContext<{ tree: SessionTree; activeId?: string; daemons: DaemonInfo[]; query: string } | null>(null)
@@ -111,9 +114,9 @@ function placePillStyle(selected: boolean, muted = false): React.CSSProperties {
     display: 'inline-flex',
     alignItems: 'center',
     gap: 5,
-    background: selected ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'none',
-    color: selected ? 'var(--amber)' : muted ? 'var(--fog-dim)' : 'var(--fog)',
-    border: `1px solid ${selected ? 'var(--blaze)' : 'var(--stone)'}`,
+    background: selected ? 'var(--selected-bg)' : 'none',
+    color: selected ? 'var(--selected-text)' : muted ? 'var(--fog-dim)' : 'var(--fog)',
+    border: `1px solid ${selected ? 'var(--selected-border)' : 'var(--stone)'}`,
     borderRadius: 20,
     padding: '2px 9px',
     fontSize: '0.72rem',
@@ -334,7 +337,7 @@ function HistorySection({
   )
 }
 
-export default function SessionList({ onNewSession, variant = 'page' }: Props) {
+export default function SessionList({ onNewSession, variant = 'page', proposalInbox }: Props) {
   const { daemons, sessions, serverVersion, serverRelease, serverCommit, latestVersion, latestUrl } = useSessionStore()
   const build = formatBuild({ version: serverVersion, release: serverRelease, commit: serverCommit, latestVersion, latestUrl })
   const navigate = useNavigate()
@@ -508,7 +511,8 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
           }}>Sessions</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <NotificationsButton />
+        {/* The app's one Notifications bell: what needs you, and push to this browser. */}
+        {proposalInbox ? <ProposalBell inbox={proposalInbox} /> : <ProposalNotifications />}
         <button
           onClick={onNewSession}
           // About to open the sheet: warm what it opens on (lib/launchCache).
@@ -743,9 +747,9 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
               marginTop: 4,
               borderRadius: 8,
               cursor: 'pointer',
-              background: isCronsActive ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'transparent',
-              border: isCronsActive ? `1px solid var(--blaze)` : '1px solid transparent',
-              color: isCronsActive ? 'var(--amber)' : 'var(--fog)',
+              background: isCronsActive ? 'var(--selected-bg)' : 'transparent',
+              border: isCronsActive ? `1px solid var(--selected-border)` : '1px solid transparent',
+              color: isCronsActive ? 'var(--selected-text)' : 'var(--fog)',
               fontSize: '0.9rem',
               fontWeight: isCronsActive ? 700 : 500,
               letterSpacing: '0.05em',
@@ -770,9 +774,9 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
               marginTop: 4,
               borderRadius: 8,
               cursor: 'pointer',
-              background: isProposalsActive ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'transparent',
-              border: isProposalsActive ? `1px solid var(--blaze)` : '1px solid transparent',
-              color: isProposalsActive ? 'var(--amber)' : 'var(--fog)',
+              background: isProposalsActive ? 'var(--selected-bg)' : 'transparent',
+              border: isProposalsActive ? `1px solid var(--selected-border)` : '1px solid transparent',
+              color: isProposalsActive ? 'var(--selected-text)' : 'var(--fog)',
               fontSize: '0.9rem',
               fontWeight: isProposalsActive ? 700 : 500,
               letterSpacing: '0.05em',
@@ -798,9 +802,9 @@ export default function SessionList({ onNewSession, variant = 'page' }: Props) {
               marginTop: 4,
               borderRadius: 8,
               cursor: 'pointer',
-              background: isInsightsActive ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'transparent',
-              border: isInsightsActive ? `1px solid var(--blaze)` : '1px solid transparent',
-              color: isInsightsActive ? 'var(--amber)' : 'var(--fog)',
+              background: isInsightsActive ? 'var(--selected-bg)' : 'transparent',
+              border: isInsightsActive ? `1px solid var(--selected-border)` : '1px solid transparent',
+              color: isInsightsActive ? 'var(--selected-text)' : 'var(--fog)',
               fontSize: '0.9rem',
               fontWeight: isInsightsActive ? 700 : 500,
               letterSpacing: '0.05em',

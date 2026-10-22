@@ -21,6 +21,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 	"github.com/blerglab/blerg-ai/runner/internal/gitremote"
+	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
 )
 
 // cloneRemote builds the git remote for a repo on provider (a gitprovider
@@ -168,15 +169,27 @@ func runClone(ctx context.Context, timeout time.Duration, cmd *exec.Cmd, what st
 	return fmt.Errorf("%s: %w after %s", what, errCloneTimedOut, timeout)
 }
 
-// gitClone runs `git clone remote dest` on the host with the daemon's
-// sanitized environment, gitSafetyEnv and extraEnv. The remote never carries
-// a token (a token rides in extraEnv, see tokenHeaderEnv), and RedactURL
-// keeps it that way in the error should a token-bearing URL ever be passed
-// here.
+// gitClone runs `git clone remote dest` on the host through the shared hardened runner
+// (internal/hostgit), with gitSafetyEnv and extraEnv. The remote never carries a token (a token
+// rides in extraEnv, see tokenHeaderEnv), and RedactURL keeps it that way in the error should a
+// token-bearing URL ever be passed here.
+//
+// Differs from the other host git calls, on purpose: a clone from a remote into a new folder has
+// no repository configuration of its own yet, so it keeps the person's own (UserConfig: their
+// system and global git configuration, HOME, PATH, proxies, ssh agent and credential helper,
+// which a private clone without a token needs), from the daemon's sanitized environment (no
+// master token, no inherited GIT_* variable). The one transport its URL names is allowed (https,
+// or ssh for the fallback; file for a local path) and every other refused; no submodule is
+// cloned. No memory limit: a large repository's clone legitimately needs the memory.
 func gitClone(ctx context.Context, timeout time.Duration, remote, dest string, extraEnv []string) error {
-	cmd := exec.Command("git", "clone", "--", remote, dest) //nolint:gosec,noctx // literal git binary; remote is a clone URL placed after -- and never carries a token; noctx: runClone owns the context and timeout and kills the process group itself
-	// git hooks/helpers must not see the master token.
-	cmd.Env = sanitizedEnviron(append(gitSafetyEnv(), extraEnv...)...)
+	cmd, err := hostgit.Command(hostgit.Options{
+		UserConfig: true, UserEnv: sanitizedEnviron(), Env: append(gitSafetyEnv(), extraEnv...),
+		Protocols: hostgit.ProtocolsFor(remote),
+	}, "clone", "--no-recurse-submodules", "--", remote, dest)
+	if err != nil {
+		return fmt.Errorf("git clone %s: %w", gitprovider.RedactURL(remote), err)
+	}
+	defer hostgit.KillGroup(cmd)
 	return runClone(ctx, timeout, cmd, "git clone "+gitprovider.RedactURL(remote), nil)
 }
 
@@ -402,13 +415,13 @@ func tokenHeaderEnv(p gitprovider.Provider, token string) []string {
 func hostGitSupportsTokenClone(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "--version").Output()
+	out, err := hostgit.Output(ctx, hostgit.Options{}, "--version")
 	if err != nil {
 		return fmt.Errorf("git is not available on this daemon: %w", err)
 	}
-	if major, minor, ok := parseGitVersion(string(out)); ok && (major < 2 || (major == 2 && minor < 31)) {
+	if major, minor, ok := parseGitVersion(out); ok && (major < 2 || (major == 2 && minor < 31)) {
 		return fmt.Errorf("git 2.31 or newer is needed to clone a private repository with your token (this daemon has %s) — update git, or launch in Local sandbox",
-			strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "git version")))
+			strings.TrimSpace(strings.TrimPrefix(out, "git version")))
 	}
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
@@ -75,33 +76,40 @@ type sandboxClone struct {
 	Base string `json:"base"`
 }
 
-// hardenedGitArgs are the -c overrides every daemon git call carries, so that a hook or a
-// configured command in a repository a sandboxed session could write never runs on the host.
-var hardenedGitArgs = []string{
-	"-c", "core.hooksPath=/dev/null",
-	"-c", "core.fsmonitor=false",
-	"-c", "core.sshCommand=false",
-	"-c", "protocol.ext.allow=never",
-	"-c", "protocol.file.allow=always",
-	"-c", "submodule.recurse=false",
-	"-c", "fetch.recurseSubmodules=false",
-	"-c", "fetch.fsckObjects=true",
-}
-
-// hostGit runs git in dir with hardenedGitArgs and a clean environment: no system or global
-// configuration, no inherited GIT_* variable, no prompt. It is bounded by sandboxGitTimeout, not by
-// a caller's context: it also runs from a session's kill, which must finish its cleanup whoever
-// asked for it.
+// hostGit runs git in dir through the shared hardened runner (internal/hostgit: its own
+// environment with no system or global configuration, every configured command, file and
+// transport refused, its own process group) with no transport at all. It is bounded by
+// sandboxGitTimeout, not by a caller's context: it also runs from a session's kill, which must
+// finish its cleanup whoever asked for it. The two calls that move objects between the person's
+// repository and the clone (the clone itself, and the turn-end fetch) use hostGitLocal instead.
 func hostGit(dir string, args ...string) (string, error) {
 	return hostGitTimeout(sandboxGitTimeout, dir, args...)
 }
 
+// hostGitLocal is hostGit with the file transport allowed (the one this call needs: a local
+// clone or fetch; GIT_ALLOW_PROTOCOL=file) and the call's own -c overrides. limitKB > 0 runs it
+// under that address-space limit (Linux).
+func hostGitLocal(timeout time.Duration, dir string, config []string, limitKB int, args ...string) (string, error) {
+	return hostgit.OutputBounded(hostgit.Options{
+		Dir: dir, Protocols: []string{"file"}, Config: config, Timeout: timeout, MemoryLimit: limitKB > 0, LimitKB: limitKB,
+		Untrusted: limitKB > 0, // the fetch: the objects come from the session's clone
+	}, args...)
+}
+
+// sandboxFetchMemoryKB bounds the turn-end fetch, upload-pack and pack-objects in the session's
+// clone included (whose pack settings the session writes): 4 GiB, well over what a clone within
+// sandboxCloneMaxBytes needs.
+const sandboxFetchMemoryKB = 4 << 20
+
 // sandboxFetchTimeout bounds the host fetch of a session's branch; sandboxCloneMaxBytes bounds what the
 // clone's own object store may hold for a fetch to be tried at all.
 var (
-	sandboxFetchTimeout          = 60 * time.Second
-	sandboxCloneMaxBytes   int64 = 1 << 30
-	sandboxCloneMaxEntries       = 200000
+	sandboxFetchTimeout        = 60 * time.Second
+	sandboxCloneMaxBytes int64 = 1 << 30
+	// sandboxCloneMaxMetaBytes bounds everything else under the clone's .git (refs, packed-refs,
+	// shallow, the index, logs): files the host reads too.
+	sandboxCloneMaxMetaBytes int64 = 256 << 20
+	sandboxCloneMaxEntries         = 200000
 	// sandboxSyncBudget bounds a whole turn-end sync: pause, checks, fetch, rev-parse, unpause.
 	sandboxSyncBudget = 80 * time.Second
 	// sandboxDockerTimeout bounds one docker pause or unpause.
@@ -143,6 +151,45 @@ func syncSandboxAtTurnEnd(path, sessionID string) error {
 	return err
 }
 
+// cloneConfigMax bounds the clone's .git/config read for include sections.
+const cloneConfigMax = 1 << 20
+
+// cloneConfigIncludes reads the clone's config as plain text (never with git) and names the first
+// include or includeIf section in it ("" for none). A config section header is "[name",
+// "[name "sub"]" or the old "[name.sub]", names case-insensitive; anything that might be one counts
+// (fail closed). A config that cannot be read whole is an error.
+func cloneConfigIncludes(path string) (string, error) {
+	st, err := os.Lstat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > cloneConfigMax {
+		return "", errors.New("the clone's .git/config is missing, not a plain file or too large")
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // the clone's own config, checked a plain file above; bounded
+	if err != nil {
+		return "", errors.New("the clone's .git/config could not be read")
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		for {
+			at := strings.IndexByte(line, '[')
+			if at < 0 {
+				break
+			}
+			line = line[at+1:]
+			name := strings.TrimLeft(line, " \t")
+			end := strings.IndexAny(name, " \t\".]")
+			if end >= 0 {
+				name = name[:end]
+			}
+			switch strings.ToLower(name) {
+			case "include":
+				return "include", nil
+			case "includeif":
+				return "includeIf", nil
+			}
+		}
+	}
+	return "", nil
+}
+
 // checkSandboxCloneTree refuses a clone whose .git a fetch must not read: anything under it that is
 // a symbolic link or not a plain file or directory, a .git that is not a directory, a commondir
 // file (which points Git at another directory), or an object store over sandboxCloneMaxBytes. It
@@ -157,6 +204,20 @@ func checkSandboxCloneTree(path string) error {
 	if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); err == nil {
 		return errors.New("the clone's .git has a commondir file")
 	}
+	// Files the host's upload-pack and pack-objects would parse that no override reaches: refused,
+	// with what to do about it. (objects/info/alternates is not refused: the clone borrows the
+	// repository's objects through it, and resetCloneAlternates rewrites it from the daemon's
+	// record right after this check.)
+	for _, name := range []string{"info/attributes", "info/grafts", "objects/info/grafts", "config.worktree"} {
+		if _, err := os.Lstat(filepath.Join(gitDir, filepath.FromSlash(name))); err == nil {
+			return fmt.Errorf("the clone has .git/%s, which the host does not read; remove it in the sandbox (rm .git/%s) and your commits come back at the next turn's end", name, name)
+		}
+	}
+	if section, err := cloneConfigIncludes(filepath.Join(gitDir, "config")); err != nil {
+		return err
+	} else if section != "" {
+		return fmt.Errorf("the clone's .git/config has an [%s] section, which the host does not follow; remove it in the sandbox (git config --remove-section %s) and your commits come back at the next turn's end", section, section)
+	}
 	// The fetch reads <clone>/.git and nothing else (syncSandboxBranch): it must be a repository.
 	for _, need := range []struct {
 		name string
@@ -167,7 +228,7 @@ func checkSandboxCloneTree(path string) error {
 			return errors.New("the clone's .git is not a valid repository (no " + need.name + ")")
 		}
 	}
-	var objects int64
+	var objects, meta int64
 	entries := 0
 	objectsDir := filepath.Join(gitDir, "objects") + string(filepath.Separator)
 	err := filepath.WalkDir(gitDir, func(p string, d os.DirEntry, err error) error {
@@ -182,13 +243,24 @@ func checkSandboxCloneTree(path string) error {
 			rel, _ := filepath.Rel(path, p)
 			return fmt.Errorf("the clone's %s is not a plain file or directory", rel)
 		}
-		if mode.IsRegular() && strings.HasPrefix(p, objectsDir) {
+		// The host's pack-objects runs in the clone's .git and reads in-tree attributes there, a
+		// .gitattributes at any depth (case-insensitive file systems included).
+		if strings.EqualFold(d.Name(), ".gitattributes") {
+			rel, _ := filepath.Rel(path, p)
+			rel = filepath.ToSlash(rel)
+			return fmt.Errorf("the clone has %s, which the host does not read; remove it in the sandbox (rm %s) and your commits come back at the next turn's end", rel, rel)
+		}
+		if mode.IsRegular() {
 			info, err := d.Info()
 			if err != nil {
 				return err
 			}
-			if objects += info.Size(); objects > sandboxCloneMaxBytes {
-				return fmt.Errorf("the clone's objects exceed %d bytes", sandboxCloneMaxBytes)
+			if strings.HasPrefix(p, objectsDir) {
+				if objects += info.Size(); objects > sandboxCloneMaxBytes {
+					return fmt.Errorf("the clone's objects exceed %d bytes", sandboxCloneMaxBytes)
+				}
+			} else if meta += info.Size(); meta > sandboxCloneMaxMetaBytes {
+				return fmt.Errorf("the clone's .git holds more than %d bytes outside its objects", sandboxCloneMaxMetaBytes)
 			}
 		}
 		return nil
@@ -197,23 +269,7 @@ func checkSandboxCloneTree(path string) error {
 }
 
 func hostGitTimeout(timeout time.Duration, dir string, args ...string) (string, error) {
-	full := append(append([]string{"-C", dir}, hardenedGitArgs...), args...)
-	cmd := exec.Command("git", full...) //nolint:gosec,noctx // literal git binary; dir and args are daemon-built (validated session id, resolved repo path); bounded by the timer below
-	// Its own process group, so a timeout stops the helpers it starts (upload-pack, index-pack) too.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"), "HOME=/nonexistent", "LC_ALL=C",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
-	}
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-	timer := time.AfterFunc(timeout, func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
-	err := cmd.Wait()
-	timer.Stop()
-	return strings.TrimSpace(out.String()), err
+	return hostgit.OutputBounded(hostgit.Options{Dir: dir, Timeout: timeout}, args...)
 }
 
 func sandboxClonePaths(sessionID string) (dir, record string, ok bool) {
@@ -297,7 +353,7 @@ func createSandboxClone(repoPath, sessionID, reposRoot string) (string, error) {
 	if _, err := os.Lstat(dir); err == nil {
 		return refuse("a clone for this session already exists")
 	}
-	if out, err := hostGit(root, "clone", "--quiet", "--shared", "--no-checkout", "--no-tags", repo, dir); err != nil {
+	if out, err := hostGitLocal(sandboxGitTimeout, root, nil, 0, "clone", "--quiet", "--shared", "--no-checkout", "--no-tags", repo, dir); err != nil {
 		_ = os.RemoveAll(dir)
 		log.Printf("sandbox clone %s: git clone: %v: %s", sessionID, err, out)
 		return refuse("git clone failed: " + firstLine(out))
@@ -509,8 +565,25 @@ func syncSandboxBranch(path, sessionID, container string) (bool, error) {
 	if fetchTimeout <= 0 {
 		return false, fmt.Errorf("fetch %s refused: the sync ran out of time", sandboxBranch(sessionID))
 	}
-	if out, err := hostGitTimeout(fetchTimeout, c.Repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
-		"--upload-pack=git-upload-pack --strict", filepath.Join(path, ".git"), "+"+branch+":"+target); err != nil {
+	// Differs from every other host git call, on purpose: the file transport (a local fetch),
+	// fetch.fsckObjects (the objects come from the session), a 4 GiB memory limit, and
+	// --upload-pack naming a fixed `git upload-pack --strict` (serving that exact Git directory
+	// only) that carries the runner's -c overrides, the untrusted-repository ones (no
+	// commit-graph, multi-pack index or bitmaps parsed) and --no-replace-objects itself: git hands
+	// a local upload-pack none of ours, and that upload-pack and its pack-objects read the clone's
+	// configuration (the session writes it). What no override reaches (info/attributes, grafts, a
+	// configuration include) is refused before git runs (checkSandboxCloneTree). Still parsed on
+	// the host: the clone's config, refs, packed-refs, shallow, pack indexes and objects (fsck on
+	// receive checks what arrives). No auto-maintenance or commit-graph write in the repository.
+	// The clone's tree is checked and its alternates rewritten before (checkSandboxCloneTree,
+	// resetCloneAlternates), the container is paused, and the fetched objects are checked here.
+	uploadPack, err := hostgit.ServeCommand("upload-pack")
+	if err != nil {
+		return false, fmt.Errorf("fetch %s refused: %w", sandboxBranch(sessionID), err)
+	}
+	if out, err := hostGitLocal(fetchTimeout, c.Repo, []string{"fetch.fsckObjects=true", "transfer.fsckObjects=true"}, sandboxFetchMemoryKB,
+		"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--no-write-commit-graph",
+		"--upload-pack="+uploadPack, filepath.Join(path, ".git"), "+"+branch+":"+target); err != nil {
 		return false, fmt.Errorf("fetch %s from the session's clone: %w: %s", sandboxBranch(sessionID), err, firstLine(out))
 	}
 	if target != branch {
@@ -811,7 +884,19 @@ func discardSandboxClone(path, sessionID string) {
 }
 
 func firstLine(s string) string {
-	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
+	// git's own reason (fatal:, error:) wherever it is in the output, else its first line that
+	// is not a hint.
+	line := ""
+	for _, l := range strings.Split(strings.TrimSpace(s), "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "fatal:") || strings.HasPrefix(l, "error:") {
+			line = l
+			break
+		}
+		if line == "" && l != "" && !strings.HasPrefix(l, "hint:") {
+			line = l
+		}
+	}
 	if len(line) > 200 {
 		line = line[:200]
 	}

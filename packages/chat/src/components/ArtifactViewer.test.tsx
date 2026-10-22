@@ -130,7 +130,8 @@ describe('ArtifactViewer: markdown', () => {
     expect(await screen.findByRole('heading', { name: 'Title' })).toBeInTheDocument()
     expect(container.ownerDocument.querySelector('script')).toBeNull()
     expect(container.ownerDocument.querySelector('img')).toBeNull()
-    expect(document.body.textContent).toContain('<script>window.__pwned = 1</script>') // shown as the text it is
+    expect(document.body.textContent).not.toContain('__pwned') // dropped with its content (GitHub's allowlist)
+    expect(screen.getByTestId('md-img-placeholder')).toBeInTheDocument() // a published file's relative image: its alt text
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined()
   })
 })
@@ -191,12 +192,12 @@ describe('ArtifactViewer: csv', () => {
 })
 
 describe('ArtifactViewer: images', () => {
-  it('shows an svg only through <img src=blob:>, never as markup', async () => {
+  it('shows an svg only through <img src=data:>, never as markup or a same-origin blob: URL', async () => {
     serve('<svg xmlns="http://www.w3.org/2000/svg"><script>window.__pwned = 1</script><circle r="4"/></svg>')
     const { container } = show(art({ name: 'logo.svg', view: 'image', content_type: 'image/svg+xml' }))
     const img = await screen.findByRole('img', { name: 'logo.svg' })
-    expect(img).toHaveAttribute('src', 'blob:test-0')
-    expect(blobs[0].type).toBe('image/svg+xml')
+    expect(img.getAttribute('src')).toMatch(/^data:image\/svg\+xml;base64,/)
+    expect(blobs.some(b => b.type === 'image/svg+xml')).toBe(false)
     expect(container.ownerDocument.querySelector('svg')).toBeNull()
     expect(container.ownerDocument.querySelector('script')).toBeNull()
     expect(container.ownerDocument.querySelector('iframe')).toBeNull()
@@ -531,6 +532,9 @@ describe('ArtifactViewer: diff review entry', () => {
     showInChat(art({ name: 'change.diff', view: 'diff', content_type: 'text/x-diff' }))
     expect(await screen.findByTestId('review-mode')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Review' })).toBeNull()
+    // It opens on the Conversation, as a pull request does; Files has the diff.
+    expect(screen.getByRole('tab', { name: 'Conversation' })).toHaveAttribute('aria-selected', 'true')
+    fireEvent.click(screen.getByRole('tab', { name: 'Files' }))
     expect(screen.getByRole('button', { name: 'Select new line 1 in file.go' })).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: 'Source' })).toBeNull()
   })

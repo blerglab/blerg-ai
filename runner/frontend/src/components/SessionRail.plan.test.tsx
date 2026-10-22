@@ -73,16 +73,17 @@ describe('Plan tab', () => {
     expect(open).toHaveBeenCalledWith('d1', undefined)
   })
 
-  it('opens an item\'s diff at the commit of the sha chip clicked, and whole from View diff', () => {
+  it('opens an item\'s diff whole from its one commit chip', () => {
     const open = vi.fn()
     const diff = 'd'.repeat(32)
-    const items = [{ text: 'Fix', done: true, commits: ['abcdef1234', '1234567'], diff }]
+    const items = [{ text: 'Fix', done: false, commits: ['abcdef1234', '1234567'], diff }]
     rail(makeLive({ checklist: { items, eventId: 'c1', updatedAt: null } }), { onOpenArtifact: open })
     fireEvent.click(screen.getByRole('tab', { name: /Plan/ }))
     const list = screen.getByTestId('rail-checklist')
-    fireEvent.click(within(list).getByRole('button', { name: 'Open commit 1234567 in the diff' }))
-    expect(open).toHaveBeenLastCalledWith(diff, '1234567')
-    fireEvent.click(within(list).getByRole('button', { name: /View diff/ }))
+    const chips = within(list).getAllByTestId('rail-plan-commit')
+    expect(chips).toHaveLength(1)
+    expect(chips[0].textContent).toBe('±abcdef1+1')
+    fireEvent.click(within(list).getByRole('button', { name: 'Open the diff of commits abcdef1, 1234567' }))
     expect(open).toHaveBeenLastCalledWith(diff, undefined)
   })
 })
@@ -117,14 +118,16 @@ describe('Live summary line', () => {
     expect(screen.getByTestId('rail-plan-summary-text').textContent).toBe('Plan · 1 of 2 · Next: Testing it')
   })
 
-  it('starts with the pinned ticket key and status', () => {
+  it('the pinned ticket is its own line above it (key, title and status); the summary is the list alone', () => {
     rail(makeLive({ tickets: [ticket], checklist: { items: planItems, eventId: 'c1', updatedAt: null } }))
-    const line = screen.getByTestId('rail-plan-summary')
-    expect(line.textContent).toMatch(/^PRJ-12In progressChecklist/)
-    expect(within(line).getByTestId('ticket-status').getAttribute('data-tone')).toBe('active')
+    const pin = screen.getByTestId('rail-pin')
+    expect(pin).toHaveTextContent('◐PRJ-12Fix the thing')
+    expect(within(pin).getByTestId('rail-pin-open')).toHaveAccessibleName('PRJ-12 Fix the thing, In progress')
+    expect(screen.getByTestId('rail-plan-summary').textContent).toMatch(/^Checklist/)
+    expect(pin.compareDocumentPosition(screen.getByTestId('rail-plan-summary')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('colors every pinned ticket row by its status; a canceled title is struck', () => {
+  it('gives every pinned ticket row its state\'s glyph (blocked is being worked, a duplicate is closed); a canceled title is struck', () => {
     const tickets = [
       ticket,
       { ...ticket, key: 'PRJ-9', title: 'Old', status: 'Blocked', eventId: 'e2' },
@@ -132,7 +135,7 @@ describe('Live summary line', () => {
     ]
     rail(makeLive({ tickets }))
     const rows = screen.getAllByTestId('rail-ticket-row')
-    expect(rows.map(r => within(r).getByTestId('ticket-status').getAttribute('data-tone'))).toEqual(['active', 'blocked', 'canceled'])
+    expect(rows.map(r => r.dataset.state)).toEqual(['doing', 'doing', 'done'])
     expect(within(rows[2]).getByText('Dropped').classList.contains('canceled')).toBe(true)
   })
 
@@ -147,7 +150,7 @@ describe('Live summary line', () => {
 
   it('the ticket part opens the ticket modal and stays on Live', () => {
     rail(makeLive({ tickets: [ticket], checklist: { items: planItems, eventId: 'c1', updatedAt: null } }))
-    fireEvent.click(screen.getByTestId('rail-plan-summary-ticket'))
+    fireEvent.click(screen.getByTestId('rail-pin-open'))
     expect(screen.getByRole('dialog')).toHaveTextContent('Fix the thing')
     expect(screen.getByRole('tab', { name: /Live/ }).getAttribute('aria-selected')).toBe('true')
   })

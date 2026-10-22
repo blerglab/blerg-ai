@@ -690,6 +690,29 @@ func TestManagedBlockNamesTopics(t *testing.T) {
 	}
 }
 
+// The session guide and the managed block ask the agent to mark the strokes History shows, with the
+// line `blerg-runner mark --help` starts with.
+func TestGuideNamesMarks(t *testing.T) {
+	if !strings.Contains(ccSessionGuide, markGuideLine) {
+		t.Errorf("the session guide lacks the mark line")
+	}
+	if !strings.Contains(managedBlock, "- `blerg-runner mark` — "+markGuideLine) {
+		t.Errorf("managed block lacks the mark bullet:\n%s", managedBlock)
+	}
+	for _, want := range []string{"--by person", "--by agent", "merges, deploys and releases", "changes the plan"} {
+		if !strings.Contains(markGuideLine, want) {
+			t.Errorf("the mark line does not say %q", want)
+		}
+	}
+	cli, err := os.ReadFile("../../.claude/skills/session-messaging/blerg-runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(string(cli)), " "), markGuideLine) {
+		t.Errorf("the CLI's MARK_GUIDE does not start with markGuideLine")
+	}
+}
+
 // The session guide and the managed block carry the same checklist/pin line, the one the CLI's
 // help starts with (WORK_LINE in blerg-runner).
 func TestGuideNamesChecklistAndPin(t *testing.T) {

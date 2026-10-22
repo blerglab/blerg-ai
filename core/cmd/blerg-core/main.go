@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/health"
 	"github.com/blerglab/blerg-ai/contracts/logsafe"
 	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
@@ -127,7 +128,7 @@ func webDistDir() string {
 // fall through to the SPA fallback and answer 200 with an HTML page instead of the 404/405 an
 // API client expects and would otherwise correctly handle.
 var apiishPrefixes = []string{
-	"/api/", "/auth/", "/internal/", "/.well-known/", "/revocations", "/agents", "/components", "/healthz",
+	"/api/", "/auth/", "/internal/", "/.well-known/", "/revocations", "/agents", "/components", "/healthz", "/readyz", "/livez",
 }
 
 func isAPIishPath(path string) bool {
@@ -524,10 +525,16 @@ func serve(ctx context.Context) error {
 		addr = ":8080"
 	}
 
-	st, err := db.Open(ctx, dsn)
+	srv, err := health.Listen(ctx, addr)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	defer func() { _ = srv.Close() }()
+	pool, err := openDatabase(ctx, dsn, &srv.Gate)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
+	st := db.NewPgStore(pool)
 	defer st.Close()
 
 	deps, identitySvc, err := buildDeps(ctx, st)
@@ -584,13 +591,10 @@ func serve(ctx context.Context) error {
 	app := spaHandler(webDistDir())
 	deps.App = app
 	handler := withSPAFallback(api.NewRouter(deps), app)
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       idleTimeout,
-	}
-	return srv.ListenAndServe()
+	srv.SetHandler(handler)
+	// On SIGTERM: drain, then shut down gracefully (health.ServeUntilSignal), so a rolling update
+	// does not cut requests the ingress still sends here.
+	return srv.ServeUntilSignal(ctx, log.Printf)
 }
 
 // runMint is the `blerg-core mint` CLI subcommand: it mints a core-signed agent token against

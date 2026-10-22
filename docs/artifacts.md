@@ -47,7 +47,7 @@ app cannot show is download only.
 | Plain text, logs and source code (`.txt .log .py .js .ts .tsx .go .rs .java .c .h .cpp .sh .yaml .yml .toml .ini .xml .sql .css .rb .php` and similar, and a file with an unknown extension whose bytes are text) | Monospace text. The first 200 KB, with **Show all**; over 2 MiB it is download only. |
 | Diffs and patches (`.diff`, `.patch`) | The diff viewer: see [Diffs](#diffs). Over 2 MiB, download only. |
 | JSON (`.json`) | Pretty-printed; Vega-Lite schema JSON and `.vl.json` / `.vega-lite.json` draw charts. Same size rules as text. |
-| Mermaid (`.mmd`, `.mermaid`) | A diagram with source, copy and zoom controls; invalid source stays code. External resources are refused. |
+| Mermaid (`.mmd`, `.mermaid`) | A diagram, scaled to fit the viewer, with source, copy and zoom controls; it also draws on its card in the chat. Invalid or refused source stays code, with the reason. Color styling (`classDef`, `class`, `style`) is drawn; external resources are refused. |
 | CSV and TSV | A scrollable table: the first 500 rows and 50 columns, with a note when there is more. |
 | Images: `.png .jpg .jpeg .gif .webp .svg` | The image. An SVG is shown only through `<img>`, where scripts in it never run. |
 | PDF | The browser's PDF viewer, with **Open in new tab**. |

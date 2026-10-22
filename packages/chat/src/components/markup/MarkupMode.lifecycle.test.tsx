@@ -5,7 +5,7 @@ import MarkupMode from './MarkupMode'
 beforeEach(()=>{
  vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockImplementation(()=>new Proxy({}, {get:()=>()=>{},set:()=>true}) as CanvasRenderingContext2D)
  vi.spyOn(HTMLCanvasElement.prototype,'toBlob').mockImplementation(cb=>cb(new Blob(['png'],{type:'image/png'})))
- vi.spyOn(HTMLCanvasElement.prototype,'getBoundingClientRect').mockReturnValue({left:0,top:0,width:400,height:300} as DOMRect)
+ vi.spyOn(HTMLImageElement.prototype,'getBoundingClientRect').mockReturnValue({left:0,top:0,width:400,height:300} as DOMRect)
 })
 afterEach(()=>{vi.restoreAllMocks();vi.useRealTimers()})
 

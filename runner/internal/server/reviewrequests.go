@@ -18,12 +18,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -46,7 +48,7 @@ const (
 	msgReviewNotFound   = "not found"
 	msgReviewNotPending = "the review request is no longer pending"
 	msgReviewOwnerOnly  = "only the session's owner, signed in, can decide this review"
-	msgReviewDecideBody = `the body is {"decision": "approve" | "request_changes", "note": "..."}`
+	msgReviewDecideBody = `the body is {"decision": "approve" | "request_changes" | "dismiss", "note": "..."}`
 )
 
 // reviewEventID is the stable client event id of a request's card and of its decision.
@@ -89,6 +91,7 @@ type reviewWaitReply struct {
 func (a *API) registerReviewRequestRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sessions/{id}/review-requests", a.HandleCreateReviewRequest)
 	mux.HandleFunc("GET /api/sessions/{id}/review-requests", a.HandleListReviewRequests)
+	mux.HandleFunc("GET /api/review-requests", a.HandleListMyReviewRequests)
 	mux.HandleFunc("GET /api/review-requests/{id}", a.HandleGetReviewRequest)
 	mux.HandleFunc("POST /api/review-requests/{id}/decide", a.HandleDecideReviewRequest)
 	mux.HandleFunc("POST /api/review-requests/{id}/withdraw", a.HandleWithdrawReviewRequest)
@@ -329,6 +332,35 @@ func (a *API) HandleListReviewRequests(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"review_requests": out, "can_decide": who.owner})
 }
 
+// HandleListMyReviewRequests is GET /api/review-requests: the pending review requests of the sessions
+// the signed-in person started (they alone decide or dismiss them), newest first, for their bell.
+// Only a person signed in as themselves; anyone else gets an empty list's refusal (403).
+func (a *API) HandleListMyReviewRequests(w http.ResponseWriter, r *http.Request) {
+	caller, ok := a.delegationCallerOf(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if caller.Account == "" {
+		writeError(w, http.StatusForbidden, msgReviewOwnerOnly)
+		return
+	}
+	if a.dbPool == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"review_requests": []reviewRequestView{}})
+		return
+	}
+	rows, err := db.ListPendingReviewRequestsOwnedBy(r.Context(), a.dbPool, caller.Account)
+	if err != nil {
+		writeDatabaseFailure(w, "read the review requests", "review list mine", err)
+		return
+	}
+	out := make([]reviewRequestView, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, reviewView(row))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"review_requests": out})
+}
+
 // HandleGetReviewRequest is GET /api/review-requests/{id}?wait=N: the session waits (long poll, at
 // most 25 s per call) until the request is no longer pending; a person who can see the session
 // reads it too.
@@ -477,6 +509,9 @@ func (a *API) HandleDecideReviewRequest(w http.ResponseWriter, r *http.Request) 
 		state = db.ReviewApproved
 	case "request_changes":
 		state = db.ReviewChangesRequested
+	case "dismiss":
+		// Closed without a decision (the person may have answered in the chat instead).
+		state = db.ReviewDismissed
 	default:
 		writeError(w, http.StatusUnprocessableEntity, msgReviewDecideBody)
 		return
@@ -488,7 +523,7 @@ func (a *API) HandleDecideReviewRequest(w http.ResponseWriter, r *http.Request) 
 	}
 	// A newer version published since the request (a supersede that raced the request's creation)
 	// supersedes it now: the owner never approves a version that is no longer the newest.
-	if req.State == db.ReviewPending {
+	if req.State == db.ReviewPending && state != db.ReviewDismissed {
 		if newest, err := db.LatestArtifactVersion(ctx, a.dbPool, req.SessionID, req.ArtifactOrigin, req.ArtifactName); err == nil && newest > req.ArtifactVersion {
 			a.supersedeReviews(context.WithoutCancel(ctx), req.SessionID, artifactInfo{Name: req.ArtifactName, Version: newest})
 			if cur, _ := db.GetReviewRequest(ctx, a.dbPool, id); cur != nil && cur.State != db.ReviewPending {
@@ -500,7 +535,12 @@ func (a *API) HandleDecideReviewRequest(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	}
-	got, err := db.DecideReviewRequest(ctx, a.dbPool, id, req.SessionID, state, note, caller.Account)
+	var got db.ReviewRequest
+	if state == db.ReviewDismissed {
+		got, err = db.DismissReviewRequest(ctx, a.dbPool, id, req.SessionID, caller.Account)
+	} else {
+		got, err = db.DecideReviewRequest(ctx, a.dbPool, id, req.SessionID, state, note, caller.Account)
+	}
 	switch {
 	case errors.Is(err, db.ErrReviewRequestNotFound):
 		writeError(w, http.StatusNotFound, msgReviewNotFound)
@@ -644,6 +684,11 @@ func (a *API) reviewDecisionMessage(ctx context.Context, r db.ReviewRequest) str
 			head, r.SupersededBy, r.ArtifactName)
 	case db.ReviewWithdrawn:
 		return head + "WITHDRAWN"
+	case db.ReviewDismissed:
+		// Not a decision: the person closed it from Needs you, maybe after answering in the chat.
+		return head + "DISMISSED. The person dismissed the review request for " + quotedName(r.ArtifactName) +
+			"; they may have answered in the chat instead. This is neither an approval nor a request for changes; " +
+			"request a review again if you still need one: blerg-runner review request " + quotedName(r.ArtifactName) + " --ask \"...\""
 	default:
 		return head + "PENDING"
 	}
@@ -666,9 +711,15 @@ type reviewFileJSON struct {
 		ArtifactID string `json:"artifactId"`
 	} `json:"file"`
 	Requests []struct {
-		ID     string `json:"id"`
-		Text   string `json:"text"`
-		Status string `json:"status"`
+		ID           string            `json:"id"`
+		Text         string            `json:"text"`
+		Status       string            `json:"status"`
+		Revision     json.RawMessage   `json:"revision"`
+		AgentReopens []json.RawMessage `json:"agentReopens"`
+		Comments     []struct {
+			Text   string `json:"text"`
+			Action string `json:"action"`
+		} `json:"comments"`
 		Anchor struct {
 			Kind             string `json:"kind"`
 			SourceArtifactID string `json:"sourceArtifactId"`
@@ -715,10 +766,25 @@ func (a *API) reviewComments(ctx context.Context, r db.ReviewRequest) []string {
 	if json.Unmarshal(raw, &review) != nil {
 		return nil
 	}
+	reopens := a.agentReopens(rows, r)
 	var out []string
 	for _, q := range review.Requests {
+		reopenedBecause := ""
 		if q.Status != "" && q.Status != "open" {
-			continue
+			// The agent may have reopened a settled thread since the person's upload.
+			agentThread, ok := reopens[q.ID]
+			if !ok {
+				continue
+			}
+			personRev, valid := threadRevision(q.Revision)
+			if !valid {
+				continue
+			}
+			why, applies := reopenApplies(q.Status, personRev, agentThread.status, agentThread.revision, agentThread.reopens)
+			if !applies {
+				continue
+			}
+			reopenedBecause = why
 		}
 		source := review.File.ArtifactID
 		if q.Anchor.SourceArtifactID != "" {
@@ -750,6 +816,23 @@ func (a *API) reviewComments(ctx context.Context, r db.ReviewRequest) []string {
 		if where != "" {
 			line = where + ": " + line
 		}
+		if reopenedBecause != "" {
+			line += " (agent reopened: " + clipRunes(relayedWords(reopenedBecause), maxReviewCommentLen) + ")"
+		}
+		// The person's newest words on the thread (a reply, a reopen's reason, a resolve's or
+		// reject's note) ride along, labeled by what they did; an action we do not know is skipped.
+		for i := len(q.Comments) - 1; i >= 0 && reopenedBecause == ""; i-- {
+			verb, known := personCommentVerbs[q.Comments[i].Action]
+			if !known {
+				continue
+			}
+			words := clipRunes(relayedWords(q.Comments[i].Text), maxReviewCommentLen)
+			if words == "" {
+				continue
+			}
+			line += " (person " + verb + ": " + words + ")"
+			break
+		}
 		if id := cleanReviewText(q.ID, false); id != "" {
 			line = "[" + clipRunes(id, 16) + "] " + line
 		}
@@ -761,8 +844,136 @@ func (a *API) reviewComments(ctx context.Context, r db.ReviewRequest) []string {
 	return out
 }
 
+// ── the agent-reopen rule, shared with the browser (TypeScript) and blerg-runner (Python) ──
+// One definition in three languages, tested against the same vectors
+// (packages/chat/src/model/testdata/agent-reopen-vectors.json): change all three together.
+
+// agentReopenMax is the most characters (code points) an agent's reopen reason may have.
+const agentReopenMax = 2000
+
+// revisionMax is the highest revision a thread can have.
+const revisionMax = 1_000_000
+
+// validReopenText: at most agentReopenMax code points, with something left after removing control
+// (Cc), format (Cf), unassigned (Cn) and separator/space (Z) characters: some letter, mark,
+// number, punctuation, symbol or private-use character. Cn counts as invisible so a writer on
+// older Unicode tables is never more lenient than a reader on newer ones.
+func validReopenText(s string) bool {
+	if !utf8.ValidString(s) || utf8.RuneCountInString(s) > agentReopenMax {
+		return false
+	}
+	for _, r := range s {
+		if unicode.In(r, unicode.L, unicode.M, unicode.N, unicode.P, unicode.S, unicode.Co) {
+			return true
+		}
+	}
+	return false
+}
+
+// validRevision: a JSON number with an integral value from 1 to revisionMax (3.0 is 3; 3.5, "3",
+// true and null are not revisions).
+func validRevision(raw json.RawMessage) (int, bool) {
+	var f float64
+	if len(raw) == 0 || string(raw) == "null" || json.Unmarshal(raw, &f) != nil || f != math.Trunc(f) || f < 1 || f > revisionMax {
+		return 0, false
+	}
+	return int(f), true
+}
+
+// threadRevision is a thread's own revision: absent is 0, otherwise a valid revision.
+func threadRevision(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, true
+	}
+	var f float64
+	if json.Unmarshal(raw, &f) != nil || f != math.Trunc(f) || f < 0 || f > revisionMax {
+		return 0, false
+	}
+	return int(f), true
+}
+
+// reopenApplies says whether the agent's copy of a thread reopens the person's: the person's is
+// resolved or rejected, the agent's is open exactly one revision above it, with a valid reopen
+// record at that revision. It returns that record's reason.
+func reopenApplies(personStatus string, personRev int, agentStatus string, agentRev json.RawMessage, reopens []json.RawMessage) (string, bool) {
+	next := personRev + 1
+	if (personStatus != "done" && personStatus != "declined") || agentStatus != "open" || next > revisionMax {
+		return "", false
+	}
+	if rev, ok := validRevision(agentRev); !ok || rev != next {
+		return "", false
+	}
+	for _, raw := range reopens {
+		var x struct {
+			Text      *string         `json:"text"`
+			CreatedAt *string         `json:"createdAt"`
+			Revision  json.RawMessage `json:"revision"`
+		}
+		if json.Unmarshal(raw, &x) != nil || x.Text == nil || x.CreatedAt == nil || !validReopenText(*x.Text) {
+			continue
+		}
+		if rev, ok := validRevision(x.Revision); ok && rev == next {
+			return *x.Text, true
+		}
+	}
+	return "", false
+}
+
+type agentThread struct {
+	status   string
+	revision json.RawMessage
+	reopens  []json.RawMessage
+}
+
+// agentReopens reads the session's newest copy of the review it published (blerg-runner review
+// reply), by thread id: its status, revision and reopen records, for reopenApplies. Only reopens
+// are taken from it: the agent's copy never settles or speaks for the person here.
+func (a *API) agentReopens(rows []db.ArtifactRow, r db.ReviewRequest) map[string]agentThread {
+	var newest *db.ArtifactRow
+	for i := range rows {
+		row := &rows[i]
+		if originOf(row.Origin) == db.OriginAgent && row.Name == r.ArtifactName+".review.json" &&
+			(newest == nil || row.Version > newest.Version) {
+			newest = row
+		}
+	}
+	if newest == nil || newest.Size > maxReviewFileBytes {
+		return nil
+	}
+	raw, err := os.ReadFile(artifactPath(r.SessionID, *newest))
+	if err != nil {
+		return nil
+	}
+	var agentCopy reviewFileJSON
+	if json.Unmarshal(raw, &agentCopy) != nil {
+		return nil
+	}
+	out := map[string]agentThread{}
+	for _, q := range agentCopy.Requests {
+		out[q.ID] = agentThread{status: q.Status, revision: q.Revision, reopens: q.AgentReopens}
+	}
+	return out
+}
+
+// personCommentVerbs labels a person's comment on a review thread by its action (none: an older
+// browser's reopen reason).
+var personCommentVerbs = map[string]string{"": "reopened", "reopen": "reopened", "reply": "replied", "resolve": "resolved", "reject": "rejected"}
+
+// relayedWords is someone's text relayed to an agent on one line: control characters and every
+// invisible format character (Unicode Cf: bidi controls, zero-width) dropped, whitespace collapsed.
+func relayedWords(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, cleanReviewText(s, false))
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // quotedName is a name someone else chose (a board's, a card's title) as a note Blerg relays to an
-// agent quotes it: control characters and line breaks dropped, runs of spaces collapsed, at most 80
+// agent quotes it: control characters, line breaks and every invisible format character (Unicode Cf)
+// dropped, runs of spaces collapsed, at most 80
 // runes, inside double quotes (a double quote inside becomes a single one). It reads as a name, never
 // as more of Blerg's own text.
 func quotedName(s string) string {
@@ -772,6 +983,8 @@ func quotedName(s string) string {
 		switch {
 		case r == '\u2028' || r == '\u2029' || unicode.IsControl(r) || unicode.IsSpace(r):
 			space = b.Len() > 0
+			continue
+		case unicode.Is(unicode.Cf, r): // invisible: bidi, zero-width, tag characters, …
 			continue
 		case r == '"':
 			r = '\''

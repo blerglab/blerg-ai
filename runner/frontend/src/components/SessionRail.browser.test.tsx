@@ -83,9 +83,9 @@ describe('the session panel on a phone (390 px)', () => {
     const toggle = screen.getByTestId('rail-toggle')
     // 1 open ask + 1 tool change need you; 2 subagents (A1 at work in a running turn, A2 in the
     // background, its task counted once) + 5 background tasks (3 the page holds, 2 that started
-    // before them) run: 9, all from the server's live state.
-    await waitFor(() => expect(screen.getByTestId('rail-badge').textContent).toBe('9'))
-    expect(screen.getByTestId('rail-announce').textContent).toBe('Session panel: 2 need you, 7 running')
+    // before them) run, from the server's live state, and the main agent at work in that turn: 10.
+    await waitFor(() => expect(screen.getByTestId('rail-badge').textContent).toBe('10'))
+    expect(screen.getByTestId('rail-announce').textContent).toBe('Session panel: 2 need you, 8 running')
     const r = toggle.getBoundingClientRect()
     expect(r.left).toBeGreaterThanOrEqual(0)
     expect(r.right).toBeLessThanOrEqual(PHONE.width)
@@ -132,7 +132,7 @@ describe('the session panel on a phone (390 px)', () => {
     await waitFor(() => expect(screen.queryByTestId('session-rail')).toBeNull())
   })
 
-  it('shows History in the drawer: cards as wide as the list, version chips wrapping inside them', async () => {
+  it('shows History in the drawer: cards as wide as the list, the opened topics\' chips wrapping inside them', async () => {
     localStorage.setItem(RAIL_TAB_KEY, 'history')
     renderPage()
     await userEvent.click(screen.getByTestId('rail-toggle'))
@@ -143,7 +143,9 @@ describe('the session panel on a phone (390 px)', () => {
     const pad = getComputedStyle(list)
     const inner = list.getBoundingClientRect().width - parseFloat(pad.paddingLeft) - parseFloat(pad.paddingRight)
     for (const card of screen.getAllByTestId('reel-card')) expect(Math.round(card.getBoundingClientRect().width)).toBe(Math.round(inner))
-    for (const chip of screen.getAllByTestId('reel-chip')) {
+    const chips = drawer.querySelectorAll('.reel-summary .reel-chip')
+    expect(chips.length).toBeGreaterThan(0)
+    for (const chip of chips) {
       const c = chip.getBoundingClientRect()
       expect(c.right).toBeLessThanOrEqual(drawer.getBoundingClientRect().right)
     }

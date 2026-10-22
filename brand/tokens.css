@@ -25,12 +25,15 @@
   --fog-dim: #8b97a7;    /* muted text */
   --chalk: #f2f6fa;      /* primary text */
 
-  --blaze: #ff6a3d;      /* primary accent — actions, active/attention, focus ring */
+  --blaze: #ff6a3d;      /* primary accent — brand, primary actions, attention, focus ring; not "selected" */
   --blaze-soft: #ff6a3d33;
   --lichen: #63d68b;     /* healthy / success / passing */
   --amber: #e8b13d;      /* pending / waiting */
   --danger: #ff6b63;     /* failing / error / down */
   --batch: #4c9bff;      /* GPU batch work */
+  --selected-border: #4c9bff;  /* on / open / pressed / selected: borders, outline icons */
+  --selected-bg: #4c9bff29;  /* its soft fill */
+  --selected-text: #6aadff;  /* its text and glyphs (4.5:1 on its fill) */
 
   /* diff inks */
   --diff-add: #8ed6a6;
@@ -75,6 +78,9 @@
     --amber: #b7791f;
     --danger: #d24747;
     --batch: #2f6fd6;
+    --selected-border: #2f6fd6;
+    --selected-bg: #2f6fd61f;
+    --selected-text: #2559b0;
     --diff-add: #2f8a52;
     --diff-del: #cf4b4b;
   }
@@ -95,6 +101,9 @@
   --amber: #b7791f;
   --danger: #d24747;
   --batch: #2f6fd6;
+  --selected-border: #2f6fd6;
+  --selected-bg: #2f6fd61f;
+  --selected-text: #2559b0;
   --diff-add: #2f8a52;
   --diff-del: #cf4b4b;
 }
@@ -113,6 +122,9 @@
   --amber: #e8b13d;
   --danger: #ff6b63;
   --batch: #4c9bff;
+  --selected-border: #4c9bff;
+  --selected-bg: #4c9bff29;
+  --selected-text: #6aadff;
   --diff-add: #8ed6a6;
   --diff-del: #ff9d94;
 }

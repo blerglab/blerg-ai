@@ -3,6 +3,8 @@ package main
 import (
 	"compress/gzip"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/health"
 	"github.com/blerglab/blerg-ai/contracts/secrets"
 	"github.com/blerglab/blerg-ai/contracts/updatenotice"
 	"github.com/blerglab/blerg-ai/runner/internal/coreauth"
@@ -154,27 +157,55 @@ func envOrDefault(key, def string) string {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	if err := validateSecrets(); err != nil {
-		log.Fatalf("%v", err)
+		return err
 	}
 	cfg := loadConfig()
 
 	ctx := context.Background()
+	srv, err := health.Listen(ctx, ":"+cfg.Port)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	defer func() { _ = srv.Close() }()
 
 	// Connect to Postgres (optional — server degrades gracefully without it).
 	var dbPool *pgxpool.Pool
 	if cfg.DatabaseURL != "" {
 		var err error
-		dbPool, err = pgxpool.New(ctx, cfg.DatabaseURL)
+		dbPool, err = openDatabase(ctx, cfg.DatabaseURL, &srv.Gate)
 		if err != nil {
-			log.Fatalf("connect to database: %v", err)
+			return fmt.Errorf("connect to database: %w", err)
 		}
 		defer dbPool.Close()
 
-		if err := db.RunMigrations(ctx, dbPool); err != nil {
-			log.Fatalf("run migrations: %v", err) //nolint:gocritic // exitAfterDefer: the process is exiting, the pool goes with it
-		}
 		log.Println("database connected and migrations applied")
+		// Read-only indexes are built without holding writes (db/concurrent_indexes.go), after the
+		// server is up; until one exists its read still works.
+		go func() {
+			// Another runner may hold the build lock, or the build may fail: try again a minute later
+			// until it is done (or the server stops).
+			for {
+				err := db.EnsureConcurrentIndexes(ctx, dbPool)
+				if err == nil {
+					return
+				}
+				if !errors.Is(err, db.ErrConcurrentIndexesBusy) {
+					log.Printf("concurrent indexes: %v (retrying in a minute)", err)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Minute):
+				}
+			}
+		}()
 	} else {
 		log.Println("BLERG_RUNNER_DATABASE_URL not set — running without database")
 	}
@@ -264,6 +295,7 @@ func main() {
 
 	// Health check endpoint.
 	mux.HandleFunc("GET /healthz", healthzHandler())
+	mux.HandleFunc("GET /readyz", health.Handler(readinessCheck(dbPool)))
 
 	// WebSocket endpoints.
 	mux.HandleFunc("/ws/daemon", hub.ServeDaemon(cfg.DaemonToken, dbPool))
@@ -293,8 +325,10 @@ func main() {
 	mux.HandleFunc("PUT /api/sessions/{id}/limit-resume", api.HandleLimitResume)
 	mux.HandleFunc("PATCH /api/sessions/{id}", api.HandlePatchSession)
 	mux.HandleFunc("GET /api/repos", api.HandleGetRepos)
+	mux.HandleFunc("GET /api/board-repo-choices", api.HandleBoardRepoChoices)
 	mux.HandleFunc("GET /api/push/vapid-public-key", api.HandleGetVapidPublicKey)
 	mux.HandleFunc("POST /api/push/subscribe", api.HandlePostPushSubscribe)
+	mux.HandleFunc("DELETE /api/push/subscribe", api.HandleDeletePushSubscribe)
 	mux.HandleFunc("GET /api/sessions/{id}/agent-events", api.HandleGetAgentEvents)
 	mux.HandleFunc("GET /api/sessions/{id}/capabilities", api.HandleGetCapabilities)
 	mux.HandleFunc("GET /api/sessions/{id}/insights", api.HandleGetSessionInsights)
@@ -360,6 +394,7 @@ func main() {
 	mux.HandleFunc("GET /api/messages/{id}/answer", api.HandleGetMessageAnswer)
 	mux.HandleFunc("POST /api/messages/{id}/reply", api.HandlePostMessageReply)
 	mux.HandleFunc("POST /api/messages/{id}/expire", api.HandlePostMessageExpire)
+	mux.HandleFunc("POST /api/messages/{id}/dismiss", api.HandlePostMessageDismiss)
 	mux.HandleFunc("GET /api/boards", api.HandleGetBoards)
 	mux.HandleFunc("POST /api/boards", api.HandlePostBoards)
 	mux.HandleFunc("DELETE /api/boards/{id}", api.HandleDeleteBoard)
@@ -383,19 +418,16 @@ func main() {
 	// Serve frontend static files (must be last for catch-all behavior).
 	mux.Handle("/", gzipHandler(spaHandler("./frontend/dist")))
 
-	addr := ":" + cfg.Port
-	log.Printf("blerg-runner-server listening on %s", addr)
-	// No overall read/write timeout: the mux serves long-lived WebSocket and
-	// streaming responses. Header and idle timeouts bound slow-loris clients.
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("server: %v", err)
-	}
+	srv.SetHandler(mux)
+	log.Printf("blerg-runner-server listening on %s", ":"+cfg.Port)
+	// Deliberately no SIGTERM handling, drain or graceful shutdown (unlike core and the board):
+	// the runner keeps its routing in memory (daemon, session and browser sockets, ask and
+	// delegation waiters), so during a rolling update the old pod must exit at once. Its sockets
+	// drop, everything reconnects to the one pod left, and its disconnect cleanup never runs
+	// after the new pod has recorded the reconnects. A drain would keep two pods each holding
+	// half the connections. Move routing state out of process before adding one
+	// (install/k8s/runner-deployment.yaml).
+	return srv.Wait()
 }
 
 // healthzHandler answers 200 "ok", and — when BLERG_CORE_PUBLIC_URL is set — allows core's

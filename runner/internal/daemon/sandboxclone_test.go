@@ -305,6 +305,7 @@ func sandboxEscapeProbesInDocker(t *testing.T, idPrefix string) {
 	if os.Getenv("BLERG_SANDBOX_CHILD_TEST") != "1" {
 		t.Skip("set BLERG_SANDBOX_CHILD_TEST=1 with a built sandbox image")
 	}
+	labelTestContainers(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(DaemonStateDirEnv, t.TempDir())
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -330,7 +331,7 @@ func sandboxEscapeProbesInDocker(t *testing.T, idPrefix string) {
 	if err != nil {
 		t.Fatalf("sandbox: %v", err)
 	}
-	t.Cleanup(func() { removeSandboxContainer(id) })
+	t.Cleanup(func() { releaseTestSandbox(id) })
 	git := filepath.Join(repo, ".git")
 	evil := filepath.Join(clone, "evil.sh")
 	script := `set -u

@@ -235,8 +235,8 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
       each(h => h.onReplayDone(full))
     },
     /** The server says an ask was answered or closed (message_answered). */
-    closeAsk(messageId: string, answer = '') {
-      each(h => h.onAskClosed?.(messageId, answer))
+    closeAsk(messageId: string, answer = '', dismissed = false, dismissedBy?: 'you' | 'other') {
+      each(h => h.onAskClosed?.(messageId, answer, dismissed, dismissedBy))
     },
     /** The transport found the gap too long to replay: the held transcript is dropped. */
     reset() {

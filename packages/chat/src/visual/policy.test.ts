@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { parseVegaLite, sanitizeSvg, validateMermaid } from './policy'
+import { normalizeMermaid, parseVegaLite, sanitizeSvg, validateMermaid } from './policy'
+import { CLASSDEF_AND_CLASS, IMAGE_WORD_LABEL, serviceGraph } from './mermaidSamples'
 
 describe('visual policy', () => {
   it('accepts a bounded diagram and inline bar/line/scatter/heatmap charts', () => {
@@ -44,5 +45,97 @@ describe('visual policy', () => {
       '<path fill="url(https://example.invalid)"/>']) {
       expect(() => sanitizeSvg(`<svg xmlns="http://www.w3.org/2000/svg">${body}</svg>`)).toThrow()
     }
+  })
+})
+
+// Board card #84: real diagrams were refused for words in their labels and for color styling.
+describe('Mermaid policy on real diagrams', () => {
+  it('accepts a label that contains the word "image"', () => {
+    expect(() => validateMermaid(IMAGE_WORD_LABEL)).not.toThrow()
+    expect(() => validateMermaid('flowchart LR\n  a[icon set] --> b[img tag docs] --> c[Style guide] --> d[click here]')).not.toThrow()
+  })
+  it('accepts classDef plus class, style and linkStyle with safe properties', () => {
+    expect(() => validateMermaid(CLASSDEF_AND_CLASS)).not.toThrow()
+    expect(() => validateMermaid('flowchart LR\n  A:::hot --> B\n  classDef hot fill:#f96;\n  style B fill:#bbf,stroke:#f66,stroke-width:2px,color:#fff,stroke-dasharray: 5 5\n  linkStyle default interpolate basis stroke:#333,opacity:0.5')).not.toThrow()
+  })
+  it('accepts a forty-node service graph with several classDefs and a title', () => {
+    const graph = serviceGraph()
+    expect((graph.match(/\[/g) ?? []).length).toBeGreaterThanOrEqual(40)
+    expect(() => validateMermaid(graph)).not.toThrow()
+  })
+  it('accepts class annotations and line breaks, which are not HTML', () => {
+    expect(() => validateMermaid('classDiagram\n  class Shape\n  <<interface>> Shape\n  Shape <|-- Circle')).not.toThrow()
+    expect(() => validateMermaid('flowchart LR\n  A[one<br/>two] --> B[three<br>four]')).not.toThrow()
+  })
+  it.each([
+    ['flowchart LR\n  A --> B\n  classDef x fill:url(#a)', 'line 3: url() not allowed'],
+    ['flowchart LR\n  A --> B\n  style A background:red', 'line 3: the style property "background" not allowed'],
+    ['flowchart LR\n  A --> B\n  classDef x fill:red !important', 'line 3: the fill value "red !important" not allowed'],
+    ['flowchart LR\n  A --> B\n  classDef x fill:u\\72l(x)', 'line 3: the fill value "u\\72l(x)" not allowed'],
+    ['flowchart LR\n  A --> B\n  A-->C; style C fill:var(--x)', 'line 3: the fill value "var(--x)" not allowed'],
+    ['flowchart LR\n  A@{ img: "/x.png" } --> B', 'line 2: the @{…} key "img" not allowed'],
+    ['flowchart LR\n  A --> B\n  B --> C["<img src=x>"]', 'line 3: HTML not allowed'],
+    ['flowchart LR\n  A --> B\n  click A callback', 'line 3: a click action not allowed'],
+    ['flowchart LR\n  A --> B["see https://example.invalid"]', 'line 2: a URL not allowed'],
+    ['%%{init: {"theme":"dark"}}%%\nflowchart LR\n  A --> B', 'line 1: a configuration directive (%%{…}%%) not allowed'],
+    ['---\ntitle: ok\nconfig:\n  theme: dark\n---\nflowchart LR\n  A --> B', 'line 3: front matter other than a title ("config") not allowed'],
+    // An indented --- does not close front matter for Mermaid, so the config after it is still front matter.
+    ['---\ntitle: x\n  ---\nconfig:\n  securityLevel: loose\n---\nflowchart LR\n  A --> B', 'line 3: front matter other than a title ("---") not allowed'],
+    ['flowchart LR\n  A --> B; click A callback', 'line 2: a click action not allowed'],
+    ['flowchart LR\n  A --> B\n  classDef a{}*{fill:red} fill:red', 'line 3: this classDef not allowed'],
+    ['mindmap\n  root\n    A::icon(fa fa-book)', 'line 3: an icon not allowed'],
+  ])('refuses %j with a reason that names the line', (source, reason) => {
+    expect(() => validateMermaid(source)).toThrow(reason)
+  })
+  it('ignores comment lines, and says why an empty or oversized diagram is refused', () => {
+    expect(() => validateMermaid('flowchart LR\n  %% docs: https://example.invalid\n  A --> B')).not.toThrow()
+    expect(() => validateMermaid('  \n')).toThrow('the diagram is empty')
+    expect(() => validateMermaid('flowchart LR\n' + 'x'.repeat(20_000))).toThrow(/too large/)
+  })
+})
+
+// Fix round 1 (review of card #84): the reviewer's payloads. Each one reached the network or a
+// live element in the page before; each is refused now, with its line.
+describe('Mermaid policy: review payloads', () => {
+  it.each([
+    // C1: shape blocks
+    ['flowchart LR\n  A@{ "img": "//example.invalid/x.png", h: 60, w: 60 }', /line 2: /],
+    ['flowchart LR\n  A@{ label: "}", img: "/x.png" }', /line 2: /],
+    ['flowchart LR\n  A@{ "\\x69mg": "/x.png" }', /line 2: /],
+    ['flowchart LR\n  A@{ icon: "fa:user", label: "x" }', 'line 2: the @{…} key "icon" not allowed'],
+    ['flowchart LR\n  A@{ shape: rect, label: "a\\u0069" }', /line 2: this @\{…\} block/],
+    ['flowchart LR\n  A@{ shape: rect', 'line 2: an unclosed @{…} block not allowed'],
+    ['flowchart LR\n  A["see //example.invalid/x"]', 'line 2: a //host address not allowed'],
+    // C2: a carriage return ends a comment for Mermaid
+    ['flowchart LR\n  %% c\rclick A href "javascript:alert(1)"', 'line 3: a click action not allowed'],
+    ['flowchart LR\n  %% c\rA["<img src=x onerror=alert(1)>"]', 'line 3: HTML not allowed'],
+    ['flowchart LR\n  %% c\rA@{ img: "/x.png" }', 'line 3: the @{…} key "img" not allowed'],
+    ['stateDiagram-v2\n  [*] --> A\n  %% c\rclassDef bad fill:red;mask-image:url(/x.png)', 'line 4: url() not allowed'],
+    ['classDiagram\n  class A\n  %% c\u2028style A fill:red,mask-image:url(/x.png)', 'line 4: url() not allowed'],
+    ['block-beta\n  a\n  %% c\u0085style a fill:red,mask-image:url(/x.png)', 'line 4: url() not allowed'],
+    // I1: every declaration, split on , and ;
+    ['stateDiagram-v2\n  [*] --> A\n  classDef bad fill:red;font-size:900px;position:fixed\n  class A bad', 'line 3: the style property "font-size" not allowed'],
+    ['classDiagram\n  class A\n  style A fill:red;stroke-width:2px,position:fixed', 'line 3: the style property "position" not allowed'],
+    ['block-beta\n  a\n  classDef c fill:#fff ; color:red ; mask:x\n  class a c', 'line 3: the style property "mask" not allowed'],
+    // I2: Unicode spaces before keywords
+    ['flowchart LR\n  A --> B\n\u00a0click A href "/x"', 'line 3: a click action not allowed'],
+    ['flowchart LR\n  A --> B\n\u3000\u200bclick A call f()', 'line 3: a click action not allowed'],
+    ['sequenceDiagram\n  A->>B: hi\n\u2003link A: x @ /y', 'line 3: a link not allowed'],
+    ['flowchart LR\n  A --> B;\u00a0click A href "/x"', 'line 2: a click action not allowed'],
+  ] as Array<[string, string | RegExp]>)('refuses %j', (source, reason) => {
+    expect(() => validateMermaid(source)).toThrow(reason)
+  })
+
+  it('accepts shape blocks with literal values for the plain keys', () => {
+    expect(validateMermaid('flowchart LR\n  A@{ shape: rounded, label: "Gateway: /api/orders" } --> B@{ shape: cyl, w: 60, h: 40 }\n  A e1@--> B\n  e1@{ animate: true }'))
+      .toContain('shape: rounded')
+  })
+
+  it('validates and returns exactly what Mermaid will read: CRLF, quoted title, Unicode spaces', () => {
+    const crlf = '---\r\ntitle: "Services"\r\n---\r\nflowchart LR\r\n  A[a\u00a0b] --> B\r\n'
+    const drawn = validateMermaid(crlf)
+    expect(drawn).toBe('---\ntitle: "Services"\n---\nflowchart LR\n  A[a b] --> B\n')
+    expect(drawn).toBe(normalizeMermaid(crlf))
+    expect(drawn).not.toMatch(/[\r\u00a0\u2028]/)
   })
 })

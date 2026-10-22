@@ -418,6 +418,17 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 		}
 		shown = sessionEndFor(ctx, pool, msg.SessionID, finalStatus)
 		hub.SessionTerminallyEnded(msg.SessionID)
+		if msg.ExitCode != 0 && msg.Message != "" {
+			// Why it failed (its engine runtime stopped): the reason the session page, the
+			// sidebar and `session watch` show.
+			if err := db.SetSessionError(ctx, pool, msg.SessionID, msg.Message); err != nil {
+				log.Printf("SetSessionError session_ended %s: %v", msg.SessionID, err)
+			}
+		}
+		if shown.Reason == db.EndReasonProcessFailed {
+			// It failed by itself (no stop was asked for): its parent is told.
+			hub.ChildTurnEnded(msg.SessionID, childSessionFailed, msg.Message)
+		}
 
 		data, _ := json.Marshal(map[string]any{
 			"status":    finalStatus,
@@ -439,6 +450,7 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 			SessionID: msg.SessionID,
 			ExitCode:  msg.ExitCode,
 			Signal:    msg.Signal,
+			Message:   msg.Message,
 			EndReason: endReason,
 			EndedBy:   endedBy,
 		}

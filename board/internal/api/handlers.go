@@ -238,6 +238,12 @@ func (a *API) handleUpdateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 				return
 			}
 		}
+		if target.Runtime == "cluster" {
+			if err := a.clusterReposProblem(r.Context(), board, board.Repos); err != nil {
+				writeStartError(w, err)
+				return
+			}
+		}
 		account := ""
 		if target != (runTarget{}) {
 			account = p.HumanAccountID()

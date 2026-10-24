@@ -93,6 +93,14 @@ class NativeGateTests(unittest.TestCase):
                     self.validate()
                 self.events.pop()
 
+    def test_linux_quota_guest_does_not_gain_a_native_docker_skip_waiver(self):
+        self.meta['docker_present'] = False
+        self.events.append(dict(Action='skip', Test='TestWorkspaceQuotaGuest', Package=self.docker['Package']))
+        with self.assertRaisesRegex(SystemExit, 'unlisted skip: .*TestWorkspaceQuotaGuest'):
+            self.validate()
+        self.assertFalse(self.meta['accepted'])
+        self.assertFalse(self.meta['native_host_accepted'])
+
     def test_docker_case_cannot_disappear_or_fail_even_when_absent(self):
         for present in (False, True):
             for action in ('missing', 'fail'):

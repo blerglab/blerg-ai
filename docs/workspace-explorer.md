@@ -206,6 +206,17 @@ Docker present fails the gate. Missing Docker presence or test evidence also
 fails. The checker updates metadata on both success and failure so an old
 acceptance cannot survive revalidation.
 
+`TestWorkspaceQuotaGuest` and its Docker launcher,
+`TestP2DockerPersistentHostFilesystemQuota`, are Linux-tagged tests. The guest
+executes the Linux-only quota backend with privileged ext4 loop mounts and
+kernel mount/device identity checks through `/proc` and `/sys`. Its launcher
+mounts the current Linux test executable into the privileged guest. These tests
+belong to the Linux guest acceptance campaign; they are not native macOS host
+cases, even when Docker Desktop is installed. On Linux, run the launcher with
+`BLERG_P2_DOCKER_TEST=1` and a prepared production sandbox image. It sets
+`BLERG_P2_QUOTA_GUEST=1` only inside the disposable guest. The macOS Docker
+pending allow-list remains limited to the production explorer image test.
+
 After the integration branch is available to GitHub, run:
 
 ```sh

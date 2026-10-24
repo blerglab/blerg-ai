@@ -152,7 +152,8 @@ without Linux descriptor paths. The former unconditional refusal and status-test
 skips are removed. Native macOS functionality, memory enforcement and traversal
 containment remain release gates: neither cross-compilation nor the shell
 accepting a limit proves them. The workflow below requires actual native passes
-without skips. Independent adversarial security review also remains required.
+without non-Docker skips. The exact Docker-pending exception below is not full
+platform acceptance. Independent adversarial security review remains required.
 Linux mount tests run in a private user/mount namespace so bind/tmpfs boundaries
 are actually exercised.
 
@@ -188,6 +189,23 @@ Git test
 requires bounded Git to start and rejects an unbounded reader before its timeout.
 A shell accepting `ulimit` alone is not acceptance evidence.
 
+The harness records `docker_present` from the isolated test environment's PATH.
+When Docker is present, it sets `BLERG_EXPLORER_DOCKER_TEST=1`; the production
+sandbox image test must run and pass. An installed but unavailable Docker daemon
+or missing production image is a failure, not an absence waiver.
+
+When Docker is absent (as on GitHub's hosted macOS runners), the only permitted
+skip is the exact daemon test `TestWorkspaceExplorerProductionDockerImage`:
+**pending: requires Docker Desktop on macOS and the locally built production
+sandbox image**. The checker records each pending case's package, test, reason
+and `accepted: false` in metadata and prints it as **NOT accepted**. All other
+tests must pass, and all three packages must complete. A passing host gate sets
+`native_host_accepted: true`; overall `accepted` remains false until every Docker
+case also passes. Any unlisted skip, listed subtest skip, or listed skip with
+Docker present fails the gate. Missing Docker presence or test evidence also
+fails. The checker updates metadata on both success and failure so an old
+acceptance cannot survive revalidation.
+
 After the integration branch is available to GitHub, run:
 
 ```sh
@@ -195,7 +213,7 @@ gh workflow run workspace-explorer.yml --ref feat/workspace-p4-050
 gh run list --workflow workspace-explorer.yml --branch feat/workspace-p4-050
 gh run watch <run-id> --exit-status
 gh run download <run-id> --name workspace-security-macOS
-python3 scripts/check-workspace-macos-gate.py workspace-daemon.json workspace-hostgit.json
+python3 scripts/check-workspace-macos-gate.py --metadata <evidence>/metadata.json --commit <tested-commit> <evidence>/workspace-daemon.json <evidence>/workspace-hostgit.json <evidence>/workspace-policy.json
 ```
 
 The equivalent native commands, from `runner`, are:

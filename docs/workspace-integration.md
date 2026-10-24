@@ -7,6 +7,24 @@ components do not establish release acceptance by themselves. The daemon's
 false, with no environment override. Old peers keep scalar single-repository
 behavior and refuse multi-repository and shell operations.
 
+## macOS host support in 0.5.0
+
+Workspace sessions that run directly on a macOS host, including host folder
+sessions and their owner shells, are unsupported in 0.5.0. The macOS daemon
+advertises no local workspace v2 or host-shell capability. Host workspace launch
+refuses with “workspace sessions are not supported on macOS hosts yet” before
+pinning a selection, writing lifecycle state, allocating runtime authority or
+starting an agent. Native descendant containment and crash-recovery identity
+support are required before these sessions can be enabled. Linux host behavior
+is unchanged.
+
+The macOS explorer's secure traversal and Git status implementations remain
+available to authorized readers and native acceptance tests. They do not prove
+agent or shell containment. Sandbox sessions on a Mac continue to use their
+Linux runtime; this host admission restriction does not change sandbox startup
+or its in-container explorer. The existing release and capability gates still
+apply, including the conservative whole-stack workspace v2 capability check.
+
 ## Desktop control and completion
 
 The daemon constructs `LocalWorkspaceService` with the real P1 selection service

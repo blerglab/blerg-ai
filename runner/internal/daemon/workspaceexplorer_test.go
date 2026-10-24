@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -29,7 +30,7 @@ func explorerFixture(t *testing.T) (*LocalExplorer, string, protocol.WorkspaceEx
 		t.Fatal(err)
 	}
 	e.statusDiagnostic = func(stage string, err error, stderr string) {
-		t.Logf("workspace status unavailable: stage=%q err=%v stderr=%q", stage, err, stderr)
+		t.Logf("workspace explorer unavailable: stage=%q err=%v stderr=%q", stage, err, stderr)
 	}
 	t.Cleanup(func() { _ = e.Close() })
 	return e, root, protocol.WorkspaceExplorerRequest{SessionID: "session", RequestID: "request", Operation: "list", WorkspaceRuntimeRef: protocol.WorkspaceRuntimeRef{LaunchGeneration: "launch", Generation: 1}}
@@ -462,6 +463,26 @@ func TestWorkspaceExplorerMemberDescriptorSurvivesNamespaceSwap(t *testing.T) {
 
 func TestWorkspaceExplorerLongDirectoryCursorStaysBounded(t *testing.T) {
 	e, _, req := explorerFixture(t)
+	relative := workspaceLongDirectoryFixture(t, e)
+	req.Path = relative
+	started := time.Now()
+	first := e.Explore(context.Background(), req)
+	if !first.OK || len(first.Entries) == 0 || len(first.Entries) > 500 || first.Cursor == "" || len(first.Cursor) > 8192 {
+		t.Fatalf("long-path page not bounded: ok=%v error=%q entries=%d cursor=%d path=%d elapsed=%v", first.OK, first.ErrorCode, len(first.Entries), len(first.Cursor), len(relative), time.Since(started))
+	}
+	payload, err := json.Marshal(map[string]any{"result": first, "members": e.manifest.Members, "runtime": e.manifest.Runtime})
+	if err != nil || len(payload)+1 > protocol.WorkspaceExplorerReplyBytes {
+		t.Fatal("escaped response envelope exceeded reply budget")
+	}
+	req.Cursor = first.Cursor
+	second := e.Explore(context.Background(), req)
+	if !second.OK || len(second.Entries) == 0 || second.Entries[0].Name <= first.Entries[len(first.Entries)-1].Name {
+		t.Fatalf("bounded long-path cursor did not resume: ok=%v error=%q entries=%d elapsed=%v", second.OK, second.ErrorCode, len(second.Entries), time.Since(started))
+	}
+}
+
+func workspaceLongDirectoryFixture(t *testing.T, e *LocalExplorer) string {
+	t.Helper()
 	relative := ""
 	for i := 0; i < 15; i++ {
 		relative = path.Join(relative, strings.Repeat("<", 200))
@@ -480,20 +501,7 @@ func TestWorkspaceExplorerLongDirectoryCursorStaysBounded(t *testing.T) {
 		}
 		_ = file.Close()
 	}
-	req.Path = relative
-	first := e.Explore(context.Background(), req)
-	if !first.OK || len(first.Entries) == 0 || len(first.Entries) > 500 || first.Cursor == "" || len(first.Cursor) > 8192 {
-		t.Fatalf("long-path page not bounded: ok=%v cursor=%d", first.OK, len(first.Cursor))
-	}
-	payload, err := json.Marshal(map[string]any{"result": first, "members": e.manifest.Members, "runtime": e.manifest.Runtime})
-	if err != nil || len(payload)+1 > protocol.WorkspaceExplorerReplyBytes {
-		t.Fatal("escaped response envelope exceeded reply budget")
-	}
-	req.Cursor = first.Cursor
-	second := e.Explore(context.Background(), req)
-	if !second.OK || len(second.Entries) == 0 || second.Entries[0].Name <= first.Entries[len(first.Entries)-1].Name {
-		t.Fatal("bounded long-path cursor did not resume")
-	}
+	return relative
 }
 
 func TestWorkspaceStatusFileCodes(t *testing.T) {

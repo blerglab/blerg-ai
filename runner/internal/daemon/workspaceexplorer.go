@@ -192,9 +192,7 @@ func explorerFailure(req protocol.WorkspaceExplorerRequest, code string) protoco
 func (e *LocalExplorer) Explore(ctx context.Context, req protocol.WorkspaceExplorerRequest) protocol.WorkspaceExplorerResult {
 	res := explorerFailure(req, "unavailable")
 	fail := func(stage string, err error) protocol.WorkspaceExplorerResult {
-		if req.Operation == "status" {
-			e.diagnoseStatus(ctx, stage, err, "")
-		}
+		e.diagnoseStatus(ctx, stage, err, "")
 		return res
 	}
 	if req.LaunchGeneration != e.manifest.LaunchGeneration || req.Generation != e.generation || !e.valid() {
@@ -225,6 +223,7 @@ func (e *LocalExplorer) Explore(ctx context.Context, req protocol.WorkspaceExplo
 		return fail("delivery identity", os.ErrPermission)
 	}
 	if ctx.Err() != nil {
+		e.diagnoseStatus(ctx, "request deadline/cancellation", ctx.Err(), "")
 		return explorerFailure(req, "cancelled")
 	}
 	raw, err := json.Marshal(res)
@@ -269,14 +268,19 @@ func (e *LocalExplorer) readCursor(token string, want explorerCursor) (string, b
 // metadata. ReadDir's d_type and paths assembled from directory names are never
 // authority. Protected names are removed before Info/counts/serialization.
 func (e *LocalExplorer) readDirectory(ctx context.Context, name string, budget *int) ([]protocol.WorkspaceEntry, string, bool, error) {
+	return e.readDirectoryUsing(ctx, name, budget, workspaceOpenListing)
+}
+
+func (e *LocalExplorer) readDirectoryUsing(ctx context.Context, name string, budget *int, openListing func(*LocalExplorer, string) (*workspaceListing, error)) ([]protocol.WorkspaceEntry, string, bool, error) {
 	if !e.memberAvailable(name) {
 		return nil, "", false, os.ErrPermission
 	}
-	dir, err := e.openDirectory(name)
+	listing, err := openListing(e, name)
 	if err != nil {
 		return nil, "", false, err
 	}
-	defer func() { _ = dir.Close() }()
+	defer func() { _ = listing.close() }()
+	dir := listing.file
 	before, err := dir.Stat()
 	if err != nil || !before.IsDir() {
 		return nil, "", false, os.ErrPermission
@@ -284,6 +288,7 @@ func (e *LocalExplorer) readDirectory(ctx context.Context, name string, budget *
 	var entries []protocol.WorkspaceEntry
 	fingerprints := map[string]string{}
 	truncated := false
+	reportedOpenFailure := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, "", false, err
@@ -304,8 +309,12 @@ func (e *LocalExplorer) readDirectory(ctx context.Context, name string, budget *
 			if _, ok := explorerPath(child); !ok {
 				continue
 			}
-			file, err := e.openFile(child)
+			file, err := listing.openChild(ent.Name())
 			if err != nil {
+				if !reportedOpenFailure {
+					e.diagnoseStatus(ctx, "list child open", err, "")
+					reportedOpenFailure = true
+				}
 				continue
 			}
 			info, err := file.Stat()
@@ -350,6 +359,9 @@ func (e *LocalExplorer) readDirectory(ctx context.Context, name string, budget *
 			break
 		}
 	}
+	if listing.validate != nil && !listing.validate() {
+		return nil, "", false, errExplorerStale
+	}
 	after, err := dir.Stat()
 	if err != nil || !os.SameFile(before, after) || workspaceMetadataFingerprint(before) != workspaceMetadataFingerprint(after) {
 		return nil, "", false, errExplorerStale
@@ -378,6 +390,7 @@ func (e *LocalExplorer) list(ctx context.Context, req protocol.WorkspaceExplorer
 	budget := protocol.WorkspaceSearchVisited
 	rows, fingerprint, truncated, err := e.readDirectory(ctx, name, &budget)
 	if err != nil {
+		e.diagnoseStatus(ctx, "list directory", err, "")
 		if errors.Is(err, errExplorerStale) {
 			res.ErrorCode = "stale"
 		}

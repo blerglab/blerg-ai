@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -219,6 +220,15 @@ func (r *authorizedHostExplorer) Close() error {
 	return nil
 }
 func (m *Manager) prepareHostWorkspace(ctx context.Context, msg protocol.SpawnSession) (string, WorkspaceExplorer, error) {
+	return m.prepareHostWorkspaceForPlatform(ctx, msg, runtime.GOOS)
+}
+
+// Keep the platform refusal ahead of selection pinning, journaling and authority
+// allocation. The seam exercises Darwin admission on Linux without enabling it.
+func (m *Manager) prepareHostWorkspaceForPlatform(ctx context.Context, msg protocol.SpawnSession, platform string) (string, WorkspaceExplorer, error) {
+	if platform == "darwin" {
+		return "", nil, errors.New("workspace sessions are not supported on macOS hosts yet")
+	}
 	service := m.config.Workspaces
 	if service == nil || service.Authority == nil || msg.Workspace == nil || msg.Workspace.Runtime != "host" {
 		return "", nil, errors.New("host workspace authority unavailable")

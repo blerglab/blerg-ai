@@ -45,3 +45,41 @@ func TestWorkspaceStatusFailureDiagnostics(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkspaceExplorerListingFailureDiagnostics(t *testing.T) {
+	for _, reason := range []string{"missing directory", "child open", "cancelled"} {
+		t.Run(reason, func(t *testing.T) {
+			e, root, req := explorerFixture(t)
+			ctx := t.Context()
+			wantStage := "list directory"
+			switch reason {
+			case "missing directory":
+				req.Path = "missing-directory"
+			case "child open":
+				if err := os.Symlink("missing-target", filepath.Join(root, "visible-link")); err != nil {
+					t.Fatal(err)
+				}
+				wantStage = "list child open"
+			case "cancelled":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+				wantStage = "request deadline/cancellation"
+			}
+			var gotStage string
+			var gotErr error
+			e.statusDiagnostic = func(stage string, err error, _ string) {
+				gotStage, gotErr = stage, err
+				t.Logf("workspace explorer diagnostic: stage=%q err=%v", stage, err)
+			}
+			res := e.Explore(ctx, req)
+			if gotStage != wantStage || gotErr == nil || res.OK != (reason == "child open") {
+				t.Fatalf("missing listing diagnostic: stage=%q err=%v result=%+v", gotStage, gotErr, res)
+			}
+			raw, err := json.Marshal(res)
+			if err != nil || strings.Contains(string(raw), "stage") || strings.Contains(string(raw), gotErr.Error()) {
+				t.Fatalf("private diagnostic exposed on wire: %s %v", raw, err)
+			}
+		})
+	}
+}

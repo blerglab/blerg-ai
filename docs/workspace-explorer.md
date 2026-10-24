@@ -6,6 +6,12 @@ An absent binding, an unsupported descriptor backend, or a changed root is
 unavailable. Existing human owner/authorized administrator viewer permissions
 apply; another person's private session remains absent.
 
+macOS supports the explorer's descriptor traversal and bounded Git status
+backend, but 0.5.0 does not admit workspace sessions or owner shells that run
+directly on macOS hosts. Those launches refuse before allocation or journaling;
+see [platform support](workspace-integration.md#macos-host-support-in-050).
+Sandbox sessions on a Mac keep their Linux runtime reader.
+
 ## Launch and runtime integration
 
 The trusted lifecycle coordinator (P1/P2/P3, integrated by P6) must:
@@ -114,6 +120,13 @@ and two seconds shared per operation. Names the existing viewer cannot safely
 address (invalid UTF-8 or control-bearing paths) are omitted rather than
 normalized to a different file. Status treats NUL-delimited Git paths as hostile,
 filters protected paths and deduplicates visible counts.
+
+On macOS, a directory listing retains its full descriptor ancestry for the
+operation and opens each child relative to that directory. Every child open
+revalidates ancestor metadata, named child identities, parent relationships and
+device boundaries; final delivery rechecks the listing and its named directory.
+This avoids repeating a complete deep walk for every entry while keeping the
+two-second deadline. Linux continues to use `openat2` for each child.
 
 Explorer admission permits two global operations and one per person/daemon,
 inside the existing four-global/two-per-person/two-per-daemon viewer limits.

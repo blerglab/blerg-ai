@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -254,6 +255,15 @@ func (a *hostExplorerAuthority) Launch(ctx context.Context, id string, m protoco
 	return launch, err
 }
 func TestWorkspaceExplorerProductionHostDispatch(t *testing.T) {
+	testWorkspaceExplorerProductionHostDispatch(t, runtime.GOOS)
+}
+
+func TestWorkspaceExplorerProductionDarwinHostRefusal(t *testing.T) {
+	testWorkspaceExplorerProductionHostDispatch(t, "darwin")
+}
+
+func testWorkspaceExplorerProductionHostDispatch(t *testing.T, platform string) {
+	t.Helper()
 	for _, scenario := range []string{"repo", "folder", "synthetic", "empty", "failed-bind", "concurrent"} {
 		kind := scenario
 		if scenario == "failed-bind" || scenario == "concurrent" {
@@ -266,9 +276,12 @@ func TestWorkspaceExplorerProductionHostDispatch(t *testing.T) {
 			workspaceFixture(t, root, "notes.txt", "host folder bytes")
 			workspaceFixture(t, filepath.Join(root, "one"), "README.md", "one bytes")
 			authority := &hostExplorerAuthority{}
-			t.Setenv(DaemonStateDirEnv, t.TempDir())
+			stateDir := t.TempDir()
+			t.Setenv(DaemonStateDirEnv, stateDir)
 			service := hostLifecycleTestService(t, authority)
+			launched := false
 			authority.beforeLaunch = func(id string, m protocol.WorkspaceManifest, token string) {
+				launched = true
 				record, _ := workspaceRecord(id)
 				state, err := readPrivateWorkspace(record)
 				if err != nil || !state.Host || !state.RuntimePreparing || state.RuntimeToken != token || len(state.Sources) != len(m.Members) {
@@ -332,6 +345,11 @@ func TestWorkspaceExplorerProductionHostDispatch(t *testing.T) {
 			}
 			host, sender, _ := newTestHost(t, &scriptedAgentProvider{}, "")
 			host.cfg.PrepareHostWorkspace = manager.prepareHostWorkspace
+			if platform != runtime.GOOS {
+				host.cfg.PrepareHostWorkspace = func(ctx context.Context, msg protocol.SpawnSession) (string, WorkspaceExplorer, error) {
+					return manager.prepareHostWorkspaceForPlatform(ctx, msg, platform)
+				}
+			}
 			host.cfg.Workspaces = service
 			manager.agents = host
 			id := "host-" + scenario
@@ -342,6 +360,34 @@ func TestWorkspaceExplorerProductionHostDispatch(t *testing.T) {
 				authority.bindErr = errors.New("interrupted bind")
 			}
 			spawn := protocol.SpawnSession{SessionID: id, Kind: "agent", Repo: "one", Workspace: &manifest}
+			if platform == "darwin" {
+				host.Spawn(spawn)
+				errs := sender.sessionErrors()
+				if len(errs) != 1 || errs[0] != "workspace sessions are not supported on macOS hosts yet" {
+					t.Fatalf("macOS host admission must explicitly refuse: errors=%q", errs)
+				}
+				if launched || authority.bound != nil || host.get(id) != nil || len(service.sessions) != 0 {
+					t.Fatalf("macOS refusal left a partial host launch: allocated=%v bound=%v agent=%v workspaces=%d", launched, authority.bound != nil, host.get(id) != nil, len(service.sessions))
+				}
+				files, err := os.ReadDir(stateDir)
+				if err != nil || len(files) != 0 {
+					t.Fatalf("macOS refusal wrote private state: entries=%v err=%v", files, err)
+				}
+				registry := service.Supervisor.(*workspaceSupervisors)
+				if _, err := registry.service.Binding(id); err == nil || registry.service.Lifecycle(id) != nil {
+					t.Fatal("macOS refusal registered a host shell")
+				}
+				if got := service.Capabilities(t.Context()); got != (protocol.WorkspaceCapabilities{}) {
+					t.Fatalf("macOS advertised unsupported host workspace/shell capabilities: %+v", got)
+				}
+				retained, err := selection.PinBound(t.Context(), manifest)
+				if err != nil {
+					t.Fatal("macOS refusal consumed the selection handoff:", err)
+				}
+				retained.Close()
+				t.Logf("macOS host admission refused before side effects: %s", errs[0])
+				return
+			}
 			if scenario == "concurrent" {
 				firstEntered := make(chan struct{})
 				release := make(chan struct{})
@@ -401,7 +447,7 @@ func TestWorkspaceExplorerProductionHostDispatch(t *testing.T) {
 			}
 			defer host.Kill(id)
 			if errs := sender.sessionErrors(); len(errs) > 0 {
-				t.Fatal(errs)
+				t.Fatalf("production host dispatch on %s (%s): %q", runtime.GOOS, scenario, errs)
 			}
 			if authority.bound == nil {
 				t.Fatal("host reader was never bound through authority")

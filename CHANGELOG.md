@@ -10,6 +10,8 @@ minor release and are called out here.
 
 ### Fixed
 
+- Bound deep macOS explorer listings within the existing deadline by retaining and revalidating directory ancestry across entries. Refuse unsupported macOS host workspace sessions and owner shells explicitly before allocation or journaling; advertise no local workspace v2 or host-shell capability. Linux hosts and sandbox sessions on a Mac retain their existing behavior. See [platform support](docs/workspace-integration.md#macos-host-support-in-050).
+
 - Compute and negotiate workspace and shell capabilities from installed runtime adapters and verified helpers; production release gates remain disabled.
 
 - Flush workspace explorer and session result responses under bounded desktop authority, and refresh the terminal privacy audit registry.

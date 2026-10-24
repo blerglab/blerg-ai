@@ -31,7 +31,7 @@ func TestDarwinDirectoryStart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cmd := exec.Command("/bin/true")
+		cmd := exec.Command("/bin/sh", "-c", "exit 0")
 		called := false
 		err = startInDirectory(cmd, directory, func(fd int) error {
 			called = true

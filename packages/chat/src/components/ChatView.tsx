@@ -244,12 +244,13 @@ export default function ChatView(props: ChatViewProps) {
   const refStore = refStoreFor(sessionId)
   const refsProp = props.refs
   const commitRead = refsProp?.commits && files?.commit ? files : null
+  const commitUnknown = refsProp?.commits === undefined
   useEffect(() => {
     refStore.setResolvers({
       cards: refsProp?.cards,
-      commit: commitRead ? (sha: string) => commitRead.commit!(sessionId, sha).then(d => d?.sha ?? null) : null,
+      commit: commitRead ? (sha: string) => commitRead.commit!(sessionId, sha).then(d => d?.sha ?? null) : commitUnknown ? undefined : null,
     })
-  }, [refStore, refsProp?.cards, commitRead, sessionId])
+  }, [refStore, refsProp?.cards, commitRead, commitUnknown, sessionId])
   const refContext = useMemo<RefContextValue | null>(() => (refsProp ? { store: refStore, sessionId, refs: refsProp } : null), [refStore, sessionId, refsProp])
 
   const [draft, setDraftState] = useState(() => getDraft(storage, sessionId))

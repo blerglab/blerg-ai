@@ -15,7 +15,7 @@ for want in 'http://localhost:9001,http://localhost:9002,http://localhost:9003' 
             'RUNNER_UI_BASE: http://localhost:9003/sessions' 'BLERG_RUNNER_DATA_DIR: /data' \
             'BLERG_RUNNER_CORE_INTERNAL_KEY: k' 'pg_isready -U blerg -d blerg_core' \
             'BLERG_CORE_COOKIE_SECURE: "false"' 'BLERG_BOARD_SECRET_KEY: board-secret-sentinel' \
-            'BLERG_BOARD_DEFAULT_RUN_AS_CREATOR: "true"'; do
+            'BLERG_INSTALL_TYPE: desktop' 'BLERG_BOARD_DEFAULT_RUN_AS_CREATOR: "true"'; do
   grep -qF -- "$want" <<<"$out" || { echo "FAIL: $want"; fail=1; }
 done
 # Run as me: core and the board both get the mint key, and the board never gets the internal key.

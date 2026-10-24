@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import DelegationRulesSection from './DelegationRulesSection'
 const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch }))
-const limits = { per_parent_running: 3, per_parent_starts: 20, per_account_running: 6, per_account_starts_per_hour: 60 }
+const limits = { per_parent_running: 3, per_parent_starts_per_hour: 120, per_account_running: 6, per_account_starts_per_hour: 60 }
 const rule = { id: 'rule', engine: 'codex', runtime: 'docker', daemon_id: 'host', daemon_name: 'Workstation', local_only: false, created_at: '2026-10-17T10:00:00Z' }
 const json = (body: unknown) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
 beforeEach(() => {

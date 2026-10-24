@@ -77,6 +77,7 @@ func newPrivFixture(t *testing.T) *privFixture {
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	api := NewAPI(hub, pool, spawnTokenDaemonTok, nil, "")
+	fixtureOwnDesktop(t, pool, dc, privAcctA)
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +131,7 @@ func privDo(h http.HandlerFunc, method, path, id, bearer, body string) *httptest
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	rec := httptest.NewRecorder()
-	h(rec, req)
+	h(&reviewDeadlineWriter{ResponseRecorder: rec}, req)
 	return rec
 }
 
@@ -205,7 +206,14 @@ func TestPrivateSession_ListAndPerSessionRoutes(t *testing.T) {
 
 	// List: every filter variant goes through the same predicate.
 	for _, q := range []string{"", "?status=running", "?daemon_id=" + f.dc.ID} {
-		idsB := listIDs(t, privDo(f.api.HandleGetSessions, "GET", "/api/sessions"+q, "", tokB, ""))
+		queryB := q
+		if strings.Contains(q, "daemon_id=") {
+			if got := privDo(f.api.HandleGetSessions, "GET", "/api/sessions"+q, "", tokB, ""); got.Code != 404 {
+				t.Fatal("foreign desktop filter was accepted")
+			}
+			queryB = ""
+		}
+		idsB := listIDs(t, privDo(f.api.HandleGetSessions, "GET", "/api/sessions"+queryB, "", tokB, ""))
 		if idsB[f.privSession] {
 			t.Errorf("list%s: B sees A's private session", q)
 		}
@@ -271,8 +279,8 @@ func TestPrivateSession_CapabilitiesAndMessages(t *testing.T) {
 	if got := caps(tokA, f.privSession); got == "null" {
 		t.Error("capabilities for the owner: got null")
 	}
-	if got := caps(tokB, f.pubSession); got == "null" {
-		t.Error("capabilities of a non-private session must stay visible to B")
+	if got := caps(tokB, f.pubSession); got != "null" {
+		t.Error("desktop capabilities leaked through a public conversation")
 	}
 
 	// Message list.
@@ -571,8 +579,8 @@ func TestPrivateSession_BrowserSocketOutbound(t *testing.T) {
 			t.Errorf("daemon_disconnected for the owner = %s", m)
 		}
 	}
-	if !anyContains(gotB, `"type":"daemon_disconnected"`) {
-		t.Error("B must still learn the daemon went away")
+	if anyContains(gotB, `"type":"daemon_disconnected"`) {
+		t.Error("B learned another person's desktop disconnected")
 	}
 }
 
@@ -729,8 +737,8 @@ func TestPrivacyLoadedAtStartupAndFailsClosed(t *testing.T) {
 	blind.RegisterBrowser(rcv)
 	blind.BroadcastJSON(protocol.SessionMetaChanged{Type: "session_meta_changed", SessionID: f.pubSession, Model: "m"})
 	blind.BroadcastJSON(protocol.DaemonConnected{Type: "daemon_connected", Daemon: protocol.DaemonInfo{ID: "d"}})
-	if len(rcv.send) != 1 || !strings.Contains(string(<-rcv.send), "daemon_connected") {
-		t.Error("a hub that cannot tell must withhold session events but still deliver the rest")
+	if len(rcv.send) != 0 {
+		t.Error("unavailable authority must withhold session and desktop metadata")
 	}
 	if blind.accountCanSee(privAcctA, f.pubSession) {
 		t.Error("accountCanSee must fail closed when the hub cannot tell")

@@ -55,6 +55,7 @@ const prebundled = [
 ]
 
 export default defineConfig({
+  cacheDir: '.cache/vite',
   resolve: { alias: chatAliases },
   // Pre-bundle these so the browser project doesn't trigger a mid-run Vite
   // re-optimize (which aborts the first test with "Failed to fetch dynamically
@@ -63,6 +64,7 @@ export default defineConfig({
   test: {
     projects: [
       {
+        cacheDir: '.cache/vitest-unit',
         plugins: [react()],
         resolve: { alias: chatAliases },
         test: {
@@ -79,6 +81,7 @@ export default defineConfig({
         },
       },
       {
+        cacheDir: '.cache/vitest-browser',
         plugins: [react(), beacon()],
         resolve: { alias: chatAliases },
         // An inline project does not inherit the root's optimizeDeps: without its own list, a cold
@@ -86,6 +89,10 @@ export default defineConfig({
         optimizeDeps: { include: prebundled },
         test: {
           name: 'browser',
+          // Bound simultaneous pages so the corpus and interactive tests share one browser
+          // without starving pointer/animation work on machines with many reported CPUs.
+          maxWorkers: 4,
+          sequence: { groupOrder: 1 },
           // Only this app's files: the Board's browser tests have their own project in board/web,
           // because files outside this root are not pre-scanned and a cold cache reloaded mid-run.
           include: ['src/**/*.browser.test.{ts,tsx}'],

@@ -561,7 +561,7 @@ func (a *API) startDecidedChild(ctx context.Context, r db.DelegationRequest, cs 
 			// The decider is the owner, signed in now: their session is the newest proof a later
 			// rule or grant start of this parent's cluster children is authorized with.
 			recordLaunchAuthSession(ctx, a.dbPool, parent.ID, r.DecidedSid)
-		} else if host.dc = a.hub.GetHostDaemon(parent.DaemonID); host.dc == nil {
+		} else if host.dc = a.hub.ownedHostDaemon(ctx, derefOrEmpty(parent.SpawningAccountID), parent.DaemonID); host.dc == nil {
 			startError = msgDelegateDisconnected
 			return nil
 		}
@@ -598,6 +598,14 @@ func (a *API) storedStartProblem(ctx context.Context, parent *db.SessionRow, hos
 	// owner/name, and validateChildStart below checks the start with its provider).
 	recheck := cs
 	recheck.Provider = ""
+	recheck.WorkspaceLaunch = ""
+	if cs.WorkspaceLaunch != "" {
+		w, err := db.GetSessionWorkspace(ctx, a.dbPool, parent.ID)
+		if err != nil || w == nil || w.Manifest == nil || w.Manifest.LaunchGeneration != cs.WorkspaceLaunch {
+			return "parent workspace selection is unavailable or changed"
+		}
+		host.workspace = w.Manifest
+	}
 	raw, err := json.Marshal(recheck)
 	if err != nil {
 		return msgStartFailed

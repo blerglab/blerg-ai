@@ -13,7 +13,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -45,7 +44,7 @@ func parse(s string) (semver, bool) {
 	}
 	var n [3]int
 	for i, p := range parts {
-		if p == "" || len(p) > 9 {
+		if p == "" || len(p) > 9 || (len(p) > 1 && p[0] == '0') {
 			return semver{}, false
 		}
 		for _, c := range p {
@@ -82,13 +81,19 @@ func Newer(running, tag string) bool {
 	return t.patch > r.patch
 }
 
-// ValidReleaseURL reports whether u is an https://github.com/ URL, the only kind a notice links to.
+// ValidReleaseURL accepts only canonical stable release pages in the public repository.
 func ValidReleaseURL(u string) bool {
-	p, err := url.Parse(u)
-	if err != nil || p.Scheme != "https" || p.Host != "github.com" || p.User != nil {
+	const prefix = "https://github.com/" + DefaultRepo + "/releases/tag/"
+	if !strings.HasPrefix(u, prefix) {
 		return false
 	}
-	return strings.HasPrefix(p.Path, "/")
+	tag := strings.TrimPrefix(u, prefix)
+	_, ok := parse(tag)
+	return ok && tag == strings.TrimSpace(tag)
+}
+
+func releaseMatches(u, tag string) bool {
+	return ValidReleaseURL(u) && u == "https://github.com/"+DefaultRepo+"/releases/tag/"+tag
 }
 
 // Enabled reports whether the update check is on. BLERG_UPDATE_CHECK=0 (also false/off/no) turns it off.
@@ -136,6 +141,8 @@ type Checker struct {
 	Client    *http.Client
 	// Disabled makes Start and Check do nothing at all (no network call).
 	Disabled bool
+	// Allowed reads the install-wide setting before every check and notice. Errors must deny.
+	Allowed func(context.Context) bool
 	// Delay is the wait before the first check; zero means 30 seconds.
 	Delay time.Duration
 
@@ -146,17 +153,17 @@ type Checker struct {
 }
 
 // NewChecker builds a Checker for the running release from the environment.
-func NewChecker(running, userAgentVersion string) *Checker {
+func NewChecker(running, _ string) *Checker {
 	c := &Checker{
 		APIBase:   "https://api.github.com",
 		Repo:      Repo(),
 		Running:   running,
-		UserAgent: "blerg-core/" + userAgentVersion,
+		UserAgent: "blerg-core",
 		Client:    newClient(httpTimeout),
 		Disabled:  !Enabled(),
 	}
-	if !c.Disabled && !ValidRepo(c.Repo) {
-		log.Print("update check: BLERG_UPDATE_REPO is not an owner/name pair; the check is disabled")
+	if !c.Disabled && c.Repo != DefaultRepo {
+		log.Print("update check: BLERG_UPDATE_REPO is not the public Blerg repository; the check is disabled")
 		c.Disabled = true
 	}
 	return c
@@ -172,8 +179,15 @@ func newClient(timeout time.Duration) *http.Client {
 
 // Latest returns the newer release known, or "", "" when there is none.
 func (c *Checker) Latest() (version, releaseURL string) {
-	if c == nil {
+	if c == nil || c.Disabled {
 		return "", ""
+	}
+	if c.Allowed != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if !c.Allowed(ctx) {
+			return "", ""
+		}
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -208,7 +222,11 @@ func (c *Checker) Check(ctx context.Context) {
 	if c == nil || c.Disabled {
 		return
 	}
-	if _, ok := parse(c.Running); !ok {
+	c.set("", "")
+	if c.Allowed != nil && !c.Allowed(ctx) {
+		return
+	}
+	if _, ok := parse(c.Running); !ok || c.Repo != DefaultRepo {
 		return
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.APIBase, "/")+"/repos/"+c.Repo+"/releases/latest", nil)
@@ -216,7 +234,7 @@ func (c *Checker) Check(ctx context.Context) {
 		c.warnOnce("bad request")
 		return
 	}
-	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("User-Agent", "blerg-core")
 	req.Header.Set("Accept", "application/vnd.github+json")
 	client := c.Client
 	if client == nil {
@@ -237,8 +255,8 @@ func (c *Checker) Check(ctx context.Context) {
 		c.warnOnce("unreadable answer")
 		return
 	}
-	// A good answer replaces what was known: nothing newer clears it. A failure keeps it.
-	if rel.Draft || rel.Prerelease || !Newer(c.Running, rel.TagName) || !ValidReleaseURL(rel.HTMLURL) {
+	// Only a valid newer stable release may populate the cache.
+	if rel.Draft || rel.Prerelease || !Newer(c.Running, rel.TagName) || !releaseMatches(rel.HTMLURL, rel.TagName) {
 		c.set("", "")
 		return
 	}
@@ -270,7 +288,7 @@ func (c *Checker) Start(ctx context.Context) {
 }
 
 // CoreFeed reads the newer release core knows of from core's public GET /api/site, cached for
-// ten minutes. Latest never blocks: it returns the cached answer and refreshes in the background.
+// ten minutes. Expired and cold reads await one shared refresh, bounded by five seconds.
 type CoreFeed struct {
 	coreURL string
 	client  *http.Client
@@ -280,6 +298,7 @@ type CoreFeed struct {
 	url        string
 	fetchedAt  time.Time
 	refreshing bool
+	refreshed  chan struct{}
 }
 
 // NewCoreFeed returns a feed for the core at coreURL (BLERG_CORE_URL), or nil when coreURL is
@@ -297,10 +316,24 @@ func (f *CoreFeed) Latest() (version, releaseURL string) {
 		return "", ""
 	}
 	f.mu.Lock()
+	if time.Since(f.fetchedAt) > feedTTL {
+		if !f.refreshing {
+			f.refreshing = true
+			f.refreshed = make(chan struct{})
+			go f.refresh()
+		}
+		done := f.refreshed
+		f.mu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			return "", ""
+		}
+		f.mu.Lock()
+	}
 	defer f.mu.Unlock()
-	if !f.refreshing && time.Since(f.fetchedAt) > feedTTL {
-		f.refreshing = true
-		go f.refresh()
+	if time.Since(f.fetchedAt) > feedTTL {
+		return "", ""
 	}
 	return f.version, f.url
 }
@@ -308,10 +341,15 @@ func (f *CoreFeed) Latest() (version, releaseURL string) {
 func (f *CoreFeed) refresh() {
 	v, u, ok := f.fetch()
 	f.mu.Lock()
-	if ok { // a failed read keeps the last good answer
-		f.version, f.url = v, u
+	if !ok {
+		v, u = "", ""
 	}
+	f.version, f.url = v, u
 	f.fetchedAt, f.refreshing = time.Now(), false
+	if f.refreshed != nil {
+		close(f.refreshed)
+		f.refreshed = nil
+	}
 	f.mu.Unlock()
 }
 
@@ -337,7 +375,7 @@ func (f *CoreFeed) fetch() (version, releaseURL string, ok bool) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&site); err != nil {
 		return "", "", false
 	}
-	if _, valid := parse(site.Version); !valid || !ValidReleaseURL(site.URL) {
+	if _, valid := parse(site.Version); !valid || (!releaseMatches(site.URL, site.Version) && !releaseMatches(site.URL, "v"+site.Version)) {
 		return "", "", true // core answered: nothing newer to show
 	}
 	return site.Version, site.URL, true

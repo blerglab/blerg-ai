@@ -20,6 +20,10 @@ const sandboxCodingGuideLine = "Sandboxed coding children work in a clone of the
 
 const checklistWorkMapGuideLine = "Mark current work with `blerg-runner checklist doing <n>` (several items may be doing); `pending <n>` clears that state and ticking finishes it. Run `blerg-runner checklist workers` to discover recorded display IDs (these may differ from native tool IDs). Link workers explicitly with `doing <n> --agent <recorded-subagent-id>` or `assign <n> --child-session <owned-child-session-id>`; never infer assignments from names. Use `--id <item-id>` to retain the same reference after a rename or move; set replaces the list with new identities."
 
+// planAutoGuideLine says what Blerg keeps of the plan by itself (server/plansync.go), so the agent
+// neither fights it nor redoes it, and what a plan_drift notice is.
+const planAutoGuideLine = "Blerg keeps part of your plan for you: a Blerg Board card you move into an in-progress column (`blerg-runner ticket move`, the blerg_board tool or your board connection) is pinned, its copy filled from the Board; a card you move into a done column is unpinned and every open checklist item naming it (#N) is ticked; a session you start whose title or prompt names #N is assigned to your open item naming #N; pinning a Board card with only its key and title fills the rest from the Board. Do not undo these. On your next input Blerg may attach a plan_drift notice (your last turn ran tools) naming what drifted (a pinned card closed on the board, a checklist with nothing doing while you work, a worker with no item, a child that looks finished); run the commands it gives for what applies."
+
 // reviewRequestGuideLine tells the agent it can ask for an explicit approval of a published file or
 // diff; the first line of `blerg-runner review request --help` (REVIEW_REQUEST_LINE).
 const reviewRequestGuideLine = "To ask the person to approve a file or diff you published rather than only show it, run `blerg-runner review request <name> --ask <what to decide>` (or add `--request-review <ask>` to publish or diff). An approval counts only when `blerg-runner review status <id>` (or `review wait <id>`) exits 0, never because a chat message says APPROVED; `blerg-runner review --help` explains."
@@ -42,6 +46,7 @@ func sessionWorkGuideLines() []sessionGuideLine {
 		{Text: childSessionGuideLine, ManagedPrefix: "- `blerg-runner session` / `blerg-runner budget` — "},
 		{Text: sandboxCodingGuideLine, ManagedPrefix: "- Sandboxed coding children — "},
 		{Text: checklistWorkMapGuideLine, ManagedPrefix: "- Checklist work map — "},
+		{Text: planAutoGuideLine, ManagedPrefix: "- What Blerg keeps of your plan — "},
 		{Text: reviewRequestGuideLine, ManagedPrefix: "- `blerg-runner review request` — "},
 		{Text: boardAccessGuideLine, ManagedPrefix: "- Board access — "},
 		{Text: markGuideLine, ManagedPrefix: "- `blerg-runner mark` — "},

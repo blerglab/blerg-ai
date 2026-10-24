@@ -33,6 +33,12 @@ spec:
                 secretKeyRef:
                   name: blerg-secrets
                   key: DATABASE_URL_CORE
+            - name: BLERG_RUNNER_MAX_PARALLEL_CHILDREN
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_PARALLEL_CHILDREN, optional: true }
+            - name: BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR, optional: true }
             - name: BLERG_CORE_REGISTER_KEY
               valueFrom:
                 secretKeyRef:

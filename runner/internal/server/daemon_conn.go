@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/blerglab/blerg-ai/contracts/desktopauth"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -137,21 +140,62 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 
 		// ── Step 2: validate token ─────────────────────────────────────────────
 		var runtimeToken db.BoardTokenRow
-		if !tokenEqual(hello.Token, daemonToken) {
+		var desktop *desktopauth.Binding
+		legacy := tokenEqual(hello.Token, daemonToken)
+		err = nil
+		switch {
+		case strings.HasPrefix(hello.Token, "bdt_"):
+			if h.desktopAuthenticate == nil {
+				err = errDesktopCredential
+			} else {
+				var binding desktopauth.Binding
+				binding, err = h.desktopAuthenticate(r.Context(), hello.Token)
+				if err == nil && (hello.DesktopID != binding.DesktopID || hello.Mode == "runner") {
+					err = errDesktopCredential
+				}
+				if err == nil {
+					desktop = &binding
+				}
+			}
+		case legacy:
+			if !legacyDesktopEnabled() || hello.DesktopID != "" {
+				err = errDesktopCredential
+			}
+		default:
 			runtimeToken, err = db.ValidateRuntimeToken(r.Context(), dbPool, hello.Token)
 		}
-		if !tokenEqual(hello.Token, daemonToken) && err != nil {
-			_ = wsConn.WriteMessage(websocket.CloseMessage,
-				websocket.FormatCloseMessage(4401, "unauthorized"))
+		if err != nil {
+			_ = wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "unauthorized"))
 			_ = wsConn.Close()
 			return
 		}
+		desktopGeneration := newUUID()
 
 		if runtimeToken.ID != "" {
 			// The bearer, never self-reported hello metadata, chooses identity.
 			hello.Name = "runner-" + runtimeToken.SessionID
 			hello.Mode = "runner"
 			hello.ReposRoot = "/repos"
+		}
+
+		legacyID := ""
+		var legacyRevision int64
+		scopedLegacy := legacy && hello.Mode != "runner" && h.desktopAuthenticate != nil
+		if scopedLegacy {
+			if dbPool == nil {
+				_ = wsConn.Close()
+				return
+			}
+			old, e := db.FindUnownedDesktopByName(r.Context(), dbPool, hello.Name)
+			if e != nil {
+				_ = wsConn.Close()
+				return
+			}
+			if old != nil {
+				legacyID = old.ID
+			} else {
+				legacyID = newUUID()
+			}
 		}
 
 		attach := func(ctx context.Context) error {
@@ -161,14 +205,45 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			// The connection outlives the upgrade request, so its work keeps the
 			// request's values but not its cancellation.
 
-			daemonID := ""
+			daemonID := legacyID
+			if desktop != nil {
+				daemonID = desktop.DesktopID
+			}
+			var workspaceRef protocol.WorkspaceRuntimeRef
 			if runtimeToken.ID != "" {
+				w, e := db.GetSessionWorkspace(ctx, dbPool, runtimeToken.SessionID)
+				if e != nil {
+					return e
+				}
+				if w != nil && w.Manifest != nil && hello.WorkspaceCapabilities.Require(*w.Manifest, false) != nil {
+					_ = wsConn.Close()
+					return db.ErrTokenInvalid
+				}
+				if w != nil && w.Manifest != nil {
+					generation, _, err := db.GetWorkspaceRuntime(ctx, dbPool, runtimeToken.SessionID)
+					if err != nil {
+						return err
+					}
+					if generation > 0 {
+						if hello.WorkspaceCapabilities.ManifestVersion != protocol.WorkspaceVersion {
+							return db.ErrTokenInvalid
+						}
+						revoked, err := clusterWorkspaceWorkRevoked(ctx, dbPool, runtimeToken.SessionID)
+						if err != nil || revoked {
+							return db.ErrTokenInvalid
+						}
+						workspaceRef = protocol.WorkspaceRuntimeRef{LaunchGeneration: w.Manifest.LaunchGeneration, Generation: generation}
+						hello.ReposRoot = clusterworkspace.PublicRoot
+					} else if w.Manifest.Kind == "folder" {
+						return db.ErrTokenInvalid
+					}
+				}
 				daemonID, err = db.RuntimeDaemonID(ctx, dbPool, runtimeToken.SessionID, runtimeToken.ID)
 				if err != nil {
 					_ = wsConn.Close()
 					return err
 				}
-			} else if dbPool != nil {
+			} else if desktop == nil && !scopedLegacy && dbPool != nil {
 				existing, err := db.GetDaemonByName(ctx, dbPool, hello.Name)
 				if err != nil {
 					log.Printf("lookup daemon by name %q: %v", hello.Name, err)
@@ -181,18 +256,43 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			}
 
 			// ── Step 4: upsert daemon in Postgres ─────────────────────────────────
-			if dbPool != nil {
+			if desktop != nil {
+				if err := db.BindDesktopConnection(ctx, dbPool, *desktop, hello.Name, hello.Mode, hello.ReposRoot, desktopGeneration); err != nil {
+					return err
+				}
+			}
+			if dbPool != nil && desktop == nil {
 				if err := db.UpsertDaemon(ctx, dbPool, daemonID, hello.Name, hello.Mode, hello.ReposRoot); err != nil {
 					log.Printf("upsert daemon %s: %v", daemonID, err)
 				}
 			}
 
+			if scopedLegacy {
+				var e error
+				legacyRevision, e = db.BindLegacyDesktop(ctx, dbPool, daemonID, desktopGeneration)
+				if e != nil {
+					return e
+				}
+			}
+
+			if desktop != nil {
+				allowed, err := db.DesktopSessionIDs(ctx, dbPool, daemonID, desktop.OwnerID)
+				if err != nil {
+					return err
+				}
+				hello.ActiveSessions = desktopSelectedSessions(hello.ActiveSessions, allowed)
+				hello.QueuedSessions = desktopSelectedSessions(hello.QueuedSessions, allowed)
+				hello.RecoveryRequiredSessions = desktopSelectedSessions(hello.RecoveryRequiredSessions, allowed)
+				hello.BackgroundTasks = desktopBackgroundInventory(hello.BackgroundTasks, allowed)
+			}
+
 			// The token is accepted and the daemon has its id: say so now, before the
 			// reconnect's slower work below (reconcile, kills, token heal, replays), so
 			// the daemon does not read a slow attach as an unconfirmed connection.
+			negotiated := protocol.NegotiateWorkspaceCapabilities(h.workspaceCapabilities(), hello.WorkspaceCapabilities)
 			recoveryCapable := hello.Welcome && hello.RecoveryReady
 			if hello.Welcome {
-				if err := sendDaemonWelcome(wsConn, daemonID, hello.Name, runtimeToken.SessionID, recoveryCapable); err != nil {
+				if err := sendDaemonWelcome(wsConn, daemonID, hello.Name, runtimeToken.SessionID, negotiated, recoveryCapable); err != nil {
 					_ = wsConn.Close()
 					return err
 				}
@@ -220,8 +320,12 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 				checkedOut = []string{}
 			}
 			dc := &DaemonConn{
+				DiscoveryVersion: hello.DiscoveryVersion, WorkspaceCapabilities: negotiated,
+				DesktopBinding: desktop, DesktopGeneration: desktopGeneration, desktopToken: hello.Token,
+				LegacyDesktop: scopedLegacy, LegacyRevision: legacyRevision, desktopClose: func() { _ = wsConn.Close() }, desktopDone: make(chan struct{}),
 				BoundSessionID:       runtimeToken.SessionID,
 				RuntimeTokenID:       runtimeToken.ID,
+				WorkspaceRuntime:     workspaceRef,
 				RecoveryReadyCapable: recoveryCapable,
 				ID:                   daemonID,
 				Name:                 hello.Name,
@@ -230,9 +334,12 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 				Version:              hello.Version,
 				// Room for the bounded hello inventory's required kill/token frames
 				// before the write pump starts, plus ordinary concurrent traffic.
-				send: make(chan []byte, max(256, len(stoppedWhileAway)+len(hello.ActiveSessions)+256)),
+				send:         make(chan []byte, max(256, len(stoppedWhileAway)+len(hello.ActiveSessions)+256)),
+				shellControl: make(chan []byte, 32),
+				shellData:    make(chan []byte, 16),
 			}
 			dc.SetCheckedOutRepos(checkedOut)
+			dc.SetInventoryLimited(hello.RepoInventoryLimited)
 			dc.SetRepoOrigins(hello.RepoOrigins, hello.RepoRemotes)
 			dc.SetGitProviders(hello.GitProviders)
 			dc.SetCloneFrom(hello.CloneFrom)
@@ -240,6 +347,9 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			dc.SetMCPGatewayViaServer(hello.MCPGatewayViaServer)
 			dc.SetSessionTokenFile(hello.SessionTokenFile)
 			dc.SetInputReceipts(hello.InputReceipts)
+			dc.liveMu.Lock()
+			dc.planNudges = hello.PlanNudges
+			dc.liveMu.Unlock()
 			dc.SetRestrictTools(hello.RestrictTools)
 			dc.SetCodexRestricted(hello.CodexRestricted)
 			dc.SetSandboxClones(hello.SandboxClones)
@@ -304,14 +414,28 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 			return nil
 		}
 		ctx := context.WithoutCancel(r.Context())
-		if runtimeToken.ID != "" {
+		switch {
+		case runtimeToken.ID != "":
 			err = db.WithRuntimeLaunchFence(ctx, dbPool, runtimeToken.SessionID, func(fenced context.Context) error {
 				if e := db.ValidateRuntimeBinding(fenced, dbPool, runtimeToken.SessionID, runtimeToken.ID, false); e != nil {
 					return e
 				}
 				return attach(db.WithRuntimeAuthority(fenced, runtimeToken.ID))
 			})
-		} else {
+		case desktop != nil:
+			err = db.WithDesktopFence(ctx, dbPool, desktop.DesktopID, attach)
+		case scopedLegacy:
+			err = db.WithDesktopFence(ctx, dbPool, legacyID, func(fenced context.Context) error {
+				current, e := db.GetDesktop(fenced, dbPool, legacyID)
+				if e != nil {
+					return e
+				}
+				if current != nil && current.OwnerID != "" {
+					return db.ErrDesktopAuthority
+				}
+				return attach(fenced)
+			})
+		default:
 			err = attach(ctx)
 		}
 		if err != nil {
@@ -323,9 +447,9 @@ func (h *Hub) ServeDaemon(daemonToken string, dbPool *pgxpool.Pool) http.Handler
 // sendDaemonWelcome writes the daemon_welcome straight to the socket. It runs
 // before the write pump starts, so nothing else writes to conn yet; a session
 // pod's welcome carries its bound session, as every message to it does.
-func sendDaemonWelcome(conn *websocket.Conn, daemonID, name, boundSession string, recoveryHold ...bool) error {
+func sendDaemonWelcome(conn *websocket.Conn, daemonID, name, boundSession string, capabilities protocol.WorkspaceCapabilities, recoveryHold ...bool) error {
 	hold := len(recoveryHold) > 0 && recoveryHold[0]
-	raw, err := json.Marshal(protocol.DaemonWelcome{Type: "daemon_welcome", DaemonID: daemonID, Name: name, SessionID: boundSession, RecoveryHold: hold})
+	raw, err := json.Marshal(protocol.DaemonWelcome{Type: "daemon_welcome", DaemonID: daemonID, Name: name, SessionID: boundSession, RecoveryHold: hold, PlanNudges: true, WorkspaceCapabilities: capabilities})
 	if err != nil {
 		return err
 	}
@@ -341,7 +465,14 @@ func sendDaemonWelcome(conn *websocket.Conn, daemonID, name, boundSession string
 // daemonWritePump drains dc.send and writes outbound messages to the daemon.
 func daemonWritePump(parent context.Context, dc *DaemonConn, conn *websocket.Conn, dbPool *pgxpool.Pool) {
 	defer func() { _ = conn.Close() }()
-	for msg := range dc.send {
+	burst := 0
+	turn := false
+	for {
+		msg, ok := nextDaemonFrame(parent, dc, &burst, &turn)
+		if !ok {
+			return
+		}
+
 		if dc.RuntimeTokenID != "" {
 			var target envelope
 			if json.Unmarshal(msg, &target) != nil || target.SessionID != dc.BoundSessionID {
@@ -349,6 +480,26 @@ func daemonWritePump(parent context.Context, dc *DaemonConn, conn *websocket.Con
 			}
 		}
 		write := func(ctx context.Context) error {
+			if dc.LegacyDesktop {
+				if err := db.ValidateLegacyDesktop(ctx, dbPool, dc.ID, dc.DesktopGeneration, dc.LegacyRevision); err != nil {
+					return err
+				}
+			}
+			if dc.DesktopBinding != nil {
+				var target envelope
+				if json.Unmarshal(msg, &target) != nil {
+					return errDesktopCredential
+				}
+				if target.SessionID != "" && !db.DesktopOwnsSession(ctx, dbPool, dc.ID, dc.DesktopBinding.OwnerID, target.SessionID) {
+					return errDesktopCredential
+				}
+				if !dc.DesktopBinding.ExpiresAt.After(time.Now()) {
+					return errDesktopCredential
+				}
+				if err := db.ValidateDesktopConnection(ctx, dbPool, *dc.DesktopBinding, dc.DesktopGeneration); err != nil {
+					return err
+				}
+			}
 			if dc.RuntimeTokenID != "" {
 				if err := db.ValidateRuntimeBinding(ctx, dbPool, dc.BoundSessionID, dc.RuntimeTokenID, false); err != nil {
 					return err
@@ -357,7 +508,7 @@ func daemonWritePump(parent context.Context, dc *DaemonConn, conn *websocket.Con
 			// A silent or stalled pod cannot hold launch rotation behind a socket
 			// write forever. The authorization check and actual delivery share one
 			// epoch fence, so no newer launch can overtake an accepted delivery.
-			deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(time.Second)
 			if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
 				deadline = end
 			}
@@ -367,14 +518,60 @@ func daemonWritePump(parent context.Context, dc *DaemonConn, conn *websocket.Con
 			return conn.WriteMessage(websocket.TextMessage, msg)
 		}
 		var err error
-		if dc.RuntimeTokenID != "" {
+		switch {
+		case dc.RuntimeTokenID != "":
 			err = db.WithRuntimeLaunchFenceRetry(parent, dbPool, dc.BoundSessionID, write)
-		} else {
+		case dc.DesktopBinding != nil || dc.LegacyDesktop:
+			err = db.WithDesktopFence(parent, dbPool, dc.ID, write)
+		default:
 			err = write(parent)
 		}
 		if err != nil {
 			return
 		}
+	}
+}
+
+// One bounded socket scheduler: four controls, then an alternating shell-data
+// or ordinary agent/file turn. Input/resize cannot fill the revocation FIFO.
+func nextDaemonFrame(ctx context.Context, dc *DaemonConn, burst *int, turn *bool) ([]byte, bool) {
+	if *burst < 4 {
+		select {
+		case msg := <-dc.shellControl:
+			*burst++
+			return msg, true
+		default:
+		}
+	}
+	first, second := dc.shellData, dc.send
+	if *turn {
+		first, second = second, first
+	}
+	for _, lane := range []chan []byte{first, second} {
+		select {
+		case msg, ok := <-lane:
+			*burst = 0
+			*turn = !*turn
+			return msg, ok
+		default:
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return nil, false
+	case <-dc.desktopDone:
+		return nil, false
+	case msg := <-dc.shellControl:
+		*burst++
+		return msg, true
+	case msg := <-dc.shellData:
+		*burst = 0
+		*turn = true
+		return msg, true
+	case msg, ok := <-dc.send:
+		*burst = 0
+		*turn = false
+		return msg, ok
 	}
 }
 
@@ -386,7 +583,11 @@ func daemonReadPump(h *Hub, dc *DaemonConn, conn *websocket.Conn, dbPool *pgxpoo
 	ctx := context.Background()
 
 	defer func() {
-		close(dc.send)
+		dc.desktopDoneOnce.Do(func() {
+			if dc.desktopDone != nil {
+				close(dc.desktopDone)
+			}
+		})
 		_ = conn.Close()
 		handleDaemonDisconnect(h, dc, dbPool)
 	}()
@@ -408,7 +609,8 @@ func daemonReadPump(h *Hub, dc *DaemonConn, conn *websocket.Conn, dbPool *pgxpoo
 		if err := json.Unmarshal(raw, &env); err != nil {
 			continue
 		}
-		if dc.RuntimeTokenID != "" {
+		switch {
+		case dc.RuntimeTokenID != "":
 			err := db.WithRuntimeLaunchFenceRetry(ctx, dbPool, dc.BoundSessionID, func(fenced context.Context) error {
 				if !handleDaemonFrame(fenced, h, dc, dbPool, raw, env) {
 					return db.ErrTokenInvalid
@@ -418,13 +620,54 @@ func daemonReadPump(h *Hub, dc *DaemonConn, conn *websocket.Conn, dbPool *pgxpoo
 			if err != nil {
 				return
 			}
-		} else if !handleDaemonFrame(ctx, h, dc, dbPool, raw, env) {
-			return
+		case dc.LegacyDesktop:
+			e := db.WithDesktopFence(ctx, dbPool, dc.ID, func(fenced context.Context) error {
+				if err := db.ValidateLegacyDesktop(fenced, dbPool, dc.ID, dc.DesktopGeneration, dc.LegacyRevision); err != nil {
+					return err
+				}
+				if !handleDaemonFrame(fenced, h, dc, dbPool, raw, env) {
+					return db.ErrDesktopAuthority
+				}
+				return nil
+			})
+			if e != nil {
+				return
+			}
+		case dc.DesktopBinding != nil:
+			err := db.WithDesktopFence(ctx, dbPool, dc.ID, func(fenced context.Context) error {
+				if !dc.DesktopBinding.ExpiresAt.After(time.Now()) {
+					return errDesktopCredential
+				}
+				if err := db.ValidateDesktopConnection(fenced, dbPool, *dc.DesktopBinding, dc.DesktopGeneration); err != nil {
+					return err
+				}
+				if env.Type == "daemon_heartbeat" {
+					b, err := h.desktopAuthenticate(fenced, helloTokenForDesktop(dc))
+					if err != nil || b.TokenID != dc.DesktopBinding.TokenID {
+						return errDesktopCredential
+					}
+				}
+				if !handleDaemonFrame(fenced, h, dc, dbPool, raw, env) {
+					return db.ErrDesktopAuthority
+				}
+				return nil
+			})
+			if err != nil {
+				return
+			}
+		default:
+			if !handleDaemonFrame(ctx, h, dc, dbPool, raw, env) {
+				return
+			}
 		}
 	}
 }
 
 func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool, raw []byte, env envelope) bool {
+	if dc.DesktopBinding != nil && env.SessionID != "" && !db.DesktopOwnsSession(ctx, dbPool, dc.ID, dc.DesktopBinding.OwnerID, env.SessionID) {
+		return false
+	}
+
 	if dc.RuntimeTokenID != "" {
 		ctx = db.WithRuntimeAuthority(ctx, dc.RuntimeTokenID)
 	}
@@ -434,7 +677,7 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 		}
 		// Global daemon control responses are never a pod capability.
 		switch env.Type {
-		case "daemon_heartbeat", "session_started", "session_state_changed", "session_ended", "session_paused", "session_meta_changed", "session_output", "agent_event", "session_scrollback", "workspace_file_result", "session_origin_result", "progress_origin_result", "commit_result":
+		case "owner_shell_output", "owner_shell_phase", "workspace_explorer_result", "owner_shell_result", "workspace_runtime_prepared", "cluster_workspace_results", "daemon_heartbeat", "session_started", "session_state_changed", "session_ended", "session_paused", "session_meta_changed", "session_output", "agent_event", "session_scrollback", "workspace_file_result", "session_origin_result", "progress_origin_result", "commit_result", "plan_input_request":
 		default:
 			return true
 		}
@@ -447,13 +690,106 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 	}
 
 	switch env.Type {
+	case "local_workspace_control":
+		if len(raw) > 1<<20 || dc.DesktopBinding == nil {
+			return false
+		}
+		var request protocol.LocalWorkspaceControl
+		if json.Unmarshal(raw, &request) != nil {
+			return false
+		}
+		response := h.localWorkspaceControl(ctx, dbPool, dc, request)
+		encoded, _ := json.Marshal(response)
+		h.trySendToDaemon(dc, encoded)
+		return true
+	case "owner_shell_result", "owner_shell_output", "owner_shell_phase":
+		if len(raw) > 32768 {
+			return false
+		}
+		var header struct {
+			Version int `json:"version"`
+		}
+		if json.Unmarshal(raw, &header) != nil {
+			return false
+		}
+		if header.Version == 0 && env.Type == "owner_shell_result" && dc.RuntimeTokenID != "" {
+			return dc.deliverClusterWorkspaceReply(ctx, dbPool, raw)
+		}
+		var frame shellruntime.RPC
+		if header.Version == 1 && json.Unmarshal(raw, &frame) == nil {
+			h.deliverShell(dc, frame)
+		}
+		return true
+	case "cluster_workspace_results":
+		if len(raw) > 1<<20 {
+			return false
+		}
+		if dc.RuntimeTokenID == "" {
+			return true
+		}
+		var msg struct {
+			SessionID string                           `json:"session_id"`
+			Results   []protocol.WorkspaceMemberResult `json:"results"`
+			Revision  int64                            `json:"revision"`
+		}
+		if json.Unmarshal(raw, &msg) != nil {
+			return true
+		}
+		if err := persistClusterWorkspaceResults(ctx, dbPool, msg.SessionID, dc.WorkspaceRuntime, msg.Revision, msg.Results); err != nil {
+			return false
+		}
+
+	case "plan_input_request":
+		var req protocol.PlanInputRequest
+		if json.Unmarshal(raw, &req) != nil || !protocol.ValidChildBranchID(req.RequestID) || len(req.ClientID) > db.SessionInputMaxClientIDBytes || h.FindDaemonForSession(req.SessionID) != dc || h.planInitialInput == nil {
+			return true
+		}
+		go func() {
+			work := func(workCtx context.Context) error {
+				if dc.DesktopBinding != nil {
+					if err := db.ValidateDesktopConnection(workCtx, dbPool, *dc.DesktopBinding, dc.DesktopGeneration); err != nil {
+						return err
+					}
+				}
+				frame, _ := json.Marshal(protocol.AgentUserMessage{Type: "agent_user_message", SessionID: req.SessionID, Text: "startup input", Source: req.Source, ClientID: req.ClientID})
+				out, finish := h.planInitialInput(dc, frame)
+				var in protocol.AgentUserMessage
+				_ = json.Unmarshal(out, &in)
+				reply, _ := json.Marshal(protocol.PlanInputResult{Type: "plan_input_result", SessionID: req.SessionID, RequestID: req.RequestID, PlanNudge: in.PlanNudge})
+				sent := h.trySendToDaemon(dc, reply)
+				if finish != nil {
+					finish(sent)
+				}
+				return nil
+			}
+			if dc.DesktopBinding != nil {
+				_ = db.WithDesktopFence(context.WithoutCancel(ctx), dbPool, dc.ID, work)
+			} else {
+				_ = work(ctx)
+			}
+		}()
 	case "daemon_heartbeat":
 		var hb protocol.DaemonHeartbeat
 		hbOK := json.Unmarshal(raw, &hb) == nil
+		if hbOK && dc.DesktopBinding != nil {
+			allowed, err := db.DesktopSessionIDs(ctx, dbPool, dc.ID, dc.DesktopBinding.OwnerID)
+			if err != nil {
+				return false
+			}
+			hb.ActiveSessions = desktopSelectedSessions(hb.ActiveSessions, allowed)
+			hb.QueuedSessions = desktopSelectedSessions(hb.QueuedSessions, allowed)
+			hb.BackgroundTasks = desktopBackgroundInventory(hb.BackgroundTasks, allowed)
+			for id := range hb.SessionStates {
+				if !allowed[id] {
+					delete(hb.SessionStates, id)
+				}
+			}
+		}
 		if hbOK {
 			dc.SetSandboxAvailable(hb.SandboxAvailable)
 			dc.SetHostClaude(hb.ClaudeCLIAvailable, hb.AnthropicKeySet, hb.SandboxClaudeCredential)
 			dc.SetCheckedOutRepos(hb.CheckedOutRepos)
+			dc.SetInventoryLimited(hb.RepoInventoryLimited)
 			dc.SetRepoOrigins(hb.RepoOrigins, hb.RepoRemotes)
 			dc.SetAvailableEngines(hb.AvailableEngines)
 			dc.SetLocalEngines(hb.LocalEngines)
@@ -473,7 +809,12 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 		// This update also writes daemon metadata in Postgres, so a replaced
 		// socket must not perform it outside the ownership fence.
 		if hbOK && hb.ReposRoot != "" && dc.RuntimeTokenID == "" {
+			previousRoot := dc.CurrentReposRoot()
 			applyReposRoot(ctx, dbPool, dc, hb.ReposRoot)
+			if previousRoot != dc.CurrentReposRoot() {
+				h.abandonWorkspaceDiscoveryRequests(dc)
+				h.broadcastOwnedDesktop(dc, func() any { return map[string]string{"type": "desktop_sources_changed", "desktop_id": dc.ID} }) //nolint:contextcheck // bounded owner-only invalidation is independent of a heartbeat
+			}
 		}
 		var changes []db.BackgroundTaskReconciliation
 		var stopped, reported []string
@@ -497,6 +838,14 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 			replaySessionPlugins(ctx, h, dbPool, dc)
 		}
 
+	case "workspace_discovery_result":
+		if len(raw) > 1<<20 {
+			return false
+		}
+		var res protocol.WorkspaceDiscoveryResult
+		if json.Unmarshal(raw, &res) == nil {
+			h.deliverWorkspaceDiscovery(dc, res)
+		}
 	case "session_origin_result":
 		if len(raw) <= 512 {
 			var msg protocol.SessionOriginResult
@@ -537,6 +886,36 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 		var msg protocol.CommitResult
 		if json.Unmarshal(raw, &msg) == nil {
 			h.deliverCommitResult(dc, msg)
+		}
+	case "workspace_runtime_prepared":
+		if len(raw) > 16384 {
+			return true
+		}
+		var msg protocol.WorkspaceRuntimePrepared
+		if json.Unmarshal(raw, &msg) == nil {
+			if dc.RuntimeTokenID != "" {
+				ref := dc.WorkspaceRuntime
+				if ref.Generation == 0 {
+					ref, _ = dc.authorizedWorkspaceRuntime(msg.SessionID)
+				}
+				if persistClusterWorkspacePrepared(ctx, dbPool, dc.BoundSessionID, ref, raw) != nil {
+					return false
+				}
+				dc.AuthorizeWorkspaceRuntime(msg.SessionID, ref)
+			} else {
+				h.bindPreparedWorkspaceRuntime(ctx, dbPool, dc, msg)
+			}
+		}
+	case "workspace_explorer_result":
+		if dc.RuntimeTokenID != "" && !dc.deliverClusterWorkspaceReply(ctx, dbPool, raw) {
+			return false
+		}
+		if len(raw) > protocol.WorkspaceExplorerReplyBytes {
+			return true
+		}
+		var msg protocol.WorkspaceExplorerResult
+		if json.Unmarshal(raw, &msg) == nil {
+			h.deliverWorkspaceExplorerResult(dc, msg)
 		}
 	case "workspace_file_result":
 		if len(raw) > workspaceFileMaxFrame {
@@ -598,6 +977,30 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 			log.Printf("daemon %s: session_ended for a session it does not host (%s) — ignored", dc.ID, msg.SessionID)
 			return true
 		}
+		if dc.RuntimeTokenID != "" && len(msg.WorkspaceResults) > 0 {
+			var header struct {
+				Revision int64  `json:"workspace_revision"`
+				StopID   string `json:"workspace_stop_id"`
+			}
+			if json.Unmarshal(raw, &header) != nil {
+				return false
+			}
+			if header.StopID != "" {
+				// A matching final report and its durable seal commit before
+				// waking the cleanup coordinator. Stale revisions cannot ack.
+				return dc.acknowledgeClusterStop(ctx, dbPool, msg.SessionID, header.StopID, dc.WorkspaceRuntime, header.Revision, msg.WorkspaceResults)
+			}
+			if persistClusterWorkspaceResults(ctx, dbPool, msg.SessionID, dc.WorkspaceRuntime, header.Revision, msg.WorkspaceResults) != nil {
+				return false
+			}
+		}
+		if dc.DesktopBinding != nil {
+			var err error
+			ctx, err = localWorkspaceTerminalContext(ctx, dbPool, msg.SessionID, msg)
+			if err != nil {
+				return true
+			}
+		}
 		HandleSessionEnded(ctx, h, dbPool, msg)
 
 	case "session_paused":
@@ -643,7 +1046,7 @@ func handleDaemonFrame(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxp
 			log.Printf("daemon %s malformed usage_limits: %v", dc.ID, err)
 			return true
 		}
-		handleUsageLimits(h, dc, msg)
+		handleUsageLimits(h, dc, msg) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 
 	case "session_scrollback":
 		var msg protocol.SessionScrollback
@@ -820,7 +1223,7 @@ func setSessionStatusEnd(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, sess
 		failPendingSessionInputs(ctx, h, dbPool, sessionID)
 		h.NotifyCompletion(sessionID)
 	}
-	broadcastWithEnd(h, shown, func(endReason string, endedBy *protocol.EndedBy) any {
+	broadcastWithEnd(h, shown, func(endReason string, endedBy *protocol.EndedBy) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		return protocol.SessionStateChanged{
 			Type:      "session_state_changed",
 			SessionID: sessionID,
@@ -883,6 +1286,10 @@ func reconcileSessionsQueuedChecked(ctx context.Context, h *Hub, dbPool *pgxpool
 		log.Printf("reconcile sessions for daemon %s: %v", daemonID, err)
 		return nil, err
 	}
+	desktop, err := db.GetDesktop(ctx, dbPool, daemonID)
+	if err != nil {
+		return nil, err
+	}
 	reportedIDs := append(append([]string(nil), activeSessions...), queuedSessions...)
 	orphans, err := db.OrphanedChildren(ctx, dbPool, reportedIDs)
 	if err != nil {
@@ -898,6 +1305,9 @@ func reconcileSessionsQueuedChecked(ctx context.Context, h *Hub, dbPool *pgxpool
 	}
 	now := time.Now()
 	for _, s := range sessions {
+		if desktop != nil && desktop.OwnerID != "" && (s.SpawningAccountID == nil || *s.SpawningAccountID != desktop.OwnerID) {
+			continue
+		}
 		_, reported := active[s.ID]
 		_, waiting := queued[s.ID]
 		if orphaned[s.ID] {
@@ -1021,8 +1431,11 @@ func killStoppedSessions(dc *DaemonConn, ids []string) bool {
 // connection, so it does nothing.
 func handleDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 	// Requests waiting on this connection can never be answered now.
+	h.abandonWorkspaceDiscoveryRequests(dc)
 	h.abandonReposRootRequests(dc)
 	h.abandonWorkspaceFileRequests(dc)
+	h.abandonWorkspaceExplorerRequests(dc)
+	h.abandonShellRequests(dc)
 	h.abandonSessionOriginRequests(dc)
 	h.abandonCommitRequests(dc)
 	h.abandonExtRequests(dc)
@@ -1066,10 +1479,13 @@ func finishDaemonDisconnect(h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) {
 		return
 	}
 	// Broadcast daemon_disconnected regardless of DB availability.
-	h.BroadcastJSON(protocol.DaemonDisconnected{
-		Type:               "daemon_disconnected",
-		DaemonID:           dc.ID,
-		AffectedSessionIDs: affectedSessionIDs,
+	h.broadcastOwnedDesktop(dc, func() any {
+		return protocol.DaemonDisconnected{
+			OwnershipRevision: dc.DesktopBinding.Revision, ConnectionGeneration: dc.DesktopGeneration,
+			Type:               "daemon_disconnected",
+			DaemonID:           dc.ID,
+			AffectedSessionIDs: affectedSessionIDs,
+		}
 	})
 }
 
@@ -1089,6 +1505,24 @@ func markDaemonSessionsLost(ctx context.Context, h *Hub, dc *DaemonConn, dbPool 
 		})
 		return affected
 	}
+	if dc.DesktopBinding != nil || dc.LegacyDesktop {
+		affected := []string{}
+		_ = db.WithDesktopFence(ctx, dbPool, dc.ID, func(fenced context.Context) error {
+			var err error
+			if dc.DesktopBinding != nil {
+				err = db.ValidateDesktopConnection(fenced, dbPool, *dc.DesktopBinding, dc.DesktopGeneration)
+			} else {
+				err = db.ValidateLegacyDesktop(fenced, dbPool, dc.ID, dc.DesktopGeneration, dc.LegacyRevision)
+			}
+			if err != nil {
+				return err
+			}
+			affected = markDaemonSessionsLostCurrent(fenced, h, dc, dbPool)
+			return nil
+		})
+		return affected
+	}
+
 	return markDaemonSessionsLostCurrent(ctx, h, dc, dbPool)
 }
 func markDaemonSessionsLostCurrent(ctx context.Context, h *Hub, dc *DaemonConn, dbPool *pgxpool.Pool) []string {
@@ -1114,6 +1548,9 @@ func markDaemonSessionsLostCurrent(ctx context.Context, h *Hub, dc *DaemonConn, 
 			now := time.Now()
 			errMsg := "daemon disconnected"
 			for _, s := range sessions {
+				if dc.DesktopBinding != nil && (s.SpawningAccountID == nil || *s.SpawningAccountID != dc.DesktopBinding.OwnerID) {
+					continue
+				}
 				if !isActiveStatus(s.Status) {
 					continue
 				}

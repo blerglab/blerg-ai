@@ -111,7 +111,7 @@ func TestPodWorkspaceFileUsesBoundSessionFolder(t *testing.T) {
 	if err := conn.WriteJSON(protocol.ReadWorkspaceFile{Type: "read_workspace_file", RequestID: "foreign", SessionID: "another-session", Path: "README.md"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.WriteJSON(protocol.ReadWorkspaceFile{Type: "read_workspace_file", RequestID: "valid", SessionID: "workspace-pod", Path: "README.md"}); err != nil {
+	if err := conn.WriteJSON(protocol.ReadWorkspaceFile{Type: "read_workspace_file", RequestID: "valid", SessionID: "workspace-pod", Path: filepath.Join(started.ProjectPath, "README.md")}); err != nil {
 		t.Fatal(err)
 	}
 	raw := next("workspace_file_result")

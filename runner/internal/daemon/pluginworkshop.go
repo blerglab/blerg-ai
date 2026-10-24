@@ -67,10 +67,11 @@ const (
 // pluginWorkshop is one daemon's plugin install area. nil means "no
 // workshop" (no state dir): sessions start without plugins.
 type pluginWorkshop struct {
-	dir   string // CLAUDE_CONFIG_DIR of the install children
-	bin   string
-	allow pluginspec.Allowlist
-	home  string // HOME of the install children (the real home: git config and credential helpers)
+	startCommand func(*exec.Cmd) error
+	dir          string // CLAUDE_CONFIG_DIR of the install children
+	bin          string
+	allow        pluginspec.Allowlist
+	home         string // HOME of the install children (the real home: git config and credential helpers)
 
 	refreshEvery time.Duration
 	run          pluginsinstall.Runner // nil = exec
@@ -149,12 +150,13 @@ func (w *pluginWorkshop) sessionDir(sessionID string) string {
 func (w *pluginWorkshop) options() pluginsinstall.Options {
 	extra := append([]string{"CLAUDE_CONFIG_DIR=" + w.dir}, gitSafetyEnv()...)
 	return pluginsinstall.Options{
-		Bin:       w.bin,
-		Env:       pluginsinstall.ChildEnv(w.home, extra...),
-		Allow:     w.allow,
-		Secrets:   []string{os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), os.Getenv("BLERG_RUNNER_DAEMON_TOKEN")},
-		Run:       w.run,
-		LogPrefix: "daemon: plugins",
+		Bin:          w.bin,
+		StartCommand: w.startCommand,
+		Env:          pluginsinstall.ChildEnv(w.home, extra...),
+		Allow:        w.allow,
+		Secrets:      []string{os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), os.Getenv("BLERG_RUNNER_DAEMON_TOKEN")},
+		Run:          w.run,
+		LogPrefix:    "daemon: plugins",
 	}
 }
 
@@ -507,3 +509,6 @@ func safeFileName(s string) string {
 	}
 	return b.String()
 }
+
+// SetStartCommand installs the owning pod's process boundary before use.
+func (w *pluginWorkshop) SetStartCommand(start func(*exec.Cmd) error) { w.startCommand = start }

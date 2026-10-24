@@ -505,6 +505,7 @@ func TestCronStartPinnedDaemon(t *testing.T) {
 	dc2.SetMCPGateway(true)
 	dc2.SetRestrictTools(true)
 	dc2.SetSandboxAvailable(true)
+	fixtureOwnDesktop(t, cf.pool, dc2, mcpAcct)
 	cf.hub.Register(dc2)
 
 	// Pinned to the fixture's (higher id) daemon: it, and only it, gets the spawn.

@@ -105,10 +105,13 @@ func handleUsageLimits(h *Hub, dc *DaemonConn, msg protocol.UsageLimits) {
 		return
 	}
 	dc.SetUsageLimits(clean)
-	h.BroadcastJSON(protocol.DaemonLimitsChanged{
-		Type:        "daemon_limits_changed",
-		DaemonID:    dc.ID,
-		UsageLimits: dc.UsageLimits(),
+	h.broadcastOwnedDesktop(dc, func() any {
+		return protocol.DaemonLimitsChanged{
+			OwnershipRevision: dc.DesktopBinding.Revision, ConnectionGeneration: dc.DesktopGeneration,
+			Type:        "daemon_limits_changed",
+			DaemonID:    dc.ID,
+			UsageLimits: dc.UsageLimits(),
+		}
 	})
 }
 

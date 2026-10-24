@@ -196,6 +196,7 @@ export { foldContext, parsePatch, patchSummary, splitRows, patchSummaryText, unq
 export type { Patch, PatchCommit, PatchFile, PatchFileStatus, PatchHunk, PatchLine, PatchLineKind, PatchSummary, SplitRow, HunkPiece } from './model/patch'
 export { splitTokenLines, useHighlighterReady } from './model/highlight'
 export { default as FilesPanel } from './components/FilesPanel'
+export { FileGlyph, FolderGlyph } from './components/FileGlyph'
 export { default as FilesList } from './components/FilesList'
 export type { FilesListProps } from './components/FilesList'
 export { default as ReviewMode } from './components/review/ReviewMode'
@@ -267,3 +268,6 @@ export type { Reasoning } from './model/reasoning'
 // ─── References in chat text: card numbers and commit hashes, linked once confirmed (#153) ─────────
 export { createRefStore, refStoreFor, resetRefStoresForTest, splitRefs, isHash, DEBOUNCE_MS as REF_DEBOUNCE_MS } from './model/refs'
 export type { ChatRefs, RefKey, RefState, RefStore } from './model/refs'
+
+// The runner explorer opens files through the same authenticated viewer.
+export { default as WorkspaceFileViewer } from './components/WorkspaceFileViewer'

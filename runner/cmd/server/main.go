@@ -263,6 +263,7 @@ func run() error {
 	api := server.NewAPI(hub, dbPool, cfg.DaemonToken, repoLister, cfg.VapidPublicKey)
 	if jm := hub.JobManager(); jm != nil {
 		jm.Overrides = api.SettingsOverrides()
+		api.ConfigureClusterWorkspaces()
 		// The advisory-lock pools (pod frames, limit resume) are sized from the
 		// session cap in force when they are first used.
 		db.SetLockPoolSessions(jm.EffectiveMaxSessions)
@@ -323,8 +324,11 @@ func run() error {
 	mux.HandleFunc("POST /api/sessions/{id}/pause", api.HandlePauseSession)
 	mux.HandleFunc("GET /api/sessions/{id}/limit-resume", api.HandleLimitResume)
 	mux.HandleFunc("PUT /api/sessions/{id}/limit-resume", api.HandleLimitResume)
+	mux.HandleFunc("GET /api/sessions/{id}/plan-nudges", api.HandlePlanNudges)
+	mux.HandleFunc("PUT /api/sessions/{id}/plan-nudges", api.HandlePlanNudges)
 	mux.HandleFunc("PATCH /api/sessions/{id}", api.HandlePatchSession)
 	mux.HandleFunc("GET /api/repos", api.HandleGetRepos)
+	api.RegisterWorkspaceDiscoveryRoutes(mux)
 	mux.HandleFunc("GET /api/board-repo-choices", api.HandleBoardRepoChoices)
 	mux.HandleFunc("GET /api/push/vapid-public-key", api.HandleGetVapidPublicKey)
 	mux.HandleFunc("POST /api/push/subscribe", api.HandlePostPushSubscribe)
@@ -351,6 +355,11 @@ func run() error {
 	// Lets GET /api/me/credentials ask core which personal credentials the
 	// caller has; inert unless both env vars are set.
 	api.SetCoreCredentials(cfg.CoreURL, cfg.CoreInternalKey)
+	api.RegisterShellRoutes(mux)
+	// P0b/runtime adapters are deliberately absent until their containment gates pass.
+	if err := api.StartRuntimeShellChannel(ctx); err != nil {
+		log.Printf("shell channel unavailable: %v", err)
+	}
 	// The per-engine model pickers (GET /api/models/{engine}). One source per
 	// engine; an engine with none gets an empty list. Claude's is the public
 	// Claude Code catalog, fetched at startup and every 6 h, compiled-in list

@@ -11,5 +11,6 @@
     "isolatedModules": true,
     "useDefineForClassFields": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/upgradeProcedure.test.ts"]
 }

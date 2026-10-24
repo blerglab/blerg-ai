@@ -25,9 +25,11 @@ const workspaceFileMaxFrame = (workspaceFileMaxBytes+2)/3*4 + (64 << 10)
 var errWorkspaceUnavailable = errors.New("workspace file daemon unavailable")
 
 type workspaceFileWaiter struct {
-	dc        *DaemonConn
-	sessionID string
-	ch        chan protocol.WorkspaceFileResult
+	dc                *DaemonConn
+	sessionID         string
+	ch                chan protocol.WorkspaceFileResult
+	launchGeneration  string
+	runtimeGeneration int64
 }
 type workspaceFileRequests struct {
 	mu             sync.Mutex
@@ -78,9 +80,19 @@ func (h *Hub) acquireWorkspaceFileRead(dc *DaemonConn, user string) (func(), boo
 	}, true
 }
 
-func (h *Hub) requestWorkspaceFile(ctx context.Context, dc *DaemonConn, sid, name string) (protocol.WorkspaceFileResult, error) {
+func (h *Hub) requestWorkspaceFile(ctx context.Context, dc *DaemonConn, sid, name string, binding ...protocol.WorkspaceExplorerRequest) (protocol.WorkspaceFileResult, error) {
 	id := newUUID()
 	w := workspaceFileWaiter{dc: dc, sessionID: sid, ch: make(chan protocol.WorkspaceFileResult, 1)}
+	if len(binding) > 0 {
+		w.launchGeneration = binding[0].LaunchGeneration
+		w.runtimeGeneration = binding[0].Generation
+	}
+	if w.launchGeneration != "" {
+		authorized, ok := dc.authorizedWorkspaceRuntime(sid)
+		if !ok || authorized != binding[0].WorkspaceRuntimeRef {
+			return protocol.WorkspaceFileResult{}, errWorkspaceUnavailable
+		}
+	}
 	r := &h.workspaceFileReqs
 	r.mu.Lock()
 	count := 0
@@ -99,7 +111,15 @@ func (h *Hub) requestWorkspaceFile(ctx context.Context, dc *DaemonConn, sid, nam
 	r.pending[id] = w
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
-	raw, _ := json.Marshal(protocol.ReadWorkspaceFile{Type: "read_workspace_file", RequestID: id, SessionID: sid, Path: name})
+	req := protocol.ReadWorkspaceFile{Type: "read_workspace_file", RequestID: id, SessionID: sid, Path: name, WorkspaceRuntimeRef: protocol.WorkspaceRuntimeRef{LaunchGeneration: w.launchGeneration, Generation: w.runtimeGeneration}}
+	raw, _ := json.Marshal(req)
+	if w.launchGeneration != "" {
+		defer func() {
+			req.Type = "cancel_workspace_file"
+			cancelRaw, _ := json.Marshal(req)
+			h.trySendToDaemon(dc, cancelRaw)
+		}()
+	}
 	if h.FindDaemonForSession(sid) != dc || !h.trySendToDaemon(dc, raw) {
 		return protocol.WorkspaceFileResult{}, errWorkspaceUnavailable
 	}
@@ -122,11 +142,17 @@ func (h *Hub) deliverWorkspaceFileResult(dc *DaemonConn, res protocol.WorkspaceF
 	if h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(res.SessionID) != dc || (dc.BoundSessionID != "" && dc.BoundSessionID != res.SessionID) {
 		return
 	}
+	if res.LaunchGeneration != "" {
+		authorized, ok := dc.authorizedWorkspaceRuntime(res.SessionID)
+		if !ok || authorized != res.WorkspaceRuntimeRef {
+			return
+		}
+	}
 	r := &h.workspaceFileReqs
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	w, ok := r.pending[res.RequestID]
-	if !ok || w.dc != dc || w.sessionID != res.SessionID {
+	if !ok || w.dc != dc || w.sessionID != res.SessionID || w.launchGeneration != res.LaunchGeneration || w.runtimeGeneration != res.Generation {
 		return
 	}
 	delete(r.pending, res.RequestID)
@@ -145,7 +171,7 @@ func (h *Hub) abandonWorkspaceFileRequests(dc *DaemonConn) {
 }
 
 func workspacePathAllowed(name string) bool {
-	if name == "" || len(name) > 4096 || strings.HasPrefix(name, "/") || strings.HasPrefix(name, "~") || strings.Contains(name, "\\") || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+	if name == "" || len(name) > 4096 || strings.HasPrefix(name, "//") || strings.HasPrefix(name, "~") || strings.Contains(name, "\\") || strings.IndexFunc(name, unicode.IsControl) >= 0 {
 		return false
 	}
 	for _, part := range strings.Split(name, "/") {
@@ -153,11 +179,24 @@ func workspacePathAllowed(name string) bool {
 			return false
 		}
 	}
-	return path.Clean(name) != "."
+	return path.Clean(name) != "." && path.Clean(name) != "/"
+}
+
+// Absolute-to-relative conversion belongs to the launch-bound daemon. Require it
+// to echo the cleaned request and return a safe relative path for document links.
+func workspaceReplyPathAllowed(name string, res protocol.WorkspaceFileResult) bool {
+	if !workspacePathAllowed(res.Path) || path.IsAbs(res.Path) || res.Path != path.Clean(res.Path) {
+		return false
+	}
+	if path.IsAbs(name) {
+		return res.RequestedPath == path.Clean(name) && strings.HasSuffix(path.Clean(name), "/"+res.Path)
+	}
+	return res.Path == path.Clean(name)
 }
 
 func (a *API) RegisterWorkspaceFileRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sessions/{id}/workspace-file", a.HandleGetWorkspaceFile)
+	mux.HandleFunc("GET /api/sessions/{id}/workspace", a.HandleGetWorkspaceExplorer)
 }
 
 // Machine-readable reasons for a refused workspace-file read, beside the sentence for people.
@@ -227,9 +266,13 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		workspaceFileProblem(w, 403, workspaceCodeForbidden, "Only the session owner or an administrator can open workspace files.")
 		return
 	}
+	if !a.hub.desktopSessionVisible(ctx, p.Sub, row) {
+		workspaceFileProblem(w, 404, workspaceCodeNotFound, "Session workspace not found.")
+		return
+	}
 	name := r.URL.Query().Get("path")
 	if !workspacePathAllowed(name) {
-		workspaceFileProblem(w, 403, workspaceCodeForbidden, "Blerg only opens relative paths inside the session workspace.")
+		workspaceFileProblem(w, 403, workspaceCodeForbidden, "Blerg only opens paths inside the session workspace.")
 		return
 	}
 	switch row.Status {
@@ -238,7 +281,7 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dc := a.hub.FindDaemonForSession(sid)
-	if dc == nil || (dc.BoundSessionID != "" && dc.BoundSessionID != sid) {
+	if dc == nil || (dc.BoundSessionID != "" && dc.BoundSessionID != sid) || validateWorkspaceDesktop(ctx, a.dbPool, dc, sid) != nil {
 		workspaceFileProblem(w, 409, workspaceCodeNotRunning, "The session has no live workspace daemon.")
 		return
 	}
@@ -248,7 +291,26 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	res, err := a.hub.requestWorkspaceFile(ctx, dc, sid, name)
+	viewerBinding := protocol.WorkspaceExplorerRequest{}
+	persisted, bindingErr := db.GetSessionWorkspace(ctx, a.dbPool, sid)
+	if bindingErr != nil {
+		workspaceFileProblem(w, 409, workspaceCodeUnavailable, "The workspace binding is unavailable.")
+		return
+	}
+	if persisted != nil && persisted.Kind == "folder" && persisted.Manifest == nil {
+		workspaceFileProblem(w, 409, workspaceCodeUnavailable, "The workspace manifest is unavailable.")
+		return
+	}
+	if persisted != nil && persisted.Manifest != nil {
+		manifest, generation, err := loadExplorerBinding(ctx, a.dbPool, sid)
+		if err != nil {
+			workspaceFileProblem(w, 409, workspaceCodeUnavailable, "The runtime workspace is not bound.")
+			return
+		}
+		viewerBinding.LaunchGeneration = manifest.LaunchGeneration
+		viewerBinding.Generation = generation
+	}
+	res, err := a.hub.requestWorkspaceFile(ctx, dc, sid, name, viewerBinding)
 	if err != nil {
 		workspaceFileProblem(w, 409, workspaceCodeDaemonTimeout, "The session daemon did not provide a workspace file.")
 		return
@@ -283,7 +345,7 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		workspaceFileProblem(w, status, code, message)
 		return
 	}
-	if !workspacePathAllowed(res.Path) || res.Path != path.Clean(name) || res.Size < 0 || res.Size > workspaceFileMaxBytes || len(res.ContentB64) > base64.StdEncoding.EncodedLen(workspaceFileMaxBytes) || res.Truncated {
+	if !workspaceReplyPathAllowed(name, res) || res.Size < 0 || res.Size > workspaceFileMaxBytes || len(res.ContentB64) > base64.StdEncoding.EncodedLen(workspaceFileMaxBytes) || res.Truncated {
 		workspaceFileProblem(w, 409, workspaceCodeInvalid, "The daemon returned an invalid workspace file.")
 		return
 	}
@@ -318,6 +380,21 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		if a.hub.GetDaemon(dc.ID) != dc || a.hub.FindDaemonForSession(sid) != dc {
 			return errWorkspaceUnavailable
 		}
+		latest, err := db.GetSession(fenced, a.dbPool, sid)
+		if err != nil || latest == nil || (latest.Private && !ownsSession(p.Sub, latest)) || (!ownsSession(p.Sub, latest) && !p.Has(insightsAdminCap)) {
+			return errWorkspaceUnavailable
+		}
+		switch latest.Status {
+		case "ended", "stopped", "error", "disconnected":
+			return errWorkspaceUnavailable
+		}
+		if viewerBinding.LaunchGeneration != "" {
+			manifest, generation, err := loadExplorerBinding(fenced, a.dbPool, sid)
+			authorized, ok := dc.authorizedWorkspaceRuntime(sid)
+			if err != nil || !ok || authorized != viewerBinding.WorkspaceRuntimeRef || manifest.LaunchGeneration != viewerBinding.LaunchGeneration || generation != viewerBinding.Generation {
+				return errWorkspaceUnavailable
+			}
+		}
 		if dc.RuntimeTokenID != "" {
 			if err := db.ValidateRuntimeBinding(fenced, a.dbPool, sid, dc.RuntimeTokenID, false); err != nil {
 				return err
@@ -337,7 +414,12 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if dc.RuntimeTokenID != "" {
 		err = db.WithRuntimeLaunchFenceRetry(ctx, a.dbPool, sid, send)
 	} else {
-		err = send(ctx)
+		err = withWorkspaceDesktopFence(ctx, a.dbPool, dc, sid, func(fenced context.Context) error {
+			if !a.hub.desktopSessionVisible(fenced, p.Sub, row) {
+				return errWorkspaceUnavailable
+			}
+			return send(fenced)
+		})
 	}
 	// A fence commit can fail after the callback already started the HTTP response.
 	// Never append a second JSON document (or retry a possibly partial file response).

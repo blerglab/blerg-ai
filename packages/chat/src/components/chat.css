@@ -3217,3 +3217,8 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
 .artifact-preview-diagram { min-width: 0; max-width: 100%; margin: 2px 0 8px; }
 .artifact-preview-diagram > .visual-block,
 .artifact-preview-diagram > .visual-failed { margin: 0; }
+
+/* Immutable child selections can contain long folder-relative member paths. */
+.delegation-members { margin: 8px 0; padding-inline-start: 20px; min-width: 0; }
+.delegation-members li { overflow-wrap: anywhere; }
+.delegation-members code { white-space: normal; overflow-wrap: anywhere; }

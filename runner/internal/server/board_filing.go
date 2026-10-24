@@ -18,6 +18,7 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/engines"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 type filingArguments struct {
@@ -191,20 +192,42 @@ func (a *API) HandleFilingSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, raw)
 }
-func (a *API) filingOrigin(ctx context.Context, row *db.SessionRow) (boardfiling.Origin, error) {
+func (a *API) filingOrigin(ctx context.Context, row *db.SessionRow, refs ...protocol.WorkspaceGitRef) (boardfiling.Origin, error) {
 	base := boardBaseURL(os.Getenv("BLERG_RUNNER_SELF_URL"))
 	if base == "" {
 		return boardfiling.Origin{}, apiErrorf(503, "Configure the runner's public URL before filing tickets.")
 	}
+	ref := protocol.WorkspaceGitRef{}
+	if len(refs) > 0 {
+		ref = refs[0]
+	}
+	canonical, err := a.hub.qualifyWorkspaceGit(ctx, row.ID, ref)
+	if err != nil {
+		return boardfiling.Origin{}, apiErrorf(409, "Select an available workspace member and launch before filing.")
+	}
+	repo := row.Repo
+	if !canonical.IsZero() {
+		ws, err := db.GetSessionWorkspace(ctx, a.dbPool, row.ID)
+		if err != nil || ws == nil || ws.Manifest == nil {
+			return boardfiling.Origin{}, apiErrorf(409, "Workspace changed.")
+		}
+		for _, member := range ws.Manifest.Members {
+			if member.ID == canonical.MemberID {
+				repo = member.Destination
+			}
+		}
+	}
 	lookup := a.sessionOriginLookup
-	if lookup == nil {
-		lookup = a.readSessionOrigin
+	if lookup == nil || !canonical.IsZero() {
+		lookup = func(ctx context.Context, sid string) (string, error) {
+			return a.readSessionOriginRef(ctx, sid, canonical)
+		}
 	}
 	commit, err := lookup(ctx, row.ID)
 	if err != nil {
 		return boardfiling.Origin{}, apiErrorf(409, "The session's workspace is unavailable; retry when its daemon reconnects.")
 	}
-	return boardfiling.Origin{SessionURL: base + "/sessions/" + row.ID, Repo: row.Repo, Commit: commit, Engine: engines.Normalize(derefOrEmpty(row.Engine))}, nil
+	return boardfiling.Origin{SessionURL: base + "/sessions/" + row.ID, Repo: repo, MemberID: canonical.MemberID, LaunchGeneration: canonical.LaunchGeneration, Generation: canonical.Generation, Commit: commit, Engine: engines.Normalize(derefOrEmpty(row.Engine))}, nil
 }
 func (a *API) HandleFileTicket(w http.ResponseWriter, r *http.Request) {
 	sid, body, ok := a.agentSessionWrite(w, r, "file-ticket", db.MaxProposalArgumentsBytes)
@@ -216,6 +239,7 @@ func (a *API) HandleFileTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		protocol.WorkspaceGitRef
 		Board     string   `json:"board"`
 		Title     string   `json:"title"`
 		Body      string   `json:"body"`
@@ -242,7 +266,7 @@ func (a *API) HandleFileTicket(w http.ResponseWriter, r *http.Request) {
 		writeFilingError(w, err)
 		return
 	}
-	draft.Origin, err = a.filingOrigin(r.Context(), row)
+	draft.Origin, err = a.filingOrigin(r.Context(), row, req.WorkspaceGitRef)
 	if err != nil {
 		writeFilingError(w, err)
 		return

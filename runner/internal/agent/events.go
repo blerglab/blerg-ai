@@ -42,6 +42,7 @@ type UserMessagePayload struct {
 // is what the transcript records instead (a slash skill: the person typed "/review x", the engine
 // gets the skill's instructions). ClientID is echoed on the user_message (UserMessagePayload).
 type Input struct {
+	PlanNudge      string `json:",omitempty"`
 	ExpectedTurnID string
 	Text           string
 	Shown          string

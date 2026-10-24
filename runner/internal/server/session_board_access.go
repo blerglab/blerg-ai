@@ -591,6 +591,7 @@ func (a *API) runSessionBoardTool(ctx context.Context, row *db.SessionRow, req b
 		return fail(status, mcpgw.UpstreamMessage(err))
 	}
 	log.Printf("board tools: session=%s board=%s tool=%s level=%s outcome=ok", row.ID, boardID, req.Tool, lv.Level)
+	a.planBoardToolDone(ctx, row.ID, boardID, req.Tool, res) // a move keeps the session's plan (plansync.go)
 	return http.StatusOK, res
 }
 

@@ -128,7 +128,7 @@ func (a *API) HandleGetSessionBudget(w http.ResponseWriter, r *http.Request) {
 	}
 	var dc *DaemonConn
 	if onDesktopDaemon(row) {
-		dc = a.hub.GetHostDaemon(row.DaemonID)
+		dc = a.hub.ownedHostDaemon(r.Context(), derefOrEmpty(row.SpawningAccountID), row.DaemonID)
 	}
 	writeJSON(w, http.StatusOK, budgetFor(dc, time.Now()))
 }

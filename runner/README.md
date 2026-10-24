@@ -145,7 +145,7 @@ Paths are relative to the runner's `base_url`.
 | `GET` | `/api/models/{engine}` | the models (and each one's effort levels) a session on that engine can use | see [Model lists](#model-lists); also readable with a browser session |
 | `POST` | `/api/runner/start` | start a session | `202 {session_id}`; honors `Idempotency-Key` |
 | `GET` | `/api/runner/sessions/{id}` | status | `{lifecycle, runtime, resumable, auto_stop, interaction, error_reason, end_reason, ended_by, limits}`; `limits` is `{max_file_bytes, max_session_upload_bytes, max_session_artifact_bytes}`, what the session's files may weigh (absent before 0.2.1) |
-| `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?, client_id?}` → `202`; resumes a disconnected cluster session. The sources Blerg writes itself (`proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`) are refused with `422`, and so is `session`, which the runner sets itself for a parent session's messages to its child |
+| `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?, client_id?}` → `202`; resumes a disconnected cluster session. The sources Blerg writes itself (`proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`, `question_answer`, `plan_drift`) are refused with `422`, and so is `session`, which the runner sets itself for a parent session's messages to its child |
 | `POST` | `/api/runner/sessions/{id}/model` | select next-turn model/effort | `{model?, effort?}` → `202`; existing session engine remains authoritative |
 | `POST` | `/api/runner/sessions/{id}/interrupt` | cancel the in-flight turn | `202`; `409` when there is no live runtime |
 | `POST` | `/api/runner/sessions/{id}/stop` | end the session | `200 {"status":"stopped"}`; idempotent. Finished work **must** call this or cluster session slots leak |
@@ -891,8 +891,18 @@ authenticated calls refuse redirects rather than forward credentials.
 Reusing an identical pending request can return `200` with that same request. Expiring an already
 allowed request returns `409` with its existing outcome rather than canceling the child.
 
-Limits are three running children and twenty starts per parent, six running children and sixty
-starts per account per hour. A real parent end stops non-kept children and invalidates old grants,
+By default a parent may run three children at once and start 120 per rolling hour; there is no
+lifetime start cap. An administrator changes both install-wide in core Settings → Child session
+limits (parallel 1–50, starts/hour 1–10000); saved settings win and apply on the next start request.
+`BLERG_RUNNER_MAX_PARALLEL_CHILDREN` (default `3`) and
+`BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR` (default `120`) seed the defaults at startup. Set them on
+core for its Settings defaults and on a standalone runner for its fallback defaults. Invalid values
+log a startup warning and use the built-in default. Runner reads core with its internal key;
+unavailable/older core retains the last valid settings, or environment defaults before a successful
+read. Account limits remain six running children and sixty starts per rolling hour across all
+parents, so these can be reached before a higher per-parent limit. Approval requests reserve rate
+budget too; allowed requests with a child count once. Refusals name the limit and say to stop a
+child or give the next available time in UTC (with `Retry-After` for the rolling window). A real parent end stops non-kept children and invalidates old grants,
 including across daemon restart; a pause only expires the requests pending at that pause. New child
 starts require the daemon's recovery-ready handshake. Host sessions share their home and can read
 other host sessions' token files; use a sandbox for isolation. The injected CLI guide is delivered
@@ -1600,16 +1610,19 @@ administrators included, it answers `404 Session not found.`, as an unknown sess
 transcript access does not grant filesystem access. Agent tokens, service credentials and the static runner key
 cannot use this route.
 
-The current session daemon reads the relative path from that session's workspace. Host sessions
-use their working folder; container sessions use its host bind mount; cluster sessions use their
-pod workspace. The daemon never executes a container command to read a file. Absolute paths,
-parent traversal, backslashes, secret-looking names, symlink escapes, nonregular files and hard
-links are refused. The launch folder's identity is captured before the session starts and checked
-against the pinned directory handle, preventing a replaced folder from changing the read scope.
+The current session daemon resolves references against that session's launch working directory,
+not its artifact storage or output directory. Repository-relative references such as `README.md`
+and absolute references inside that working directory are supported. A sandbox's `/workspace/`
+references map to its own clone; a cluster pod's absolute references retain the project subdirectory.
+Host sessions use their working folder; container sessions use its host bind mount; cluster sessions
+use their pod workspace. The daemon never executes a container command to read a file. Absolute paths
+outside the launch working directory, parent traversal, backslashes, secret-looking names, symlink
+escapes, nonregular files and hard links are refused. The launch folder's identity is captured
+before the session starts and checked against the pinned directory handle, preventing a replaced folder from changing the read scope.
 Paths are checked again against the opened file to prevent replacement races.
 
-A `200` JSON response contains `path`, `size`, `view`, `content_type`, `truncated: false`,
-`content_b64` and RFC3339 `mtime`. The viewer classification matches published artifacts.
+A `200` JSON response contains the normalized workspace-relative `path`, `size`, `view`,
+`content_type`, `truncated: false`, `content_b64` and RFC3339 `mtime`. The viewer classification matches published artifacts.
 Responses are private and not cached; file contents never become transcript events.
 Refusals contain a safe `error` sentence and `error_id`: `403` for an unsafe path or filename,
 `404` for a missing file, `409` for a missing/stale/busy daemon or a timeout, and `413` for a file
@@ -1640,9 +1653,9 @@ requires reading Go source to discover.
 | Var | Required? | Default | What it does |
 |---|---|---|---|
 | `BLERG_RUNNER_DATABASE_URL` | yes | — | Postgres DSN |
-| `BLERG_RUNNER_DAEMON_TOKEN` | yes | — | shared token the daemon presents on `/ws/daemon` |
+| `BLERG_RUNNER_DAEMON_TOKEN` | yes | — | install-wide service secret; desktop use requires the explicit deprecated legacy window |
 | `BLERG_RUNNER_LISTEN_PORT` | no | `8080` | app-level HTTP listen port. Deliberately not `BLERG_RUNNER_PORT` — Kubernetes auto-injects that name (`BLERG_RUNNER_PORT=tcp://<clusterIP>:8080`) into every pod for a `blerg-runner` Service already in the namespace, which would silently clobber a same-named custom var |
-| `BLERG_RUNNER_DATA_DIR` | no | `data` (relative to the working directory) | directory for runner's on-disk state: published mockups and screenshots, uploaded agent-config bundles, and the files agents publish with `blerg-runner publish` (`artifacts/<session>/…`; see [`docs/artifacts.md`](../docs/artifacts.md)). It needs a persistent volume to keep them across restarts, writable by the runner's user (id 65532 in the image); at startup the runner checks this and logs one `STORAGE NOT WRITABLE` line if it is not |
+| `BLERG_RUNNER_DATA_DIR` | no | `data` (relative to the working directory) | directory for runner's on-disk state: published mockups and screenshots, historical agent-config bundles (automatic desktop sharing is retired), and the files agents publish with `blerg-runner publish` (`artifacts/<session>/…`; see [`docs/artifacts.md`](../docs/artifacts.md)). It needs a persistent volume to keep them across restarts, writable by the runner's user (id 65532 in the image); at startup the runner checks this and logs one `STORAGE NOT WRITABLE` line if it is not |
 | `BLERG_RUNNER_MAX_FILE_MB` | no | `100` | the largest file, in MiB, a person may attach or an agent publish. An invalid value keeps the default and logs one line; a value above either session total below is lowered to that total (also logged), so the limit the runner advertises is one a file can actually meet. Behind an ingress or proxy, its body-size limit must be larger (the Kubernetes ingress allows `128m`) |
 | `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB` | no | `500` | the total, in MiB, of the files people attach to one session |
 | `BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB` | no | `1024` | the total, in MiB, of the files one session's agent publishes |
@@ -1653,6 +1666,8 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_SELF_URL` | no | — | the runner's own URL, advertised at registration. Also the base of the proposal links an agent is given when its write call is queued (`<this>/proposals?id=<id>`); without it the agent is given only the proposal id |
 | `VOYAGE_API_KEY` | no | — | enables semantic (embedding) search for the agent memory / knowledge store. **Privacy: when set, the name and content of each memory an agent saves (`POST /api/agent/memories`) and the query text of each knowledge search (`POST /api/agent/knowledge-search`) is sent to Voyage AI's API (`https://api.voyageai.com/v1/embeddings`), and the returned vector is stored beside the memory in your database. Unset by default; when unset, nothing is sent to Voyage and search uses plain keyword matching.** A failed Voyage call also falls back to keyword matching, and a memory is still saved without its vector |
 | `VOYAGE_MODEL` | no | `voyage-3-lite` | the Voyage embedding model to request; only read when `VOYAGE_API_KEY` is set |
+| `BLERG_RUNNER_MAX_PARALLEL_CHILDREN` | no | `3` | environment-seeded fallback for children at once per parent (1–50); core's saved admin setting wins at the next start request |
+| `BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR` | no | `120` | environment-seeded fallback for starts per rolling hour per parent (1–10000); no lifetime cap; core's saved admin setting wins |
 | `BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE` | no | `false` | `true` = allow session completion webhooks to be delivered to private, loopback or link-local addresses. Off by default: a `callback_url` is chosen by whoever starts a session, so without this the runner refuses to become a proxy into its own network (checked at connect time, on the address actually resolved, per attempt). It also gates the contract's plain-`http://localhost` callback exception: without it, a loopback `callback_url` is refused at start with a `422`. Set it `true` when receivers legitimately live beside the runner — the desktop compose stack does |
 | `BLERG_CORE_PUBLIC_URL` | no | — | core's browser-facing origin; when set, `/healthz` allows that origin (the landing page's status tiles) cross-origin |
 | `BLERG_RUNNER_ALLOWED_ORIGINS` | no | — | comma-separated `scheme://host` origins allowed to open `/ws/browser` cross-origin. Same-origin requests and requests with no `Origin` header are always allowed, so this is only needed when the frontend is served from a different origin than runner's API |
@@ -1691,7 +1706,8 @@ dropped after 30 min. See ["When nobody is watching"](#what-runs-as-you-means) a
 | Var | Required? | Default | What it does |
 |---|---|---|---|
 | `BLERG_RUNNER_SERVER_URL` | yes | — | the server's WS URL to dial |
-| `BLERG_RUNNER_DAEMON_TOKEN` | yes | — | must match the server's value above |
+| `BLERG_RUNNER_DAEMON_TOKEN` | no | — | fallback credential only when no private desktop credential file exists; use a person-issued token with `BLERG_RUNNER_DESKTOP_ID`. Shared tokens require the explicit 0.5 legacy window |
+| `BLERG_RUNNER_DESKTOP_ID` | no | — | stable ID bound to a person-issued environment token; the private credential file overrides both |
 | `BLERG_RUNNER_REPOS_ROOT` | yes | — | where session checkouts live — the **first-run default**. The folder can be changed from the app (the launch sheet's Run column: "Repos folder → Change"); the daemon saves that choice to `<state dir>/settings.json`, and from then on the saved value wins over this variable on every start. Delete the file (or its `repos_root` key) to go back to the variable |
 | `BLERG_RUNNER_DAEMON_STATE_DIR` | no | `~/.blerg-runner-daemon` | where the daemon keeps its own state (`settings.json`, and `connection.json`, see [Checking a daemon token](#checking-a-daemon-token); mode 0600 in a 0700 directory). Deliberately outside the repos root. If it can't be determined or written, changing the repos folder from the app is refused rather than applied until the next restart silently undoes it |
 | `BLERG_RUNNER_DAEMON_NAME` | no | hostname | how this daemon identifies itself |
@@ -1725,7 +1741,8 @@ It writes `connecting` before its first dial, so a file another process left is 
 token, ever. `install/desktop/daemon/install.sh status` prints it.
 
 `GET /api/daemon/whoami` with `Authorization: Bearer <daemon token>` checks a token without
-connecting a daemon: `200 {"ok":true,"mode":"daemon"}` for `BLERG_RUNNER_DAEMON_TOKEN`,
+connecting a daemon: `200 {"ok":true,"mode":"desktop",...}` for a person-issued credential,
+`200 {"ok":true,"mode":"daemon"}` for the explicitly enabled legacy shared credential,
 `200 {"ok":true,"mode":"runtime"}` for a session pod's current runtime token, `401` for anything
 else (`503` if a runtime token could not be checked). It has no rate limit, like the websocket
 hello: the tokens are long random strings. A server older than 0.2.1 has no such route and answers
@@ -1847,7 +1864,7 @@ The daemon runs on the host (it drives your local `claude`); start it with:
 
 ```
 export BLERG_RUNNER_SERVER_URL=ws://localhost:8083/ws/daemon
-export BLERG_RUNNER_DAEMON_TOKEN=<same value the server has>
+# Enroll first; the daemon loads ~/.blerg-runner-daemon/desktop-credential.json.
 export CLAUDE_CODE_OAUTH_TOKEN=<from `claude setup-token`>
 go run ./cmd/daemon
 ```
@@ -1872,3 +1889,24 @@ for retry, with its admission fence retained across server restarts. Repeat the 
 the worker reconnects. Success is idempotent and returns `status`, `session_id` and `archived_at`.
 Discard keeps conversations, artifacts, direct links, History and Insights. It does not change
 standing desktop rules, and ordinary Stop/`DELETE /api/sessions/{id}` still respects Keep running.
+
+### Person-owned desktops (0.5)
+
+Desktop daemons enroll with a credential issued by core for the installing person,
+stable desktop ID and ownership revision. Re-run the installer after upgrading;
+`BLERG_RUNNER_INSTALLING_ACCOUNT_ID` selects the installing account, otherwise the first
+enabled admin is used. A fresh install must create its account before enrolling.
+Runner Settings → Desktop ownership lets a live human administrator assign an unknown
+or owned desktop; reassignment fences old connections and credentials. Shared desktop
+credentials are disabled by default; `BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS=true` is a 0.5-only
+upgrade compatibility mode, removed in 0.6. See [desktop ownership](../docs/desktop-ownership.md)
+for issuer APIs, private credential storage, migration and the P1–P6 authority interface.
+
+
+Workspace selection and desktop confidentiality in 0.5 are described in
+[workspace selection](../docs/workspace-selection.md). Automatic desktop config
+uploads are retired. `BLERG_RUNNER_SHARED_AGENT_CONFIG_BUNDLE` optionally names
+an absolute path to an operator-managed, intentionally shared archive; leave it
+unset to serve none. Historical uploaded archives are ignored and should be
+removed from the runner data volume during upgrade. This does not re-enable
+personal desktop configuration sharing.

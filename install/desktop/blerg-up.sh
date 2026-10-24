@@ -427,6 +427,7 @@ fi
 
 DAEMON_UP=0
 DAEMON_REFUSED=0
+DAEMON_ENROLL_PENDING=0
 if [ "$INSTALL_DAEMON" -eq 1 ]; then
   blerg_step "Installing the runner daemon as a host service..."
   daemon_rc=0
@@ -438,6 +439,8 @@ if [ "$INSTALL_DAEMON" -eq 1 ]; then
     5) # install.sh's EXIT_WORK_RUNNING: the old daemon is still up, as it was
       DAEMON_UP=1
       blerg_fail "The daemon was not reinstalled: agent work is running; re-run with --yes to reinstall anyway." ;;
+    7) DAEMON_ENROLL_PENDING=1
+      blerg_step "Create your installing account at setup, then run ./daemon/install.sh install again to enroll this desktop." ;;
     6) # install.sh's EXIT_TOKEN_REFUSED: the server refused the daemon token in .env (said above)
       DAEMON_REFUSED=1
       blerg_fail "The server refused the daemon token in .env; see the message above." ;;
@@ -532,9 +535,9 @@ EOF
 else
   if [ "$DAEMON_REFUSED" -eq 1 ]; then
     DAEMON_STEP="$(cat <<STEP
-1. Fix the daemon token: the server refused BLERG_RUNNER_DAEMON_TOKEN
-   from $PWD/.env (the message above says more). Put the
-   server's token there, then run: ./daemon/install.sh install
+1. Enroll the desktop for its recorded owner: the server refused its
+   credential (the message above says more). Then run:
+   ./daemon/install.sh install
 STEP
 )"
     DAEMON_FOOTER="$(cat <<STEP
@@ -544,14 +547,14 @@ error (exit code 6) for that reason.
 STEP
 )"
   else
-    # The token is read from .env by the command itself: this box never prints it.
+    # Enrollment stores a private person credential; this box never prints it.
     DAEMON_STEP="$(cat <<STEP
 1. Start the runner daemon (new terminal - it runs on this host, not
    in a container, so it can use your own claude CLI login and tmux;
    see DAEMON.md to install it as a persistent service instead):
 
      export BLERG_RUNNER_SERVER_URL=ws://localhost:$PORT_RUNNER/ws/daemon
-     export BLERG_RUNNER_DAEMON_TOKEN="\$(grep '^BLERG_RUNNER_DAEMON_TOKEN=' '$PWD/.env' | cut -d= -f2)"
+     python3 "$PWD/daemon/enroll.py" "$PWD/.env" "\$HOME/.blerg-runner-daemon" "ws://localhost:$PORT_RUNNER/ws/daemon"
      $REPOS_ROOT_LINE
      ( cd $RUNNER_DIR && GOWORK=off go run ./cmd/daemon )
 
@@ -590,4 +593,9 @@ fi
 if [ "$DAEMON_REFUSED" -eq 1 ]; then
   blerg_fail "The daemon is not connected: the server refused the daemon token in .env."
   exit 6
+fi
+
+if [ "$DAEMON_ENROLL_PENDING" -eq 1 ]; then
+  blerg_fail "The stack is ready. Create your account in setup, then rerun ./daemon/install.sh install to enroll this desktop."
+  exit 7
 fi

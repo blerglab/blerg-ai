@@ -289,7 +289,7 @@ func GetSessionActivity(ctx context.Context, pool *pgxpool.Pool, sessionID strin
 		SELECT e.kind, COALESCE(e.payload->>'tool', ''), COALESCE(e.payload->>'parent_call_id', '') <> '', count(*)
 		  FROM agent_events e
 		 WHERE e.session_id = $1
-		   AND (e.kind = 'tool_call' OR (e.kind = 'user_message' AND COALESCE(e.payload->>'source', '') NOT IN ('system', 'runner', 'blerg-board', 'session', 'cron', 'review', 'proposal', 'child_turn')))
+		   AND (e.kind = 'tool_call' OR (e.kind = 'user_message' AND COALESCE(e.payload->>'source', '') NOT IN ('system', 'runner', 'blerg-board', 'session', 'cron', 'review', 'proposal', 'child_turn', 'plan_drift')))
 		 GROUP BY 1, 2, 3`, sessionID)
 	if err != nil {
 		return out, fmt.Errorf("session activity: %w", err)

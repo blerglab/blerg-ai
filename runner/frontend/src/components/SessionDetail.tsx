@@ -1,3 +1,4 @@
+import { useShellCapability } from '../hooks/useShellCapability'
 import { useProposalInbox } from '../hooks/useProposalInbox'
 import { useProposalsWaiting } from '../hooks/useProposalsWaiting'
 import { ConfirmPopover, endSessionText, modelDisplayName } from '@blerglab/chat'
@@ -16,6 +17,9 @@ import { send } from '../ws'
 import { arrowSeq, KEY_SEQ, type ArrowDir } from '../terminalKeys'
 import { sessionViewportBox } from '../terminalRenderer'
 import TerminalDOMView, { type TerminalHandle } from './TerminalDOMView'
+import ShellWorkspace, { type ShellWorkspaceHandle } from './ShellWorkspace'
+import { tokenSubject } from '../claims'
+import { getAccessToken } from '../authClient'
 import AgentChatView from './AgentChatView'
 import { ParentDiscardAction, ChildDiscardAction } from './ChildDiscard'
 import { MessageThread } from './MessageThread'
@@ -27,6 +31,10 @@ import StatusPill from './StatusPill'
 import { backgroundCount, displayState } from '../lib/displayState'
 import { childIsWorking } from '../lib/liveState'
 import SessionRail from './SessionRail'
+import ExplorerDock, { ExplorerToggle } from './ExplorerDock'
+import { EXPLORER_CHAT_MIN, useExplorerLayout } from '../hooks/useExplorerLayout'
+import { PaletteButton } from './CommandPalette'
+import { usePaletteCommands } from '../commands/context'
 import { ProposalBell } from './ProposalNotifications'
 import { IconMenu, IconMenuItem, InsightsIcon, PanelToggleIcon, StarIcon, EndSessionIcon } from './IconButton'
 import { readRailPref, useCompact, useThinking, writeRailPref } from '../lib/sessionRail'
@@ -55,6 +63,9 @@ export default function SessionDetail() {
   const isMobile = useIsMobile()
 
   const session = useSessionStore(s => s.sessions.find(sess => sess.id === sessionId))
+  const explorer = useExplorerLayout(!!session)
+  const { columnsRef: explorerColumnsRef } = explorer
+  const shellAvailable = useShellCapability(sessionId, session?.status)
   const daemon = useSessionStore(s => s.daemons.find(d => d.id === session?.daemon_id))
   // A child's header names its parent's agent: "started by Codex agent from <parent>".
   const parentSession = useSessionStore(s => (session?.parent_session_id ? s.sessions.find(p => p.id === session.parent_session_id) : undefined))
@@ -111,6 +122,7 @@ export default function SessionDetail() {
     }
   }, [isMobile])
 
+  const shellRef = useRef<ShellWorkspaceHandle>(null)
   const [activeTab, setActiveTab] = useState<'terminal' | 'chat'>('terminal')
   const allMessages = useMessageStore(s => s.messages)
   const sessionMessages = useMemo(
@@ -274,6 +286,17 @@ export default function SessionDetail() {
     (document.activeElement as HTMLElement | null)?.blur()
   }
 
+  const paletteCommands = useMemo(() => session && !session.archived_at && ['running', 'idle', 'waiting', 'starting', 'disconnected'].includes(session.status) ? [{
+    id: `end-session:${session.id}`, title: 'End this session',
+    run: () => { endRef.current?.focus(); setConfirmEnd(true) },
+  }] : [], [session])
+  usePaletteCommands(paletteCommands)
+  const revealPanel = useCallback(() => {
+    writeRailPref(true)
+    setRailPref(true)
+    if (narrow && sessionId) setDrawerFor(sessionId)
+  }, [narrow, sessionId])
+
   if (!session) {
     const isFailed = sessionId !== undefined && sessionId in failedSessions
     const isPending = sessionId !== undefined && sessionId in pendingSessionIds
@@ -374,9 +397,9 @@ export default function SessionDetail() {
 
 
   return (
-    <div ref={rootRef} style={{ display: 'flex', flexDirection: 'column', ...(isMobile ? { position: 'fixed', inset: 0 } : { height: '100%' }), background: 'var(--basalt)', color: 'var(--chalk)' }}>
+    <div ref={rootRef} data-session-root style={{ display: 'flex', flexDirection: 'column', ...(isMobile ? { position: 'fixed', inset: 0 } : { height: '100%' }), background: 'var(--basalt)', color: 'var(--chalk)' }}>
       {/* Header */}
-      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--stone)', display: 'flex', alignItems: 'center', gap: 12, background: 'var(--basalt)' }}>
+      <div style={{ padding: isMobile ? '12px' : '12px 16px', borderBottom: '1px solid var(--stone)', display: 'flex', alignItems: 'center', gap: isMobile ? 6 : 12, background: 'var(--basalt)' }}>
         {isMobile && (
           <button
             onClick={() => navigate('/sessions')}
@@ -507,7 +530,9 @@ export default function SessionDetail() {
         {/* The header's controls, one style (IconButton): the view first (star, insights, the
             panel), then End session, the one action that changes the session, then ⋯ with the rarer ones. */}
         <div className="icon-btn-group" data-testid="session-header-controls">
-          <button
+          <PaletteButton />
+          <ExplorerToggle layout={explorer} />
+          {!isMobile && <button
             type="button"
             className={session.starred ? 'icon-btn starred' : 'icon-btn'}
             data-testid="star-toggle"
@@ -518,7 +543,7 @@ export default function SessionDetail() {
             onClick={() => send({ type: 'set_session_star', session_id: session.id, starred: !session.starred })}
           >
             <StarIcon filled={!!session.starred} />
-          </button>
+          </button>}
           {/* This session's figures: time, work, subagents, tokens and cost. On a phone it is in ⋯,
               to leave the title room beside the bell. */}
           {!isMobile && (
@@ -580,6 +605,8 @@ export default function SessionDetail() {
           )}
           {(isMobile || canPause || !isAgent || !session.archived_at) && (
             <IconMenu label="More actions" testId="session-more" triggerRef={moreRef}>
+              {isMobile && <IconMenuItem label={session.starred ? 'Unstar' : 'Star'} hint="Keep this session at the top of the list" testId="star-toggle" onSelect={() => send({ type: 'set_session_star', session_id: session.id, starred: !session.starred })} />}
+              {isAgent && shellAvailable && !session.archived_at && <IconMenuItem label="Shell" hint="Open an owner shell" testId="owner-shell-open" onSelect={() => shellRef.current?.open()} />}
               {isMobile && (
                 <IconMenuItem label="Insights" hint="This session's time, work, tokens and cost" testId="session-insights-toggle" onSelect={() => setShowInsights(true)} />
               )}
@@ -619,8 +646,9 @@ export default function SessionDetail() {
 
       {/* Below the header: the session's column (banners, the chat or terminal) and, for an agent
           session on a wide screen, the side panel beside it. */}
-      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
+      <div ref={explorerColumnsRef} data-testid="session-columns" style={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0, overflowX: isMobile ? 'hidden' : 'auto' }}>
+      <ExplorerDock key={`${session.id}:${explorer.account}`} sessionId={session.id} layout={explorer} />
+      <div data-testid="session-chat-column" style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: isMobile ? 0 : EXPLORER_CHAT_MIN, minHeight: 0 }}>
 
       {/* Posture banner — states plainly how this session runs and whether
           permission prompts are bypassed (R5); persistent, not dismissible. */}
@@ -703,7 +731,7 @@ export default function SessionDetail() {
         {isAgent
           // Keyed by id: draft, pending turn and notices belong to one
           // session and must not carry over when the route switches sessions.
-          ? <AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} onOpenChecklistItem={openChecklistItem} onManageChildApproval={openChildApproval} checklistItems={sessionLive.source === 'server' ? (liveState.checklist?.items ?? EMPTY_CHECKLIST_ITEMS) : undefined} mcpHold={liveState.mcpHold ?? null} canReleasePrompt={liveState.canReleasePrompt === true} canAnswerApprovals={sessionLive.source === 'loading' ? null : liveState.canReleasePrompt === true} reasoningTokens={liveState.reasoningTokens === true} />
+          ? <ShellWorkspace enabled={shellAvailable} key={session.id + tokenSubject(getAccessToken())} ref={shellRef} sessionId={session.id} accountId={tokenSubject(getAccessToken())}><AgentChatView key={session.id} session={session} thinking={showThinking} compact={compactTools} openArtifact={fileAsk} onOpenChecklistItem={openChecklistItem} onManageChildApproval={openChildApproval} checklistItems={sessionLive.source === 'server' ? (liveState.checklist?.items ?? EMPTY_CHECKLIST_ITEMS) : undefined} mcpHold={liveState.mcpHold ?? null} canReleasePrompt={sessionLive.source === 'loading' ? undefined : liveState.canReleasePrompt === true} canAnswerApprovals={sessionLive.source === 'loading' ? null : liveState.canReleasePrompt === true} reasoningTokens={liveState.reasoningTokens === true} /></ShellWorkspace>
           : <TerminalDOMView sessionId={sessionId ?? ''} ref={termRef} readOnly={!!session.archived_at}/>}
       </div>
 
@@ -796,6 +824,7 @@ export default function SessionDetail() {
           mode={narrow ? 'drawer' : 'panel'}
           open={railOpen}
           onClose={closeRail}
+          onReveal={revealPanel}
           onCapabilitiesShown={toolsLook}
           onOpenArtifact={openArtifact}
           openChildApproval={approvalTarget?.session === session.id ? approvalTarget.n : undefined}

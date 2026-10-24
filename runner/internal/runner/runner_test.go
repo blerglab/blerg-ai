@@ -401,3 +401,32 @@ func TestConfigFromEnvNewRepo(t *testing.T) {
 		t.Fatal("NewRepo set without the variable")
 	}
 }
+
+func TestPrepareExistingWorkspacePinsTrustedPushDestination(t *testing.T) {
+	bare := makeBareRepo(t)
+	home := t.TempDir()
+	dir := filepath.Join(home, "proj")
+	if out, err := gitServed(home, bare, "upload-pack", "clone", "--", bare, dir); err != nil {
+		t.Fatal(err, out)
+	}
+	cfg := Config{Home: home, Repo: "proj", SessionID: "existing", GitURL: bare}
+	if _, state, err := PrepareWorkspace(cfg); err != nil || state != "existing" {
+		t.Fatal(state, err)
+	}
+	// Agent-controlled origin must never replace the trusted launch endpoint.
+	other := makeBareRepo(t)
+	gitT(t, dir, "remote", "set-url", "origin", other)
+	gitT(t, dir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--allow-empty", "-m", "existing work")
+	PushWip(dir, cfg.SessionID)
+	if got := gitT(t, bare, "rev-parse", "refs/heads/wip/existing"); got != gitT(t, dir, "rev-parse", "HEAD") {
+		t.Fatal("existing checkout did not push to launch destination")
+	}
+	cfg.GitURL = other
+	if _, _, err := PrepareWorkspace(cfg); err == nil {
+		t.Fatal("accepted changed destination on existing checkout")
+	}
+	cfg.GitURL = ""
+	if _, _, err := PrepareWorkspace(cfg); err == nil {
+		t.Fatal("accepted existing checkout without trusted destination")
+	}
+}

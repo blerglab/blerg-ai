@@ -40,12 +40,12 @@ func TestWorkspaceFileReadAndClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspaceLink(t, "docs/README.md", filepath.Join(root, "alias.md"))
-	if got = readWorkspaceFile(root, "alias.md", workspaceFileLimits{}); !got.OK {
-		t.Fatalf("safe internal link: %+v", got)
+	if got = readWorkspaceFile(root, "alias.md", workspaceFileLimits{}); got.OK || got.ErrorCode != "forbidden" {
+		t.Fatalf("internal symlink was followed: %+v", got)
 	}
 	workspaceLink(t, filepath.Join(root, "docs/README.md"), filepath.Join(root, "absolute-internal.md"))
-	if got = readWorkspaceFile(root, "absolute-internal.md", workspaceFileLimits{}); !got.OK {
-		t.Fatalf("safe absolute internal link: %+v", got)
+	if got = readWorkspaceFile(root, "absolute-internal.md", workspaceFileLimits{}); got.OK || got.ErrorCode != "forbidden" {
+		t.Fatalf("absolute internal symlink was followed: %+v", got)
 	}
 }
 func TestWorkspaceFileRejectsTraversal(t *testing.T) {
@@ -107,7 +107,8 @@ func TestWorkspaceFileRegularOnlyAndHardlinks(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(root, "pipe"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("unix", filepath.Join(root, "socket"))
+	t.Chdir(root) // Keep the AF_UNIX bind pathname short in deep worktrees.
+	listener, err := net.Listen("unix", "socket")
 	if err != nil {
 		t.Fatal(err)
 	}

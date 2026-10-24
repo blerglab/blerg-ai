@@ -30,11 +30,12 @@ func ParsePluginsEnv(raw string) ([]pluginspec.Entry, error) {
 func InstallPlugins(ctx context.Context, cfg Config, entries []pluginspec.Entry) PluginResult {
 	allow, _ := pluginspec.ParseAllowlist(os.Getenv("BLERG_RUNNER_PLUGIN_MARKETPLACES"))
 	return pluginsinstall.Install(ctx, pluginsinstall.Options{
-		Bin:       "claude",
-		Env:       pluginsinstall.ChildEnv(cfg.Home),
-		Allow:     allow,
-		Secrets:   []string{cfg.GitToken, cfg.APIKey, cfg.DaemonToken, os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")},
-		LogPrefix: "runner: plugins",
+		Bin:          "claude",
+		StartCommand: cfg.StartCommand,
+		Env:          pluginsinstall.ChildEnv(cfg.Home),
+		Allow:        allow,
+		Secrets:      []string{cfg.GitToken, cfg.APIKey, cfg.DaemonToken, os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")},
+		LogPrefix:    "runner: plugins",
 	}, entries)
 }
 

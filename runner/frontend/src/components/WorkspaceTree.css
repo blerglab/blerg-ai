@@ -1,0 +1,28 @@
+.workspace-tree { min-width: 0; width: 100%; overflow-wrap: anywhere; }
+.workspace-tools { display: flex; gap: 6px; padding: 8px; align-items: center; }
+.workspace-tools input { min-width: 0; width: 100%; padding: 6px; color: inherit; background: transparent; border: 1px solid var(--stone); border-radius: 5px; }
+.workspace-tools button { flex-shrink: 0; }
+.workspace-tree ul { list-style: none; margin: 0; padding: 0; min-width: 0; }
+.workspace-row { width: 100%; display: flex; align-items: center; text-align: start; gap: 7px; padding: 6px 8px; color: inherit; background: transparent; border: 0; cursor: pointer; }
+.workspace-row:hover, .workspace-row:focus-visible { background: var(--scree-2); }
+.workspace-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.workspace-repository { margin-inline-start: auto; flex-shrink: 0; }
+.workspace-note, .workspace-status { font-size: 12px; opacity: .8; margin: 4px 8px 8px; }
+.workspace-status { display: block; padding-inline-start: 16px; }
+
+.workspace-row:focus-visible { outline: 2px solid var(--blaze); outline-offset: -2px; }
+.workspace-tools button { padding: 5px 7px; border: 1px solid var(--stone); border-radius: 6px; background: transparent; color: var(--fog); font: inherit; cursor: pointer; }
+.workspace-tools { padding: 8px 32px 8px 8px; gap: 3px; }
+.workspace-tools input { height: 28px; box-sizing: border-box; font: inherit; }
+.workspace-tools button { display: grid; place-items: center; border: 0; width: 24px; height: 28px; padding: 0; }
+.workspace-chevron { flex: none; width: 8px; color: var(--fog); }
+.workspace-row .artifact-glyph { flex: none; color: var(--fog); }
+.workspace-row { gap: 5px; padding-top: 4px; padding-bottom: 4px; font: inherit; }
+.workspace-codes { display: flex; gap: 4px; margin-inline-start: auto; font-family: var(--chat-font-mono); font-size: 11px; }
+.workspace-code-M { color: var(--chat-muted); }
+.workspace-code-A, .workspace-code-U { color: var(--chat-diff-add); }
+.workspace-code-D, .workspace-code-C { color: var(--chat-diff-del); }
+.workspace-code-R, .workspace-code-T { color: var(--chat-code-type); }
+.workspace-search-all { display: flex; justify-content: space-between; width: 100%; padding: 5px 8px; border: 0; background: transparent; color: var(--fog); font: inherit; text-align: start; cursor: pointer; }
+.workspace-search-all:hover, .workspace-search-all:focus-visible { background: var(--scree-2); color: var(--chalk); }
+.workspace-row[aria-selected="true"] { background: var(--selected-bg); outline: 1px solid var(--selected-border); outline-offset: -1px; }

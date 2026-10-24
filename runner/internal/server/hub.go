@@ -5,6 +5,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"github.com/blerglab/blerg-ai/contracts/desktopauth"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"slices"
 	"sort"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/gitremote"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
 )
 
 // BrowserConn represents a connected browser client.
@@ -31,10 +34,12 @@ type BrowserConn struct {
 	AccountID string
 	// SessionID is the `sid` of the token that authorized the socket: the browser
 	// session core checks when this socket's resume needs the launcher's credentials.
-	SessionID string
-	send      chan []byte
-	ctx       context.Context
-	cancel    context.CancelFunc
+	SessionID      string
+	send           chan []byte
+	desktopFilter  func([]byte) ([]byte, bool)
+	desktopDeliver func([]byte, func([]byte) error) error
+	ctx            context.Context
+	cancel         context.CancelFunc
 
 	subMu sync.Mutex
 	subs  map[string]context.CancelFunc // sessionID → cancel func for forwarder goroutine
@@ -42,9 +47,26 @@ type BrowserConn struct {
 
 // DaemonConn represents a connected daemon.
 type DaemonConn struct {
+	clusterStopMu         sync.Mutex
+	clusterStop           *clusterStopWaiter
+	inventoryLimited      bool
+	DiscoveryVersion      int
+	WorkspaceCapabilities protocol.WorkspaceCapabilities
+	desktopToken          string
+	DesktopBinding        *desktopauth.Binding
+	DesktopGeneration     string
+	LegacyDesktop         bool
+	LegacyRevision        int64
+	desktopClose          func()
+	desktopDone           chan struct{}
+	desktopDoneOnce       sync.Once
+
 	// BoundSessionID and RuntimeTokenID are immutable server-verified pod authority.
-	BoundSessionID string
-	RuntimeTokenID string
+	BoundSessionID   string
+	RuntimeTokenID   string
+	WorkspaceRuntime protocol.WorkspaceRuntimeRef // immutable authenticated connection binding
+	clusterReplyMu   sync.RWMutex
+	clusterReply     func(context.Context, []byte)
 	// BackgroundTaskLifetime is immutable, accepted only from a valid full hello inventory.
 	BackgroundTaskLifetime string
 	RecoveryReadyCapable   bool // immutable hello capability, not permission to resume
@@ -54,9 +76,11 @@ type DaemonConn struct {
 	Mode                   string
 	// ReposRoot is the root the daemon reported in its hello. The owner can
 	// change it live (set_repos_root), so read CurrentReposRoot instead.
-	ReposRoot string
-	Version   string
-	send      chan []byte
+	ReposRoot    string
+	Version      string
+	send         chan []byte
+	shellControl chan []byte
+	shellData    chan []byte
 
 	// liveMu guards the fields below: unlike the ones above (set once at
 	// Register and read-only thereafter), these are refreshed on every
@@ -65,6 +89,7 @@ type DaemonConn struct {
 	// reconnect (a hello-only snapshot bit a real user: repos checked out
 	// before AND after daemon start both stayed invisible until restart).
 	liveMu               sync.RWMutex
+	workspaceRuntimeRefs map[string]protocol.WorkspaceRuntimeRef
 	checkedOutRepos      []string                       // repo names present on disk at ReposRoot
 	repoRemotes          map[string]protocol.RepoOrigin // checked-out name → provider + "owner/name" of its origin (known ones only)
 	gitProviders         []string                       // providers the daemon can clone from (hello); nil = GitHub only
@@ -74,10 +99,11 @@ type DaemonConn struct {
 	inputReceipts        bool
 	sessionTokenFile     bool        // handles SessionToken and answers it (hello session_token_file)
 	tokenHealSkipLogged  atomic.Bool // the "too old for a token heal" line was logged for this connection
-	restrictTools        bool        // honours SpawnSession.RestrictTools (hello restrict_tools)
-	codexRestricted      bool        // isolated Codex file/MCP runtime (hello codex_restricted)
-	sandboxClones        bool        // every sandboxed session in its own clone (hello sandbox_clones)
-	plugins              bool        // honours SpawnSession.Plugins (hello plugins)
+	planNudges           bool
+	restrictTools        bool // honours SpawnSession.RestrictTools (hello restrict_tools)
+	codexRestricted      bool // isolated Codex file/MCP runtime (hello codex_restricted)
+	sandboxClones        bool // every sandboxed session in its own clone (hello sandbox_clones)
+	plugins              bool // honours SpawnSession.Plugins (hello plugins)
 	sessionPluginEngines []string
 	pluginEngines        []string
 	pluginCatalogEngines []string // engines answered by read_plugin_catalog (hello plugin_catalog_engines)
@@ -379,6 +405,13 @@ func (dc *DaemonConn) AvailableEngines() []string {
 // Hub holds maps of connected daemons and browsers and serialises access to
 // those maps.
 type Hub struct {
+	runtimeShellReady   atomic.Bool
+	shellPhase          func(shellruntime.RPC) bool
+	shellRPC            shellRPCState
+	desktopAuthenticate func(context.Context, string) (desktopauth.Binding, error)
+	discoveryReqs       discoveryRequests
+	desktopPool         *pgxpool.Pool
+
 	reasoning reasoningCache
 	// daemonWorkFences is guarded by mu. Never wait for a fence while holding mu.
 	// Entries include waiters and are removed when their final holder releases.
@@ -403,6 +436,9 @@ type Hub struct {
 	completionNotifier func(sessionID string)
 	childActivity      func(string)
 	childTurn          func(sessionID, kind, detail string) // child_turn_notes.go
+	planInitialInput   func(*DaemonConn, []byte) ([]byte, func(bool))
+	planInput          func(*DaemonConn, []byte) ([]byte, func(bool))
+	planTurn           func(sessionID string, seq int64, at time.Time, stopReason string) // plansync.go
 	delegationTerminal func(sessionID string)
 	delegationPaused   func(sessionID string)
 	delegationHello    func(context.Context, string) error
@@ -418,6 +454,7 @@ type Hub struct {
 	// answer (reposroot.go).
 	reposRootReqs      reposRootRequests
 	workspaceFileReqs  workspaceFileRequests
+	explorerReqs       workspaceExplorerRequests
 	sessionOriginReqs  sessionOriginRequests
 	commitReqs         commitRequests
 	extReqs            extRequests
@@ -790,26 +827,34 @@ func (h *Hub) UnregisterBrowser(id string) {
 // that owns it; see privacy.go. Every broadcast helper below funnels through
 // here, so no call site has to remember to filter.
 func (h *Hub) BroadcastToBrowsers(msg []byte) {
-	scope := h.scopeOf(msg) // reads the database: never under h.mu
-	perAccount := map[string][]byte{}
+	scope := h.scopeOf(msg)
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	browsers := make([]*BrowserConn, 0, len(h.browsers))
 	for _, b := range h.browsers {
-		data, ok := perAccount[b.AccountID]
-		if !ok {
+		browsers = append(browsers, b)
+	}
+	h.mu.RUnlock()
+	perAccount := map[string][]byte{}
+	for _, b := range browsers {
+		data, seen := perAccount[b.AccountID]
+		if !seen {
 			var allowed bool
-			if data, allowed = scope.forAccount(b.AccountID, msg); !allowed {
+			data, allowed = scope.forAccount(b.AccountID, msg)
+			if allowed {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				data, allowed = h.desktopPayloadFor(ctx, b.AccountID, data)
+				cancel()
+			}
+			if !allowed {
 				data = nil
 			}
 			perAccount[b.AccountID] = data
 		}
-		if data == nil {
-			continue
-		}
-		select {
-		case b.send <- data:
-		default:
-			// browser channel full — skip rather than block
+		if data != nil {
+			select {
+			case b.send <- data:
+			default:
+			}
 		}
 	}
 }
@@ -842,13 +887,22 @@ func (h *Hub) BroadcastJSONPerAccount(build func(accountID string) any) {
 	for _, b := range browsers {
 		data, ok := cache[b.AccountID]
 		if !ok {
-			raw, err := json.Marshal(build(b.AccountID))
+			payload := build(b.AccountID)
+			if payload == nil {
+				cache[b.AccountID] = nil
+				continue
+			}
+			raw, err := json.Marshal(payload)
 			if err != nil {
 				cache[b.AccountID] = nil
 				continue
 			}
 			if out, allowed := h.scopeOf(raw).forAccount(b.AccountID, raw); allowed {
-				data = out
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				if filtered, ok := h.desktopPayloadFor(ctx, b.AccountID, out); ok {
+					data = filtered
+				}
+				cancel()
 			}
 			cache[b.AccountID] = data
 		}
@@ -1006,7 +1060,7 @@ func (h *Hub) FindDaemonForSession(sessionID string) *DaemonConn {
 // its own events and controls, but neither its advertised mode nor repository
 // inventory can grant it authority to host another session.
 func isHostDaemon(dc *DaemonConn) bool {
-	return dc != nil && dc.Mode != "runner" && dc.BoundSessionID == ""
+	return dc != nil && dc.Mode != "runner" && dc.BoundSessionID == "" && !dc.LegacyDesktop
 }
 
 // GetHostDaemon looks up a workstation execution target. GetDaemon deliberately

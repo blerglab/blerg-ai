@@ -508,7 +508,9 @@ collapsed, with Show all), extra fields, the acceptance criteria and the latest 
 Pinning it again refreshes it, and the new card says "Ticket updated" and what changed (the status,
 a new title). At most five are pinned at once; the newest is the current one, and
 `blerg-runner unpin [<source>:<key>]` takes one off (a line in the chat says so). A Board card is
-pinned the same way (source `blerg-board`); nothing is pinned by itself.
+pinned the same way (source `blerg-board`), and its copy is filled from the Board (title, description, column, type,
+priority, tags, read with the session's board access; what the agent sent stays only where the Board has
+nothing, and all of it when the card cannot be read).
 
 Pinning copies the ticket's text into the session: whoever can see the session can read it, as
 they can read the rest of it (a private session is yours alone). The text is drawn as plain text and
@@ -549,6 +551,46 @@ publishes the diff of those commits ([Diffs](artifacts.md#diffs)) and keeps its 
 gets **View diff**, which opens it. When the diff cannot be made (the commits are not in that
 repository, or it is over the per-file limit) the command says so and the item keeps its commits
 without one.
+
+#### What keeps the plan honest
+
+The pins and the checklist used to drift when the agent forgot them. Part of the plan is now kept by
+the runner from what it sees, and the rest is checked at the end of each turn. Nothing here asks a
+model; every rule is a fixed check.
+
+Kept automatically:
+
+- A Board card the session moves into an in-progress column (a column named like "In progress",
+  "Doing" or "Working", the Board's own rule), through `blerg-runner ticket move`, the `blerg_board`
+  tool or the session's board connection, is pinned, filled from the Board. With five pinned, the
+  oldest pin whose card is done is unpinned first; when none is done, the card is not pinned and the
+  agent is told at the end of the turn.
+- A card the session moves into a done column (the Board's terminal columns) is unpinned, and every
+  open checklist item naming it as `#N` (a whole token, as the chat's card chips read it, on the
+  session's one board) is ticked. The chat row says so: "ticked “Parser #12” (Blerg: #12 done)".
+- A board-started session pins the card it was started for.
+- A session the agent starts whose title or prompt names `#N` is assigned to the agent's open
+  checklist item naming `#N`.
+
+Checked at turn end and held until the next input, with each fact rechecked and told once: the agent gets a Blerg system message (marked, like a child's turn note) naming exactly
+what drifted and the commands that fix it, when
+
+- every pinned ticket is done and your last turn ran tools;
+- every checklist item is ticked, or none is doing, and your last turn ran tools (`blerg-runner`
+  commands alone do not count);
+- a child session or a background subagent started in the turn has no checklist item;
+- a pinned card was closed on the board;
+- a child looks finished: stopped or idle, and either nothing done since the agent read its result
+  (`blerg-runner session result`), or its `wip/<id>` branch, holding work beyond its recorded clone base, merged into the parent's branch (its own `wip/<parent>` for a sandboxed parent) (asked of the agent's daemon,
+  which reinstalling brings). The notice suggests `blerg-runner session discard <id>`; nothing is
+  discarded by itself.
+
+The notice shares one input with the next message; it never starts a turn or wakes a parent.
+Older daemons receive no notice. Interrupted or failed turns are not checked. **Nudge when the plan drifts**, in the session panel's
+Session section, turns the notices off for that session (the automatic pins and ticks go on); it is
+on by default and only the session's owner sees it. A cron session gets notices only when it keeps
+pins or a checklist. The checks read the pinned Board cards with the session's own board access, so
+an unreadable card is never treated as closed.
 
 ### Proposing a new Board ticket
 
@@ -686,10 +728,11 @@ again and renew the parent's level), or when the parent was stopped for good or 
 
 **Each child has its own limits.** A child's board calls count against its own limits, not its
 parent's: 8 board calls at once and 600 board requests a minute per session (the defaults; see above),
-and at most 20 filings an hour approved without asking per permission. A parent runs at most 3
+and at most 20 filings an hour approved without asking per permission. By default a parent runs at most 3
 children at once and an account at most 6, so with children an account can have up to 48 more board
 calls in flight, and a parent at **File without asking** and its children together up to 80 filings
-an hour without asking.
+an hour without asking at the default child limit. The install administrator can change the
+parallel child limit in core Settings; the account cap still applies.
 
 Every board call of the child is checked against the lower of its own level and the parent's level
 at that moment. Lowering or revoking the parent's level lowers every child at its next call, and
@@ -914,8 +957,12 @@ you add or remove them, desktop and cluster rules alike (the cluster runtime is 
 install has one); a card's **Always allow** button adds one too. The sidebar groups children under their parent, and Insights shows child
 usage separately from the parent's own usage.
 
-A parent can have three running children and make twenty starts. Across your account, the limits
-are six running children and sixty starts per hour. Approval requests expire after ten minutes.
+By default a parent can run three children at once and start 120 per rolling hour, with no
+lifetime start cap. An administrator can change both under core Settings → Child session limits;
+changes apply on the next start request. Across your account, the limits remain six running
+children and sixty starts per rolling hour, which can be reached before the parent limit.
+Approval requests reserve rate budget too. A refusal names the limit and says to stop a child
+or gives the next available time in UTC. Approval requests expire after ten minutes.
 Pausing or restarting a parent expires its pending requests while preserving existing children and
 session permissions. A real end revokes those permissions and stops children, including children
 whose daemon reconnects later, unless you approved **Keep running** for them. Resuming the parent
@@ -1131,3 +1178,5 @@ changes. Use **Discard** on its panel row or in its sidebar card's Actions menu,
 Discard stops and archives the child. History, Insights totals and its direct session URL stay
 available. A failed stop leaves the child listed so you can retry. The parent can also run
 `blerg-runner session discard <child>`; `session stop` by itself keeps the worker listed.
+
+Automatic Board pin fill copies descriptions into the session; anyone allowed to view the session can see that copy. With one board, bare `#N` in checklist items means that board's card, including text that also mentions a PR. Items naming several cards tick only when every named card is done. Child assignment prefers a single title reference and requires one matching item.

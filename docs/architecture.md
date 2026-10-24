@@ -138,3 +138,24 @@ agent's side in [`AGENTS.md`](../AGENTS.md).
 | `install/desktop/`, `install/k8s/` | The two installers, with their own documentation |
 | `docs/` | User documentation and, under `design/`, the notes behind larger decisions |
 | `scripts/` | Checks CI runs: links, the privacy scrub, the release tooling |
+
+## Workspace integration
+
+Workspace selection and physical runtime authority are separate. P1 persists an
+immutable authorized member manifest; P0b allocates a runtime generation and pins
+the prepared public root. P2 and P3 own preparation, settlement, retention and
+writer cleanup. P4 reads only through that runtime binding. P5 independently
+checks live human identity, policy, grants and containment; selection grants no
+shell permission.
+
+The desktop control adapter uses the enrolled outbound socket and persisted owner
+and connection fences. Migration 083 journals generation tokens and exact final
+outcomes. Results, terminal state and receipt commit atomically; reconnect can
+reconcile an identical completion even after ordinary live-runtime authority has
+ended. Files and shell bytes use bounded separate scheduling lanes and never
+become agent transcript events.
+
+Workspace and shell capability gates remain false until their real lifecycle,
+protected-storage, platform and independent security gates pass. The [integration
+status](workspace-integration.md) lists the current missing bindings and acceptance
+work. Unavailable capabilities return explicit refusals.

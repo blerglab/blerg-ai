@@ -368,7 +368,7 @@ func TestFailedClusterChildStartDoesNotCountAsAStart(t *testing.T) {
 		t.Fatalf("start with a refused Job = %d %v, want a 5xx", code, out)
 	}
 	ctx := context.Background()
-	if n, err := db.CountParentStarts(ctx, cx.pool, cx.cparent); err != nil || n != 0 {
+	if n, _, err := db.ParentStartWindow(ctx, cx.pool, cx.cparent, time.Now().Add(-time.Hour), "", 20); err != nil || n != 0 {
 		t.Fatalf("parent starts = %d %v, want 0", n, err)
 	}
 	if n, _, err := db.AccountStartsSince(ctx, cx.pool, "owner-1", time.Now().Add(-time.Hour)); err != nil || n != 0 {

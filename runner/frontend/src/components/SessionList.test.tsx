@@ -83,6 +83,7 @@ describe('SessionList', () => {
     expect(link).toHaveAttribute('target', '_blank')
     expect(link).toHaveAttribute('rel', 'noopener noreferrer')
     expect(link).toHaveAttribute('title', 'A newer Blerg release is available')
+    expect(screen.getByRole('link', { name: 'How to upgrade' })).toHaveAttribute('href', expect.stringContaining('/upgrade'))
     useSessionStore.setState({ latestVersion: '', latestUrl: '' })
   })
 

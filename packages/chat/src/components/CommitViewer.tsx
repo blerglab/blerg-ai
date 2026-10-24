@@ -14,7 +14,7 @@ import { createPortal } from 'react-dom'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { MAXIMIZED_KEY, isMaximizeShortcut, localStorageChatStorage } from '../model/storage'
-import type { TransportFiles } from '../transport/types'
+import type { TransportFiles, WorkspaceGitRef } from '../transport/types'
 import DiffView from './DiffView'
 import { repoName } from './Hovercard'
 import { visibleText } from '../model/visibleText'
@@ -27,13 +27,14 @@ type State = { kind: 'loading' } | { kind: 'ready'; text: string } | { kind: 'la
 export interface CommitViewerProps {
   sessionId: string
   sha: string
+  member?: WorkspaceGitRef
   files: TransportFiles
   /** The session's repository (a name or a path; its last part is shown). */
   repo?: string
   onClose: () => void
 }
 
-export default function CommitViewer({ sessionId, sha, files, repo, onClose }: CommitViewerProps) {
+export default function CommitViewer({ sessionId, sha, files, repo, member, onClose }: CommitViewerProps) {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
   useSelectAllIn(dialogRef)
@@ -54,12 +55,13 @@ export default function CommitViewer({ sessionId, sha, files, repo, onClose }: C
     const ac = new AbortController()
     // Past the wait, the read is given up and the commit reads as not available.
     const timer = setTimeout(() => ac.abort(), GIVE_UP_MS)
-    read.call(files, sessionId, sha, ac.signal).then(
+    const reading = (member ? read.call(files, sessionId, sha, ac.signal, member) : read.call(files, sessionId, sha, ac.signal))
+    reading.then(
       d => { if (live) setState(d === 'large' ? { kind: 'large' } : d ? { kind: 'ready', text: d.text } : { kind: 'none' }) },
       () => { if (live) setState({ kind: 'none' }) },
     ).finally(() => clearTimeout(timer))
     return () => { live = false; clearTimeout(timer); ac.abort() }
-  }, [files, sessionId, sha])
+  }, [files, sessionId, sha, member])
 
   function toggleMaximized() {
     const next = !maximized
@@ -132,7 +134,7 @@ export function shownHeader(text: string): string {
 }
 
 /** Opens a commit's diff, from a chip. */
-export type OpenCommit = (sessionId: string, sha: string) => void
+export type OpenCommit = (sessionId: string, sha: string, member?: WorkspaceGitRef) => void
 
 const OpenerContext = createContext<OpenCommit | null>(null)
 
@@ -152,20 +154,20 @@ export function CommitViewerHost({ files, repo, opened, children }: {
   children: ReactNode
 }) {
   const parent = useContext(OpenerContext)
-  const [open, setOpen] = useState<{ sessionId: string; sha: string } | null>(null)
+  const [open, setOpen] = useState<{ sessionId: string; sha: string; member?: WorkspaceGitRef } | null>(null)
   const openedRef = useRef(opened)
   useEffect(() => { openedRef.current = opened }, [opened])
   const can = !!files?.commitDiff
-  const openCommit = useCallback<OpenCommit>((sessionId, sha) => {
-    if (openedRef.current?.(sessionId, sha)) return
-    setOpen({ sessionId, sha })
+  const openCommit = useCallback<OpenCommit>((sessionId, sha, member) => {
+    if (!member && openedRef.current?.(sessionId, sha)) return
+    setOpen({ sessionId, sha, member })
   }, [])
   const value = useMemo(() => (can ? openCommit : parent), [can, openCommit, parent])
   return (
     <OpenerContext.Provider value={value}>
       {children}
       {open && files && (
-        <CommitViewer key={`${open.sessionId}/${open.sha}`} sessionId={open.sessionId} sha={open.sha} files={files} repo={repo?.(open.sessionId)} onClose={() => setOpen(null)} />
+        <CommitViewer key={`${open.sessionId}/${open.sha}/${JSON.stringify(open.member)}`} sessionId={open.sessionId} sha={open.sha} member={open.member} files={files} repo={repo?.(open.sessionId)} onClose={() => setOpen(null)} />
       )}
     </OpenerContext.Provider>
   )

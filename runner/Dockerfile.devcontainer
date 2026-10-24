@@ -20,7 +20,7 @@ FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddf
 
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git curl bash make ripgrep jq unzip build-essential \
+    ca-certificates git curl bash make ripgrep jq unzip build-essential util-linux \
     python3 python3-pip python3-venv \
     chromium fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
@@ -62,8 +62,14 @@ COPY --from=build /out/blerg-runner-pod /usr/local/bin/blerg-runner-pod
 COPY --from=build /src/runner/.claude/skills/session-messaging/blerg-runner /usr/local/bin/blerg-runner
 RUN chmod 0755 /usr/local/bin/blerg-runner
 
-# Non-root workspace user.
-RUN useradd -m -u 1000 -d /workspace agent && mkdir -p /workspace && chown agent:agent /workspace
+# Non-root workspace user. The workspace-v2 Job runs the trusted controller
+# as UID 1001 and drops engine/PTY exec to this agent UID.
+RUN useradd -m -u 1000 -d /workspace agent \
+    && useradd -M -u 1001 -d /run/blerg-workspace-private -s /usr/sbin/nologin workspace-controller \
+    && mkdir -p /workspace /run/blerg-workspace-private \
+    && chown agent:agent /workspace \
+    && chown 1001:1001 /run/blerg-workspace-private \
+    && chmod 0700 /run/blerg-workspace-private
 USER agent
 WORKDIR /workspace
 ENV HOME=/workspace \

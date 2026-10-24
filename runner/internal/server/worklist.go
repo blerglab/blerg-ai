@@ -255,6 +255,10 @@ func (a *API) HandlePostTickets(w http.ResponseWriter, r *http.Request) {
 		// Blerg, never a link the agent wrote.
 		if board, number, ok := ticket.BoardCard(t); ok {
 			t.URL = a.boardCardURL(r.Context(), board, number)
+			// The pinned copy is the Board's (title, description, column, type, priority, tags),
+			// read with the session's board access; what the agent sent stays only where the Board
+			// has nothing, and all of it when the read fails (plansync.go).
+			t = a.enrichBoardPin(r.Context(), sid, t)
 		}
 	case "unpin":
 	default:
@@ -494,7 +498,7 @@ func readWorkState(ctx context.Context, q db.Querier, sid string, through int64)
 
 // addChecklistCommitURLs gives the checklist's commits their web pages when the session's
 // repository is known (the same rule as the History tab's commit chips).
-func (a *API) addChecklistCommitURLs(row *db.SessionRow, ws *workState) {
+func (a *API) addChecklistCommitURLs(ctx context.Context, viewer string, row *db.SessionRow, ws *workState) {
 	if ws.Checklist == nil {
 		return
 	}
@@ -503,7 +507,7 @@ func (a *API) addChecklistCommitURLs(row *db.SessionRow, ws *workState) {
 	for _, it := range ws.Checklist.Items {
 		for _, sha := range it.Commits {
 			if !looked {
-				repo, have = a.sessionRepo(row)
+				repo, have = a.sessionRepo(ctx, viewer, row)
 				looked = true
 			}
 			if !have {

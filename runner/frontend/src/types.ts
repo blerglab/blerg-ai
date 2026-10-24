@@ -589,7 +589,14 @@ export interface TicketDependencyChanged {
 // Discriminated union of all server→browser messages.
 export interface ChildrenChanged { type: 'children_changed'; session_id: string }
 
+export interface DesktopSourcesChanged { type: "desktop_sources_changed"; desktop_id: string }
+export interface DesktopOwnershipChanged { type: "desktop_ownership_changed"; desktop_id: string; ownership_revision: number }
+export interface DesktopInventoryInvalidated { type: "desktop_inventory_invalidated" }
+
 export type ServerMessage =
+  | DesktopOwnershipChanged
+  | DesktopInventoryInvalidated
+  | DesktopSourcesChanged
   | ChildrenChanged
   | InitialState
   | DaemonConnected

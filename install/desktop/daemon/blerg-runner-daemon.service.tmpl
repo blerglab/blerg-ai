@@ -1,6 +1,8 @@
 [Unit]
 Description=Blerg runner daemon (drives local claude CLI + tmux for agent sessions)
 After=network-online.target
+# Keep retrying transient boot failures even with a strict distro rate limit.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -13,7 +15,7 @@ Restart=on-failure
 # Stop the daemon first and its engine processes only once it has gone: the daemon records which
 # sessions were mid-turn, and an engine that died first would make it record that none were.
 KillMode=mixed
-RestartSec=5
+RestartSec=15
 
 [Install]
 WantedBy=default.target

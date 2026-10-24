@@ -184,8 +184,8 @@ func TestRunKillsTheProcessGroup(t *testing.T) {
 }
 
 func TestMemoryLimitStopsAnUnboundedReader(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the limit is Linux only")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("unsupported platform")
 	}
 	dir := repoWithHistory(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
@@ -194,6 +194,25 @@ func TestMemoryLimitStopsAnUnboundedReader(t *testing.T) {
 	err := Run(ctx, Options{Dir: dir, MemoryLimit: true, Config: []string{"diff.orderFile=/dev/zero"}, Stdout: io.Discard}, "show", "--numstat", "HEAD~1")
 	if err == nil || ctx.Err() != nil || time.Since(start) > 10*time.Second {
 		t.Fatalf("not stopped by the limit: %v after %s", err, time.Since(start))
+	}
+}
+
+func TestWorkspaceStatusExactMemoryLimit(t *testing.T) {
+	version, err := Output(t.Context(), Options{MemoryLimit: true, LimitKB: 256 << 10, Timeout: 2 * time.Second}, "--version")
+	if err != nil || !strings.HasPrefix(version, "git version ") {
+		t.Fatalf("bounded Git cannot start: %v %s", err, version)
+	}
+	dir := repoWithHistory(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	err = Run(ctx, Options{Dir: dir, MemoryLimit: true, LimitKB: 256 << 10, Config: []string{"diff.orderFile=/dev/zero"}, Stdout: io.Discard}, "show", "--numstat", "HEAD~1")
+	if err == nil || ctx.Err() != nil || time.Since(start) > 8*time.Second {
+		t.Fatalf("256 MiB did not stop unbounded Git: %v (%s)", err, time.Since(start))
+	}
+	cmd, err := Command(Options{MemoryLimit: true, LimitKB: 256 << 10}, "--version")
+	if err != nil || !strings.Contains(strings.Join(cmd.Args, " "), "262144") {
+		t.Fatalf("wrong worker memory limit: %v %v", cmd, err)
 	}
 }
 
@@ -253,5 +272,54 @@ func TestServeCommandRefusesAQuote(t *testing.T) {
 	}
 	if cfg := strings.Join(Config(Options{Protocols: []string{"ssh"}}), " "); !strings.Contains(cfg, "core.sshCommand=ssh") {
 		t.Errorf("an ssh call pins the ssh command: %s", cfg)
+	}
+}
+
+func TestWorkspaceStatusDarwinCommand(t *testing.T) {
+	cmd, err := commandForPlatform(Options{Dir: "/dev/fd/9", MemoryLimit: true, LimitKB: 256 << 10, Untrusted: true}, "darwin", "status", "--porcelain=v2", "-z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != "/bin/sh" || len(cmd.Args) < 6 || cmd.Args[4] != "262144" || cmd.Dir != "/dev/fd/9" {
+		t.Fatalf("Darwin Git lacks fixed memory/cwd boundary: %v", cmd)
+	}
+	if !strings.Contains(strings.Join(cmd.Args, " "), "core.fsmonitor=false") || !strings.Contains(strings.Join(cmd.Env, " "), "GIT_CONFIG_NOSYSTEM=1") {
+		t.Fatal("Darwin hardening missing")
+	}
+}
+
+// Test a known-size allocation, rather than inferring 256 MiB from a Git
+// failure that would also happen under the old one-GiB default limit.
+func TestWorkspaceStatusMemoryBoundary(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "memory.c")
+	binary := filepath.Join(dir, "git")
+	program := `#include <stdlib.h>
+#include <string.h>
+int main(int argc,char **argv) {
+ size_t size=(argc>1 && !strcmp(argv[argc-1],"small")) ? 1024*1024 : 300UL*1024*1024;
+ volatile unsigned char *p=malloc(size); if(!p) return 42;
+ for(size_t i=0;i<size;i+=4096) p[i]=1;
+ free((void*)p); return 0;
+}`
+	if err := os.WriteFile(source, []byte(program), 0600); err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("cc", source, "-o", binary)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("native memory probe compiler: %v %s", err, out)
+	}
+	t.Setenv("PATH", dir+":/usr/bin:/bin")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	bounded := Options{MemoryLimit: true, LimitKB: 256 << 10}
+	if err := Run(ctx, bounded, "small"); err != nil {
+		t.Fatalf("bounded native probe cannot start: %v", err)
+	}
+	if err := Run(ctx, Options{}, "large"); err != nil {
+		t.Fatalf("control allocation failed without cap: %v", err)
+	}
+	if err := Run(ctx, bounded, "large"); err == nil || ctx.Err() != nil {
+		t.Fatalf("300 MiB allocation escaped 256 MiB cap: %v", err)
 	}
 }

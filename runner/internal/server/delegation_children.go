@@ -208,7 +208,7 @@ func (a *API) handleChildModel(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
-		resolved, problem := a.resolveChildModel(r.Context(), derefOrEmpty(row.Engine), request.Model, a.childHostOfChild(row), p)
+		resolved, problem := a.resolveChildModel(r.Context(), derefOrEmpty(row.Engine), request.Model, a.childHostOfChild(r.Context(), row), p)
 		if problem != nil {
 			writeAPIError(w, problem)
 			return

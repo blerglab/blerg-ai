@@ -125,9 +125,12 @@ describe('SessionDetail', () => {
       expect(group).toContainElement(bells[0])
       expect(bells[0]).toHaveClass('icon-btn')
       const controls = [...group.querySelectorAll<HTMLButtonElement>('button:not([role="menuitem"])')]
-      expect(controls.map(b => b.getAttribute('aria-label')?.replace(/ \(.*$/, ''))).toEqual(['Star', expect.any(String), 'Notifications', 'End session', 'More actions'])
+      expect(controls.map(b => b.getAttribute('aria-label')?.replace(/ \(.*$/, ''))).toEqual(['Search commands and files', 'Toggle explorer', expect.any(String), 'Notifications', 'End session', 'More actions'])
       const insights = screen.getByTestId('session-insights-toggle')
       expect(insights).toHaveAttribute('role', 'menuitem')
+      fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: /^Star/ }))
+      expect(wsMock.send).toHaveBeenCalledWith({ type: 'set_session_star', session_id: 'sess-a', starred: true })
       fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
       fireEvent.click(insights)
       expect(screen.getByRole('dialog', { name: 'Fix the bug · Insights' })).toBeInTheDocument()
@@ -509,7 +512,7 @@ describe('SessionDetail', () => {
     renderDetail()
     const group = screen.getByTestId('session-header-controls')
     const controls = [...group.querySelectorAll<HTMLButtonElement>('button:not([role="menuitem"])')]
-    expect(controls.map(b => b.getAttribute('aria-label'))).toEqual(['Star', 'Insights', expect.stringMatching(/panel|need|running|Session/i), 'End session', 'More actions'])
+    expect(controls.map(b => b.getAttribute('aria-label'))).toEqual(['Search commands and files', 'Toggle explorer', 'Star', 'Insights', expect.stringMatching(/panel|need|running|Session/i), 'End session', 'More actions'])
     for (const b of controls) {
       expect(b).toHaveClass('icon-btn')
       // Icons only: the word is in the tooltip and the label, no text or emoji drawn.

@@ -62,6 +62,27 @@ func (a *API) autoStopOnTurnDone(sessionID string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), autoStopTimeout)
 	defer cancel()
+	workspace, err := db.GetSessionWorkspace(ctx, a.dbPool, sessionID)
+	if err != nil {
+		log.Printf("auto-stop: workspace lookup failed")
+		return
+	}
+	if workspace != nil && workspace.Manifest != nil && workspace.Manifest.Runtime == "cluster" {
+		// The final report returns on this same read pump. A workspace stop
+		// must leave it free, and cannot terminally claim before settlement.
+		go a.autoStopTurnDone(sessionID, true)
+		return
+	}
+	a.autoStopTurnDone(sessionID, false)
+}
+
+func (a *API) autoStopTurnDone(sessionID string, workspace bool) {
+	timeout := autoStopTimeout
+	if workspace {
+		timeout = 95 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	err := withLimitResumeActionLock(ctx, a.dbPool, sessionID, func(conn *pgxpool.Conn) error {
 		pending, err := db.HasPendingLimitResume(ctx, conn, sessionID)
 		if err != nil {
@@ -83,6 +104,21 @@ func (a *API) autoStopOnTurnDone(sessionID string) {
 			retry.TurnID == retry.CancelledTurnID && retry.CancelledAt != nil &&
 			time.Since(*retry.CancelledAt) >= 0 && time.Since(*retry.CancelledAt) < 2*time.Minute {
 			return nil
+		}
+		if workspace {
+			var eligible bool
+			if err := a.dbPool.QueryRow(ctx, `SELECT auto_stop AND ended_at IS NULL AND status NOT IN ('ended','stopped','error') FROM sessions WHERE id=$1`, sessionID).Scan(&eligible); err != nil {
+				return err
+			}
+			if !eligible {
+				return nil
+			}
+			if err := db.CancelLimitResume(ctx, conn, sessionID); err != nil {
+				return err
+			}
+			// The distributed continuation lock serializes this decision with
+			// other auto/manual stops; final marking follows the result ack.
+			return a.stopSessionWithDelivery(ctx, sessionID, systemEnd(db.EndReasonAutoStopped), false)
 		}
 		claimed, err := db.ClaimSessionAutoStop(ctx, a.dbPool, sessionID)
 		if err != nil {

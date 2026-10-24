@@ -121,7 +121,8 @@ export function readChecklist(payload: unknown, eventId?: string): ChecklistPayl
   const changed = c && typeof c.text === 'string' && Number.isSafeInteger(c.index) && (c.index as number) > 0
     ? { ...readItem(c), index: c.index as number, ...(workId(c.from_item_id) ? { from_item_id: workId(c.from_item_id) } : {}) }
     : undefined
-  return { items, op: str(p.op), ...(changed ? { changed } : {}) }
+  const note = typeof p.note === 'string' ? p.note.slice(0, 120) : ''
+  return { items, op: str(p.op), ...(changed ? { changed } : {}), ...(note ? { note } : {}) }
 }
 
 /** Explicit association only. An absent/ambiguous target must not navigate to another row. */
@@ -193,7 +194,7 @@ export function checklistRowText(p: ChecklistPayload): string {
   const head = `Checklist · ${progressText(doneCount(p.items), p.items.length)}`
   const c = p.changed
   switch (p.op) {
-    case 'tick': return c ? `${head} · ticked “${c.text}”` : head
+    case 'tick': return c ? `${head} · ticked “${c.text}”${p.note ? ` (Blerg: ${p.note.replace(/^ticked: /, '')})` : ''}` : head
     case 'doing': return c ? `${head} · doing “${c.text}”` : head
     case 'pending': return c ? `${head} · queued “${c.text}”` : head
     case 'assign': return c ? `${head} · assigned work on “${c.text}”` : head

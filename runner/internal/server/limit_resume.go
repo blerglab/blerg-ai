@@ -378,13 +378,11 @@ func (a *API) checkLimitResumes(ctx context.Context) {
 					limitResumeAudit(ctx, a.hub, a.dbPool, id, messageEventID(attemptID, "limit-resume-dispatch"), "Automatic continuation requested after the provider usage limit reset.")
 					if dc != nil {
 						raw, _ := json.Marshal(protocol.AgentUserMessage{Type: "agent_user_message", SessionID: id, Text: limitResumePrompt, Source: limitResumeSource, ExpectedTurnID: state.TurnID})
-						select {
-						case dc.send <- raw:
+						if a.hub.trySendToDaemon(dc, raw) {
 							return nil
-						default:
-							settleAutoStop = true
-							return db.SetLimitResumeState(ctx, conn, id, "blocked", "The runtime could not accept continuation; continue manually.")
 						}
+						settleAutoStop = true
+						return db.SetLimitResumeState(ctx, conn, id, "blocked", "The runtime could not accept continuation; continue manually.")
 					}
 					// The strict path validates retained owner authority at actual credential
 					// fetch and forbids operator fallback even if the proof expired meanwhile.

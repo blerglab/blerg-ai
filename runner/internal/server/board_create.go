@@ -401,7 +401,12 @@ func (a *API) HandleBoardRepoChoices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	daemons := a.hub.GetHostDaemons()
+	owner := a.boardDesktopViewer(r)
+	if owner == "" {
+		writeError(w, http.StatusUnauthorized, "signed person proof required")
+		return
+	}
+	daemons := a.hub.ownedHostDaemons(r.Context(), owner)
 	byRepo := map[string]*boardRepoChoice{}
 	for _, d := range daemons {
 		for _, folder := range d.CheckedOutRepos() {

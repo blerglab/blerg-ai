@@ -138,6 +138,7 @@ Implementation roots: [server](../runner/internal/server/), [DB](../runner/inter
 | RUN-71 | Workstation sessions reach the MCP gateway through the server's web address (sandbox and, for the board alone, This machine) | Shared | Shared | [Web-port mount](../runner/internal/server/mcpstart.go) (`RegisterMCPGatewayRoutes`: grants issued for it only, uniform 401, address throttle, seven-day idle limit, `BLERG_RUNNER_MCP_GW_PUBLIC`), [daemon](../runner/internal/daemon/mcpgateway.go) (`viaServerGateway`); `mcpgw_web_test.go`, `mcpgatewayvia_test.go`. |
 | RUN-72 | Explicit review requests: a session asks its owner to approve one published file or diff at an exact version; owner-only decide, supersede on a newer version, decision delivered as a message or to a waiting CLI | shared | shared | [Review requests](../runner/internal/server/reviewrequests.go), [storage](../runner/internal/db/reviewrequests.go) (migration 069), [guide](artifacts.md#asking-for-an-approval); `reviewrequests_test.go`, `test_blerg_runner_review_request.py`. |
 | RUN-73 | A parent is told when its child's turn ends (finished, asked, waiting on an approval, failed): one Blerg note per child turn at the parent's next step, never to an ended parent, reserved source `child_turn` | shared | shared | [Child-turn notes](../runner/internal/server/child_turn_notes.go), [guide](talking-to-an-agent.md#when-the-agent-starts-other-sessions); `child_turn_notes_test.go`. |
+| RUN-74 | The plan keeps itself honest: the session's own card moves pin (in progress) or unpin and tick the items naming `#N` (done), a board-started session pins its card, a child naming `#N` is assigned to the item naming it, a Board card's pin is filled from the Board; holds deterministic drift facts at turn end and attaches one rechecked notice to the next input (your last turn ran tools), each fact once (reserved source `plan_drift`), off per session (Nudge when the plan drifts) | shared | shared | [plansync.go](../runner/internal/server/plansync.go), migration 075, mcpgw `BoardObserver`, chat 0.83.0, runner `PlanNudges`; [guide](talking-to-an-agent.md#what-keeps-the-plan-honest); `plansync_test.go`, `board_test.go`, `PlanNudges.test.tsx`, `SessionRail.browser.test.tsx`. |
 
 ## Native engines and execution runtimes
 
@@ -321,3 +322,13 @@ and bounded plain-text excerpts before send, with file-tile fallbacks. Document 
 uses icon formatting controls with tooltips, accessible labels and live active states.
 
 Hermes agent-session protocol coverage and explicit runtime limits are documented in [Hermes gateway support](hermes-gateway.md). Its native tools, steering, questions, plans, children, background inventory and cumulative usage are translated into the shared runner event contracts; this does not enable restricted MCP/cron or managed-plugin gates.
+
+## Workspace 0.5.0 integration status
+
+| ID | Feature | Implementation / availability |
+| --- | --- | --- |
+| WORKSPACE-01 | Immutable, owner-bound selections, members and results; additive legacy compatibility | [Selection](workspace-selection.md), [contracts and runtime gates](workspace-integration.md). Workspace v2 remains disabled pending integration acceptance. |
+| WORKSPACE-02 | Descriptor-based explorer, bounded filename search and member Git status | [Explorer](workspace-explorer.md), [quick open](command-palette.md). Runtime reader binding is required; legacy sandbox reads without it return unavailable. Native Mac acceptance remains pending. |
+| WORKSPACE-03 | Quota-backed local preparation, frozen copy, retained recovery and durable result completion | [Sandbox runtime](sandbox-image.md), [desktop transaction adapter](../runner/internal/daemon/workspacecontrol.go). Production lifecycle integration remains gated. |
+| WORKSPACE-04 | Independent cluster member credentials, retained claims and generation-fenced settlement | [Cluster runtime](cluster-workspace.md). Production containment/private-storage and real-pod acceptance remain required. |
+| WORKSPACE-05 | Owner-only leased shells and split/docked terminal UI | [Owner shells](owner-shell.md), [supervisors](owner-shell-supervisors.md). Capability stays off; the palette/menu/shortcut appear only after an affirmative owner capability response. |

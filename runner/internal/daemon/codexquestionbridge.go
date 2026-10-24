@@ -13,9 +13,9 @@ import (
 // Native questions use the same private message/answer route as the agent
 // messaging tool. The server records the answer once; the poll never starts a
 // second engine turn or retains the daemon token in the Codex process.
-func codexQuestionHandler(base, token, sessionID string, emitter agent.Emitter, currentTurn ...func() string) func(context.Context, string) (string, error) {
+func codexQuestionHandler(base, token string, tokenSource func() string, sessionID string, emitter agent.Emitter, currentTurn ...func() string) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, body string) (string, error) {
-		if base == "" || token == "" {
+		if base == "" || (token == "" && tokenSource == nil) {
 			return "", errors.New("questions are unavailable for this session")
 		}
 		ctx, cancel := context.WithCancel(ctx)
@@ -33,7 +33,7 @@ func codexQuestionHandler(base, token, sessionID string, emitter agent.Emitter, 
 			turnID = childTurn
 		}
 		ownerOnly, _ := ctx.Value(ownerOnlyAsk{}).(bool)
-		messenger := &httpMessenger{base: base, token: token, sessionID: sessionID, turnID: turnID, ownerOnly: ownerOnly, client: &http.Client{Timeout: 30 * time.Second}, ctx: ctx, onAnswer: func(answer string) {
+		messenger := &httpMessenger{base: base, token: token, tokenSource: tokenSource, sessionID: sessionID, turnID: turnID, ownerOnly: ownerOnly, client: &http.Client{Timeout: 30 * time.Second}, ctx: ctx, onAnswer: func(answer string) {
 			select {
 			case answers <- result{answer: answer}:
 			case <-ctx.Done():
@@ -73,8 +73,13 @@ func codexQuestionHandler(base, token, sessionID string, emitter agent.Emitter, 
 
 // questionAsker is the AskUser of a Codex or Hermes session: native questions and approvals go to
 // the session's chat with the marker code taken out (scrubQuestions). currentTurn may be nil.
-func (h *AgentHost) questionAsker(sessionID string, emitter agent.Emitter, nonce string, currentTurn func() string) func(context.Context, string) (string, error) {
-	return scrubQuestions(codexQuestionHandler(h.cfg.ServerHTTP, h.cfg.DaemonToken, sessionID, emitter, currentTurn), nonce)
+func (h *AgentHost) questionAsker(sessionID string, emitter agent.Emitter, nonce string, currentTurn func() string, initialTokens ...string) func(context.Context, string) (string, error) {
+	initial := ""
+	if len(initialTokens) > 0 {
+		initial = initialTokens[0]
+	}
+	tokenSource := h.nativeHTTPToken(protocol.SpawnSession{SessionID: sessionID, SessionToken: initial})
+	return scrubQuestions(codexQuestionHandler(h.cfg.ServerHTTP, "", tokenSource, sessionID, emitter, currentTurn), nonce)
 }
 
 // scrubQuestions takes the session's marker code out of a question before it is posted.

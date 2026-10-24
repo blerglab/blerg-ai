@@ -160,6 +160,10 @@ jobs:
           BLERG_SKIP_KUBECTL: "1"
       - run: bash install/desktop/hostcheck_test.sh
       - run: bash install/desktop/daemon_install_test.sh
+      # ubuntu-latest includes Linux pwsh. The suite requires it and mocks all
+      # Windows APIs/WSL launches; missing PowerShell is a failure, not a skip.
+      - name: WSL startup regressions
+        run: bash install/desktop/wsl_startup_test.sh
       # The messaging CLI's tests: one is unittest, the other needs pytest.
       - name: Messaging CLI tests
         working-directory: runner/.claude/skills/session-messaging

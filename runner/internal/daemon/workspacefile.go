@@ -15,6 +15,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/fileview"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workspacepolicy"
 )
 
 const workspaceFileAbsoluteMax int64 = 25 << 20
@@ -25,6 +26,7 @@ type workspaceFileLimits struct {
 	// Launch-time directory identity prevents retargeting a session's workspace
 	// before the read begins. The pinned Root is compared against it as well.
 	expectedRoot os.FileInfo
+	pinnedRoot   *os.Root
 	// Per-call test hooks exercise the check/open/read boundaries without
 	// changing process-wide state or exposing a runtime configuration hook.
 	beforeOpen, afterOpen func()
@@ -61,56 +63,8 @@ func normalizedWorkspaceFileLimits(limits workspaceFileLimits) workspaceFileLimi
 // Secret paths have one policy, used for requested names, resolved names and
 // every intermediate symlink target. Directory names are protected anywhere;
 // file globs apply to basenames, so a project called secret-project is allowed.
-// foldName folds a name for the secret checks: upper then lower case, so Unicode letters that only
-// map to ASCII one way (ſ → S → s, the Kelvin sign → k) cannot dodge a match.
-func foldName(name string) string { return strings.ToLower(strings.ToUpper(name)) }
-
-func workspaceSecretDirectory(name string) bool {
-	switch foldName(name) {
-	case ".git", ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".claude", ".codex", "secrets", ".vault":
-		return true
-	default:
-		return false
-	}
-}
-func workspaceSecretFile(name string) bool {
-	name = foldName(name)
-	switch name {
-	case ".env", ".netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass", ".htpasswd", ".vault-token",
-		"kubeconfig", ".kubeconfig":
-		return true
-	}
-	for _, prefix := range []string{".env.", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials"} {
-		if strings.HasPrefix(name, prefix) {
-			return true
-		}
-	}
-	if strings.Contains(name, "secret") {
-		return true
-	}
-	for _, suffix := range []string{".pem", ".key", ".p12", ".pfx", ".kdbx", ".ppk", ".jks", ".keystore", ".tfstate", ".tfstate.backup"} {
-		if strings.HasSuffix(name, suffix) {
-			return true
-		}
-	}
-	return false
-}
-func workspaceSecretPath(name string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
-		if workspaceSecretDirectory(part) {
-			return true
-		}
-	}
-	return workspaceSecretFile(filepath.Base(name))
-}
-func workspaceHasSecretDirectory(name string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
-		if workspaceSecretDirectory(part) {
-			return true
-		}
-	}
-	return false
-}
+func workspaceSecretFile(name string) bool { return !workspacepolicy.File(name) }
+func workspaceSecretPath(name string) bool { return !workspacepolicy.File(name) }
 
 func workspaceUnsafePath(name string) bool {
 	if name == "" || len(name) > 4096 || !utf8.ValidString(name) || filepath.IsAbs(name) || strings.HasPrefix(name, "~") || strings.Contains(name, "\\") || strings.IndexFunc(name, unicode.IsControl) >= 0 {
@@ -150,86 +104,6 @@ func workspaceCleanRequest(name string) (string, bool) {
 	}
 	return "", false
 }
-func workspaceContained(root, name string) (string, bool) {
-	rel, err := filepath.Rel(root, name)
-	return rel, err == nil && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// Resolve each link explicitly so an intermediate secret alias cannot hide
-// behind a benign final EvalSymlinks result. Root confines metadata operations
-// while a separate no-follow descriptor walk confines the eventual open.
-func workspaceResolve(root *os.Root, rootName, requested string) (string, os.FileInfo, error) {
-	pending := strings.Split(filepath.ToSlash(requested), "/")
-	var parts []string
-	links := 0
-	for len(pending) > 0 {
-		part := pending[0]
-		pending = pending[1:]
-		if part == "" || part == "." {
-			continue
-		}
-		if part == ".." {
-			if len(parts) == 0 {
-				return "", nil, os.ErrPermission
-			}
-			parts = parts[:len(parts)-1]
-			continue
-		}
-		if workspaceSecretDirectory(part) {
-			return "", nil, errWorkspaceSecret
-		}
-		current := filepath.Join(append(append([]string(nil), parts...), part)...)
-		info, err := root.Lstat(current)
-		if err != nil {
-			return "", nil, err
-		}
-		if !info.IsDir() && workspaceSecretFile(part) {
-			return "", nil, errWorkspaceSecret
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			links++
-			if links > 40 {
-				return "", nil, os.ErrPermission
-			}
-			target, err := root.Readlink(current)
-			if err != nil {
-				return "", nil, err
-			}
-			if strings.Contains(target, "\\") || strings.IndexFunc(target, unicode.IsControl) >= 0 {
-				return "", nil, os.ErrPermission
-			}
-			if workspaceSecretPath(target) {
-				return "", nil, errWorkspaceSecret
-			}
-			var rel string
-			if filepath.IsAbs(target) {
-				prefix := strings.TrimSuffix(rootName, string(filepath.Separator)) + string(filepath.Separator)
-				if !strings.HasPrefix(target, prefix) {
-					return "", nil, os.ErrPermission
-				}
-				rel = strings.TrimPrefix(target, prefix)
-				parts = nil
-			} else {
-				rel = target
-			}
-			// Do not Clean before walking: a symlink followed by /.. must
-			// still have its target checked, even if the final path looks safe.
-			pending = append(strings.Split(filepath.ToSlash(rel), "/"), pending...)
-			continue
-		}
-		parts = append(parts, part)
-		if len(pending) == 0 {
-			if !info.Mode().IsRegular() {
-				return "", nil, os.ErrPermission
-			}
-			return filepath.Join(parts...), info, nil
-		}
-		if !info.IsDir() {
-			return "", nil, os.ErrNotExist
-		}
-	}
-	return "", nil, os.ErrPermission
-}
 
 var errWorkspaceSecret = errors.New("protected workspace file")
 
@@ -255,7 +129,7 @@ func workspaceRootUnchanged(root *os.Root, name string, checked os.FileInfo) boo
 	if err != nil || !os.SameFile(pinned, checked) {
 		return false
 	}
-	current, err := os.Stat(name)
+	current, err := os.Lstat(name) //nolint:gosec // launch root identity revalidation only; reads use the pinned no-follow descriptor
 	return err == nil && current.IsDir() && os.SameFile(current, pinned)
 }
 
@@ -277,52 +151,36 @@ func readWorkspaceFile(folder, name string, limits workspaceFileLimits) protocol
 	if err != nil {
 		return workspaceFileError(clean, err)
 	}
-	resolvedRoot, err := filepath.EvalSymlinks(absolute)
+	resolvedRoot := absolute
+	rootInfo, err := os.Lstat(resolvedRoot)
 	if err != nil {
 		return workspaceFileError(clean, err)
 	}
-	if workspaceHasSecretDirectory(resolvedRoot) {
-		return workspaceFileFailure(clean, "forbidden", workspaceProtectedNameMessage)
-	}
-	rootInfo, err := os.Stat(resolvedRoot)
-	if err != nil {
-		return workspaceFileError(clean, err)
-	}
-	if !rootInfo.IsDir() {
-		return workspaceFileFailure(clean, "forbidden", "The session workspace is not a directory.")
+	if !rootInfo.IsDir() || !workspacePublicRoot(resolvedRoot) || !workspacePublicPath(clean) {
+		return workspaceFileError(clean, os.ErrPermission)
 	}
 	if limits.expectedRoot != nil && !os.SameFile(limits.expectedRoot, rootInfo) {
 		return workspaceFileError(clean, os.ErrPermission)
 	}
-	root, err := os.OpenRoot(resolvedRoot)
-	if err != nil {
-		return workspaceFileError(clean, err)
+	root := limits.pinnedRoot
+	if root == nil {
+		root, err = os.OpenRoot(resolvedRoot)
+		if err != nil {
+			return workspaceFileError(clean, err)
+		}
+		defer func() { _ = root.Close() }()
 	}
-	defer func() { _ = root.Close() }()
-	if !workspaceRootUnchanged(root, resolvedRoot, rootInfo) || (limits.expectedRoot != nil && !workspaceRootUnchanged(root, resolvedRoot, limits.expectedRoot)) {
+	if !workspaceRootUnchanged(root, resolvedRoot, rootInfo) {
 		return workspaceFileError(clean, os.ErrPermission)
 	}
-	resolved, checked, err := workspaceResolve(root, resolvedRoot, clean)
+	resolved := clean
+	checkedFile, err := workspaceOpenFile(root, resolved)
 	if err != nil {
 		return workspaceFileError(clean, err)
 	}
-	full, err := filepath.EvalSymlinks(filepath.Join(resolvedRoot, clean))
-	if err != nil {
-		return workspaceFileError(clean, err)
-	}
-	rel, inside := workspaceContained(resolvedRoot, full)
-	if !inside || rel != resolved {
-		return workspaceFileError(clean, os.ErrPermission)
-	}
-	if workspaceSecretPath(rel) {
-		return workspaceFileFailure(clean, "forbidden", workspaceProtectedNameMessage)
-	}
-	// Check the pathname identity independently of the pinned-root resolver.
-	named, err := os.Lstat(full)
-	if err != nil {
-		return workspaceFileError(clean, err)
-	}
-	if !os.SameFile(named, checked) || !workspaceRegularFile(checked) {
+	checked, err := checkedFile.Stat()
+	_ = checkedFile.Close()
+	if err != nil || !workspaceRegularFile(checked) {
 		return workspaceFileError(clean, os.ErrPermission)
 	}
 	limits = normalizedWorkspaceFileLimits(limits)
@@ -378,12 +236,29 @@ func readWorkspaceFile(folder, name string, limits workspaceFileLimits) protocol
 	if !workspaceRegularFile(final) || !os.SameFile(opened, final) || final.Size() != opened.Size() || !final.ModTime().Equal(opened.ModTime()) || int64(len(body)) != final.Size() || !workspaceRootUnchanged(root, resolvedRoot, rootInfo) {
 		return workspaceFileError(clean, os.ErrPermission)
 	}
-	finalResolved, finalInfo, err := workspaceResolve(root, resolvedRoot, clean)
+	finalFile, err := workspaceOpenFile(root, resolved)
 	if err != nil {
 		return workspaceFileError(clean, err)
 	}
-	if finalResolved != resolved || !os.SameFile(finalInfo, final) {
+	finalInfo, err := finalFile.Stat()
+	_ = finalFile.Close()
+	if err != nil || !os.SameFile(finalInfo, final) || !workspacePublicRoot(resolvedRoot) {
 		return workspaceFileError(clean, os.ErrPermission)
 	}
 	return protocol.WorkspaceFileResult{OK: true, Path: filepath.ToSlash(clean), Size: final.Size(), View: view, ContentType: contentType, ContentB64: base64.StdEncoding.EncodeToString(body), Mtime: final.ModTime().UTC().Format(time.RFC3339Nano)}
+}
+
+func workspacePublicPath(name string) bool          { return workspacepolicy.File(name) }
+func workspacePublicDirectoryPath(name string) bool { return workspacepolicy.Directory(name) }
+
+// Root names come from trusted runtime configuration, not request paths. Check
+// both the configured spelling and its physical location so an ancestor alias
+// cannot hide a protected root. Identity is checked separately before delivery.
+func workspacePublicRoot(name string) bool {
+	absolute, err := filepath.Abs(name)
+	if err != nil || !workspacePublicDirectoryPath(absolute) {
+		return false
+	}
+	physical, err := filepath.EvalSymlinks(absolute)
+	return err == nil && workspacePublicDirectoryPath(physical)
 }

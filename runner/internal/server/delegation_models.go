@@ -151,11 +151,11 @@ func (a *API) resolveChildModel(ctx context.Context, engine, model string, host 
 
 // childHostOfChild is where an existing child runs, for its model changes: the cluster for a
 // cluster child, else its desktop daemon (nil while disconnected).
-func (a *API) childHostOfChild(row *db.SessionRow) childHost {
+func (a *API) childHostOfChild(ctx context.Context, row *db.SessionRow) childHost {
 	if onClusterParent(row) {
 		return childHost{cluster: true}
 	}
-	return childHost{dc: a.hub.GetHostDaemon(row.DaemonID)}
+	return childHost{dc: a.hub.ownedHostDaemon(ctx, derefOrEmpty(row.SpawningAccountID), row.DaemonID)}
 }
 
 type childModelsEngine struct {

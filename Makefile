@@ -21,9 +21,7 @@ lint: lint-go lint-web
 lint-go:
 	@./scripts/check_lint_pin.sh $(GOLANGCI_LINT)
 	@test -z "$$(gofmt -l ./contracts ./core ./board ./runner)" || { echo "gofmt needed:"; gofmt -l ./contracts ./core ./board ./runner; exit 1; }
-	$(GOLANGCI_LINT) run --config=$(LINT_CONFIG) ./contracts/... ./core/...
-	cd runner && GOWORK=off $(GOLANGCI_LINT) run --config=$(LINT_CONFIG) ./...
-	cd board && GOWORK=off $(GOLANGCI_LINT) run --config=$(LINT_CONFIG) ./...
+	@for m in contracts core runner board; do (cd $$m && GOWORK=off $(GOLANGCI_LINT) run --config=$(LINT_CONFIG) ./...) || exit 1; done
 
 lint-web:
 	@for d in $(FRONTENDS); do echo "== $$d"; (cd $$d && npm run lint) || exit 1; done
@@ -33,23 +31,21 @@ lint-web:
 # board) is set in the environment. Fixtures create isolated databases; the configured
 # database user needs CREATEDB. Packages run in parallel. gofmt is checked by `make lint`.
 test:
-	go vet ./contracts/... ./core/...
-	go test -timeout 30m ./contracts/... ./core/...
-	cd runner && export GOWORK=off && go vet ./... && go test -timeout 30m ./...
-	cd board && export GOWORK=off && go vet ./... && go test -timeout 30m ./...
+	@for m in contracts core runner board; do (cd $$m && GOWORK=off go vet ./... && GOWORK=off go test -p 1 -timeout 45m ./...) || exit 1; done
 
 # The frontend steps CI runs after lint: type-check, tests, production build. The
 # runner frontend's and the board's browser tests need Chromium: npx playwright install chromium.
 test-web:
-	@for d in $(FRONTENDS); do echo "== $$d"; (cd $$d && npx tsc --noEmit && npm test && npm run build) || exit 1; done
+	@for d in $(FRONTENDS); do echo "== $$d"; (cd $$d && npx tsc --noEmit && npm test -- $(WEB_TEST_ARGS) && npm run build) || exit 1; done
 
-# The installer-script, messaging-CLI (needs pytest: pip install pytest), scrub and link
+# The installer-script (needs Linux pwsh), messaging-CLI (needs pytest: pip install pytest), scrub and link
 # checks CI runs.
 check-scripts:
 	BLERG_SKIP_KUBECTL=1 ./install/desktop/compose_test.sh
 	BLERG_SKIP_KUBECTL=1 ./install/k8s/deploy_test.sh
 	bash ./install/desktop/hostcheck_test.sh
 	bash ./install/desktop/daemon_install_test.sh
+	bash ./install/desktop/wsl_startup_test.sh
 	cd runner/.claude/skills/session-messaging && python3 -m unittest test_blerg_runner test_blerg_runner_review_request && python3 -m pytest -q blerg_runner_board_test.py
 	bash video/demo/demo_test.sh
 	python3 -m unittest discover -s video/demo -p 'test_*.py' && python3 -m unittest discover -s video/build -p 'test_*.py'

@@ -17,7 +17,7 @@
 //     signature;
 //   - its own process group, killed whole on timeout or cancel and again once git is done, so no
 //     helper outlives the call;
-//   - with MemoryLimit, an address-space limit (Linux), so a reader something still makes read
+//   - with MemoryLimit, an address-space limit (Linux and macOS), so a reader something still makes read
 //     without end fails fast.
 package hostgit
 
@@ -36,7 +36,7 @@ import (
 	"time"
 )
 
-// MemoryLimitKB bounds a git process's address space under Options.MemoryLimit (Linux). Pack
+// MemoryLimitKB bounds a git process's address space under Options.MemoryLimit (Linux and macOS). Pack
 // windows are kept well under it (memoryConfig).
 const MemoryLimitKB = 1 << 20
 
@@ -84,7 +84,7 @@ type Options struct {
 	// workspace or sandbox clone). Its optional binary indexes are not parsed: no commit-graph,
 	// multi-pack index or bitmaps, no sparse walk, no filter served (UntrustedConfig).
 	Untrusted bool
-	// MemoryLimit runs git under an address-space limit (Linux): MemoryLimitKB, or LimitKB when
+	// MemoryLimit runs git under an address-space limit (Linux and macOS): MemoryLimitKB, or LimitKB when
 	// set, with small pack windows.
 	MemoryLimit bool
 	LimitKB     int
@@ -235,13 +235,16 @@ func Binary() (string, error) {
 // Command is the hardened git command for args, not started: for a caller that runs it itself
 // (it must call Wait and then KillGroup). Prefer Run.
 func Command(o Options, args ...string) (*exec.Cmd, error) {
+	return commandForPlatform(o, runtime.GOOS, args...)
+}
+func commandForPlatform(o Options, platform string, args ...string) (*exec.Cmd, error) {
 	git, err := Binary()
 	if err != nil {
 		return nil, err
 	}
 	argv := append(Config(o), args...)
 	name := git
-	if o.MemoryLimit && runtime.GOOS == "linux" {
+	if o.MemoryLimit && (platform == "linux" || platform == "darwin") {
 		limit := MemoryLimitKB
 		if o.LimitKB > 0 {
 			limit = o.LimitKB

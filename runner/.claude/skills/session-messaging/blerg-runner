@@ -2054,6 +2054,10 @@ recorded workers in this session, never guessed names: native subagents or direc
 Several workers may share an item; assigning one elsewhere transfers it. Tick clears doing and keeps
 assignment history. There are at most 32 workers per item and 128 in the checklist.
 
+Blerg keeps part of it for you: a Blerg Board card you move into a done column ticks every open item
+naming it as #N ("ticked: #N done"), and a session you start whose title or prompt names #N is
+assigned to your open item naming #N. On your next input a plan_drift notice may say what drifted (your last turn ran tools, nothing doing, or a worker with no item); run the commands it names.
+
 At most 50 items of 200 characters. Each command prints the list after the change. With --commit,
 run it in the repository: it also publishes the diff of those commits (as `blerg-runner diff` does),
 which the person opens from the item's "View diff"; when it cannot (not a commit here, over the
@@ -2086,6 +2090,11 @@ A Bugzilla bug: source "bugzilla", key = the bug id as text, url = <site>/show_b
   title = summary, status = status (+ " " + resolution), type = component, priority = priority or
   severity, assignee = assigned_to, reporter = creator, description = the first comment's text,
   comments = the latest few, fields = e.g. Product, Version, Severity.
+
+A Blerg Board card is filled from the Board when you pin it (title, description, column, type,
+priority, tags; what you sent stays where the Board has nothing). A card you move into an
+in-progress column is pinned for you, one you move into a done column unpinned; a pinned card
+that closes is named in a plan_drift notice attached to your next input (your last turn ran tools), with the unpin command.
 
 --checklist also sets the checklist to the ticket's acceptance criteria.
 `blerg-runner unpin [<source>:<key>]` unpins one (no argument: the current one).
@@ -4733,6 +4742,13 @@ SESSION_LINE = ("To ask another agent or hand it work (Codex, Claude, Hermes or 
 
 SESSION_GUIDE = SESSION_LINE + """
 
+Child start limits default to 3 children at once and 120 starts per parent per rolling hour,
+with no lifetime start cap. An administrator can change these install-wide in core Settings;
+changes apply on the next start request. Account limits still apply: 6 children at once and
+60 starts per rolling hour across all parents. Approval requests reserve rate budget too.
+On a refusal, stop a child or wait until the reported UTC time; do not retry in a loop.
+
+
 Sandboxed coding children work in a clone of their own on the branch `wip/<child-id>`, never in
 your checkout. Their commits land on `wip/<child-id>` in your repository at the end of each of
 their turns (`git log wip/<child-id>`). Ask for commit IDs and test results; the parent reviews
@@ -4751,6 +4767,10 @@ spent. Budgets are per provider (Claude, Codex), not per model. Prefer an engine
 another is above 80% of its 5-hour window or capped. A local engine (Hermes, OpenClaw on your own
 hardware) costs nothing, but a Hermes endpoint on a loopback address may not be reachable from a
 docker child: prefer --runtime daemon for a local Hermes.
+
+Workspace selection. Repeat --repo <member> to select parent members, or use --all-repos.
+Members keep their parent runtime paths; use those paths for work, commit each changed
+repository separately, and report every commit ID. Selection grants no shell access.
 
 Where a child runs. A session on a desktop starts its children on the same desktop: --runtime docker
 (the sandbox) or --runtime daemon (the bare host); the default is the sandbox when the desktop has
@@ -5063,14 +5083,24 @@ def cmd_session_start(args):
     prompt = _read_prompt_file(args.prompt_file) if args.prompt_file else args.prompt
     if not prompt or not prompt.strip():
         _sfail("start", "a prompt is required (an argument or --prompt-file)", code=2)
-    if not args.repo and not args.no_repo:
-        _sfail("start", "give --repo <name> or --no-repo", code=2)
+    if not args.repo and not args.no_repo and not getattr(args, "all_repos", False):
+        _sfail("start", "give --repo <member> (repeatable), --all-repos, or --no-repo", code=2)
     body = {"prompt": prompt}
     for key in ("engine", "model", "effort", "runtime", "title"):
         if getattr(args, key):
             body[key] = getattr(args, key)
+    if args.no_repo and (args.repo or getattr(args, "all_repos", False)) or getattr(args, "all_repos", False) and args.repo:
+        _sfail("start", "choose --repo, --all-repos or --no-repo", code=2)
     if args.repo:
-        body["repo"] = args.repo
+        repos = args.repo if isinstance(args.repo, list) else [args.repo]
+        if len(repos) > 20 or len(set(repos)) != len(repos):
+            _sfail("start", "select at most 20 distinct repository members", code=2)
+        if len(repos) == 1:
+            body["repo"] = repos[0]
+        else:
+            body["repos"] = repos
+    if getattr(args, "all_repos", False):
+        body["all_repos"] = True
     if args.no_repo:
         body["no_repo"] = True
     if args.keep_running:
@@ -5766,8 +5796,10 @@ def main():
     ps_start.add_argument("--model", default=None,
                           help="A routing id, a display name or a unique part of an id (`blerg-runner models` lists them)")
     ps_start.add_argument("--effort", default=None)
-    ps_start.add_argument("--repo", default=None, help="A repository checked out on the daemon (on the cluster: one it clones, as org/name)")
-    ps_start.add_argument("--no-repo", action="store_true", help="No repository")
+    repo_group = ps_start.add_mutually_exclusive_group()
+    repo_group.add_argument("--repo", action="append", default=None, metavar="MEMBER", help="Parent workspace member ID or unambiguous name; repeat for several. Legacy sessions accept one repository")
+    repo_group.add_argument("--all-repos", action="store_true", help="Select every member of the parent's immutable workspace")
+    repo_group.add_argument("--no-repo", action="store_true", help="No repository (legacy parent)")
     ps_start.add_argument("--runtime", choices=["docker", "daemon", "cluster"], default=None,
                           help="docker or daemon (this desktop), or cluster (a desktop session on an install with a cluster, "
                                "and a cluster session) (default: where the parent runs)")

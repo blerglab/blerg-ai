@@ -446,7 +446,7 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 		return nil, err
 	}
 	cmd.Stderr = cmd.Stdout // interleaved, as in the per-turn engine
-	if err := cmd.Start(); err != nil {
+	if err := startEngineCommand(cmd, d.startCommand); err != nil {
 		_ = stdin.Close()
 		return nil, err
 	}
@@ -531,7 +531,7 @@ func (d *claudeCodeDriver) killProc(p *ccProc) {
 		_ = d.prefix.killPID(p.pidFile)
 	}
 	if p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
+		_ = cancelEngineCommand(p.cmd, d.startCommand != nil)
 	}
 }
 

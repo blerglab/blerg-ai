@@ -659,7 +659,8 @@ func TestRunnerStartOnDaemonRecordsAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 	api.coreAuth = newTestCoreAuthClient(t, pub, "core-1")
-	registerDaemon(t, api, hub, "00000000-0000-4000-8000-0000000000b7", "laptop", "proj")
+	dc := registerDaemon(t, api, hub, "00000000-0000-4000-8000-0000000000b7", "laptop", "proj")
+	fixtureOwnDesktop(t, api.dbPool, dc, "acct-9")
 	tok := mintRunnerToken(t, priv, "core-1", identity.Claims{
 		Sub: "tok-xyz", Aud: "blerg-runner", Kind: "agent", OnBehalfOf: "acct-9",
 		Caps: []string{coreAuthRunnerCap}, ExpiresAt: time.Now().Unix() + 300,

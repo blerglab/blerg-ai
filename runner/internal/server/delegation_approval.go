@@ -62,7 +62,7 @@ func (a *API) childApprovalSnapshot(ctx context.Context, tx pgx.Tx, parent *db.S
 	clusterRow := cluster || onDesktopDaemon(parent) && jm != nil
 	var dc *DaemonConn
 	if !cluster {
-		dc = a.hub.GetHostDaemon(parent.DaemonID)
+		dc = a.hub.ownedHostDaemon(ctx, derefOrEmpty(parent.SpawningAccountID), parent.DaemonID)
 	}
 	// Cluster children's engines are the readiness snapshot's.
 	var clusterEngines []string

@@ -54,7 +54,7 @@ var toolDefs = []map[string]any{
 			"session_id": str("session id"),
 			"text":       str("what to say to the agent"),
 			"client_id":  str("retry-safe message id (at most 256 bytes); reuse the same id and text on retries to avoid a second turn. Persisted until the engine acknowledges consumption"),
-			"source":     str(`who is speaking: "human" or an automation's name (empty = "runner"); the sources Blerg writes itself (proposal, review, system, ask_answer, note_reply, limit_resume, child_turn, question_answer) are refused, and so is session (a parent's message to its child, set by the runner)`),
+			"source":     str(`who is speaking: "human" or an automation's name (empty = "runner"); the sources Blerg writes itself (proposal, review, system, ask_answer, note_reply, limit_resume, child_turn, question_answer, plan_drift) are refused, and so is session (a parent's message to its child, set by the runner)`),
 		}, req("session_id", "text")),
 	},
 	{

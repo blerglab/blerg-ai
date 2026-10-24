@@ -69,6 +69,9 @@ type Payload struct {
 	Items   []Item  `json:"items"`
 	Op      string  `json:"op"`
 	Changed *Change `json:"changed,omitempty"`
+	// Note says why Blerg made the change itself (e.g. "ticked: #127 done" when the session moved
+	// card #127 to a done column); empty for the agent's own changes.
+	Note string `json:"note,omitempty"`
 }
 
 // Request is a session-scoped checklist mutation. Existing-item operations select

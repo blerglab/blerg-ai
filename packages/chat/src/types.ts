@@ -145,6 +145,9 @@ export interface ChecklistPayload {
   items: ChecklistItem[]
   op: 'set' | 'add' | 'tick' | 'untick' | 'remove' | 'clear' | string
   changed?: ChecklistItem & { index: number; from_item_id?: string }
+  /** Why Blerg made the change itself, e.g. "ticked: #127 done" (the session moved card #127 to a
+   *  done column); absent for the agent's own changes. */
+  note?: string
 }
 // kind "ticket" (`blerg-runner pin` / `unpin`): a tracker's ticket the agent pinned, in one
 // source-neutral shape (the server caps every field). Untrusted tracker data: drawn as text, the url
@@ -421,6 +424,9 @@ export interface InterruptSession {
 // person's answer (the server writes both into the parent's transcript).
 export type DelegationChoice = 'once' | 'session' | 'always' | 'deny'
 export interface DelegationRequestPayload {
+  members?: { id: string; name: string; path: string }[]
+  metadata_hidden?: boolean
+
   request_id: string
   engine: string
   model?: string

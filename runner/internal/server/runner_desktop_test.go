@@ -38,6 +38,7 @@ func registerDaemon(t *testing.T, api *API, hub *Hub, id, name string, repos ...
 	if err := db.UpsertDaemon(context.Background(), api.dbPool, id, name, "local", "/repos"); err != nil {
 		t.Fatal(err)
 	}
+	fixtureOwnDesktop(t, api.dbPool, dc, "user-1")
 	return dc
 }
 
@@ -51,7 +52,7 @@ func runnerReq(t *testing.T, api *API, method, path string, body any) *httptest.
 		rd = strings.NewReader("")
 	}
 	req := httptest.NewRequest(method, path, rd)
-	req.Header.Set("Authorization", "Bearer "+runnerTestKey)
+	req.Header.Set("Authorization", "Bearer "+enableBrowserAuth(t, api)("session.start"))
 	if id := strings.TrimPrefix(path, "/api/runner/sessions/"); id != path {
 		req.SetPathValue("id", strings.SplitN(id, "/", 2)[0])
 	}
@@ -110,7 +111,7 @@ func TestRunnerStartSpawnsOnDaemonWithRepo(t *testing.T) {
 	if err != nil || row == nil {
 		t.Fatalf("GetSession: %v", err)
 	}
-	if row.DaemonID != dc.ID || row.Status != "starting" || row.Runtime == nil || *row.Runtime != "daemon" || row.SpawningAccountID != nil {
+	if row.DaemonID != dc.ID || row.Status != "starting" || row.Runtime == nil || *row.Runtime != "daemon" || derefOrEmpty(row.SpawningAccountID) != "user-1" {
 		t.Fatalf("row = %+v", row)
 	}
 	if row.SkipPermissions {

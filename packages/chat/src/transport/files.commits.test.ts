@@ -48,3 +48,19 @@ describe('createFiles: commits', () => {
     expect(await filesOver(() => new Response('{"error":"x"}', { status: 409 })).files.commitDiff!('s1', SHA)).toBeNull()
   })
 })
+
+it('qualifies summaries and patches by member and launch and refuses mismatched provenance', async () => {
+  const member = { member_id: 'two', launch_generation: 'launch', generation: 7 }
+  const body = { sha: SHA, subject: 'Second member', ...member }
+  const fetch = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify(body), { status: 200 }))
+  const files = createFiles({ base: s => `/api/sessions/${s}`, fetch: fetch as unknown as typeof globalThis.fetch, commits: true })
+  expect(await files.commit!('s1', SHA, undefined, member)).toMatchObject(member)
+  expect(fetch.mock.calls[0]?.[0]).toBe(`/api/sessions/s1/commits/${SHA}?member_id=two&launch_generation=launch&generation=7`)
+  fetch.mockImplementation(async () => new Response(JSON.stringify({ ...body, member_id: 'one' }), { status: 200 }))
+  expect(await files.commit!('s1', SHA, undefined, member)).toBeNull()
+  fetch.mockImplementation(async () => new Response('second patch', { status: 200, headers: { 'X-Blerg-Member-ID': 'two', 'X-Blerg-Launch-Generation': 'launch', 'X-Blerg-Generation': '7' } }))
+  expect(await files.commitDiff!('s1', SHA, undefined, member)).toEqual({ text: 'second patch', member })
+  expect(fetch.mock.calls[2]?.[0]).toBe(`/api/sessions/s1/commits/${SHA}/diff?member_id=two&launch_generation=launch&generation=7`)
+  fetch.mockImplementation(async () => new Response('old patch', { status: 200, headers: { 'X-Blerg-Member-ID': 'two', 'X-Blerg-Launch-Generation': 'launch', 'X-Blerg-Generation': '6' } }))
+  expect(await files.commitDiff!('s1', SHA, undefined, member)).toBeNull()
+})

@@ -530,7 +530,9 @@ func broadcastSessionCreated(ctx context.Context, h *Hub, pool *pgxpool.Pool, se
 	if err != nil || row == nil {
 		return
 	}
-	h.BroadcastJSON(protocol.BrowserSessionStarted{Type: "session_started", Session: sessionRowToInfo(*row, "")})
+	h.BroadcastJSONPerAccount(func(account string) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+		return protocol.BrowserSessionStarted{Type: "session_started", Session: h.sessionInfoFor(ctx, *row, account)}
+	})
 }
 
 // announceClusterStart runs once a cluster session's row exists, before its
@@ -579,7 +581,7 @@ func (a *API) markClusterStartFailed(ctx context.Context, sessionID, reason stri
 		revokeSessionGrants(ctx, a.dbPool, sessionID, "cluster start failed")
 	}
 	clusterJobCreateFailed(ctx, a.hub, a.dbPool, sessionID, reason)
-	broadcastWithEnd(a.hub, sessionEndFor(ctx, a.dbPool, sessionID, "error"), func(endReason string, endedBy *protocol.EndedBy) any {
+	broadcastWithEnd(a.hub, sessionEndFor(ctx, a.dbPool, sessionID, "error"), func(endReason string, endedBy *protocol.EndedBy) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		return protocol.SessionStateChanged{
 			Type: "session_state_changed", SessionID: sessionID, Status: "error", Message: &reason,
 			EndReason: endReason, EndedBy: endedBy,

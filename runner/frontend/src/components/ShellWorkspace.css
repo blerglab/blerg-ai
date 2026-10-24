@@ -1,0 +1,29 @@
+.shell-workspace{display:flex;flex-direction:column;position:relative;height:100%;min-height:0;min-width:0;overflow:hidden}
+.shell-chat{flex:1;min-height:0;min-width:0;position:relative;overflow:hidden}
+.shell-dock{box-sizing:border-box;display:flex;flex-direction:column;position:relative;flex:0 0 var(--shell-size,35%);min-height:0;min-width:0;overflow:hidden;background:#171717;color:#eee;border-top:1px solid var(--stone,#555)}
+.shell-at-right{flex-direction:row}.shell-at-right .shell-dock{border-top:0;border-left:1px solid var(--stone,#555)}
+.shell-at-maximized.shell-visible>.shell-chat{display:none}.shell-at-maximized.shell-visible .shell-dock{flex:1}
+.shell-at-pop-out>.shell-chat{flex:1}.shell-at-pop-out .shell-dock{flex:1}.shell-at-pop-out .shell-dock{height:100%;border:0}
+.shell-dock.shell-collapsed{flex:0 0 30px}.shell-header{display:flex;align-items:center;gap:5px;padding:3px 6px;min-height:30px;box-sizing:border-box;flex-shrink:0;overflow-x:auto}
+.shell-header button,.shell-header select,.shell-tabs button,.shell-connection button,.shell-pane-title button{font:inherit;font-size:12px;background:transparent;color:inherit;border:1px solid #555;border-radius:4px;padding:3px 7px;cursor:pointer;white-space:nowrap}
+.shell-header button:disabled{opacity:.4;cursor:default}.shell-header>button:first-child{border:0;flex:1;text-align:left}
+.shell-tabs{display:flex;gap:4px;flex-shrink:0;overflow:auto;padding:3px 6px}.shell-tabs button[aria-selected=true]{border-color:var(--selected-border,#6e9be8)}
+.shell-panes{flex:1;min-height:0;min-width:0;display:grid;position:relative;overflow:hidden;gap:3px}
+.shell-pane{display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden;background:#171717}
+.shell-pane-title{display:flex;gap:6px;align-items:center;padding:2px 6px;min-height:24px;font-size:12px;border-bottom:1px solid #333}.shell-pane-title>span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shell-terminal{position:relative;min-height:0;flex:1;overflow:hidden;padding:4px;box-sizing:border-box}.shell-terminal-renderer{height:100%;width:100%;overflow:hidden}
+.shell-connection{position:absolute;bottom:3px;left:3px;right:3px;display:flex;align-items:center;gap:4px;flex-wrap:wrap;background:#242424;padding:6px;font-size:12px}.shell-connection>span{flex:1}
+.shell-as-tabs{display:block}.shell-as-tabs>.shell-pane{height:100%}.shell-as-tabs>.shell-pane[data-active=false]{display:none}
+.shell-dock-divider{position:absolute;z-index:4;height:5px;left:0;right:0;top:0;cursor:row-resize;touch-action:none}
+.shell-at-right .shell-dock-divider{width:5px;height:auto;bottom:0;right:auto;cursor:col-resize}
+.shell-split-x{position:absolute;top:0;bottom:0;width:5px;cursor:col-resize;touch-action:none;z-index:3;background:#444}
+.shell-split-y{position:absolute;left:0;right:0;height:5px;cursor:row-resize;touch-action:none;z-index:3;background:#444}
+.shell-return{display:none}.shell-error{position:absolute;z-index:6;bottom:4px;left:8px;right:8px;background:#382720;color:#fff;padding:10px;display:flex;justify-content:space-between}
+.shell-error button{background:transparent;border:0;color:inherit;cursor:pointer}
+@media(max-width:767px){.shell-workspace .shell-dock:not(.shell-collapsed){position:fixed;inset:0;z-index:90;flex:none;height:100dvh;padding-bottom:env(safe-area-inset-bottom)}.shell-workspace .shell-collapsed{position:relative;flex:0 0 30px}.shell-at-right{flex-direction:column}.shell-return{display:block}.shell-header{flex-wrap:wrap;overflow:visible}.shell-header select{max-width:115px}.shell-panes{display:block!important}.shell-pane{height:100%}.shell-pane[data-active=false]{display:none}.shell-split-x,.shell-split-y,.shell-dock-divider{display:none}.shell-at-maximized.shell-visible>.shell-chat{display:block}.shell-tabs{min-height:32px}.shell-header button,.shell-header select,.shell-pane-title button{min-height:30px}}
+
+.shell-content{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}.shell-content[hidden]{display:none}
+
+.shell-sync-header{top:0;bottom:auto}
+
+.shell-consent{position:fixed;z-index:110;inset:50% auto auto 50%;transform:translate(-50%,-50%);box-sizing:border-box;width:min(520px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;padding:20px;background:var(--panel-bg,#222);color:var(--text-primary,#eee);border:1px solid var(--stone,#777);border-radius:8px}.shell-consent dd{margin:0 0 12px;overflow-wrap:anywhere}.shell-consent dt{font-weight:bold}.shell-consent button{margin:8px 8px 0 0;padding:8px 12px}

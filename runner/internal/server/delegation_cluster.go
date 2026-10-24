@@ -33,7 +33,9 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/engines"
+	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -56,6 +58,8 @@ const msgClusterChildResumeNoProof = "the sign-in this child was started with is
 // childHost is where a parent's child runs: its desktop daemon (dc, nil while disconnected) or the
 // cluster (a cluster parent's children, and a desktop parent's runtime "cluster" child).
 type childHost struct {
+	workspace *protocol.WorkspaceManifest
+
 	repoSource *DaemonConn
 	dc         *DaemonConn
 	cluster    bool
@@ -290,7 +294,7 @@ func clusterParentPod(h *Hub, parent *db.SessionRow) *DaemonConn {
 // refusal comes before the Job exists; a child row that could not be fully recorded is removed.
 func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, principal runnerPrincipal, sessionID string) *APIError {
 	jm := a.hub.JobManager()
-	if jm == nil {
+	if jm == nil && req.Workspace == nil {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgClusterNotConfigured)
 	}
 	if a.dbPool == nil {
@@ -311,11 +315,34 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	if account == "" || account != derefOrEmpty(parent.SpawningAccountID) {
 		return apiErrorf(http.StatusForbidden, "%s", msgDelegateNoOwner)
 	}
-	if jm.personalCredentialsWired() && !proof.valid() {
+	if jm != nil && jm.personalCredentialsWired() && !proof.valid() {
 		return apiErrorf(http.StatusConflict, "%s", msgClusterChildNoProof)
 	}
+	var parentManifest *protocol.WorkspaceManifest
+	var workspaceConsumer WorkspaceClusterChildConsumer
+	if req.Workspace != nil {
+		saved, err := db.GetSessionWorkspace(ctx, a.dbPool, parent.ID)
+		consumer, ok := a.workspaceCluster.(WorkspaceClusterChildConsumer)
+		if err != nil || saved == nil || saved.Manifest == nil || !ok || a.workspaceCluster.Capabilities().ManifestVersion != 2 || req.Workspace.OwnerID != account || protocol.ValidateWorkspaceChild(*saved.Manifest, *req.Workspace) != nil {
+			return apiErrorf(409, "cluster child workspace unavailable")
+		}
+		parentManifest = saved.Manifest
+		workspaceConsumer = consumer
+	}
+	var workspace *protocol.WorkspaceManifest
+	var members []clusterworkspace.Member
+	if req.Workspace == nil {
+		var selectionErr *APIError
+		workspace, members, selectionErr = a.clusterChildWorkspace(ctx, parent, req, sessionID)
+		if selectionErr != nil {
+			return selectionErr
+		}
+	}
 	gitURL, workdir := "", clusterNoRepoWorkdir
-	if !req.NoRepo {
+	if workspace != nil {
+		workdir = clusterworkspace.PublicRoot
+	}
+	if !req.NoRepo && req.Workspace == nil && workspace == nil {
 		gitURL = jm.CloneURLFor(req.Provider, req.Repo)
 		workdir = "/workspace/" + req.Repo
 	}
@@ -356,6 +383,11 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	}
 	if err := db.SetSessionKind(ctx, a.dbPool, sessionID, "agent"); err != nil {
 		log.Printf("cluster child %s: SetSessionKind: %v", sessionID, err)
+	}
+	if workspace != nil {
+		if err := db.InsertSessionWorkspace(ctx, a.dbPool, sessionID, *workspace); err != nil {
+			return abort()
+		}
 	}
 	recordLaunchEffort(ctx, a.dbPool, sessionID, req.Effort)
 	// The proof the child starts with is its own from now on: a desktop parent resumes the idle
@@ -401,6 +433,18 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		PluginsResolved: true,
 		PluginsNote:     pluginsNoteDelegated,
 	}
+	if req.Workspace != nil {
+		if db.InsertSessionWorkspace(ctx, a.dbPool, sessionID, *req.Workspace) != nil {
+			return abort()
+		}
+		if err := workspaceConsumer.StartChild(ctx, *parentManifest, *req.Workspace, spec); err != nil {
+			a.markClusterStartFailed(ctx, sessionID, "workspace preparation failed")
+			_ = db.RevokeBoardTokensForSession(ctx, a.dbPool, sessionID)
+			return apiErrorf(409, "cluster child workspace unavailable")
+		}
+		return nil
+	}
+	spec.Workspace, spec.WorkspaceMembers = workspace, members
 	announceClusterStart(ctx, a.hub, a.dbPool, sessionID, req.Repo, false, pluginStage(nil, pluginsNoteDelegated))
 	if err := jm.CreateSessionJob(spec); err != nil { //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
 		a.markClusterStartFailed(ctx, sessionID, err.Error())

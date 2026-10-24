@@ -1,0 +1,11 @@
+# Build from repository root. The Linux helper runs inside the Docker VM on
+# Linux and macOS; the host never executes this binary against agent metadata.
+FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
+WORKDIR /src
+COPY contracts contracts
+COPY runner runner
+RUN cd runner && GOWORK=off CGO_ENABLED=0 go build -trimpath -o /workspace-worker ./cmd/workspace-worker
+FROM blerg-runner-sandbox:latest
+LABEL org.blerg.workspace-worker-protocol="3"
+COPY --from=build /workspace-worker /usr/local/bin/blerg-workspace-worker
+ENTRYPOINT ["/usr/local/bin/blerg-workspace-worker"]

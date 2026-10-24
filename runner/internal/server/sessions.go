@@ -185,28 +185,35 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	advanceStart(ctx, hub, pool, msg.SessionID, false,
 		protocol.StartStage{ID: protocol.StageEngine, State: protocol.StageStateActive, Detail: "Starting the engine"})
 
-	hub.BroadcastJSON(protocol.BrowserSessionStarted{
-		Type: "session_started",
-		Session: protocol.SessionInfo{
-			ParentSessionID:      parentSessionID,
-			SteeringSupported:    engineSteeringSupported(engine, kind),
-			LimitResumeSupported: kind == "agent" && engineLimitResumeSupported(engine),
-			ID:                   msg.SessionID,
-			DaemonID:             daemonID,
-			Status:               "starting",
-			ProjectPath:          msg.ProjectPath,
-			Repo:                 msg.Repo,
-			Title:                msg.Title,
-			Model:                msg.Model,
-			Effort:               effort,
-			Engine:               engine,
-			StartedAt:            time.Now().UTC().Format(time.RFC3339),
-			Kind:                 kind,
-			Runtime:              runtime,
-			CronID:               cronID,
-			StartedBy:            startedBy,
-			Interaction:          interaction,
-		},
+	hub.BroadcastJSONPerAccount(func(account string) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+		visible := runtime == runnerRuntimeCluster || hub.ownsDesktopID(ctx, account, daemonID)
+		publicDaemon, publicPath, publicRepo := "", "", ""
+		if visible {
+			publicDaemon, publicPath, publicRepo = daemonID, msg.ProjectPath, msg.Repo
+		}
+		return protocol.BrowserSessionStarted{
+			Type: "session_started",
+			Session: protocol.SessionInfo{
+				ParentSessionID:      parentSessionID,
+				SteeringSupported:    engineSteeringSupported(engine, kind),
+				LimitResumeSupported: kind == "agent" && engineLimitResumeSupported(engine),
+				ID:                   msg.SessionID,
+				DaemonID:             publicDaemon,
+				Status:               "starting",
+				ProjectPath:          publicPath,
+				Repo:                 publicRepo,
+				Title:                msg.Title,
+				Model:                msg.Model,
+				Effort:               effort,
+				Engine:               engine,
+				StartedAt:            time.Now().UTC().Format(time.RFC3339),
+				Kind:                 kind,
+				Runtime:              runtime,
+				CronID:               cronID,
+				StartedBy:            startedBy,
+				Interaction:          interaction,
+			},
+		}
 	})
 }
 
@@ -242,7 +249,7 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 			return fmt.Errorf("GetSession %s: %w", msg.SessionID, err)
 		}
 		if current == nil {
-			return handleSessionNotFound(hub, msg)
+			return handleSessionNotFound(hub, msg) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		}
 		if blocked, err := db.DelegationResumeBlocked(ctx, pool, msg.SessionID); err != nil {
 			return err
@@ -378,7 +385,7 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		notice = func() { noticeOnTransition(ctx, hub, pool, current, msg.Status, readyIdle) }
 	}
 
-	broadcastWithEnd(hub, shown, func(endReason string, endedBy *protocol.EndedBy) any {
+	broadcastWithEnd(hub, shown, func(endReason string, endedBy *protocol.EndedBy) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		m := msg
 		m.EndReason, m.EndedBy = endReason, endedBy
 		return m
@@ -394,6 +401,17 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 // It sets ended_at, updates the status, appends a state_change event, and
 // broadcasts to browsers.
 func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg protocol.SessionEnded) {
+	if committed, _ := ctx.Value(workspaceFinalCommittedKey{}).(bool); committed {
+		if err := hub.completeLocalWorkspaceFinal(ctx, pool, msg.SessionID); err != nil {
+			log.Printf("workspace terminal effects retained: %v", err)
+		}
+		return
+	}
+	_ = handleSessionEndedEffects(ctx, hub, pool, msg)
+}
+func handleSessionEndedEffects(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg protocol.SessionEnded) error {
+	var effectErr error
+	committed, _ := ctx.Value(workspaceFinalCommittedKey{}).(bool)
 	finalStatus := "stopped"
 	if msg.ExitCode != 0 {
 		finalStatus = "error"
@@ -410,13 +428,29 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 
 	if pool != nil {
 		now := time.Now()
-		if err := db.EndSessionStatus(ctx, pool, msg.SessionID, finalStatus, &now, systemEnd(endReason)); err != nil {
-			log.Printf("UpdateSessionStatus session_ended %s: %v", msg.SessionID, err)
-			if db.HasRuntimeAuthority(ctx) {
-				return
+		if committed, _ := ctx.Value(workspaceFinalCommittedKey{}).(bool); !committed {
+			if err := db.EndSessionStatus(ctx, pool, msg.SessionID, finalStatus, &now, systemEnd(endReason)); err != nil {
+				log.Printf("UpdateSessionStatus session_ended %s: %v", msg.SessionID, err)
+				if db.HasRuntimeAuthority(ctx) {
+					return err
+				}
+			}
+		}
+		if msg.WorkspaceResults != nil {
+			workspace, workspaceErr := db.GetSessionWorkspace(ctx, pool, msg.SessionID)
+			if workspaceErr != nil || workspace == nil || workspace.Manifest == nil {
+				log.Printf("session_ended workspace results have no trusted launch for %s", msg.SessionID)
+				return errWorkspaceUnavailable
+			}
+			if err := db.SetWorkspaceResults(ctx, pool, msg.SessionID, workspace.Manifest.LaunchGeneration, msg.WorkspaceResults); err != nil {
+				log.Printf("session_ended workspace results refused for %s: %v", msg.SessionID, err)
+				return errWorkspaceUnavailable
 			}
 		}
 		shown = sessionEndFor(ctx, pool, msg.SessionID, finalStatus)
+		if ws, err := db.GetSessionWorkspace(ctx, pool, msg.SessionID); err == nil && ws != nil {
+			hub.releaseWorkspaceSelection(hub.FindDaemonForSession(msg.SessionID), ws.Manifest)
+		}
 		hub.SessionTerminallyEnded(msg.SessionID)
 		if msg.ExitCode != 0 && msg.Message != "" {
 			// Why it failed (its engine runtime stopped): the reason the session page, the
@@ -434,17 +468,20 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 			"status":    finalStatus,
 			"exit_code": msg.ExitCode,
 		})
-		if err := db.AppendSessionEvent(ctx, pool, msg.SessionID, "state_change",
-			string(data), 0); err != nil {
-			log.Printf("AppendSessionEvent session_ended %s: %v", msg.SessionID, err)
+		if !committed {
+			if err := db.AppendSessionEvent(ctx, pool, msg.SessionID, "state_change",
+				string(data), 0); err != nil {
+				log.Printf("AppendSessionEvent session_ended %s: %v", msg.SessionID, err)
+				effectErr = errors.Join(effectErr, err)
+			}
 		}
 
 		// The ordinary end of a session (both "stopped" and a non-zero exit's
 		// "error" are terminal), and so the ordinary webhook trigger.
-		hub.NotifyCompletion(msg.SessionID)
+
 	}
 
-	broadcastWithEnd(hub, shown, func(endReason string, endedBy *protocol.EndedBy) any {
+	broadcastWithEnd(hub, shown, func(endReason string, endedBy *protocol.EndedBy) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		return protocol.BrowserSessionEnded{
 			Type:      "session_ended",
 			SessionID: msg.SessionID,
@@ -462,16 +499,17 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 		closed, err := db.CloseOpenMessagesForSession(ctx, pool, msg.SessionID)
 		if err != nil {
 			log.Printf("CloseOpenMessagesForSession session_ended %s: %v", msg.SessionID, err)
+			effectErr = errors.Join(effectErr, err)
 		}
 		for _, row := range closed {
-			hub.BroadcastJSON(protocol.MessageAnswered{
+			hub.BroadcastJSON(protocol.MessageAnswered{ //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 				Type:    "message_answered",
 				Message: messageRowToInfo(row),
 			})
 		}
 	}
 
-	failPendingSessionInputs(ctx, hub, pool, msg.SessionID)
+	effectErr = errors.Join(effectErr, failPendingSessionInputsChecked(ctx, hub, pool, msg.SessionID))
 	hub.QuestionSessionEnded(msg.SessionID) // nothing retries its questions' answers now
 	hub.UnsubscribeSession(msg.SessionID)
 	hub.RemoveSessionOwner(msg.SessionID)
@@ -482,12 +520,22 @@ func HandleSessionEnded(ctx context.Context, hub *Hub, pool *pgxpool.Pool, msg p
 	if pool != nil {
 		if err := db.RevokeBoardTokensForSession(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("RevokeBoardTokensForSession session_ended %s: %v", msg.SessionID, err)
+			effectErr = errors.Join(effectErr, err)
 		}
-		revokeSessionGrants(ctx, pool, msg.SessionID, "session_ended")
+		if committed {
+			effectErr = errors.Join(effectErr, revokeWorkspaceFinalGrants(ctx, pool, msg.SessionID))
+		} else {
+			revokeSessionGrants(ctx, pool, msg.SessionID, "session_ended")
+		}
 		if err := db.ClearTicketSessionBySession(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("ClearTicketSessionBySession session_ended %s: %v", msg.SessionID, err)
+			effectErr = errors.Join(effectErr, err)
 		}
 	}
+	if effectErr == nil {
+		hub.NotifyCompletion(msg.SessionID)
+	}
+	return effectErr
 }
 
 // HandleSessionMetaChanged handles a session_meta_changed message from a daemon.
@@ -498,7 +546,7 @@ func HandleSessionMetaChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool,
 			log.Printf("UpdateSessionMeta %s: %v", msg.SessionID, err)
 		}
 	}
-	hub.BroadcastJSON(msg)
+	hub.BroadcastJSON(msg) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 }
 
 // HandleSessionOutput handles a session_output message from a daemon.

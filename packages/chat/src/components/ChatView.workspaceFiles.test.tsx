@@ -27,6 +27,14 @@ function mount(text: string, opts: Opts = {}) {
 }
 
 describe('files the agent names', () => {
+  it.each(['/workspace/notes', '/workspace/bin/build'])('opens extensionless sandbox inline code %s intact', async path => {
+    const { read } = mount(`Open \`${path}\`.`, { reply: async () => file({ path: path.slice('/workspace/'.length), view: 'text', body: 'sandbox file' }) })
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    const dialog = await screen.findByRole('dialog', { name: path })
+    expect(await within(dialog).findByText('sandbox file')).toBeInTheDocument()
+    expect(read).toHaveBeenCalledWith('s1', path, expect.anything())
+  })
+
   it('opens a bare name the session published as that published file, not from the folder', async () => {
     const plan: ArtifactInfo = { id: 'p1', name: 'plan.md', size: 20, content_type: 'text/markdown', view: 'markdown', origin: 'agent' }
     const { read } = mount('Open `plan.md`, then `docs/plan.md`.', { published: [plan] })
@@ -41,6 +49,21 @@ describe('files the agent names', () => {
     fireEvent.click((await screen.findByText('notes.md')).closest('[data-workspace-path]')!)
     await screen.findByRole('dialog', { name: 'notes.md' })
     expect(read).toHaveBeenCalledWith('s1', 'notes.md', expect.anything())
+  })
+
+  it.each(['/workspace/app/README.md', '/srv/projects/app/README.md'])('opens %s intact and uses the returned relative path for document links', async path => {
+    const { read } = mount(`[Project README](${path})`, { reply: async p => {
+      if (p === path) return file({ body: '# Project README\n\n[Guide](docs/guide.md)\n' })
+      if (p === 'docs/guide.md') return file({ path: p, body: '# Guide' })
+      throw new WorkspaceFileError(404, 'The workspace file was not found.')
+    } })
+    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    const dialog = await screen.findByRole('dialog', { name: path })
+    expect(read).toHaveBeenCalledWith('s1', path, expect.anything())
+    expect(await within(dialog).findByRole('heading', { name: 'Project README', level: 1 })).toBeInTheDocument()
+    fireEvent.click(await within(dialog).findByText('Guide'))
+    expect(await screen.findByRole('heading', { name: 'Guide', level: 1 })).toBeInTheDocument()
+    expect(read).toHaveBeenLastCalledWith('s1', 'docs/guide.md', expect.anything())
   })
 
   it('turns relative links and path-like inline code into buttons, and nothing else', async () => {

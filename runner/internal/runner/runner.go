@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
+	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
@@ -33,6 +35,16 @@ import (
 // Config is assembled from the pod environment (set by the server's Job
 // manifest).
 type Config struct {
+	StartCommand  func(*exec.Cmd) error
+	ClusterAttach func(context.Context, *daemon.WSClient) error
+	// Supplied by P5 after grant/connection validation, never decoded from env.
+	ClusterPrivateRoot   string // trusted adapter storage excluded from the agent mount/UID authority; never env decoded
+	ClusterServices      ClusterServicesFactory
+	ClusterWriters       clusterworkspace.Writers
+	Supervisor           protocol.RuntimeSupervisor
+	SupervisorLaunch     protocol.SupervisorLaunch
+	Workspace            *clusterworkspace.Plan
+	WorkspaceErr         error
 	RequireRecoveryReady bool // BLERG_RUNNER_REQUIRE_RECOVERY_READY=1; internal child attribution only
 	ManagedCredential    bool // access-only engine connection brokered by Core
 
@@ -173,6 +185,10 @@ func podSpawn(cfg Config, workDir string) protocol.SpawnSession {
 	if daemon.NativePluginEngine(cfg.Engine) && !cfg.skipsUserConfig() {
 		spawn.Plugins = cfg.Plugins
 	}
+	if cfg.Workspace != nil {
+		spawn.Workspace = &cfg.Workspace.Manifest
+		spawn.ProjectPath = workDir
+	}
 	if cfg.NoRepo {
 		// No Repo to resolve a path from: hand the host the directory itself.
 		spawn.ProjectPath = workDir
@@ -181,6 +197,7 @@ func podSpawn(cfg Config, workDir string) protocol.SpawnSession {
 }
 
 func ConfigFromEnv() Config {
+	workspace, workspaceErr := takeClusterWorkspace()
 	plugins, pluginsErr := ParsePluginsEnv(os.Getenv("BLERG_RUNNER_PLUGINS"))
 	gateway, gatewayErr := takeMCPGatewayEnv()
 	var retained *daemon.NativeHistoryConfig
@@ -188,6 +205,7 @@ func ConfigFromEnv() Config {
 		retained = &daemon.NativeHistoryConfig{Directory: nativehistory.IdentityPath, AccountID: os.Getenv("BLERG_RUNNER_NATIVE_HISTORY_ACCOUNT"), ClaimUID: os.Getenv("BLERG_RUNNER_NATIVE_HISTORY_UID"), Resume: os.Getenv("BLERG_RUNNER_RESUME") == "1"}
 	}
 	return Config{
+		Workspace: workspace, WorkspaceErr: workspaceErr,
 		NativeHistory:         retained,
 		ManagedCredential:     os.Getenv("BLERG_RUNNER_MANAGED_CREDENTIAL") == "1",
 		RestrictTools:         takeRestrictToolsEnv(),
@@ -328,29 +346,15 @@ func scrubToken(s, token string) string {
 	return s
 }
 
-// podRemote is the session's clone URL, set by PrepareWorkspace: the one transport the pod's own
-// git calls may use is the one it names (gitProtocols).
-var (
-	podRemoteMu sync.Mutex
-	podRemote   string
-)
+// Legacy scalar workspaces retain one immutable context per prepared directory.
+// Folder workspaces use clusterworkspace's independent contexts instead.
+var legacyGitContexts sync.Map // canonical workdir -> immutable clone URL
 
-func setPodRemote(u string) {
-	podRemoteMu.Lock()
-	podRemote = u
-	podRemoteMu.Unlock()
-}
-
-// gitProtocols is the transport the pod's git may use: the clone URL's (https on a cluster).
-// Never one the repository's configuration names: the agent owns .git/config, and a remote it
-// points at ext:: or elsewhere gets no transport.
-func gitProtocols() []string {
-	podRemoteMu.Lock()
-	defer podRemoteMu.Unlock()
-	if podRemote == "" {
+func gitProtocols(remote string) []string {
+	if remote == "" {
 		return []string{"https"}
 	}
-	return hostgit.ProtocolsFor(podRemote)
+	return hostgit.ProtocolsFor(remote)
 }
 
 // gitRun runs the pod's own git (the clone, the wip checkout, the push; never the agent's)
@@ -366,13 +370,14 @@ func gitProtocols() []string {
 // Differs from the daemon's calls, on purpose: the image's own system git configuration is kept
 // (CA settings), proxy and CA variables pass through, the clone is blobless so a lazy fetch of a
 // missing blob is allowed (over that same transport), and there is no memory limit (the clone).
-func gitRun(dir string, args ...string) (string, error) {
+func gitRun(dir string, args ...string) (string, error) { return gitRunFor(dir, "", args...) }
+func gitRunFor(dir, remote string, args ...string) (string, error) {
 	timeout := gitStepTimeout
 	if len(args) > 0 && args[0] == "clone" {
 		timeout = gitCloneTimeout
 	}
 	return hostgit.OutputBounded(hostgit.Options{
-		Dir: dir, Protocols: gitProtocols(), LazyFetch: true, SystemConfig: true, Timeout: timeout,
+		Dir: dir, Protocols: gitProtocols(remote), LazyFetch: true, SystemConfig: true, Timeout: timeout,
 		PassEnv: []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"},
 	}, args...)
 }
@@ -390,8 +395,8 @@ var (
 // one the plain git-<service>; https has none to name. A local origin whose hardened command
 // cannot be built is refused, never served by the plain command (which would run the origin's
 // configuration unhardened).
-func servingFlag(service string) ([]string, error) {
-	switch p := gitProtocols(); {
+func servingFlag(remote, service string) ([]string, error) {
+	switch p := gitProtocols(remote); {
 	case len(p) == 1 && p[0] == "file":
 		cmd, err := hostgit.ServeCommand(service)
 		if err != nil {
@@ -405,12 +410,12 @@ func servingFlag(service string) ([]string, error) {
 }
 
 // gitServed is gitRun with the serving flag for service inserted after the subcommand.
-func gitServed(dir, service, sub string, rest ...string) (string, error) {
-	flag, err := servingFlag(service)
+func gitServed(dir, remote, service, sub string, rest ...string) (string, error) {
+	flag, err := servingFlag(remote, service)
 	if err != nil {
 		return "", err
 	}
-	return gitRun(dir, append(append([]string{sub}, flag...), rest...)...)
+	return gitRunFor(dir, remote, append(append([]string{sub}, flag...), rest...)...)
 }
 
 // ScratchDir is the workspace directory, under Home, of a "No repository"
@@ -452,10 +457,15 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 		return workDir, WorkspaceEmpty, nil
 	}
 	workDir := filepath.Join(cfg.Home, cfg.Repo)
-	if _, err := os.Stat(filepath.Join(workDir, ".git")); err == nil {
-		return workDir, "existing", nil // pre-mounted workspace (tests)
+	if cfg.GitURL == "" || len(hostgit.ProtocolsFor(cfg.GitURL)) == 0 {
+		return "", "", fmt.Errorf("workspace destination unavailable")
 	}
-	setPodRemote(cfg.GitURL)
+	if old, loaded := legacyGitContexts.LoadOrStore(workDir, authURL(cfg.GitURL, cfg.GitToken)); loaded && old != authURL(cfg.GitURL, cfg.GitToken) {
+		return "", "", fmt.Errorf("workspace destination changed")
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".git")); err == nil {
+		return workDir, "existing", nil
+	}
 	cloneURL := authURL(cfg.GitURL, cfg.GitToken)
 	// A blobless partial clone: full history and every branch, but file
 	// contents are fetched only for the checkout (and lazily afterwards). Pod
@@ -470,7 +480,7 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 		if i > 0 {
 			time.Sleep(newRepoCloneDelay)
 		}
-		out, err := gitServed(cfg.Home, "upload-pack", "clone", "--filter=blob:none", "--", cloneURL, workDir)
+		out, err := gitServed(cfg.Home, cfg.GitURL, "upload-pack", "clone", "--filter=blob:none", "--", cloneURL, workDir)
 		if err == nil {
 			cloneErr = nil
 			break
@@ -500,7 +510,7 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 	}
 	state := "fresh-clone"
 	wip := wipBranch(cfg.SessionID)
-	if out, err := gitServed(workDir, "upload-pack", "ls-remote", "--heads", "origin", wip); err == nil && strings.Contains(out, wip) {
+	if out, err := gitServed(workDir, cfg.GitURL, "upload-pack", "ls-remote", "--heads", "origin", wip); err == nil && strings.Contains(out, wip) {
 		if out, err := gitRun(workDir, "checkout", "-b", wip, "origin/"+wip); err != nil {
 			log.Printf("runner: wip checkout failed (%v: %s); staying on default branch", err, out)
 		} else {
@@ -563,16 +573,24 @@ var pushProblem func(workDir, sessionID, detail string)
 // PushWip force-pushes the session's wip branch if there are new commits.
 // Idempotent and cheap; called after every turn and on SIGTERM.
 func PushWip(workDir, sessionID string) {
+	remote, ok := legacyGitContexts.Load(workDir)
+	if !ok {
+		return
+	}
+	contextURL, ok := remote.(string)
+	if !ok {
+		return
+	}
 	head, err := gitRun(workDir, "rev-parse", "HEAD")
 	if err != nil {
 		return
 	}
-	remote, _ := gitRun(workDir, "rev-parse", "origin/"+wipBranch(sessionID))
-	if head == remote {
+	remoteHead, _ := gitRun(workDir, "rev-parse", "origin/"+wipBranch(sessionID))
+	if head == remoteHead {
 		return
 	}
-	if out, err := gitServed(workDir, "receive-pack", "push", "--force", "origin", "HEAD:"+wipBranch(sessionID)); err != nil {
-		log.Printf("runner: wip push: %v: %s", err, out)
+	if out, err := gitServed(workDir, contextURL, "receive-pack", "push", "--force", "--", contextURL, "HEAD:"+wipBranch(sessionID)); err != nil {
+		log.Printf("runner: wip push failed: %s", classifyPushFailure(out))
 		if pushProblem != nil {
 			pushProblem(workDir, sessionID, classifyPushFailure(out))
 		}
@@ -635,6 +653,9 @@ func FetchTranscript(ctx context.Context, cfg Config) ([]agent.RestoredEvent, er
 // agent session, and block until ctx is cancelled (SIGTERM) or the session is
 // killed server-side.
 func Run(ctx context.Context, cfg Config) error {
+	if cfg.WorkspaceErr != nil {
+		return cfg.WorkspaceErr
+	}
 	if cfg.SessionID == "" || cfg.ServerWS == "" {
 		return fmt.Errorf("BLERG_RUNNER_SESSION_ID and BLERG_RUNNER_SERVER_WS are required")
 	}
@@ -646,18 +667,35 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
+	disk, workspace, err := prepareClusterDisk(cfg)
+	if err != nil {
+		return err
+	}
+	if disk != nil {
+		defer disk.Close()
+	}
+	cfg.StartCommand = workspaceCommandLauncher(ctx, workspace, cfg.StartCommand)
+	publicRoot := cfg.Home
+	if workspace != nil {
+		publicRoot = filepath.Join(cfg.Home, "projects")
+	}
 	// Connect first, prepare the workspace second: the clone is the slow,
 	// failure-prone part of a start, and reporting its progress (and its
 	// failure, with a reason) needs the server connection. The session has
 	// no host-side state yet, so nothing is reported active until spawn.
-	client := daemon.NewWSClient(daemon.Config{
-		ServerURL:   cfg.ServerWS,
-		DaemonToken: cfg.DaemonToken,
-		DaemonName:  "runner-" + cfg.SessionID,
-		DaemonMode:  "runner",
-		ReposRoot:   cfg.Home,
-		Version:     cfg.Version,
+	incompatible := make(chan struct{}, 1)
+	client := newPodWorkspaceClient(cfg, publicRoot, func() {
+		select {
+		case incompatible <- struct{}{}:
+		default:
+		}
 	})
+
+	if cfg.ClusterAttach != nil {
+		if err := cfg.ClusterAttach(ctx, client); err != nil {
+			return err
+		}
+	}
 
 	// workDir is set once the workspace is ready; the turn-done hook below
 	// only fires after spawn, which is after that.
@@ -668,43 +706,68 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.ManagedCredential {
 		credentialSource = daemon.ManagedEngineCredentialSource(cfg.ServerHTTP, cfg.DaemonToken, cfg.Engine)
 	}
-	host := daemon.NewAgentHost(client, daemon.AgentHostConfig{
+	workshop := daemon.NewPluginWorkshop(filepath.Join(cfg.Home, ".blerg"))
+	workshop.SetStartCommand(cfg.StartCommand)
+	sender := &workspaceSender{WSClient: client, runtime: workspace}
+	host := daemon.NewAgentHost(sender, daemon.AgentHostConfig{
 		CredentialSource: credentialSource,
-		ReposRoot:        cfg.Home,
-		ServerHTTP:       cfg.ServerHTTP,
-		DaemonToken:      cfg.DaemonToken,
-		APIKey:           cfg.APIKey,
+		StartCommand:     cfg.StartCommand,
+		BeforeDriverStop: func(string) error {
+			if workspace == nil || cfg.ClusterWriters == nil {
+				return nil
+			}
+			workspace.FenceAdmission()
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			return cfg.ClusterWriters.Stop(cleanup)
+		},
+		PlanNudges:  client.CanPlanNudges,
+		ReposRoot:   publicRoot,
+		ServerHTTP:  cfg.ServerHTTP,
+		DaemonToken: cfg.DaemonToken,
+		APIKey:      cfg.APIKey,
 		// Subscription mode: bill sessions to the operator's Claude plan via
 		// headless Claude Code when its OAuth token is provided and no
 		// metered API key is.
-		ClaudeCode:    (os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" && cfg.APIKey == "") || cfg.NativeHistory != nil,
+		ClaudeCode:    (os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" && cfg.APIKey == "") || cfg.NativeHistory != nil || cfg.Workspace != nil,
 		NativeHistory: cfg.NativeHistory,
-		Plugins:       daemon.NewPluginWorkshop(filepath.Join(cfg.Home, ".blerg")),
+		Plugins:       workshop,
 		HomeDir:       cfg.Home,
 		Pricing:       daemon.DefaultPricing(),
 		OnTurnDone: func(sessionID string) {
 			activity.touch()
-			go PushWip(workDir, sessionID)
+			go func() {
+				if workspace != nil {
+					workspace.PushRound(context.WithoutCancel(ctx))
+					_ = client.SendContext(ctx, workspaceReport(workspace, sessionID))
+				} else {
+					PushWip(workDir, sessionID)
+				}
+			}()
 		},
 	})
 
 	// AgentHost owns independent session contexts and native processes. Close
 	// them on every return path, including startup failure and pod cancellation.
-	defer host.Kill(cfg.SessionID)
+	defer host.Kill(cfg.SessionID) //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
 	client.OnMessage("agent_event_ack", func(raw []byte) {
 		var msg protocol.AgentEventAck
 		if json.Unmarshal(raw, &msg) == nil {
 			host.HandleAck(msg.SessionID, msg.ClientEventID)
 		}
 	})
+	client.OnMessage("plan_input_result", host.DeliverPlanInput)
 	client.OnMessage("agent_user_message", func(raw []byte) {
+		if workspace != nil && workspace.AdmissionFenced() {
+			return
+		}
 		var msg protocol.AgentUserMessage
 		if json.Unmarshal(raw, &msg) == nil {
 			activity.touch()
 			if msg.Source == "limit_resume" && msg.ExpectedTurnID == "" {
 				return
 			}
-			host.UserInput(msg.SessionID, agent.Input{Text: msg.Text, Source: msg.Source, ClientID: msg.ClientID, ExpectedTurnID: msg.ExpectedTurnID})
+			host.UserInput(msg.SessionID, agent.Input{Text: msg.Text, PlanNudge: msg.PlanNudge, Source: msg.Source, ClientID: msg.ClientID, ExpectedTurnID: msg.ExpectedTurnID})
 		}
 	})
 	client.OnMessage("set_session_model", func(raw []byte) {
@@ -720,14 +783,37 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	})
 	client.OnMessage("release_held_prompt", func(raw []byte) {
+		if workspace != nil && workspace.AdmissionFenced() {
+			return
+		}
 		var msg protocol.ReleaseHeldPrompt
 		if json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
 			host.ReleaseHeldPrompt(msg.SessionID)
 		}
 	})
-	client.OnMessage("kill_session", func(raw []byte) {
+	client.OnMessage("cluster_workspace_stop", func(raw []byte) { //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
+		var msg struct {
+			SessionID string `json:"session_id"`
+			RequestID string `json:"request_id"`
+			protocol.WorkspaceRuntimeRef
+		}
+		if workspace == nil || len(raw) > 4096 || json.Unmarshal(raw, &msg) != nil || msg.SessionID != cfg.SessionID || msg.WorkspaceRuntimeRef != cfg.Workspace.Runtime || msg.RequestID == "" {
+			return
+		}
+		workspace.FenceAdmission()
+		sender.stopMu.Lock()
+		sender.stopID = msg.RequestID
+		sender.stopMu.Unlock()
+		// Killing/settling may take the complete sync budget; keep the reader
+		// pump available for acks and connection control while it completes.
+		go host.Kill(cfg.SessionID)
+	})
+	client.OnMessage("kill_session", func(raw []byte) { //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
 		var msg protocol.KillSession
 		if json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
+			if workspace != nil {
+				workspace.FenceAdmission()
+			}
 			host.Kill(msg.SessionID)
 			close(killed)
 		}
@@ -753,25 +839,70 @@ func Run(ctx context.Context, cfg Config) error {
 	client.OnMessage("read_commit", func(raw []byte) {
 		var msg protocol.ReadCommit
 		if len(raw) <= 1024 && json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
+			if workspace != nil {
+				_ = client.SendContext(ctx, protocol.CommitResult{Type: "commit_result", RequestID: msg.RequestID, SessionID: cfg.SessionID, ErrorCode: "unavailable"})
+				return
+			}
 			host.ReadCommit(ctx, msg)
 		}
 	})
+	for _, explorerType := range []string{"workspace_explorer", "cancel_workspace_explorer"} {
+		client.OnMessage(explorerType, func(raw []byte) {
+			var msg protocol.WorkspaceExplorerRequest
+			if len(raw) <= 16384 && json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
+				host.HandleWorkspaceExplorer(ctx, raw)
+			}
+		})
+	}
+	client.OnMessage("cancel_workspace_file", func(raw []byte) {
+		var req protocol.ReadWorkspaceFile
+		if len(raw) <= 16384 && json.Unmarshal(raw, &req) == nil && req.SessionID == cfg.SessionID {
+			host.ReadWorkspaceFileContext(ctx, req)
+		}
+	})
+	client.OwnerShellRuntimeContext(ctx) // P5 uses this existing authenticated outbound connection; no exec API.
 	client.OnMessage("read_workspace_file", func(raw []byte) {
 		var msg protocol.ReadWorkspaceFile
 		if json.Unmarshal(raw, &msg) == nil && msg.SessionID == cfg.SessionID {
-			host.ReadWorkspaceFile(msg)
+			host.ReadWorkspaceFileContext(ctx, msg)
 		}
 	})
+	var requests *clusterRequests
+	if workspace != nil {
+		// Bind only after every member is prepared, below. Until then requests
+		// cannot reach files or PTYs; no privileged API fallback exists.
+		requests = newClusterRequests(ctx, cfg.SessionID, cfg.Workspace.Runtime, workspace, nil, client)
+		sender.requests = requests
+		client.SetRecoveryStateHandler(func(state daemon.RecoveryState) {
+			host.NoteRecoveryState(state)
+			if state.Phase == daemon.RecoveryDisconnected {
+				requests.Disconnect()
+			}
+		})
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_ = requests.Close(closeCtx)
+		}()
+	}
 	// Start stage reports queue until the connection allows them; each
 	// (re)connect flushes what is waiting.
 	stages := &stageReporter{s: client, sessionID: cfg.SessionID}
 	connected := make(chan struct{})
 	var connectOnce sync.Once
 	client.SetOnConnect(func() {
+		if workspace != nil && workspace.Prepared() {
+			_ = client.SendContext(ctx, struct {
+				protocol.WorkspaceRuntimePrepared
+				Identities []clusterworkspace.MemberIdentity `json:"identities"`
+			}{protocol.WorkspaceRuntimePrepared{Type: "workspace_runtime_prepared", SessionID: cfg.SessionID, Binding: disk.Binding(cfg.Workspace.Runtime, cfg.Workspace.Manifest.Digest)}, disk.Identities()})
+			_ = client.SendContext(ctx, workspaceReport(workspace, cfg.SessionID))
+		}
 		connectOnce.Do(func() { close(connected) })
 		host.ResendPending()
 		stages.flush()
 	})
+	client.SetWorkspaceDisconnect(func() { host.CancelWorkspaceExplorerWork() })
 	client.SetSessionStates(host.States)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -790,6 +921,14 @@ func Run(ctx context.Context, cfg Config) error {
 		return nil
 	}
 
+	if workspace != nil {
+		negotiate, stop := context.WithTimeout(ctx, 15*time.Second)
+		err := client.WaitWorkspace(negotiate)
+		stop()
+		if err != nil {
+			return err
+		}
+	}
 	if detail, hint := missingEngineCredential(cfg.Engine, os.Getenv); detail != "" {
 		stages.report(done(protocol.StageConnect))
 		stages.fail(protocol.StageEngine, detail, hint, cfg.Resume)
@@ -836,8 +975,33 @@ func Run(ctx context.Context, cfg Config) error {
 		client.RequestHeartbeat()
 	}
 
-	wd, wsState, err := PrepareWorkspace(cfg)
+	var wd, wsState string
+	if workspace != nil {
+		err = client.SendContext(ctx, protocol.WorkspaceRuntimePrepared{Type: "workspace_runtime_prepared", SessionID: cfg.SessionID, Binding: disk.Binding(cfg.Workspace.Runtime, cfg.Workspace.Manifest.Digest)})
+		if err == nil {
+			err = workspace.Prepare(ctx, cfg.Resume)
+		}
+		wd = publicRoot
+		if cfg.Workspace.Manifest.Kind == "repo" {
+			wd = filepath.Join(publicRoot, cfg.Workspace.Manifest.Members[0].ID)
+		}
+		wsState = "prepared-members"
+		if err == nil {
+			err = client.SendContext(ctx, struct {
+				protocol.WorkspaceRuntimePrepared
+				Identities []clusterworkspace.MemberIdentity `json:"identities"`
+			}{protocol.WorkspaceRuntimePrepared{Type: "workspace_runtime_prepared", SessionID: cfg.SessionID, Binding: disk.Binding(cfg.Workspace.Runtime, cfg.Workspace.Manifest.Digest)}, disk.Identities()})
+		}
+		if err == nil {
+			err = client.SendContext(ctx, workspaceReport(workspace, cfg.SessionID))
+		}
+	} else {
+		wd, wsState, err = PrepareWorkspace(cfg)
+	}
 	if err != nil {
+		if workspace != nil {
+			_ = client.SendContext(ctx, workspaceReport(workspace, cfg.SessionID))
+		}
 		detail, hint := classifyWorkspaceError(err)
 		stages.fail(protocol.StageClone, detail, hint, cfg.Resume)
 		return err
@@ -855,15 +1019,35 @@ func Run(ctx context.Context, cfg Config) error {
 		pushProblem = func(_, sessionID, detail string) {
 			once.Do(func() {
 				payload, _ := json.Marshal(agent.ErrorPayload{Message: "Pushing the wip branch failed: " + detail, Retryable: true})
-				_ = client.Send(protocol.AgentEvent{
+				_ = client.SendContext(ctx, protocol.AgentEvent{
 					Type: "agent_event", SessionID: sessionID, ClientEventID: newEventID(),
 					Ts: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: payload,
 				})
 			})
 		}
 	}
-	reportWorkspaceReady(ctx, cfg, stages, installPlugins)
 
+	if workspace != nil {
+		if err := workspace.ArmWriters(); err != nil {
+			return fmt.Errorf("cluster writer containment unavailable: %w", err)
+		}
+	}
+	if requests != nil && cfg.ClusterServices != nil {
+		services, err := cfg.ClusterServices(publicRoot, cfg.ClusterPrivateRoot, cfg.Workspace.Manifest, disk.Binding(cfg.Workspace.Runtime, cfg.Workspace.Manifest.Digest), workspace)
+		if err != nil {
+			return err
+		}
+		requests.mu.Lock()
+		requests.services = services
+		requests.mu.Unlock()
+		if explorer, ok := services.(daemon.WorkspaceExplorer); ok {
+			host.BindWorkspaceExplorer(cfg.SessionID, explorer)
+		}
+	}
+	reportWorkspaceReady(ctx, cfg, stages, installPlugins)
+	if cfg.Workspace != nil {
+		cfg.InitialPrompt = clusterWorkspaceGuide(*cfg.Workspace) + cfg.InitialPrompt
+	}
 	spawn := podSpawn(cfg, workDir)
 	spawn.InitialPromptSource = cfg.InitialPromptSource
 	spawn.InitialPromptClientID = cfg.InitialPromptClientID
@@ -904,14 +1088,29 @@ func Run(ctx context.Context, cfg Config) error {
 				continue
 			}
 			log.Printf("runner: idle for %s — ending the pod; the session can be resumed", cfg.IdleTimeout)
-			PushWip(workDir, cfg.SessionID)
+			if workspace != nil {
+				host.Kill(cfg.SessionID) //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
+			} else {
+				PushWip(workDir, cfg.SessionID)
+			}
 			return nil
 		case <-ctx.Done():
 			log.Printf("runner: terminating — final wip push")
-			PushWip(workDir, cfg.SessionID)
+			if workspace != nil {
+				host.Kill(cfg.SessionID) //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
+			} else {
+				PushWip(workDir, cfg.SessionID)
+			}
 			return nil
+		case <-incompatible:
+			host.Kill(cfg.SessionID) //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
+			return fmt.Errorf("server no longer supports workspace v2")
 		case <-killed:
-			PushWip(workDir, cfg.SessionID)
+			if workspace != nil {
+				host.Kill(cfg.SessionID) //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
+			} else {
+				PushWip(workDir, cfg.SessionID)
+			}
 			return nil
 		}
 	}

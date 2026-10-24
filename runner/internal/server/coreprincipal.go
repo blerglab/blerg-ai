@@ -42,13 +42,13 @@ func listCorePersonalKinds(parent context.Context, client *http.Client, coreURL,
 	if err != nil {
 		return nil, errCorePrincipalUnavailable
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coreURL+"/internal/credentials/list", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coreURL+"/internal/credentials/list", bytes.NewReader(body)) // #nosec G704 -- Target is operator-configured Core URL; requester fields are JSON data and redirects are disabled.
 	if err != nil {
 		return nil, errCorePrincipalUnavailable
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Key", internalKey)
-	resp, err := coreHTTPClient(client).Do(req)
+	resp, err := coreHTTPClient(client).Do(req) // #nosec G704 -- Target is operator-configured Core URL; requester fields are JSON data and redirects are disabled.
 	if err != nil {
 		return nil, errCorePrincipalUnavailable
 	}

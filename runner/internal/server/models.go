@@ -2,13 +2,11 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"log"
 	"net/http"
 	"sort"
 	"strings"
 
-	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -31,8 +29,8 @@ func NewModelSources(claude models.Source, hub *Hub) *models.Registry {
 			if engine == models.ClaudeEngine {
 				continue
 			}
-			r.Register(engine, models.SourceFunc(func(_ context.Context, daemonID string) (models.List, error) {
-				return reportedModelList(hub, engine, daemonID), nil
+			r.Register(engine, models.SourceFunc(func(ctx context.Context, daemonID string) (models.List, error) {
+				return mergeReportedModels(hub.ownedHostDaemons(ctx, desktopViewer(ctx, "")), engine, daemonID), nil
 			}))
 		}
 	}
@@ -50,11 +48,17 @@ func NewModelSources(claude models.Source, hub *Hub) *models.Registry {
 //     and the oldest fetched_at among them.
 //
 // No list anywhere is source "none" with no models.
-func reportedModelList(hub *Hub, engine, daemonID string) models.List {
+func mergeReportedModels(daemons []*DaemonConn, engine, daemonID string) models.List {
 	engine = models.NormalizeEngine(engine)
 	none := models.List{Models: []models.Model{}, Source: models.SourceNone}
 	if daemonID != "" {
-		dc := hub.GetHostDaemon(daemonID)
+		var dc *DaemonConn
+		for _, candidate := range daemons {
+			if candidate.ID == daemonID {
+				dc = candidate
+				break
+			}
+		}
 		if dc == nil {
 			return none
 		}
@@ -65,7 +69,7 @@ func reportedModelList(hub *Hub, engine, daemonID string) models.List {
 		t := rep.FetchedAt
 		return models.List{Models: rep.Models, Source: models.SourceDaemon, FetchedAt: &t, DaemonID: dc.ID}
 	}
-	daemons := hub.GetHostDaemons()
+	daemons = append([]*DaemonConn(nil), daemons...)
 	sort.Slice(daemons, func(i, j int) bool { return daemons[i].ID < daemons[j].ID })
 	type reported struct {
 		id  string
@@ -129,7 +133,7 @@ func (a *API) HandleGetModels(w http.ResponseWriter, r *http.Request) {
 		a.handleClusterModels(w, r)
 		return
 	}
-	if !a.authBrowserOrRunner(w, r) {
+	if _, ok := a.authorizeLaunchOptions(w, r); !ok {
 		return
 	}
 	engine := r.PathValue("engine")
@@ -138,7 +142,14 @@ func (a *API) HandleGetModels(w http.ResponseWriter, r *http.Request) {
 	if cluster {
 		daemonID = ""
 	}
-	list, err := a.modelRegistry().Models(r.Context(), engine, daemonID)
+	if daemonID != "" && a.hub.ownedHostDaemon(r.Context(), desktopViewer(r.Context(), ""), daemonID) == nil {
+		writeError(w, http.StatusNotFound, "desktop unavailable")
+		return
+	}
+	snapshot := a.hub.ownedHostDaemons(r.Context(), desktopViewer(r.Context(), ""))
+	ctx := withDesktopReadSnapshot(r.Context(), snapshot)
+	w.Header().Set("Cache-Control", "private, no-store")
+	list, err := a.modelRegistry().Models(ctx, engine, daemonID)
 	if err != nil {
 		log.Printf("models %s: %v", engine, err)
 		writeError(w, http.StatusBadGateway, "model list unavailable")
@@ -156,27 +167,13 @@ func (a *API) HandleGetModels(w http.ResponseWriter, r *http.Request) {
 	if list.EngineEfforts == nil {
 		list.EngineEfforts = []string{}
 	}
-	writeJSON(w, http.StatusOK, list)
-}
-
-// authBrowserOrRunner accepts either a browser session token or any
-// credential authRunner accepts (the static runner key, or a core token with
-// the runner capability). It writes 401 and returns false otherwise.
-func (a *API) authBrowserOrRunner(w http.ResponseWriter, r *http.Request) bool {
-	raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if _, ok := a.verifyBrowserToken(raw); ok {
-		return true
-	}
-	if a.runnerKey != "" && raw != "" && subtle.ConstantTimeCompare([]byte(raw), []byte(a.runnerKey)) == 1 {
-		return true
-	}
-	if raw != "" && a.coreAuth != nil {
-		if p, err := identity.Verify(raw, coreAuthAudience, a.coreAuth.KeySet(), a.coreAuth, coreAuthSensitiveCaps); err == nil && p.Has(coreAuthRunnerCap) {
-			return true
+	if list.Source == models.SourceDaemon {
+		if err := a.hub.deliverDesktopSnapshot(ctx, desktopViewer(ctx, ""), snapshot, func() { writeJSON(w, http.StatusOK, list) }); err != nil {
+			writeError(w, http.StatusConflict, "desktop changed; refresh the model list")
 		}
+		return
 	}
-	writeError(w, http.StatusUnauthorized, "unauthorized")
-	return false
+	writeJSON(w, http.StatusOK, list)
 }
 
 // modelEffortProblem returns why a requested model/effort cannot be used on

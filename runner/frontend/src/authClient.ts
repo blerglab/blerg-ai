@@ -7,6 +7,17 @@
 // tradeoff given redirectToRefresh below makes reacquiring it cheap (spec §1).
 let accessToken: string | null = null;
 
+// This runner copy also notifies local desktop caches when the signed-in
+// subject changes. The comparison is advisory; the server verifies authority.
+function receiveAccessToken(token: string): void {
+  const subject = (raw: string | null): string => {
+    try { const data = JSON.parse(atob((raw ?? '').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))) as { sub?: string }; return data.sub ?? ''; } catch { return ''; }
+  };
+  const before = subject(accessToken);
+  accessToken = token;
+  if (before !== subject(token)) window.dispatchEvent(new Event('blerg-identity-changed'));
+}
+
 export function getAccessToken(): string | null {
   return accessToken;
 }
@@ -18,7 +29,7 @@ export function getAccessToken(): string | null {
 export function consumeAccessTokenFromFragment(): void {
   const match = location.hash.match(/access_token=([^&]+)/);
   if (match) {
-    accessToken = decodeURIComponent(match[1]);
+    receiveAccessToken(decodeURIComponent(match[1]));
     history.replaceState(null, "", location.pathname + location.search);
   }
 }
@@ -155,7 +166,7 @@ function silentFrame(): { answered: Promise<SilentOutcome>; done: Promise<void> 
       const sameOrigin = loc.origin === location.origin;
       const match = sameOrigin ? loc.hash.match(/access_token=([^&]+)/) : null;
       if (match) {
-        accessToken = decodeURIComponent(match[1]);
+        receiveAccessToken(decodeURIComponent(match[1]));
         finish("token");
         return;
       }

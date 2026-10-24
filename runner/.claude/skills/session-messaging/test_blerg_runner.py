@@ -2328,6 +2328,14 @@ class TestWork(unittest.TestCase):
         for needle in ("A JIRA issue", "A Bugzilla bug", "show_bug.cgi", "fields.summary", "copies the ticket's text"):
             self.assertIn(needle, out)
 
+    def test_help_says_what_blerg_keeps_of_the_plan(self):
+        checklist = " ".join(run_blerg_runner(["checklist", "--help"]).stdout.split())
+        for needle in ('ticks every open item naming it as #N ("ticked: #N done")', "assigned to your open item naming #N", "plan_drift notice"):
+            self.assertIn(needle, checklist)
+        pin = " ".join(run_blerg_runner(["pin", "--help"]).stdout.split())
+        for needle in ("A Blerg Board card is filled from the Board when you pin it", "in-progress column is pinned for you", "plan_drift notice"):
+            self.assertIn(needle, pin)
+
     def test_noop_when_not_under_blerg(self):
         env = {k: None for k in ("BLERG_RUNNER_SESSION_ID", "BLERG_RUNNER_SERVER_HTTP",
                                   "BLERG_RUNNER_SESSION_TOKEN", "BLERG_RUNNER_DAEMON_TOKEN", "BLERG_RUNNER_BOARD_TOKEN")}
@@ -3724,6 +3732,13 @@ class TestSession(unittest.TestCase):
     def _body(self, rec):
         return json.loads(rec["raw"]) if rec["raw"] else {}
 
+    def test_workspace_selection_repeatable_repo_and_all_repos(self):
+        for flags, expected in [(["--repo", "api", "--repo", "web"], {"repos": ["api", "web"]}),
+                                (["--all-repos"], {"all_repos": True})]:
+            result, rec = self._run(["start", *flags, "p"], [("POST", "/children", 201, STARTED)])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._body(rec[0]), {"prompt": "p", **expected})
+
     def test_start_with_a_rule_prints_the_child(self):
         result, rec = self._run(["start", "--engine", "codex", "--no-repo", "do it"],
                                 [("POST", "/api/sessions/sess-par/children", 201, STARTED)])
@@ -3750,6 +3765,17 @@ class TestSession(unittest.TestCase):
         result, rec = self._run(["start", "--no-repo", "--idempotency-key", "k-1", "p"], [("POST", "/children", 201, STARTED)])
         self.assertEqual(rec[0]["headers"]["Idempotency-Key"], "k-1")
         self.assertEqual(self._body(rec[0]), {"prompt": "p", "no_repo": True})
+
+    def test_start_workspace_subset_and_all(self):
+        for flags, expected in [(["--repo", "one", "--repo", "two"], {"repos": ["one", "two"]}),
+                                (["--all-repos"], {"all_repos": True})]:
+            result, rec = self._run(["start"] + flags + ["p"], [("POST", "/children", 201, STARTED)])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._body(rec[0]), dict(prompt="p", **expected))
+        for flags in [["--all-repos", "--repo", "one"], ["--all-repos", "--no-repo"], ["--no-repo", "--repo", "one"]]:
+            result, rec = self._run(["start"] + flags + ["p"], [])
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(rec, [])
 
     def test_start_passes_boards_down(self):
         started = json.loads(json.dumps(STARTED))
@@ -4269,7 +4295,8 @@ class TestSession(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         for text in ("blerg-runner budget", "session start", "per provider", "destructive or irreversible",
                      "blerg-runner ask", "session wait <request_id>", "never run\n`start` with a NEW key",
-                     "loopback", "--runtime daemon", "exit with code 3", "80%", "blerg-runner models", "--runtime cluster"):
+                     "loopback", "--runtime daemon", "exit with code 3", "80%", "blerg-runner models", "--runtime cluster", "120 starts per parent per rolling hour",
+                     "no lifetime start cap", "core Settings", "stop a child or wait until the reported UTC time"):
             self.assertIn(text, res.stdout, text)
 
     def test_the_help_starts_with_the_line_the_daemon_injects(self):

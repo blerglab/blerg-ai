@@ -9,6 +9,7 @@ import { playwright } from "@vitest/browser-playwright";
 const chat = (p: string) => fileURLToPath(new URL(`../../packages/chat/src/${p}`, import.meta.url));
 
 export default defineConfig({
+  cacheDir: '.cache/vite',
   plugins: [react()],
   resolve: {
     alias: [

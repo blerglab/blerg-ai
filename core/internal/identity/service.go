@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/blerglab/blerg-ai/contracts/childlimits"
 	cid "github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/core/internal/db"
 	"github.com/blerglab/blerg-ai/core/internal/signing"
@@ -22,8 +23,9 @@ const agentTokenTTL = 15 * time.Minute
 const signingKeyLockKey int64 = 0x626c6572676b6579
 
 type Service struct {
-	st     db.Store
-	signer signing.KeyPair
+	childLimitDefaults childlimits.Limits
+	st                 db.Store
+	signer             signing.KeyPair
 
 	// sessionTTLValue backs SetSessionTTL/sessionTTL (human_session.go). Zero means "never
 	// configured" — sessionTTL() then falls back to defaultSessionTTL (720h).
@@ -62,7 +64,7 @@ type Revocation struct {
 }
 
 func NewService(st db.Store, signer signing.KeyPair) *Service {
-	return &Service{st: st, signer: signer}
+	return &Service{st: st, signer: signer, childLimitDefaults: childlimits.FromEnv()}
 }
 
 // LoadOrGenerateSigningKey returns the persisted active keypair, or generates + persists a new

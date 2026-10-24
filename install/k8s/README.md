@@ -338,10 +338,24 @@ tag other than `latest`, the default `imagePullPolicy` (`IfNotPresent`) also
 means a node that already has that tag never re-pulls it, so even the
 restarted runner keeps the old image.
 
+### Child session limits
+
+Core Settings → Child session limits lets an administrator set children at once per parent
+(1–50, default 3) and starts per parent per rolling hour (1–10000, default 120). There is no
+lifetime start cap. Saved settings win and runner reads them on the next start request.
+The environment variables `BLERG_RUNNER_MAX_PARALLEL_CHILDREN` and
+`BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR` seed those defaults; set them in `configmap.yaml`
+for core and runner before rollout. Invalid values produce a startup warning and fall back
+to 3 or 120. Account limits remain six running children and sixty starts per rolling hour,
+so they can be reached before a higher per-parent limit. Approval requests reserve rate
+budget too. Core migration 024 stores saved settings; runner reads `/internal/child-limits`
+with its internal key. Unavailable core retains runner's last valid values (or its defaults
+before the first successful read).
+
 ### Runner data volume
 
 The runner keeps the bytes of every file a session published (`blerg-runner
-publish`) or a person attached, uploaded agent-config bundles and mockups under
+publish`) or a person attached, historical agent-config bundles (automatic desktop sharing is retired) and mockups under
 `/data` (`BLERG_RUNNER_DATA_DIR`); its database only indexes them. `/data` is the
 PersistentVolumeClaim `blerg-runner-data` (`ReadWriteOnce`, `10Gi` by default),
 so those files survive restarts and deploys.
@@ -673,7 +687,8 @@ through the Ingress. In the foreground, from a checkout of this repository
 
 ```sh
 export BLERG_RUNNER_SERVER_URL=wss://runner.<DOMAIN>/ws/daemon
-export BLERG_RUNNER_DAEMON_TOKEN="$(kubectl -n blerg get secret blerg-secrets -o jsonpath='{.data.BLERG_RUNNER_DAEMON_TOKEN}' | base64 -d)"
+# First save your person-issued credential in the private daemon state file.
+# See docs/desktop-ownership.md; do not copy the cluster shared server secret.
 export BLERG_RUNNER_REPOS_ROOT="$HOME/repositories"
 ( cd runner && GOWORK=off go run ./cmd/daemon )
 ```
@@ -685,13 +700,13 @@ its session checkouts live. Every daemon variable is listed in
 
 To run it as a persistent service instead (systemd `--user` on Linux,
 launchd on macOS), use the desktop installer with those same values — no
-desktop compose stack is needed on the workstation, only these three lines
+desktop compose stack is needed on the workstation. Obtain a person-issued desktop
+credential through core and save its private credential file first; then use these lines
 in `install/desktop/.env` (git-ignored; keep it `0600`):
 
 ```sh
 cat > install/desktop/.env <<EOF
 BLERG_RUNNER_SERVER_URL=wss://runner.<DOMAIN>/ws/daemon
-BLERG_RUNNER_DAEMON_TOKEN=<the value in blerg-secrets>
 BLERG_RUNNER_REPOS_ROOT=$HOME/repositories
 EOF
 chmod 600 install/desktop/.env
@@ -762,7 +777,7 @@ The same procedure for both installs, with a restore drill checklist, is in
 |---|---|---|
 | Postgres data: accounts, boards, sessions, encrypted credentials | PVC `postgres-data-postgres-0` in `blerg` (`5Gi`) | Everything. |
 | `blerg-secrets`, above all `BLERG_CORE_LOCAL_KEY` | Secret in `blerg` | **Losing `BLERG_CORE_LOCAL_KEY` loses every stored credential** — there is no recovery; users must re-enter them. Losing `POSTGRES_PASSWORD` locks the components out of the database. |
-| Runner data (uploaded agent-config bundles, published mockups, files agents published with `blerg-runner publish`, files people attached) | PVC `blerg-runner-data` in `blerg` (`10Gi`), at `/data` in the runner pod | Those files: they stay listed in the Files tab, marked "no longer available", but cannot be opened or downloaded. Back it up with a volume snapshot, or copy `/data` from a helper pod that mounts the claim while the runner is scaled to 0 (the runner image has no shell or `tar`). |
+| Runner data (historical agent-config bundles (automatic desktop sharing is retired), published mockups, files agents published with `blerg-runner publish`, files people attached) | PVC `blerg-runner-data` in `blerg` (`10Gi`), at `/data` in the runner pod | Those files: they stay listed in the Files tab, marked "no longer available", but cannot be opened or downloaded. Back it up with a volume snapshot, or copy `/data` from a helper pod that mounts the claim while the runner is scaled to 0 (the runner image has no shell or `tar`). |
 | Retained native conversations (account-owned Claude and Codex Cluster sessions) | one PVC per session in `blerg-runner-sessions` (`1Gi` each, `BLERG_RUNNER_NATIVE_HISTORY_*` in `blerg-config`), reclaimed seven days after the session ends | That session's native conversation: replacing its pod then fails explicitly instead of resuming. See [`CLUSTER-RUNTIME.md`](CLUSTER-RUNTIME.md#retained-native-conversations). |
 | `blerg-runner-agent` | Secret in `blerg-runner-sessions` | Recreated by the next `deploy.sh` run (daemon token copied from `blerg-secrets`; optional keys only if pinned in `.env`). |
 
@@ -919,3 +934,50 @@ this directory hardcodes a real private registry, hostname, or IP.
   `cluster-runtime.yaml` on its own. It never touches a live cluster itself.
 - Every manifest in this directory parses as valid YAML and the container
   images build from these exact Dockerfiles with repo-root contexts.
+
+### Desktop ownership upgrade
+
+Upgrade core and runner before reinstalling workstation daemons. They now use core-issued
+person-bound desktop credentials, stored in private daemon state. An existing unknown desktop
+is assigned to its installing account or the first enabled admin through trusted enrollment;
+Runner Settings → Desktop ownership provides explicit admin assignment. For a hosted desktop,
+issue/import a personal credential as described in [desktop ownership](../../docs/desktop-ownership.md).
+`BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS` defaults to `false` in the ConfigMap. An explicit `true`
+provides a 0.5-only migration window, removed in 0.6; unknown desktops remain admin inventory,
+not launch targets. Runner migration 077 and core migration 025 persist the new authority.
+
+
+Workspace selection and desktop confidentiality in 0.5 are described in
+[workspace selection](../../docs/workspace-selection.md). Automatic desktop config
+uploads are retired. `BLERG_RUNNER_SHARED_AGENT_CONFIG_BUNDLE` optionally names
+an absolute path to an operator-managed, intentionally shared archive; leave it
+unset to serve none. Historical uploaded archives are ignored and should be
+removed from the runner data volume during upgrade. This does not re-enable
+personal desktop configuration sharing.
+
+## Workspace 0.5.0 runtime gates
+
+Workspace v2 and owner shells remain disabled pending production integration and
+acceptance. The selected CSI/storage configuration must enforce byte and inode
+limits. The pod adapter must protect private Git/status storage from agent write
+authority and contain all agent and shell descendants while keeping the runner
+and Git worker outside the frozen group. A path or storage-class name alone is
+not proof. Preserve retained PVCs across failures and never reclaim them solely
+because commits were pushed. No pods/exec permission is required or added.
+
+Run the [cluster acceptance matrix](../../docs/cluster-workspace.md) after deployment
+on the designated lab cluster, including provider/CA/proxy behavior, physical
+writer fencing under partitions, replacement and retained-volume recovery. See
+[workspace integration](../../docs/workspace-integration.md) for shared gates and
+migration ordering.
+
+
+## Disposable acceptance installs
+
+Use [acceptance/RUNBOOK.md](acceptance/RUNBOOK.md) for an explicitly owned
+`acceptance-` namespace, server-free rendering, test-only images, required node
+exclusions, private results and UID-checked namespace/PV teardown. Do not use
+`deploy.sh` for this campaign. Its missing lab-specific case adapters deliberately
+block full acceptance; neither release gate is enabled by this preparation.
+`BLERG_RUNNER_POD_EXCLUDE_NODES` is an optional trusted operator scheduling
+policy for session and model-catalog Jobs, not a browser setting or release gate.

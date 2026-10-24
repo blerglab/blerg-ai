@@ -13,6 +13,7 @@ import (
 
 // Session represents a single running PTY session.
 type Session struct {
+	sandboxed     bool
 	workspace     string
 	workspaceInfo os.FileInfo
 	ID            string

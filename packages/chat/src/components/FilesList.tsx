@@ -16,6 +16,7 @@ import { fileErrorText } from '../transport/files'
 import ErrorId from './ErrorId'
 import { Hover } from './Hovercard'
 import { TimeLabel } from './TimeLabel'
+import { FileGlyph } from './FileGlyph'
 
 const SORT_KEY = 'blerg.files.sort'
 const ORIGIN_KEY = 'blerg.files.origin'
@@ -24,30 +25,6 @@ const SEARCH_OVER = 6
 
 type Sort = 'newest' | 'name'
 type Origin = 'all' | 'agent' | 'user'
-
-// One small glyph per view: a page with a mark that tells the kinds apart.
-const GLYPHS: Record<string, string> = {
-  markdown: 'M6 11V8l1.5 2L9 8v3',
-  pdf: 'M6.5 12V8h2a1 1 0 0 1 0 2h-2',
-  image: 'm5 12 2-3 1.5 2 1-1 2 2z',
-  csv: 'M5.5 8.5h6M5.5 10.5h6M8.5 7v6',
-  json: 'm7 8-2 2 2 2m3-4 2 2-2 2',
-  diff: 'M8.5 7v3M7 8.5h3M7 12h3',
-  html: 'M8.5 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6',
-  audio: 'M7 12V8.5l4-1V11',
-  video: 'M7 8v4l3.5-2z',
-  text: 'M6 8.5h5M6 10.5h5M6 12.5h3',
-}
-
-function FileGlyph({ view, label }: { view: string; label: string }) {
-  return (
-    <svg className="artifact-glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-      <title>{label}</title>
-      <path d="M3.5 1.5h6L13 5v9.5H3.5zM9.5 1.5V5H13" fill="none" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" />
-      <path d={GLYPHS[view] ?? GLYPHS.text} fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
 
 const DOWNLOAD_ICON = 'M8 2.5v8m-3-3 3 3 3-3M3 13h10'
 const DELETE_ICON = 'M3.5 4.5h9M6.5 4.5v-2h3v2M5 4.5l.5 9h5l.5-9'

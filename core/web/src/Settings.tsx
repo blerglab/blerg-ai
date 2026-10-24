@@ -7,7 +7,10 @@ import PluginsSection from "./PluginsSection";
 import { useEngineDescriptors } from "./engineDescriptors";
 import ManagedCredentials, { type ManagedCredentialSummary } from "./ManagedCredentials";
 import McpConnectionsSection from "./McpConnectionsSection";
+import UpdateNoticeSection from "./UpdateNoticeSection";
+import ChildLimitsSection from "./ChildLimitsSection";
 import BoardLimitsSection from "./BoardLimitsSection";
+import ShellPolicySection from "./ShellPolicySection";
 import Shell, { useSite, type Site } from "./Shell";
 
 // Settings: per-credential paste-in. Talks to POST/GET/DELETE /api/credentials (Task 14),
@@ -936,6 +939,8 @@ function SettingsScreen() {
       <McpConnectionsSection site={site} />
       <AgentTokens site={site} />
       {isAdministrator && <BoardLimitsSection />}
+      {isAdministrator && <><ChildLimitsSection /><UpdateNoticeSection /></>}
+      {isAdministrator && <ShellPolicySection />}
     </Shell>
   );
 }

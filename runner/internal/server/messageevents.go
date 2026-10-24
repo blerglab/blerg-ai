@@ -312,7 +312,7 @@ func answerAskFrom(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, t
 	}
 	h.QuestionAnswered(*row, text, answerer)
 
-	h.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)})
+	h.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	return true
 }
 

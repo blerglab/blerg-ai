@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,11 +13,40 @@ import (
 	"syscall"
 
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
 )
 
 var version = "dev"
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "workspace-runtime" && os.Args[2] == "--probe" {
+		if daemon.ProbeWorkspaceRuntime(os.Stdout) != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "cluster-writer" {
+		os.Exit(daemon.ServeHostWriter(os.Args[2:]))
+	}
+	if daemon.WorkspaceWorkerMain(os.Args[1:]) {
+		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "shell-supervisor" && os.Args[2] == "--probe" {
+		if shellruntime.Probe(os.Stdout) != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "shell-supervisor" {
+		if err := shellruntime.ServeHelper(os.Stdin, os.Stdout); err != nil {
+			if errors.Is(err, shellruntime.ErrIdentityChanged) {
+				os.Exit(3)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 	// A subcommand (the installer's question before a reinstall) runs and exits before anything
 	// a running daemon does: no provisioning, no records lock, no connection.
 	if len(os.Args) > 1 {
@@ -58,13 +88,28 @@ func main() {
 	settingsPath := daemon.DaemonSettingsPath(daemon.DaemonStateDir())
 	reposRoot, reposRootSource := daemon.LoadReposRootSetting(settingsPath, envReposRoot)
 
+	desktopToken := os.Getenv("BLERG_RUNNER_DAEMON_TOKEN")
+	desktopID := os.Getenv("BLERG_RUNNER_DESKTOP_ID")
+	credential, err := daemon.LoadDesktopCredential(daemon.DaemonStateDir())
+	if err != nil {
+		log.Fatalf("desktop credential: %v", err)
+	}
+	if credential != nil {
+		desktopToken, desktopID = credential.Token, credential.DesktopID
+	}
+	if desktopToken == "" {
+		log.Fatal("enroll this desktop with the installer first")
+	}
+	var workspaces *daemon.LocalWorkspaceService
 	cfg := daemon.Config{
-		ServerURL:   requireEnv("BLERG_RUNNER_SERVER_URL"),
-		DaemonToken: requireEnv("BLERG_RUNNER_DAEMON_TOKEN"),
-		DaemonName:  envOr("BLERG_RUNNER_DAEMON_NAME", hostname()),
-		DaemonMode:  envOr("BLERG_RUNNER_DAEMON_MODE", "local"),
-		ReposRoot:   reposRoot.Get(),
-		Version:     version,
+		WorkspaceCapabilitiesProvider: func(ctx context.Context) protocol.WorkspaceCapabilities { return workspaces.Capabilities(ctx) },
+		ServerURL:                     requireEnv("BLERG_RUNNER_SERVER_URL"),
+		DaemonToken:                   desktopToken,
+		DesktopID:                     desktopID,
+		DaemonName:                    envOr("BLERG_RUNNER_DAEMON_NAME", hostname()),
+		DaemonMode:                    envOr("BLERG_RUNNER_DAEMON_MODE", "local"),
+		ReposRoot:                     reposRoot.Get(),
+		Version:                       version,
 		// Only on a daemon nobody else uses: see DAEMON.md "Cloning a
 		// repository you name".
 		AllowHostCredentialClone: os.Getenv("BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE") == "true",
@@ -105,7 +150,10 @@ func main() {
 	}
 	limits := daemon.NewUsageLimitsTracker(client.Send, daemon.UsageLimitsOptions{ClaudeUsage: claudeUsage, Version: version})
 
-	mgr := daemon.NewManager(client, daemon.ManagerConfig{
+	var mgr *daemon.Manager
+	workspaces = daemon.NewIntegratedWorkspaceService(client, func() *daemon.Manager { return mgr })
+	mgr = daemon.NewManager(client, daemon.ManagerConfig{
+		Workspaces:       workspaces,
 		ReposRoot:        cfg.ReposRoot,
 		ReposRootSetting: reposRoot,
 		DaemonName:       cfg.DaemonName,

@@ -361,6 +361,7 @@ func TestClusterHermesPersonalCredentialIsNotLocal(t *testing.T) {
 func TestHermesSharedLocalRefusesBundledHermesConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BLERG_RUNNER_DATA_DIR", dir)
+	t.Setenv("BLERG_RUNNER_SHARED_AGENT_CONFIG_BUNDLE", filepath.Join(dir, "agent-config.tar.gz"))
 	jm := newTestJobManager(t, &fakeK8s{})
 	jm.Hermes = hermesShared(sharedHermesFragment)
 	writeBundle := func(names ...string) {

@@ -115,6 +115,9 @@ type Gateway struct {
 	refresherMu sync.RWMutex
 	refresher   Refresher
 
+	observerMu sync.RWMutex
+	observer   BoardObserver
+
 	statesMu sync.Mutex
 	states   map[string]*grantState
 
@@ -189,6 +192,26 @@ func New(cfg Config) *Gateway {
 	g.client = cfg.Policy.Client(cfg.CallTimeout+30*time.Second, maxUpstreamBytes)
 	g.boardClient = BoardHTTPClient(cfg.BoardMCPURL, cfg.CallTimeout+30*time.Second, maxUpstreamBytes)
 	return g
+}
+
+// BoardObserver hears each successful tool call on a session's built-in board connection (the
+// runner keeps the session's plan from the moves it sees: server/plansync.go). It must return at
+// once; it gets the board, the tool and the sanitized result.
+type BoardObserver interface {
+	BoardToolCalled(sessionID, boardID, tool string, result json.RawMessage)
+}
+
+// SetBoardObserver installs the observer (nil removes it).
+func (g *Gateway) SetBoardObserver(o BoardObserver) {
+	g.observerMu.Lock()
+	g.observer = o
+	g.observerMu.Unlock()
+}
+
+func (g *Gateway) boardObserver() BoardObserver {
+	g.observerMu.RLock()
+	defer g.observerMu.RUnlock()
+	return g.observer
 }
 
 // SetProposalSink installs the sink for propose-mode tools (nil removes it).
@@ -952,6 +975,10 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 		if rerr != nil {
 			return upstreamRPCError(mode, p.Name, rerr)
 		}
-		return outcome{result: sanitizeResult(res, g.cfg.MaxResultBytes), tool: p.Name, mode: mode, outcome: "ok"}
+		result := sanitizeResult(res, g.cfg.MaxResultBytes)
+		if o := g.boardObserver(); o != nil && gr.Builtin == BuiltinBoard {
+			o.BoardToolCalled(gr.SessionID, gr.BuiltinRef, p.Name, result)
+		}
+		return outcome{result: result, tool: p.Name, mode: mode, outcome: "ok"}
 	})
 }

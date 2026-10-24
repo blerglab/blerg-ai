@@ -42,6 +42,8 @@ import (
 // running, waiting, idle, disconnected, stopped, ended, error), with the end attribution a
 // browser would be shown when there is one.
 type liveStatus struct {
+	Type string `json:"type,omitempty"`
+
 	SessionID string            `json:"session_id"`
 	Status    string            `json:"status"`
 	Message   *string           `json:"message,omitempty"`
@@ -118,19 +120,28 @@ func (a *API) HandleRunnerEventsLive(w http.ResponseWriter, r *http.Request) {
 	lastWrite := time.Now()
 	// frame writes one record (no id line when seq is 0) and reports whether the client is still there.
 	frame := func(seq int64, event string, data []byte) bool {
-		if seq > 0 {
-			if _, err := fmt.Fprintf(w, "id: %d\n", seq); err != nil {
-				return false
+		return a.hub.deliverDesktopPayload(ctx, desktopViewer(ctx, principal.spawningAccountID()), data, func(filtered []byte) error {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+			defer func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) }()
+			if seq > 0 {
+				if _, err := fmt.Fprintf(w, "id: %d\n", seq); err != nil {
+					return err
+				}
 			}
-		}
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, sseData(string(data))); err != nil {
-			return false
-		}
-		flusher.Flush()
-		lastWrite = time.Now()
-		return true
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, sseData(string(filtered))); err != nil {
+				return err
+			}
+			flusher.Flush()
+			lastWrite = time.Now()
+			return nil
+		}) == nil
 	}
+
 	status := func(s liveStatus) bool {
+		s.Type = "session_state_changed"
+		if current, err := db.GetSession(ctx, a.dbPool, sessionID); err != nil || !a.hub.desktopSessionVisible(ctx, desktopViewer(ctx, principal.spawningAccountID()), current) {
+			s.Message = nil
+		}
 		raw, err := json.Marshal(s)
 		if err != nil {
 			return false
@@ -139,7 +150,7 @@ func (a *API) HandleRunnerEventsLive(w http.ResponseWriter, r *http.Request) {
 	}
 	// end sends the result; the stream is over either way.
 	end := func() {
-		res, err := a.buildSessionResult(ctx, sessionID)
+		res, err := a.buildSessionResult(ctx, sessionID, desktopViewer(ctx, principal.spawningAccountID()))
 		if err != nil {
 			log.Printf("runner live stream %s: result: %v", sessionID, err)
 			return
@@ -153,7 +164,7 @@ func (a *API) HandleRunnerEventsLive(w http.ResponseWriter, r *http.Request) {
 	repairEndedSessionInputs(ctx, a.hub, a.dbPool, sessionID)
 	rows, done := replayAgentEventsPage(ctx, a.dbPool, page)
 	for _, ev := range rows {
-		raw, err := json.Marshal(replayedAgentEvent(ev))
+		raw, err := json.Marshal(a.replayedDesktopEvent(ctx, desktopViewer(ctx, principal.spawningAccountID()), ev))
 		if err != nil {
 			continue
 		}
@@ -200,7 +211,7 @@ func (a *API) HandleRunnerEventsLive(w http.ResponseWriter, r *http.Request) {
 				return true // the consumer can still resume from the last id it saw
 			}
 			for _, ev := range rows {
-				raw, err := json.Marshal(replayedAgentEvent(ev))
+				raw, err := json.Marshal(a.replayedDesktopEvent(ctx, desktopViewer(ctx, principal.spawningAccountID()), ev))
 				if err != nil {
 					continue
 				}

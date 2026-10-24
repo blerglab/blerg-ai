@@ -66,6 +66,19 @@ describe('text nobody typed', () => {
     expect(notes[0].textContent).toContain('finished its turn')
   })
 
+  it('a nudge that the plan drifted is a Blerg note, never the person', () => {
+    seed(
+      ev(1, 'user_message', { text: 'start', source: 'chat' }),
+      ev(2, 'user_message', { text: 'Your plan drifted from what you are doing:\n- No checklist item is doing.', source: 'plan_drift' }),
+    )
+    mount()
+    expect(screen.getAllByText('You')).toHaveLength(1)
+    const notes = screen.getAllByTestId('system-note')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].textContent).toContain('Blerg')
+    expect(notes[0].textContent).toContain('Your plan drifted')
+  })
+
   it('a prompt a board, a parent session or a cron wrote is drawn under that author, never "You"', () => {
     seed(
       ev(1, 'user_message', { text: 'You are working card #43 on the blerg-board board', source: 'blerg-board' }),

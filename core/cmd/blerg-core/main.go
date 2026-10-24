@@ -19,7 +19,6 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/contracts/secrets"
-	"github.com/blerglab/blerg-ai/contracts/updatenotice"
 	"github.com/blerglab/blerg-ai/core/internal/api"
 	"github.com/blerglab/blerg-ai/core/internal/authprovider"
 	"github.com/blerglab/blerg-ai/core/internal/credentials"
@@ -31,6 +30,7 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
 	"github.com/blerglab/blerg-ai/core/internal/plugins"
 	"github.com/blerglab/blerg-ai/core/internal/projects"
+	"github.com/blerglab/blerg-ai/core/internal/shellpolicy"
 )
 
 // validateSecrets refuses to boot on placeholder or too-short shared secrets (R4) — a copied
@@ -457,6 +457,7 @@ func buildDeps(ctx context.Context, st *db.PgStore) (api.Deps, *identity.Service
 	identitySvc.SetSessionTTL(ttl)
 	return api.Deps{
 		Identity:             identitySvc,
+		ShellPolicy:          shellpolicy.New(st.Pool()),
 		Projects:             projects.NewService(st),
 		Registry:             discovery.NewRegistry(st, componentTTL),
 		Credentials:          credentials.NewService(st, keyBackend),
@@ -542,8 +543,8 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("build deps: %w", err)
 	}
 
-	// Look for a newer public release in the background (BLERG_UPDATE_CHECK=0 turns it off).
-	updates := updatenotice.NewChecker(landing.Release(), landing.Version())
+	// Saved administrator settings override the environment seed; database failures deny checks.
+	updates := identitySvc.ReleaseChecker(landing.Release(), landing.Version())
 	deps.LatestRelease = updates.Latest
 	updates.Start(ctx)
 

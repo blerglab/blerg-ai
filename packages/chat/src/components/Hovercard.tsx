@@ -26,7 +26,7 @@ import { visibleText } from '../model/visibleText'
 import { visualFile } from '../model/visualKind'
 import { localStorageChatStorage } from '../model/storage'
 import { priorityGlyph, sourceLabel, statusTone } from '../model/worklist'
-import type { CommitDetails, TransportFiles } from '../transport/types'
+import type { CommitDetails, TransportFiles, WorkspaceGitRef } from '../transport/types'
 import type { Ticket } from '../types'
 import { VisualThumb } from './VisualBlock'
 import './worklist.css'
@@ -145,6 +145,7 @@ export interface FileTarget {
 }
 export interface CommitTarget {
   kind: 'commit'
+  member?: WorkspaceGitRef
   sessionId: string
   sha: string
   /** The session's published diff that holds the commit (its message, author and files are read from it).
@@ -937,15 +938,15 @@ function shown(c: CommitPreview): CommitPreview {
 
 /** The commit from the session's workspace, through the transport's commit read; null when it
  *  cannot be read (nothing is said of why). */
-function lookupCommit(files: TransportFiles, sessionId: string, given: string): Promise<CommitPreview | null> {
+function lookupCommit(files: TransportFiles, sessionId: string, given: string, member?: WorkspaceGitRef): Promise<CommitPreview | null> {
   const sha = given.toLowerCase()
   if (!files.commit || !COMMIT_SHA.test(sha)) return Promise.resolve(null)
-  const key = `${sessionId}/${sha}`
+  const key = `${sessionId}/${sha}/${JSON.stringify(member)}`
   let entry = workspaceCommits.get(key)
   if (entry) workspaceCommits.delete(key)
   if (entry?.until !== undefined && Date.now() >= entry.until) entry = undefined
   if (!entry) {
-    const read: Promise<CommitPreview | null> = files.commit(sessionId, sha).then(c => (c ? previewOf(c) : null), () => null)
+    const read: Promise<CommitPreview | null> = (member ? files.commit(sessionId, sha, undefined, member) : files.commit(sessionId, sha)).then(c => (c ? previewOf(c) : null), () => null)
     const fresh: { read: Promise<CommitPreview | null>; until?: number } = { read }
     void read.then(v => { if (!v) fresh.until = Date.now() + COMMIT_MISS_MS })
     entry = fresh
@@ -959,9 +960,9 @@ function lookupCommit(files: TransportFiles, sessionId: string, given: string): 
  *  too large to read here stays 'large' when the workspace cannot say either. */
 async function readAnyCommit(t: CommitTarget, files: TransportFiles, size: number | undefined): Promise<CommitRead> {
   let fromDiff: CommitRead = null
-  if (t.diff) fromDiff = await readCommit(t, files, size).catch(() => null)
+  if (t.diff && !t.member) fromDiff = await readCommit(t, files, size).catch(() => null)
   if (fromDiff && fromDiff !== 'large') return fromDiff
-  return (await lookupCommit(files, t.sessionId, t.sha)) ?? fromDiff
+  return (await lookupCommit(files, t.sessionId, t.sha, t.member)) ?? fromDiff
 }
 /** The commits of a published diff, parsed once per session and diff: every commit chip of that
  *  diff reuses the one read. Only the parsed commits are kept, never the patch's text. */
@@ -1028,7 +1029,7 @@ function CommitBody({ target: given, sources }: { target: CommitTarget; sources:
   const files = sources.files ?? null
   const can = !!files && (!!target.diff || !!files.commit)
   const size = target.diff ? sources.artifact?.(target.sessionId, target.diff)?.size : undefined
-  const read = useRead(can ? () => readAnyCommit(target, files!, size) : null, [target.sessionId, target.diff, target.sha, can])
+  const read = useRead(can ? () => readAnyCommit(target, files!, size) : null, [target.sessionId, target.diff, target.sha, target.member?.member_id, target.member?.launch_generation, target.member?.generation, can])
   const large = read.value === 'large'
   const c = read.value === 'large' || !read.value ? null : shown(read.value)
   const fields = HOVERCARD.fields.commit

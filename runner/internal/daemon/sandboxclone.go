@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -89,17 +89,10 @@ func hostGit(dir string, args ...string) (string, error) {
 // hostGitLocal is hostGit with the file transport allowed (the one this call needs: a local
 // clone or fetch; GIT_ALLOW_PROTOCOL=file) and the call's own -c overrides. limitKB > 0 runs it
 // under that address-space limit (Linux).
-func hostGitLocal(timeout time.Duration, dir string, config []string, limitKB int, args ...string) (string, error) {
-	return hostgit.OutputBounded(hostgit.Options{
-		Dir: dir, Protocols: []string{"file"}, Config: config, Timeout: timeout, MemoryLimit: limitKB > 0, LimitKB: limitKB,
-		Untrusted: limitKB > 0, // the fetch: the objects come from the session's clone
-	}, args...)
-}
-
 // sandboxFetchMemoryKB bounds the turn-end fetch, upload-pack and pack-objects in the session's
-// clone included (whose pack settings the session writes): 4 GiB, well over what a clone within
-// sandboxCloneMaxBytes needs.
-const sandboxFetchMemoryKB = 4 << 20
+// clone included (whose pack settings the session writes): the workspace Git
+// worker address-space ceiling, also used by the single-repository compatibility path.
+const sandboxFetchMemoryKB = 512 << 10
 
 // sandboxFetchTimeout bounds the host fetch of a session's branch; sandboxCloneMaxBytes bounds what the
 // clone's own object store may hold for a fetch to be tried at all.
@@ -143,6 +136,12 @@ func unpauseSandbox(container, sessionID string) {
 // syncSandboxAtTurnEnd is the turn-end sync of a sandboxed session: its container must be known (fail
 // closed: a fetch never runs against a clone that could be changing).
 func syncSandboxAtTurnEnd(path, sessionID string) error {
+	mu := workspaceLock(sessionID)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := legacyExplorerReady(sessionID); err != nil {
+		return err
+	}
 	container, ok := sandboxContainer(sessionID)
 	if !ok {
 		return fmt.Errorf("fetch %s refused: the session's container is not known, so it cannot be paused", sandboxBranch(sessionID))
@@ -194,7 +193,10 @@ func cloneConfigIncludes(path string) (string, error) {
 // a symbolic link or not a plain file or directory, a .git that is not a directory, a commondir
 // file (which points Git at another directory), or an object store over sandboxCloneMaxBytes. It
 // never follows a link, so nothing it accepts resolves outside the clone.
-func checkSandboxCloneTree(path string) error {
+func checkSandboxCloneTreeContext(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	for _, p := range []string{path, filepath.Join(path, ".git")} {
 		if st, err := os.Lstat(p); err != nil || !st.IsDir() {
 			return errors.New("the clone or its .git is not a plain directory")
@@ -233,6 +235,9 @@ func checkSandboxCloneTree(path string) error {
 	objectsDir := filepath.Join(gitDir, "objects") + string(filepath.Separator)
 	err := filepath.WalkDir(gitDir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if entries++; entries > sandboxCloneMaxEntries {
@@ -302,6 +307,27 @@ func createSandboxClone(repoPath, sessionID, reposRoot string) (string, error) {
 	if !ok {
 		return refuse("invalid session id, or the daemon has no state directory")
 	}
+	return createSandboxCloneAt(context.Background(), repoPath, sessionID, reposRoot, dir, record, false)
+}
+
+// createSandboxCloneAt is shared by the legacy session-root allocator and the
+// private workspace allocator. Callers must supply daemon-owned unused paths.
+func createSandboxCloneAt(ctx context.Context, repoPath, sessionID, reposRoot, dir, record string, allocatedRoot bool) (string, error) {
+	refuse := func(why string) (string, error) {
+		return "", fmt.Errorf("could not give this sandboxed session its own clone of the repository: %s; the session was not started (a sandbox never works in your checkout)", why)
+	}
+	remaining := func() time.Duration {
+		if deadline, ok := ctx.Deadline(); ok {
+			return max(time.Nanosecond, min(sandboxGitTimeout, time.Until(deadline)))
+		}
+		return sandboxGitTimeout
+	}
+	git := func(dir string, args ...string) (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return hostgit.Output(ctx, hostgit.Options{Dir: dir, Timeout: remaining()}, args...)
+	}
 	repo, err := filepath.EvalSymlinks(repoPath)
 	if err != nil {
 		return refuse("the repository folder is missing")
@@ -309,18 +335,18 @@ func createSandboxClone(repoPath, sessionID, reposRoot string) (string, error) {
 	if _, err := os.Lstat(filepath.Join(repo, ".git")); os.IsNotExist(err) {
 		// Never inside one of the person's checkouts (an empty subfolder of a checkout): a
 		// repository made there would be embedded in theirs.
-		if top, err := hostGit(filepath.Dir(repo), "rev-parse", "--show-toplevel"); err == nil && insideACheckout(top, reposRoot) {
+		if top, err := git(filepath.Dir(repo), "rev-parse", "--show-toplevel"); err == nil && insideACheckout(top, reposRoot) {
 			return refuse(filepath.Base(repo) + " is an empty folder inside the Git repository " + filepath.Base(top) + "; a sandbox works in a clone of a whole repository, so start it on " + filepath.Base(top) + " or on a folder outside it")
 		}
 		if !emptyDir(repo) {
 			return refuse(filepath.Base(repo) + " is not a Git repository and is not empty (make it one with git init and a first commit, or run the session on this machine unsandboxed)")
 		}
-		if out, err := hostGit(repo, "init", "--quiet", "--initial-branch=main"); err != nil {
+		if out, err := git(repo, "init", "--quiet", "--initial-branch=main"); err != nil {
 			log.Printf("sandbox clone %s: git init: %v: %s", sessionID, err, out)
 			return refuse(filepath.Base(repo) + " is not a Git repository, and it could not be made one: " + firstLine(out))
 		}
 	}
-	top, err := hostGit(repo, "rev-parse", "--show-toplevel")
+	top, err := git(repo, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return refuse(filepath.Base(repo) + " is not a Git repository")
 	}
@@ -328,14 +354,14 @@ func createSandboxClone(repoPath, sessionID, reposRoot string) (string, error) {
 		return refuse(filepath.Base(repo) + " is not the top of a Git repository")
 	}
 	// No commit yet (a new repository): the clone starts with none either.
-	base, err := hostGit(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+	base, err := git(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
 	if err != nil {
 		base = ""
 	}
-	if _, err := hostGit(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+sandboxBranch(sessionID)); err == nil {
+	if _, err := git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+sandboxBranch(sessionID)); err == nil {
 		return refuse("the repository already has a branch " + sandboxBranch(sessionID))
 	}
-	common, err := hostGit(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	common, err := git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return refuse("its Git directory could not be read")
 	}
@@ -350,11 +376,13 @@ func createSandboxClone(repoPath, sessionID, reposRoot string) (string, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return refuse("the clone directory could not be created")
 	}
-	if _, err := os.Lstat(dir); err == nil {
+	if _, err := os.Lstat(dir); err == nil && (!allocatedRoot || !emptyDir(dir)) {
 		return refuse("a clone for this session already exists")
 	}
-	if out, err := hostGitLocal(sandboxGitTimeout, root, nil, 0, "clone", "--quiet", "--shared", "--no-checkout", "--no-tags", repo, dir); err != nil {
-		_ = os.RemoveAll(dir)
+	if out, err := hostGitLocalContext(ctx, remaining(), root, nil, 0, "clone", "--quiet", "--shared", "--no-checkout", "--no-tags", repo, dir); err != nil {
+		if !allocatedRoot {
+			_ = os.RemoveAll(dir)
+		}
 		log.Printf("sandbox clone %s: git clone: %v: %s", sessionID, err, out)
 		return refuse("git clone failed: " + firstLine(out))
 	}
@@ -362,23 +390,27 @@ func createSandboxClone(repoPath, sessionID, reposRoot string) (string, error) {
 	if base == "" {
 		branchArgs = []string{"symbolic-ref", "HEAD", "refs/heads/" + sandboxBranch(sessionID)}
 	}
-	if out, err := hostGit(dir, branchArgs...); err != nil {
-		_ = os.RemoveAll(dir)
+	if out, err := git(dir, branchArgs...); err != nil {
+		if !allocatedRoot {
+			_ = os.RemoveAll(dir)
+		}
 		log.Printf("sandbox clone %s: git %s: %v: %s", sessionID, branchArgs[0], err, out)
 		return refuse("git " + branchArgs[0] + " failed: " + firstLine(out))
 	}
 	// The clone's own copy of the repository's default branch goes: a clone that holds only
 	// wip/<id> is one the settle probe can call clean once that branch is brought back.
-	if out, err := hostGit(dir, "for-each-ref", "--format=%(refname)", "refs/heads/"); err == nil {
+	if out, err := git(dir, "for-each-ref", "--format=%(refname)", "refs/heads/"); err == nil {
 		for _, ref := range strings.Fields(out) {
 			if ref != "refs/heads/"+sandboxBranch(sessionID) {
-				_, _ = hostGit(dir, "update-ref", "-d", ref)
+				_, _ = git(dir, "update-ref", "-d", ref)
 			}
 		}
 	}
 	raw, _ := json.Marshal(sandboxClone{Repo: repo, Objects: objects, Base: base})
 	if err := os.WriteFile(record, raw, 0o600); err != nil {
-		_ = os.RemoveAll(dir)
+		if !allocatedRoot {
+			_ = os.RemoveAll(dir)
+		}
 		return refuse("the clone's record could not be written")
 	}
 	return dir, nil
@@ -537,8 +569,31 @@ func syncSandboxBranch(path, sessionID, container string) (bool, error) {
 		}
 		defer unpauseSandbox(container, sessionID)
 	}
-	if err := checkSandboxCloneTree(path); err != nil {
+	return fetchSandboxClone(path, sessionID, c, deadline)
+}
+
+// fetchSandboxClone requires the caller to own the session lifecycle mutex,
+// validate the exact private clone identity and fence every writer first.
+// It never pauses or executes a command inside a container.
+func fetchSandboxClone(path, sessionID string, c *sandboxClone, deadline time.Time) (bool, error) {
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	return fetchSandboxCloneContext(ctx, path, sessionID, c)
+}
+
+func fetchSandboxCloneContext(ctx context.Context, path, sessionID string, c *sandboxClone) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return false, errors.New("copy deadline required")
+	}
+	if err := checkSandboxCloneTreeContext(ctx, path); err != nil {
 		return false, fmt.Errorf("fetch %s refused: %w", sandboxBranch(sessionID), err)
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	if err := resetCloneAlternates(path, c); err != nil {
 		return false, fmt.Errorf("fetch %s refused: %w", sandboxBranch(sessionID), err)
@@ -555,18 +610,22 @@ func syncSandboxBranch(path, sessionID, container string) (bool, error) {
 	// refuses to fetch into a checked-out branch, and moving it under their working tree would be
 	// wrong anyway. The commits then go to wip/<id>.incoming, and the caller says so once.
 	target := branch
-	if checkedOutAnywhere(c.Repo, branch) {
+	checked, queryErr := checkedOutAnywhereContext(ctx, c.Repo, branch)
+	if queryErr != nil {
+		return false, queryErr
+	}
+	if checked {
 		target = branch + ".incoming"
 	}
 	// Fetched from <clone>/.git, never the clone's top folder (which a session could make look like
 	// a bare repository), and with upload-pack --strict, which refuses anything but that exact Git
 	// directory.
-	fetchTimeout := min(sandboxFetchTimeout, time.Until(deadline)-2*sandboxDockerTimeout)
+	fetchTimeout := min(sandboxFetchTimeout, time.Until(deadline))
 	if fetchTimeout <= 0 {
 		return false, fmt.Errorf("fetch %s refused: the sync ran out of time", sandboxBranch(sessionID))
 	}
 	// Differs from every other host git call, on purpose: the file transport (a local fetch),
-	// fetch.fsckObjects (the objects come from the session), a 4 GiB memory limit, and
+	// fetch.fsckObjects (the objects come from the session), a 512 MiB memory limit, and
 	// --upload-pack naming a fixed `git upload-pack --strict` (serving that exact Git directory
 	// only) that carries the runner's -c overrides, the untrusted-repository ones (no
 	// commit-graph, multi-pack index or bitmaps parsed) and --no-replace-objects itself: git hands
@@ -581,7 +640,7 @@ func syncSandboxBranch(path, sessionID, container string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("fetch %s refused: %w", sandboxBranch(sessionID), err)
 	}
-	if out, err := hostGitLocal(fetchTimeout, c.Repo, []string{"fetch.fsckObjects=true", "transfer.fsckObjects=true"}, sandboxFetchMemoryKB,
+	if out, err := hostGitLocalContext(ctx, fetchTimeout, c.Repo, []string{"fetch.fsckObjects=true", "transfer.fsckObjects=true"}, sandboxFetchMemoryKB,
 		"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--no-write-commit-graph",
 		"--upload-pack="+uploadPack, filepath.Join(path, ".git"), "+"+branch+":"+target); err != nil {
 		return false, fmt.Errorf("fetch %s from the session's clone: %w: %s", sandboxBranch(sessionID), err, firstLine(out))
@@ -589,7 +648,7 @@ func syncSandboxBranch(path, sessionID, container string) (bool, error) {
 	if target != branch {
 		return true, &sandboxCheckedOutError{sessionID: sessionID}
 	}
-	tip, err := hostGitTimeout(10*time.Second, c.Repo, "rev-parse", "--verify", "--quiet", branch)
+	tip, err := hostgit.Output(ctx, hostgit.Options{Dir: c.Repo, Timeout: min(10*time.Second, time.Until(deadline))}, "rev-parse", "--verify", "--quiet", branch)
 	if err != nil {
 		return false, fmt.Errorf("read %s after the fetch: %w", sandboxBranch(sessionID), err)
 	}
@@ -607,19 +666,6 @@ func (e *sandboxCheckedOutError) Error() string {
 
 // checkedOutAnywhere reports whether ref is the checked-out branch of the repository at repo or of
 // any of its worktrees. Read with the hardened host Git in the person's repository (never the clone).
-func checkedOutAnywhere(repo, ref string) bool {
-	out, err := hostGitTimeout(10*time.Second, repo, "worktree", "list", "--porcelain")
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "branch "+ref {
-			return true
-		}
-	}
-	return false
-}
-
 // sandboxSettleScript runs in the session's container when the session stops. Work left
 // uncommitted on wip/<id> is committed there first (never through host Git, and with the clone's
 // hooks and fsmonitor off, so the session's own setup cannot stop it), so the last fetch brings it
@@ -718,18 +764,13 @@ func releaseSandboxClone(path, sessionID string, clean, known bool) {
 	_ = os.Remove(record)
 }
 
-// sandboxFinishing serializes finishSandbox per session: a terminal's kill and the end of its
-// attach stream can both reach it. One small mutex per sandboxed session the daemon ever ended.
-var sandboxFinishing sync.Map
-
 // finishSandbox ends a sandboxed session's container and clone for good: the stop-time commit and
 // probe run in the container while it still exists, then the container is removed, then the
 // clone's branch is fetched into the repository and the clone removed if nothing else is in it.
 // Safe to call twice and for a session that never had a clone (then it only removes the
 // container).
 func finishSandbox(sessionID string) {
-	v, _ := sandboxFinishing.LoadOrStore(sessionID, &sync.Mutex{})
-	mu, _ := v.(*sync.Mutex)
+	mu := workspaceLock(sessionID)
 	mu.Lock()
 	defer mu.Unlock() // kept in the map: a delete here would let a third caller run beside a second
 	dir, record, ok := sandboxClonePaths(sessionID)
@@ -904,4 +945,27 @@ func firstLine(s string) string {
 		return "unknown error"
 	}
 	return line
+}
+
+func hostGitLocalContext(ctx context.Context, timeout time.Duration, dir string, config []string, limitKB int, args ...string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return hostgit.Output(ctx, hostgit.Options{Dir: dir, Protocols: []string{"file"}, Config: config, Timeout: timeout, MemoryLimit: limitKB > 0, LimitKB: limitKB, Untrusted: limitKB > 0}, args...)
+}
+
+func checkedOutAnywhereContext(ctx context.Context, repo, ref string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	out, err := hostgit.Output(ctx, hostgit.Options{Dir: repo, Timeout: 10 * time.Second}, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "branch "+ref {
+			return true, nil
+		}
+	}
+	return false, nil
 }

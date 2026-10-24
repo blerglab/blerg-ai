@@ -652,3 +652,25 @@ describe('headsFor: direction over a window, with tolerance', () => {
     expect(headsFor({ x: 509, y: 206 }, { x: 510, y: 200 }, card)).toBe(false)
   })
 })
+
+it('keeps same-SHA hover reads separate for each member and runtime generation', async () => {
+  const first = { member_id: 'one', launch_generation: 'launch', generation: 7 }
+  const second = { member_id: 'two', launch_generation: 'launch', generation: 7 }
+  const commit = vi.fn(async (_session: string, _sha: string, _signal?: AbortSignal, member?: typeof first) => ({ ...DETAILS, ...member, subject: `Member ${member?.member_id} generation ${member?.generation}` }))
+  const files = Object.assign(filesWith({ d1: COMMIT_PATCH }), { commit })
+  const { rerender } = render(<HovercardProvider value={{ files }}><CommitChips commits={[{ sha: SHA, member: first }, { sha: SHA, member: second }]} hover={{ sessionId: 's1', diff: 'd1' }} /></HovercardProvider>)
+  const chips = screen.getAllByRole('button', { name: `Copy commit ${SHA}` })
+  await openOn(chips[0]!)
+  expect(screen.getByTestId('hovercard-subject')).toHaveTextContent('Member one generation 7')
+  fireEvent.keyDown(document.body, { key: 'Escape' })
+  await openOn(chips[1]!)
+  expect(screen.getByTestId('hovercard-subject')).toHaveTextContent('Member two generation 7')
+  expect(commit).toHaveBeenCalledWith('s1', SHA, undefined, first)
+  expect(commit).toHaveBeenCalledWith('s1', SHA, undefined, second)
+  fireEvent.keyDown(document.body, { key: 'Escape' })
+  const replacement = { ...second, generation: 8 }
+  rerender(<HovercardProvider value={{ files }}><CommitChips commits={[{ sha: SHA, member: replacement }]} hover={{ sessionId: 's1', diff: 'd1' }} /></HovercardProvider>)
+  await openOn(screen.getByRole('button', { name: `Copy commit ${SHA}` }))
+  expect(screen.getByTestId('hovercard-subject')).toHaveTextContent('Member two generation 8')
+  expect(commit).toHaveBeenCalledTimes(3)
+})

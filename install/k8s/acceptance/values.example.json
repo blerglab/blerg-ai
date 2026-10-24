@@ -1,0 +1,10 @@
+{
+  "registry": "registry.example.invalid:5000",
+  "tag": "p6-review-COMMIT-RUN",
+  "postgres_image": "postgres:16",
+  "excluded_nodes": ["excluded-control-node"],
+  "workspace_storage_class": "verified-csi-class",
+  "data_storage_class": "disposable-data-class",
+  "fixtures_file": "/private/path/to/acceptance-fixtures.json",
+  "case_drivers": {}
+}

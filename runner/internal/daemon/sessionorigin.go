@@ -98,6 +98,11 @@ func readSandboxOrigin(binding workspaceFileBinding) (string, bool) {
 }
 
 func queueSessionOrigin(ctx context.Context, sender Sender, req protocol.ReadSessionOrigin, binding workspaceFileBinding) {
+	queueSessionOriginUsing(ctx, sender, req, func(ctx context.Context) protocol.CommitResult {
+		return readLegacyGit(ctx, protocol.ReadCommit{SessionID: req.SessionID, WorkspaceGitRef: req.WorkspaceGitRef}, true, binding)
+	})
+}
+func queueSessionOriginUsing(ctx context.Context, sender Sender, req protocol.ReadSessionOrigin, read func(context.Context) protocol.CommitResult) {
 	if !validSessionOriginID(req.RequestID) || !validSessionOriginID(req.SessionID) {
 		return
 	}
@@ -113,14 +118,14 @@ func queueSessionOrigin(ctx context.Context, sender Sender, req protocol.ReadSes
 	}
 	go func() {
 		defer func() { <-sessionOriginReads; sessionOriginBusy.Delete(req.SessionID) }()
-		var commit string
-		var ok bool
-		if isSandboxClone(binding.root, req.SessionID) {
-			commit, ok = readSandboxOrigin(binding)
-		} else {
-			commit, ok = readWorkspaceOrigin(ctx, binding, nil)
+		bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		res := read(bounded)
+		commit := ""
+		if res.Commit != nil {
+			commit = res.Commit.SHA
 		}
-		result := protocol.SessionOriginResult{Type: "session_origin_result", RequestID: req.RequestID, SessionID: req.SessionID, OK: ok, Commit: commit}
+		result := protocol.SessionOriginResult{WorkspaceGitRef: req.WorkspaceGitRef, Type: "session_origin_result", RequestID: req.RequestID, SessionID: req.SessionID, OK: res.OK, Commit: commit}
 		if bounded, ok := sender.(interface {
 			SendSessionOriginResult(protocol.SessionOriginResult) error
 		}); ok {
@@ -134,14 +139,30 @@ func validSessionOriginID(id string) bool {
 	return len(id) > 0 && len(id) <= 100 && !strings.ContainsAny(id, "\r\n\x00")
 }
 func (h *AgentHost) ReadSessionOrigin(ctx context.Context, req protocol.ReadSessionOrigin) {
-	queueSessionOrigin(ctx, h.sender, req, h.workspaceFileBinding(req.SessionID))
+	queueSessionOriginUsing(ctx, h.sender, req, func(ctx context.Context) protocol.CommitResult {
+		q := protocol.ReadCommit{SessionID: req.SessionID, RequestID: req.RequestID, WorkspaceGitRef: req.WorkspaceGitRef}
+		if result, handled := h.explorer.readGit(ctx, q, true); handled {
+			return result
+		}
+		return readLegacyGit(ctx, q, true, h.workspaceFileBinding(req.SessionID))
+	})
 }
 func (m *Manager) handleReadSessionOrigin(raw []byte) {
 	var req protocol.ReadSessionOrigin
-	if len(raw) > 512 || json.Unmarshal(raw, &req) != nil {
+	if len(raw) > 2048 || json.Unmarshal(raw, &req) != nil {
 		return
 	}
-	queueSessionOrigin(context.Background(), m.client, req, m.workspaceFileBinding(req.SessionID))
+	if m.agents != nil && m.agents.get(req.SessionID) != nil {
+		m.agents.ReadSessionOrigin(context.Background(), req)
+		return
+	}
+	queueSessionOriginUsing(context.Background(), m.client, req, func(ctx context.Context) protocol.CommitResult {
+		q := protocol.ReadCommit{SessionID: req.SessionID, RequestID: req.RequestID, WorkspaceGitRef: req.WorkspaceGitRef}
+		if result, handled := m.explorer.readGit(ctx, q, true); handled {
+			return result
+		}
+		return readLegacyGit(ctx, q, true, m.workspaceFileBinding(req.SessionID))
+	})
 }
 func (c *WSClient) SendSessionOriginResult(result protocol.SessionOriginResult) error {
 	return c.sendBoundedWorkspaceReply(result, time.Second)

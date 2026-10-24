@@ -26,13 +26,11 @@ func forwardToSessionDaemon(h *Hub, bc *BrowserConn, sessionID string, msg any) 
 	if err != nil {
 		return false
 	}
-	select {
-	case dc.send <- raw:
+	if h.trySendToDaemon(dc, raw) {
 		return true
-	default:
-		log.Printf("browser %s: daemon %s send channel full", bc.ID, dc.ID)
-		return false
 	}
+	log.Printf("browser %s: daemon %s send channel full", bc.ID, dc.ID)
+	return false
 }
 
 // RefreshSessionTools tells the daemon running sessionID that the session's MCP tool definitions
@@ -281,7 +279,7 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 			if err := db.UpdateSessionModelEffort(ctx, pool, msg.SessionID, p.Model, p.Effort); err != nil {
 				log.Printf("agent model mirror %s: %v", msg.SessionID, err)
 			}
-			h.BroadcastJSON(protocol.SessionMetaChanged{
+			h.BroadcastJSON(protocol.SessionMetaChanged{ //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 				Type: "session_meta_changed", SessionID: msg.SessionID, Model: p.Model, Effort: p.Effort,
 			})
 		}
@@ -306,7 +304,7 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		}
 	case backgroundStartedKind, backgroundDoneKind:
 		if pool != nil {
-			h.BroadcastJSON(protocol.SessionBackgroundChanged{
+			h.BroadcastJSON(protocol.SessionBackgroundChanged{ //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 				Type: "session_background_changed", SessionID: msg.SessionID, BackgroundTasks: backgroundCount,
 			})
 		}
@@ -329,6 +327,8 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		default:
 			h.ChildTurnEnded(msg.SessionID, childTurnFinished, "")
 		}
+		// The session's own plan is checked against what the turn did (plansync.go).
+		h.PlanTurnEnded(msg.SessionID, seq, at, p.StopReason)
 	case "ask":
 		// The agent asked the person something: that question's own notice says so, and a
 		// deferred idle notice (notices.go) would only repeat it.
@@ -383,12 +383,23 @@ func ackAgentEvent(dc *DaemonConn, msg protocol.AgentEvent, seq int64) {
 // replays only the first window of one, so the Skills & plugins panel asks
 // for the latest directly.
 func (a *API) HandleGetCapabilities(w http.ResponseWriter, r *http.Request) {
+	err := a.sessionReadFence(r.Context(), r.PathValue("id"), func(ctx context.Context) error {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+		a.snapshotHandleGetCapabilities(w, r.WithContext(ctx))
+		return nil
+	})
+	if err != nil {
+		writeError(w, 409, "session source changed; refresh")
+	}
+}
+
+func (a *API) snapshotHandleGetCapabilities(w http.ResponseWriter, r *http.Request) {
 	principal, ok := a.authBrowser(w, r)
 	if !ok {
 		return
 	}
 	sessionID := r.PathValue("id")
-	if !a.browserCanSee(r.Context(), principal.Sub, sessionID) {
+	if !a.browserCanSee(r.Context(), principal.Sub, sessionID) || !a.hub.automaticDesktopEventVisible(r.Context(), principal.Sub, sessionID) {
 		// Same answer as for a session that has no capabilities report, so
 		// the route is not an oracle for which private sessions exist.
 		writeJSON(w, http.StatusOK, map[string]any{"capabilities": nil})
@@ -506,7 +517,9 @@ func replayAgentEvents(ctx context.Context, h *Hub, bc *BrowserConn, pool *pgxpo
 	}
 
 	for _, r := range rows {
-		raw, err := json.Marshal(replayedAgentEvent(r))
+		event := replayedAgentEvent(r)
+		event.Payload = h.desktopEventPayload(ctx, bc.AccountID, r.SessionID, r.Kind, r.Payload)
+		raw, err := json.Marshal(event)
 		if err != nil {
 			continue
 		}
@@ -582,12 +595,27 @@ func replayedAgentEvent(r db.AgentEventRow) protocol.AgentEvent {
 // (bearer: daemon token). Runner pods use it to rebuild provider context on
 // resume; ?after_seq= and ?limit= mirror the WS replay parameters.
 func (a *API) HandleGetAgentEvents(w http.ResponseWriter, r *http.Request) {
+	err := a.sessionReadFence(r.Context(), r.PathValue("id"), func(ctx context.Context) error {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+		a.snapshotHandleGetAgentEvents(w, r.WithContext(ctx))
+		return nil
+	})
+	if err != nil {
+		writeError(w, 409, "session source changed; refresh")
+	}
+}
+
+func (a *API) snapshotHandleGetAgentEvents(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
+	viewer := a.boardDesktopViewer(r)
 	if !a.isDaemonToken(a.rawBearer(r)) {
 		bound, err := a.authenticateRuntimeToken(r)
 		if err != nil || bound.ID != sessionID {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
+		}
+		if bound != nil && viewer == "" {
+			viewer = derefOrEmpty(bound.SpawningAccountID)
 		}
 	}
 	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
@@ -607,7 +635,7 @@ func (a *API) HandleGetAgentEvents(w http.ResponseWriter, r *http.Request) {
 		out = append(out, protocol.AgentEvent{
 			Type: "agent_event", SessionID: row.SessionID, ClientEventID: row.ClientEventID,
 			Seq: row.Seq, Ts: row.Ts.UTC().Format(time.RFC3339Nano),
-			Kind: row.Kind, Payload: json.RawMessage(row.Payload),
+			Kind: row.Kind, Payload: a.hub.desktopEventPayload(r.Context(), viewer, row.SessionID, row.Kind, row.Payload),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

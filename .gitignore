@@ -47,3 +47,9 @@ dist-packages/
 
 # Video pipeline output (takes, finished videos, voice-over cache): never committed.
 /video/out/
+
+# Native workspace security gate evidence and private temporary caches.
+/workspace-macos-evidence/
+
+# Per-worktree frontend optimizer and TypeScript caches.
+.cache/

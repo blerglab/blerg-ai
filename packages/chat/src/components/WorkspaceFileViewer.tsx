@@ -114,9 +114,9 @@ export default function WorkspaceFileViewer({ sessionId, files, path, line, onCl
   const ready = state.kind === 'ready' ? state : null
   // A markdown file's relative images and links resolve beside it, in the same folder.
   const mdDocument = useMemo<MarkdownDocument>(() => ({
-    path,
+    path: ready?.file.path ?? path,
     readWorkspace: files.workspaceFile ? (p: string, signal?: AbortSignal) => files.workspaceFile!.call(files, sessionId, p, signal) : undefined,
-  }), [files, sessionId, path])
+  }), [files, sessionId, path, ready?.file.path])
 
   async function saveCopy() {
     if (!ready) return

@@ -10,6 +10,16 @@ describe("authClient", () => {
     expect(getAccessToken()).toBeNull();
   });
 
+  it('notifies desktop consumers only when the signed-in subject changes', () => {
+    const token = (sub: string, revision: number) => `h.${btoa(JSON.stringify({ sub, revision }))}.s`;
+    const receive = (raw: string) => { window.history.replaceState(null, '', `/#access_token=${raw}`); consumeAccessTokenFromFragment(); };
+    receive(token('person-a', 1));
+    const changed = vi.fn(); window.addEventListener('blerg-identity-changed', changed);
+    receive(token('person-a', 2)); expect(changed).not.toHaveBeenCalled();
+    receive(token('person-b', 1)); expect(changed).toHaveBeenCalledTimes(1);
+    window.removeEventListener('blerg-identity-changed', changed);
+  });
+
   it("consumes an access token from the URL fragment and strips it", () => {
     window.history.replaceState(null, "", "/#access_token=abc123");
     consumeAccessTokenFromFragment();

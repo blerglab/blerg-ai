@@ -20,7 +20,7 @@ func (h *AgentHost) RecoveryRequiredSessions() []string {
 			}
 		}
 	}
-	return ids
+	return mergeSessionIDs(ids, h.cfg.Workspaces.PendingIDs())
 }
 
 // RecoveryPhase is a current websocket link's recovery-policy handshake.

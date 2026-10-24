@@ -17,6 +17,7 @@ import (
 )
 
 type codexDriver struct {
+	startCommand      func(*exec.Cmd) error
 	CredentialSource  EngineCredentialSource
 	managedCredential codexCredentialState
 	workDir           string
@@ -290,3 +291,5 @@ func (d *codexDriver) addAdoptionWork(line string) {
 func (d *codexDriver) codexToolsRestricted() bool {
 	return d.RestrictedRuntime != nil && d.RestrictedRuntime.Restricted
 }
+
+func (d *codexDriver) useCommandBoundary(f func(*exec.Cmd) error) { d.startCommand = f }

@@ -105,23 +105,26 @@ func TestCodexCronEnginePersistsAcrossCreateAndPatch(t *testing.T) {
 }
 
 func TestCodexCronSelectsOnlyCapableDaemons(t *testing.T) {
+	pool := connectSrvTestDB(t)
 	h := NewHub()
-	old := &DaemonConn{ID: "a", Name: "legacy"}
+	api := NewAPI(h, pool, "", nil, "")
+	old := &DaemonConn{ID: newUUID(), Name: "legacy"}
 	old.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
-	modern := &DaemonConn{ID: "b", Name: "modern"}
+	modern := &DaemonConn{ID: newUUID(), Name: "modern"}
 	modern.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	for _, dc := range []*DaemonConn{old, modern} {
 		dc.SetSandboxAvailable(true)
 		dc.SetRestrictTools(true)
+		fixtureOwnDesktop(t, pool, dc, "user-1")
 		h.Register(dc)
 	}
 	modern.SetCodexRestricted(true)
-	s := &CronService{api: &API{hub: h}}
-	chosen, err := s.pickDaemon(nil, false, "codex")
+	s := &CronService{api: api}
+	chosen, err := s.pickOwnedDaemon(t.Context(), "user-1", nil, false, "codex")
 	if err != nil || chosen != modern {
 		t.Fatalf("Codex selected incapable daemon: %v", err)
 	}
-	if _, err := s.pickDaemon(&old.ID, false, "codex"); err == nil {
+	if _, err := s.pickOwnedDaemon(t.Context(), "user-1", &old.ID, false, "codex"); err == nil {
 		t.Fatal("explicit legacy daemon pin bypassed the Codex capability")
 	}
 	if checkRestrictTarget(runnerRuntimeDocker, old, "codex") == nil || checkRestrictTarget(runnerRuntimeDocker, modern, "codex") != nil {

@@ -10,8 +10,8 @@ for f in $(grep -E '^\s+- ' "$here/kustomization.yaml" | sed 's/^\s*- //'); do c
 cp "$here/kustomization.yaml" "$tmp/"
 for f in "$tmp"/*.yaml; do
   REGISTRY=reg.example TAG=t1 DOMAIN=blerg.example SCHEME=https \
-  AGENT_IMAGE=reg.example/blerg-runner-agent:t1 WEBHOOK_ALLOW_PRIVATE=false TRUSTED_PROXIES=192.0.2.0/24 \
-    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES}' < "$f" > "$f.r" && mv "$f.r" "$f"
+  AGENT_IMAGE=reg.example/blerg-runner-agent:t1 WEBHOOK_ALLOW_PRIVATE=false TRUSTED_PROXIES=192.0.2.0/24 WORKSPACE_STORAGE_CLASS=bounded-fixture \
+    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES} ${WORKSPACE_STORAGE_CLASS}' < "$f" > "$f.r" && mv "$f.r" "$f"
 done
 fail=0
 if grep -rn '\${' "$tmp"/*.yaml; then echo "FAIL: unsubstituted placeholder"; fail=1; fi
@@ -50,6 +50,8 @@ for want in 'BLERG_RUNNER_AGENT_NAMESPACE: "blerg-runner-sessions"' \
             'BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN: "once"'; do
   grep -qF -- "$want" "$tmp/configmap.yaml" || { echo "FAIL: $want not wired"; fail=1; }
 done
+grep -qF 'BLERG_RUNNER_WORKSPACE_STORAGE_CLASS: "bounded-fixture"' "$tmp/configmap.yaml" || { echo "FAIL: workspace CSI class not rendered"; fail=1; }
+grep -qF 'key: BLERG_RUNNER_WORKSPACE_STORAGE_CLASS, optional: true' "$tmp/runner-deployment.yaml" || { echo "FAIL: workspace CSI class not passed to runner"; fail=1; }
 # BLERG_RUNNER_AGENT_GIT_BASE must stay UNSET: the runner already defaults to
 # https://github.com, and setting it explicitly disables the clean 422 for bare
 # repo names and overrides BLERG_RUNNER_GITHUB_ORG. Documented-only key.
@@ -57,8 +59,8 @@ grep -qE '^\s+BLERG_RUNNER_AGENT_GIT_BASE:' "$tmp/configmap.yaml" \
   && { echo "FAIL: BLERG_RUNNER_AGENT_GIT_BASE must not be set in the ConfigMap data"; fail=1; }
 # CLUSTER_RUNTIME=off renders the same ConfigMap with an empty image — the
 # runner's on/off switch — and must not leave a placeholder behind.
-AGENT_IMAGE= WEBHOOK_ALLOW_PRIVATE=false REGISTRY=reg.example TAG=t1 DOMAIN=blerg.example SCHEME=https \
-  envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE}' < "$here/configmap.yaml" > "$tmp/configmap-off.yaml"
+WORKSPACE_STORAGE_CLASS= AGENT_IMAGE= WEBHOOK_ALLOW_PRIVATE=false REGISTRY=reg.example TAG=t1 DOMAIN=blerg.example SCHEME=https \
+  envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${WORKSPACE_STORAGE_CLASS}' < "$here/configmap.yaml" > "$tmp/configmap-off.yaml"
 grep -q 'BLERG_RUNNER_AGENT_IMAGE: ""' "$tmp/configmap-off.yaml" \
   || { echo "FAIL: empty AGENT_IMAGE does not render BLERG_RUNNER_AGENT_IMAGE: \"\""; fail=1; }
 

@@ -59,7 +59,7 @@ skip unless it is configured.
 | `make test` | `go vet`, then `go test` on contracts, core, runner and board | nothing; database tests run only if the variables below are set |
 | `make test-web` | `tsc --noEmit`, tests and production build in each frontend | `npm ci` in each first; Chromium for `runner/frontend` |
 | `make lint` | gofmt and golangci-lint on all four Go modules, then ESLint in each frontend (`make lint-go` and `make lint-web` run the halves) | golangci-lint; `npm ci` in each frontend |
-| `make check-scripts` | installer, messaging-CLI, scrub and link checks | `python3` with `pytest` (`pip install pytest`); the `docker compose` CLI makes the Compose check run instead of skip |
+| `make check-scripts` | installer, messaging-CLI, scrub and link checks | `pwsh` (Linux PowerShell, with Windows APIs mocked), `python3` with `pytest` (`pip install pytest`); the `docker compose` CLI makes the Compose check run instead of skip |
 | `make db-up` / `make db-down` | start / stop Postgres from `docker-compose.yml` | **Docker** |
 
 Lint failures block a merge. A `//nolint` or `eslint-disable` must name the rule and give
@@ -144,6 +144,7 @@ BLERG_SKIP_KUBECTL=1 ./install/desktop/compose_test.sh   # skips without `docker
 BLERG_SKIP_KUBECTL=1 ./install/k8s/deploy_test.sh        # skips the kubectl dry-run; no cluster needed
 bash ./install/desktop/hostcheck_test.sh                 # engine preflight; needs no docker
 bash ./install/desktop/daemon_install_test.sh            # the daemon token check and connection wait; stubs only
+bash ./install/desktop/wsl_startup_test.sh               # requires pwsh; Windows APIs and WSL launches are fakes
 (cd runner/.claude/skills/session-messaging && python3 -m unittest test_blerg_runner test_blerg_runner_review_request && python3 -m pytest -q blerg_runner_board_test.py)
 ./scripts/scrub.sh && ./scripts/scrub_test.sh            # no hostnames, addresses or personal paths
 ./scripts/check_links_test.sh && ./scripts/check_links.sh   # doc links and stale references

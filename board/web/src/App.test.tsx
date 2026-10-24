@@ -64,6 +64,7 @@ describe("Shell nav", () => {
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
     expect(link).toHaveAttribute("title", "A newer Blerg release is available");
+    expect(screen.getByRole("link", { name: "How to upgrade" })).toHaveAttribute("href", expect.stringContaining("/upgrade"));
   });
   it("shows no version when /api/version fails, rather than an ellipsis", async () => {
     responses["/api/me"] = { kind: "service", is_admin: false, is_human: true };

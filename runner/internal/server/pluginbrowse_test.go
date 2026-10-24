@@ -28,6 +28,7 @@ func newBrowseFx(t *testing.T, engines ...string) *browseFx {
 	fx.api.pluginAllow, _ = pluginspec.ParseAllowlist("")
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
 	dc.SetExtensionEngines(engines, engines)
+	fixtureOwnDesktop(t, fx.pool, dc, topicOwner)
 	fx.api.hub.Register(dc)
 	for _, sid := range []string{fx.sess, fx.privSess, fx.ended} {
 		fx.api.hub.SetSessionOwner(sid, dc.ID)

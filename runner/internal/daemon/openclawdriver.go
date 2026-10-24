@@ -69,6 +69,7 @@ type openclawTurn struct {
 }
 
 type openclawDriver struct {
+	startCommand      func(*exec.Cmd) error
 	recoveryInputGate func(context.Context) // guarded by mu; worker admission only
 	workDir           string
 	engineModel
@@ -136,7 +137,7 @@ func (d *openclawDriver) Interrupt() {
 	cmd := d.cmd
 	d.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		_ = cancelEngineCommand(cmd, d.startCommand != nil)
 	}
 }
 
@@ -260,7 +261,7 @@ func (d *openclawDriver) runTurn(ctx context.Context, text string) {
 	}
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
-	if err := cmd.Start(); err != nil {
+	if err := startEngineCommand(cmd, d.startCommand); err != nil {
 		d.emit("error", agent.ErrorPayload{Message: "openclaw start: " + err.Error()})
 		d.emit("turn_done", agent.TurnDonePayload{StopReason: "error", Model: d.model})
 		return
@@ -310,3 +311,5 @@ func (d *openclawDriver) runTurn(ctx context.Context, text string) {
 	}
 	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: d.model})
 }
+
+func (d *openclawDriver) useCommandBoundary(f func(*exec.Cmd) error) { d.startCommand = f }

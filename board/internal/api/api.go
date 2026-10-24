@@ -18,6 +18,7 @@ import (
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
 	"github.com/blerglab/blerg-ai/board/internal/gate"
+	"github.com/blerglab/blerg-ai/board/internal/runner"
 	"github.com/blerglab/blerg-ai/board/prompts"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -90,6 +91,9 @@ func (a *API) Routes(mux *http.ServeMux) {
 			// that board here, before any handler runs (see scope.go).
 			if board, scoped := p.ProjectScoped(); scoped && !a.scopeDecision(w, r, board) {
 				return
+			}
+			if p.IsHuman() {
+				r = r.WithContext(runner.WithDesktopViewerProof(r.Context(), auth.BearerToken(r)))
 			}
 			h(w, r, p)
 		}

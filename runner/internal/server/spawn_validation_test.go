@@ -30,15 +30,15 @@ func TestRuntimeNameMapsEveryRuntimeToItself(t *testing.T) {
 // sent to the daemon, on both the REST and the browser-WS spawn paths.
 func TestPostSessionsRejectsTraversalRepo(t *testing.T) {
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", ReposRoot: "/home/dev/repos", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", ReposRoot: "/home/dev/repos", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	mint := enableBrowserAuth(t, api)
 	tok := mint("session.start")
 
 	for _, repo := range []string{"../..", "../../..", "a/b/c", "org/../x", "a\\b", ".hidden", ".hidden/x", "org/.hidden", "..", "/etc", "/abs", "app/", "/org/name"} {
-		body, _ := json.Marshal(map[string]any{"daemon_id": "d1", "repo": repo, "runtime": "docker", "kind": "agent"})
+		body, _ := json.Marshal(map[string]any{"daemon_id": "00000000-0000-4000-8000-0000000000f1", "repo": repo, "runtime": "docker", "kind": "agent"})
 		req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(body)))
 		req.Header.Set("Authorization", "Bearer "+tok)
 		rec := httptest.NewRecorder()
@@ -56,12 +56,12 @@ func TestPostSessionsRejectsTraversalRepo(t *testing.T) {
 
 func TestPostSessionsAcceptsPlainRepoName(t *testing.T) {
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
-	body, _ := json.Marshal(map[string]any{"daemon_id": "d1", "repo": "my-app", "runtime": "docker", "kind": "agent"})
+	body, _ := json.Marshal(map[string]any{"daemon_id": "00000000-0000-4000-8000-0000000000f1", "repo": "my-app", "runtime": "docker", "kind": "agent"})
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
@@ -83,13 +83,13 @@ func TestPostSessionsAcceptsPlainRepoName(t *testing.T) {
 // directly here.
 func TestForwardBrowserSpawnRejectsTraversalRepo(t *testing.T) {
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
 	bc := &BrowserConn{ID: "b1"}
 
 	for _, repo := range []string{"../..", "../../..", "a/b/c", "org/../x", "a\\b", ".hidden", ".hidden/x", "org/.hidden", "..", "/etc", "/abs", "app/", "/org/name"} {
-		msg := protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "d1", Repo: repo}
+		msg := protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "00000000-0000-4000-8000-0000000000f1", Repo: repo}
 		_, err := hub.forwardBrowserSpawn(bc, msg, nil)
 		if err == nil {
 			t.Errorf("repo %q: expected error, got nil", repo)
@@ -104,12 +104,13 @@ func TestForwardBrowserSpawnRejectsTraversalRepo(t *testing.T) {
 
 func TestForwardBrowserSpawnAcceptsPlainRepoName(t *testing.T) {
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
-	bc := &BrowserConn{ID: "b1"}
+	api := ownedInventoryAPI(t, hub, "fixture", nil, "")
+	bc := &BrowserConn{ID: "b1", AccountID: "user-1"}
 
-	sessionID, err := hub.forwardBrowserSpawn(bc, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "d1", Repo: "my-app"}, nil)
+	sessionID, err := hub.forwardBrowserSpawn(bc, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "00000000-0000-4000-8000-0000000000f1", Repo: "my-app"}, api.dbPool)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,12 +147,12 @@ func TestValidateRepoNameAllowsOneOrgSegment(t *testing.T) {
 // The REST spawn path must let an org-qualified repo through to the daemon.
 func TestPostSessionsAcceptsOrgQualifiedRepo(t *testing.T) {
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
-	body, _ := json.Marshal(map[string]any{"daemon_id": "d1", "repo": "blerglab/blerg", "runtime": "docker", "kind": "agent"})
+	body, _ := json.Marshal(map[string]any{"daemon_id": "00000000-0000-4000-8000-0000000000f1", "repo": "blerglab/blerg", "runtime": "docker", "kind": "agent"})
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
@@ -175,7 +176,7 @@ func TestPostSessionsClusterRequiresOrgQualifiedRepoWithoutOrg(t *testing.T) {
 	jm := newTestJobManager(t, f)
 	jm.GitHubOrg = ""
 	hub.SetJobManager(jm)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
 
 	body, _ := json.Marshal(map[string]any{"repo": "widget", "runtime": "cluster", "kind": "agent"})
@@ -201,7 +202,7 @@ func TestPostSessionsClusterAcceptsBareRepoWithOrg(t *testing.T) {
 	jm := newTestJobManager(t, f)
 	jm.GitHubOrg = "acme"
 	hub.SetJobManager(jm)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
 
 	body, _ := json.Marshal(map[string]any{"repo": "widget", "runtime": "cluster", "kind": "agent"})
@@ -226,7 +227,7 @@ func TestPostSessionsClusterAcceptsBareRepoWithExplicitGitBase(t *testing.T) {
 	jm.ExplicitGitURLBase = "https://git.example.test/team"
 	jm.GitURLBase = "https://git.example.test/team"
 	hub.SetJobManager(jm)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
 
 	body, _ := json.Marshal(map[string]any{"repo": "widget", "runtime": "cluster", "kind": "agent"})
@@ -253,7 +254,7 @@ func TestPostSessionsClusterAcceptsOrgQualifiedRepoWithoutOrg(t *testing.T) {
 	jm := newTestJobManager(t, f)
 	jm.GitHubOrg = ""
 	hub.SetJobManager(jm)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
 
 	body, _ := json.Marshal(map[string]any{"repo": "acme/widget", "runtime": "cluster", "kind": "agent"})
@@ -274,6 +275,9 @@ func TestPostSessionsClusterAcceptsOrgQualifiedRepoWithoutOrg(t *testing.T) {
 // postSpawn POSTs a spawn body with a session.start token and returns the
 // recorder, so the runtime rules can be asserted on status and body.
 func postSpawn(t *testing.T, api *API, body map[string]any) *httptest.ResponseRecorder {
+	if body["daemon_id"] == "d1" && api.hub.GetDaemon(runtimeTestDesktopID) != nil {
+		body["daemon_id"] = runtimeTestDesktopID
+	}
 	t.Helper()
 	if _, ok := body["kind"]; !ok {
 		body["kind"] = "agent"
@@ -287,13 +291,18 @@ func postSpawn(t *testing.T, api *API, body map[string]any) *httptest.ResponseRe
 	return rec
 }
 
+const runtimeTestDesktopID = "00000000-0000-4000-8000-0000000000f1"
+
 func runtimeTestAPI(t *testing.T) (*API, *DaemonConn) {
 	t.Helper()
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: runtimeTestDesktopID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
-	return NewAPI(hub, nil, "daemon-tok-1234567890", nil, ""), dc
+	pool := connectSrvTestDB(t)
+	api := NewAPI(hub, pool, "daemon-tok-1234567890", nil, "")
+	fixtureOwnDesktop(t, pool, dc, "user-1")
+	return api, dc
 }
 
 // runtime is a closed set: anything outside cluster|docker|daemon|"" is a
@@ -301,7 +310,7 @@ func runtimeTestAPI(t *testing.T) (*API, *DaemonConn) {
 func TestPostSessionsRejectsUnknownRuntime(t *testing.T) {
 	api, dc := runtimeTestAPI(t)
 	for _, rt := range []string{"vm", "DOCKER", "host", "sandbox", "kubernetes"} {
-		rec := postSpawn(t, api, map[string]any{"daemon_id": "d1", "repo": "my-app", "runtime": rt, "kind": "agent"})
+		rec := postSpawn(t, api, map[string]any{"daemon_id": "00000000-0000-4000-8000-0000000000f1", "repo": "my-app", "runtime": rt, "kind": "agent"})
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Errorf("runtime %q: status %d, want 422", rt, rec.Code)
 		}
@@ -325,7 +334,7 @@ func TestPostSessionsRejectsTerminalOnCluster(t *testing.T) {
 		jm := newTestJobManager(t, f)
 		jm.GitHubOrg = "acme"
 		hub.SetJobManager(jm)
-		api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+		api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 
 		rec := postSpawn(t, api, map[string]any{"repo": "acme/widget", "runtime": "cluster", "kind": kind})
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -347,7 +356,7 @@ func TestPostSessionsRejectsTerminalOnCluster(t *testing.T) {
 // Agent + docker is the new case: the daemon is told to sandbox the engine.
 func TestPostSessionsSandboxesAgentOnDocker(t *testing.T) {
 	api, dc := runtimeTestAPI(t)
-	rec := postSpawn(t, api, map[string]any{"daemon_id": "d1", "repo": "my-app", "runtime": "docker", "kind": "agent"})
+	rec := postSpawn(t, api, map[string]any{"daemon_id": "00000000-0000-4000-8000-0000000000f1", "repo": "my-app", "runtime": "docker", "kind": "agent"})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status %d, want 202: %s", rec.Code, rec.Body.String())
 	}
@@ -365,7 +374,7 @@ func TestPostSessionsSandboxesAgentOnDocker(t *testing.T) {
 func TestPostSessionsAgentOnDaemonIsUnsandboxed(t *testing.T) {
 	api, dc := runtimeTestAPI(t)
 	for _, rt := range []string{"daemon", ""} {
-		rec := postSpawn(t, api, map[string]any{"daemon_id": "d1", "repo": "my-app", "runtime": rt, "kind": "agent"})
+		rec := postSpawn(t, api, map[string]any{"daemon_id": "00000000-0000-4000-8000-0000000000f1", "repo": "my-app", "runtime": rt, "kind": "agent"})
 		if rec.Code != http.StatusAccepted {
 			t.Fatalf("runtime %q: status %d, want 202: %s", rt, rec.Code, rec.Body.String())
 		}
@@ -381,7 +390,7 @@ func TestPostSessionsSkipPermissionsStillDockerOnly(t *testing.T) {
 	api, dc := runtimeTestAPI(t)
 	for _, rt := range []string{"daemon", ""} {
 		rec := postSpawn(t, api, map[string]any{
-			"daemon_id": "d1", "repo": "my-app", "runtime": rt, "kind": "agent",
+			"daemon_id": "00000000-0000-4000-8000-0000000000f1", "repo": "my-app", "runtime": rt, "kind": "agent",
 			"dangerously_skip_permissions": true,
 		})
 		if rec.Code != http.StatusUnprocessableEntity {

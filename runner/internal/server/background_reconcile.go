@@ -69,7 +69,7 @@ func publishBackgroundTaskReconciliation(ctx context.Context, h *Hub, pool *pgxp
 		for _, ev := range change.Events {
 			fanOutServerEvent(h, ev.SessionID, ev.ClientEventID, ev.Kind, []byte(ev.Payload), ev.Seq, ev.Ts)
 		}
-		h.BroadcastJSON(protocol.SessionBackgroundChanged{Type: "session_background_changed", SessionID: change.SessionID, BackgroundTasks: change.Count})
+		h.BroadcastJSON(protocol.SessionBackgroundChanged{Type: "session_background_changed", SessionID: change.SessionID, BackgroundTasks: change.Count}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		if len(change.Events) > 0 {
 			noticeOnWorkEnded(ctx, h, pool, change.SessionID)
 		}

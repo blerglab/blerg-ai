@@ -50,8 +50,8 @@ type LaunchTarget struct {
 	HasRepo *bool `json:"has_repo,omitempty"`
 	// RepoOrigin (only the desktop the request names, for a bare folder name it has): the hosted
 	// repository that folder's origin remote points at, or absent when it has none the desktop
-	// recognised. No other desktop's remote is reported: desktops have no owner in the runner,
-	// so a caller resolving a folder name to owner/name consults only the desktop it chose.
+	// recognised. Only the exact persisted owner can consult a desktop, and a
+	// caller resolving a folder name consults only the desktop it chose.
 	RepoOrigin *protocol.RepoOrigin `json:"repo_origin,omitempty"`
 	// ResolvesBareRepos (the cluster): the install has a default organization or git base, so a
 	// cluster start may name a bare folder and the cluster resolves it itself.
@@ -60,6 +60,7 @@ type LaunchTarget struct {
 
 func (a *API) authorizeLaunchOptions(w http.ResponseWriter, r *http.Request) (runnerPrincipal, bool) {
 	if p, ok := a.verifyBrowserToken(a.rawBearer(r)); ok {
+		*r = *r.WithContext(withDesktopViewer(r.Context(), a.desktopRecipient(r, runnerPrincipalFromIdentity(p).spawningAccountID())))
 		return runnerPrincipalFromIdentity(p), true
 	}
 	return a.authRunner(w, r)
@@ -70,14 +71,18 @@ func (a *API) HandleLaunchOptions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	snapshot := a.hub.ownedHostDaemons(r.Context(), p.spawningAccountID())
+	ctx := withDesktopReadSnapshot(r.Context(), snapshot)
 	q := r.URL.Query()
-	options, err := a.DiscoverLaunchOptions(r.Context(), p, LaunchOptionsRequest{SessionID: q.Get("session_id"), Runtime: q.Get("runtime"), DaemonID: q.Get("daemon_id"), Repo: q.Get("repo"), Kind: q.Get("kind"), Restricted: q.Get("restricted") == "1", Refresh: q.Get("refresh") == "1", PersonalOnly: q.Get("personal_only") == "1"})
+	options, err := a.DiscoverLaunchOptions(ctx, p, LaunchOptionsRequest{SessionID: q.Get("session_id"), Runtime: q.Get("runtime"), DaemonID: q.Get("daemon_id"), Repo: q.Get("repo"), Kind: q.Get("kind"), Restricted: q.Get("restricted") == "1", Refresh: q.Get("refresh") == "1", PersonalOnly: q.Get("personal_only") == "1"})
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
-	writeJSON(w, http.StatusOK, options)
+	if err := a.hub.deliverDesktopSnapshot(ctx, p.spawningAccountID(), snapshot, func() { writeJSON(w, http.StatusOK, options) }); err != nil {
+		writeError(w, http.StatusConflict, "desktop changed; refresh launch options")
+	}
 }
 
 // folderOrigin is the hosted repository dc reports for its folder, normalized the way a cluster
@@ -98,6 +103,7 @@ func folderOrigin(dc *DaemonConn, folder string) *protocol.RepoOrigin {
 // as launch. It never substitutes another account's catalog or a host union for
 // a Cluster catalog. Catalog acquisition itself remains asynchronous.
 func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, req LaunchOptionsRequest) (LaunchOptions, *APIError) {
+	parent = withDesktopViewer(parent, desktopViewer(parent, p.spawningAccountID()))
 	if req.SessionID != "" {
 		return a.discoverExistingSessionOptions(parent, p, req)
 	}
@@ -107,7 +113,7 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 		out.Targets = append(out.Targets, LaunchTarget{Name: "Cluster", Runtimes: []string{runnerRuntimeCluster},
 			ResolvesBareRepos: jm.GitHubOrg != "" || jm.ExplicitGitURLBase != ""})
 	}
-	hosts := a.hub.GetHostDaemons()
+	hosts := a.hub.ownedHostDaemons(parent, p.spawningAccountID())
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].ID < hosts[j].ID })
 	for _, host := range hosts {
 		runtimes := []string{runnerRuntimeDaemon}
@@ -143,7 +149,7 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 	var dc *DaemonConn
 	if out.Runtime != runnerRuntimeCluster {
 		if req.DaemonID != "" {
-			dc = a.hub.GetHostDaemon(req.DaemonID)
+			dc = a.hub.ownedHostDaemon(parent, p.spawningAccountID(), req.DaemonID)
 			if dc == nil {
 				out.Error = "The selected execution host is not connected"
 				return out, nil
@@ -183,9 +189,9 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 		if out.Runtime != runnerRuntimeCluster && target == nil {
 			requirement := HostSelection{Engine: descriptor.ID, Runtime: runtime, Restricted: req.Restricted, Kind: req.Kind}
 			if req.Repo != "" {
-				target = a.hub.DaemonForRepo(req.Repo, requirement)
+				target = a.hub.ownedDaemonForRepo(parent, p.spawningAccountID(), req.Repo, requirement)
 			} else {
-				target = a.hub.DaemonForScratch(runtime, requirement)
+				target = a.hub.ownedDaemonForScratch(parent, p.spawningAccountID(), runtime, requirement)
 			}
 			if target == nil {
 				continue
@@ -273,7 +279,7 @@ func (a *API) discoverExistingSessionOptions(ctx context.Context, p RunnerPrinci
 	}
 	scoped := LaunchOptionsRequest{Runtime: runtime, Kind: "agent", Refresh: req.Refresh}
 	if runtime != runnerRuntimeCluster {
-		host := a.hub.FindDaemonForSession(row.ID)
+		host := a.hub.ownedHostDaemon(ctx, p.spawningAccountID(), row.DaemonID)
 		if host == nil {
 			return LaunchOptions{Runtime: runtime, State: "unknown", Engines: []LaunchEngine{}, Targets: []LaunchTarget{}, Error: "The session's execution host is not connected"}, nil
 		}

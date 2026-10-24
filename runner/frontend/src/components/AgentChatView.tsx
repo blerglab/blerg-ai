@@ -1,3 +1,4 @@
+import { usePaletteCommands } from '../commands/context'
 import { isFromParentSession, modelDisplayNames, type ChatRefs, type FiledCard, type Ticket } from '@blerglab/chat'
 // Chat/timeline view for agent-kind sessions: the runner's page over @blerglab/chat's ChatView.
 // The package draws the transcript, composer, files and viewer; this file adds what is the
@@ -154,7 +155,7 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
     // A pin row in the chat opens the same live dialog as the panel (#96): the Board card read live,
     // in the two-column layout; another tracker's ticket as pinned.
     openTicket: t => setRefTicket(t),
-    commits: canReleasePrompt === true,
+    commits: canReleasePrompt,
   }), [refBoard, sessionId, canReleasePrompt])
   const [proposalRevision, setProposalRevision] = useState(0)
   // The server's per-file limit (initial_state): the chat refuses a larger attachment before sending it.
@@ -182,6 +183,18 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
   const sessionEfforts: readonly string[] = currentModel
     ? currentModel.efforts
     : Array.from(new Set(engineModels.models.flatMap(m => m.efforts)))
+
+  const paletteCommands = useMemo(() => session.archived_at ? [] : [
+    ...engineModels.models.filter(model => model.id !== session.model).map(model => ({
+      id: `model:${sessionId}:${model.id}`, title: `Change model: ${modelNames.get(model.id) ?? model.id}`,
+      run: () => {
+        const effort = effectiveEffort(model, session.effort ?? null)
+        ws.send({ type: 'set_session_model', session_id: sessionId, model: model.id, ...(effort ? { effort } : {}) })
+      },
+    })),
+    ...sessionEfforts.filter(effort => effort !== session.effort).map(effort => ({ id: `effort:${sessionId}:${effort}`, title: `Change effort: ${effort}`, run: () => ws.send({ type: 'set_session_model', session_id: sessionId, effort }) })),
+  ], [session.archived_at, session.effort, session.model, engineModels.models, modelNames, sessionId, sessionEfforts])
+  usePaletteCommands(paletteCommands)
 
   const meta: SessionMeta = session
   const engine = ENGINE_LABELS[session.engine || 'claude'] ?? session.engine

@@ -17,17 +17,25 @@ FAKE_TOKEN="fake-daemon-token-0123456789abcdef"
 inst="$tmp/inst"
 mkdir -p "$inst/repo/install/desktop/daemon" "$inst/repo/runner" "$inst/repo/bin" "$inst/home" "$inst/repos" "$inst/tmp"
 cp brand.sh hostcheck.sh "$inst/repo/install/desktop/"
-cp daemon/install.sh daemon/*.tmpl "$inst/repo/install/desktop/daemon/"
+cp daemon/install.sh daemon/*.tmpl daemon/wsl-startup.ps1 "$inst/repo/install/desktop/daemon/"
 echo "the binary of the running daemon" > "$inst/repo/bin/blerg-runner-daemon"
 
 # The tools install.sh calls, from the real system; the ones under test are stubs below.
 bin="$inst/bin"
 mkdir -p "$bin"
 for x in bash sh cat grep sed tr id dirname date awk head cut wc mkdir seq sleep mv chmod rm cmp \
-         mktemp find touch kill printf env basename timeout; do
+         mktemp find touch kill printf env basename timeout iconv base64; do
   p="$(command -v "$x" 2>/dev/null)" && [ "$p" != "$x" ] && ln -sf "$p" "$bin/$x"
 done
-printf '#!/bin/sh\nexit 0\n' > "$bin/loginctl"
+cat > "$bin/loginctl" <<'EOF'
+#!/bin/sh
+case "$1" in
+  show-user) echo "${FAKE_LINGER:-yes}" ;;
+  enable-linger) echo "linger-user:$2" >> "$FAKE_LOG"; exit "${FAKE_LINGER_RC:-0}" ;;
+esac
+EOF
+printf '#!/bin/sh\necho "C:\\fake\\wsl-startup.ps1"\n' > "$bin/wslpath"
+printf '#!/bin/sh\necho windows-startup >> "$FAKE_LOG"\nexit "${FAKE_WINDOWS_RC:-0}"\n' > "$bin/powershell.exe"
 printf '#!/bin/sh\n[ "$1" = -m ] && echo x86_64 || echo Linux\n' > "$bin/uname"
 # go: "build -o OUT" writes a daemon that reports no open work.
 printf '#!/bin/sh\n[ "$1" = version ] && { echo "go version go1.26.9 linux/amd64"; exit 0; }\nprintf "#!/bin/sh\\nexit 0\\n" > "$3"; chmod +x "$3"\n' > "$bin/go"
@@ -76,7 +84,7 @@ case "$FAKE_CURL" in
   *)       printf '503 application/json' ;;
 esac
 EOF
-chmod +x "$bin/loginctl" "$bin/uname" "$bin/go" "$bin/systemctl" "$bin/curl"
+chmod +x "$bin/wslpath" "$bin/powershell.exe" "$bin/loginctl" "$bin/uname" "$bin/go" "$bin/systemctl" "$bin/curl"
 # stat for the header-file check: from the system, under a name curl's stub can find.
 p="$(command -v stat)" && ln -sf "$p" "$bin/stat"
 
@@ -84,7 +92,7 @@ state="$inst/state"
 run_install() { # [VAR=value...] ; runs install.sh install; output in $inst/out, exit code in $rc
   rm -f "$inst/systemctl.log" "$inst/curl.log" "$inst/curl.header"
   rm -rf "$inst/home/.config"
-  printf 'BLERG_RUNNER_DAEMON_TOKEN=%s\nBLERG_RUNNER_REPOS_ROOT=%s\nBLERG_SKIP_CLAUDE_TOKEN_PROMPT=1\n' "$FAKE_TOKEN" "$inst/repos" \
+  printf 'BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS=true\nBLERG_RUNNER_DAEMON_TOKEN=%s\nBLERG_RUNNER_REPOS_ROOT=%s\nBLERG_SKIP_CLAUDE_TOKEN_PROMPT=1\n' "$FAKE_TOKEN" "$inst/repos" \
     > "$inst/repo/install/desktop/.env"
   echo "the binary of the running daemon" > "$inst/repo/bin/blerg-runner-daemon"
   local start; start="$(date +%s)"
@@ -94,7 +102,10 @@ run_install() { # [VAR=value...] ; runs install.sh install; output in $inst/out,
       BLERG_DAEMON_CONNECT_WAIT=3 BLERG_PROC_VERSION="$inst/pv" XDG_RUNTIME_DIR="$inst/run"
     unset WSL_DISTRO_NAME CLAUDE_CODE_OAUTH_TOKEN BLERG_RUNNER_SERVER_URL http_proxy https_proxy HTTP_PROXY HTTPS_PROXY FAKE_SHOW_DELAY
     for kv in "$@"; do export "$kv"; done
-    "$inst/repo/install/desktop/daemon/install.sh" install </dev/null >"$inst/out" 2>&1 )
+    opts=(install)
+    [ "${FAKE_STARTUP_FLAG:-0}" = 1 ] && opts+=(--wsl-startup)
+    [ "${FAKE_INSTALL_YES:-0}" = 1 ] && opts+=(--yes)
+    "$inst/repo/install/desktop/daemon/install.sh" "${opts[@]}" </dev/null >"$inst/out" 2>&1 )
   rc=$?
   elapsed=$(( $(date +%s) - start ))
 }
@@ -109,7 +120,8 @@ no_token_anywhere() { # the token never reaches the output, curl's command line 
 
 # --- token accepted, daemon connects: installed, restarted, says connected
 rm -rf "$state"
-run_install
+run_install USER=ignored
+grep -qx "linger-user:$(id -un)" "$inst/systemctl.log" || t "lingering must use the UID account, not inherited USER"
 [ "$rc" = 0 ] || t "accepted token: exit $rc: $(out)"
 restarted || t "accepted token: the service was not restarted"
 grep -q 'accepts this daemon token' "$inst/out" || t "accepted token: not said: $(out)"
@@ -204,6 +216,24 @@ run_install FAKE_CONN_STATE= FAKE_SHOW_DELAY=20 BLERG_DAEMON_CONNECT_WAIT=2
 [ "$rc" = 0 ] || t "hung pid query: exit $rc"
 [ "$elapsed" -le 8 ] || t "a hung pid query stretched a 2s wait to ${elapsed}s"
 
+# --- WSL setup discloses the opt-in, and noninteractive setup does not opt in.
+mkdir -p "$inst/sysd"
+rm -rf "$state"
+run_install WSL_DISTRO_NAME='Example Distro' BLERG_SYSTEMD_RUN_DIR="$inst/sysd" FAKE_INSTALL_YES=1
+[ "$rc" = 0 ] || t "WSL default install: rc=$rc $(out)"
+grep -q 'Optional: ./daemon/install.sh wsl-startup enable' "$inst/out" || t "WSL setup did not disclose Windows opt-in"
+grep -q 'windows-startup' "$inst/systemctl.log" && t "noninteractive WSL setup opted in without permission"
+run_install WSL_DISTRO_NAME='Example Distro' BLERG_SYSTEMD_RUN_DIR="$inst/sysd" FAKE_STARTUP_FLAG=1
+[ "$rc" = 0 ] || t "explicit WSL opt-in: rc=$rc $(out)"
+[ "$(grep -c '^windows-startup$' "$inst/systemctl.log")" = 1 ] || t "WSL opt-in did not configure exactly one Windows task"
+grep -q 'including on battery' "$inst/out" || t "WSL opt-in lacks battery disclosure"
+run_install WSL_DISTRO_NAME='Example Distro' BLERG_SYSTEMD_RUN_DIR="$inst/sysd" FAKE_STARTUP_FLAG=1 FAKE_LINGER=no FAKE_LINGER_RC=1
+[ "$rc" != 0 ] || t "WSL opt-in without lingering succeeded"
+grep -q 'sudo loginctl enable-linger' "$inst/out" || t "WSL missing linger has no repair command"
+grep -q 'windows-startup' "$inst/systemctl.log" && t "WSL configured Windows startup without linger"
+run_install WSL_DISTRO_NAME='Example Distro' BLERG_SYSTEMD_RUN_DIR="$inst/sysd" FAKE_STARTUP_FLAG=1 FAKE_WINDOWS_RC=1
+[ "$rc" != 0 ] && grep -q 'Task Scheduler startup enable failed' "$inst/out" || t "Windows setup failure was hidden"
+
 # --- status prints the connection state (and still redacts the unit's token)
 mkdir -p "$state"
 printf '{"state":"refused","server":"wss://runner.example.com/ws/daemon","since":"2026-01-01T00:00:00Z","detail":"the server refused the daemon token (close 4401)","pid":%s}\n' "$$" > "$state/connection.json"
@@ -237,13 +267,12 @@ grep -q '^DAEMON_TOKEN=' blerg-up.sh && t "blerg-up.sh still reads the daemon to
 step="$(sed -n '/^  if \[ "\$DAEMON_REFUSED" -eq 1 \]; then/,/^  fi$/p' blerg-up.sh)"
 [ -n "$step" ] || t "blerg-up.sh: the manual box's daemon step was not found"
 up="$tmp/up dir"
-mkdir -p "$up"; printf 'BLERG_RUNNER_DAEMON_TOKEN=%s\n' "$FAKE_TOKEN" > "$up/.env"
+mkdir -p "$up"; printf 'BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS=true\nBLERG_RUNNER_DAEMON_TOKEN=%s\n' "$FAKE_TOKEN" > "$up/.env"
 render() { ( cd "$up" && PORT_RUNNER=8083 REPOS_ROOT_LINE="" RUNNER_DIR=/r DAEMON_REFUSED="$1" bash -c "$step"'; printf "%s\n%s\n" "$DAEMON_STEP" "$DAEMON_FOOTER"' ); }
 box="$(render 0)"
 grep -q "$FAKE_TOKEN" <<<"$box" && t "blerg-up.sh's manual box prints the daemon token"
-line="$(grep 'export BLERG_RUNNER_DAEMON_TOKEN=' <<<"$box")"
-[ "$( cd /; eval "$line" && printf '%s' "$BLERG_RUNNER_DAEMON_TOKEN" )" = "$FAKE_TOKEN" ] \
-  || t "blerg-up.sh's manual box: its export line does not read the token from .env ($line)"
+grep -q 'daemon/enroll.py' <<<"$box" || t "blerg-up.sh: manual start lacks personal enrollment"
+grep -q 'export BLERG_RUNNER_DAEMON_TOKEN=' <<<"$box" && t "blerg-up.sh: manual start copies the shared server secret"
 grep -q "that's success" <<<"$box" || t "blerg-up.sh: the normal manual box lost its footer"
 box="$(render 1)"
 grep -q 'refused' <<<"$box" && grep -q 'daemon/install.sh install' <<<"$box" || t "blerg-up.sh: no fix step after a refused token: $box"

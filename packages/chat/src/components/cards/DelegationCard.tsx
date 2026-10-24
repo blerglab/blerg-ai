@@ -92,9 +92,10 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
       <div className="delegation-body">
         <div className="delegation-facts">
           {[p.model, p.effort].filter(Boolean).join(' · ') && <span>{[p.model, p.effort].filter(Boolean).join(' · ')}</span>}
-          <span>{p.repo ? p.repo : 'no repository'}</span>
+          <span>{p.metadata_hidden ? 'Workspace details are private' : p.members?.length ? `${p.members.length} repositories` : p.repo ? p.repo : 'no repository'}</span>
           <span className={unsandboxed ? 'delegation-warn' : undefined}>{runtimeWords(p.runtime)}</span>
         </div>
+        {!p.metadata_hidden && !!p.members?.length && <ul className="delegation-members" aria-label="Chosen repositories">{p.members.map(m => <li key={m.id}><b>{m.name}</b> <code>{m.path}</code></li>)}</ul>}
         {boards && <div className="delegation-boards" data-testid="delegation-boards" title="Board access the new session gets, never above this session's own">{boards}</div>}
         {p.title && <div className="delegation-name">{p.title}</div>}
         {prompt && <div className="delegation-prompt" data-testid="delegation-prompt">{excerpt}</div>}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { type ReactNode, useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { defaultSessionName } from '../lib/sessionName'
@@ -6,6 +6,7 @@ import { keepNotice, matchModel, placeWords, type ModelPick } from '../lib/model
 import { apiFetch } from '../apiFetch'
 import { coreOrigin } from '../authClient'
 import RunColumn from './RunColumn'
+import WorkspacePicker, { type WorkspaceSelection } from './WorkspacePicker'
 import McpPicker from './McpPicker'
 import LaunchPermissions from './LaunchPermissions'
 import { NO_LAUNCH_PERMISSIONS, effectiveLaunchPermissions, type LaunchPermissionsValue } from '../lib/launchPermissions'
@@ -176,6 +177,10 @@ function partState(p: LaunchCacheData[PartName]): PartState {
   return !p ? 'waiting' : isFresh(p) ? 'fresh' : 'cached'
 }
 
+function RepositoryActions({modern,hidden,children}:{modern:boolean;hidden:boolean;children:ReactNode}) {
+ return modern ? <div hidden={hidden}>{children}</div> : <>{children}</>
+}
+
 export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const navigate = useNavigate()
   const addPendingSession = useSessionStore(s => s.addPendingSession)
@@ -209,6 +214,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [daemons, setDaemons] = useState<DaemonApiInfo[]>(() => boot.cache.daemons?.value ?? [])
   const [search, setSearch] = useState('')
   const [selectedRepo, setSelectedRepo] = useState<RepoInfo | null>(null)
+  const [workspacePick, setWorkspacePick] = useState<{scope: string; selection: WorkspaceSelection | null; names: string[]}>({scope: '', selection: null, names: []})
+  const [desktopScope, setDesktopScope] = useState(0)
+
   // "No repository" is the default pick: a session tied to no repository.
   // On the cluster that is an empty, throwaway workspace; on a daemon it is a
   // new scratch folder under the repos root, named for the person
@@ -216,6 +224,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [noRepoMode, setNoRepoMode] = useState(true)
   const [scratchSuffix, setScratchSuffix] = useState(() => newScratchSuffix())
   const [scratchRenaming, setScratchRenaming] = useState(false)
+  const [repoActions, setRepoActions] = useState(false)
   const [newFolderMode, setNewFolderMode] = useState(false)
   // Visibility of a new repository created on the cluster (private by default).
   const [visibility, setVisibility] = useState<'private' | 'public'>('private')
@@ -227,6 +236,15 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [freeTextMode, setFreeTextMode] = useState(false)
   const [freeTextProvider, setFreeTextProvider] = useState('github')
   const [selectedDaemon, setSelectedDaemon] = useState<DaemonApiInfo | null>(() => boot.defaults?.daemon ?? null)
+  useEffect(() => {
+    const invalidate = () => {
+      setDesktopScope(n => n + 1); setNoRepoMode(false); setSelectedRepo(null); setSelectedDaemon(null); setDaemons([]); setRepos([])
+      void fetchDaemons().then(list => { setDaemons(list); if (list.length === 1) setSelectedDaemon(list[0]) }).catch(() => setDaemons([]))
+      void fetchRepos().then(part => setRepos(part.repos)).catch(() => setRepos([]))
+    }
+    window.addEventListener('blerg-desktop-scope-changed', invalidate)
+    return () => window.removeEventListener('blerg-desktop-scope-changed', invalidate)
+  }, [])
   const [initialPrompt, setInitialPrompt] = useState('')
   // MCP servers and tools chosen for this session (McpPicker). Empty: none, and no `mcp` is sent.
   const boards = useSessionBoards(open)
@@ -631,7 +649,12 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const newRepoTokenMissing =
     !!newRepoRef && myCreds !== null && !(myCreds.git_providers ?? []).includes(newRepoRef.provider)
 
+  const workspaceScope = `${desktopScope}:${runtime}:${selectedDaemon?.id ?? ''}:${selectedDaemon?.ownership_revision ?? ''}:${selectedDaemon?.connection_generation ?? ''}`
+  const useWorkspacePicker = Boolean(runtime === 'cluster' || selectedDaemon?.discovery_version === 1)
+  const workspaceSelection = workspacePick.scope === workspaceScope ? workspacePick.selection : null
+
   const hasRepoChoice =
+    workspaceSelection !== null ||
     (noRepoMode && !scratchNameInvalid) ||
     selectedRepo !== null ||
     (newFolderMode && folderName !== '' && (runtime !== 'cluster' || newRepoRef !== null)) ||
@@ -736,7 +759,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     : null
   const blockedReason = boardProblem ?? runtimeBlockedReason ?? hostClaudeBlockedReason ?? cloneByNameUnsupported ?? clonePlanProblem ?? scratchNameProblem ?? daemonUnconfirmedReason
 
+
   const canSubmit = engineKnown && hasRepoChoice &&
+    (!workspaceSelection || runtime === 'cluster' || ((selectedDaemon?.workspace_capabilities?.manifest_version === 2) && daemons.some(d => d.id === selectedDaemon?.id && d.connection_generation === selectedDaemon?.connection_generation))) &&
     (!needsDaemon || selectedDaemon !== null) && !submitting &&
     (runtime !== 'daemon' || agentAck) && !clusterEngineBlocked && blockedReason === null &&
     !clusterRepoUnresolved && !freeTextModelInvalid
@@ -804,6 +829,10 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     // one keeps the historical bare name (the daemon qualifies it with its
     // org); any other provider's goes as owner/name with its provider, so
     // the daemon clones it from that host — never a same-named GitHub repo.
+    if (workspaceSelection) {
+      await postSession({ selection: workspaceSelection, daemon_id: selectedDaemon?.id })
+      return
+    }
     if (noRepoMode) {
       await postSession({
         daemon_id: selectedDaemon?.id ?? '',
@@ -963,6 +992,14 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             {/* Section 1: Repository */}
             <div className="launch-repo-section">
               <span style={sectionLabel}>Repository</span>
+              {useWorkspacePicker && <>
+                <WorkspacePicker key={workspaceScope} daemon={selectedDaemon} runtime={runtime} repos={repos}
+                  onChange={(selection, names) => { setWorkspacePick({scope: workspaceScope, selection, names}); setNoRepoMode(false); setSelectedRepo(null); setNewFolderMode(false); setFreeTextMode(false) }} />
+                <button type="button" style={noRepoMode ? itemSelected : itemBase} onClick={() => { setWorkspacePick({scope: workspaceScope, selection: null, names: []}); setNoRepoMode(true) }}>No repository · empty workspace</button>
+                {workspaceSelection && runtime !== 'cluster' && selectedDaemon?.workspace_capabilities?.manifest_version !== 2 && <p role="status" className="workspace-note">Selection is available to review. Update the workspace runtime before launching it.</p>}
+              </>}
+              {useWorkspacePicker && <button type="button" onClick={()=>setRepoActions(value=>!value)}>Create or clone a repository</button>}
+              <RepositoryActions modern={useWorkspacePicker} hidden={!repoActions && !newFolderMode && !freeTextMode}>
               <input
                 ref={repoInputRef}
                 value={search}
@@ -1047,7 +1084,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               <div className="launch-repo-list" data-testid="repo-list">
                 {/* Always first and always there, whatever is typed above:
                     the default pick, a session tied to no repository. */}
-                <div
+                {!useWorkspacePicker && <div
                   data-testid="no-repo-option"
                   role="option"
                   aria-selected={noRepoMode}
@@ -1058,7 +1095,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                   <div style={{ fontSize: '0.75rem', marginTop: 2, color: 'var(--fog)' }}>
                     {runtime === 'cluster' ? 'an empty, throwaway workspace' : 'a new scratch folder, nothing cloned'}
                   </div>
-                </div>
+                </div>}
                 {/* A repository typed as owner/name or pasted as a URL is
                     launchable even when nobody listed it or has it checked
                     out: the cluster pod clones it, and so does a daemon. */}
@@ -1200,7 +1237,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     style={{ ...itemBase, cursor: 'default', height: 38, opacity: 0.45 - i * 0.12 }}
                   />
                 ))}
-                {filteredRepos.map(repo => (
+                {(useWorkspacePicker ? [] : filteredRepos).map(repo => (
                   <div
                     key={repoKey(repo)}
                     style={selectedRepo && repoKey(selectedRepo) === repoKey(repo) ? itemSelected : itemBase}
@@ -1256,6 +1293,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                 )}
               </div>
               </div>
+              </RepositoryActions>
             </div>
           </div>
 

@@ -240,11 +240,11 @@ func TestUserRepoListerKindsSingleFlight(t *testing.T) {
 // that still matches with 304 and no body.
 func TestHandleGetReposETag(t *testing.T) {
 	hub := NewHub()
-	d := &DaemonConn{ID: "d1", Name: "desk"}
+	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk"}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"tool"})
 	hub.Register(d)
-	api := NewAPI(hub, nil, "", nil, "")
+	api := ownedInventoryAPI(t, hub, "", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
 
 	get := func(ifNoneMatch string) *httptest.ResponseRecorder {
@@ -254,7 +254,7 @@ func TestHandleGetReposETag(t *testing.T) {
 			req.Header.Set("If-None-Match", ifNoneMatch)
 		}
 		rec := httptest.NewRecorder()
-		api.HandleGetRepos(rec, req)
+		api.HandleGetRepos(&reviewDeadlineWriter{ResponseRecorder: rec}, req)
 		return rec
 	}
 

@@ -16,9 +16,10 @@ import (
 // DataPlaneConfig points the memory/rules/knowledge tools at the blerg-runner
 // server. Embedding happens server-side — no embedding key here.
 type DataPlaneConfig struct {
-	Base    string
-	Token   string
-	Project string
+	Base        string
+	Token       string
+	TokenSource func() string
+	Project     string
 }
 
 func (c DataPlaneConfig) call(ctx context.Context, method, path string, body any) ([]byte, error) {
@@ -34,7 +35,11 @@ func (c DataPlaneConfig) call(ctx context.Context, method, path string, body any
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	token := c.Token
+	if c.TokenSource != nil {
+		token = c.TokenSource()
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)

@@ -21,6 +21,13 @@ describe('checklist rows', () => {
     expect(checklistRowText({ items: [], op: 'clear' })).toBe('Checklist cleared')
   })
 
+  it('says when Blerg ticked an item itself because its card was done', () => {
+    const raw = { items: [{ text: 'Parser #12', done: true }], op: 'tick', changed: { index: 1, text: 'Parser #12', done: true }, note: 'ticked: #12 done' }
+    const p = readChecklist(raw)!
+    expect(p.note).toBe('ticked: #12 done')
+    expect(checklistRowText(p)).toBe('Checklist · 1 of 1 done · ticked “Parser #12” (Blerg: #12 done)')
+  })
+
   it('drops what is not a checklist', () => {
     expect(readChecklist({ items: 'x' })).toBeNull()
     expect(readChecklist({ items: [{ text: 1 }, { text: 'ok', done: 'yes' }], op: 'set' })).toEqual({ items: [{ text: 'ok', done: false }], op: 'set' })

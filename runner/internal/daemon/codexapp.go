@@ -290,7 +290,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	// diagnostics for recognized native login failures may reach the session.
 	cmd.Stderr = &codexAuthDiagnostic{emit: d.emit}
 	d.recordProjectMCP()
-	if err = cmd.Start(); err != nil {
+	if err = startEngineCommand(cmd, d.startCommand); err != nil {
 		d.emit("error", agent.ErrorPayload{Message: "Codex app-server could not start: " + err.Error(), Retryable: true})
 		return
 	}
@@ -304,7 +304,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	d.mu.Unlock()
 	defer func() {
 		_ = in.Close()
-		_ = cmd.Process.Kill()
+		_ = cancelEngineCommand(cmd, d.startCommand != nil)
 		_ = cmd.Wait()
 		d.prefix.clearTurnPID()
 		d.mu.Lock()
@@ -1131,7 +1131,7 @@ func (a *codexApp) stop() {
 	same := a.d.app == a
 	a.d.mu.Unlock()
 	if same && cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		_ = cancelEngineCommand(cmd, a.d.startCommand != nil)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 var errSessionOriginUnavailable = errors.New("session origin unavailable")
 
 type sessionOriginWaiter struct {
+	ref       protocol.WorkspaceGitRef
 	dc        *DaemonConn
 	sessionID string
 	ch        chan protocol.SessionOriginResult
@@ -23,9 +24,17 @@ type sessionOriginRequests struct {
 	pending map[string]sessionOriginWaiter
 }
 
-func (h *Hub) requestSessionOrigin(ctx context.Context, dc *DaemonConn, sid string) (protocol.SessionOriginResult, error) {
+func (h *Hub) requestSessionOrigin(ctx context.Context, dc *DaemonConn, sid string, refs ...protocol.WorkspaceGitRef) (protocol.SessionOriginResult, error) {
+	ref := protocol.WorkspaceGitRef{}
+	if len(refs) > 0 {
+		ref = refs[0]
+	}
+	ref, err := h.qualifyWorkspaceGit(ctx, sid, ref)
+	if err != nil {
+		return protocol.SessionOriginResult{}, err
+	}
 	id := newUUID()
-	w := sessionOriginWaiter{dc: dc, sessionID: sid, ch: make(chan protocol.SessionOriginResult, 1)}
+	w := sessionOriginWaiter{ref: ref, dc: dc, sessionID: sid, ch: make(chan protocol.SessionOriginResult, 1)}
 	r := &h.sessionOriginReqs
 	r.mu.Lock()
 	count := 0
@@ -48,7 +57,7 @@ func (h *Hub) requestSessionOrigin(ctx context.Context, dc *DaemonConn, sid stri
 	r.pending[id] = w
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
-	raw, _ := json.Marshal(protocol.ReadSessionOrigin{Type: "read_session_origin", RequestID: id, SessionID: sid})
+	raw, _ := json.Marshal(protocol.ReadSessionOrigin{WorkspaceGitRef: ref, Type: "read_session_origin", RequestID: id, SessionID: sid})
 	if h.FindDaemonForSession(sid) != dc || !h.trySendToDaemon(dc, raw) {
 		return protocol.SessionOriginResult{}, errSessionOriginUnavailable
 	}
@@ -74,7 +83,7 @@ func (h *Hub) deliverSessionOriginResult(dc *DaemonConn, res protocol.SessionOri
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	w, ok := r.pending[res.RequestID]
-	if !ok || w.dc != dc || w.sessionID != res.SessionID {
+	if !ok || w.dc != dc || w.sessionID != res.SessionID || w.ref != res.WorkspaceGitRef {
 		return
 	}
 	delete(r.pending, res.RequestID)
@@ -94,6 +103,9 @@ func (h *Hub) abandonSessionOriginRequests(dc *DaemonConn) {
 
 // readSessionOrigin is internal to authenticated filing: no agent-supplied commit or folder.
 func (a *API) readSessionOrigin(ctx context.Context, sid string) (string, error) {
+	return a.readSessionOriginRef(ctx, sid, protocol.WorkspaceGitRef{})
+}
+func (a *API) readSessionOriginRef(ctx context.Context, sid string, ref protocol.WorkspaceGitRef) (string, error) {
 	if a.dbPool == nil || a.hub == nil {
 		return "", errSessionOriginUnavailable
 	}
@@ -107,7 +119,7 @@ func (a *API) readSessionOrigin(ctx context.Context, sid string) (string, error)
 	if dc == nil || dc.ID != row.DaemonID || (dc.BoundSessionID != "" && dc.BoundSessionID != sid) {
 		return "", errSessionOriginUnavailable
 	}
-	result, err := a.hub.requestSessionOrigin(ctx, dc, sid)
+	result, err := a.hub.requestSessionOrigin(ctx, dc, sid, ref)
 	if err != nil {
 		return "", err
 	}
@@ -123,6 +135,9 @@ func (a *API) readSessionOrigin(ctx context.Context, sid string) (string, error)
 	}
 	current, err := db.GetSession(ctx, a.dbPool, sid)
 	if err != nil || current == nil || current.DaemonID != dc.ID || terminalSessionStatus(current.Status) || current.Status == "disconnected" {
+		return "", errSessionOriginUnavailable
+	}
+	if !a.hub.currentWorkspaceGit(ctx, sid, result.WorkspaceGitRef) {
 		return "", errSessionOriginUnavailable
 	}
 	return result.Commit, nil

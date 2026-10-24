@@ -167,7 +167,7 @@
         ],
         "operationId": "getSessionWorkspaceFile",
         "summary": "Open a live session workspace file (human owner or administrator only)",
-        "description": "Browser-only primitive: a signed-in human owning the session or carrying account.manage may read one relative file through the current daemon. Public transcript visibility grants no access. Agent, service and operator credentials are refused. Resolves symlinks inside the workspace, refuses secret-looking files and nonregular files. Text/code limit defaults to 2 MiB, image/PDF limit to 25 MiB; configured limits cannot exceed 25 MiB. Oversized files return 413 without partial content. Missing or old daemons return 409 after a daemon wait capped at 10 seconds, with up to one additional second to write the small refusal response. Nothing is stored in the transcript.",
+        "description": "Browser-only primitive: a signed-in human owning the session or carrying account.manage may read one file through the current daemon, relative to the launch working directory or absolute inside it (including a sandbox's /workspace mount). Public transcript visibility grants no access. Agent, service and operator credentials are refused. Resolves symlinks inside the workspace, refuses secret-looking files and nonregular files. Text/code limit defaults to 2 MiB, image/PDF limit to 25 MiB; configured limits cannot exceed 25 MiB. Oversized files return 413 without partial content. Missing or old daemons return 409 after a daemon wait capped at 10 seconds, with up to one additional second to write the small refusal response. Nothing is stored in the transcript.",
         "security": [
           {
             "humanSession": []
@@ -191,7 +191,7 @@
               "type": "string",
               "maxLength": 4096
             },
-            "description": "Relative workspace path; absolute paths, tilde, backslashes, NUL and parent traversal are refused."
+            "description": "Workspace-relative path or absolute path inside the launch working directory. The daemon maps sandbox /workspace paths to the session clone. Paths outside that directory, tilde, backslashes, NUL and parent traversal are refused."
           }
         ],
         "responses": {
@@ -1458,7 +1458,7 @@
       },
       "Result": {
         "type": "object",
-        "required": ["session_id", "lifecycle", "terminal", "runtime", "repo", "branch", "artifacts"],
+        "required": ["session_id", "lifecycle", "terminal", "runtime", "repo", "branch", "artifacts", "workspace_results"],
         "properties": {
           "session_id": { "type": "string", "format": "uuid" },
           "lifecycle": { "$ref": "#/components/schemas/Lifecycle" },
@@ -1467,6 +1467,8 @@
           "repo": { "type": "string" },
           "git_url": { "type": "string" },
           "branch": { "type": "string", "description": "`wip/<session_id>`: pushed to the repository's remote by a cluster session; for any sandboxed session (a child or not), the branch fetched from its own clone into the repository on its desktop. Empty for a host session or a session with no repository." },
+          "workspace": { "type": "object", "description": "Authorized immutable launch manifest with member IDs, paths, provider/destination and launch_generation. Omitted when source metadata is not authorized." },
+          "workspace_results": { "type": "array", "description": "Persisted outcomes qualified by member_id and launch_generation. Folder scalar repo, git_url and branch remain empty. Recovery locations require the exact desktop recipient.", "items": { "type": "object", "required": ["member_id", "launch_generation", "base", "head", "branch"], "properties": { "member_id": { "type": "string" }, "launch_generation": { "type": "string" }, "base": { "type": "string" }, "head": { "type": "string" }, "branch": { "type": "string" }, "sync_error": { "type": "string" }, "push_error": { "type": "string" }, "pending": { "type": "boolean" }, "recovery_location": { "type": "string" } } } },
           "last_assistant_message": { "type": "string", "description": "The last text the agent wrote in its last turn (the one in progress, while one is). Empty when that turn wrote none or failed." },
           "error_reason": { "type": "string", "description": "Why the session failed; else, when its last turn failed, why that turn did." },
           "end_reason": { "$ref": "#/components/schemas/EndReason" },

@@ -18,6 +18,14 @@ FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad
 
 FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node
 
+FROM go AS shell-builder
+WORKDIR /src
+COPY contracts/ /src/contracts/
+COPY runner/ /src/runner/
+WORKDIR /src/runner
+RUN GOWORK=off CGO_ENABLED=0 go build -o /out/blerg-shell-supervisor ./cmd/shell-supervisor \
+    && GOWORK=off CGO_ENABLED=0 go build -o /out/blerg-workspace-explorer ./cmd/workspace-explorer
+
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,7 +48,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # it there (`npm install --package-lock-only` refreshes the lockfile) and
 # rebuild. Linked into /usr/local/bin so they are on PATH in every kind of
 # shell.
-COPY engines/package.json engines/package-lock.json /opt/blerg-engines/
+COPY runner/sandbox/engines/package.json runner/sandbox/engines/package-lock.json /opt/blerg-engines/
 RUN cd /opt/blerg-engines && npm ci --omit=dev --no-audit --no-fund \
     && ln -s /opt/blerg-engines/node_modules/.bin/claude /usr/local/bin/claude \
     && ln -s /opt/blerg-engines/node_modules/.bin/codex /usr/local/bin/codex \
@@ -59,11 +67,16 @@ ENV PATH="/home/agent/.local/bin:${PATH}"
 # Hermes is the odd one out: not an npm package but a source checkout set up
 # by its own installer, so it runs as a build step, as the session user.
 # install-hermes.sh pins the release and says what is and is not pinned.
-COPY install-hermes.sh /opt/blerg-engines/install-hermes.sh
+COPY runner/sandbox/install-hermes.sh /opt/blerg-engines/install-hermes.sh
 RUN /opt/blerg-engines/install-hermes.sh
 
 COPY --from=go /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Keep trusted helper copies after the engine/toolchain layers: rebuilding a
+# runtime adapter should not reinstall the pinned engine dependencies.
+COPY --from=shell-builder /out/blerg-shell-supervisor /usr/local/bin/blerg-shell-supervisor
+COPY --from=shell-builder /out/blerg-workspace-explorer /usr/local/bin/blerg-workspace-explorer
 
 WORKDIR /workspace
 

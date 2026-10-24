@@ -3,7 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -35,5 +38,24 @@ func TestBashEnvUsesGivenEnvironmentOnly(t *testing.T) {
 	}
 	if !strings.Contains(out, "host-only-secret") {
 		t.Fatalf("Bash(nil env) should inherit the host env; output = %q", out)
+	}
+}
+
+func TestBashEnvOwnedStartBoundary(t *testing.T) {
+	dir := t.TempDir()
+	denied := errors.New("writer journal unavailable")
+	calls := 0
+	tool := BashEnvWithStart(dir, nil, func(*exec.Cmd) error { calls++; return denied })
+	_, err := tool.Execute(t.Context(), json.RawMessage(`{"command":"echo unsafe > started"}`))
+	if !errors.Is(err, denied) || calls != 1 {
+		t.Fatal("BASH_START_BOUNDARY: command bypassed owned start", err, calls)
+	}
+	if _, err = os.Stat(filepath.Join(dir, "started")); !os.IsNotExist(err) {
+		t.Fatal("unrecorded command executed")
+	}
+	tool = BashEnvWithStart(dir, nil, func(cmd *exec.Cmd) error { calls++; return cmd.Start() })
+	out, err := tool.Execute(t.Context(), json.RawMessage(`{"command":"printf ready"}`))
+	if err != nil || out != "ready" || calls != 2 {
+		t.Fatal("owned start did not execute", out, err, calls)
 	}
 }

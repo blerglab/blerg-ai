@@ -19,8 +19,9 @@ import (
 
 // PublishConfig points the publishing tools at the blerg-runner server.
 type PublishConfig struct {
-	Base  string // server HTTP base
-	Token string // daemon token
+	Base        string        // server HTTP base
+	Token       string        // legacy operator credential
+	TokenSource func() string // current session-scoped credential
 }
 
 const maxPublishUpload = 20 << 20
@@ -55,7 +56,11 @@ func postPublish(ctx context.Context, cfg PublishConfig, path, contentType strin
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	token := cfg.Token
+	if cfg.TokenSource != nil {
+		token = cfg.TokenSource()
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", contentType)
 	resp, err := publishClient().Do(req)
 	if err != nil {

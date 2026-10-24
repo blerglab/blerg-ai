@@ -10,9 +10,11 @@ const CONFIG = {
   maxEdges: 500,
   htmlLabels: false,
   flowchart: { htmlLabels: false },
+  // Journey defaults to foreignObject labels even with global htmlLabels disabled.
+  journey: { textPlacement: 'tspan' },
   fontFamily: 'sans-serif',
   secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'maxEdges',
-    'suppressErrorRendering', 'htmlLabels', 'flowchart', 'themeCSS', 'fontFamily', 'theme', 'themeVariables'],
+    'suppressErrorRendering', 'htmlLabels', 'flowchart', 'journey', 'themeCSS', 'fontFamily', 'theme', 'themeVariables'],
 }
 
 // One diagram at a time: the frame keeps Mermaid's global configuration (the theme) between
@@ -47,6 +49,8 @@ async function drawMermaid(source: string, container: HTMLElement, theme: Visual
     throw new Error(`the drawn diagram was refused (${error instanceof Error ? error.message : 'unsupported SVG'})`, { cause: error })
   }
   const safe = new DOMParser().parseFromString(clean, 'image/svg+xml').documentElement
+  const failed = safe.querySelector('text.error-text')
+  if (failed) throw new Error(mermaidReason(failed.textContent || 'Mermaid could not draw it'))
   const bounds = safe.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number)
   if (bounds?.length === 4 && bounds.every(Number.isFinite) && bounds[2] > 0 && bounds[3] > 0) {
     // A percentage SVG width gives an <img> the browser's 300px fallback,

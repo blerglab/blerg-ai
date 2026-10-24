@@ -93,7 +93,7 @@ func (h *AgentHost) keepRecord(msg protocol.SpawnSession, workDir, model string,
 // Freeze stops every recovery-record write. It is the daemon's first act when it is told to
 // stop: the engines are stopped with it, each driver then reports its turn over, and that
 // report must not erase the "a turn was running" the next daemon needs to see.
-func (h *AgentHost) Freeze() { h.frozen.Store(true) }
+func (h *AgentHost) Freeze() { h.explorer.Close(); h.frozen.Store(true) }
 
 // DropRecord forgets a session this daemon is not hosting: a stop that arrived for a session
 // that was never adopted, or before it could be (it is then not brought back at all).

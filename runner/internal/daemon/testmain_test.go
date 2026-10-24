@@ -18,6 +18,15 @@ import (
 // ignores stdin, so the package runs with the kill switch on. The steering tests build their driver with
 // newSteeringDriver, which turns the streaming engine on for that one driver.
 func TestMain(m *testing.M) {
+	if workspaceRound2CrashMain(os.Args[1:]) {
+		os.Exit(0)
+	}
+	if workspaceCrashTestMain(os.Args[1:]) {
+		os.Exit(0)
+	}
+	if WorkspaceWorkerMain(os.Args[1:]) {
+		os.Exit(0)
+	}
 	_ = os.Setenv("BLERG_CLAUDE_STEERING", "0")
 	// No test starts a CLI to read its --help: the fake would take it for a session. Tests of the
 	// flag probe replace this themselves.

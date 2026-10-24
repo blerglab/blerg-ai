@@ -164,14 +164,14 @@ func (a *API) HandlePostMessages(w http.ResponseWriter, r *http.Request) {
 		// A question the owner alone answers notifies the owner alone: every other viewer gets it
 		// quiet and not answerable (they see it read-only in the session).
 		owner := derefOrEmpty(sess.SpawningAccountID)
-		a.hub.BroadcastJSONPerAccount(func(account string) any {
+		a.hub.BroadcastJSONPerAccount(func(account string) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 			mine := owner != "" && account == owner
 			view := info
 			view.Answerable = mine
 			return protocol.MessageCreated{Type: "message_created", Message: view, Quiet: quiet || !mine}
 		})
 	} else {
-		a.hub.BroadcastJSON(protocol.MessageCreated{Type: "message_created", Message: info, Quiet: quiet})
+		a.hub.BroadcastJSON(protocol.MessageCreated{Type: "message_created", Message: info, Quiet: quiet}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	}
 	if row.Kind == "ask" {
 		// A question is its own notice: a deferred idle notice would only repeat it.
@@ -464,7 +464,7 @@ func (a *API) replyMessageUnlocked(w http.ResponseWriter, r *http.Request, id st
 	// A question the agent did not wait on: the answer goes to it as a message (questions.go).
 	a.hub.QuestionAnswered(*row, req.Answer, answerer)
 
-	a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)})
+	a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
 }
 
@@ -567,7 +567,7 @@ func (a *API) HandlePostMessageExpire(w http.ResponseWriter, r *http.Request) {
 		if err != nil || row == nil {
 			log.Printf("api expire reload %s: %v", id, err)
 		} else {
-			a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)})
+			a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 			a.hub.ChildActivity(row.SessionID)
 		}
 	}

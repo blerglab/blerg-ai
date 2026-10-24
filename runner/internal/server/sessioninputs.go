@@ -148,14 +148,15 @@ func repairEndedSessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool, s
 
 // True session endings settle every durable bubble with a visible failure.
 // Revivable errors and daemon disconnects deliberately do not call this helper.
-func failPendingSessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID string) {
+func failPendingSessionInputsChecked(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID string) error {
+	var combined error
 	if pool == nil {
-		return
+		return nil
 	}
 	pending, err := db.PendingSessionInputs(ctx, pool, sessionID)
 	if err != nil {
 		log.Printf("ended session inputs %s: %v", sessionID, err)
-		return
+		return err
 	}
 	for _, input := range pending {
 		var msg protocol.AgentUserMessage
@@ -167,12 +168,14 @@ func failPendingSessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool, s
 		seq, fresh, err := db.FailSessionInput(ctx, pool, sessionID, msg.ClientID, eventID, string(payload))
 		if err != nil {
 			log.Printf("settle ended session input %s: %v", sessionID, err)
+			combined = errors.Join(combined, err)
 			continue
 		}
 		if fresh {
 			fanOutServerEvent(h, sessionID, eventID, "error", payload, seq, time.Now())
 		}
 	}
+	return combined
 }
 
 func (dc *DaemonConn) CanInputReceipts() bool {
@@ -199,4 +202,8 @@ func sessionInputAPIError(err error) *APIError {
 		status = http.StatusTooManyRequests
 	}
 	return apiErrorf(status, "%s", sessionInputError(err))
+}
+
+func failPendingSessionInputs(ctx context.Context, hub *Hub, pool *pgxpool.Pool, sessionID string) {
+	_ = failPendingSessionInputsChecked(ctx, hub, pool, sessionID)
 }

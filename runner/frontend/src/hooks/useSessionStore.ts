@@ -1,3 +1,6 @@
+import { clearHovercardCache, clearPreviewCache, useTranscriptStore } from '@blerglab/chat'
+import { invalidateChatTransport } from '../lib/chatTransport'
+import { clearLaunchCache } from '../lib/launchCache'
 import { create } from 'zustand'
 import type { DaemonInfo, SessionInfo, SessionStatus, InitialState, DaemonConnected, DaemonDisconnected, SessionStarted, SessionStateChanged, SessionReadChanged, SessionStarChanged, SessionMetaChanged, SessionTitleChanged, SessionEnded, SessionArchived, SessionBackgroundChanged, SessionPausedChanged, SessionNotice, DaemonLimitsChanged } from '../types'
 import { onMessage } from '../ws'
@@ -48,9 +51,65 @@ interface SessionStore {
   clearPaused: (sessionId: string) => void
 }
 
+// A scope loss invalidates automatic source metadata even in transcripts whose
+// sidebar row is no longer loaded. Keep conversation prose, but replay from zero
+// so the server can replace the source events under the new authority.
+function invalidateDesktopTranscripts() {
+  invalidateChatTransport()
+  useTranscriptStore.setState(state => ({ sessions: Object.fromEntries(
+    Object.entries(state.sessions).map(([id, transcript]) => [id, {
+      ...transcript,
+      events: transcript.events.filter(e => !['capabilities', 'delegation_request', 'start_stage'].includes(e.kind)),
+      lastSeq: 0, firstSeq: 0, replayCursor: undefined,
+      replayDone: false, hasMore: false, hasOlder: false,
+    }]),
+  ) }))
+}
+
 export const useSessionStore = create<SessionStore>((set, get) => {
+  window.addEventListener('blerg-identity-changed', () => {
+    invalidateChatTransport()
+    useTranscriptStore.setState({ sessions: {} })
+    clearLaunchCache()
+    set({ daemons: [], sessions: [], pendingSessionIds: {}, failedSessions: {} })
+    clearHovercardCache()
+    clearPreviewCache()
+    window.dispatchEvent(new Event('blerg-desktop-scope-changed'))
+  })
+  onMessage<import('../types').DesktopSourcesChanged>('desktop_sources_changed', () => {
+    invalidateDesktopTranscripts()
+    clearLaunchCache()
+    clearHovercardCache()
+    clearPreviewCache()
+    window.dispatchEvent(new Event('blerg-desktop-scope-changed'))
+  })
+  onMessage<import('../types').DesktopOwnershipChanged>('desktop_ownership_changed', msg => {
+    invalidateDesktopTranscripts()
+    clearLaunchCache()
+    set(state => ({ failedSessions: {}, daemons: state.daemons.filter(d => d.id !== msg.desktop_id),
+      sessions: state.sessions.map(s => s.daemon_id === msg.desktop_id
+        ? { ...s, daemon_id: '', project_path: '', repo: '', workspace: undefined, workspace_results: undefined, error_reason: undefined, message: undefined } : s) }))
+    clearHovercardCache()
+    clearPreviewCache()
+    window.dispatchEvent(new Event('blerg-desktop-scope-changed'))
+  })
+  onMessage<import('../types').DesktopInventoryInvalidated>('desktop_inventory_invalidated', () => {
+    invalidateDesktopTranscripts()
+    set(state => ({ failedSessions: {}, daemons: [], sessions: state.sessions.map(s => ({ ...s, daemon_id: '', project_path: '', repo: '', workspace: undefined, workspace_results: undefined, error_reason: undefined, message: undefined })) }))
+    // Metadata-free hint: refresh only our own inventory, never borrow the
+    // administrator's assignment list for launch discovery.
+    clearLaunchCache()
+    clearHovercardCache()
+    clearPreviewCache()
+    window.dispatchEvent(new Event('blerg-desktop-scope-changed'))
+  })
   // Register WS handlers once at store creation time
   onMessage<InitialState>('initial_state', (msg) => {
+    invalidateDesktopTranscripts()
+    clearLaunchCache()
+    clearHovercardCache()
+    clearPreviewCache()
+    window.dispatchEvent(new Event('blerg-desktop-scope-changed'))
     const now = Date.now()
     const statusChangedAt: Record<string, number> = {}
     for (const s of msg.sessions) {

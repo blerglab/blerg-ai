@@ -184,6 +184,7 @@ func (a *API) HandleRunnerMe(w http.ResponseWriter, r *http.Request) {
 func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
 	// Documented browser integration primitive; its own handler refuses every non-human credential.
 	a.RegisterWorkspaceFileRoutes(mux)
+	a.RegisterDesktopRoutes(mux)
 	// Discovery: public, no auth (see HandleAgents).
 	mux.HandleFunc("GET /agents", a.HandleAgents)
 	mux.HandleFunc("GET /openapi.json", handleOpenAPI)

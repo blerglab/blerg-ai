@@ -33,7 +33,7 @@ build-frontend:
 
 .PHONY: test
 test:
-	$(GO) test -timeout 30m ./...
+	$(GO) test -p 1 -timeout 45m ./...
 
 # ── docker ─────────────────────────────────────────────────────────────────────
 

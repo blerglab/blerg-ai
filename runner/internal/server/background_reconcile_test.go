@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/desktopauth"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/gorilla/websocket"
@@ -21,7 +22,10 @@ func backgroundHelloBarrier(t *testing.T, fx *topicFx, srvURL string, inventory 
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	hello := map[string]any{"type": "daemon_hello", "name": "laptop", "mode": "local", "token": topicDaemonToken, "active_sessions": []string{fx.sess}, "protocol_version": "1"}
+	ownedToken := "bdt_" + strings.Repeat("b", 64)
+	binding := desktopauth.Binding{DesktopID: topicDaemonID, OwnerID: topicOwner, Revision: 1, TokenID: newUUID(), ExpiresAt: time.Now().Add(time.Hour)}
+	desktopFakeCore(t, fx.api, map[string]desktopauth.Binding{ownedToken: binding})
+	hello := map[string]any{"type": "daemon_hello", "name": "laptop", "mode": "local", "token": ownedToken, "desktop_id": topicDaemonID, "active_sessions": []string{fx.sess}, "protocol_version": "1"}
 	if inventory != nil {
 		hello["background_task_inventory"] = inventory
 	}

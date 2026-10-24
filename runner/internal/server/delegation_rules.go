@@ -5,6 +5,7 @@ package server
 // rows; changes need a login with a sid, like a decision.
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -38,7 +39,7 @@ type delegationRuleView struct {
 
 type delegationLimitsView struct {
 	PerParentRunning        int `json:"per_parent_running"`
-	PerParentStarts         int `json:"per_parent_starts"`
+	PerParentStartsPerHour  int `json:"per_parent_starts_per_hour"`
 	PerAccountRunning       int `json:"per_account_running"`
 	PerAccountStartsPerHour int `json:"per_account_starts_per_hour"`
 }
@@ -53,8 +54,9 @@ func ruleView(r db.DelegationRule) delegationRuleView {
 		LocalOnly: r.LocalOnly, CreatedVia: r.CreatedVia, CreatedAt: r.CreatedAt}
 }
 
-func delegationLimits() delegationLimitsView {
-	return delegationLimitsView{PerParentRunning: maxRunningChildrenPerParent, PerParentStarts: maxStartsPerParent,
+func (a *API) delegationLimits(ctx context.Context) delegationLimitsView {
+	limits := a.effectiveChildLimits(ctx)
+	return delegationLimitsView{PerParentRunning: limits.parallel, PerParentStartsPerHour: limits.hourly,
 		PerAccountRunning: maxRunningChildrenPerAccount, PerAccountStartsPerHour: maxStartsPerAccountPerHour}
 }
 
@@ -90,7 +92,7 @@ func (a *API) HandleGetDelegationRules(w http.ResponseWriter, r *http.Request) {
 		writeDatabaseFailure(w, "list the rules", "delegation ListDelegationRules", err)
 		return
 	}
-	out := delegationRulesReply{Rules: make([]delegationRuleView, 0, len(rules)), Limits: delegationLimits()}
+	out := delegationRulesReply{Rules: make([]delegationRuleView, 0, len(rules)), Limits: a.delegationLimits(r.Context())}
 	for _, rule := range rules {
 		out.Rules = append(out.Rules, ruleView(rule))
 	}
@@ -140,7 +142,8 @@ func (a *API) HandlePostDelegationRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, engineLabel(desc.ID)+" does not run in "+body.Runtime)
 		return
 	}
-	if body.Runtime == runnerRuntimeCluster {
+	switch {
+	case body.Runtime == runnerRuntimeCluster:
 		if a.hub.JobManager() == nil {
 			writeError(w, http.StatusUnprocessableEntity, "this install has no cluster")
 			return
@@ -155,16 +158,14 @@ func (a *API) HandlePostDelegationRule(w http.ResponseWriter, r *http.Request) {
 			writeDatabaseFailure(w, "check the daemon", "delegation cluster daemon", err)
 			return
 		}
-	} else if !validSessionID(body.DaemonID) || body.DaemonID == clusterDaemonID {
+	case !validSessionID(body.DaemonID) || body.DaemonID == clusterDaemonID:
 		writeError(w, http.StatusUnprocessableEntity, "unknown daemon")
 		return
-	} else if _, host, err := db.HostDaemonName(r.Context(), a.dbPool, body.DaemonID); err != nil {
-		writeDatabaseFailure(w, "check the daemon", "delegation HostDaemonName", err)
-		return
-	} else if !host {
+	case !a.hub.ownsDesktopID(r.Context(), account, body.DaemonID):
 		writeError(w, http.StatusUnprocessableEntity, "unknown daemon")
 		return
 	}
+
 	localOnly := defaultLocalOnly(desc.ID)
 	if body.LocalOnly != nil {
 		localOnly = *body.LocalOnly

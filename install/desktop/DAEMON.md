@@ -25,7 +25,9 @@ it: [`docs/backup-and-restore.md`](../../docs/backup-and-restore.md).
 
 `install/desktop/.env`, the systemd unit (`~/.config/systemd/user/blerg-runner-daemon.service`),
 and the launchd plist (`~/Library/LaunchAgents/dev.blerg.runner-daemon.plist`)
-all hold the daemon token and, if you gave one, your Claude OAuth token. Both
+hold private install configuration and, if you gave one, your Claude OAuth token.
+Person-issued desktop credentials live only in the private daemon state file; the
+new service loads that file rather than copying its token into the environment. Both
 installer scripts `umask 077` before writing anything, and the unit/plist are
 additionally `chmod 600` right after being rendered — so all three end up
 owner-read/write-only (`0600`), not group- or world-readable. This is enforced
@@ -492,7 +494,7 @@ be accepted and then fail inside the container.
 installer does:
 
 ```
-docker build --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest runner/sandbox
+docker build -f runner/sandbox/Dockerfile --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest .
 ```
 
 (`runner/sandbox/Dockerfile` — debian + git/node/python/build tools + all
@@ -880,6 +882,98 @@ detects it and prints the fix: add `[boot]` and `systemd=true` (two lines) to
 `/etc/wsl.conf`, run `wsl --shutdown` from Windows, reopen the distribution and
 re-run `./blerg-up.sh`.
 
+### WSL2: return after Windows restart
+
+There are two separate startup steps. The enabled systemd user service plus
+**lingering** starts the daemon when the distro boots, without a Linux login.
+Windows must also start the distro after sign-in. Systemd services alone
+[do not keep WSL alive](https://learn.microsoft.com/en-us/windows/wsl/systemd).
+
+During interactive setup, the installer offers an optional Windows logon task
+(default **No**). Noninteractive setup prints the opt-in command; `--yes` only
+confirms replacing a busy daemon and does not opt in to Windows startup.
+From `install/desktop` inside the distro, as your normal Linux account:
+
+```bash
+./daemon/install.sh wsl-startup enable   # opt in, without restarting the daemon
+./daemon/install.sh wsl-startup status   # task name, state, result, log location
+./daemon/install.sh wsl-startup disable  # remove this account/distro's task
+# Or opt in while installing/upgrading the daemon:
+./daemon/install.sh install --wsl-startup
+```
+
+**Disclosure:** enabling creates one `Blerg-WSL-<id>` task in Windows Task
+Scheduler for the current Windows account, distro, and Linux account. PowerShell
+runs without a profile and with a process-scoped execution-policy bypass;
+organization policy still applies. The task runs at that Windows account's
+sign-in, without elevation or a stored password,
+and starts immediately on opt-in. A hidden Windows PowerShell process runs
+`wsl.exe --distribution <distro> --user <linux-account> --exec /bin/sleep infinity`.
+This keeps the distro and its background services running while signed in,
+**including on battery**, even after you close all terminals. It uses resources
+until Windows sign-out/shutdown or you disable the task. It does not edit
+`.wslconfig`, Windows Startup folders, or WSL boot configuration.
+
+The task's self-contained worker and bounded startup logs live under
+`%LOCALAPPDATA%\Blerg\wsl\<id>\`. They contain no Blerg credentials. The
+worker is stored on Windows so it can start before the distro is running;
+it does not depend on the source checkout at sign-in. Re-running enable updates
+the same task and worker. Task settings and a worker lock prevent duplicates.
+A running worker picks up script updates at its next start/sign-in. Disable is
+idempotent and retains logs; it does not stop the daemon or terminate WSL.
+Daemon uninstall removes this task first; if Windows is inaccessible, fix interop
+and retry uninstall, or delete the exact task shown by `wsl-startup status` in
+Windows Task Scheduler before removing the Linux service.
+
+**Prerequisites:** WSL2 with systemd support (WSL 0.67.6 or newer; run
+`wsl --version` in Windows and `wsl --update` if needed), systemd enabled in
+`/etc/wsl.conf`, an enabled daemon unit, and `Linger=yes` from
+`loginctl show-user "$(id -u)" -p Linger`. If needed, run
+`sudo loginctl enable-linger "$(id -un)"` once; enabling the Windows task refuses
+to proceed without lingering. The distro needs `/bin/sleep` with `infinity`
+support (standard on Ubuntu/Debian), Windows interop (`powershell.exe` and
+`wslpath` on PATH), Windows PowerShell 5.1 with ScheduledTasks, and permission
+to create your own interactive logon task. Start from the Windows account that
+owns the registered distro. Distro names support letters, numbers, spaces,
+dots, underscores, and hyphens (starting with a letter or number); other names
+need a manually configured startup task.
+
+**Recovery and diagnostics:** the Windows worker retries every 15 seconds after
+WSL startup errors or exits, including a deliberate WSL shutdown. To keep WSL
+stopped for maintenance, disable the task first. Task Scheduler also retries a
+failed worker every minute (up to 999 times), without its default execution
+time limit or battery restrictions. Check `wsl-startup status`, Task Scheduler's
+History/last result, and the printed `startup.log` location for WSL errors.
+`0x41301` (267009) means the keep-alive task is running; it does not confirm the
+daemon connected. Once the distro is running, check:
+
+```bash
+systemctl --user is-enabled blerg-runner-daemon
+loginctl show-user "$(id -u)" -p Linger
+./daemon/install.sh status
+journalctl --user -u blerg-runner-daemon -b --no-pager
+```
+
+The daemon unit retries process startup failures every 15 seconds without a
+start rate limit. The daemon independently reconnects with exponential backoff
+when the runner/network is unavailable, and reports its connection state in
+`install.sh status`. A local Docker Desktop/Compose server must also start at
+Windows sign-in (or start the server yourself); this task starts only the WSL
+distro. A remote runner needs working network/DNS/VPN. Token refusal needs the
+correct daemon token in `.env` and a service reinstall; retries cannot fix it.
+
+**Unsupported configurations:** WSL1 or WSL without systemd needs migration to
+WSL2/systemd or the manual terminal daemon below. If interop or Windows PATH
+import is disabled, enable `[interop] enabled=true` and `appendWindowsPath=true`
+in `/etc/wsl.conf` and restart WSL at a safe time, or run the copied
+`wsl-startup.ps1 -Action enable -Distro "<distro>" -LinuxUser "<account>"` from
+Windows PowerShell as the distro's Windows owner. If organization policy blocks
+PowerShell or Task Scheduler, ask your administrator to provision an equivalent
+interactive logon task that keeps a foreground WSL process alive. Without it,
+start the distro manually after sign-in. Running before Windows sign-in or after
+sign-out is not supported by this integration; use a separate always-on Linux
+host for that requirement. Do not run setup as root or elevate the whole installer.
+
 ### Failed to connect to bus
 
 There are two different causes, and `blerg-up.sh` tells them apart:
@@ -991,7 +1085,7 @@ process id; never a token. Only the daemon that owns the state directory writes 
 started by hand does not), and a session pod in a cluster never writes one.
 
 **What the installer checks.** `install.sh install` (and `blerg-up.sh`, which runs it) asks the
-server whether it accepts the token from `install/desktop/.env` before it replaces the running
+server whether it accepts the enrolled credential before it replaces the running
 daemon (`GET /api/daemon/whoami`; the token goes to `curl` in a private header file, never on a
 command line, and is never printed):
 
@@ -1007,35 +1101,23 @@ daemon's `connection.json`; a file the replaced daemon left is not taken as the 
 a warning only, with the command to read the daemon's log; it never waits for a key press.
 
 `blerg-up.sh` exits 6 too when the daemon token was refused: the stack is up, but the daemon is
-not connected, and its last box says to fix the token in `.env` and run `./daemon/install.sh
-install`. The installer's messages never show a `user:password@` part of the server URL, and its
+not connected, and its last box says to enroll the desktop for its recorded owner and
+run `./daemon/install.sh install`. The installer's messages never show a `user:password@` part of the server URL, and its
 check ignores your `~/.curlrc`.
 
 ### The server refused the daemon token
 
-The daemon logs a line that starts with `daemon: REFUSED:` (`the server at ... refused the daemon
-token (close 4401)`), and `install.sh` says `the server refused this daemon token`. The token the
-daemon presents is not the server's `BLERG_RUNNER_DAEMON_TOKEN`.
+The daemon reports close 4401 when its credential is expired, revoked or bound to an
+old desktop owner/revision. Enroll again for the persisted owner, then rerun
+`./daemon/install.sh install`. The private credential is
+`~/.blerg-runner-daemon/desktop-credential.json`; the daemon prefers it over environment
+credentials. See [Desktop ownership](../../docs/desktop-ownership.md) for hosted
+issuance, admin assignment and the installer-account/first-admin upgrade path.
 
-Where the daemon's token comes from: the installed service's environment
-(`Environment=BLERG_RUNNER_DAEMON_TOKEN` in the systemd unit, or the launchd plist), which
-`install.sh install` copies from `BLERG_RUNNER_DAEMON_TOKEN` in `install/desktop/.env`. A daemon
-you started by hand in a terminal takes it from that shell.
-
-Common causes:
-
-- **A daemon connected to a cluster** (`BLERG_RUNNER_SERVER_URL` is `wss://runner.<DOMAIN>/ws/daemon`):
-  the token in `.env` is not the one in the cluster's `blerg-secrets`, for example after the
-  cluster's secrets were generated again. Put the cluster's value in `.env` (see
-  [Connecting the workstation daemon](../k8s/README.md#connecting-the-workstation-daemon)), then
-  run `./daemon/install.sh install`.
-- **The desktop stack on this machine**: its runner reads the same `.env`, so the runner container
-  is running with an older token. `./blerg-up.sh` starts it again with the current `.env` and then
-  reinstalls the daemon.
-
-A refused daemon keeps trying, more and more slowly (from 2 seconds up to once a minute), so it
-connects by itself once the server has the matching token. When the token in `.env` was the wrong
-one, the daemon needs the new value in its service: run `./daemon/install.sh install`.
+A refused daemon retries with backoff, but an obsolete credential cannot become valid
+by reconnecting. Do not copy the install-wide server secret to repair a person-owned
+desktop. The explicit legacy compatibility switch supports unowned desktops during
+0.5 only and is removed in 0.6.
 
 ## Verifying an engine actually works
 
@@ -1071,7 +1153,7 @@ prints the exact commands to run the daemon in a foreground terminal instead:
 
 ```
 export BLERG_RUNNER_SERVER_URL=ws://localhost:8083/ws/daemon   # your BLERG_PORT_RUNNER
-export BLERG_RUNNER_DAEMON_TOKEN=<BLERG_RUNNER_DAEMON_TOKEN from install/desktop/.env>
+# Enroll first; the daemon loads its private desktop-credential.json file.
 export BLERG_RUNNER_REPOS_ROOT=<the directory your repos live in — required>
 # either already logged into claude, or:
 export CLAUDE_CODE_OAUTH_TOKEN=<from `claude setup-token`>
@@ -1112,3 +1194,35 @@ sessions; no separate change to the person's interactive CLI configuration is ne
 An agent's `request-plugin` command only asks the person. Approval is required before installing
 or saving an account setting, including for cron and board-started sessions. Rejection or expiry
 leaves both the running session and settings unchanged.
+
+### Person-owned desktop credentials (0.5 upgrade)
+
+The installer now enrolls the desktop with core and keeps its credential in the user's
+private daemon state file. The old install-wide `.env` token is no longer the normal daemon
+identity. Existing desktop IDs and session associations are preserved. Set
+`BLERG_RUNNER_INSTALLING_ACCOUNT_ID` to the installing person's account ID before the
+upgrade; otherwise the first enabled admin is selected. On a fresh install create the
+account in setup, then rerun `daemon/install.sh install` (exit 7 means enrollment is pending).
+For an assigned hosted desktop, its exact owner can issue the current credential through
+runner and import it before reinstalling. Assignment is in Runner Settings → Desktop ownership.
+See [the ownership contract](../../docs/desktop-ownership.md) for the API and migration steps.
+The explicit `BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS=true` mode is available only in 0.5 and is
+removed in 0.6; it cannot authenticate an owned desktop.
+
+## Workspace 0.5.0 upgrade status
+
+Update core, runner and the desktop daemon together and retain database backups.
+Core migrations 026/027 add desktop credentials and shell policy; runner migrations
+076–083 add selection, ownership, runtime, settlement, consent and completion state.
+The installer builds the contained Linux workspace worker (protocol 3). Sandbox
+builds use the repository root as their Docker build context.
+
+Workspace v2 and owner shells remain gated off. Existing single-repository sessions
+retain scalar contracts. A discovery-capable peer without workspace v2 refuses
+checked-out selections, including a single repository, rather than losing source
+identity through a bare-name downgrade. Sandbox file viewing requires an in-container
+reader and returns unavailable when that binding is absent. Do not enable a
+capability from discovery availability or a successful image build. See
+[workspace integration](../../docs/workspace-integration.md) for remaining gates,
+including physical Mac and Docker engine restart acceptance. Reinstalling does
+not authorize deleting retained workspace allocations.

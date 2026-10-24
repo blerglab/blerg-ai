@@ -2,7 +2,7 @@
 // browser API and on the proxy contract (list, raw, download, delete, upload), only the prefix and
 // the authentication differ. Ported from the runner's lib/artifacts.ts, lib/attachments.ts and
 // apiFetch.ts; the pure helpers (grouping, versions, size text) live in the model, not here.
-import type { ArtifactInfo, CommitDetails, CommitDiff, TransportFiles, UploadedFile, WorkspaceFile } from './types'
+import type { ArtifactInfo, CommitDetails, CommitDiff, TransportFiles, UploadedFile, WorkspaceFile, WorkspaceGitRef } from './types'
 import { imageBlobType } from '../model/markdownHtml'
 
 export interface FilesOptions {
@@ -38,6 +38,7 @@ function commitDetails(j: unknown): CommitDetails | null {
   const num = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : 0)
   const str = (v: unknown) => (typeof v === 'string' ? v : '')
   return {
+    ...(typeof c.member_id === 'string' && typeof c.launch_generation === 'string' && typeof c.generation === 'number' ? { member_id: c.member_id, launch_generation: c.launch_generation, generation: c.generation } : {}),
     sha: c.sha,
     short: str(c.short) || c.sha.slice(0, 7),
     subject: c.subject,
@@ -320,29 +321,33 @@ export function createFiles(opts: FilesOptions): TransportFiles {
 
   const commitUrl = (sessionId: string, sha: string) => `${opts.base(sessionId)}/commits/${enc(sha)}`
 
+  const qualification = (member?: WorkspaceGitRef) => member ? `?member_id=${enc(member.member_id)}&launch_generation=${enc(member.launch_generation)}&generation=${member.generation}` : ''
+  const sameMember = (a: Partial<WorkspaceGitRef> | null, b: WorkspaceGitRef) => a?.member_id === b.member_id && a.launch_generation === b.launch_generation && a.generation === b.generation
+
   /** The commit's summary; null for every refusal (no access, no workspace, unknown sha). */
-  const commit = async (sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDetails | null> => {
+  const commit = async (sessionId: string, sha: string, signal?: AbortSignal, member?: WorkspaceGitRef): Promise<CommitDetails | null> => {
     const s = sha.toLowerCase()
     if (!COMMIT_SHA.test(s)) return null
-    const r = await request(commitUrl(sessionId, s), { signal })
+    const r = await request(commitUrl(sessionId, s) + qualification(member), { signal })
     if (!r.ok) return null
     const c = commitDetails(await r.json().catch(() => null))
-    return c && c.sha.startsWith(s) ? c : null
+    return c && c.sha.startsWith(s) && (!member || sameMember(c, member)) ? c : null
   }
 
   /** The commit's diff, read no further than COMMIT_DIFF_MAX. */
-  const commitDiff = async (sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDiff> => {
+  const commitDiff = async (sessionId: string, sha: string, signal?: AbortSignal, member?: WorkspaceGitRef): Promise<CommitDiff> => {
     const s = sha.toLowerCase()
     if (!COMMIT_SHA.test(s)) return null
     const abort = new AbortController()
     const stop = () => abort.abort()
     signal?.addEventListener('abort', stop)
     try {
-      const r = await request(`${commitUrl(sessionId, s)}/diff`, { signal: abort.signal })
+      const r = await request(`${commitUrl(sessionId, s)}/diff${qualification(member)}`, { signal: abort.signal })
       if (r.status === 413) return 'large'
       if (!r.ok) return null
+      if (member && (r.headers.get('X-Blerg-Member-ID') !== member.member_id || r.headers.get('X-Blerg-Launch-Generation') !== member.launch_generation || Number(r.headers.get('X-Blerg-Generation')) !== member.generation)) return null
       const blob = await readCapped(r, COMMIT_DIFF_MAX, abort)
-      return blob ? { text: await blob.text() } : 'large'
+      return blob ? { text: await blob.text(), ...(member ? { member } : {}) } : 'large'
     } finally {
       signal?.removeEventListener('abort', stop)
     }

@@ -2,6 +2,7 @@ package protocol
 
 // ReadSessionOrigin reads only HEAD from an existing workspace; it never starts an engine.
 type ReadSessionOrigin struct {
+	WorkspaceGitRef
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
 	SessionID string `json:"session_id"`
@@ -10,6 +11,7 @@ type ReadSessionOrigin struct {
 // SessionOriginResult carries no workspace path, credential, command or git diagnostics.
 // An empty successful commit means no verifiable HEAD (non-repository or unborn branch).
 type SessionOriginResult struct {
+	WorkspaceGitRef
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
 	SessionID string `json:"session_id"`

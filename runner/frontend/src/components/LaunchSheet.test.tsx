@@ -1028,7 +1028,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     fireEvent.click(screen.getByText(/Launch/))
 
     await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.repo).toBe('org/myrepo')
+    expect(captureBody.value!.selection).toEqual({ members: [], hosted: [{ provider: 'github', full_name: 'org/myrepo' }] })
     expect(captureBody.value!.runtime).toBe('cluster')
   })
 
@@ -1043,21 +1043,11 @@ describe('LaunchSheet — cluster credential preflight', () => {
     name: 'scratchpad', full_name: 'scratchpad', checked_out: ['workstation'], is_local: true, cloneable: false,
   }
 
-  it('shows and sends the remote org/name for a local-only folder on cluster runtime', async () => {
-    await renderClusterAgent({
-      clusterStatus: CLUSTER_ON,
-      myCreds: { engines: ['claude'], git: true },
-      extraRepos: [LOCAL_KNOWN],
-    })
-    expect(screen.getByTestId('repo-remote')).toHaveTextContent('example-org/example-repo')
-    fireEvent.click(screen.getByText('entertainment'))
-    expect(screen.queryByTestId('cluster-repo-unresolved')).not.toBeInTheDocument()
-    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
-    fireEvent.click(screen.getByText(/Launch/))
-
-    await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.repo).toBe('example-org/example-repo')
-    expect(captureBody.value!.runtime).toBe('cluster')
+  it('keeps local origins separate from the authorized hosted cluster list', async () => {
+    await renderClusterAgent({ clusterStatus: CLUSTER_ON, myCreds: { engines: ['claude'], git: true }, extraRepos: [LOCAL_KNOWN] })
+    expect(screen.queryByText('entertainment')).toBeNull()
+    expect(screen.queryByText('example-org/example-repo')).toBeNull()
+    expect(screen.getByRole('group', { name: 'Hosted repositories' })).toBeTruthy()
   })
 
   it('labels a GitLab repository and sends its provider with a cluster launch', async () => {
@@ -1073,8 +1063,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.repo).toBe('example-group/lab-tool')
-    expect(captureBody.value!.provider).toBe('gitlab')
+    expect(captureBody.value!.selection).toEqual({ members: [], hosted: [{ provider: 'gitlab', full_name: 'example-group/lab-tool' }] })
   })
 
   it('blocks a local-only folder with no GitHub remote on cluster runtime and asks for org/name', async () => {
@@ -1083,15 +1072,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
       myCreds: { engines: ['claude'], git: true },
       extraRepos: [LOCAL_UNKNOWN],
     })
-    fireEvent.click(screen.getByText('scratchpad'))
-
-    expect(screen.getByTestId('cluster-repo-unresolved')).toHaveTextContent(
-      'This folder has no GitHub or GitLab remote the cluster can clone — enter org/name',
-    )
-    const launch = screen.getByText(/Launch/).closest('button')!
-    expect(launch).toBeDisabled()
-    expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('enter org/name')
-    fireEvent.click(launch)
+    expect(screen.queryByText('scratchpad')).toBeNull()
     expect(captureBody.value).toBeUndefined()
 
     // Resolving it through the existing free-text org/name entry unblocks.

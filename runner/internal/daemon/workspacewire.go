@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"time"
@@ -9,20 +10,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// SendWorkspaceFileResult bounds this new large-response path without changing
-// ordinary event writes. A connection that stays busy lets the server expire its
-// request; waiting long behind an unrelated blocked write must not pin another
-// large buffer. A writer that is busy for a moment (another file reply, an event
-// going out) is waited for, up to workspaceWriterWait: dropping the reply then
-// cost the person the server's whole timeout and, in a README, an image that
-// never loaded.
-//
-// The wait is a TryLock poll, so it is not fair: while the writer is saturated
-// (a big file frame going out with events queued behind it on sync.Mutex, which
-// then hands the lock to queued Lock callers) the reply still loses and is
-// dropped after the wait. That fairness is the right way round for control
-// traffic, and the page reads a dropped reply again (its "daemon_timeout"). A
-// single writer with a file-reply queue is the follow-up design.
+// File replies share the connection's bounded ordinary lane with agent traffic.
+// Shell controls have priority, and shell/file lanes each receive fair turns.
 func (c *WSClient) SendWorkspaceFileResult(result protocol.WorkspaceFileResult) error {
 	return c.SendWorkspaceFileResultBy(result, time.Time{})
 }
@@ -31,7 +20,10 @@ func (c *WSClient) SendWorkspaceFileResult(result protocol.WorkspaceFileResult) 
 // waiting for at notAfter: a reply that could only start after that is not sent
 // (a large frame the server would read and throw away).
 func (c *WSClient) SendWorkspaceFileResultBy(result protocol.WorkspaceFileResult, notAfter time.Time) error {
-	return c.sendBoundedReply(result, 10*time.Second, workspaceWriterWait, notAfter)
+	if notAfter.IsZero() {
+		notAfter = time.Now().Add(workspaceReplyTTL)
+	}
+	return c.SendWorkspaceFileResultContext(context.Background(), result, notAfter)
 }
 func (c *WSClient) sendWorkspaceFileResult(result protocol.WorkspaceFileResult, timeout time.Duration) error {
 	return c.sendBoundedReply(result, timeout, workspaceWriterWait, time.Time{})
@@ -49,7 +41,10 @@ func (c *WSClient) sendBoundedWorkspaceReply(result any, timeout time.Duration) 
 }
 
 // lockWriterWithin takes the write lock, trying until `wait` has passed (never past notAfter).
-func (c *WSClient) lockWriterWithin(wait time.Duration, notAfter time.Time) bool {
+func (c *WSClient) lockWriterWithin(ctx context.Context, wait time.Duration, notAfter time.Time) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	if c.writeMu.TryLock() {
 		return true
 	}
@@ -58,7 +53,11 @@ func (c *WSClient) lockWriterWithin(wait time.Duration, notAfter time.Time) bool
 		until = notAfter
 	}
 	for time.Now().Before(until) {
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(5 * time.Millisecond):
+		}
 		if c.writeMu.TryLock() {
 			return true
 		}
@@ -72,38 +71,44 @@ func (c *WSClient) currentConn() *websocket.Conn {
 	return c.conn
 }
 
-// sendBoundedReply writes one reply frame: it waits for the writer up to `wait`, gives up
-// when the reply is past notAfter (if set), writes only on the connection it started
-// with, and gives the write itself the whole `timeout`, counted once it holds the writer.
+type fairWriteKey struct{}
+type fairWriteOptions struct {
+	connection        *websocket.Conn
+	startBy, notAfter time.Time
+	timeout           time.Duration
+	wait              time.Duration
+}
+
+// Queue time and actual write time have separate bounds. The reply stays bound
+// to the original socket, and its TTL applies both before and during delivery.
 func (c *WSClient) sendBoundedReply(result any, timeout, wait time.Duration, notAfter time.Time) error {
-	conn := c.currentConn()
+	return c.sendBoundedReplyTo(result, timeout, wait, notAfter, c.currentConn())
+}
+func (c *WSClient) sendBoundedReplyTo(result any, timeout, wait time.Duration, notAfter time.Time, conn *websocket.Conn) error {
+	return c.sendBoundedReplyContext(context.Background(), conn, result, timeout, wait, notAfter)
+}
+func (c *WSClient) sendBoundedReplyContext(parent context.Context, conn *websocket.Conn, result any, timeout, wait time.Duration, notAfter time.Time) error {
 	if conn == nil {
 		return errors.New("workspace file transport is disconnected")
 	}
-	if !c.lockWriterWithin(wait, notAfter) {
-		return errors.New("workspace file transport is busy")
+	if !notAfter.IsZero() && !time.Now().Before(notAfter) {
+		return errors.New("workspace file reply expired")
 	}
-	defer c.writeMu.Unlock()
-	if !notAfter.IsZero() && time.Now().After(notAfter) {
-		return errors.New("workspace file reply expired: the server stopped waiting")
+	if wait <= 0 {
+		wait = workspaceWriterWait
 	}
-	// A reconnect during the wait: the server bound the request to the old connection,
-	// and a half-dead old socket must not hold the writer the new hello needs.
-	if c.currentConn() != conn {
-		return errors.New("workspace file transport changed")
-	}
+	timeout = min(timeout, time.Second)
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}
-	if err = conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
-		return err
+	options := fairWriteOptions{connection: conn, startBy: time.Now().Add(wait), notAfter: notAfter, timeout: timeout, wait: wait}
+	ctx, cancel := context.WithTimeout(parent, wait+timeout)
+	defer cancel()
+	if !notAfter.IsZero() {
+		var stop context.CancelFunc
+		ctx, stop = context.WithDeadline(ctx, notAfter)
+		defer stop()
 	}
-	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
-	if err = conn.WriteMessage(websocket.TextMessage, raw); err != nil {
-		// A timed-out gorilla writer is no longer usable. Closing also wakes
-		// the normal read loop so it can reconnect instead of blocking control.
-		_ = conn.Close()
-	}
-	return err
+	return c.sendFair(context.WithValue(ctx, fairWriteKey{}, options), raw)
 }

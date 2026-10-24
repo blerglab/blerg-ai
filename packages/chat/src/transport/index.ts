@@ -13,6 +13,7 @@ export type {
   Transport,
   TransportFiles,
   WorkspaceFile,
+  WorkspaceGitRef,
 } from './types'
 export { createBlergTransport, GAP_WAIT_MS, INITIAL_TAIL, MAX_FORWARD_PAGES } from './blerg'
 export type { BlergSocket, BlergTransportOptions, ChatBrowserMessage } from './blerg'

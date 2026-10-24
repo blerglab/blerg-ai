@@ -349,7 +349,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         let k = -1
         // A question the agent did not wait on closes only with the answer naming it.
         if (source === 'ask_answer') k = id ? asks.findIndex(a => a.messageId === id) : asks.map(a => !a.noWait).lastIndexOf(true)
-        else if (source !== 'system' && source !== 'question_answer') k = asks.map(a => a.messageId === '').lastIndexOf(true)
+        else if (source !== 'system' && source !== 'question_answer' && source !== 'plan_drift') k = asks.map(a => a.messageId === '').lastIndexOf(true)
         if (k >= 0) asks.splice(k, 1)
         // The chat's liveCalls (and the server's rule): a message that is not the system's ends the
         // calls in flight, so a foreground subagent stops counting; a background one runs on.

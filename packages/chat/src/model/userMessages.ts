@@ -24,10 +24,10 @@ const RESTART_NOTE = '[system] Session resumed after a restart'
 const ADOPT_PROMPT = 'Continue the task you were working on.'
 const ADOPT_NOTE = 'Session recovered: the agent was asked to continue the task it was working on.'
 
-/** Sources whose messages Blerg wrote on its own behalf (decisions relayed to the agent, and a
- *  parent's note that its child's turn ended). */
+/** Sources whose messages Blerg wrote on its own behalf (decisions relayed to the agent, a parent's
+ *  note that its child's turn ended, and a nudge that the session's plan drifted). */
 export function isBlergRelaySource(source: unknown): boolean {
-  return source === 'review' || source === 'proposal' || source === 'child_turn'
+  return source === 'review' || source === 'proposal' || source === 'child_turn' || source === 'plan_drift'
 }
 
 /** Who wrote a message that some automation, not the person, sent: a board's (a card's task, a

@@ -406,7 +406,7 @@ type askAcc struct {
 // child.
 func answersLegacyAsk(source string) bool {
 	switch source {
-	case "system", "review", "proposal", "child_turn", "blerg-board", "cron", "question_answer":
+	case "system", "review", "proposal", "child_turn", "blerg-board", "cron", "question_answer", "plan_drift":
 		return false
 	}
 	return true

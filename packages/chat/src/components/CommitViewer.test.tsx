@@ -1,7 +1,7 @@
 // A commit chip with no published diff opens the commit's diff, generated on demand from the
 // session's workspace, in Blerg's own diff viewer (card #131).
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { CommitChips } from './CommitChips'
 import { CommitViewerHost } from './CommitViewer'
 import type { CommitDiff, TransportFiles } from '../transport/types'
@@ -106,4 +106,12 @@ describe('CommitViewer: a commit chip with no published diff', () => {
     fireEvent.click(screen.getByRole('button', { name: `Copy commit ${'b'.repeat(40)}` }))
     expect(writeText).toHaveBeenCalledTimes(2)
   })
+})
+
+it('carries a chip member and launch to its on-demand diff reader', async () => {
+  const member = { member_id: 'second', launch_generation: 'launch', generation: 7 }
+  const files = filesWith(async () => ({ text: PATCH }))
+  render(<CommitViewerHost files={files}><CommitChips commits={[{ sha: SHA, member }]} hover={{ sessionId: 's1' }} /></CommitViewerHost>)
+  fireEvent.click(screen.getByRole('button', { name: `Open commit ${SHA.slice(0, 7)} in the diff` }))
+  await waitFor(() => expect(files.commitDiff).toHaveBeenCalledWith('s1', SHA, expect.any(AbortSignal), member))
 })

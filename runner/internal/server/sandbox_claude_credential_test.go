@@ -16,7 +16,7 @@ func TestGetDaemonsReportsSandboxClaudeCredential(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/daemons", nil)
 		req.Header.Set("Authorization", "Bearer "+f.token)
 		rec := httptest.NewRecorder()
-		f.mux.ServeHTTP(rec, req)
+		f.mux.ServeHTTP(&reviewDeadlineWriter{ResponseRecorder: rec}, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET /api/daemons = %d", rec.Code)
 		}

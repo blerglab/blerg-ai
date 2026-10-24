@@ -1,0 +1,9 @@
+/* A separate column: session list | explorer | chat | session panel. */
+.explorer-dock { position: relative; display: flex; flex-direction: column; flex: 0 0 auto; min-height: 0; box-sizing: border-box; border-right: 1px solid var(--stone); background: var(--basalt); color: var(--chalk); font-size: var(--text-sm); }
+.explorer-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.explorer-resize { position: absolute; inset: 0 -4px 0 auto; width: 8px; cursor: col-resize; touch-action: none; z-index: 2; }
+.explorer-resize:hover, .explorer-resize:focus-visible { background: var(--selected-border); outline: none; }
+.explorer-sheet { position: fixed; inset: 0; width: 100%; height: 100dvh; z-index: 1000; border: 0; }
+.explorer-sheet .explorer-body { padding-bottom: env(safe-area-inset-bottom); }
+.explorer-collapse { position: absolute; top: 9px; right: 5px; z-index: 3; display: grid; place-items: center; width: 23px; height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--fog); cursor: pointer; }
+.explorer-collapse:hover, .explorer-collapse:focus-visible { color: var(--chalk); background: var(--scree); outline: 1px solid var(--selected-border); }

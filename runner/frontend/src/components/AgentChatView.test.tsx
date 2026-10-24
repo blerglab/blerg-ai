@@ -11,14 +11,13 @@ import { useSessionStore } from '../hooks/useSessionStore'
 
 const apiFetch = vi.fn()
 vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }))
-vi.mock('../ws', () => ({ send: vi.fn(), onMessage: vi.fn() }))
+vi.mock('../ws', () => import('../test/wsMock'))
 vi.mock('@blerglab/chat', async () => ({
   ...await vi.importActual<typeof import('@blerglab/chat')>('@blerglab/chat'),
   ChatView: ({ slots, maxFileBytes, canOpenWorkspaceFiles, canAnswerApprovals, describeUserMessage, readOnly }: { slots: { header: ReactNode }; readOnly?: boolean; maxFileBytes?: number; canOpenWorkspaceFiles?: boolean; canAnswerApprovals?: boolean | null; describeUserMessage?: DescribeUserMessage }) => (
     <div data-testid="chat" data-read-only={String(!!readOnly)} data-answer-approvals={String(canAnswerApprovals)} data-session-author={describeUserMessage?.({} as never, { source: 'session', text: 'fixture' }, { first: false })?.author} data-session-href={describeUserMessage?.({} as never, { source: 'session', text: 'fixture' }, { first: false })?.authorHref} data-answer-author={describeUserMessage?.({} as never, { source: 'ask_answer', answered_by: 'session', text: 'fixture' }, { first: false })?.author} data-person-answer-author={String(describeUserMessage?.({} as never, { source: 'ask_answer', text: 'fixture' }, { first: false })?.author)} data-max-file-bytes={maxFileBytes ?? 'none'} data-workspace-files={String(canOpenWorkspaceFiles)}>{slots.header}</div>
   ),
   ReadyCard: () => null,
-  createBlergTransport: () => ({}),
 }))
 vi.mock('./UsageLimitResume', () => ({ default: () => <span>Resume when limit resets</span> }))
 

@@ -40,13 +40,18 @@ cd "$(dirname "${BASH_SOURCE[0]}")"            # install/desktop/daemon
 
 usage() {
   cat <<EOF
-Usage: $0 {install [--yes]|uninstall|status|preflight}
+Usage: $0 {install [--yes] [--wsl-startup]|uninstall|status|preflight|wsl-startup {enable|disable|status}}
 
   install     build the daemon binary, install and start the service. A
               reinstall over a running daemon that has agent work in
               progress lists it and asks first; --yes reinstalls anyway.
               With no terminal to ask, it stops with exit code 5. A daemon
-              token the server refuses stops it with exit code 6
+              token the server refuses stops it with exit code 6.
+              --wsl-startup opts in to Windows sign-in startup (WSL2).
+  wsl-startup {enable|disable|status}
+              manage Windows sign-in startup without restarting the daemon.
+              enable creates a Windows logon task that keeps this distro
+              running while signed in (including on battery), with retries
   uninstall   stop and remove the service (the binary is left in place)
   status      show whether it is running, and its connection to the server
   preflight   check only (used by blerg-up.sh); tries to start a missing
@@ -58,7 +63,7 @@ EOF
 
 CMD="${1:-}"
 case "$CMD" in
-  install|uninstall|status|preflight) ;;
+  install|uninstall|status|preflight|wsl-startup) ;;
   -h|--help|help) usage; exit 0 ;;
   *)
     [ -n "$CMD" ] && echo "install.sh: unknown subcommand: $CMD" >&2
@@ -68,9 +73,19 @@ case "$CMD" in
 esac
 shift
 ASSUME_YES=0
+WSL_STARTUP=0
+STARTUP_ACTION=""
+if [ "$CMD" = wsl-startup ]; then
+  STARTUP_ACTION="${1:-}"
+  case "$STARTUP_ACTION" in
+    enable|disable|status) shift ;;
+    *) usage >&2; exit 1 ;;
+  esac
+fi
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) [ "$CMD" = install ] && ASSUME_YES=1 && continue ;;
+    --wsl-startup) [ "$CMD" = install ] && WSL_STARTUP=1 && continue ;;
   esac
   echo "install.sh: unknown option: $arg" >&2
   echo >&2
@@ -131,7 +146,7 @@ tighten_existing_secrets() {
   [ -f "$HOME/Library/LaunchAgents/dev.blerg.runner-daemon.plist" ] && chmod 600 "$HOME/Library/LaunchAgents/dev.blerg.runner-daemon.plist" 2>/dev/null || true
   true
 }
-tighten_existing_secrets
+[ "$CMD" = wsl-startup ] || tighten_existing_secrets
 
 env_val() {
   # Strips one pair of surrounding quotes, if present — systemd already does
@@ -235,6 +250,20 @@ EOF
   fi
 }
 
+# The host daemon may be Mach-O. Its trusted Git/quota helper is always a
+# Linux executable in Docker Desktop's VM; install the matching protocol image.
+build_workspace_worker_image_if_missing() {
+  local protocol
+  protocol="$(docker image inspect --format '{{index .Config.Labels "org.blerg.workspace-worker-protocol"}}' blerg-workspace-worker:latest 2>/dev/null || true)"
+  [ "$protocol" = 3 ] && return 0
+  blerg_step "Building the contained workspace worker image..."
+  if docker build -f "$RUNNER_DIR/Dockerfile.workspace-worker" -t blerg-workspace-worker:latest "$REPO_ROOT"; then
+    return 0
+  fi
+  blerg_fail "Workspace worker image build failed; the daemon was not installed. Re-run after fixing the build."
+  return 1
+}
+
 build_sandbox_image_if_missing() {
   # "Local sandbox" is the default runtime for terminal sessions (see
   # DAEMON.md). No docker on PATH is a structural absence, not a failure —
@@ -244,12 +273,18 @@ build_sandbox_image_if_missing() {
   # going on to start a daemon whose default runtime silently doesn't work —
   # a half-working install is worse than an install that refuses to start.
   command -v docker >/dev/null 2>&1 || return 0
-  docker image inspect blerg-runner-sandbox:latest >/dev/null 2>&1 && return 0
+  if docker image inspect blerg-runner-sandbox:latest >/dev/null 2>&1; then
+    build_workspace_worker_image_if_missing || return 1
+    return 0
+  fi
   blerg_step "Building the local-sandbox session image (one-time, a minute or two)..."
   # Deliberately not silenced: this pulls a base image, apt-get's a dev
   # toolchain, and npm-installs the claude CLI — real progress output here
   # beats a silent multi-minute pause that looks hung.
-  docker build --build-arg UID="$(id -u)" -t blerg-runner-sandbox:latest "$RUNNER_DIR/sandbox" && return 0
+  if docker build -f "$RUNNER_DIR/sandbox/Dockerfile" --build-arg UID="$(id -u)" -t blerg-runner-sandbox:latest "$RUNNER_DIR/.."; then
+    build_workspace_worker_image_if_missing || return 1
+    return 0
+  fi
 
   blerg_box "sandbox image build didn't finish" <<EOF
 'Local sandbox' is the default runtime for terminal sessions, so the
@@ -259,7 +294,7 @@ otherwise the first session launch would fail on a broken default.
 Fix whatever stopped it (network, disk space, or you canceled it),
 then re-run. Or build it by hand first to see the full error:
 
-  docker build --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest $RUNNER_DIR/sandbox
+  docker build -f $RUNNER_DIR/sandbox/Dockerfile --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest $RUNNER_DIR/..
 EOF
   exit 1
 }
@@ -287,6 +322,16 @@ put_binary_in_place() {
       exit "$EXIT_WORK_RUNNING"
     fi
   fi
+  if personal_desktop_install; then
+    local enrollment_rc=0
+    ( enroll_desktop ) || enrollment_rc=$?
+    if [ "$enrollment_rc" -ne 0 ]; then
+      rm -f "$NEW_BIN_PATH"
+      exit "$enrollment_rc"
+    fi
+    # Service rendering reads the file; it never embeds this personal bearer.
+    DAEMON_TOKEN=""
+  fi
   mv -f "$NEW_BIN_PATH" "$BIN_PATH"
 }
 
@@ -297,7 +342,7 @@ put_binary_in_place() {
 # restart cut off that nothing they ran caused it; without it they are told
 # the daemon stopped unexpectedly. Nothing when no daemon was running. Never
 # fatal: a marker that cannot be written only changes those words.
-daemon_state_dir() { printf '%s' "${BLERG_RUNNER_DAEMON_STATE_DIR:-$HOME/.blerg-runner-daemon}"; }
+daemon_state_dir() { local configured; configured="${BLERG_RUNNER_DAEMON_STATE_DIR:-$(env_val BLERG_RUNNER_DAEMON_STATE_DIR)}"; printf '%s' "${configured:-$HOME/.blerg-runner-daemon}"; }
 note_planned_restart() {
   [ -n "$RESTART_REASON" ] || return 0
   local dir
@@ -378,9 +423,10 @@ token_refused_box() { # what was refused, where the token comes from, how to fix
   blerg_box "daemon token refused" <<EOF
 $1
 
-The daemon token is BLERG_RUNNER_DAEMON_TOKEN in $ENV_FILE.
-It must be the same as the server's BLERG_RUNNER_DAEMON_TOKEN. Put the
-server's token there, then run ./daemon/install.sh install again.
+Enroll this desktop for its recorded owner again, then rerun ./daemon/install.sh install.
+Its person-issued credential is stored in $(daemon_state_dir)/desktop-credential.json.
+An ownership change invalidates old credentials. Legacy BLERG_RUNNER_DAEMON_TOKEN
+in $ENV_FILE is supported only with the explicit deprecated compatibility switch.
 See DAEMON.md, "The server refused the daemon token".
 EOF
 }
@@ -540,11 +586,14 @@ require_env_file() {
 }
 
 render_placeholders() {
+  local service_token="$DAEMON_TOKEN"
+  # Person credentials are loaded only from the private state file.
+  case "$service_token" in bdt_*) service_token="" ;; esac
   # Reads a template on stdin, writes the substituted result to stdout.
   # '#' delimiter because values here are paths/URLs, never '#'.
   sed -e "s#__BIN_PATH__#$BIN_PATH#g" \
       -e "s#__SERVER_URL__#$SERVER_URL#g" \
-      -e "s#__DAEMON_TOKEN__#$DAEMON_TOKEN#g" \
+      -e "s#__DAEMON_TOKEN__#$service_token#g" \
       -e "s#__REPOS_ROOT__#$REPOS_ROOT#g" \
       -e "s#__LOG_DIR__#$LOG_DIR#g"
 }
@@ -554,7 +603,7 @@ render_placeholders() {
 # putting one in install/desktop/.env and re-running `install.sh install`
 # (or blerg-up.sh) bakes it into the unit/plist. The daemon itself never
 # reads .env — only its service environment.
-OPTIONAL_DAEMON_ENV="BLERG_RUNNER_PROVISION_CLAUDE_MD BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE BLERG_RUNNER_CLAUDE_USAGE"
+OPTIONAL_DAEMON_ENV="BLERG_RUNNER_DAEMON_STATE_DIR BLERG_RUNNER_DAEMON_NAME BLERG_RUNNER_PROVISION_CLAUDE_MD BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE BLERG_RUNNER_CLAUDE_USAGE"
 daemon_extra_env() {
   local k v
   if [ -n "${OAUTH_TOKEN:-}" ]; then printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$OAUTH_TOKEN"; fi
@@ -655,6 +704,17 @@ remember_skip_claude_token_prompt() {
   blerg_step "Won't ask again (saved BLERG_SKIP_CLAUDE_TOKEN_PROMPT=1 to .env; delete that line to be asked)."
 }
 
+# Enrollment may fence a legacy socket. Wait until the existing active-work
+# confirmation has allowed replacement, before changing its persisted owner.
+personal_desktop_install() {
+  [ "$(env_val BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS)" != "true" ] || [ -n "$(env_val BLERG_CORE_INTERNAL_KEY)" ]
+}
+enroll_desktop() {
+  python3 "$DESKTOP_DIR/daemon/enroll.py" "$ENV_FILE" "$(daemon_state_dir)" "$SERVER_URL" || return 7
+  DAEMON_TOKEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$(daemon_state_dir)/desktop-credential.json")"
+  check_daemon_token
+}
+
 resolve_config() {
   require_env_file
   # The daemon dials the runner SERVER, which is not necessarily the desktop
@@ -666,7 +726,10 @@ resolve_config() {
   SERVER_URL="${BLERG_RUNNER_SERVER_URL:-$(env_val BLERG_RUNNER_SERVER_URL)}"
   [ -n "$SERVER_URL" ] || SERVER_URL="ws://localhost:${PORT_RUNNER:-8083}/ws/daemon"
   DAEMON_TOKEN="$(env_val BLERG_RUNNER_DAEMON_TOKEN)"
-  [ -n "$DAEMON_TOKEN" ] || { blerg_fail "BLERG_RUNNER_DAEMON_TOKEN missing from $ENV_FILE"; exit 1; }
+  if ! personal_desktop_install; then
+    blerg_step "Deprecated shared desktop credential: enroll a person-owned desktop before 0.6."
+  fi
+
 
   REPOS_ROOT="$(env_val BLERG_RUNNER_REPOS_ROOT)"
   if [ -z "$REPOS_ROOT" ]; then
@@ -762,9 +825,69 @@ EOF
   fi
 }
 
+# Windows sign-in and distro boot are separate startup layers. Lingering starts
+# the user manager at distro boot; the Windows task boots and keeps WSL alive.
+wsl_startup() {
+  local action="$1" linux_user ps_path encoded
+  if [ "$OS" != Linux ] || ! is_wsl || [ -z "${WSL_DISTRO_NAME:-}" ]; then
+    blerg_fail "Windows sign-in startup requires WSL2. Run this inside the registered distro as its Linux account (WSL_DISTRO_NAME must be set)."
+    return 1
+  fi
+  linux_user="$(id -un)"
+  # These values are later passed through a Windows task command line. Reject
+  # shell/PowerShell metacharacters rather than trusting cross-shell quoting.
+  if [[ ! "$WSL_DISTRO_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9._\ -]*$ ]] ||
+     [[ ! "$linux_user" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]]; then
+    blerg_fail "Unsupported distro or Linux account name for Windows startup; use letters, numbers, spaces (distro only), dots, underscores, or hyphens. See DAEMON.md."
+    return 1
+  fi
+  if [ "$action" = enable ]; then
+    if wsl_without_systemd || ! systemctl --user is-enabled --quiet "$SERVICE_NAME.service"; then
+      blerg_fail "Install the enabled systemd daemon first: ./daemon/install.sh install (see DAEMON.md for WSL2 systemd prerequisites)."
+      return 1
+    fi
+    if [ "$(loginctl show-user "$(id -u)" -p Linger --value 2>/dev/null)" != yes ]; then
+      blerg_fail "Distro boot requires lingering: run sudo loginctl enable-linger $linux_user, then retry."
+      return 1
+    fi
+    blerg_step "Opting in: a Windows Task Scheduler logon task will start this distro and keep it running while you are signed in, including on battery. No elevation or Windows password is used."
+  fi
+  if ! command -v powershell.exe >/dev/null 2>&1 || ! command -v wslpath >/dev/null 2>&1; then
+    blerg_fail "Windows interop (powershell.exe and wslpath) is required. Enable WSL interop and Windows PATH, or see DAEMON.md for manual Windows setup."
+    return 1
+  fi
+  ps_path="$(wslpath -w "$DESKTOP_DIR/daemon/wsl-startup.ps1")" || return 1
+  # Transport the path as data: PowerShell recognizes Unicode quote delimiters
+  # too. Encoding an interpolated expression alone would preserve an injection.
+  # The other arguments have already passed the action/name allowlists.
+  ps_path="$(printf '%s' "$ps_path" | base64 -w0)" || return 1
+  encoded="$(printf "& ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%s'))) -Action '%s' -Distro '%s' -LinuxUser '%s'" \
+    "$ps_path" "$action" "$WSL_DISTRO_NAME" "$linux_user" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)" || return 1
+  if ! powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "$encoded"; then
+    blerg_fail "Windows Task Scheduler startup $action failed. Check Task Scheduler permissions and Windows PowerShell policy; retry ./daemon/install.sh wsl-startup $action. See DAEMON.md."
+    return 1
+  fi
+}
+
+offer_wsl_startup() {
+  is_wsl || return 0
+  local answer=""
+  if [ "$WSL_STARTUP" = 1 ]; then
+    wsl_startup enable
+    return
+  fi
+  blerg_step "WSL does not start this distro after Windows sign-in by itself."
+  blerg_step "Optional: ./daemon/install.sh wsl-startup enable creates a Windows logon task that starts and keeps this distro running while signed in, including on battery."
+  if [ -t 0 ]; then
+    read -r -p "  Enable that Windows sign-in task? [y/N] " answer
+    case "$answer" in y|Y) wsl_startup enable ;; esac
+  fi
+  return 0
+}
+
 install_systemd() {
   resolve_config
-  check_daemon_token
+  if ! personal_desktop_install; then check_daemon_token; fi
   build_binary
   build_sandbox_image_if_missing
   UNIT_DIR="$HOME/.config/systemd/user"
@@ -793,13 +916,15 @@ EOF
   note_planned_restart
   mark_restart
   systemctl --user restart "$SERVICE_NAME.service"
-  if ! loginctl enable-linger "$USER" 2>/dev/null; then
+  if ! loginctl enable-linger "$(id -un)" 2>/dev/null; then
     # Usually harmless and only a warning: the daemon is running now, it just
     # isn't allowed to outlive your last login session.
-    blerg_step "Warning: couldn't enable 'lingering' for $USER (it needs polkit or root)."
+    blerg_step "Warning: couldn't enable 'lingering' for $(id -un) (it needs polkit or root)."
     blerg_step "  The daemon is running now, but it will stop when you log out of this machine."
-    blerg_step "  To keep it running after logout: sudo loginctl enable-linger $USER"
+    blerg_step "  To start at distro boot and keep it running after logout: sudo loginctl enable-linger $(id -un)"
   fi
+
+  offer_wsl_startup
 
   blerg_ok "Installed and started. Logs: journalctl --user -u $SERVICE_NAME -f"
   wait_for_connection systemd_daemon_pid "journalctl --user -u $SERVICE_NAME -f" || exit "$EXIT_TOKEN_REFUSED"
@@ -834,6 +959,9 @@ remove_provisioned_links() {
 }
 
 uninstall_systemd() {
+  # Remove only this distro/account's opt-in task, before removing its service.
+  # If Windows is inaccessible, leave the service installed and explain repair.
+  if is_wsl; then wsl_startup disable || return 1; fi
   systemctl --user disable --now "$SERVICE_NAME.service" 2>/dev/null || true
   rm -f "$HOME/.config/systemd/user/$SERVICE_NAME.service"
   systemctl --user daemon-reload
@@ -885,7 +1013,7 @@ status_systemd() {
 
 install_launchd() {
   resolve_config
-  check_daemon_token
+  if ! personal_desktop_install; then check_daemon_token; fi
   build_binary
   build_sandbox_image_if_missing
   LABEL="dev.blerg.runner-daemon"
@@ -973,6 +1101,16 @@ ensure_systemd_user_session() {
   systemctl is-active --quiet "user@$(id -u).service" 2>/dev/null && return 2
   return 1
 }
+
+# Startup management never starts/restarts a user manager or the daemon.
+if [ "$CMD" = wsl-startup ]; then
+  wsl_startup "$STARTUP_ACTION"
+  exit $?
+fi
+if [ "$WSL_STARTUP" = 1 ] && { [ "$OS" != Linux ] || ! is_wsl; }; then
+  blerg_fail "--wsl-startup is only supported inside WSL2."
+  exit 1
+fi
 
 case "$OS" in
   Linux)

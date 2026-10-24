@@ -108,6 +108,9 @@ func (a *API) readChildrenSnapshot(ctx context.Context, parent *db.SessionRow, a
 		}
 		daemonNames := make(map[string]string)
 		for _, g := range grants {
+			if g.DaemonID != clusterDaemonID && !a.hub.ownsDesktopID(ctx, account, g.DaemonID) {
+				continue
+			}
 			name, known := daemonNames[g.DaemonID]
 			if !known && g.DaemonID == clusterDaemonID {
 				name, known = clusterDaemonLabel, true

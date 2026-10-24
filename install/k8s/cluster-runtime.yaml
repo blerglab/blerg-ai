@@ -42,7 +42,10 @@ metadata:
   name: blerg-runner-agent-launcher
   namespace: blerg-runner-sessions
 rules:
-  # Only the runner launcher manages conversation PVCs. Workers mount no SA token.
+  # Only the runner launcher manages retained conversation/workspace PVCs.
+  # The UID-separated workspace controller uses a private emptyDir and init
+  # container inside the Job; neither receives an API token. No exec subresource
+  # is granted. Keep these permissions identical for legacy and workspace Jobs.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "create", "delete"]

@@ -95,7 +95,7 @@ func (a *API) renameSession(ctx context.Context, sessionID, title, by string) *A
 		return apiErrorf(http.StatusInternalServerError, "update failed")
 	}
 	log.Printf("session %s renamed by %s", sessionID, by)
-	a.hub.BroadcastTitleChanged(sessionID, title)
+	a.hub.BroadcastTitleChanged(sessionID, title) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	return nil
 }
 

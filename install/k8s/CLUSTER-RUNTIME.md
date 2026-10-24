@@ -21,6 +21,30 @@ unless you turn it off, and it needs **no operator-supplied credential at all**
 two runtimes coexist; a session picks one in the launch sheet, which defaults
 to the cluster runtime whenever no workstation daemon is connected.
 
+### Workspace v2 deployment profile
+
+Workspace v2 and owner shells remain compiled off pending release acceptance.
+For the workspace runtime, set `WORKSPACE_STORAGE_CLASS` in `.env` to a CSI class
+with verified physical byte and inode limits. The installer passes it as
+`BLERG_RUNNER_WORKSPACE_STORAGE_CLASS`. An empty value refuses workspace
+allocation; a default host-path provisioner does not establish quota acceptance.
+
+The workspace Job adds an init container and separate HOME, temporary and private
+scratch volumes. Only the retained projects claim is public. The init process
+sets private scratch to UID 1001, mode 0700. A fixed `setpriv` entry point starts
+the trusted Go controller as UID 1001 with CHOWN, DAC_OVERRIDE, SETUID, SETGID,
+KILL and SYS_PTRACE. Engine and PTY exec run as UID 1000 with zero capabilities.
+The controller requires its own container PID namespace and a distinct private
+mount; changing an environment path cannot supply that boundary.
+
+The root bootstrap, init container and listed capabilities require an operator
+admission profile that permits them. Workspace Jobs do not satisfy the Restricted
+Pod Security profile. The installer does not relax namespace admission policy.
+Review this profile before enabling the release gates. The container root
+filesystem is read-only, no host namespace or hostPath is used, and no service
+account token is mounted. Existing launcher RBAC remains unchanged: the runner
+cannot create the pod exec subresource. See the [runtime integration details](../../docs/cluster-workspace.md).
+
 ### Retained native conversations
 
 New account-owned Claude and Codex sessions retain their native conversation
@@ -290,7 +314,7 @@ What it does:
   endpoint the merged configuration can route to is on loopback or a private
   network and no provider key is set, the same rule as on a desktop. Before a
   pod exists the runner checks the fragment, the operator's
-  `HERMES_ENV_CONTENTS`, any uploaded config bundle's `~/.hermes/config.yaml`,
+  `HERMES_ENV_CONTENTS`, an explicitly configured operator bundle's `~/.hermes/config.yaml`,
   and whether the person saved their own Hermes credential (it becomes their
   pods' `.env`, which may hold a key), asked of core with the session's
   recorded launch proof: any of those, or a lookup that cannot tell, means
@@ -679,3 +703,12 @@ agent image doesn't install the `openclaw` CLI, and cluster session Jobs have
 no `OPENCLAW_*` credential wiring. The workstation daemon path supports all
 four engines; this is a real capability gap of cluster runtime specifically,
 not a bug. Extending cluster runtime to OpenClaw is future work.
+
+
+Workspace selection and desktop confidentiality in 0.5 are described in
+[workspace selection](../../docs/workspace-selection.md). Automatic desktop config
+uploads are retired. `BLERG_RUNNER_SHARED_AGENT_CONFIG_BUNDLE` optionally names
+an absolute path to an operator-managed, intentionally shared archive; leave it
+unset to serve none. Historical uploaded archives are ignored and should be
+removed from the runner data volume during upgrade. This does not re-enable
+personal desktop configuration sharing.

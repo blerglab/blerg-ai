@@ -13,6 +13,7 @@ import type { ProposalInbox } from '../hooks/useProposalInbox'
 import { ProposalsBadge } from './Proposals'
 import { OpenSessionContext } from '../lib/openSession'
 import { prefetchLaunchData } from '../lib/launchCache'
+import { coreOrigin } from '../authClient'
 import { formatBuild } from '../lib/buildInfo'
 import { setSettingsOpen } from '../lib/settingsDialog'
 import UsageMeters from './UsageMeters'
@@ -868,6 +869,8 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
           {build.commit && <span style={{ opacity: 0.7 }}> · {build.commit}</span>}
           {build.update && (
             <>
+              {' · '}
+              <a href={`${coreOrigin()}/upgrade`}>How to upgrade</a>
               {' · '}
               <a
                 data-testid="build-update"

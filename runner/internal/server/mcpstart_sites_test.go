@@ -305,17 +305,21 @@ func TestSpawnSitesAreEnumerated(t *testing.T) {
 
 	// Grant-aware paths: they resolve or check a grant, attach it, or (resume) re-issue it.
 	aware := map[string]struct{ decide, attach string }{
-		"HandlePostSessions":              {"resolveLaunchGrant", "attachGrant"},
+		"postSessions":                    {"resolveLaunchGrant", "attachGrant"},
 		"startClusterNoRepo":              {"resolveLaunchGrant", "attachGrant"},
 		"startRunnerSession":              {"checkGrant", "attachGrant"},
 		"startBoardSessionOnDaemon":       {"checkGrant", "attachGrant"},
 		"resumeClusterSessionModeGuarded": {"grantResumeProblem", "reissueGrants"},
 	}
 	// Paths that never carry a grant, by construction: nothing they decode names one.
-	// reclaimNativeHistory builds a label/fencing spec solely to remove an ended writer; it never starts an engine.
+	// reclaimNativeHistory and settleClusterStop build label/fencing specs solely
+	// to remove an old writer; neither starts an engine.
 	// startClusterChild starts a delegate's child, whose allowlisted start never names a grant (startChild).
-	grantless := map[string]bool{"HandlePostAssist": true, "forwardBrowserSpawn": true, "CreateSessionJob": true, "reclaimNativeHistory": true, "startClusterChild": true}
+	grantless := map[string]bool{"HandlePostAssist": true, "forwardOwnedBrowserSpawn": true, "CreateSessionJob": true, "reclaimNativeHistory": true, "settleClusterStop": true, "startClusterChild": true}
 
+	if cleanup := funcs["settleClusterStop"]; cleanup == nil || cleanup.calls["fenceNativeHistoryWriter"] != 1 || cleanup.calls["CreateSessionJob"] != 0 || cleanup.literals["SpawnSession"] {
+		t.Error("workspace stop must only fence an existing writer, never spawn one")
+	}
 	var found []string
 	for name, info := range funcs {
 		if !info.literals["SpawnSession"] && !info.literals["SessionJobSpec"] {
@@ -340,7 +344,7 @@ func TestSpawnSitesAreEnumerated(t *testing.T) {
 	}
 	// The public route has two grant-carrying branches (cluster and daemon); StartSession's
 	// paths have one each.
-	if c := funcs["HandlePostSessions"]; c.calls["attachGrant"] < 2 || c.calls["resolveLaunchGrant"] < 2 {
+	if c := funcs["postSessions"]; c.calls["attachGrant"] < 2 || c.calls["resolveLaunchGrant"] < 2 {
 		t.Errorf("HandlePostSessions must resolve and attach on both the cluster and the daemon branch: %v", c.calls)
 	}
 	// The board-aware wrapper must still resolve personal connections, and it

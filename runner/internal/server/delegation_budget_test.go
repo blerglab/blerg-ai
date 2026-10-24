@@ -30,6 +30,7 @@ func TestBudgetFromTheParentsDaemonOnly(t *testing.T) {
 	fx.dc.SetUsageLimits(protocol.UsageLimits{Provider: "codex", Windows: []protocol.UsageWindow{
 		{ID: "capped", UsedPercent: 100, ResetsAt: reset}}})
 	other := registerDaemon(t, fx.api, fx.hub, "00000000-0000-4000-8000-0000000000d2", "desktop", "app")
+	fixtureOwnDesktop(t, fx.pool, other, "owner-1")
 	other.SetAvailableEngines([]string{"claude"})
 	other.SetUsageLimits(protocol.UsageLimits{Provider: "claude", Windows: []protocol.UsageWindow{{ID: "5h", UsedPercent: 5}}})
 

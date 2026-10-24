@@ -13,6 +13,7 @@ func TestDigestBindsTargetAndEveryApprovedField(t *testing.T) {
 		t.Fatal("digest must be SHA256 lowerhex")
 	}
 	changes := []func(*Draft){
+		func(d *Draft) { d.Origin.MemberID = "two" }, func(d *Draft) { d.Origin.LaunchGeneration = "launch" }, func(d *Draft) { d.Origin.Generation = 7 },
 		func(d *Draft) { d.Repos = []string{"other/repo"} },
 		func(d *Draft) { d.Title += " changed" }, func(d *Draft) { d.Body += " changed" }, func(d *Draft) { d.Type = "task" }, func(d *Draft) { d.Sensitive = false },
 		func(d *Draft) { d.Origin.SessionURL += "-other" }, func(d *Draft) { d.Origin.Repo += "-other" }, func(d *Draft) { d.Origin.Commit = "abcdef2" }, func(d *Draft) { d.Origin.Engine = "claude" }, func(d *Draft) { d.Origin.ComponentVersion = "0.5.0" }, func(d *Draft) { d.Origin.ComponentCommit = "abcdef3" },

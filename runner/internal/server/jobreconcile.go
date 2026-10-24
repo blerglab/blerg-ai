@@ -140,6 +140,7 @@ func (a *API) reconcileClusterJobsOnce(ctx context.Context) {
 			}
 		}
 	}
+	a.reconcileLocalWorkspaceFinals(ctx)
 	a.finaliseLostDaemonSessions(ctx)
 }
 
@@ -284,7 +285,7 @@ func (a *API) broadcastReconciledStatus(ctx context.Context, sessionID, status s
 		unread = row.Unread
 		end = rowEnd(row)
 	}
-	broadcastWithEnd(a.hub, end, func(endReason string, endedBy *protocol.EndedBy) any {
+	broadcastWithEnd(a.hub, end, func(endReason string, endedBy *protocol.EndedBy) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		return protocol.SessionStateChanged{
 			Type:      "session_state_changed",
 			SessionID: sessionID,

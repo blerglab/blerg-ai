@@ -169,11 +169,18 @@ func (h *Hub) ServeBrowser(dbPool *pgxpool.Pool, authorize func(*http.Request) (
 			cancel:    cancel,
 			subs:      make(map[string]context.CancelFunc),
 		}
+		bc.desktopFilter = func(raw []byte) ([]byte, bool) { return h.desktopPayloadFor(ctx, accountID, raw) }
+		bc.desktopDeliver = func(raw []byte, send func([]byte) error) error {
+			return h.deliverDesktopPayload(ctx, accountID, raw, send)
+		}
 		h.RegisterBrowser(bc)
+
+		scope, _ := h.desktopScopeRows(ctx, accountID)
 
 		// Send initial_state before starting the read pump so the browser
 		// gets it as its very first message.
 		sendInitialState(ctx, bc, h, dbPool)
+		go h.watchDesktopScope(ctx, bc, dbPool, scope)
 
 		conn := wsConn
 		go browserWritePump(bc, conn)
@@ -183,13 +190,16 @@ func (h *Hub) ServeBrowser(dbPool *pgxpool.Pool, authorize func(*http.Request) (
 
 // sendInitialState assembles and sends the initial_state message to bc.
 func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxpool.Pool) {
-	daemons := h.GetHostDaemons()
+	daemons := h.ownedHostDaemons(ctx, bc.AccountID)
 	daemonInfos := make([]protocol.DaemonInfo, 0, len(daemons))
 	for _, d := range daemons {
 		if !isHostDaemon(d) {
 			continue // a cluster session pod, not a machine the owner picks
 		}
 		daemonInfos = append(daemonInfos, protocol.DaemonInfo{
+			RepoInventoryLimited: d.InventoryLimited(),
+			DiscoveryVersion:     d.DiscoveryVersion, WorkspaceCapabilities: d.WorkspaceCapabilities,
+			OwnershipRevision: d.DesktopBinding.Revision, ConnectionGeneration: d.DesktopGeneration,
 			ID:                  d.ID,
 			Name:                d.Name,
 			Mode:                d.Mode,
@@ -219,7 +229,7 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 				// Use the shared row→info mapper so every SessionInfo field
 				// (including unread/starred) is populated consistently — a manual
 				// duplicate here previously dropped those flags on reconnect.
-				sessionInfos = append(sessionInfos, sessionRowToInfo(r, bc.AccountID))
+				sessionInfos = append(sessionInfos, h.sessionInfoFor(ctx, r, bc.AccountID))
 			}
 		}
 	}
@@ -278,12 +288,26 @@ func browserWritePump(bc *BrowserConn, conn *websocket.Conn) {
 	for {
 		select {
 		case msg, ok := <-bc.send:
+			if ok && bc.desktopFilter != nil {
+				var allowed bool
+				msg, allowed = bc.desktopFilter(msg)
+				if !allowed {
+					continue
+				}
+			}
 			_ = conn.SetWriteDeadline(time.Now().Add(browserWriteWait))
 			if !ok {
 				_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+			write := func(data []byte) error { return conn.WriteMessage(websocket.TextMessage, data) }
+			var err error
+			if bc.desktopDeliver != nil {
+				err = bc.desktopDeliver(msg, write)
+			} else {
+				err = write(msg)
+			}
+			if err != nil {
 				log.Printf("browser write pump %s: %v", bc.ID, err)
 				return
 			}
@@ -591,14 +615,33 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 // browser socket is a second, independent entry point into the same daemon
 // spawn, so it must not skip the check. Like the REST path it mints the
 // per-session messaging token (dbPool nil → no token, spawn still proceeds).
-func (h *Hub) forwardBrowserSpawn(_ *BrowserConn, msg protocol.BrowserSpawnSession, dbPool *pgxpool.Pool) (sessionID string, err error) {
+func (h *Hub) forwardBrowserSpawn(bc *BrowserConn, msg protocol.BrowserSpawnSession, pool *pgxpool.Pool) (id string, err error) {
+	if problem := newSessionKindProblem(msg.Kind); problem != "" {
+		return "", errors.New(problem)
+	}
+	if bc == nil || bc.AccountID == "" || pool == nil {
+		return "", errors.New("desktop owner required")
+	}
+	err = db.WithDesktopFence(context.Background(), pool, msg.DaemonID, func(ctx context.Context) error {
+		var inner error
+		id, inner = h.forwardOwnedBrowserSpawn(ctx, bc, msg, pool)
+		return inner
+	})
+	return id, err
+}
+
+func (h *Hub) forwardOwnedBrowserSpawn(ctx context.Context, bc *BrowserConn, msg protocol.BrowserSpawnSession, dbPool *pgxpool.Pool) (sessionID string, err error) {
 	if err := validateRepoName(msg.Repo); err != nil {
 		return "", fmt.Errorf("rejected repo %q: %w", msg.Repo, err)
 	}
 	if problem := newSessionKindProblem(msg.Kind); problem != "" {
 		return "", errors.New(problem)
 	}
-	dc := h.GetHostDaemon(msg.DaemonID)
+	account := ""
+	if bc != nil {
+		account = bc.AccountID
+	}
+	dc := h.ownedHostDaemon(ctx, account, msg.DaemonID)
 	if dc == nil {
 		return "", fmt.Errorf("daemon %s not found", msg.DaemonID)
 	}
@@ -608,7 +651,11 @@ func (h *Hub) forwardBrowserSpawn(_ *BrowserConn, msg protocol.BrowserSpawnSessi
 		return "", fmt.Errorf("rejected interaction %q: %s", msg.Interaction, apiErr.Message)
 	}
 	sessionID = newUUID()
-	fwd, err := json.Marshal(protocol.SpawnSession{
+	token := mintSpawnSessionTokenAs(ctx, dbPool, sessionID, dc, msg.Repo, msg.Title, "", sessionOriginFor(account, false, ""))
+	if token == "" {
+		return "", errors.New("session credential unavailable")
+	}
+	fwd, err := json.Marshal(protocol.SpawnSession{ //nolint:gosec // scoped session credential travels only over its authenticated owner desktop connection
 		Type:          "spawn_session",
 		Kind:          msg.Kind,
 		SessionID:     sessionID,
@@ -619,16 +666,14 @@ func (h *Hub) forwardBrowserSpawn(_ *BrowserConn, msg protocol.BrowserSpawnSessi
 		Rows:          24,
 		InitialPrompt: msg.InitialPrompt,
 		Interaction:   interaction,
-		SessionToken:  mintSpawnSessionToken(context.Background(), dbPool, sessionID, dc, msg.Repo, msg.Title, ""),
+		SessionToken:  token,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal spawn_session: %w", err)
 	}
-	recordInteraction(context.Background(), dbPool, sessionID, interaction)
-	select {
-	case dc.send <- fwd:
-	default:
-		abortSpawnSessionToken(context.Background(), dbPool, sessionID)
+	recordInteraction(ctx, dbPool, sessionID, interaction)
+	if !h.trySendToDaemon(dc, fwd) {
+		abortSpawnSessionToken(ctx, dbPool, sessionID)
 		return "", fmt.Errorf("daemon %s send channel full", dc.ID)
 	}
 	return sessionID, nil

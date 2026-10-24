@@ -15,13 +15,18 @@ import (
 
 // DaemonInfo describes a connected daemon.
 type DaemonInfo struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Mode       string `json:"mode"`
-	Version    string `json:"version"`
-	ReposRoot  string `json:"repos_root"`
-	Status     string `json:"status"`
-	LastSeenAt string `json:"last_seen_at"`
+	RepoInventoryLimited  bool                  `json:"repo_inventory_limited,omitempty"`
+	DiscoveryVersion      int                   `json:"discovery_version,omitempty"`
+	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
+	OwnershipRevision     int64                 `json:"ownership_revision,omitempty"`
+	ConnectionGeneration  string                `json:"connection_generation,omitempty"`
+	ID                    string                `json:"id"`
+	Name                  string                `json:"name"`
+	Mode                  string                `json:"mode"`
+	Version               string                `json:"version"`
+	ReposRoot             string                `json:"repos_root"`
+	Status                string                `json:"status"`
+	LastSeenAt            string                `json:"last_seen_at"`
 	// SandboxAvailable reports whether this daemon can actually run "Local
 	// sandbox" sessions right now (the blerg-runner-sandbox image is present)
 	// — surfaced in the launch UI so picking that runtime isn't a guess.
@@ -143,6 +148,9 @@ type MyCredentials struct {
 
 // SessionInfo describes a terminal or agent session.
 type SessionInfo struct {
+	Workspace        *WorkspaceManifest      `json:"workspace,omitempty"`
+	WorkspaceResults []WorkspaceMemberResult `json:"workspace_results,omitempty"`
+
 	ArchivedAt           *string `json:"archived_at,omitempty"`
 	SteeringSupported    bool    `json:"steering_supported"`
 	LimitResumeSupported bool    `json:"limit_resume_supported,omitempty"`
@@ -216,6 +224,12 @@ type EndedBy struct {
 
 // DaemonHello is the first message a daemon sends upon connecting.
 type DaemonHello struct {
+	RepoInventoryLimited  bool                  `json:"repo_inventory_limited,omitempty"`
+	DiscoveryVersion      int                   `json:"discovery_version,omitempty"`
+	DesktopID             string                `json:"desktop_id,omitempty"`
+	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
+
+	PlanNudges bool `json:"plan_nudges,omitempty"`
 	// RecoveryReady negotiates the current-link recovery policy barrier.
 	RecoveryReady            bool     `json:"recovery_ready,omitempty"`
 	RecoveryRequiredSessions []string `json:"recovery_required_sessions,omitempty"`
@@ -369,6 +383,9 @@ type DaemonHello struct {
 // was accepted and the daemon attached. Sent only when the hello set Welcome,
 // before any other message on the connection. Never carries a credential.
 type DaemonWelcome struct {
+	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
+
+	PlanNudges bool `json:"plan_nudges,omitempty"`
 	// RecoveryHold keeps marked recovered children paused until daemon_recovery_ready.
 	RecoveryHold bool   `json:"recovery_hold,omitempty"`
 	Type         string `json:"type"` // "daemon_welcome"
@@ -395,10 +412,11 @@ type RepoOrigin struct {
 // dropped session_state_changed event (a lost "idle" would otherwise leave the
 // session stuck on "running" forever).
 type DaemonHeartbeat struct {
-	Type            string                   `json:"type"`            // "daemon_heartbeat"
-	ActiveSessions  []string                 `json:"active_sessions"` // IDs of currently live sessions
-	BackgroundTasks *BackgroundTaskInventory `json:"background_task_inventory,omitempty"`
-	SessionStates   map[string]string        `json:"session_states,omitempty"` // sessionID → "running"|"idle"|"waiting"
+	RepoInventoryLimited bool                     `json:"repo_inventory_limited,omitempty"`
+	Type                 string                   `json:"type"`            // "daemon_heartbeat"
+	ActiveSessions       []string                 `json:"active_sessions"` // IDs of currently live sessions
+	BackgroundTasks      *BackgroundTaskInventory `json:"background_task_inventory,omitempty"`
+	SessionStates        map[string]string        `json:"session_states,omitempty"` // sessionID → "running"|"idle"|"waiting"
 	// QueuedSessions refreshes DaemonHello's field of the same name.
 	QueuedSessions []string `json:"queued_sessions,omitempty"`
 	// SandboxAvailable reports whether blerg-runner-sandbox:latest is present
@@ -593,6 +611,8 @@ type SessionPausedChanged struct {
 
 // SessionEnded is sent when a session's process exits.
 type SessionEnded struct {
+	WorkspaceResults []WorkspaceMemberResult `json:"workspace_results,omitempty"`
+
 	Type      string  `json:"type"` // "session_ended"
 	SessionID string  `json:"session_id"`
 	ExitCode  int     `json:"exit_code"`
@@ -610,6 +630,9 @@ type SessionEnded struct {
 
 // SpawnSession instructs the daemon to start a new session.
 type SpawnSession struct {
+	Workspace             *WorkspaceManifest    `json:"workspace,omitempty"`
+	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
+
 	// RequireRecoveryReady persists fail-closed recovery for delegated work.
 	RequireRecoveryReady  bool   `json:"require_recovery_ready,omitempty"`
 	Type                  string `json:"type"` // "spawn_session"
@@ -855,16 +878,20 @@ type DaemonConnected struct {
 // DaemonLimitsChanged tells browsers a daemon's usage limits changed: its
 // full current set, one entry per provider (empty when none reports).
 type DaemonLimitsChanged struct {
-	Type        string        `json:"type"` // "daemon_limits_changed"
-	DaemonID    string        `json:"daemon_id"`
-	UsageLimits []UsageLimits `json:"usage_limits"`
+	OwnershipRevision    int64         `json:"ownership_revision,omitempty"`
+	ConnectionGeneration string        `json:"connection_generation,omitempty"`
+	Type                 string        `json:"type"` // "daemon_limits_changed"
+	DaemonID             string        `json:"daemon_id"`
+	UsageLimits          []UsageLimits `json:"usage_limits"`
 }
 
 // DaemonDisconnected notifies the browser that a daemon went offline.
 type DaemonDisconnected struct {
-	Type               string   `json:"type"` // "daemon_disconnected"
-	DaemonID           string   `json:"daemon_id"`
-	AffectedSessionIDs []string `json:"affected_session_ids"`
+	OwnershipRevision    int64    `json:"ownership_revision,omitempty"`
+	ConnectionGeneration string   `json:"connection_generation,omitempty"`
+	Type                 string   `json:"type"` // "daemon_disconnected"
+	DaemonID             string   `json:"daemon_id"`
+	AffectedSessionIDs   []string `json:"affected_session_ids"`
 }
 
 // BrowserSessionStarted notifies the browser that a session was created.
@@ -1135,6 +1162,7 @@ type AgentEventAck struct {
 // AgentUserMessage delivers a user message to an agent session
 // (browser → server → daemon).
 type AgentUserMessage struct {
+	PlanNudge      string `json:"plan_nudge,omitempty"`
 	ExpectedTurnID string `json:"expected_turn_id,omitempty"`
 	Type           string `json:"type"` // "agent_user_message"
 	SessionID      string `json:"session_id"`
@@ -1242,4 +1270,27 @@ type DaemonRecoveryReady struct {
 	Type string `json:"type"` // "daemon_recovery_ready"
 	// SessionID routes the frame through a session pod's scoped write pump.
 	SessionID string `json:"session_id,omitempty"`
+}
+
+// PlanInputRequest asks for drift metadata immediately before an initial/resume input is queued.
+// Only the daemon owning SessionID can request it; it never creates a model input itself.
+type PlanInputRequest struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	RequestID string `json:"request_id"`
+	ClientID  string `json:"client_id,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+type PlanInputResult struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	RequestID string `json:"request_id"`
+	PlanNudge string `json:"plan_nudge,omitempty"`
+}
+
+// DesktopOwnershipChanged removes previously delivered inventory for its exact recipient.
+type DesktopOwnershipChanged struct {
+	Type              string `json:"type"`
+	DesktopID         string `json:"desktop_id"`
+	OwnershipRevision int64  `json:"ownership_revision"`
 }

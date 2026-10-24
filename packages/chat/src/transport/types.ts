@@ -111,7 +111,8 @@ export interface WorkspaceFile {
 
 /** A commit read from the session's own workspace (the runner's commit route): every field
  *  bounded by the server. */
-export interface CommitDetails {
+export interface WorkspaceGitRef { member_id: string; launch_generation: string; generation: number }
+export interface CommitDetails extends Partial<WorkspaceGitRef> {
   sha: string
   short: string
   subject: string
@@ -129,15 +130,15 @@ export interface CommitDetails {
 
 /** A commit's diff read on demand: its text, 'large' when it is over the server's cap, null when it
  *  cannot be read (the session's workspace or daemon is gone, the commit is unknown, no access). */
-export type CommitDiff = { text: string } | 'large' | null
+export type CommitDiff = { text: string; member?: WorkspaceGitRef } | 'large' | null
 
 export interface TransportFiles {
   /** A commit by sha (7 to 64 hex digits), read from the session's workspace; null when it cannot be
    *  read, for whatever reason (there is nothing to tell the person). Absent on a transport
    *  without the route. */
-  commit?(sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDetails | null>
+  commit?(sessionId: string, sha: string, signal?: AbortSignal, member?: WorkspaceGitRef): Promise<CommitDetails | null>
   /** The commit's diff, generated on demand (see CommitDiff). Absent with `commit`. */
-  commitDiff?(sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDiff>
+  commitDiff?(sessionId: string, sha: string, signal?: AbortSignal, member?: WorkspaceGitRef): Promise<CommitDiff>
   /** Reads a file by its path in the session's folder (owner only; absent on a transport without
    *  the route). Throws WorkspaceFileError for a refusal; honours `signal`. */
   workspaceFile?(sessionId: string, path: string, signal?: AbortSignal): Promise<WorkspaceFile>

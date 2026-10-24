@@ -74,6 +74,15 @@ spec:
             - name: mcp-gateway
               containerPort: 8090
           env:
+            - name: BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS, optional: true }
+            - name: BLERG_RUNNER_MAX_PARALLEL_CHILDREN
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_PARALLEL_CHILDREN, optional: true }
+            - name: BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR, optional: true }
             - name: BLERG_RUNNER_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -221,6 +230,9 @@ spec:
             - name: BLERG_RUNNER_AGENT_IMAGE
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_AGENT_IMAGE, optional: true }
+            - name: BLERG_RUNNER_WORKSPACE_STORAGE_CLASS
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_WORKSPACE_STORAGE_CLASS, optional: true }
             - name: BLERG_RUNNER_NATIVE_HISTORY
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_NATIVE_HISTORY, optional: true }

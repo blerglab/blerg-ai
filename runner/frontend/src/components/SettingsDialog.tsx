@@ -14,6 +14,7 @@ import { useCompact, useThinking } from '../lib/sessionRail'
 import { coreOrigin } from '../authClient'
 import './CapabilitiesPanel.css'
 import './SettingsDialog.css'
+import DesktopOwnershipSection from './DesktopOwnershipSection'
 import DelegationRulesSection from './DelegationRulesSection'
 
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])'
@@ -167,6 +168,7 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
             </section>
 
             <DelegationRulesSection />
+            <DesktopOwnershipSection />
             <h3 id={`${titleId}-colors`} className="st-heading">Code colors</h3>
             <div className="cc-pickers" role="group" aria-labelledby={`${titleId}-colors`}>
               {(['dark', 'light'] as const).map(m => (

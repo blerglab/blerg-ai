@@ -86,6 +86,7 @@ function stubFetch(changes = 0, live?: LiveReply) {
         : { ok: false, status: 404, headers: new Headers({ 'Content-Type': 'text/plain; charset=utf-8' }), json: () => Promise.reject(new SyntaxError('not JSON')) })
     }
     if (String(url).endsWith('/limit-resume')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ enabled: false, state: 'disabled', reason: '', attempts: 0 }) })
+    if (String(url).endsWith('/plan-nudges')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ enabled: true }) })
     const body = String(url).includes('/api/tool-changes')
       ? { tool_changes: Array.from({ length: changes }, (_, i) => ({ id: `t${i}`, kind: 'changed', muted: false })) }
       : {}
@@ -285,6 +286,15 @@ describe('session side panel', () => {
     await renderPage()
     expect(within(screen.getByTestId('rail-session')).queryByRole('checkbox', { name: 'Resume when limit resets' })).not.toBeInTheDocument()
     expect(fetchCalls().filter(url => url.endsWith('/limit-resume'))).toEqual([])
+  })
+
+  it('offers the plan nudge setting in the panel Session section, on by default', async () => {
+    seedSession({ engine: 'hermes', limit_resume_supported: false })
+    seedEvents(user())
+    await renderPage()
+    const box = await within(screen.getByTestId('rail-session')).findByRole('checkbox', { name: 'Nudge when the plan drifts' })
+    expect(box).toBeChecked()
+    expect(fetchCalls().filter(url => url.endsWith('/plan-nudges'))).toEqual(['/api/sessions/sess-a/plan-nudges'])
   })
 
   describe('on a wide screen', () => {

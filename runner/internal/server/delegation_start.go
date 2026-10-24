@@ -84,6 +84,8 @@ type storedChildRequest struct {
 
 // delegationRequestPayload is the delegation_request event in the parent's transcript.
 type delegationRequestPayload struct {
+	Members []protocol.WorkspaceMember `json:"members,omitempty"`
+
 	RequestID       string        `json:"request_id"`
 	Engine          string        `json:"engine"`
 	Model           string        `json:"model,omitempty"`
@@ -147,11 +149,23 @@ func parseChildStart(raw []byte, host childHost) (childStart, childHost, *APIErr
 		host = host.forRuntime(runnerRuntimeCluster)
 	}
 	dc := host.dc
-	if cs.NoRepo {
+	switch {
+	case host.workspace != nil:
+		if host.workspace.Runtime == "cluster" {
+			if apiErr := selectClusterChild(&cs, *host.workspace); apiErr != nil {
+				return fail(apiErr)
+			}
+		}
+		if apiErr := selectWorkspaceChild(&cs, *host.workspace); apiErr != nil {
+			return fail(apiErr)
+		}
+	case len(cs.Repos) > 0 || cs.AllRepos:
+		return fail(apiErrorf(422, "repository member selection requires a workspace parent"))
+	case cs.NoRepo:
 		if msg := noRepoProblem(cs.Repo, "", "", false, false); msg != "" {
 			return fail(apiErrorf(http.StatusUnprocessableEntity, "%s", msg))
 		}
-	} else {
+	default:
 		if cs.Repo == "" {
 			return fail(apiErrorf(http.StatusUnprocessableEntity, "repo is required"))
 		}
@@ -414,18 +428,27 @@ func (a *API) checkDelegationLimits(ctx context.Context, parent *db.SessionRow, 
 	if err != nil {
 		return dbErr(err)
 	}
-	if n >= maxRunningChildrenPerParent {
-		return limitErr(60, "this session already runs %d started sessions; stop one first", maxRunningChildrenPerParent)
+	limits := a.effectiveChildLimits(ctx)
+	if n >= limits.parallel {
+		return limitErr(60, "this session already runs %d sessions at once (the limit is %d); stop one first", n, limits.parallel)
 	}
-	n, err = db.CountParentStarts(ctx, a.dbPool, parent.ID)
+	now := time.Now()
+	since := now.Add(-time.Hour)
+	exclude := ""
+	if self != nil && self.ParentSessionID == parent.ID && self.ChildSessionID == "" {
+		exclude = self.ID
+	}
+	n, freeingStart, err := db.ParentStartWindow(ctx, a.dbPool, parent.ID, since, exclude, limits.hourly)
 	if err != nil {
 		return dbErr(err)
 	}
-	if self != nil && self.ParentSessionID == parent.ID && self.ChildSessionID == "" {
-		n--
-	}
-	if n >= maxStartsPerParent {
-		return limitErr(0, "this session has used all %d of its starts; this limit does not reset", maxStartsPerParent)
+	if n >= limits.hourly {
+		if freeingStart == nil {
+			return dbErr(errors.New("missing start window timestamp"))
+		}
+		next := freeingStart.Add(time.Hour)
+		retry := max(1, int(math.Ceil(next.Sub(now).Seconds())))
+		return limitErr(retry, "this session started %d sessions in the last hour (the limit is %d); the next start is possible at %s", n, limits.hourly, next.UTC().Format("15:04:05 UTC"))
 	}
 	n, err = db.CountAccountRunningChildren(ctx, a.dbPool, account)
 	if err != nil {
@@ -434,8 +457,6 @@ func (a *API) checkDelegationLimits(ctx context.Context, parent *db.SessionRow, 
 	if n >= maxRunningChildrenPerAccount {
 		return limitErr(60, "your sessions already run %d started sessions; stop one first", maxRunningChildrenPerAccount)
 	}
-	now := time.Now()
-	since := now.Add(-time.Hour)
 	n, oldest, err := db.AccountStartsSince(ctx, a.dbPool, account, since)
 	if err != nil {
 		return dbErr(err)
@@ -556,10 +577,24 @@ func childRequestHash(cs childStart) string {
 // childRunnerRequest is the contract request startChild builds; the replay check rebuilds it to
 // compare the stored idempotency hash.
 func childRunnerRequest(parent *db.SessionRow, cs childStart, via string) runnerStartRequest {
+	repo := cs.Repo
+	if cs.Workspace != nil {
+		repo = "workspace"
+		if cs.Workspace.Runtime == "cluster" {
+			repo = ""
+		}
+	}
+	var clusterRepos []string
+	var clusterLaunch string
+	if cs.Runtime == "cluster" {
+		clusterRepos, clusterLaunch = cs.Repos, cs.WorkspaceLaunch
+	}
 	return runnerStartRequest{
+		Workspace:      cs.Workspace,
+		WorkspaceRepos: clusterRepos, WorkspaceLaunch: clusterLaunch,
 		Engine: cs.Engine, Model: cs.Model, Effort: cs.Effort,
-		Repo: cs.Repo, NoRepo: cs.NoRepo, Runtime: cs.Runtime, Provider: cs.Provider, resolvedRepoProvider: cs.Provider != "",
-		Title: cs.Title, Prompt: cs.Prompt,
+		Repo: repo, NoRepo: cs.NoRepo, Runtime: cs.Runtime, Provider: cs.Provider, resolvedRepoProvider: cs.Provider != "",
+		Title: cs.Title, Prompt: workspacePrompt(cs.Prompt, cs.Workspace),
 		Interaction:     protocol.InteractionUnattended,
 		DaemonID:        childDaemonID(parent, cs.Runtime),
 		ParentSessionID: parent.ID,
@@ -653,7 +688,14 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	cs, host, apiErr := parseChildStart(raw, a.parentHost(parent, dc))
+	parentHost := a.parentHost(parent, dc)
+	if ws, err := db.GetSessionWorkspace(ctx, a.dbPool, parent.ID); err != nil {
+		writeError(w, 409, "parent workspace unavailable")
+		return
+	} else if ws != nil {
+		parentHost.workspace = ws.Manifest
+	}
+	cs, host, apiErr := parseChildStart(raw, parentHost)
 	// A cluster child's delegate carries the owner's proof (delegateFor); a desktop child's none.
 	delegate := a.delegateFor(ctx, parent, cs.Runtime, "")
 	if apiErr == nil {
@@ -810,6 +852,7 @@ func (a *API) announceDelegationRequest(ctx context.Context, parent db.SessionRo
 	excerpt := cutRunes(cs.Prompt, delegationPromptExcerpt)
 	daemonName := host.name()
 	payload := delegationRequestPayload{
+		Members:   childWorkspaceMembers(cs),
 		RequestID: req.ID, Engine: cs.Engine, Model: cs.Model, Effort: cs.Effort, Repo: cs.Repo, NoRepo: cs.NoRepo,
 		Runtime: cs.Runtime, DaemonName: daemonName, Title: cs.Title, Prompt: excerpt,
 		PromptTruncated: excerpt != cs.Prompt, Budget: budget, Boards: cs.Boards, Offered: req.Offered, ExpiresAt: req.ExpiresAt,

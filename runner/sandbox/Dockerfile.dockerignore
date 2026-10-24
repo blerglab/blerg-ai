@@ -1,0 +1,20 @@
+# Sandbox builds use the repository root. Send only build inputs, never checkout
+# metadata, frontend dependency caches, local state, reports or credentials.
+**
+!contracts/
+!contracts/**
+!runner/
+!runner/go.mod
+!runner/go.sum
+!runner/cmd/
+!runner/cmd/shell-supervisor/
+!runner/cmd/shell-supervisor/**
+!runner/cmd/workspace-explorer/
+!runner/cmd/workspace-explorer/**
+!runner/internal/
+!runner/internal/**
+!runner/sandbox/
+!runner/sandbox/engines/
+!runner/sandbox/engines/package.json
+!runner/sandbox/engines/package-lock.json
+!runner/sandbox/install-hermes.sh

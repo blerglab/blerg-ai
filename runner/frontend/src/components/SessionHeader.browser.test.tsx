@@ -51,7 +51,8 @@ describe('the session header', () => {
     mount(width > 1000)
     const group = await screen.findByTestId('session-header-controls')
     const buttons = [...group.querySelectorAll<HTMLButtonElement>('button:not([role="menuitem"])')]
-    expect(buttons).toHaveLength(5)
+    expect(buttons).toHaveLength(width < 900 ? 6 : 7)
+    expect(group.querySelector('[aria-label="Search commands and files"]')).not.toBeNull()
     // Exactly one Notifications bell on the page: in the header on a phone (no sidebar there), in
     // the sidebar beside + New on a wide screen.
     const bells = screen.getAllByRole('button', { name: /^Notifications/ })

@@ -145,7 +145,7 @@ type BlergRunner struct {
 func NewBlergRunner(url, key, gitBase string) *BlergRunner {
 	return &BlergRunner{url: strings.TrimRight(url, "/"), key: key,
 		gitBase: strings.TrimRight(gitBase, "/"),
-		client:  &http.Client{Timeout: 15 * time.Second}}
+		client:  &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
 // SetRuntime pins the runtime every start asks for (a value ParseRuntime
@@ -221,6 +221,10 @@ func (k *BlergRunner) doAs(ctx context.Context, bearer, method, path string, bod
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.Header.Set("X-Blerg-Desktop-Viewer", "none")
+	if viewer := desktopViewerProof(ctx); viewer != "" {
+		req.Header.Set("X-Blerg-Desktop-Viewer", viewer)
+	}
 	resp, err := k.client.Do(req)
 	if err != nil {
 		return meta, err
@@ -228,8 +232,11 @@ func (k *BlergRunner) doAs(ctx context.Context, bearer, method, path string, bod
 	defer func() { _ = resp.Body.Close() }()
 	meta.Status, meta.ContentType = resp.StatusCode, resp.Header.Get("Content-Type")
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		safeBody := string(raw)
+		if viewer := desktopViewerProof(ctx); viewer != "" {
+			safeBody = strings.ReplaceAll(safeBody, viewer, "[redacted]")
+		}
 		if bearer != "" {
 			safeBody = strings.ReplaceAll(safeBody, bearer, "[redacted]")
 		}

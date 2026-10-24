@@ -23,7 +23,7 @@ func TestCodexQuestionLeavesAnswerRecordingToServer(t *testing.T) {
 	}))
 	defer server.Close()
 	em := &collectEmitter{}
-	answer, err := codexQuestionHandler(server.URL, "fixture-token", "session", em)(context.Background(), "Pick a fixture")
+	answer, err := codexQuestionHandler(server.URL, "fixture-token", nil, "session", em)(context.Background(), "Pick a fixture")
 	if err != nil || answer != "fixture choice" {
 		t.Fatal("question did not receive its answer")
 	}
@@ -50,7 +50,7 @@ func TestCodexQuestionLeavesAnswerRecordingToServer(t *testing.T) {
 func TestCodexQuestionErrorsAreSafe(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "fixture-secret-never-display", 500) }))
 	defer server.Close()
-	_, err := codexQuestionHandler(server.URL, "fixture-token", "session", &collectEmitter{})(context.Background(), "Question")
+	_, err := codexQuestionHandler(server.URL, "fixture-token", nil, "session", &collectEmitter{})(context.Background(), "Question")
 	if err == nil || strings.Contains(err.Error(), "fixture-secret") {
 		t.Fatal("unsafe question API error")
 	}
@@ -67,7 +67,7 @@ func TestCodexQuestionStopsWhenItsMessageExpires(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := codexQuestionHandler(server.URL, "fixture-token", "session", &collectEmitter{})(ctx, "Question")
+	_, err := codexQuestionHandler(server.URL, "fixture-token", nil, "session", &collectEmitter{})(ctx, "Question")
 	if err == nil || ctx.Err() != nil {
 		t.Fatal("an expired ask waited until the turn was interrupted")
 	}
@@ -92,7 +92,7 @@ func TestCodexChildQuestionKeepsIndependentPrivateRoute(t *testing.T) {
 	}))
 	defer server.Close()
 	ctx := context.WithValue(context.Background(), codexQuestionOriginKey{}, "canonical-child-run")
-	answer, err := codexQuestionHandler(server.URL, "fixture-token", "session", &collectEmitter{}, func() string { return "root-turn" })(ctx, "Codex subagent asks: Choose a color")
+	answer, err := codexQuestionHandler(server.URL, "fixture-token", nil, "session", &collectEmitter{}, func() string { return "root-turn" })(ctx, "Codex subagent asks: Choose a color")
 	if err != nil || answer != "Blue" {
 		t.Fatal("child private question did not resolve")
 	}
@@ -124,7 +124,7 @@ func TestOwnerOnlyApprovalFailureSaysWhy(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			em := &collectEmitter{}
-			ask := codexQuestionHandler(tc.base, "fixture-token", "session", em)
+			ask := codexQuestionHandler(tc.base, "fixture-token", nil, "session", em)
 			if _, err := ask(withOwnerOnlyAsk(t.Context()), "Allow rm?"); err == nil {
 				t.Fatal("an undelivered approval was answered")
 			}
@@ -138,5 +138,36 @@ func TestOwnerOnlyApprovalFailureSaysWhy(t *testing.T) {
 				t.Fatalf("error %q, want runner-key explanation %v", msg, tc.runnerKey)
 			}
 		})
+	}
+}
+
+func TestDesktopQuestionsUseRotatingSessionCredential(t *testing.T) {
+	t.Setenv(DaemonStateDirEnv, t.TempDir())
+	desktopToken := "bdt_" + strings.Repeat("a", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expected := "Bearer session-initial"
+		if r.Method == http.MethodGet {
+			expected = "Bearer session-renewed"
+		}
+		if r.Header.Get("Authorization") != expected {
+			t.Errorf("question used a credential outside its session")
+			w.WriteHeader(401)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			if err := writeSessionTokenFile(DaemonStateDir(), "session", "session-renewed"); err != nil {
+				t.Error(err)
+			}
+			_, _ = w.Write([]byte(`{"id":"question"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"answered":true,"answer":"choice"}`))
+		}
+	}))
+	defer server.Close()
+	h := &AgentHost{cfg: AgentHostConfig{ServerHTTP: server.URL, DaemonToken: desktopToken}}
+	answer, err := h.questionAsker("session", &collectEmitter{}, "", nil, "session-initial")(t.Context(), "Choose")
+	if err != nil || answer != "choice" {
+		t.Fatal("session-scoped question failed", err)
 	}
 }

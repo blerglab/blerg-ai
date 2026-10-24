@@ -68,13 +68,13 @@ func fetchCorePlugins(ctx context.Context, client *http.Client, coreURL, interna
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coreURL+"/internal/plugins/list", bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coreURL+"/internal/plugins/list", bytes.NewReader(raw)) // #nosec G704 -- Target is operator-configured Core URL; requester fields are JSON data and redirects are disabled.
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Key", internalKey)
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- Target is operator-configured Core URL; requester fields are JSON data and redirects are disabled.
 	if err != nil {
 		return nil, fmt.Errorf("request to core failed: %w", err)
 	}

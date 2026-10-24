@@ -345,11 +345,12 @@ func TestNamedCloneTokenIsNeverLogged(t *testing.T) {
 	}
 	_ = recvNamedSpawn(t, dc)
 	// A full send buffer: the spawn fails, and still nothing is logged.
-	full := &DaemonConn{ID: "d2", Name: "full", send: make(chan []byte)}
+	full := &DaemonConn{ID: newUUID(), Name: "full", send: make(chan []byte)}
 	full.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	full.SetCloneFrom(true)
+	fixtureOwnDesktop(t, api.dbPool, full, "user-1")
 	api.hub.Register(full)
-	rec := postSpawn(t, api, map[string]any{"daemon_id": "d2", "git_url": "https://github.com/octo/tiny", "kind": "agent", "runtime": "docker"})
+	rec := postSpawn(t, api, map[string]any{"daemon_id": full.ID, "git_url": "https://github.com/octo/tiny", "kind": "agent", "runtime": "docker"})
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("full buffer: status %d", rec.Code)
 	}

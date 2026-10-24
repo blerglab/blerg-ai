@@ -98,6 +98,9 @@ describe('Pins and hovercards, in Chromium', () => {
     await railReady()
     // The hovercard's clock is the test's: the delay is decided by it, not by the machine's load.
     await userEvent.hover(chip)
+    // Wait until the real pointer event has registered the manual-clock timer.
+    // Advancing first can put a late browser event beyond the test's deadline.
+    await expect.poll(() => clock.pending()).toBeGreaterThan(0)
     clock.advance(HOVERCARD.openDelayMs - 1)
     await frame()
     expect(hovercard()).toBeNull()

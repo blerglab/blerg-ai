@@ -312,3 +312,21 @@ it('does not reopen the Permissions modal by itself after it was closed, across 
   await userEvent.click(await screen.findByRole('button',{name:'Change child approvals'}))
   expect(await screen.findByRole('dialog',{name:'Permissions'})).toBeInTheDocument()
 })
+
+// The plan nudge setting (card #158) sits in the panel's Session section and stays inside it, on a
+// phone's drawer and on a 4K screen alike.
+it.each([390, 3840])('shows the plan nudge setting inside the panel at %ipx', async width => {
+  await page.viewport(width, 900)
+  const fallback = apiFetch.getMockImplementation()!
+  apiFetch.mockImplementation((url: string) => url.endsWith('/plan-nudges') ? json({ enabled: true }) : fallback(url))
+  renderPage()
+  if (width < 700) await userEvent.click(screen.getByTestId('rail-toggle'))
+  const section = await screen.findByTestId('rail-session')
+  const box = await within(section).findByRole('checkbox', { name: 'Nudge when the plan drifts' })
+  expect(box).toBeChecked()
+  const label = box.closest('label')!.getBoundingClientRect()
+  const panel = screen.getByTestId('session-rail').getBoundingClientRect()
+  expect(label.left).toBeGreaterThanOrEqual(panel.left)
+  expect(label.right).toBeLessThanOrEqual(panel.right)
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+})

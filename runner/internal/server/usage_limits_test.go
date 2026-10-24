@@ -38,7 +38,7 @@ func TestUsageLimitsStoredBroadcastAndInInitialState(t *testing.T) {
 		{ID: "5h", UsedPercent: 42, ResetsAt: reset}, {ID: "7d", UsedPercent: 7},
 	}, FetchedAt: time.Now()})
 	m := nextLimitsChanged(t, bc)
-	if m.DaemonID != "ws1" || len(m.UsageLimits) != 1 || m.UsageLimits[0].Provider != "codex" || len(m.UsageLimits[0].Windows) != 2 {
+	if m.DaemonID != "00000000-0000-4000-8000-0000000000b1" || len(m.UsageLimits) != 1 || m.UsageLimits[0].Provider != "codex" || len(m.UsageLimits[0].Windows) != 2 {
 		t.Fatalf("broadcast = %+v", m)
 	}
 
@@ -150,7 +150,8 @@ func TestGetDaemonsCarriesUsageLimits(t *testing.T) {
 	coreSrv := newTestCoreServer(t, pub)
 	t.Cleanup(coreSrv.Close)
 	hub, ws, _, _ := sidebarHubFixture(t)
-	api := NewAPI(hub, nil, "daemon-tok", nil, "")
+	api := NewAPI(hub, hub.desktopPool, "daemon-tok", nil, "")
+	fixtureOwnDesktop(t, api.dbPool, ws, "human:test-user")
 	api.SetCoreAuth(ownedCoreAuthClient(t, coreSrv.URL))
 	token := mintTestToken(t, priv, "k1", identity.Claims{
 		Sub: "human:test-user", Aud: "blerg-runner", Kind: "human",
@@ -160,7 +161,7 @@ func TestGetDaemonsCarriesUsageLimits(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/daemons", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		w := httptest.NewRecorder()
-		api.HandleGetDaemons(w, req)
+		api.HandleGetDaemons(&reviewDeadlineWriter{ResponseRecorder: w}, req)
 		var out []protocol.DaemonInfo
 		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 			t.Fatalf("GET /api/daemons: %d %s", w.Code, w.Body.String())

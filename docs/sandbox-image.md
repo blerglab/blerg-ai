@@ -239,3 +239,311 @@ BLERG_SANDBOX_CHILD_TEST=1 GOWORK=off go test ./internal/daemon -run '^TestSandb
 The test uses a disposable repository and container, commits on the child branch, verifies that
 the parent branch stays unchanged, and runs small dependency-free Go and Node tests. It does not
 use an engine login or push a branch.
+
+## Workspace v2 shared contract (0.5.0 P0)
+
+`protocol.WorkspaceManifest` is immutable launch state, persisted by migration 076.
+`workspace_kind` defaults to `repo` for existing and old-writer sessions;
+`GetSessionWorkspace` returns a nil manifest for those sessions. Scalar fields keep
+their single-repository meanings; never choose an arbitrary first member for them.
+Folder persistence clears repo/git_url rather than retaining a first-member scalar.
+Manifest runtime values are host/sandbox/cluster; persistence maps existing
+session daemon/docker values to host/sandbox for binding validation. Member destination
+is the authorized destination identity, inherited by children; each child's wip
+branch is allocated separately, not supplied as a replacement destination.
+
+Negotiate `WorkspaceCapabilities` at both hops and call `Require` before dispatch.
+Absent or unknown versions refuse folder/multi-repo and shell. P0 adds schemas,
+not runtime support advertisements. P1–P5 must wire enforcement before enabling
+features. Public source/common-directory identities must be opaque, never private
+paths. Private mounts and credentials stay in trusted runtime state. Validation
+caps members at 20 and checks unique identities and disjoint safe paths; P1 still
+must resolve canonical roots, authorize destinations and discover submodules.
+
+`WorkspaceMemberRef` fences diff/commit/artifact operations by member and launch.
+`WorkspaceMemberResult` carries per-member base/head/branch, pending, sync/push
+errors and owner-authorized recovery locations; validate provenance before delivery.
+`DefaultWorkspaceBudget` applies once per session. Folder children may choose a
+parent-manifest subset through `ValidateWorkspaceChild`, retaining existing child
+authorization and allocating each member's own wip/<child-id> branch. Shell grants
+are never inherited. Unqualified project tools refuse folder sessions: member-aware
+routes must verify member/project and generation against trusted manifest state;
+explorer discovery never confers project authority.
+
+`contracts/shellpolicy` defines `ShellPolicy`, `ShellGrant`, `HostShellConsent`
+(with runner protocol aliases) so core and runtime share P5 control-plane schemas.
+Grants bind audience, human owner/login, connection, launch/shell generation,
+runtime and policy revision: maximum 30-second leases, renewed every 10 seconds.
+Host grants require exact challenge-bound consent. P5 implements authenticated issuance,
+validation, revocation, policy authority and supervisor containment; these types
+alone grant no shell access. Unknown policy and peer capabilities fail closed.
+
+## Local workspace lifecycle primitives (0.5.0 P2)
+
+The daemon's `PrepareLocalWorkspace` accepts an authorized immutable manifest,
+trusted canonical `WorkspaceSource` records and an enforced `WorkspaceStorage`
+allocation. It clones every selected repository through the existing hardened
+`--shared` preparation path. Loose source-folder files are never copied. A
+private, versioned, authenticated manifest pins sources, common directories,
+clone Git/object directories, bases and per-member destinations. The existing
+single-session clone-root gate still rejects arbitrary descendants.
+
+`DockerMountPlan` is private daemon data: mount its public root at `/workspace`,
+mount only the recorded source object directories read-only, and apply its exact
+owner/session/launch/context labels. Never forward this plan to an agent or browser.
+After creating the runtime, call `BindRuntime` with the immutable Docker ID and
+pinned Docker context. The returned root identity comes from inside that runtime;
+it is separate from the host allocation identity and must be bound to the launch
+before file/shell operations are enabled. P4 status workers must use
+`WithRuntimeMember` to share the lifecycle gate. The explorer notice is **Only selected
+repositories were copied.**
+
+Call `Sync` at turn boundaries. It drains status work, reads member heads inside
+the running container and skips freezing when there are no new commits. Otherwise
+it freezes the whole container once, validates metadata, resets exact alternates
+and copies members with the existing strict `.git` upload-pack path. It never
+executes inside a paused container. The shell adapter receives **Syncing the
+agent's commits…** during this operation. Each round rotates its first member and
+shares aggregate metadata/object budgets. Member refusals retain that member's
+work; shared-record corruption or an unproved freeze prevents all copying. A
+failed thaw fences the workspace for recovery.
+
+`Stop` fences admission through P0b's all-launch supervisor cleanup proof,
+then stops and removes the exact immutable runtime. A fresh, memory-capped helper
+snapshots leftover work without reading agent Git configuration. Clean, saved
+members may be released independently; uncertain members retain recovery paths.
+Durable preparation/removal/member/allocation intents reconcile process crashes.
+
+`LocalWorkspaceService` connects Manager/AgentHost dispatch, child authorization,
+turn-end sync, stop, recovery and results. Its selection, authenticated runtime
+binding/CAS, current-incarnation, result persistence and P5 supervisor adapters
+are mandatory; P6 connects the real package implementations. Runtime results must
+use `SetWorkspaceRuntimeResults` through that authenticated adapter. The legacy
+SessionEnded result handler cannot authorize a generation-bound report.
+`WithBoundRuntimeMember` checks generation and current authority at entry and
+delivery; the older selection-only member API refuses bound workspaces.
+Capability support remains unadvertised pending integration/security signoff.
+
+The default storage authority keeps a private persistent ext4 image in Docker's
+Linux VM on both Linux and macOS. A trusted, labelled quota keeper mounts only
+its own image; a second labelled local volume exposes that exact device's public
+`tree` subdirectory. Daemon state contains authenticated allocation and release
+journals, never an unbounded ordinary-directory fallback. Host source pins and
+worker-namespace clone pins are separate. Recovery locations for VM allocations
+are logical worker paths; resolve them through the authenticated private volume
+journal rather than opening them as host paths. The public checkout need not exist as
+a host filesystem path, and the host needs no mount privilege.
+
+Kernel byte/inode ceilings combine with a mandatory per-write entry policy:
+`link` and `linkat` return EXDEV in every workspace runtime and Git worker.
+Directory names therefore cannot alias one inode to evade the entry ceiling.
+The policy preserves Docker's default syscall restrictions; Git can use its
+normal rename/copy fallback. The daemon checks the runtime's exact policy and
+workers independently probe the kernel's hardlink denial before work.
+
+Preparation, copy and settlement run in a Linux Docker container with one
+512 MiB memory/swap budget, 64 PIDs and no network. Linux can mount its native
+helper executable; macOS uses the matching Linux helper image, never a Mach-O
+binary or host cgroup. The desktop installer builds/checks that image even when
+the base sandbox image already exists. To build it manually from repository root:
+
+```sh
+docker build -f runner/Dockerfile.workspace-worker -t blerg-workspace-worker:latest .
+```
+
+Settlement seeds a fresh trusted index from the current session commit. It never
+reads the agent's index/config. Tracked files remain tracked under newly added
+ignore rules. Raw checkout bytes must match the snapshot and the actual fetched
+source blobs before a saved-tree proof permits release. Ignored untracked files
+remain in retained recovery storage; they are not force-added. Attribute
+conversions that would change raw bytes also retain the checkout.
+
+Runtime start tokens are journalled before generation allocation or Docker
+creation. `WorkspaceRuntimeAuthority.Launch` must be idempotent for that token;
+CAS intent is journalled before `Bind`. `Abort` must independently authorize and
+fence a pending token (or an explicitly identified historical immutable runtime)
+before acknowledging cleanup. Interrupted/unacknowledged starts can then return
+to prepared state without discarding clones. `Recover` authenticates a new
+connection to the same runtime generation and physical binding before replay.
+These are P2 adapter requirements, not authority conferred by the token itself.
+
+Finalization journals an immutable result payload and terminal message. A failed
+result persistence keeps the private/agent recovery records and sends no terminal
+event. `Results` acknowledges durable, idempotent replacement of the exact
+runtime/member payload before terminal submission. Acknowledged results are not
+resent during normal terminal retries. Crash/lost-ack replay can repeat the same
+idempotent persistence or terminal submission; transport acceptance is not an
+exactly-once wire-delivery promise. Current authority is checked again before
+terminal submission. P6 connects the real authenticated adapters and their
+server-side acknowledgements; capability advertisement remains disabled.
+
+Run the credential-free P2 Docker tests with a locally built sandbox image:
+
+```sh
+cd runner
+BLERG_P2_DOCKER_TEST=1 GOWORK=off go test ./internal/daemon -run '^TestP2Docker' -count=1
+```
+
+Tests use unique container labels and remove only their own containers. They use
+fake trusted selection/quota/status/supervisor peers; they do not enable another
+package's discovery, explorer or shell implementation.
+### Prepared runtime roots and supervisor lifecycle (P0b)
+
+Manifest membership and its launch generation remain immutable. `WorkspaceManifest.Root`
+is legacy metadata, grants no file authority, and may be zero before preparation.
+For host, sandbox and cluster, the trusted server calls `db.BeginWorkspaceRuntime`
+with the expected prior generation before dispatch. It must authorize the session
+and fence the old physical writer first. This compare-and-set increments the runtime
+generation and clears the binding without changing membership or results.
+
+The runtime pins its actual public directory and sends `WorkspaceRuntimePrepared`
+(`workspace_runtime_prepared`) over its existing authenticated connection. The server
+calls `BindWorkspaceRuntime` with the runtime reference from trusted connection
+state, never authority supplied by the frame. Binding checks manifest digest/launch,
+runtime generation and physical root; it is write-once per generation with exact
+retries. Pending binding means unavailable. No new transport or capability is enabled.
+
+Explorer request interfaces carry `WorkspaceRuntimeRef`, checked against current
+trusted binding before dispatch and delivery in addition to viewer authorization
+and descriptor checks. Replacement requires a new runtime generation even if inode
+numbers are reused. `SetWorkspaceRuntimeResults` fences member reports against this
+reference. The legacy results API refuses writes once a runtime generation exists.
+Replacement preserves results; callers merge successful outcomes and retry failures.
+
+`contracts/runtimelifecycle.Supervisor` (runner protocol aliases in `supervisor.go`)
+is the shared in-process seam implemented by P5 and faked by P2/P3. It specifies
+admission, phase notifications, shell/launch close and orphan recovery. Runtime
+coordinators serialize admission/fencing with settlement under one session mutex;
+cleanup failures/cancellation keep admission fenced and storage retained. Exact
+launch/connection/runtime-generation proofs require empty containment, closed PTYs
+and reaped processes. A shell-specific proof cannot prove launch-wide cleanup.
+The four shells share session rate/resource budgets. This interface does not
+implement containment, policy, grants or transport; those remain P5/runtime work.
+
+### Cluster workspace runtime (P3)
+
+Cluster workspace-v2 jobs mount only the project volume at `/workspace/projects`;
+`/workspace` remains HOME. Members use their stable ID as the manifest-relative
+path, so duplicate display names do not collide. The runtime guide lists each path
+and its `wip/<session-id>` branch. All members must be prepared before agent spawn.
+
+The trusted selection service supplies `SessionJobSpec.Workspace` plus private
+`WorkspaceMembers` contexts. These are not browser/agent manifest fields. The
+launcher compares the persisted immutable selection, checks the live owner, fetches
+each exact provider credential, and prechecks every member before allocating
+storage or creating a Job. There is no operator Git-token fallback. Clone access
+does not grant push authority; read-only members report a push refusal. Private
+launch JSON travels through a per-session Kubernetes Secret and is consumed/unset
+before any engine starts. Tokens are absent from clone configuration, Job literals,
+public manifests and durable workspace-context records.
+
+Set `BLERG_RUNNER_WORKSPACE_STORAGE_CLASS` explicitly for workspace-v2. The class
+must provide a dedicated filesystem with an enforced byte ceiling no greater than
+11.25 GiB and an enforced inode ceiling no greater than 700,000. P3 requests
+11,520 MiB, validates actual statfs limits and a separate mount device, and refuses
+unbounded shared-directory/local-path provisioners. Smaller enforced limits are
+allowed. The aggregate checkout/object/metadata budgets are also checked during
+preparation and settlement. Linux openat2/no-symlink/no-cross-mount support is
+required; no weaker traversal or ephemeral-storage fallback is used.
+
+Migration 079 stores immutable token-free contexts, owner and PVC name/UID, plus
+prepared member identities. Resume refuses missing/replaced volumes or switched
+Git/object directories. It fences the old Job and every old Pod before dispatch,
+revokes old runtime authority before advancing generation, and binds each socket
+to one runtime generation. Monotonic report revisions and result updates commit
+atomically, so reordered turn/reconnect reports cannot overwrite newer successes.
+Existing result successes survive replacement; failed pushes remain pending and
+are retried. Settlement snapshots bounded regular object
+files into an isolated bare directory, ignoring live config/index/includes/remotes,
+and pushes explicit verified heads to authorized destinations under the existing
+force-push policy. Git workers share a rotating single-worker 80-second round and
+a 512 MiB aggregate memory ceiling. Workspace-v2 currently enforces that ceiling
+on the entire runner container (including the engine and all Git descendants),
+while preserving any tighter existing limit. P6 must provide a dedicated enforced
+Git cgroup before allowing a larger engine container budget. Integer byte, IEC
+and decimal K/M/G/T resource quantities are supported; unknown quantities refuse
+the workspace launch. Partial preparation removes only proven unused clones;
+uncertain allocations and local work remain retained. Volumes are conservatively
+retained for recovery rather than garbage-collected with Jobs; owner-authorized
+recovery/reclamation must use the persisted owner and exact claim UID.
+
+`ClusterWorkspaceChild` validates an already-authorized parent-manifest subset and
+returns token-free contexts for a separately credentialed child Job. P6 wires the
+selection/approval/CLI producer to this runtime entry point; existing delegation
+authorization remains mandatory. No shell grants are inherited. P5's shared
+supervisor can be connected before preparation, with admission serialized against
+stop and exact launch-wide cleanup proofs required. Shell capability remains absent
+until P5 supplies its full implementation. No Kubernetes exec permission is added.
+
+### Integrated desktop completion
+
+The production daemon constructs the workspace service and its authenticated
+control adapter. Local runtime generation allocation, binding, abort, recovery,
+Current and result acknowledgments use the enrolled desktop connection and
+persisted owner/connection fences. Migration 083 stores idempotency tokens and
+final completion digests. Exact results, terminal outcome and receipt commit
+atomically; an identical final transaction can reconcile after reconnect/end.
+Socket submission never acknowledges durable completion. Terminal notifications
+preserve the committed result and original end timestamp.
+
+Workspace v2 remains disabled until the real explorer/supervisor lifecycle and
+release gates pass. Missing lifecycle registration refuses cleanup. See
+[workspace integration](workspace-integration.md) for explicit outstanding work.
+
+### Production workspace explorer helper
+
+The local sandbox image packages the statically built, root-owned executable
+`/usr/local/bin/blerg-workspace-explorer`. Rebuild the image after upgrading the
+daemon; an older image without the helper returns workspace unavailable. Build
+from the repository root, so the helper and shared contracts are included:
+
+```sh
+docker build -f runner/sandbox/Dockerfile -t blerg-runner-sandbox:latest .
+```
+
+The daemon starts the helper with fixed argv over private Docker exec pipes,
+using the launcher's pinned Docker context and immutable container ID. List,
+search, status and viewer reads execute inside the container. Legacy single-repo
+sessions use the same reader for relative references, `/workspace/...` and the
+recorded clone-path alias; the original checkout is never a viewer fallback.
+The legacy wire contract retains its zero runtime reference. Workspace-v2 uses
+the authenticated prepared binding and checks authority before and after reads.
+Manager routes agent-session requests to AgentHost's registered reader.
+
+Agent engines remain non-root, with no effective capabilities and
+`no-new-privileges`. The container permits `DAC_OVERRIDE` for the trusted root
+helper to read user-owned mode-0700 workspace directories. The helper runs with
+an empty environment except a fixed PATH and temporary directory, and creates
+its own mode-0700 temporary directory outside the public tree. A separate
+256 MiB/200,000-inode tmpfs at `/run/blerg-explorer`, owned by root with mode
+0700 under the root-owned `/run` namespace, bounds these snapshots. Agent-owned
+`/tmp` remains separate from the trusted helper snapshot namespace. Agent processes
+cannot read or modify that directory or the helper's private descriptors. The
+helper retains the descriptor traversal/protected-name policy; extra filesystem
+read permission never expands its public root.
+
+The reader shares the session lifecycle mutex with sync and stop. Admission
+refuses while that mutex is held, so reader cancellation/join cannot deadlock
+freeze. Navigation cancellation closes private input, drains output and waits
+for helper exit before releasing reader ownership. Restart requires the same
+root, member, Git and object identities; it cannot adopt replacement directories.
+Unbind/stop closes registered descriptors and helpers. Unproven helper cleanup
+fences further reads and sync, retaining work for recovery. Reconnect retains
+pinned runtime readers and reauthorizes the workspace authority; a complete
+process-crash/platform acceptance campaign remains a release requirement.
+
+Credential-free explorer/image acceptance (with a unique local test tag):
+
+```sh
+docker build -f runner/sandbox/Dockerfile -t blerg-sandbox-explorer-test .
+BLERG_RUNNER_SANDBOX_IMAGE=blerg-sandbox-explorer-test \
+BLERG_EXPLORER_DOCKER_TEST=1 GOWORK=off \
+go -C runner test -p 1 -timeout 45m ./internal/daemon \
+  -run '^TestWorkspaceExplorerProductionDockerImage$' -count=1 -v
+```
+
+The test creates uniquely labelled containers and removes only its own immutable
+IDs after checking ownership. It verifies actual list/search/status/viewer replies,
+helper ownership/mode, non-root engine capabilities and private temporary storage.
+The workspace and owner-shell release gates remain false pending the complete
+runtime/platform matrix and independent review.

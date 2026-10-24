@@ -67,6 +67,7 @@ func newCommitFx(t *testing.T) *commitFx {
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true)
 	fx.api.hub.Register(dc)
+	fixtureOwnDesktop(t, fx.pool, dc, topicOwner)
 	for _, sid := range []string{fx.sess, fx.privSess, fx.ended} {
 		fx.api.hub.SetSessionOwner(sid, dc.ID)
 	}
@@ -146,12 +147,12 @@ func TestCommitLookupOwnerOrAdministratorOnly(t *testing.T) {
 	if got["sha"] != fixtureSHA || got["subject"] != "Fix the thing" || got["request_id"] != nil || got["session_id"] != nil {
 		t.Fatalf("reply %s", rec.Body)
 	}
-	// An administrator reads a session that is not private.
-	if rec := fx.answered(url(fx.sess), admin, okCommit); rec.Code != http.StatusOK {
+	// Administrator status never grants another person's desktop.
+	if rec := fx.refused(url(fx.sess), admin); rec.Code != http.StatusForbidden {
 		t.Fatalf("administrator: %d %s", rec.Code, rec.Body)
 	}
-	// Its owner alone reads a private one.
-	if rec := fx.answered(url(fx.privSess), other, okCommit); rec.Code != http.StatusOK {
+	// A private session owner still needs the persisted desktop owner to match.
+	if rec := fx.refused(url(fx.privSess), other); rec.Code != http.StatusForbidden {
 		t.Fatalf("private session owner: %d %s", rec.Code, rec.Body)
 	}
 	// Someone who can read the transcript of a shared session cannot read its workspace's commits.

@@ -99,7 +99,10 @@ func Bash(workDir string) agent.Tool { return BashEnv(workDir, nil) }
 // inherits the host process env (Bash's behaviour); a hosting daemon passes
 // its sanitised session env so the model's shell never sees credentials the
 // daemon holds for itself.
-func BashEnv(workDir string, env []string) agent.Tool {
+func BashEnv(workDir string, env []string) agent.Tool { return BashEnvWithStart(workDir, env, nil) }
+
+// BashEnvWithStart lets a trusted host lifecycle own the complete writer tree.
+func BashEnvWithStart(workDir string, env []string, start func(*exec.Cmd) error) agent.Tool {
 	return fnTool{
 		def: agent.ToolDef{
 			Name:        "bash",
@@ -132,7 +135,11 @@ func BashEnv(workDir string, env []string) agent.Tool {
 			var buf strings.Builder
 			cmd.Stdout = &buf
 			cmd.Stderr = &buf
-			if err := cmd.Start(); err != nil {
+			launch := cmd.Start
+			if start != nil {
+				launch = func() error { return start(cmd) }
+			}
+			if err := launch(); err != nil {
 				return "", err
 			}
 			done := make(chan error, 1)

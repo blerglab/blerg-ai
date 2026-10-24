@@ -85,9 +85,9 @@ func handleSessionPaused(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *
 	}
 	for _, m := range closed {
 		h.SignalAskAnswered(m.ID)
-		h.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(m)})
+		h.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(m)}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	}
-	h.BroadcastJSON(protocol.SessionPausedChanged{Type: "session_paused_changed", SessionID: msg.SessionID, PausedReason: msg.Reason})
+	h.BroadcastJSON(protocol.SessionPausedChanged{Type: "session_paused_changed", SessionID: msg.SessionID, PausedReason: msg.Reason}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 }
 
 // clearPausedOnMessage drops a session's paused reason once a message for it has been accepted
@@ -103,6 +103,6 @@ func clearPausedOnMessage(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, ses
 		return
 	}
 	if cleared {
-		h.BroadcastJSON(protocol.SessionPausedChanged{Type: "session_paused_changed", SessionID: sessionID})
+		h.BroadcastJSON(protocol.SessionPausedChanged{Type: "session_paused_changed", SessionID: sessionID}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	}
 }

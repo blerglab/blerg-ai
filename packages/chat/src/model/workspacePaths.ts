@@ -1,8 +1,8 @@
 // Which text in an agent's message names a file in the session's folder. Two sources, both
 // conservative (a wrong guess is a click that ends in "Not found", so unsure means plain text):
-//   - a markdown link with a RELATIVE target: `[x](docs/a.md#L12)`;
+//   - a markdown link with a local target: `[x](docs/a.md#L12)`;
 //   - inline code that looks like a path: `runner/a.go:120`, `README.md`, `./scripts/x.sh`.
-// What comes back is the path the read route wants (relative, no `./`, no `/workspace/`, no
+// What comes back is the path the read route wants (relative or absolute, no `./`, no
 // `:line`, `#L`, `?query`) and the line to land on. Nothing here touches the network.
 
 export interface WorkspaceRef {
@@ -37,14 +37,13 @@ function splitSuffix(raw: string): { rest: string; line?: number; col?: number }
   return { rest: base.slice(0, m.index), line: line > 0 ? line : undefined, col }
 }
 
-// The path itself, or null: relative after `./` and `/workspace/` are dropped, with no `..`,
-// no empty or trailing-slash parts. Other absolute paths are never readable, so they stay text.
+// Keep absolute paths intact: only the daemon knows the launch folder and any container mount.
+// It authorizes the path before reading; chat must not guess a workspace prefix.
 function clean(p: string): string | null {
   let s = p
-  if (s.startsWith('/workspace/')) s = s.slice('/workspace/'.length)
   while (s.startsWith('./')) s = s.slice(2)
-  if (s === '' || s.startsWith('/') || s.endsWith('/') || s.includes('//')) return null
-  const parts = s.split('/')
+  if (s === '' || s.endsWith('/') || s.includes('//')) return null
+  const parts = (s.startsWith('/') ? s.slice(1) : s).split('/')
   if (parts.some(x => x === '' || x === '.' || x === '..')) return null
   return s
 }
@@ -77,7 +76,7 @@ export function workspaceFromCode(text: string): WorkspaceRef | null {
   const slashed = path.includes('/')
   // `and/or`, `TCP/IP`, `src/components`: a slash alone is not enough, the last part must look
   // like a file (an extension with a letter in it, a well-known bare name, a dotfile) — or the
-  // text said `./`/`/workspace/` outright.
+  // text said `./` or `/workspace/` outright.
   const explicit = raw.startsWith('./') || raw.startsWith('/workspace/')
   const fileLike = (ext !== '' && /[a-z]/i.test(ext)) || bare || dotfile
   if (slashed) {
@@ -88,8 +87,8 @@ export function workspaceFromCode(text: string): WorkspaceRef | null {
   return { path, ...(line ? { line } : {}), ...(col ? { col } : {}) }
 }
 
-/** The file a markdown link's relative target names, or null (absolute URLs, anchors, other schemes,
- *  host paths and anything climbing out of the folder are not workspace links). */
+/** The file a markdown link's local target names, or null (absolute URLs, anchors, other schemes,
+ *  anything climbing out of the folder are not workspace links; the daemon authorizes host paths). */
 export function workspaceFromHref(href: string | null | undefined): WorkspaceRef | null {
   if (!href) return null
   const h = href.trim()

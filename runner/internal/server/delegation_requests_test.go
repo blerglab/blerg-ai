@@ -325,6 +325,7 @@ func TestDecideStartFailureIsRecorded(t *testing.T) {
 }
 
 func TestDecideStartRechecksTheParentAndLimits(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR", "20")
 	fx := newDelegFx(t)
 	ctx := context.Background()
 	owner := fx.human("owner-1")
@@ -351,10 +352,10 @@ func TestDecideStartRechecksTheParentAndLimits(t *testing.T) {
 	}
 	fx.noSpawn()
 
-	// The request being decided is not counted twice: at maxStartsPerParent-1 children plus this
+	// The request being decided is not counted twice: at 20-1 children plus this
 	// request, the start still goes through.
 	p3, p3Tok := fx.session(sessOpts{owner: "owner-1"})
-	for i := 0; i < maxStartsPerParent-1; i++ {
+	for i := 0; i < 20-1; i++ {
 		c := fx.childOf(p3)
 		if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET ended_at = now(), status = 'stopped' WHERE id = $1::uuid`, c); err != nil {
 			t.Fatal(err)

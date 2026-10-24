@@ -74,12 +74,14 @@ type toolRefresher interface {
 }
 
 type claudeCodeDriver struct {
-	workDir  string
-	progress progressCalls
-	model    string
-	effort   string // "" = Claude Code's own default for the model
-	emitter  agent.Emitter
-	env      []string // sanitised env every `claude` turn starts from
+	startCommand   func(*exec.Cmd) error
+	workspaceGuide string
+	workDir        string
+	progress       progressCalls
+	model          string
+	effort         string // "" = Claude Code's own default for the model
+	emitter        agent.Emitter
+	env            []string // sanitised env every `claude` turn starts from
 	// prefix routes each turn through `docker exec` into the session's
 	// sandbox container; empty means the turn runs on the host (the default).
 	prefix sandboxExec
@@ -339,6 +341,7 @@ func ccDenyDir(dir string) (string, bool) {
 
 // ccOptions are the optional extras of a Claude Code turn.
 type ccOptions struct {
+	WorkspaceGuide string
 	// ForwardSubagentText passes --forward-subagent-text, so a subagent's own text and thinking
 	// are streamed too. Set only when the CLI lists the flag (claudeflags.go).
 	ForwardSubagentText bool
@@ -592,6 +595,10 @@ func (d *claudeCodeDriver) interruptLegacy() {
 	d.mu.Lock()
 	cmd, prefix := d.cmd, d.prefix
 	d.mu.Unlock()
+	if d.startCommand != nil && cmd != nil && cmd.Process != nil {
+		_ = cancelEngineCommand(cmd, true)
+		return
+	}
 	interruptTurn(prefix, cmd)
 }
 
@@ -1069,7 +1076,7 @@ func ccCommonArgs(model, effort, resumeID string, opts ...ccOption) []string {
 			"--disallowedTools="+strings.Join(ccGrantDenyRules(configDir), ","))
 	}
 	if guided {
-		prompt := ccSystemPromptFor(o.Interaction)
+		prompt := ccSystemPromptFor(o.Interaction) + o.WorkspaceGuide
 		if o.MarkerNonce != "" {
 			prompt += " " + agent.MarkerInstructions(o.MarkerNonce)
 		}
@@ -1090,7 +1097,7 @@ func (d *claudeCodeDriver) runTurn(ctx context.Context, text string) {
 	} else {
 		turnOpts = append(turnOpts, withSessionGuide(), withInteraction(d.interaction))
 	}
-	turnOpts = append(turnOpts, withMarkerNonce(d.markerNonce), withPromptFile(d.promptFile))
+	turnOpts = append(turnOpts, withMarkerNonce(d.markerNonce), withPromptFile(d.promptFile), func(o *ccOptions) { o.WorkspaceGuide = d.workspaceGuide })
 	if d.mcpFile != nil {
 		path, err := d.mcpFile.Ensure()
 		if err != nil {
@@ -1141,7 +1148,7 @@ func (d *claudeCodeDriver) runTurn(ctx context.Context, text string) {
 		return
 	}
 	cmd.Stderr = cmd.Stdout // interleave; stream-json is line-delimited on stdout only in practice
-	if err := cmd.Start(); err != nil {
+	if err := startEngineCommand(cmd, d.startCommand); err != nil {
 		d.emit("error", agent.ErrorPayload{Message: "claude-code start: " + err.Error()})
 		return
 	}
@@ -1279,3 +1286,5 @@ func (d *claudeCodeDriver) emitTurnMessage(p agent.UserMessagePayload) {
 	d.sm.Unlock()
 	d.emit("user_message", p)
 }
+
+func (d *claudeCodeDriver) useCommandBoundary(f func(*exec.Cmd) error) { d.startCommand = f }

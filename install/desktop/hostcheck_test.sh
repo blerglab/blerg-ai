@@ -169,7 +169,7 @@ inst="$tmp/inst"
 mkdir -p "$inst/repo/install/desktop/daemon" "$inst/repo/runner" "$inst/repo/bin" "$inst/home" "$inst/repos"
 cp brand.sh hostcheck.sh "$inst/repo/install/desktop/"
 cp daemon/install.sh daemon/*.tmpl "$inst/repo/install/desktop/daemon/"
-printf 'BLERG_RUNNER_DAEMON_TOKEN=tok\nBLERG_RUNNER_REPOS_ROOT=%s\nBLERG_SKIP_CLAUDE_TOKEN_PROMPT=1\n' "$inst/repos" > "$inst/repo/install/desktop/.env"
+printf 'BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS=true\nBLERG_RUNNER_DAEMON_TOKEN=tok\nBLERG_RUNNER_REPOS_ROOT=%s\nBLERG_SKIP_CLAUDE_TOKEN_PROMPT=1\n' "$inst/repos" > "$inst/repo/install/desktop/.env"
 mkbin "$inst/bin" loginctl
 for x in mv chmod rm cmp; do p="$(command -v "$x")" && ln -sf "$p" "$inst/bin/$x"; done
 rm -f "$inst/bin/uname"

@@ -23,6 +23,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/contracts/engines"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
+	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
@@ -36,6 +37,11 @@ import (
 // using the in-cluster service account. It deliberately speaks plain HTTP to
 // the API server (no client-go dependency) — the two calls we need are tiny.
 type JobManager struct {
+	// Trusted operator scheduling policy, never supplied by a session request.
+	ExcludedNodes []string
+
+	// Explicit storage class with enforced persistent-volume capacity; absent fails closed.
+	WorkspaceStorageClass string
 	// Tests replace the network read; nil uses the guarded Git HTTP precheck.
 	repositoryRead func(context.Context, string, string) error
 	// Optional owner for start watchers; nil retains process-lifetime defaults.
@@ -178,10 +184,11 @@ func NewJobManagerFromEnv(gitHubOrg string) *JobManager {
 	pluginAllow, pluginAllowRaw := pluginAllowlistFromEnv()
 	return &JobManager{
 		PluginAllow: pluginAllow, PluginAllowRaw: pluginAllowRaw,
-		BaseURL:   "https://" + host + ":" + port,
-		Token:     string(bytes.TrimSpace(token)),
-		Namespace: ns,
-		Image:     image,
+		WorkspaceStorageClass: os.Getenv("BLERG_RUNNER_WORKSPACE_STORAGE_CLASS"),
+		BaseURL:               "https://" + host + ":" + port,
+		Token:                 string(bytes.TrimSpace(token)),
+		Namespace:             ns,
+		Image:                 image,
 		Client: &http.Client{
 			Timeout:   30 * time.Second,
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
@@ -202,6 +209,7 @@ func NewJobManagerFromEnv(gitHubOrg string) *JobManager {
 		CredentialClient: &http.Client{Timeout: 10 * time.Second},
 		NativeHistory:    NativeHistoryConfig{Enabled: strings.EqualFold(os.Getenv("BLERG_RUNNER_NATIVE_HISTORY"), "true"), StorageClass: os.Getenv("BLERG_RUNNER_NATIVE_HISTORY_STORAGE_CLASS"), Size: envOr("BLERG_RUNNER_NATIVE_HISTORY_SIZE", "1Gi"), MaxClaims: envOrInt("BLERG_RUNNER_NATIVE_HISTORY_MAX_CLAIMS", 128), Retention: time.Duration(envOrInt("BLERG_RUNNER_NATIVE_HISTORY_RETENTION_HOURS", 7*24)) * time.Hour},
 
+		ExcludedNodes:           excludedNodesFromEnv(),
 		CPURequest:              envOr("BLERG_RUNNER_POD_CPU_REQUEST", "500m"),
 		MemRequest:              envOr("BLERG_RUNNER_POD_MEM_REQUEST", "1Gi"),
 		CPULimit:                envOr("BLERG_RUNNER_POD_CPU_LIMIT", "1"),
@@ -264,6 +272,9 @@ func (j *JobManager) do(method, path string, body any) (*http.Response, error) {
 // need a patch media type (e.g. application/merge-patch+json) rather than
 // plain application/json.
 func (j *JobManager) doWithContentType(ctx context.Context, method, path string, body any, contentType string) (*http.Response, error) {
+	if err := j.guardJobScheduling(method, path, body); err != nil {
+		return nil, err
+	}
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -508,6 +519,10 @@ func (j *JobManager) Status() protocol.ClusterStatus {
 
 // SessionJobSpec is what the spawn/resume paths need to start a pod.
 type SessionJobSpec struct {
+	Workspace             *protocol.WorkspaceManifest
+	WorkspaceMembers      []clusterworkspace.Member `json:"-"` // authorized private contexts from selection service
+	workspacePlan         *clusterworkspace.Plan
+	workspaceClaim        string
 	nativeHistory         *db.SessionNativeHistory
 	SessionID             string
 	Repo                  string
@@ -806,9 +821,8 @@ func (j *JobManager) createSessionSecret(ctx context.Context, sessionID string, 
 		// including the names (and, on some validation errors, the shape) of
 		// the very credential material this Secret carries. It reaches a
 		// browser through the spawn endpoint's error, so it never leaves the
-		// server: the caller gets one fixed string, the detail goes to the log.
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		log.Printf("create session secret for %s: %d: %s", sessionID, resp.StatusCode, raw)
+		// server: both caller errors and logs exclude the response payload.
+		log.Printf("create session secret for %s: HTTP %d", sessionID, resp.StatusCode)
 		return false, errSessionSecretCreate
 	}
 	return true, nil
@@ -956,13 +970,13 @@ func fetchCoreCredential(parent context.Context, client *http.Client, coreURL, i
 	if err != nil {
 		return nil, false, errPersonalCredentialUnavailable
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coreURL+"/internal/credentials/fetch", bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coreURL+"/internal/credentials/fetch", bytes.NewReader(raw)) // #nosec G704 -- Target is operator-configured Core URL; requester fields are JSON data and redirects are disabled.
 	if err != nil {
 		return nil, false, errPersonalCredentialUnavailable
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Key", internalKey)
-	resp, err := coreHTTPClient(client).Do(req)
+	resp, err := coreHTTPClient(client).Do(req) // #nosec G704 -- Target is operator-configured Core URL; requester fields are JSON data and redirects are disabled.
 	if err != nil {
 		return nil, false, errPersonalCredentialUnavailable
 	}
@@ -997,7 +1011,12 @@ func fetchCoreCredential(parent context.Context, client *http.Client, coreURL, i
 }
 
 // CreateSessionJob creates the runner Job. Enforces the concurrency cap.
-func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error { return j.withNativeHistory(spec) }
+func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
+	if spec.Workspace != nil {
+		return j.withClusterWorkspace(spec)
+	}
+	return j.withNativeHistory(spec)
+}
 
 func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 	limit := j.effectiveMaxSessions()
@@ -1014,7 +1033,7 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 		return errNoLivenessProof
 	}
 	cloneURL := ""
-	if !spec.NoRepo {
+	if !spec.NoRepo && spec.workspacePlan == nil {
 		cloneURL = j.CloneURL(spec.Repo, spec.GitURL)
 	}
 	env := []map[string]any{
@@ -1164,6 +1183,9 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 	// keys present in sessionData is sourced from the per-session Secret
 	// instead, and the rest are omitted from the pod entirely. Empty means no
 	// personal credential was found, i.e. today's behavior for every key.
+	if err := clusterWorkspaceSecret(spec, sessionData, &env); err != nil {
+		return err
+	}
 	personalKeys := map[string]bool{}
 	managedCredential := false
 	gitKind, gitOperatorOK := j.gitCredentialFor(cloneURL)
@@ -1242,12 +1264,14 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 	// (gitCredentialFor): for a clone anywhere else it is claimed as
 	// "personal" so the operator Secret can never supply it — the key is
 	// then either the launcher's own token for that provider or omitted.
-	if !gitOperatorOK || spec.NoOperatorGitToken {
+	if !gitOperatorOK || spec.NoOperatorGitToken || spec.workspacePlan != nil {
 		personalKeys[gitTokenKey] = true
 	}
 
-	if err := j.precheckRepository(spec, cloneURL, sessionData, personalKeys, gitOperatorOK); err != nil {
-		return err
+	if spec.workspacePlan == nil {
+		if err := j.precheckRepository(spec, cloneURL, sessionData, personalKeys, gitOperatorOK); err != nil {
+			return err
+		}
 	}
 
 	// secretCreated tracks whether this call actually created a per-session
@@ -1256,48 +1280,7 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 	// personal credential was found (personalKeys empty).
 	secretCreated := false
 	if len(sessionData) > 0 {
-		// A FINISHED Job (graceful stop, idle exit, deadline) keeps its
-		// per-session Secret for ttlSecondsAfterFinished, and that Secret would
-		// 409 the create below — clear both first. A live Job is left alone.
-		if err := j.clearFinishedSession(spec.SessionID); err != nil {
-			return err
-		}
-		created, err := j.createSessionSecret(context.Background(), spec.SessionID, sessionData)
-		if errors.Is(err, errSessionSecretExists) {
-			// Still 409: either a live session's Secret (refuse, untouched) or
-			// an orphan of a crashed start (no live Job owns it) — replace the
-			// orphan and retry exactly once.
-			if exists, finished := j.jobPresence(spec.SessionID); exists && !finished {
-				return errSessionSecretCreate
-			}
-			if derr := j.deleteSessionSecret(context.Background(), spec.SessionID); derr != nil {
-				log.Printf("delete orphan session secret for %s: %v", spec.SessionID, derr)
-				return errSessionSecretCreate
-			}
-			if !j.waitSessionGone(spec.SessionID, false) {
-				log.Printf("orphan session secret for %s still present after %s", spec.SessionID, sessionCleanupWait)
-				return errSessionSecretCreate
-			}
-			created, err = j.createSessionSecret(context.Background(), spec.SessionID, sessionData)
-			if errors.Is(err, errSessionSecretExists) {
-				err = errSessionSecretCreate
-			}
-		}
-		if err != nil {
-			// Fail closed rather than falling back to a literal env value:
-			// the prompt/ExtraEnv (runner-brokered session tokens) and any
-			// personal credential must never appear as plaintext in the Job
-			// spec, so a Secret-create failure fails the whole spawn instead
-			// of silently downgrading confidentiality.
-			//
-			// The error travels to a browser (the spawn endpoint surfaces
-			// it), so it carries no k8s detail — that is what
-			// errSessionSecretCreate is. Whatever the failure actually said
-			// was logged where it happened.
-			log.Printf("create per-session secret for %s: %v", spec.SessionID, err)
-			return errSessionSecretCreate
-		}
-		secretCreated = created
+
 		if spec.InitialPrompt != "" {
 			env = append(env, map[string]any{
 				"name": "BLERG_RUNNER_INITIAL_PROMPT",
@@ -1450,8 +1433,56 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 	if !ok {
 		return errNativeHistory
 	}
+	if err := clusterWorkspacePod(spec, pod); err != nil {
+		return err
+	}
 	if err := nativeHistoryPod(spec, pod); err != nil {
 		return err
+	}
+	// Allocate credentials only after the complete pod has passed validation.
+	if len(sessionData) > 0 {
+		// A FINISHED Job (graceful stop, idle exit, deadline) keeps its
+		// per-session Secret for ttlSecondsAfterFinished, and that Secret would
+		// 409 the create below — clear both first. A live Job is left alone.
+		if err := j.clearFinishedSession(spec.SessionID); err != nil {
+			return err
+		}
+		created, err := j.createSessionSecret(context.Background(), spec.SessionID, sessionData)
+		if errors.Is(err, errSessionSecretExists) {
+			// Still 409: either a live session's Secret (refuse, untouched) or
+			// an orphan of a crashed start (no live Job owns it) — replace the
+			// orphan and retry exactly once.
+			if exists, finished := j.jobPresence(spec.SessionID); exists && !finished {
+				return errSessionSecretCreate
+			}
+			if derr := j.deleteSessionSecret(context.Background(), spec.SessionID); derr != nil {
+				log.Printf("delete orphan session secret for %s: %v", spec.SessionID, derr)
+				return errSessionSecretCreate
+			}
+			if !j.waitSessionGone(spec.SessionID, false) {
+				log.Printf("orphan session secret for %s still present after %s", spec.SessionID, sessionCleanupWait)
+				return errSessionSecretCreate
+			}
+			created, err = j.createSessionSecret(context.Background(), spec.SessionID, sessionData)
+			if errors.Is(err, errSessionSecretExists) {
+				err = errSessionSecretCreate
+			}
+		}
+		if err != nil {
+			// Fail closed rather than falling back to a literal env value:
+			// the prompt/ExtraEnv (runner-brokered session tokens) and any
+			// personal credential must never appear as plaintext in the Job
+			// spec, so a Secret-create failure fails the whole spawn instead
+			// of silently downgrading confidentiality.
+			//
+			// The error travels to a browser (the spawn endpoint surfaces
+			// it), so it carries no k8s detail — that is what
+			// errSessionSecretCreate is. Whatever the failure actually said
+			// was logged where it happened.
+			log.Printf("create per-session secret for %s: %v", spec.SessionID, err)
+			return errSessionSecretCreate
+		}
+		secretCreated = created
 	}
 	resp, err := j.do(http.MethodPost, "/apis/batch/v1/namespaces/"+j.Namespace+"/jobs", job)
 	if err != nil {
@@ -1493,8 +1524,7 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 		// This error reaches the caller as the start's 503 AND is persisted as
 		// the session's error_reason, so it is a fixed string: the detail goes
 		// to the log, where an operator can read it.
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		log.Printf("create session job for %s: %d: %s", spec.SessionID, resp.StatusCode, raw)
+		log.Printf("create session job for %s: HTTP %d", spec.SessionID, resp.StatusCode)
 		j.deleteOrphanSessionSecret(secretCreated, spec.SessionID)
 		return errSessionJobCreate
 	}
@@ -1827,6 +1857,24 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 		// The mode the session was started in (migration 038); a row from before it is read
 		// by who started it (effectiveInteraction).
 		Interaction: effectiveInteraction(row),
+	}
+	w, workspaceErr := db.GetSessionWorkspace(ctx, pool, sessionID)
+	if workspaceErr != nil {
+		return workspaceErr
+	}
+	if w != nil && w.Manifest != nil {
+		generation, _, err := db.GetWorkspaceRuntime(ctx, pool, sessionID)
+		if err != nil {
+			return err
+		}
+		if generation > 0 || row.WorkspaceKind == "folder" {
+			spec.Workspace = w.Manifest
+			spec.NoRepo = false
+			spec.Repo = ""
+			spec.GitURL = ""
+		}
+	} else if row.WorkspaceKind == "folder" {
+		return errClusterWorkspace
 	}
 	if len(grants) > 0 {
 		// New tokens for the new pod, replacing the old ones in one transaction: the old

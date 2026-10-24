@@ -509,7 +509,7 @@ func (s *CronService) start(ctx context.Context, c *db.Cron, run *db.CronRun) (s
 		return "", err
 	}
 	hasBoard := c.BoardID != nil && *c.BoardID != ""
-	dc, err := s.preflight(rt, c.DaemonID, len(sel) > 0 || hasBoard, c.Engine) //nolint:contextcheck // the cluster count is bounded by the JobManager client timeout, like every cluster call
+	dc, err := s.preflightOwned(ctx, c.OwnerAccountID, rt, c.DaemonID, len(sel) > 0 || hasBoard, c.Engine)
 	if err != nil {
 		return "", err
 	}
@@ -585,10 +585,11 @@ func (s *CronService) pauseRevoked(ctx context.Context, c *db.Cron) error {
 
 // preflight is the capacity check. It writes nothing. For the Docker runtime it returns the daemon
 // the session must run on (the request pins it, so the check and the start agree).
-func (s *CronService) preflight(rt string, pin *string, needGateway bool, engine ...string) (*DaemonConn, error) {
+
+func (s *CronService) preflightOwned(ctx context.Context, owner, rt string, pin *string, needGateway bool, engine ...string) (*DaemonConn, error) {
 	if rt == runnerRuntimeCluster {
 		jm := s.api.hub.JobManager()
-		n, err := jm.ActiveSessionJobs()
+		n, err := jm.ActiveSessionJobs() //nolint:contextcheck // JobManager bounds cluster I/O independently of the caller
 		if err != nil {
 			return nil, capacityErrorf("the cluster's running sessions cannot be counted, will retry: %v", err)
 		}
@@ -597,12 +598,13 @@ func (s *CronService) preflight(rt string, pin *string, needGateway bool, engine
 		}
 		return nil, nil
 	}
-	return s.pickDaemon(pin, needGateway, engine...)
+	return s.pickOwnedDaemon(ctx, owner, pin, needGateway, engine...)
 }
 
 // pickDaemon chooses the connected daemon a Docker sandbox cron runs on: the pinned one, which
 // must be connected and able, or the lowest id among those that can.
-func (s *CronService) pickDaemon(pin *string, needGateway bool, engine ...string) (*DaemonConn, error) {
+
+func (s *CronService) pickOwnedDaemon(ctx context.Context, owner string, pin *string, needGateway bool, engine ...string) (*DaemonConn, error) {
 	problem := func(dc *DaemonConn) string {
 		switch {
 		case !isHostDaemon(dc):
@@ -623,7 +625,7 @@ func (s *CronService) pickDaemon(pin *string, needGateway bool, engine ...string
 		return ""
 	}
 	if pin != nil {
-		dc := s.api.hub.GetHostDaemon(*pin)
+		dc := s.api.hub.ownedHostDaemon(ctx, owner, *pin)
 		if dc == nil {
 			return nil, capacityErrorf("the pinned daemon is not connected")
 		}
@@ -632,7 +634,7 @@ func (s *CronService) pickDaemon(pin *string, needGateway bool, engine ...string
 		}
 		return dc, nil
 	}
-	all := s.api.hub.GetHostDaemons()
+	all := s.api.hub.ownedHostDaemons(ctx, owner)
 	if len(all) == 0 {
 		return nil, capacityErrorf("no daemon is connected")
 	}

@@ -99,3 +99,21 @@ func (h *AgentHost) driverFor(msg protocol.SpawnSession) (agentDriverKind, strin
 	}
 	return chooseAgentDriver(in)
 }
+
+// startEngineCommand keeps containment creation and descriptor ownership under
+// one launcher. A launcher returns only after Start's inheritance work finishes.
+func startEngineCommand(cmd *exec.Cmd, start func(*exec.Cmd) error) error {
+	if start != nil {
+		return start(cmd)
+	}
+	return cmd.Start()
+}
+
+// cancelEngineCommand preserves the pod helper long enough to acknowledge its
+// traced descendants' cleanup. Host commands keep their existing kill behavior.
+func cancelEngineCommand(cmd *exec.Cmd, contained bool) error {
+	if contained && cmd.Cancel != nil {
+		return cmd.Cancel()
+	}
+	return cmd.Process.Kill()
+}

@@ -46,6 +46,12 @@ func initChildRepo(t *testing.T, dir string) {
 
 func runCalls(calls string) string {
 	for _, line := range strings.Split(calls, "\n") {
+		if strings.HasPrefix(line, "--context ") {
+			parts := strings.SplitN(line, " ", 3)
+			if len(parts) == 3 {
+				line = parts[2]
+			}
+		}
 		if strings.HasPrefix(line, "run ") {
 			return line
 		}

@@ -65,6 +65,7 @@ AGENT_SECRET_EXTERNAL="${AGENT_SECRET_EXTERNAL:-}"
 AGENT_NAMESPACE=blerg-runner-sessions
 # The runner's data volume (runner-data-pvc.yaml): its size, and a StorageClass when the cluster
 # has no default one (or you want another). Both apply only when deploy.sh first creates the claim.
+WORKSPACE_STORAGE_CLASS="${WORKSPACE_STORAGE_CLASS:-}"
 RUNNER_DATA_SIZE="${RUNNER_DATA_SIZE:-10Gi}"
 RUNNER_DATA_STORAGE_CLASS="${RUNNER_DATA_STORAGE_CLASS:-}"
 
@@ -111,6 +112,7 @@ command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 1; }
 command -v envsubst >/dev/null || { echo "envsubst is required (package: gettext / gettext-base)" >&2; exit 1; }
 command -v openssl >/dev/null || { echo "openssl is required (generates BLERG_CORE_LOCAL_KEY on a first deploy)" >&2; exit 1; }
 runner_data_size_ok "$RUNNER_DATA_SIZE" || { echo "RUNNER_DATA_SIZE is not a Kubernetes quantity (e.g. 10Gi): $RUNNER_DATA_SIZE" >&2; exit 1; }
+runner_data_class_ok "$WORKSPACE_STORAGE_CLASS" || { echo "WORKSPACE_STORAGE_CLASS is not a StorageClass name" >&2; exit 1; }
 runner_data_class_ok "$RUNNER_DATA_STORAGE_CLASS" || { echo "RUNNER_DATA_STORAGE_CLASS is not a StorageClass name: $RUNNER_DATA_STORAGE_CLASS" >&2; exit 1; }
 
 # Say which cluster this will change, and make the operator agree, before anything is
@@ -315,8 +317,8 @@ for f in $(grep -E '^\s+- ' "$script_dir/kustomization.yaml" | sed 's/^\s*- //')
 done
 cp "$script_dir/kustomization.yaml" "$render_dir/"
 for f in "$render_dir"/*.yaml; do
-  REGISTRY="$REGISTRY" TAG="$TAG" DOMAIN="$DOMAIN" SCHEME="$SCHEME" AGENT_IMAGE="$AGENT_IMAGE" WEBHOOK_ALLOW_PRIVATE="$WEBHOOK_ALLOW_PRIVATE" TRUSTED_PROXIES="$TRUSTED_PROXIES" \
-    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES}' < "$f" > "$f.rendered"
+  REGISTRY="$REGISTRY" TAG="$TAG" DOMAIN="$DOMAIN" SCHEME="$SCHEME" AGENT_IMAGE="$AGENT_IMAGE" WEBHOOK_ALLOW_PRIVATE="$WEBHOOK_ALLOW_PRIVATE" TRUSTED_PROXIES="$TRUSTED_PROXIES" WORKSPACE_STORAGE_CLASS="$WORKSPACE_STORAGE_CLASS" \
+    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES} ${WORKSPACE_STORAGE_CLASS}' < "$f" > "$f.rendered"
   mv "$f.rendered" "$f"
 done
 

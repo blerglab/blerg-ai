@@ -289,6 +289,7 @@ func newMCPFx(t *testing.T) *mcpFx {
 	fx.hub.Register(fx.dc)
 
 	fx.api = NewAPI(fx.hub, fx.pool, "daemon-tok-1234567890", nil, "")
+	fixtureOwnDesktop(t, fx.pool, fx.dc, mcpAcct)
 	fx.api.SetRunnerKey(runnerTestKey)
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

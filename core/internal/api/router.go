@@ -24,6 +24,7 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
 	"github.com/blerglab/blerg-ai/core/internal/plugins"
 	"github.com/blerglab/blerg-ai/core/internal/projects"
+	"github.com/blerglab/blerg-ai/core/internal/shellpolicy"
 )
 
 // identityProvider is the narrow surface of *identity.Service the API layer needs. Declaring
@@ -36,6 +37,8 @@ type identityProvider interface {
 }
 
 type Deps struct {
+	ShellPolicy *shellpolicy.Service
+
 	// CookieNow supplies the refresh-cookie lifetime clock; nil uses real time.
 	// Tests can advance it without sleeping through a session lifetime.
 	CookieNow func() time.Time
@@ -478,10 +481,23 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("POST /internal/plugins/policy", deps.handleInternalPluginPolicy)
 	mux.HandleFunc("POST /internal/plugins/add", deps.handleInternalPluginAdd)
 
-	// Board call limits: an administrator's setting (account.manage), and the runner's read.
+	// Install-wide child and board limits: administrator settings and authenticated runner reads.
+	mux.HandleFunc("GET /api/settings/update-notice", requireHumanPrincipal(deps.handleUpdateNotice, deps, "account.manage"))
+	mux.HandleFunc("PUT /api/settings/update-notice", requireHumanPrincipal(deps.handleUpdateNotice, deps, "account.manage"))
+	mux.HandleFunc("POST /api/desktop-tokens", requireHumanPrincipal(deps.handleIssueDesktopToken, deps, "session.start"))
+	mux.HandleFunc("POST /internal/desktop-tokens/issue", deps.handleInternalIssueDesktopToken)
+	mux.HandleFunc("POST /internal/desktop-tokens/validate", deps.handleValidateDesktopToken)
+	mux.HandleFunc("POST /internal/desktop-owners", deps.handleDesktopOwners)
+	mux.HandleFunc("GET /api/settings/child-limits", requireHumanPrincipal(deps.handleGetChildLimits, deps, "account.manage"))
+	mux.HandleFunc("PUT /api/settings/child-limits", requireHumanPrincipal(deps.handlePutChildLimits, deps, "account.manage"))
+	mux.HandleFunc("POST /internal/child-limits", deps.handleInternalChildLimits)
 	mux.HandleFunc("GET /api/settings/board-limits", requireHumanPrincipal(deps.handleGetBoardLimits, deps, "account.manage"))
 	mux.HandleFunc("PUT /api/settings/board-limits", requireHumanPrincipal(deps.handlePutBoardLimits, deps, "account.manage"))
 	mux.HandleFunc("POST /internal/board-limits", deps.handleInternalBoardLimits)
+	mux.HandleFunc("GET /api/settings/shell-policy", requireHumanPrincipal(deps.handleGetShellPolicy, deps, "account.manage"))
+	mux.HandleFunc("PUT /api/settings/shell-policy", requireHumanPrincipal(deps.handlePutShellPolicy, deps, "account.manage"))
+	mux.HandleFunc("POST /internal/shell/authorize", deps.handleAuthorizeShell)
+	mux.HandleFunc("POST /internal/shell/control", deps.handleShellControl)
 
 	deps.registerMCPRoutes(mux)
 	deps.registerInternalTokenRoutes(mux)

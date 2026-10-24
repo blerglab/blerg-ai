@@ -630,10 +630,12 @@ Added in 0.15.0; nothing removed. Older builds draw neither.
 Added in 0.16.0; nothing removed. Older builds leave such text as text.
 
 - **`canOpenWorkspaceFiles`** (ChatView): with a transport that has `files.workspaceFile` (the
-  runner's), a relative link or a path in inline code in the agent's text (`README.md`,
+  runner's), a local link or a path in inline code in the agent's text (`README.md`,
   `src/a.go:120`, `docs/a.md#L12`) opens that file from the session's folder in the viewer, at the
   line named, with Copy path, Download and Save a copy to Files. Pass it only for a viewer the route
-  accepts (the runner's session owner).
+  accepts (the runner's session owner). Absolute references are preserved for the daemon to
+  authorize against the launch working directory; chat does not strip `/workspace/`. The returned
+  workspace-relative path is used for links and images inside the opened document (0.90.0).
 
 ## Files in the viewer
 

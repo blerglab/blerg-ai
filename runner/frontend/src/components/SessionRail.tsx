@@ -1,3 +1,4 @@
+import { usePaletteCommands } from '../commands/context'
 import { PendingProposal } from './ProposalAttention'
 import type { ProposalInfo } from '../types'
 import { reasoningLabel } from '@blerglab/chat'
@@ -16,7 +17,7 @@ import { modelDisplayName } from '@blerglab/chat'
 // dismissed, since when it watches — lives as long as the page shows the session. Render it under
 // a key of the session.
 import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import { Link, useNavigate } from 'react-router-dom'
 import { OpenSessionContext } from '../lib/openSession'
 import {
@@ -87,6 +88,7 @@ import RunCard, { RunGlyph, RunStep } from './RunCard'
 import type { SessionInfo } from '../types'
 import StatusPill from './StatusPill'
 import UsageLimitResume from './UsageLimitResume'
+import PlanNudges from './PlanNudges'
 import SessionPermissions from './SessionPermissions'
 import { backgroundCount, displayState } from '../lib/displayState'
 import { ChildSessionRow, StartedSessions } from './ChildSessions'
@@ -141,6 +143,8 @@ export interface SessionRailProps {
   mode: 'panel' | 'drawer'
   open: boolean
   onClose: () => void
+  /** Reveal the panel when a registered command selects a tab. */
+  onReveal?: () => void
   /** The Capabilities tab came on screen: the page reads the tool changes again. */
   onCapabilitiesShown?: () => void
   /** Opens a file in the chat's viewer (History's version chips). */
@@ -155,7 +159,7 @@ export interface SessionRailProps {
 const NO_EVENTS: never[] = []
 
 export default function SessionRail(props: SessionRailProps) {
-  const { session, live, toolChanges: pendingToolChanges, mode, open, onClose } = props
+  const { session, live, toolChanges: pendingToolChanges, mode, open, onClose, onReveal } = props
   const toolChanges = session.archived_at ? 0 : pendingToolChanges
   const bg = useBackgroundTasks(session.id)
   // A background subagent is also a background task: its subagent row says more, so the task row goes.
@@ -264,6 +268,15 @@ export default function SessionRail(props: SessionRailProps) {
     setTab(t)
     writeRailTab(t)
   }
+  const paletteId = props.id
+  const paletteCommands = useMemo(() => ['live', ...(planShown ? ['plan'] : []), 'history', 'files', 'capabilities'].map(t => ({
+    id: `panel:${session.id}:${t}`, title: `Show ${t[0].toUpperCase() + t.slice(1)} panel`,
+    run: () => {
+      flushSync(() => { setTab(t as RailTab); writeRailTab(t as RailTab); onReveal?.() })
+      document.getElementById(`${paletteId}-tab-${t}`)?.focus()
+    },
+  })), [session.id, planShown, onReveal, paletteId])
+  usePaletteCommands(paletteCommands)
   // The summary line on Live: to the Plan tab, with the focus on its tab.
   const goPlan = () => {
     pick('plan')
@@ -630,8 +643,10 @@ export default function SessionRail(props: SessionRailProps) {
       {!session.archived_at && <SessionPermissions sessionId={session.id} active={open && tab === 'live'} delegationGrants={props.delegationGrants ?? []} refreshKey={[...(props.delegationGrants ?? []).map(g => g.id), String(decidedProposals)].join(',')} openRequest={open && tab === 'live' ? props.openChildApproval : undefined} onOpenRequestTaken={props.onChildApprovalShown} />}
       <Section title="Session" testId="rail-session">
         <SessionFacts session={session} machine={props.machine} now={minute} liveRunning={props.liveRunning ?? null} />
-        {!session.archived_at && session.limit_resume_supported === true &&
-          <div className="rail-settings"><UsageLimitResume key={session.id} sessionId={session.id} /></div>}
+        {!session.archived_at && <div className="rail-settings">
+          {session.limit_resume_supported === true && <UsageLimitResume key={session.id} sessionId={session.id} />}
+          <PlanNudges key={`plan-${session.id}`} sessionId={session.id} />
+        </div>}
       </Section>
     </>
   )

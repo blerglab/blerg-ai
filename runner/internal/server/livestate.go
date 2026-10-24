@@ -70,6 +70,17 @@ func liveETag(through int64, status string, toolChanges, proposals int, asks db.
 // person who may see the session; an agent token is refused and a private session of someone
 // else's answers the uniform 404.
 func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
+	err := a.sessionReadFence(r.Context(), r.PathValue("id"), func(ctx context.Context) error {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+		a.snapshotHandleGetLive(w, r.WithContext(ctx))
+		return nil
+	})
+	if err != nil {
+		writeError(w, 409, "session source changed; refresh")
+	}
+}
+
+func (a *API) snapshotHandleGetLive(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.authBrowser(w, r)
 	if !ok {
 		return
@@ -151,7 +162,11 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 	reasoning := a.hub.liveReasoning(sid, snapshot.Rows, p.Sub, showTokens, p.Has(insightsAdminCap))
 	reasoningJSON, _ := json.Marshal(reasoning)
 	priceJSON, _ := json.Marshal(prices)
-	etag := liveETag(through, row.Status, toolChanges, proposals, asks, showTokens, snapshot.digest()+"."+childrenDigestBytes(reasoningJSON)+"."+childrenDigestBytes(priceJSON)+"."+reviewsDigest(reviews))
+	repoScope := p.Sub
+	if ref, ok := a.sessionRepo(ctx, p.Sub, row); ok {
+		repoScope += ":" + ref.Key()
+	}
+	etag := liveETag(through, row.Status, toolChanges, proposals, asks, showTokens, repoScope+"."+snapshot.digest()+"."+childrenDigestBytes(reasoningJSON)+"."+childrenDigestBytes(priceJSON)+"."+reviewsDigest(reviews))
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-store")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
@@ -186,7 +201,7 @@ func (a *API) HandleGetLive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	applyReasoning(&st, children, sid, reasoning)
-	a.addChecklistCommitURLs(row, &ws)
+	a.addChecklistCommitURLs(ctx, p.Sub, row, &ws)
 	checklistChildTitles(ws.Checklist, snapshot.Rows)
 	writeJSON(w, http.StatusOK, liveReply{
 		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, workState: ws, ToolChanges: toolChanges, Proposals: proposals, liveDelegation: liveDelegation{Children: children, DelegationRequests: snapshot.Requests, DelegationGrants: snapshot.Grants},

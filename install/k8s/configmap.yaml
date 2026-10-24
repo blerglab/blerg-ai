@@ -129,6 +129,9 @@ data:
   # Cluster runtime. Empty BLERG_RUNNER_AGENT_IMAGE = off (CLUSTER_RUNTIME=off).
   BLERG_RUNNER_AGENT_IMAGE: "${AGENT_IMAGE}"
   BLERG_RUNNER_AGENT_NAMESPACE: "blerg-runner-sessions"
+  # Workspace v2 requires an explicitly verified byte/inode-bounded CSI class.
+  # Empty refuses workspace allocation. It never picks the cluster default.
+  BLERG_RUNNER_WORKSPACE_STORAGE_CLASS: "${WORKSPACE_STORAGE_CLASS}"
   # Session pods call the runner from inside the cluster, so this is the
   # Service DNS name, not the public Ingress host.
   BLERG_RUNNER_INTERNAL_URL: "http://blerg-runner.blerg.svc.cluster.local:8080"
@@ -163,3 +166,11 @@ data:
   # install whose public hostnames resolve to a private network (a private
   # network behind NAT) — otherwise every callback into that network is refused.
   BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE: "${WEBHOOK_ALLOW_PRIVATE}"
+
+  # Defaults for core Settings → Child session limits; saved admin settings win.
+  # Per parent: 1–50 running at once, 1–10000 starts per rolling hour.
+  BLERG_RUNNER_MAX_PARALLEL_CHILDREN: "3"
+  BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR: "120"
+
+  # 0.5-only upgrade compatibility; new desktop installs use per-person tokens.
+  BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS: "false"

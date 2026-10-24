@@ -65,6 +65,7 @@ func newDelegFx(t *testing.T) *delegFx {
 	api.coreAuth = newTestCoreAuthClient(t, pub, "core-1")
 	api.SetRunnerKey(runnerTestKey)
 	dc := registerDaemon(t, api, hub, "00000000-0000-4000-8000-0000000000d1", "laptop", "app")
+	fixtureOwnDesktop(t, pool, dc, "owner-1")
 	dc.SetSandboxAvailable(true)
 	dc.RecoveryReadyCapable = true
 	dc.SetSandboxClones(true)

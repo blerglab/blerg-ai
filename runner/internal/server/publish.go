@@ -91,7 +91,7 @@ func validPublishID(id string) bool {
 // HandlePostMockup accepts a tar.gz of static files (bearer: daemon token)
 // and returns the served URL.
 func (a *API) HandlePostMockup(w http.ResponseWriter, r *http.Request) {
-	if !checkBearerToken(w, r, a.daemonToken) {
+	if !a.authNativePublish(w, r) {
 		return
 	}
 	id := newPublishID()
@@ -201,7 +201,7 @@ func (a *API) HandleServeMockup(w http.ResponseWriter, r *http.Request) {
 // HandlePostScreenshot accepts a PNG/JPEG (bearer: daemon token), validates
 // by decoding (never trusts Content-Type), and returns the served URL.
 func (a *API) HandlePostScreenshot(w http.ResponseWriter, r *http.Request) {
-	if !checkBearerToken(w, r, a.daemonToken) {
+	if !a.authNativePublish(w, r) {
 		return
 	}
 	data, err := io.ReadAll(io.LimitReader(r.Body, maxScreenshot+1))

@@ -17,7 +17,7 @@ board or runner at all — see [Human login](#human-login) below.
 | `BLERG_CORE_LISTEN` | `:8080` | Listen address. |
 | `BLERG_CORE_WEB_DIST` | `web/dist` | Directory `core/web`'s built SPA (`/login`, `/app`, `/settings`) is served from, relative to the process's working directory when not absolute. The Docker image sets this to `/app/web/dist`. If the directory doesn't exist, every SPA route 404s — which looks exactly like "login is broken". |
 | `BLERG_VERSION` | `dev` | Build version shown on the landing page. |
-| `BLERG_UPDATE_CHECK` / `BLERG_UPDATE_REPO` | on / `blerglab/blerg-ai` | Core looks up the latest public release shortly after startup (30 s) and every 6 hours (`GET https://api.github.com/repos/<repo>/releases/latest`, unauthenticated) and, when it is newer than the running release, adds `latest_version` and `latest_url` to `GET /api/site`; the core footer, the board top bar and the runner sidebar then show a "vX.Y.Z available" link to its GitHub release page (board and runner read it from core through `BLERG_CORE_URL`). Privacy: this check contacts `api.github.com`, which sees the server's IP address; nothing else is sent. `BLERG_UPDATE_REPO` must be `owner/name`; anything else disables the check (logged once). Set `BLERG_UPDATE_CHECK=0` to turn it off (no request is made). |
+| `BLERG_UPDATE_CHECK` / `BLERG_UPDATE_REPO` | on / `blerglab/blerg-ai` | Core looks up the latest public release shortly after startup (30 s) and every 6 hours (`GET https://api.github.com/repos/<repo>/releases/latest`, unauthenticated) and, when it is newer than the running release, adds `latest_version` and `latest_url` to `GET /api/site`; the core footer, the board top bar and the runner sidebar then show a "vX.Y.Z available" link to its GitHub release page (board and runner read it from core through `BLERG_CORE_URL`). Privacy: this check contacts `api.github.com`, which sees the server's IP address; it also receives the static `User-Agent: blerg-core` and `Accept: application/vnd.github+json` headers, plus normal transport headers (`Host` and automatic `Accept-Encoding: gzip`). No custom build labels or install identifiers are sent. `BLERG_UPDATE_REPO` must be `blerglab/blerg-ai`; anything else disables the check (logged once). Set `BLERG_UPDATE_CHECK=0` to seed the disabled default (no request is made unless an administrator has saved an enabled setting in core). |
 | `BLERG_CORE_REGISTER_KEY` | unset | Shared bootstrap key components (board, runner) present to `POST /components` to register themselves. Unset disables component self-registration. |
 | `BLERG_CORE_BOARD_MINT_DISABLED` | `false` | Set `true` or `1` to disable new Run as me tokens entirely. Revocation of existing tokens remains available. |
 | `BLERG_CORE_BOARD_MINT_KEY` | unset | Shared secret the board presents for "Run as me": `POST /internal/tokens/board-automation` mints a `run-sessions` agent token for the person signed in to the board, proved by their own live board access token (kind human, a live browser session of that account), and `.../revoke` revokes only a token minted for that board. Opens nothing else; core refuses to boot when it equals `BLERG_CORE_INTERNAL_KEY` or `BLERG_CORE_REGISTER_KEY`. At most 10 attempts per account an hour. Unset disables both routes (503) and boards take a pasted token. Board reads the same value under the same name. |
@@ -807,3 +807,56 @@ Not read by `blerg-core` itself, but they must agree with the values above.
 | `BLERG_RUNNER_CORE_INTERNAL_KEY` | runner | Must equal core's `BLERG_CORE_INTERNAL_KEY`. Together with `BLERG_CORE_URL`, enables the personal-credential-first session spawn path; either unset means runner always uses the shared operator Secret. |
 | `BLERG_RUNNER_ALLOWED_ORIGINS` | runner | Comma-separated `scheme://host` origins allowed to open the `/ws/browser` WebSocket cross-origin. Same-origin requests and requests with no `Origin` header are always allowed, so this is only needed when the frontend is served from a different origin than runner's API. |
 | `BLERG_BIND_ADDR` | `install/desktop/docker-compose.yml` | Not read by any Go process — it's a `docker compose` interpolation variable that prefixes all three published ports (core/board/runner): `${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_CORE:-8081}:8080`, etc. (R2/C1: without a host address, Docker publishes on `0.0.0.0` and bypasses `ufw`/`firewalld` — every LAN/VPN peer can reach core, board and runner). Defaults to `127.0.0.1` (loopback only). Set to `0.0.0.0` only if other machines must reach the stack — and then also point `BLERG_CORE_ALLOWED_RETURN_ORIGINS`/`BLERG_CORE_ORIGIN_AUDIENCES`/`BLERG_CORE_PUBLIC_URL` at that host, or login will still only work from `localhost`. |
+
+### Child session limits
+
+An administrator with a live login reads/sets `GET`/`PUT /api/settings/child-limits`.
+The two integer fields are `parallel` (1–50, default 3) and `starts_per_hour`
+(1–10000, default 120). Core migration 024 persists the install-wide override,
+including update time and actor. There is no lifetime start cap. Environment variables
+`BLERG_RUNNER_MAX_PARALLEL_CHILDREN` and `BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR`
+seed defaults at core startup; invalid values log a warning and use 3/120. Saved settings
+always win. Runner reads `POST /internal/child-limits` using `X-Internal-Key` on the
+next start request, so settings changes require no restart. Runner retains the last
+valid values if core is unavailable, or its environment defaults before its first read.
+Account limits remain six running children and sixty starts per rolling hour across
+parents. Approval requests also reserve rate budget.
+
+### Release notice administration
+
+An administrator can save **Settings → Release notices** for the whole install.
+The saved value overrides the `BLERG_UPDATE_CHECK` environment default. Turning
+it off suppresses core's notices immediately and prevents subsequent GitHub
+requests. Board and runner cache core's answer for up to ten minutes; reload
+open pages after that interval. Expired or cold reads await one shared core
+refresh for at most five seconds, returning no notice on timeout. Reenabling resumes checks at the next scheduled
+poll. Failed checks clear the notice quietly. Browsers never call GitHub.
+
+`BLERG_INSTALL_TYPE=desktop|kubernetes` selects the commands in core's
+`/upgrade` panel, linked beside each release notice. Desktop Compose sets this
+value; Kubernetes is detected from `KUBERNETES_SERVICE_HOST` when no explicit
+value is set. Unrecognized or absent values outside Kubernetes are reported as
+unknown, with no guessed commands. Install detection is returned only to current
+administrators through the settings endpoint; public visitors receive generic
+guidance. Run the entire copyable procedure from a clean repository root. It
+fetches the exact validated tag from `blerglab/blerg-ai` into a new checkout,
+verifies its revision and VERSION, copies the existing install `.env`, and stops
+on any failure before deployment. Desktop rebuilds the stack and reinstalls the
+daemon; Kubernetes updates TAG in the new configuration and runs deploy.sh.
+Keep the new release directory for the installed source and configuration.
+
+`GET` and `PUT /api/settings/update-notice` accept an administrator's human
+principal; writes also require a live browser sign-in. The payload is
+`{"enabled":true}` or `{"enabled":false}`. The setting records the updating
+account and timestamp, like the child start limits.
+
+### Desktop credential issuance
+
+Core migration 026 stores hashes of person-bound desktop credentials. A live human calls
+`POST /api/desktop-tokens` with `{}` for a fresh desktop identity at revision 1; no other
+account or caller-selected identity is accepted. The internal component key gates
+`POST /internal/desktop-tokens/issue`, `/internal/desktop-tokens/validate` and
+`/internal/desktop-owners`. The installer issuer selects the explicit installing account
+or first enabled admin. Runner's persisted desktop owner and ownership revision remain
+the authoritative use-time check; core issuance alone never transfers a desktop.
+See [desktop ownership](../../docs/desktop-ownership.md) for enrollment and fencing.

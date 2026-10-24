@@ -71,13 +71,11 @@ func TestPodGitUsesOnlyTheCloneURLsTransport(t *testing.T) {
 // never served by the plain git-<service>.
 func TestPodRefusesWithoutAHardenedServingCommand(t *testing.T) {
 	bare := makeBareRepo(t)
-	setPodRemote(bare)
-	t.Cleanup(func() { setPodRemote("") })
 	t.Setenv("PATH", t.TempDir()) // no git: the hardened command cannot be built
-	if flag, err := servingFlag("receive-pack"); err == nil {
+	if flag, err := servingFlag(bare, "receive-pack"); err == nil {
 		t.Fatalf("served without a hardened command: %v", flag)
 	}
-	if _, err := gitServed(t.TempDir(), "upload-pack", "ls-remote", "--heads", bare); err == nil {
+	if _, err := gitServed(t.TempDir(), bare, "upload-pack", "ls-remote", "--heads", bare); err == nil {
 		t.Fatal("ls-remote ran without a hardened serving command")
 	}
 }

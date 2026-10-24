@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -96,5 +98,27 @@ func TestInputReceiptReplayDoesNotReobserveOrDuplicateBuffer(t *testing.T) {
 	}
 	if emitter.pendingCount() != 1 {
 		t.Fatalf("replay duplicated pending event buffer: %d", emitter.pendingCount())
+	}
+}
+
+func TestInputJournalAcceptsPreNudgeReceiptAfterUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	j, err := newInputJournal(dir, "legacy-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This is the encoding used by Input before PlanNudge existed.
+	sum := sha256.Sum256([]byte(`{"ExpectedTurnID":"","Text":"Resume","Shown":"","Source":"chat","ClientID":"legacy"}`))
+	j.state.Receipts = []inputReceipt{{ID: "legacy", Hash: hex.EncodeToString(sum[:])}}
+	if err := j.save(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := newInputJournal(dir, "legacy-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	send, _, err := reopened.accept(agent.Input{Text: "Resume", Source: "chat", ClientID: "legacy"})
+	if err != nil || !send {
+		t.Fatalf("old durable input refused after upgrade: send=%v err=%v", send, err)
 	}
 }

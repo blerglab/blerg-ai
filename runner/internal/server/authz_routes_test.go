@@ -236,6 +236,9 @@ var coreClassCaps = map[string][]string{
 // boardA (board token scoped to A, used on A), boardB (same token used on B),
 // daemon.
 func expectFor(rt authzRoute, class string) int {
+	if rt.name == "POST /api/boards/x/assist" && (class == "boardA" || class == "daemon") {
+		return http.StatusForbidden
+	}
 	switch class {
 	case "none", "garbage":
 		return http.StatusUnauthorized
@@ -291,6 +294,7 @@ func TestAuthzRoutes(t *testing.T) {
 	}
 	hub.Register(&DaemonConn{ID: authzHubDaemonID, Name: "authz-hub-daemon", send: make(chan []byte, 256)})
 	api := NewAPI(hub, pool, daemonTok, nil, "")
+	fixtureOwnDesktop(t, pool, hub.GetDaemon(authzHubDaemonID), "user-1")
 	mint := enableBrowserAuth(t, api)
 	mux := newAuthzMux(api)
 

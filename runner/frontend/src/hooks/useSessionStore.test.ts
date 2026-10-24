@@ -1,3 +1,5 @@
+import {useTranscriptStore} from '@blerglab/chat'
+import ownershipEvent from '../test/desktopOwnership.json'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as wsMock from '../test/wsMock'
 import { useSessionStore } from './useSessionStore'
@@ -11,6 +13,26 @@ const get = () => useSessionStore.getState()
 const TAKING_LONGER_MSG = "This is taking longer than expected — it may have failed to start. Try again or check the sidebar."
 
 describe('useSessionStore', () => {
+  it('removes desktop source fields on reassignment and clears all lists on identity change', () => {
+    useSessionStore.setState({ daemons: [makeDaemon({ id: 'desktop-a' })], sessions: [makeSession({ daemon_id: 'desktop-a', project_path: '/private-a', repo: 'private-a' })] })
+    wsMock.emit(ownershipEvent as import('../types').DesktopOwnershipChanged)
+    expect(get().daemons).toHaveLength(0)
+    expect(get().sessions[0].project_path).toBe('')
+    expect(get().sessions[0].repo).toBe('')
+    useTranscriptStore.getState().ingest({type:'agent_event',session_id:'cached',client_event_id:'caps',seq:1,ts:'2026-01-01T00:00:00Z',kind:'capabilities',payload:{private:'old owner'}})
+    window.dispatchEvent(new Event('blerg-identity-changed'))
+    expect(get().sessions).toHaveLength(0)
+    expect(useTranscriptStore.getState().sessions).toEqual({})
+  })
+
+  it('clears already delivered source and error state on a remote-replica invalidation', () => {
+    useSessionStore.setState({daemons:[makeDaemon({id:'desktop-a'})],sessions:[makeSession({daemon_id:'desktop-a',repo:'secret',project_path:'/secret',error_reason:'private failure'})]})
+    wsMock.emit({type:'desktop_inventory_invalidated'})
+    expect(get().daemons).toHaveLength(0)
+    expect(get().sessions[0]).toMatchObject({daemon_id:'',repo:'',project_path:''})
+    expect(get().sessions[0].error_reason).toBeUndefined()
+  })
+
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllTimers()

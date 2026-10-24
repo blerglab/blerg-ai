@@ -159,6 +159,9 @@ func TestRunnerResultEndpoint(t *testing.T) {
 	if err := db.InsertSession(ctx, pool, sessionID, daemonID, "error", "/workspace/org/proj", "org/proj", "T", ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetSessionPosture(ctx, pool, sessionID, "cluster", false); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.SetSessionError(ctx, pool, sessionID, "clone failed"); err != nil {
 		t.Fatal(err)
 	}

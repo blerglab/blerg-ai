@@ -68,7 +68,7 @@ func getRepos(t *testing.T, api *API) map[string]RepoInfo {
 	req := httptest.NewRequest(http.MethodGet, "/api/repos", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
-	api.HandleGetRepos(rec, req)
+	api.HandleGetRepos(&reviewDeadlineWriter{ResponseRecorder: rec}, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -88,7 +88,7 @@ func getRepos(t *testing.T, api *API) map[string]RepoInfo {
 // stays bare and is flagged not cloneable.
 func TestHandleGetReposLocalFolderUsesReportedRemote(t *testing.T) {
 	hub := NewHub()
-	d1 := &DaemonConn{ID: "d1", Name: "desk"}
+	d1 := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk"}
 	d1.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d1.SetCheckedOutRepos([]string{"entertainment", "scratch", "shared", "split"})
 	d1.SetRepoRemotes(map[string]string{
@@ -97,7 +97,7 @@ func TestHandleGetReposLocalFolderUsesReportedRemote(t *testing.T) {
 		"split":         "example-org/split-a",
 	})
 	hub.Register(d1)
-	d2 := &DaemonConn{ID: "d2", Name: "laptop"}
+	d2 := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006c", Name: "laptop"}
 	d2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d2.SetCheckedOutRepos([]string{"shared", "split"})
 	d2.SetRepoRemotes(map[string]string{
@@ -105,7 +105,7 @@ func TestHandleGetReposLocalFolderUsesReportedRemote(t *testing.T) {
 		"split":  "example-org/split-b", // same folder name, different repo
 	})
 	hub.Register(d2)
-	api := NewAPI(hub, nil, "", nil, "")
+	api := ownedInventoryAPI(t, hub, "", nil, "")
 
 	repos := getRepos(t, api)
 
@@ -137,11 +137,11 @@ func TestHandleGetReposLocalFolderUsesReportedRemote(t *testing.T) {
 // always had, now explicitly flagged cloneable=false.
 func TestHandleGetReposWithoutRemoteReport(t *testing.T) {
 	hub := NewHub()
-	d := &DaemonConn{ID: "d1", Name: "desk"}
+	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk"}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"example-repo"})
 	hub.Register(d)
-	api := NewAPI(hub, nil, "", nil, "")
+	api := ownedInventoryAPI(t, hub, "", nil, "")
 	r := getRepos(t, api)["example-repo"]
 	if r.FullName != "example-repo" || r.Cloneable == nil || *r.Cloneable {
 		t.Errorf("got %+v, want bare FullName and cloneable=false", r)
@@ -157,14 +157,14 @@ func TestPostSessionsClusterResolvesBareRepoViaRequestedDaemon(t *testing.T) {
 	jm.GitHubOrg = ""
 	jm.GitURLBase = "https://github.com"
 	hub.SetJobManager(jm)
-	d := &DaemonConn{ID: "d1", Name: "desk", send: make(chan []byte, 8)}
+	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk", send: make(chan []byte, 8)}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"entertainment"})
 	d.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo"})
 	hub.Register(d)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 
-	rec := postSpawn(t, api, map[string]any{"repo": "entertainment", "runtime": "cluster", "kind": "agent", "daemon_id": "d1"})
+	rec := postSpawn(t, api, map[string]any{"repo": "entertainment", "runtime": "cluster", "kind": "agent", "daemon_id": "00000000-0000-4000-8000-00000000006b"})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status %d, want 202: %s", rec.Code, rec.Body.String())
 	}
@@ -184,19 +184,19 @@ func TestPostSessionsClusterBackstopOnlyUsesRequestedDaemon(t *testing.T) {
 	jm := newTestJobManager(t, f)
 	jm.GitHubOrg = ""
 	hub.SetJobManager(jm)
-	other := &DaemonConn{ID: "d2", Name: "laptop", send: make(chan []byte, 8)}
+	other := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006c", Name: "laptop", send: make(chan []byte, 8)}
 	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	other.SetCheckedOutRepos([]string{"entertainment"})
 	other.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo"})
 	hub.Register(other)
-	asked := &DaemonConn{ID: "d1", Name: "desk", send: make(chan []byte, 8)}
+	asked := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk", send: make(chan []byte, 8)}
 	asked.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	asked.SetCheckedOutRepos([]string{"entertainment"})
 	hub.Register(asked)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 
 	for _, body := range []map[string]any{
-		{"repo": "entertainment", "runtime": "cluster", "kind": "agent", "daemon_id": "d1"},
+		{"repo": "entertainment", "runtime": "cluster", "kind": "agent", "daemon_id": "00000000-0000-4000-8000-00000000006b"},
 		{"repo": "entertainment", "runtime": "cluster", "kind": "agent"},
 		{"repo": "entertainment", "runtime": "cluster", "kind": "agent", "daemon_id": "nope"},
 	} {
@@ -217,14 +217,14 @@ func TestPostSessionsClusterDefaultOrgWinsOverRequestedDaemon(t *testing.T) {
 	f := &fakeK8s{}
 	jm := newTestJobManager(t, f) // default org "org", base https://github.com/org
 	hub.SetJobManager(jm)
-	d := &DaemonConn{ID: "d1", Name: "desk", send: make(chan []byte, 8)}
+	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk", send: make(chan []byte, 8)}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"entertainment"})
 	d.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo"})
 	hub.Register(d)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 
-	rec := postSpawn(t, api, map[string]any{"repo": "entertainment", "runtime": "cluster", "kind": "agent", "daemon_id": "d1"})
+	rec := postSpawn(t, api, map[string]any{"repo": "entertainment", "runtime": "cluster", "kind": "agent", "daemon_id": "00000000-0000-4000-8000-00000000006b"})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status %d, want 202: %s", rec.Code, rec.Body.String())
 	}

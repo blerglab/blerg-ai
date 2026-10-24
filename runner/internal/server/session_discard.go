@@ -100,14 +100,14 @@ func (a *API) handleSessionDiscard(w http.ResponseWriter, r *http.Request) {
 				if member != id {
 					message["parent_session_id"] = id
 				}
-				a.hub.BroadcastJSONPerAccount(func(account string) any {
+				a.hub.BroadcastJSONPerAccount(func(account string) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 					if account != viewer.Sub {
 						return nil
 					}
 					return message
 				})
 				if member != id {
-					a.broadcastChildrenChanged(id, member)
+					a.broadcastChildrenChanged(id, member) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 				}
 				return nil
 			})

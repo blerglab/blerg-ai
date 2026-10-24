@@ -15,6 +15,7 @@ permissions:
 jobs:
   descriptor-traversal:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -49,9 +50,15 @@ jobs:
             workspace-daemon.json
             workspace-hostgit.json
             workspace-macos-evidence/
+            !workspace-macos-evidence/**/private-*/tmp/**
       - name: Mount crossing gate in a private user and mount namespace
         if: runner.os == 'Linux'
         working-directory: runner
         env:
           GOWORK: 'off'
-        run: unshare --user --map-root-user --mount go test -p 1 -timeout 45m ./internal/daemon -run '^TestWorkspaceExplorer(SameDeviceBindMount|OtherDeviceMount|Device)$' -v -count=1
+        run: |
+          # Ubuntu 24.04 runners restrict unprivileged user namespaces through AppArmor.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount go test -p 1 -timeout 45m ./internal/daemon -run '^TestWorkspaceExplorer(SameDeviceBindMount|OtherDeviceMount|Device)$' -v -count=1

@@ -28,6 +28,9 @@ func explorerFixture(t *testing.T) (*LocalExplorer, string, protocol.WorkspaceEx
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.statusDiagnostic = func(stage string, err error, stderr string) {
+		t.Logf("workspace status unavailable: stage=%q err=%v stderr=%q", stage, err, stderr)
+	}
 	t.Cleanup(func() { _ = e.Close() })
 	return e, root, protocol.WorkspaceExplorerRequest{SessionID: "session", RequestID: "request", Operation: "list", WorkspaceRuntimeRef: protocol.WorkspaceRuntimeRef{LaunchGeneration: "launch", Generation: 1}}
 }

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -35,6 +36,17 @@ func (s *workspaceStatusSnapshot) close() {
 	}
 }
 func (e *LocalExplorer) statusSnapshot(ctx context.Context, name string, worktree hostWorktreePin, isWorktree bool) (*workspaceStatusSnapshot, error) {
+	return e.statusSnapshotForPlatform(ctx, name, worktree, isWorktree, runtime.GOOS)
+}
+
+// The Darwin copy path also runs on Linux with real Git in regression tests.
+func (e *LocalExplorer) statusSnapshotForPlatform(ctx context.Context, name string, worktree hostWorktreePin, isWorktree bool, platform string) (_ *workspaceStatusSnapshot, resultErr error) {
+	stage := "reserve private metadata"
+	defer func() {
+		if resultErr != nil {
+			resultErr = fmt.Errorf("%s: %w", stage, resultErr)
+		}
+	}()
 	snapshot := &workspaceStatusSnapshot{}
 	if e.manifest.Runtime != "host" {
 		e.mu.Lock()
@@ -59,6 +71,7 @@ func (e *LocalExplorer) statusSnapshot(ctx context.Context, name string, worktre
 	if err := reserve(0, 1); err != nil {
 		return nil, err
 	}
+	stage = "create private directory"
 	directory, err := os.MkdirTemp("", "blerg-workspace-status-")
 	if err != nil {
 		if snapshot.ledger != nil {
@@ -67,6 +80,7 @@ func (e *LocalExplorer) statusSnapshot(ctx context.Context, name string, worktre
 		return nil, err
 	}
 	snapshot.directory = directory
+	stage = "check private directory placement"
 	// Refuse a misconfigured runtime whose private temp directory is public.
 	relative, err := filepath.Rel(e.folder, directory)
 	if err != nil || relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
@@ -79,6 +93,7 @@ func (e *LocalExplorer) statusSnapshot(ctx context.Context, name string, worktre
 			snapshot.close()
 		}
 	}()
+	stage = "select metadata roots"
 	primary, primaryDir, _ := e.anchorFor(path.Join(name, ".git"))
 	if primary == nil {
 		return nil, os.ErrPermission
@@ -91,6 +106,7 @@ func (e *LocalExplorer) statusSnapshot(ctx context.Context, name string, worktre
 		common = worktree.common
 		commonDir = "."
 	}
+	stage = "open objects"
 	objects, err := workspaceOpenDirectory(common, path.Join(commonDir, "objects"))
 	if err != nil {
 		return nil, err
@@ -102,6 +118,7 @@ func (e *LocalExplorer) statusSnapshot(ctx context.Context, name string, worktre
 	}
 	budget := &metadataBudget{entries: 200000, reserve: reserve}
 	copyFile := func(root *os.Root, source, destination string, required bool) error {
+		stage = "copy " + destination
 		return copyStatusMetadataFile(ctx, root, source, filepath.Join(directory, destination), required, budget)
 	}
 	if err := copyFile(primary, path.Join(primaryDir, "HEAD"), "HEAD", true); err != nil {
@@ -115,9 +132,11 @@ func (e *LocalExplorer) statusSnapshot(ctx context.Context, name string, worktre
 			return nil, err
 		}
 	}
+	stage = "copy refs"
 	if err := copyStatusRefs(ctx, common, path.Join(commonDir, "refs"), filepath.Join(directory, "refs"), budget, 0); err != nil {
 		return nil, err
 	}
+	stage = "read object format"
 	format := "sha1"
 	configFile, err := workspaceOpenFile(common, path.Join(commonDir, "config"))
 	if err != nil {
@@ -147,6 +166,7 @@ func (e *LocalExplorer) statusSnapshot(ctx context.Context, name string, worktre
 	default:
 		return nil, errors.New("unsupported object format")
 	}
+	stage = "write private config"
 	if err := reserve(int64(len(config)), 2); err != nil {
 		return nil, err
 	}
@@ -156,15 +176,19 @@ func (e *LocalExplorer) statusSnapshot(ctx context.Context, name string, worktre
 	if err := os.Mkdir(filepath.Join(directory, "objects"), 0700); err != nil {
 		return nil, err
 	}
-	if runtime.GOOS == "darwin" {
+	if platform == "darwin" {
 		// fdescfs has no directory-relative descendants. Copy only the bounded,
 		// descriptor-vetted object store into the private snapshot; use pinned cwd
 		// for worktree access, without any /dev/fd/N/child path.
-		_ = os.Remove(filepath.Join(directory, "objects"))
+		stage = "copy objects"
+		if err := os.Remove(filepath.Join(directory, "objects")); err != nil {
+			return nil, err
+		}
 		if err := copyStatusRefs(ctx, common, path.Join(commonDir, "objects"), filepath.Join(directory, "objects"), budget, 0); err != nil {
 			return nil, err
 		}
 	}
+	stage = "final metadata reservation"
 	if err := reserve(0, 0); err != nil {
 		return nil, err
 	}
@@ -277,13 +301,16 @@ func copyStatusRefs(ctx context.Context, root *os.Root, source, destination stri
 	return ctx.Err()
 }
 func (s *workspaceStatusSnapshot) options(p *pinnedGitDir, out io.Writer) hostgit.Options {
+	return s.optionsForPlatform(p, out, runtime.GOOS)
+}
+func (s *workspaceStatusSnapshot) optionsForPlatform(p *pinnedGitDir, out io.Writer, platform string) hostgit.Options {
 	worktree := "/proc/self/fd/3"
 	objects := "/proc/self/fd/4"
-	if runtime.GOOS == "darwin" {
+	if platform == "darwin" {
 		worktree = "."
 		objects = filepath.Join(s.directory, "objects")
 	}
-	return hostgit.Options{Dir: p.cwd, ExtraFiles: []*os.File{p.dir, s.objects}, SafeDirectory: p.resolved, Ceiling: filepath.Dir(p.resolved), MemoryLimit: true, LimitKB: 256 << 10, Untrusted: true, Stdout: out,
+	return hostgit.Options{Dir: p.cwd, DirFile: p.dir, ExtraFiles: []*os.File{p.dir, s.objects}, SafeDirectory: p.resolved, Ceiling: filepath.Dir(p.resolved), MemoryLimit: true, LimitKB: 256 << 10, Untrusted: true, Stdout: out,
 		Env:    []string{"GIT_DIR=" + s.directory, "GIT_WORK_TREE=" + worktree, "GIT_OBJECT_DIRECTORY=" + objects},
 		Config: []string{"core.bare=false", "core.fsmonitor=false", "core.hooksPath=/dev/null", "core.untrackedCache=false", "index.threads=1", "status.showUntrackedFiles=normal"},
 	}

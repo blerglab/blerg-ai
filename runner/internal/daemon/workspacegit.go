@@ -60,7 +60,7 @@ func pinGitDir(path string, expected os.FileInfo) (*pinnedGitDir, bool) {
 	switch runtime.GOOS {
 	case "linux":
 	case "darwin":
-		cwd = "/dev/fd/" + fd
+		cwd = "" // hostgit uses DirFile and Darwin's thread-local fchdir before forking.
 	default:
 		_ = directory.Close()
 		_ = root.Close()
@@ -76,9 +76,10 @@ func (p *pinnedGitDir) close() { _ = p.dir.Close(); _ = p.root.Close() }
 // safe.directory naming this directory alone and no repository looked for above it. extra are the
 // call site's own -c overrides (key=value).
 func (p *pinnedGitDir) gitWith(ctx context.Context, stdout io.Writer, extra []string, args ...string) error {
-	// Go changes cwd before remapping ExtraFiles, so name the inherited parent descriptor.
+	// Linux changes cwd before remapping ExtraFiles, so Dir names the parent descriptor.
+	// Darwin uses DirFile; /dev/fd/N supports opening a descriptor, not chdir.
 	return hostgit.Run(ctx, hostgit.Options{
-		Dir: p.cwd, ExtraFiles: []*os.File{p.dir}, SafeDirectory: p.resolved, Ceiling: filepath.Dir(p.resolved),
+		Dir: p.cwd, DirFile: p.dir, ExtraFiles: []*os.File{p.dir}, SafeDirectory: p.resolved, Ceiling: filepath.Dir(p.resolved),
 		MemoryLimit: true, LimitKB: p.memoryLimitKB, Untrusted: true, Config: extra, Stdout: stdout,
 	}, args...)
 }

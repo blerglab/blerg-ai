@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -68,7 +69,10 @@ func TestWorkspaceExplorerChildProcess(t *testing.T) {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		os.Exit(0)
 	}
-	if ServeWorkspaceExplorer(context.Background(), root, os.Stdin, os.Stdout) != nil {
+	ctx := context.WithValue(context.Background(), workspaceStatusDiagnosticKey{}, workspaceStatusDiagnostic(func(stage string, err error, stderr string) {
+		fmt.Fprintf(os.Stderr, "workspace status unavailable: stage=%q err=%v stderr=%q\n", stage, err, stderr)
+	}))
+	if ServeWorkspaceExplorer(ctx, root, os.Stdin, os.Stdout) != nil {
 		os.Exit(1)
 	}
 	os.Exit(0)
@@ -78,6 +82,7 @@ func processExplorer(t *testing.T, root string, start WorkspaceExplorerStart) *r
 	remote := &remoteWorkspaceExplorer{start: start, command: func() *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestWorkspaceExplorerChildProcess$")
 		cmd.Env = []string{"PATH=/usr/bin:/bin", "BLERG_EXPLORER_TEST_PROCESS=1", "BLERG_EXPLORER_TEST_ROOT=" + root}
+		cmd.Stderr = os.Stderr
 		return cmd
 	}}
 	t.Cleanup(func() {

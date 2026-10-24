@@ -90,10 +90,17 @@ cap. Exceeding 256 MiB kills the whole group and returns `hostgit.ErrMemoryLimit
 completion, timeout or cancellation. This is an observed RSS budget: memory can
 overshoot between samples, and short-lived allocations between samples may go
 unobserved. Bounded macOS calls must use `Run`/`Output`/`OutputBounded`; the raw
-`Command` API refuses `MemoryLimit` because it cannot own a supervisor's lifetime.
+`Command` API refuses `MemoryLimit` or `DirFile` on Darwin because these require
+the supervised launch APIs.
 On macOS the bounded private metadata snapshot also copies
-the object store; worktree access uses the inherited pinned cwd, not a mutable
-absolute path or a Linux-only descriptor path. Repository-defined clean/process filters cannot run. Counts use
+the object store. Worktree access uses a held directory descriptor: a disposable,
+locked OS thread sets its thread-local cwd with `pthread_fchdir_np`, then starts
+Git with an empty command `Dir`. Darwin's fork inherits that cwd; the daemon's
+process cwd remains unchanged. The thread exits locked and is retired on both
+success and failure. `/dev/fd/N` can duplicate an open descriptor on macOS but
+cannot be used as a searchable cwd or as a directory prefix. Linux retains its
+`/proc/self/fd/N` cwd and inherited object descriptors. Repository-defined
+clean/process filters cannot run. Counts use
 this safe configuration and may differ from an interactive Git command that
 honors custom filters. The coordinator must protect private temporary storage
 from agent writes, keep it outside the public tree, and account for its bounded
@@ -145,10 +152,20 @@ directory delivery repeats the named open and identity checks. Device changes,
 symlinks, replaced ancestors and an opened ancestor moved outside the root fail
 closed. Descriptor pinning does not prevent the owner from changing files.
 
+Status integration tests install a private diagnostic sink. Unavailable results
+print the failing stage, underlying error, and up to 4 KiB of Git stderr in test
+output; snapshot errors identify the copy/setup step. The process-helper test
+forwards these diagnostics on stderr, separate from its JSON pipe. Private paths
+and stderr are never added to explorer protocol replies or production logs.
+
 `.github/workflows/workspace-explorer.yml` runs the common adversarial matrix on
 Linux and macOS. The macOS gate requires all status, worktree, filter, memory,
 helper, special-file, real disk-image mount, deterministic ancestor-move and
-exhaustion tests to pass without skips. It uploads JSON test evidence. In
+exhaustion tests to pass without skips. It uploads JSON test evidence. The native
+harness collects all three package logs and records their exit codes even when
+an earlier package fails; any failed command still refuses acceptance. Go tool
+stderr is retained in companion `.stderr.log` files so download/build diagnostics
+do not corrupt the JSON event streams. In
 particular, `TestWorkspaceStatusMemoryBoundary` verifies that a native worker
 can start with a small allocation, a 300 MiB allocation succeeds without a cap,
 and the same allocation fails with the exact 256 MiB budget. The probe holds

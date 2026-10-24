@@ -19,10 +19,31 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
+type workspaceStatusDiagnostic func(stage string, err error, stderr string)
+type workspaceStatusDiagnosticKey struct{}
+
+func (e *LocalExplorer) diagnoseStatus(ctx context.Context, stage string, err error, stderr string) {
+	diagnostic := e.statusDiagnostic
+	if sink, ok := ctx.Value(workspaceStatusDiagnosticKey{}).(workspaceStatusDiagnostic); ok {
+		diagnostic = sink
+	}
+	if diagnostic != nil {
+		diagnostic(stage, err, stderr)
+	}
+}
+
 // status is invoked in the same runtime as traversal. The daemon never calls
 // this on a sandbox clone: that adapter must invoke its in-container helper.
 func (e *LocalExplorer) status(ctx context.Context, req protocol.WorkspaceExplorerRequest, name string) protocol.WorkspaceExplorerResult {
 	res := explorerFailure(req, "unavailable")
+	stderr := &cappedOutput{max: 4 << 10}
+	fail := func(stage string, err error) protocol.WorkspaceExplorerResult {
+		if err == nil {
+			err = errors.New("status safety check failed")
+		}
+		e.diagnoseStatus(ctx, stage, err, stderr.buf.String())
+		return res
+	}
 	memberID := ""
 	for _, m := range e.manifest.Members {
 		if m.Path == name && (req.MemberID == "" || req.MemberID == m.ID) {
@@ -45,16 +66,16 @@ func (e *LocalExplorer) status(ctx context.Context, req protocol.WorkspaceExplor
 	defer func() { e.mu.Lock(); e.statusBusy = false; e.mu.Unlock() }()
 	file, err := e.openDirectory(name)
 	if err != nil {
-		return res
+		return fail("open member", err)
 	}
 	info, err := file.Stat()
 	_ = file.Close()
 	if err != nil || !info.IsDir() {
-		return res
+		return fail("stat member", err)
 	}
 	p, ok := pinGitDir(filepath.Join(e.folder, name), info)
 	if !ok {
-		return res
+		return fail("pin Git cwd", os.ErrPermission)
 	}
 	defer p.close()
 	p.memoryLimitKB = 256 << 10
@@ -63,29 +84,29 @@ func (e *LocalExplorer) status(ctx context.Context, req protocol.WorkspaceExplor
 	// pointers never establish new authority.
 	gitDir, err := e.openDirectory(path.Join(name, ".git"))
 	if err != nil {
-		return res
+		return fail("open Git metadata", err)
 	}
 	gitInfo, err := gitDir.Stat()
 	_ = gitDir.Close()
 	worktree, isWorktree := e.worktrees[memberID]
 	if err != nil || (!gitInfo.IsDir() && !isWorktree) {
-		return res
+		return fail("stat Git metadata/worktree pin", err)
 	}
 	if memberID != "" {
 		if workspaceRootIdentity(info) != e.memberRoots[memberID] || workspaceRootIdentity(gitInfo) != e.gitRoots[memberID] {
-			return res
+			return fail("member/Git identity", os.ErrPermission)
 		}
 	} else {
 		e.mu.Lock()
 		discovery, ok := e.discoveries[name]
 		e.mu.Unlock()
 		if !ok || workspaceRootIdentity(info) != discovery.root || workspaceRootIdentity(gitInfo) != discovery.git {
-			return res
+			return fail("discovered identity", os.ErrPermission)
 		}
 	}
 	pin, pinned := e.gitPins[memberID]
 	if pinned && (workspaceRootIdentity(gitInfo) != pin.GitRoot || !validWorkspaceObjectPin(pin)) {
-		return res
+		return fail("object pin", os.ErrPermission)
 	}
 	guard := func() (string, bool) {
 		if isWorktree {
@@ -99,7 +120,7 @@ func (e *LocalExplorer) status(ctx context.Context, req protocol.WorkspaceExplor
 	}
 	fingerprint, safe := guard()
 	if !safe {
-		return res
+		return fail("metadata guard", os.ErrPermission)
 	}
 	// Cached counts may be stale for five seconds, but switched Git metadata is
 	// never accepted merely because there is a cached answer.
@@ -113,32 +134,34 @@ func (e *LocalExplorer) status(ctx context.Context, req protocol.WorkspaceExplor
 	out := &cappedOutput{max: protocol.WorkspaceExplorerReplyBytes, strict: true}
 	snapshot, err := e.statusSnapshot(ctx, name, worktree, isWorktree)
 	if err != nil {
-		return res
+		return fail("private snapshot", err)
 	}
 	defer snapshot.close()
-	err = hostgit.Run(ctx, snapshot.options(p, out), "--no-optional-locks", "status", "--porcelain=v2", "-z", "--branch", "--no-renames", "--untracked-files=normal", "--ignore-submodules=all")
+	options := snapshot.options(p, out)
+	options.Stderr = stderr
+	err = hostgit.Run(ctx, options, "--no-optional-locks", "status", "--porcelain=v2", "-z", "--branch", "--no-renames", "--untracked-files=normal", "--ignore-submodules=all")
 	if err != nil || out.over {
-		return res
+		return fail("Git status", err)
 	}
 	status, err := parseWorkspaceStatus(out.buf.String())
 	if err != nil {
-		return res
+		return fail("parse Git status", err)
 	}
 	if snapshot.ledger != nil {
 		if err := snapshot.ledger.reserve(ctx, sessionGitUsage{}); err != nil {
-			return res
+			return fail("snapshot ledger", err)
 		}
 	}
 	// Do not deliver status from switched metadata or a moved member root.
 	final, err := e.openDirectory(path.Join(name, ".git"))
 	if err != nil {
-		return res
+		return fail("reopen Git metadata", err)
 	}
 	finalInfo, err := final.Stat()
 	_ = final.Close()
 	finalFingerprint, safe := guard()
 	if err != nil || !os.SameFile(gitInfo, finalInfo) || (pinned && !validWorkspaceObjectPin(pin)) || !safe || finalFingerprint != fingerprint {
-		return res
+		return fail("final metadata guard", err)
 	}
 	status.Path = req.Path
 	status.MemberID = memberID

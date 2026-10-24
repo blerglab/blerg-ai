@@ -52,7 +52,10 @@ var protocols = []string{"ext", "fd", "file", "git", "http", "https", "ssh", "te
 type Options struct {
 	// Dir is git's working directory. With ExtraFiles it may name an inherited descriptor
 	// (/proc/self/fd/N): a pinned directory.
-	Dir        string
+	Dir string
+	// DirFile pins cwd on Darwin, where chdir through /dev/fd/N is unsupported.
+	// Run owns its thread-local launch; Linux continues to use Dir.
+	DirFile    *os.File
 	ExtraFiles []*os.File
 	// SafeDirectory is the one directory safe.directory names ("" for none).
 	SafeDirectory string
@@ -236,10 +239,11 @@ func Binary() (string, error) {
 
 // Command is the hardened git command for args, not started: for a caller that runs it itself
 // (it must call Wait and then KillGroup). Prefer Run. Bounded Darwin commands require Run/Output;
-// a raw exec.Cmd cannot own the resident-memory supervisor, so Command refuses that combination.
+// a raw exec.Cmd cannot own the memory supervisor or descriptor-cwd launch, so Command refuses
+// either combination on Darwin.
 func Command(o Options, args ...string) (*exec.Cmd, error) {
-	if runtime.GOOS == "darwin" && o.MemoryLimit {
-		return nil, &memoryRefusal{fmt.Errorf("%w: bounded Darwin commands require Run or Output", ErrMemoryMonitor)}
+	if runtime.GOOS == "darwin" && (o.MemoryLimit || o.DirFile != nil) {
+		return nil, &memoryRefusal{fmt.Errorf("%w: supervised Darwin commands require Run or Output", ErrMemoryMonitor)}
 	}
 	return commandForPlatform(o, runtime.GOOS, args...)
 }
@@ -257,6 +261,9 @@ func commandForPlatform(o Options, platform string, args ...string) (*exec.Cmd, 
 	}
 	cmd := exec.Command(name, argv...) //nolint:gosec,noctx // G204: the git binary (or a constant sh script exec'ing it) with argv built by the call site; no shell parses any value. noctx: Run bounds it and kills the process group itself.
 	cmd.Dir = o.Dir
+	if platform == "darwin" && o.DirFile != nil {
+		cmd.Dir = "" // platformStartCommand sets cwd from the held directory on a private thread.
+	}
 	cmd.ExtraFiles = o.ExtraFiles
 	cmd.Env = Environ(o, git)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -306,7 +313,7 @@ func run(stop <-chan struct{}, o Options, args ...string) error {
 }
 
 func runCommand(stop <-chan struct{}, timeout <-chan time.Time, o Options, cmd *exec.Cmd, watch func(Options, *exec.Cmd) *memoryWatch) error {
-	if err := cmd.Start(); err != nil {
+	if err := platformStartCommand(o, cmd); err != nil {
 		return err
 	}
 	done := make(chan error, 1)

@@ -81,8 +81,11 @@ class NativeGateTests(unittest.TestCase):
                 self.assertNotIn('GOOS', kwargs['env'])
                 self.assertNotIn('BLERG_RUNNER_SESSION_TOKEN', kwargs['env'])
                 self.assertEqual(kwargs['env']['CGO_ENABLED'], '1')
+                self.assertIsNot(kwargs['stderr'], runner.subprocess.STDOUT,
+                                 'Go download/build diagnostics must not corrupt JSON evidence')
+                kwargs['stderr'].write('go: downloading example.test/fixture v1.0.0\n')
                 kwargs['stdout'].write(''.join(json.dumps(event) + '\n' for event in self.events))
-                if fail:
+                if fail and './internal/daemon' in args:
                     raise runner.subprocess.CalledProcessError(1, args)
             else:
                 with open(args[3], encoding='utf-8') as source:
@@ -104,9 +107,12 @@ class NativeGateTests(unittest.TestCase):
         self.assertEqual(metadata['accepted'], not fail)
         self.assertEqual(metadata['complete'], not fail)
         self.assertFalse(list(evidence.glob('private-*')))
-        if not fail:
-            self.assertEqual(len(calls), 4)
-            self.assertTrue(all('-race' in command and '-json' in command for command in calls[:3]))
+        self.assertEqual(len(calls), 3 if fail else 4)
+        self.assertTrue(all('-race' in command and '-json' in command for command in calls[:3]))
+        self.assertEqual(metadata['test_exit_codes'], dict(daemon=1 if fail else 0, hostgit=0, workspacepolicy=0))
+        self.assertEqual({path.name for path in evidence.glob('workspace-*.json')},
+                         {'workspace-daemon.json', 'workspace-hostgit.json', 'workspace-policy.json'})
+        self.assertEqual(len(list(evidence.glob('workspace-*.stderr.log'))), 3)
 
     def test_runner_rejects_cross_compile_before_writing(self):
         with patch.object(runner.platform, 'system', return_value='Linux'), patch.object(runner.tempfile, 'TemporaryDirectory') as temporary:

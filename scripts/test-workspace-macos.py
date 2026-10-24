@@ -52,17 +52,31 @@ def run():
             metadata["git"] = output("git", "--version")
             save()
             logs = []
+            failures = []
+            metadata["test_exit_codes"] = {}
             for package, name, subset in [("daemon", "daemon", ["-run", "TestWorkspace"]), ("hostgit", "hostgit", []), ("workspacepolicy", "policy", [])]:
                 log = evidence / ("workspace-" + name + ".json")
                 logs.append(str(log))
                 command = [go, "test", "-race", "-json", "-p", "1", "-timeout", "45m", "./internal/" + package, *subset, "-count=1"]
                 print("Running", " ".join(command), flush=True)
-                with log.open("w", encoding="utf-8") as target:
-                    subprocess.run(command, cwd=root / "runner", env=env, stdout=target, stderr=subprocess.STDOUT, check=True)
+                diagnostics = evidence / ("workspace-" + name + ".stderr.log")
+                with log.open("w", encoding="utf-8") as target, diagnostics.open("w", encoding="utf-8") as stderr:
+                    try:
+                        subprocess.run(command, cwd=root / "runner", env=env, stdout=target, stderr=stderr, check=True)
+                    except subprocess.CalledProcessError as error:
+                        metadata["test_exit_codes"][package] = error.returncode
+                        failures.append(error)
+                    else:
+                        metadata["test_exit_codes"][package] = 0
+                save()
             metadata["commit_after"] = git("rev-parse", "HEAD")
             metadata["clean_after"] = clean()
-            metadata["complete"] = True
+            metadata["complete"] = not failures
             save()
+            if failures:
+                # Keep every package's evidence, but never accept a failing command,
+                # even if its output lacks a final JSON failure record.
+                raise failures[0]
             subprocess.run([sys.executable, str(root / "scripts/check-workspace-macos-gate.py"), "--metadata", str(metadata_path), "--commit", head, *logs], check=True)
         metadata["accepted"] = True
     finally:

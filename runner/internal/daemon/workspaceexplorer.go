@@ -32,25 +32,27 @@ type WorkspaceExplorer interface {
 // in-runtime helper). It holds a launch-bound descriptor for its whole lifetime.
 // The caller must close it before releasing/replacing runtime storage.
 type LocalExplorer struct {
-	closeOnce   sync.Once
-	closeErr    error
-	ledger      *workspaceSessionLedger
-	anchors     map[string]workspaceMemberAnchor
-	root        *os.Root
-	folder      string
-	info        os.FileInfo
-	manifest    protocol.WorkspaceManifest
-	generation  int64
-	key         [32]byte
-	live        func() bool
-	mu          sync.Mutex
-	statusBusy  bool
-	cache       map[string]explorerStatusCache
-	gitPins     map[string]WorkspaceGitPin
-	memberRoots map[string]protocol.WorkspaceRoot
-	gitRoots    map[string]protocol.WorkspaceRoot
-	discoveries map[string]explorerGitIdentity
-	worktrees   map[string]hostWorktreePin
+	// Optional private test diagnostics. Never included in public explorer replies.
+	statusDiagnostic workspaceStatusDiagnostic
+	closeOnce        sync.Once
+	closeErr         error
+	ledger           *workspaceSessionLedger
+	anchors          map[string]workspaceMemberAnchor
+	root             *os.Root
+	folder           string
+	info             os.FileInfo
+	manifest         protocol.WorkspaceManifest
+	generation       int64
+	key              [32]byte
+	live             func() bool
+	mu               sync.Mutex
+	statusBusy       bool
+	cache            map[string]explorerStatusCache
+	gitPins          map[string]WorkspaceGitPin
+	memberRoots      map[string]protocol.WorkspaceRoot
+	gitRoots         map[string]protocol.WorkspaceRoot
+	discoveries      map[string]explorerGitIdentity
+	worktrees        map[string]hostWorktreePin
 }
 type workspaceMemberAnchor struct {
 	root   *os.Root
@@ -189,12 +191,18 @@ func explorerFailure(req protocol.WorkspaceExplorerRequest, code string) protoco
 }
 func (e *LocalExplorer) Explore(ctx context.Context, req protocol.WorkspaceExplorerRequest) protocol.WorkspaceExplorerResult {
 	res := explorerFailure(req, "unavailable")
-	if req.LaunchGeneration != e.manifest.LaunchGeneration || req.Generation != e.generation || !e.valid() {
+	fail := func(stage string, err error) protocol.WorkspaceExplorerResult {
+		if req.Operation == "status" {
+			e.diagnoseStatus(ctx, stage, err, "")
+		}
 		return res
+	}
+	if req.LaunchGeneration != e.manifest.LaunchGeneration || req.Generation != e.generation || !e.valid() {
+		return fail("runtime/root binding", os.ErrPermission)
 	}
 	name, ok := explorerPath(req.Path)
 	if !e.memberAvailable(name) {
-		return res
+		return fail("prepared member unavailable", os.ErrPermission)
 	}
 	if !ok || len(req.Filter) > 256 || !utf8.ValidString(req.Filter) || len(req.Cursor) > 8192 {
 		res.ErrorCode = "forbidden"
@@ -213,14 +221,16 @@ func (e *LocalExplorer) Explore(ctx context.Context, req protocol.WorkspaceExplo
 		res.ErrorCode = "invalid"
 	}
 	if !e.valid() || !e.memberAvailable(name) {
-		return explorerFailure(req, "unavailable")
+		res = explorerFailure(req, "unavailable")
+		return fail("delivery identity", os.ErrPermission)
 	}
 	if ctx.Err() != nil {
 		return explorerFailure(req, "cancelled")
 	}
 	raw, err := json.Marshal(res)
 	if err != nil || len(raw) > protocol.WorkspaceExplorerReplyBytes {
-		return explorerFailure(req, "unavailable")
+		res = explorerFailure(req, "unavailable")
+		return fail("reply envelope", err)
 	}
 	return res
 }

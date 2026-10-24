@@ -277,11 +277,16 @@ func TestServeCommandRefusesAQuote(t *testing.T) {
 }
 
 func TestWorkspaceStatusDarwinCommand(t *testing.T) {
-	cmd, err := commandForPlatform(Options{Dir: "/dev/fd/9", MemoryLimit: true, LimitKB: 256 << 10, Untrusted: true}, "darwin", "status", "--porcelain=v2", "-z")
+	directory, err := os.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmd.Path == "/bin/sh" || strings.Contains(strings.Join(cmd.Args, " "), "ulimit") || cmd.Dir != "/dev/fd/9" || !cmd.SysProcAttr.Setpgid {
+	defer directory.Close()
+	cmd, err := commandForPlatform(Options{Dir: "/dev/fd/9", DirFile: directory, ExtraFiles: []*os.File{directory}, MemoryLimit: true, LimitKB: 256 << 10, Untrusted: true}, "darwin", "status", "--porcelain=v2", "-z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path == "/bin/sh" || strings.Contains(strings.Join(cmd.Args, " "), "ulimit") || cmd.Dir != "" || !cmd.SysProcAttr.Setpgid {
 		t.Fatalf("Darwin Git lacks fixed memory/cwd boundary: %v", cmd)
 	}
 	if !strings.Contains(strings.Join(cmd.Args, " "), "core.fsmonitor=false") || !strings.Contains(strings.Join(cmd.Env, " "), "GIT_CONFIG_NOSYSTEM=1") {

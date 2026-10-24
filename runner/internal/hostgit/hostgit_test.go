@@ -2,6 +2,7 @@ package hostgit
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -210,7 +211,7 @@ func TestWorkspaceStatusExactMemoryLimit(t *testing.T) {
 	if err == nil || ctx.Err() != nil || time.Since(start) > 8*time.Second {
 		t.Fatalf("256 MiB did not stop unbounded Git: %v (%s)", err, time.Since(start))
 	}
-	cmd, err := Command(Options{MemoryLimit: true, LimitKB: 256 << 10}, "--version")
+	cmd, err := commandForPlatform(Options{MemoryLimit: true, LimitKB: 256 << 10}, "linux", "--version")
 	if err != nil || !strings.Contains(strings.Join(cmd.Args, " "), "262144") {
 		t.Fatalf("wrong worker memory limit: %v %v", cmd, err)
 	}
@@ -280,11 +281,16 @@ func TestWorkspaceStatusDarwinCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmd.Path != "/bin/sh" || len(cmd.Args) < 6 || cmd.Args[4] != "262144" || cmd.Dir != "/dev/fd/9" {
+	if cmd.Path == "/bin/sh" || strings.Contains(strings.Join(cmd.Args, " "), "ulimit") || cmd.Dir != "/dev/fd/9" || !cmd.SysProcAttr.Setpgid {
 		t.Fatalf("Darwin Git lacks fixed memory/cwd boundary: %v", cmd)
 	}
 	if !strings.Contains(strings.Join(cmd.Args, " "), "core.fsmonitor=false") || !strings.Contains(strings.Join(cmd.Env, " "), "GIT_CONFIG_NOSYSTEM=1") {
 		t.Fatal("Darwin hardening missing")
+	}
+	if runtime.GOOS == "darwin" {
+		if _, err := Command(Options{MemoryLimit: true}, "--version"); !errors.Is(err, ErrMemoryMonitor) {
+			t.Fatalf("raw Darwin command bypassed required supervisor: %v", err)
+		}
 	}
 }
 
@@ -296,10 +302,12 @@ func TestWorkspaceStatusMemoryBoundary(t *testing.T) {
 	binary := filepath.Join(dir, "git")
 	program := `#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 int main(int argc,char **argv) {
  size_t size=(argc>1 && !strcmp(argv[argc-1],"small")) ? 1024*1024 : 300UL*1024*1024;
  volatile unsigned char *p=malloc(size); if(!p) return 42;
  for(size_t i=0;i<size;i+=4096) p[i]=1;
+ usleep(500000); /* Keep resident pages observable across several watchdog polls. */
  free((void*)p); return 0;
 }`
 	if err := os.WriteFile(source, []byte(program), 0600); err != nil {
@@ -319,7 +327,14 @@ int main(int argc,char **argv) {
 	if err := Run(ctx, Options{}, "large"); err != nil {
 		t.Fatalf("control allocation failed without cap: %v", err)
 	}
-	if err := Run(ctx, bounded, "large"); err == nil || ctx.Err() != nil {
+	err := Run(ctx, bounded, "large")
+	if err == nil || ctx.Err() != nil {
 		t.Fatalf("300 MiB allocation escaped 256 MiB cap: %v", err)
+	}
+	if runtime.GOOS == "darwin" {
+		var refusal interface{ ExitCode() int }
+		if !errors.Is(err, ErrMemoryLimit) || !errors.As(err, &refusal) || refusal.ExitCode() != 126 {
+			t.Fatalf("expected observed RSS refusal (126), got %v", err)
+		}
 	}
 }

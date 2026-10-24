@@ -17,14 +17,15 @@
 //     signature;
 //   - its own process group, killed whole on timeout or cancel and again once git is done, so no
 //     helper outlives the call;
-//   - with MemoryLimit, an address-space limit (Linux and macOS), so a reader something still makes read
-//     without end fails fast.
+//   - with MemoryLimit, an address-space limit on Linux or a process-group RSS supervisor on
+//     macOS, so a reader something still makes read without end fails fast.
 package hostgit
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -36,8 +37,8 @@ import (
 	"time"
 )
 
-// MemoryLimitKB bounds a git process's address space under Options.MemoryLimit (Linux and macOS). Pack
-// windows are kept well under it (memoryConfig).
+// MemoryLimitKB is the default memory budget under Options.MemoryLimit: address space on Linux,
+// observed process-group RSS on macOS. Pack windows are kept well under it (Config).
 const MemoryLimitKB = 1 << 20
 
 // limitScript runs git under `ulimit -v`. It is a constant: the limit, git's path and its
@@ -84,8 +85,9 @@ type Options struct {
 	// workspace or sandbox clone). Its optional binary indexes are not parsed: no commit-graph,
 	// multi-pack index or bitmaps, no sparse walk, no filter served (UntrustedConfig).
 	Untrusted bool
-	// MemoryLimit runs git under an address-space limit (Linux and macOS): MemoryLimitKB, or LimitKB when
-	// set, with small pack windows.
+	// MemoryLimit bounds address space on Linux and observed process-group RSS on macOS:
+	// MemoryLimitKB, or LimitKB when set, with small pack windows. On macOS use Run/Output,
+	// which own the resident-memory supervisor and join it before returning.
 	MemoryLimit bool
 	LimitKB     int
 	// Timeout bounds the call (0: only ctx).
@@ -233,8 +235,12 @@ func Binary() (string, error) {
 }
 
 // Command is the hardened git command for args, not started: for a caller that runs it itself
-// (it must call Wait and then KillGroup). Prefer Run.
+// (it must call Wait and then KillGroup). Prefer Run. Bounded Darwin commands require Run/Output;
+// a raw exec.Cmd cannot own the resident-memory supervisor, so Command refuses that combination.
 func Command(o Options, args ...string) (*exec.Cmd, error) {
+	if runtime.GOOS == "darwin" && o.MemoryLimit {
+		return nil, &memoryRefusal{fmt.Errorf("%w: bounded Darwin commands require Run or Output", ErrMemoryMonitor)}
+	}
 	return commandForPlatform(o, runtime.GOOS, args...)
 }
 func commandForPlatform(o Options, platform string, args ...string) (*exec.Cmd, error) {
@@ -244,11 +250,8 @@ func commandForPlatform(o Options, platform string, args ...string) (*exec.Cmd, 
 	}
 	argv := append(Config(o), args...)
 	name := git
-	if o.MemoryLimit && (platform == "linux" || platform == "darwin") {
-		limit := MemoryLimitKB
-		if o.LimitKB > 0 {
-			limit = o.LimitKB
-		}
+	if o.MemoryLimit && platform == "linux" {
+		limit := memoryLimitKB(o)
 		argv = append([]string{"-c", limitScript, "blerg-git", strconv.Itoa(limit), git}, argv...)
 		name = "/bin/sh"
 	}
@@ -295,19 +298,32 @@ func run(stop <-chan struct{}, o Options, args ...string) error {
 		defer timer.Stop()
 		timeout = timer.C
 	}
-	cmd, err := Command(o, args...)
+	cmd, err := commandForPlatform(o, runtime.GOOS, args...)
 	if err != nil {
 		return err
 	}
+	return runCommand(stop, timeout, o, cmd, platformMemoryWatch)
+}
+
+func runCommand(stop <-chan struct{}, timeout <-chan time.Time, o Options, cmd *exec.Cmd, watch func(Options, *exec.Cmd) *memoryWatch) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	var refused <-chan error
+	monitor := watch(o, cmd)
+	if monitor != nil {
+		defer monitor.stop()
+		refused = monitor.refused
+	}
 	finished := false
+	stopped := errStopped
+	var err error
 	select {
 	case err = <-done:
 		finished = true
+	case stopped = <-refused:
 	case <-stop:
 	case <-timeout:
 	}
@@ -318,9 +334,18 @@ func run(stop <-chan struct{}, o Options, args ...string) error {
 		case <-time.After(5 * time.Second): // an output reader that never lets go
 		}
 		KillGroup(cmd)
-		return errStopped
+		return stopped
 	}
 	KillGroup(cmd)
+	if monitor != nil {
+		monitor.stop()
+		// Preserve a refusal already observed even when Wait wins the select. Joining first
+		// prevents an in-flight sample from publishing a refusal after this final check.
+		select {
+		case err = <-refused:
+		default:
+		}
+	}
 	return err
 }
 
@@ -355,11 +380,15 @@ func output(stop <-chan struct{}, o Options, args ...string) (string, error) {
 }
 
 type capped struct {
-	buf bytes.Buffer
-	max int
+	buf      bytes.Buffer
+	max      int
+	overflow bool
 }
 
 func (w *capped) Write(p []byte) (int, error) {
+	if len(p) > w.max-w.buf.Len() {
+		w.overflow = true
+	}
 	if room := w.max - w.buf.Len(); room > 0 {
 		if len(p) > room {
 			w.buf.Write(p[:room])

@@ -80,8 +80,18 @@ Status copies bounded HEAD/index/refs into a private temporary metadata view;
 repository configuration and info attributes are not copied. Git reads the pinned
 worktree and object directory by inherited descriptors, with fixed safe config,
 no optional locks, no rename/submodule work, a two-second deadline and 256 MiB
-worker address-space limit on Linux and macOS. Failure to establish the limit
-refuses the worker. On macOS the bounded private metadata snapshot also copies
+worker memory budget. Linux retains its inherited address-space limit. macOS does
+not use `RLIMIT_AS`/`ulimit -v`: a supervisor samples the entire Git process group's
+resident memory with the system `/bin/ps -o rss= -g <pgid>` every 20 ms, summing
+Git and its helpers in KiB. Each sample has a 100 ms deadline and 64 KiB output
+cap. Exceeding 256 MiB kills the whole group and returns `hostgit.ErrMemoryLimit`
+(refusal code 126); an observation failure also kills the group and returns
+`hostgit.ErrMemoryMonitor` (code 125). The supervisor is canceled and joined on
+completion, timeout or cancellation. This is an observed RSS budget: memory can
+overshoot between samples, and short-lived allocations between samples may go
+unobserved. Bounded macOS calls must use `Run`/`Output`/`OutputBounded`; the raw
+`Command` API refuses `MemoryLimit` because it cannot own a supervisor's lifetime.
+On macOS the bounded private metadata snapshot also copies
 the object store; worktree access uses the inherited pinned cwd, not a mutable
 absolute path or a Linux-only descriptor path. Repository-defined clean/process filters cannot run. Counts use
 this safe configuration and may differ from an interactive Git command that
@@ -141,7 +151,10 @@ helper, special-file, real disk-image mount, deterministic ancestor-move and
 exhaustion tests to pass without skips. It uploads JSON test evidence. In
 particular, `TestWorkspaceStatusMemoryBoundary` verifies that a native worker
 can start with a small allocation, a 300 MiB allocation succeeds without a cap,
-and the same allocation fails with the exact 256 MiB cap. A separate Git test
+and the same allocation fails with the exact 256 MiB budget. The probe holds
+touched pages resident across several sampling intervals; macOS must report the
+specific RSS-overrun refusal, rather than an unrelated startup failure. A separate
+Git test
 requires bounded Git to start and rejects an unbounded reader before its timeout.
 A shell accepting `ulimit` alone is not acceptance evidence.
 
@@ -168,8 +181,9 @@ GitHub credential returns 404 for workflow and branch lookups;
 the task prohibits pushing. Cross-compilation and running the shared descriptor
 implementation on Linux are additional checks, not substitutes for native
 acceptance. P6 must retain the macOS release gate until the above native tests
-pass and the run URL/artifacts are recorded. In particular, older macOS kernels
-that do not enforce the requested memory limit must fail the native memory gate.
+pass and the run URL/artifacts are recorded. The native memory gate must prove
+that macOS observes and refuses an over-budget process group; cross-compilation
+cannot validate the system RSS sampler.
 
 ## Production desktop registration
 
